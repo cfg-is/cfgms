@@ -185,7 +185,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		entry := auditEntries[0]
 		assert.Equal(t, "delete_role", entry.Action)
 		assert.Equal(t, business.AuditResultSuccess, entry.Result)
-		assert.Equal(t, business.AuditSeverityCritical, entry.Severity, "Role deletion should be critical severity")
+		assert.Equal(t, business.AuditSeverityHigh, entry.Severity, "Role deletion is a sensitive admin action (High); Critical is reserved for compromise indicators (Issue #2964)")
 
 		// Verify deleted role information is captured
 		assert.Contains(t, entry.Details, "deleted_permissions")

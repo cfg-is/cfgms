@@ -5,7 +5,19 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,15 +26,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	stwreg "github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -30,12 +45,60 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
+// testValidDeviceID is a 64-character lowercase hex string used across registration handler tests.
+const testValidDeviceID = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1"
+
+// testValidIdentityKeyPub is a base64-encoded 32-byte Ed25519 public key generated once per
+// test binary run. Using a fixed-per-run key keeps tests deterministic within a run while
+// avoiding a hardcoded test credential.
+var testValidIdentityKeyPub string
+
+// testValidCSRPEM is a PEM-encoded CERTIFICATE REQUEST over a throwaway ECDSA
+// P-256 keypair, generated once per test binary run (Issue #3780). Registration
+// handler tests need a real, signature-verifying CSR to exercise the
+// steward-submits-a-CSR flow, but do not care about the specific keypair —
+// reused across tests the same way testValidIdentityKeyPub is.
+var testValidCSRPEM string
+
+func init() {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic("test setup: failed to generate Ed25519 key: " + err.Error())
+	}
+	testValidIdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+
+	csrPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic("test setup: failed to generate CSR keypair: " + err.Error())
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: "test-steward"},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, csrPriv)
+	if err != nil {
+		panic("test setup: failed to create test CSR: " + err.Error())
+	}
+	testValidCSRPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
+}
+
 // newTestRegistrationStore creates a real SQLite-backed registration.Store for handler tests.
+//
+// The database is in-memory rather than a file under t.TempDir(). A file-backed
+// path takes the provider's full schema-DDL path (~15 CREATE TABLEs plus indexes
+// and the back-fill probes) against a WAL journal on real disk, measured at
+// 0.4s-2.6s per call under -race; that cost is paid by every test in this file and
+// is what pushed this package past the 10-minute per-binary hang detector. The
+// in-memory path takes the provider's deserialize fast-path instead (~10ms) and is
+// what pkg/testing.SetupTestStorage already uses for every other store in these
+// tests. Isolation is unchanged: pkg/storage/providers/sqlite.openDB collapses any
+// in-memory request to a *private*, single-connection database owned by this pool,
+// so each call still gets its own store with no cross-test sharing. The store is a
+// real SQLite store either way — no fake, no mock.
 func newTestRegistrationStore(t *testing.T) registration.Store {
 	t.Helper()
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
 		"sqlite",
-		map[string]interface{}{"path": t.TempDir() + "/tokens.db"},
+		map[string]interface{}{"path": ":memory:"},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
@@ -51,10 +114,14 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	t.Helper()
 
 	// Isolate secrets storage per test to prevent shared-path contention on Windows CI.
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
+	// Default config binds 0.0.0.0:4433; set ExternalAddress so getTransportAddress() succeeds.
+	if cfg.Transport != nil {
+		cfg.Transport.ExternalAddress = "localhost"
+	}
 
 	var logger logging.Logger
 	if len(loggers) > 0 && loggers[0] != nil {
@@ -99,8 +166,11 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
 		nil, // No blob store for basic tests
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
+	server.SetPendingStore(storageManager.GetPendingRegistrationStore())
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -111,24 +181,72 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	return server, auditMgr
 }
 
-// newTestCertManager creates a real cert manager backed by a temp dir.
+// newTestCertManager creates a real cert manager backed by a temp dir, loaded from
+// the process-wide shared test CA (Issue #3797) rather than generating a fresh one.
 func newTestCertManager(t *testing.T) *cert.Manager {
 	t.Helper()
-	mgr, err := cert.NewManager(&cert.ManagerConfig{
+	return newSharedTestCertManager(t)
+}
+
+// newTestIntermediateCertManager creates a real cert manager whose active CA
+// identity is a subordinate (regional intermediate) signed from a freshly
+// generated test root — the Issue #3778 shape a controller cell backed by an
+// imported regional intermediate has once S3's ImportSubordinateCA lands.
+func newTestIntermediateCertManager(t *testing.T) *cert.Manager {
+	t.Helper()
+	rootMgr, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath: t.TempDir(),
 		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
+			Organization:  "Test CFGMS Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
 		},
 	})
 	require.NoError(t, err)
-	return mgr
+
+	rootCertPEM, err := rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &cert.SubordinateCAConfig{
+		CommonName:   "Test CFGMS Regional Intermediate",
+		Organization: "Test CFGMS",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	intermediateMgr, err := cert.NewManagerFromCAMaterial(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, subCert.CertificatePEM, subKeyPEM, rootCertPEM)
+	require.NoError(t, err)
+	return intermediateMgr
 }
 
-// postRegister sends a POST /api/v1/register request and returns the recorder.
+// postRegister sends a POST /api/v1/register request with valid device identity fields
+// and returns the recorder. Use postRegisterWithBody for custom field combinations.
 func postRegister(server *Server, token string) *httptest.ResponseRecorder {
-	body, _ := json.Marshal(RegistrationRequest{Token: token})
+	return postRegisterWithBody(server, RegistrationRequest{
+		Token:          token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
+}
+
+// postRegisterWithBody sends a POST /api/v1/register with an arbitrary request body,
+// allowing tests to set specific DeviceID, IdentityKeyPub, or KeyProtectionLevel values.
+func postRegisterWithBody(server *Server, regReq RegistrationRequest) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(regReq)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -197,32 +315,120 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 		"token_prefix in audit detail must be redacted by the audit manager")
 }
 
-func TestHandleRegister_PerennialToken_AllowsMultipleRegistrations(t *testing.T) {
+func TestHandleRegister_RetryDoesNotIssueSecondCertificate(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
-	// Explicitly use always-approve hook: this test verifies perennial token behaviour
-	// on the approve path, not registration approval policy.
 	server.SetApprovalHook(&AlwaysApproveHook{})
 
 	tok := &registration.Token{
-		Token:         "cfgms_reg_perennial_valid",
+		Token:         "cfgms_reg_retry_once",
 		TenantID:      "test-tenant",
 		ControllerURL: "grpc://controller:7443",
 	}
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
 
-	rec1 := postRegister(server, "cfgms_reg_perennial_valid")
-	assert.Equal(t, http.StatusOK, rec1.Code)
+	rec1 := postRegister(server, tok.Token)
+	require.Equal(t, http.StatusOK, rec1.Code)
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.ClientCert)
 
-	rec2 := postRegister(server, "cfgms_reg_perennial_valid")
-	assert.Equal(t, http.StatusOK, rec2.Code)
+	// A transport retry of the same request is safe: it cannot generate a second
+	// private key/certificate after the durable REST claim has committed.
+	rec2 := postRegister(server, tok.Token)
+	assert.Equal(t, http.StatusConflict, rec2.Code)
+	assert.NotContains(t, rec2.Body.String(), "BEGIN CERTIFICATE")
+}
 
-	// Both registrations should have distinct steward IDs
-	var resp1, resp2 RegistrationResponse
-	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
-	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
-	assert.NotEqual(t, resp1.StewardID, resp2.StewardID)
+func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	const tokenStr = "cfgms_reg_parallel_certificate"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	// One device racing itself. Only one of these may receive a private key —
+	// that is the double-issuance the REST claim exists to prevent.
+	const contenders = 16
+	const deviceID = "00000000000000000000000000000000000000000000000000000000000000ab"
+	start := make(chan struct{})
+	recorders := make([]*httptest.ResponseRecorder, contenders)
+	var wg sync.WaitGroup
+	wg.Add(contenders)
+	for i := 0; i < contenders; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			recorders[i] = postRegisterWithBody(server, RegistrationRequest{
+				Token:          tokenStr,
+				DeviceID:       deviceID,
+				IdentityKeyPub: testValidIdentityKeyPub,
+				CSRPEM:         testValidCSRPEM,
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	conflicts := 0
+	for _, rec := range recorders {
+		switch rec.Code {
+		case http.StatusOK:
+			successes++
+			var resp RegistrationResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.NotEmpty(t, resp.ClientCert)
+		case http.StatusConflict:
+			conflicts++
+			assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE")
+		default:
+			t.Errorf("unexpected registration status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, contenders-1, conflicts)
+}
+
+// The claim is scoped to the device, not the token: a perennial fleet token
+// (Issue #1690) must keep enrolling endpoints after the first one registers.
+func TestHandleRegister_PerennialTokenEnrollsManyDevices(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	const tokenStr = "cfgms_reg_fleet_enrolment"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	stewardIDs := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       fmt.Sprintf("%064x", i+1),
+			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"device %d must enrol on the perennial token: %s", i, rec.Body.String())
+
+		var resp RegistrationResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.ClientCert, "device %d must receive its own certificate", i)
+		assert.False(t, stewardIDs[resp.StewardID], "steward IDs must be unique")
+		stewardIDs[resp.StewardID] = true
+	}
+
+	tok, err := tokenStore.GetToken(context.Background(), tokenStr)
+	require.NoError(t, err)
+	assert.True(t, tok.IsValid(), "enrolment must not spend the fleet token")
 }
 
 // kvCapturingLogger captures both Warn message and key-value pairs for security assertions.
@@ -458,10 +664,12 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 
 	t.Run("returns pending entries from durable store", func(t *testing.T) {
 		now := time.Now().UTC()
+		// Use the same TenantID as the API key created in newRegistrationApprovalServer
+		// ("default") so the scoped list returns this entry (Issue #2932 tenant scoping).
 		entry := &business.PendingRegistrationEntry{
 			PendingID:    "pending-list-test-1",
 			StewardID:    "steward-list-test-1",
-			TenantID:     "tenant-a",
+			TenantID:     "default",
 			TokenStr:     "tok-list-1",
 			SourceIP:     "192.168.1.1",
 			RegisteredAt: now,
@@ -480,24 +688,21 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 		require.Len(t, pending, 1)
 		assert.Equal(t, "pending-list-test-1", pending[0].PendingID)
 		assert.Equal(t, "steward-list-test-1", pending[0].StewardID)
-		assert.Equal(t, "tenant-a", pending[0].TenantID)
+		assert.Equal(t, "default", pending[0].TenantID)
 		assert.Equal(t, "192.168.1.1", pending[0].SourceIP)
 	})
 }
 
 func TestHandleApproveRegistration(t *testing.T) {
-	_, ts, pendingStore := newRegistrationApprovalServer(t)
+	server, ts, pendingStore := newRegistrationApprovalServer(t)
 	defer ts.Close()
 
-	makeApprove := func(t *testing.T, pendingID string) *http.Response {
+	makeApprove := func(t *testing.T, pendingID string) *httptest.ResponseRecorder {
 		t.Helper()
-		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			ts.URL+"/api/v1/registration/"+pendingID+"/approve", nil)
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer reg-approval-key")
-		resp, err := ts.Client().Do(req)
-		require.NoError(t, err)
-		return resp
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/approve", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
 	}
 
 	t.Run("happy path - marks pending entry as approved", func(t *testing.T) {
@@ -514,10 +719,9 @@ func TestHandleApproveRegistration(t *testing.T) {
 		}
 		require.NoError(t, pendingStore.AddPending(context.Background(), entry))
 
-		resp := makeApprove(t, "pending-approve-1")
-		defer func() { _ = resp.Body.Close() }()
+		rec := makeApprove(t, "pending-approve-1")
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, http.StatusOK, rec.Code)
 
 		// Entry status must be updated to "approved" in the durable store.
 		got, err := pendingStore.GetPendingByID(context.Background(), "pending-approve-1")
@@ -526,12 +730,48 @@ func TestHandleApproveRegistration(t *testing.T) {
 	})
 
 	t.Run("not found returns 404", func(t *testing.T) {
-		resp := makeApprove(t, "nonexistent-pending-id")
-		defer func() { _ = resp.Body.Close() }()
+		rec := makeApprove(t, "nonexistent-pending-id")
 
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-		assert.Contains(t, resp.Header.Get("Content-Type"), "text/plain")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Contains(t, rec.Header().Get("Content-Type"), "text/plain")
 	})
+}
+
+// TestHandleApproveRegistration_CrossTenantRefused is the REQUIRED regression test
+// for Issue #4336: a caller scoped to tenant-a cannot approve a pending registration
+// belonging to tenant-b. Calls the handler directly with only ctxkeys.TenantScope set
+// (no ctxkeys.TenantID, no principal) — exactly what the pre-#4336 callerTenantID
+// helper read as "" (unrestricted), so this fails (200 OK, entry approved) before
+// this story's fix.
+func TestHandleApproveRegistration_CrossTenantRefused(t *testing.T) {
+	server, ts, pendingStore := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	now := time.Now().UTC()
+	entry := &business.PendingRegistrationEntry{
+		PendingID:    "pending-tenant-b-1",
+		StewardID:    "steward-tenant-b-1",
+		TenantID:     "tenant-b",
+		TokenStr:     "tok-tenant-b-1",
+		SourceIP:     "10.0.0.2",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}
+	require.NoError(t, pendingStore.AddPending(context.Background(), entry))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/pending-tenant-b-1/approve", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "pending-tenant-b-1"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	rec := httptest.NewRecorder()
+	server.handleApproveRegistration(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	got, err := pendingStore.GetPendingByID(context.Background(), "pending-tenant-b-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+		"a refused cross-tenant approve must not change status")
 }
 
 // quarantineHookForTest is a test-only RegistrationApprovalHook that always quarantines.
@@ -571,6 +811,17 @@ func TestHandleRegister_QuarantineReturns202NoCert(t *testing.T) {
 	assert.Equal(t, "test-tenant", pending.TenantID)
 	assert.Equal(t, "pending", pending.Status)
 
+	// Same-device retry is idempotent: return the same durable pending record
+	// rather than creating a second pending registration.
+	retry := postRegister(server, "cfgms_reg_quarantine_test")
+	require.Equal(t, http.StatusAccepted, retry.Code)
+	var retryPending RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(retry.Body.Bytes(), &retryPending))
+	assert.Equal(t, pending.PendingID, retryPending.PendingID)
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+
 	// Verify no cert fields in the raw JSON — the struct definition must not carry them.
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
@@ -580,12 +831,116 @@ func TestHandleRegister_QuarantineReturns202NoCert(t *testing.T) {
 
 	// Verify the quarantine audit event was emitted.
 	require.NoError(t, auditMgr.Flush(context.Background()))
-	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	auditEntries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, "registration_quarantined", entries[0].Action)
-	assert.Equal(t, string(business.AuditResultSuccess), string(entries[0].Result))
-	assert.Equal(t, string(business.AuditEventAuthentication), string(entries[0].EventType))
+	require.Len(t, auditEntries, 1)
+	assert.Equal(t, "registration_quarantined", auditEntries[0].Action)
+	assert.Equal(t, string(business.AuditResultSuccess), string(auditEntries[0].Result))
+	assert.Equal(t, string(business.AuditEventAuthentication), string(auditEntries[0].EventType))
+}
+
+func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	const tokenStr = "cfgms_reg_parallel_pending"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	// One device racing itself must produce exactly one quarantine entry, and the
+	// retries that lose the race must be handed back that same entry rather than
+	// a second one.
+	const contenders = 16
+	const deviceID = "00000000000000000000000000000000000000000000000000000000000000cd"
+	start := make(chan struct{})
+	recorders := make([]*httptest.ResponseRecorder, contenders)
+	var wg sync.WaitGroup
+	wg.Add(contenders)
+	for i := 0; i < contenders; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			recorders[i] = postRegisterWithBody(server, RegistrationRequest{
+				Token:          tokenStr,
+				DeviceID:       deviceID,
+				IdentityKeyPub: testValidIdentityKeyPub,
+				CSRPEM:         testValidCSRPEM,
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	pendingIDs := make(map[string]bool)
+	for _, rec := range recorders {
+		switch rec.Code {
+		case http.StatusAccepted:
+			assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE")
+			var resp RegistrationPendingResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			pendingIDs[resp.PendingID] = true
+		case http.StatusConflict:
+			// A retry that raced the entry's creation.
+		default:
+			t.Errorf("unexpected registration status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	assert.Len(t, pendingIDs, 1, "the device must only ever be told about one pending entry")
+
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+}
+
+// Quarantined devices sharing a perennial token must each get their own pending
+// entry — never a handle to another device's registration.
+func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	const tokenStr = "cfgms_reg_quarantine_fleet"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	pendingIDs := make(map[string]string)
+	for i := 0; i < 3; i++ {
+		deviceID := fmt.Sprintf("%064x", i+1)
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       deviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code,
+			"device %d must be quarantined, not refused: %s", i, rec.Body.String())
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotEmpty(t, resp.PendingID)
+		pendingIDs[deviceID] = resp.PendingID
+	}
+	assert.Len(t, pendingIDs, 3, "each device must receive a distinct pending_id")
+
+	// A device retrying gets its own entry back, not one of its peers'.
+	for deviceID, want := range pendingIDs {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       deviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "retry body: %s", rec.Body.String())
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, want, resp.PendingID, "device %s must recover its own pending entry", deviceID)
+	}
+
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 3)
 }
 
 func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
@@ -609,10 +964,152 @@ func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
 	var resp RegistrationResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.ClientCert, "client_cert must be present and non-empty on approve")
-	assert.NotEmpty(t, resp.ClientKey, "client_key must be present and non-empty on approve")
 	assert.NotEmpty(t, resp.CACert, "ca_cert must be present and non-empty on approve")
 	assert.NotEmpty(t, resp.StewardID, "steward_id must be present on approve")
 	assert.Equal(t, "test-tenant", resp.TenantID)
+	assert.Empty(t, resp.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
+	assert.NotContains(t, rec.Body.String(), "client_key", "no private key is ever generated by the controller (Issue #3780)")
+}
+
+// TestRegistration_EndToEnd_ClaimToMTLSHandshake drives the full CSR-based
+// registration flow with no mocks: a real pkg/cert-backed controller (via the real
+// HTTP router) is registered against by a real features/steward/registration.HTTPClient,
+// through the quarantine -> approve -> claim path, and the resulting controller-signed
+// certificate is paired with the steward's own locally generated key to complete a
+// genuine mTLS handshake against a throwaway listener — proving the steward-held key
+// is actually usable, not merely present (Issue #3780 AC).
+func TestRegistration_EndToEnd_ClaimToMTLSHandshake(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_e2e_mtls"
+	tok := &registration.Token{
+		Token:         regToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	stewardClient, err := stwreg.NewHTTPClient(&stwreg.HTTPConfig{
+		ControllerURL: ts.URL,
+		Logger:        logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	// Step 1: Register -> quarantine (202). The real steward client generates its
+	// own keypair and submits a CSR.
+	_, pendingResp, err := stewardClient.Register(context.Background(), stwreg.RegistrationRequest{
+		Token:          regToken,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, pendingResp)
+	require.NotEmpty(t, pendingResp.PendingID)
+
+	// Step 2: Operator approves.
+	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+		pendingResp.PendingID, business.PendingRegistrationStatusApproved))
+
+	// Step 3: Steward polls -> claim (buildClaimResponse signs the CSR from step 1).
+	claimResp, err := stewardClient.PollStatus(context.Background(), pendingResp.PendingID, regToken, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, "claimed", claimResp.Status)
+	require.NotEmpty(t, claimResp.ClientCert)
+	require.NotEmpty(t, claimResp.ClientKeyPEM, "the steward's locally generated key must be attached to the claim response")
+
+	// Step 4: Combine the steward-held key with the controller-issued certificate
+	// exactly as the steward's own transport layer does, and complete a real mTLS
+	// handshake against a throwaway listener that requires and verifies the client
+	// certificate against the same CA.
+	stewardTLSCert, err := tls.X509KeyPair([]byte(claimResp.ClientCert), []byte(claimResp.ClientKeyPEM))
+	require.NoError(t, err, "controller-issued certificate and steward-held key must form a usable TLS pair")
+
+	caCertPool := x509.NewCertPool()
+	require.True(t, caCertPool.AppendCertsFromPEM([]byte(claimResp.CACert)))
+
+	listenerCert, err := certMgr.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "mtls-listener.test",
+		DNSNames:     []string{"mtls-listener.test"},
+		Organization: "CFGMS Test",
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	listenerTLSCert, err := tls.X509KeyPair(listenerCert.CertificatePEM, listenerCert.PrivateKeyPEM)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{listenerTLSCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caCertPool,
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			accepted <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			accepted <- fmt.Errorf("accepted connection is not a *tls.Conn")
+			return
+		}
+		accepted <- tlsConn.HandshakeContext(context.Background())
+	}()
+
+	clientConn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		Certificates: []tls.Certificate{stewardTLSCert},
+		RootCAs:      caCertPool,
+		ServerName:   "mtls-listener.test",
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err, "the steward-held key and controller-issued certificate must complete a real mTLS handshake")
+	defer func() { _ = clientConn.Close() }()
+
+	require.NoError(t, <-accepted, "the listener must accept and verify the steward's client certificate against the delivered CA")
+}
+
+// TestHandleRegister_ApproveReturns200WithCert_IntermediateCA_IncludesIssuerChain
+// verifies issuer_chain is present and non-empty on the direct-approval registration
+// response when the controller's cert manager is backed by an intermediate CA
+// (Issue #3778). [REQUIRED TEST]
+func TestHandleRegister_ApproveReturns200WithCert_IntermediateCA_IncludesIssuerChain(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestIntermediateCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_approve_intermediate_test",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_approve_intermediate_test")
+
+	assert.Equal(t, http.StatusOK, rec.Code, "approve decision must return HTTP 200")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.ClientCert, "client_cert must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.CACert, "ca_cert must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.IssuerChain, "issuer_chain must be present and non-empty when the cert manager is backed by an intermediate CA")
 }
 
 func TestHandleRegister_RejectReturns403(t *testing.T) {
@@ -680,7 +1177,8 @@ func TestHandleDenyRegistration(t *testing.T) {
 	}
 
 	t.Run("happy path - marks entry as denied in durable store", func(t *testing.T) {
-		addEntry(t, "pending-deny-1", "steward-deny-1", "tenant-b", "10.0.0.2")
+		// "default" matches the API key's TenantID (Issue #2932: deny enforces caller subtree).
+		addEntry(t, "pending-deny-1", "steward-deny-1", "default", "10.0.0.2")
 
 		resp := makeDeny(t, "pending-deny-1", "")
 		defer func() { _ = resp.Body.Close() }()
@@ -693,7 +1191,7 @@ func TestHandleDenyRegistration(t *testing.T) {
 	})
 
 	t.Run("deny with reason - marks entry as denied", func(t *testing.T) {
-		addEntry(t, "pending-deny-2", "steward-deny-2", "tenant-b", "10.0.0.3")
+		addEntry(t, "pending-deny-2", "steward-deny-2", "default", "10.0.0.3")
 
 		resp := makeDeny(t, "pending-deny-2", `{"reason":"Unauthorized deployment"}`)
 		defer func() { _ = resp.Body.Close() }()
@@ -710,6 +1208,229 @@ func TestHandleDenyRegistration(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
+
+	t.Run("malformed body returns 400 and leaves the entry pending", func(t *testing.T) {
+		addEntry(t, "pending-deny-3", "steward-deny-3", "default", "10.0.0.4")
+
+		resp := makeDeny(t, "pending-deny-3", `{"reason":`)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
+			"a malformed deny body must be reported, not silently dropped")
+
+		// The audited deny reason is part of the request: a body the server could
+		// not read must not produce a deny record with the reason missing.
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-deny-3")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+			"a rejected deny request must not change the entry status")
+	})
+}
+
+// TestHandleDenyRegistration_CrossTenantRefused is the REQUIRED regression test for
+// Issue #4336: a caller scoped to tenant-a cannot deny a pending registration
+// belonging to tenant-b. registration:deny requires no elevated assurance, so this
+// drives the full router with a real tenant-scoped API key rather than a direct
+// handler call.
+func TestHandleDenyRegistration_CrossTenantRefused(t *testing.T) {
+	server, ts, pendingStore := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	server.apiKeys["tenant-a-deny-key"] = &APIKey{
+		ID:          "tenant-a-deny-key-id",
+		Key:         "tenant-a-deny-key",
+		Permissions: []string{"registration:deny"},
+		TenantID:    "tenant-a",
+	}
+
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:    "pending-deny-tenant-b",
+		StewardID:    "steward-deny-tenant-b",
+		TenantID:     "tenant-b",
+		TokenStr:     "tok-deny-tenant-b",
+		SourceIP:     "10.0.0.9",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		ts.URL+"/api/v1/registration/pending-deny-tenant-b/deny", bytes.NewReader(nil))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer tenant-a-deny-key")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	got, err := pendingStore.GetPendingByID(context.Background(), "pending-deny-tenant-b")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+		"a refused cross-tenant deny must not change status")
+}
+
+// staleListPendingStore wraps a real business.PendingRegistrationStore and makes
+// ListPending return a fixed, stale snapshot instead of querying the store. It
+// models a bulk handler (approve-all / approve-by-cidr) whose ListPending read
+// raced a concurrent claim: the snapshot still shows the entry as "pending" even
+// though the underlying store has since moved it to "claimed". All other methods
+// delegate to the real store, so the resulting UpdateStatus call exercises the
+// real guarded SQL, not a fake.
+type staleListPendingStore struct {
+	business.PendingRegistrationStore
+	staleSnapshot []*business.PendingRegistrationEntry
+}
+
+func (s *staleListPendingStore) ListPending(_ context.Context, _ string) ([]*business.PendingRegistrationEntry, error) {
+	return s.staleSnapshot, nil
+}
+
+// TestApproveRegistration_CannotReopenClaimedEntry is the [REQUIRED TEST] for
+// Issue #3895: handleApproveRegistration, handleDenyRegistration,
+// handleApproveAllRegistrations, and handleApproveByCIDR must not transition an
+// already-claimed (or otherwise non-pending) entry back to approved/denied,
+// which would reopen the claim window handleRegistrationStatus's own
+// "AND status = 'approved'" guard exists to close and enable a second
+// certificate issuance for one registration. Table-driven across all four
+// handlers.
+func TestApproveRegistration_CannotReopenClaimedEntry(t *testing.T) {
+	t.Run("handleApproveRegistration", func(t *testing.T) {
+		server, ts, pendingStore := newRegistrationApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-approve"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-approve", "default", "10.0.0.1")
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/approve", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusConflict, rec.Code, "re-approving a claimed entry must be rejected, not silently succeed: %s", rec.Body.String())
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed")
+	})
+
+	t.Run("handleDenyRegistration", func(t *testing.T) {
+		server, ts, pendingStore := newRegistrationApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-deny"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-deny", "default", "10.0.0.2")
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/deny", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusConflict, rec.Code, "denying a claimed entry must be rejected, not silently succeed: %s", rec.Body.String())
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed")
+	})
+
+	t.Run("handleDenyRegistration revokes an approved-but-unclaimed entry", func(t *testing.T) {
+		// The Issue #3895 guard must not cost the operator the ability to revoke
+		// an approval before the steward claims it. An approved entry stays
+		// claimable until ExpiresAt, so deny is the only control that stops
+		// certificate issuance for an approval made in error or later judged
+		// hostile.
+		server, ts, pendingStore := newRegistrationApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-approved-deny"
+		addPendingEntry(t, pendingStore, pendingID, "steward-approved-deny", "default", "10.0.0.6")
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/deny", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "denying an approved-but-unclaimed entry must succeed: %s", rec.Body.String())
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status, "the approval must be revoked")
+		assert.Nil(t, got.ClaimedAt, "a revoked registration must never record a claim")
+
+		// The revocation must actually close the claim window: the steward's
+		// status poll can no longer transition the entry to claimed.
+		assert.ErrorIs(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed),
+			business.ErrPendingRegistrationNotFound, "a denied registration must not be claimable")
+	})
+
+	t.Run("handleApproveAllRegistrations", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-approve-all"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-approve-all", "tenant-a", "10.0.0.3")
+		staleSnapshot, err := pendingStore.ListPending(context.Background(), "")
+		require.NoError(t, err)
+		require.Len(t, staleSnapshot, 1, "sanity: the stale snapshot must capture the entry while still pending")
+
+		// Simulate a concurrent claim landing after the (now-stale) list read above.
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		server.SetPendingStore(&staleListPendingStore{PendingRegistrationStore: pendingStore, staleSnapshot: staleSnapshot})
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "the bulk endpoint itself must still succeed: %s", rec.Body.String())
+		var result struct {
+			Approved int `json:"approved"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+		assert.Equal(t, 0, result.Approved, "the guard-rejected entry must not be counted as approved")
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened by the stale bulk list")
+	})
+
+	t.Run("handleApproveByCIDR", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-cidr"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-cidr", "tenant-a", "192.168.1.50")
+		staleSnapshot, err := pendingStore.ListPending(context.Background(), "")
+		require.NoError(t, err)
+		require.Len(t, staleSnapshot, 1, "sanity: the stale snapshot must capture the entry while still pending")
+
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		server.SetPendingStore(&staleListPendingStore{PendingRegistrationStore: pendingStore, staleSnapshot: staleSnapshot})
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
+			strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "the bulk endpoint itself must still succeed: %s", rec.Body.String())
+		var result struct {
+			Approved int `json:"approved"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+		assert.Equal(t, 0, result.Approved, "the guard-rejected entry must not be counted as approved")
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened by the stale bulk list")
 	})
 }
 
@@ -749,6 +1470,26 @@ func TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy(t *testing.T) {
 	got = extractSourceIP(reqFromProxy, proxies)
 	assert.Equal(t, spoofedXFF, got,
 		"peer in trustedProxies: XFF must be honored")
+
+	// Standard proxies append the observed upstream address. Walk from the
+	// trusted edge toward the client so an attacker-controlled leftmost value
+	// cannot replace the address actually observed by the proxy.
+	reqFromProxy.Header.Set("X-Forwarded-For", "198.51.100.99, 203.0.113.5")
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, peerAddr, got,
+		"trusted proxy chain: first untrusted hop from the right is the client")
+
+	reqFromProxy.Header.Del("X-Forwarded-For")
+	reqFromProxy.Header.Add("X-Forwarded-For", "198.51.100.99")
+	reqFromProxy.Header.Add("X-Forwarded-For", "203.0.113.5")
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, peerAddr, got,
+		"multiple X-Forwarded-For fields must form one right-to-left chain")
+
+	reqFromProxy.Header.Set("X-Forwarded-For", "198.51.100.99, not-an-ip")
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, "192.168.1.10", got,
+		"malformed trusted-proxy chain must fall back to the TCP peer")
 
 	// When the peer IS in trustedProxies but XFF is absent, use peer address.
 	reqFromProxyNoXFF := httptest.NewRequest(http.MethodPost, "/api/v1/register", nil)
@@ -805,6 +1546,7 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		RegisteredAt: now,
 		ExpiresAt:    now.Add(5 * 24 * time.Hour),
 		Status:       business.PendingRegistrationStatusPending,
+		CSRPEM:       testValidCSRPEM,
 	}
 	require.NoError(t, pendingStore.AddPending(context.Background(), entry))
 
@@ -843,8 +1585,8 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 		assert.Equal(t, "claimed", body.Status)
 		assert.NotEmpty(t, body.ClientCert, "client_cert must be present after approval")
-		assert.NotEmpty(t, body.ClientKey, "client_key must be present after approval")
 		assert.NotEmpty(t, body.CACert, "ca_cert must be present after approval")
+		assert.Empty(t, body.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
 
 		// Entry must be persisted as claimed.
 		got, err := pendingStore.GetPendingByID(context.Background(), "pending-lifecycle-1")
@@ -859,6 +1601,62 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		assert.Equal(t, http.StatusGone, resp.StatusCode,
 			"second poll after claim must return 410 Gone — cert must not be re-issued")
 	})
+}
+
+// TestHandleRegistrationStatus_ClaimIntermediateCA_IncludesIssuerChain verifies
+// issuer_chain is present and non-empty on the claim-poll response (buildClaimResponse)
+// when the controller's cert manager is backed by an intermediate CA (Issue #3778).
+// [REQUIRED TEST]
+func TestHandleRegistrationStatus_ClaimIntermediateCA_IncludesIssuerChain(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestIntermediateCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_intermediate_claim_tok"
+	const tenantID = "test-tenant"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+	}))
+
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:    "pending-intermediate-claim-1",
+		StewardID:    "steward-intermediate-claim-1",
+		TenantID:     tenantID,
+		TokenStr:     regToken,
+		SourceIP:     "10.0.0.1",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+		CSRPEM:       testValidCSRPEM,
+	}))
+	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+		"pending-intermediate-claim-1", business.PendingRegistrationStatusApproved))
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET",
+		ts.URL+"/api/v1/registration/status/pending-intermediate-claim-1", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+regToken)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body RegistrationStatusResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "claimed", body.Status)
+	assert.NotEmpty(t, body.ClientCert)
+	assert.NotEmpty(t, body.IssuerChain, "issuer_chain must be present and non-empty when the cert manager is backed by an intermediate CA")
 }
 
 // TestHandleRegistrationStatus_TenantIsolation verifies that a token from a different tenant
@@ -970,7 +1768,7 @@ func addPendingEntry(t *testing.T, store business.PendingRegistrationStore, pend
 // TestApproveByCIDR_FiltersCorrectly verifies that only entries whose source IP is in the
 // CIDR are approved; entries outside it remain pending (required test from AC).
 func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
-	_, ts, pendingStore := newBulkApprovalServer(t)
+	server, ts, pendingStore := newBulkApprovalServer(t)
 	defer ts.Close()
 
 	// Two entries inside the CIDR 192.168.1.0/24, one outside.
@@ -978,24 +1776,20 @@ func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
 	addPendingEntry(t, pendingStore, "pending-cidr-in-2", "steward-in-2", "tenant-a", "192.168.1.200")
 	addPendingEntry(t, pendingStore, "pending-cidr-out-1", "steward-out-1", "tenant-a", "10.0.0.5")
 
-	body := `{"cidr":"192.168.1.0/24"}`
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-by-cidr",
-		strings.NewReader(body))
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
+		strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
 	req.Header.Set("Content-Type", "application/json")
+	// registration:approve-by-cidr requires RequireUserPresence (Issue #2969).
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var result struct {
 		Approved int `json:"approved"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
 	assert.Equal(t, 2, result.Approved, "only two entries inside the CIDR should be approved")
 
 	// Verify store state: inside entries approved, outside entry still pending.
@@ -1016,7 +1810,7 @@ func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
 // TestApproveAll_Idempotent verifies that calling approve-all twice does not error and
 // the second call returns 0 approved (required test from AC).
 func TestApproveAll_Idempotent(t *testing.T) {
-	_, ts, pendingStore := newBulkApprovalServer(t)
+	server, ts, pendingStore := newBulkApprovalServer(t)
 	defer ts.Close()
 
 	addPendingEntry(t, pendingStore, "pending-idem-1", "steward-idem-1", "tenant-a", "10.0.0.1")
@@ -1024,21 +1818,16 @@ func TestApproveAll_Idempotent(t *testing.T) {
 
 	doApproveAll := func(t *testing.T) int {
 		t.Helper()
-		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			ts.URL+"/api/v1/registration/approve-all", nil)
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer bulk-key")
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
 
-		resp, err := ts.Client().Do(req)
-		require.NoError(t, err)
-		defer func() { _ = resp.Body.Close() }()
-
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, http.StatusOK, rec.Code)
 
 		var result struct {
 			Approved int `json:"approved"`
 		}
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
 		return result.Approved
 	}
 
@@ -1053,73 +1842,1815 @@ func TestApproveAll_Idempotent(t *testing.T) {
 
 // TestHandleApproveByCIDR_InvalidCIDR verifies that a malformed CIDR returns 400.
 func TestHandleApproveByCIDR_InvalidCIDR(t *testing.T) {
-	_, ts, _ := newBulkApprovalServer(t)
+	server, ts, _ := newBulkApprovalServer(t)
 	defer ts.Close()
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-by-cidr",
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"not-a-cidr"}`))
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
 	req.Header.Set("Content-Type", "application/json")
+	// Presence token required even for error paths — gate is enforced before handler logic.
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // TestHandleApproveByCIDR_NoPendingStore verifies 503 when pendingStore is nil.
 func TestHandleApproveByCIDR_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
-	// Do NOT set pendingStore.
-	server.apiKeys["bulk-key"] = &APIKey{
-		ID:          "bulk-key-id",
-		Key:         "bulk-key",
-		Permissions: []string{"registration:approve"},
-		TenantID:    "default",
-	}
-	ts := httptest.NewServer(server.router)
+	server.SetPendingStore(nil)
+
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
+		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Presence token required — gate fires before handler's pendingStore nil check.
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleApproveByCIDR_RequiresPresence verifies that calling approve-by-cidr without
+// a presence token returns 401 with presence="required" in WWW-Authenticate.
+func TestHandleApproveByCIDR_RequiresPresence(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
 	defer ts.Close()
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-by-cidr",
+	// No presence token attached — should be rejected before reaching the handler.
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
 	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`,
+		"approve-by-cidr must require a user-presence proof (Issue #2969)")
+}
 
-	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+// TestHandleApproveByCIDRPreview_HappyPath verifies that the preview endpoint returns
+// the count, IDs, and source IPs of matching pending entries without mutating state.
+func TestHandleApproveByCIDRPreview_HappyPath(t *testing.T) {
+	server, ts, pendingStore := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	addPendingEntry(t, pendingStore, "prev-in-1", "stwd-in-1", "tenant-a", "192.168.1.10")
+	addPendingEntry(t, pendingStore, "prev-in-2", "stwd-in-2", "tenant-a", "192.168.1.20")
+	addPendingEntry(t, pendingStore, "prev-out-1", "stwd-out-1", "tenant-a", "10.0.0.5")
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=192.168.1.0/24", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var result approveByCIDRPreviewResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	assert.Equal(t, 2, result.Count)
+	assert.ElementsMatch(t, []string{"prev-in-1", "prev-in-2"}, result.PendingIDs)
+	assert.ElementsMatch(t, []string{"192.168.1.10", "192.168.1.20"}, result.SourceIPs)
+
+	// Verify the store is unmodified — preview must not mutate state.
+	for _, id := range []string{"prev-in-1", "prev-in-2", "prev-out-1"} {
+		e, err := pendingStore.GetPendingByID(context.Background(), id)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusPending, e.Status,
+			"preview must not mutate entry %q", id)
+	}
+}
+
+// TestHandleApproveByCIDRPreview_EmptyResult verifies that the preview returns an empty
+// JSON array (not null) when no entries match.
+func TestHandleApproveByCIDRPreview_EmptyResult(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=10.0.0.0/8", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var result approveByCIDRPreviewResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	assert.Equal(t, 0, result.Count)
+	assert.NotNil(t, result.PendingIDs, "pending_ids must be an empty array, not null")
+	assert.NotNil(t, result.SourceIPs, "source_ips must be an empty array, not null")
+}
+
+// TestHandleApproveByCIDRPreview_InvalidCIDR verifies that a malformed CIDR returns 400.
+func TestHandleApproveByCIDRPreview_InvalidCIDR(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=not-a-cidr", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleApproveByCIDRPreview_MissingCIDR verifies that a missing cidr parameter returns 400.
+func TestHandleApproveByCIDRPreview_MissingCIDR(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleApproveByCIDRPreview_NoPendingStore verifies 503 when pendingStore is nil.
+func TestHandleApproveByCIDRPreview_NoPendingStore(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetPendingStore(nil)
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=10.0.0.0/8", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleApproveByCIDR_UnsetScope_Refused is the REQUIRED regression test for
+// Issue #4336 on the bulk CIDR pair. Both handlers resolve their ListPending tenant
+// filter through tenantListFilterForScope, whose default case refuses a scope that is
+// neither root nor a non-empty tenant path. The router-driven tests above all
+// authenticate via API key or admin certificate, and authenticationMiddleware always
+// resolves those to a set scope, so this defensive branch is only reachable by calling
+// the handler directly with no ctxkeys.TenantScope on the request context — the exact
+// signature of an auth-plumbing bug that dropped the scope. Before this story, an
+// unset scope fell through to the root-scoped "" filter and approved (or previewed)
+// every tenant's pending entries.
+func TestHandleApproveByCIDR_UnsetScope_Refused(t *testing.T) {
+	t.Run("approve refuses and approves nothing", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+		addPendingEntry(t, pendingStore, "pending-unset-scope-1", "steward-unset-1", "tenant-a", "192.168.1.10")
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr",
+			strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
+		req.Header.Set("Content-Type", "application/json")
+		// Deliberately no ctxkeys.TenantScopeKey on the context.
+		rec := httptest.NewRecorder()
+		server.handleApproveByCIDR(rec, req)
+
+		require.Equal(t, http.StatusForbidden, rec.Code,
+			"unset scope must be refused, not fall through to the root-scoped \"\" filter: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "tenant scope required")
+
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-unset-scope-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+			"no entry may be approved on a 403")
+	})
+
+	t.Run("preview refuses and discloses nothing", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+		addPendingEntry(t, pendingStore, "pending-unset-scope-2", "steward-unset-2", "tenant-a", "192.168.1.11")
+
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/v1/registration/approve-by-cidr/preview?cidr=192.168.1.0/24", nil)
+		// Deliberately no ctxkeys.TenantScopeKey on the context.
+		rec := httptest.NewRecorder()
+		server.handleApproveByCIDRPreview(rec, req)
+
+		require.Equal(t, http.StatusForbidden, rec.Code,
+			"unset scope must be refused, not fall through to the root-scoped \"\" filter: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "tenant scope required")
+		assert.NotContains(t, rec.Body.String(), "pending-unset-scope-2",
+			"a refused preview must not disclose any pending entry")
+	})
 }
 
 // TestHandleApproveAll_NoPendingStore verifies 503 when pendingStore is nil.
 func TestHandleApproveAll_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetPendingStore(nil)
 	// Do NOT set pendingStore.
-	server.apiKeys["bulk-key"] = &APIKey{
-		ID:          "bulk-key-id",
-		Key:         "bulk-key",
-		Permissions: []string{"registration:approve"},
-		TenantID:    "default",
+
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestGetTransportAddress_ExternalAddressConfig verifies that transport.external_address
+// is returned as the steward-facing address when ListenAddr binds 0.0.0.0.
+func TestGetTransportAddress_ExternalAddressConfig(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{
+		ListenAddr:      "0.0.0.0:4433",
+		ExternalAddress: "controller.example.com",
 	}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "controller.example.com:4433", addr)
+}
+
+// TestGetTransportAddress_EnvVarFallback verifies that CFGMS_EXTERNAL_HOSTNAME is used
+// when no transport.external_address is configured.
+func TestGetTransportAddress_EnvVarFallback(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env-controller.example.com")
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:9433"}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "env-controller.example.com:9433", addr)
+}
+
+// TestGetTransportAddress_ConfigPrecedenceOverEnvVar verifies that transport.external_address
+// takes precedence over CFGMS_EXTERNAL_HOSTNAME when both are set.
+func TestGetTransportAddress_ConfigPrecedenceOverEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env-controller.example.com")
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{
+		ListenAddr:      "0.0.0.0:4433",
+		ExternalAddress: "config-controller.example.com",
+	}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "config-controller.example.com:4433", addr)
+}
+
+// TestGetTransportAddress_NonBindAll verifies that a specific bind address is
+// returned unchanged without requiring an external address.
+func TestGetTransportAddress_NonBindAll(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{ListenAddr: "192.168.1.10:4433"}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.1.10:4433", addr)
+}
+
+// TestGetTransportAddress_BindAll_NoExternalAddress_ReturnsError verifies that
+// getTransportAddress() returns an informative error when ListenAddr is 0.0.0.0
+// and no external address is available.
+func TestGetTransportAddress_BindAll_NoExternalAddress_ReturnsError(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+
+	_, err := srv.getTransportAddress()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transport.external_address")
+	assert.Contains(t, err.Error(), "CFGMS_EXTERNAL_HOSTNAME")
+}
+
+// TestHandleRegister_QuarantinePath_TransportAddressError verifies that the quarantine
+// branch returns HTTP 500 when getTransportAddress() fails (misconfigured 0.0.0.0 bind
+// with no external address). This can only occur if startup validation is bypassed.
+func TestHandleRegister_QuarantinePath_TransportAddressError(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	tokenStore := newTestRegistrationStore(t)
+	// newHandleRegisterServer sets ExternalAddress="localhost" so the server builds.
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	// Now simulate a misconfigured transport address (clears the ExternalAddress).
+	server.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_quarantine_transport_err",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_quarantine_transport_err")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"quarantine path must return HTTP 500 when transport address is misconfigured")
+	assert.Contains(t, rec.Body.String(), "transport address not configured")
+}
+
+// TestHandleRegister_ApprovePath_TransportAddressError verifies that the approve
+// branch returns HTTP 500 when getTransportAddress() fails (misconfigured 0.0.0.0 bind
+// with no external address). This can only occur if startup validation is bypassed.
+func TestHandleRegister_ApprovePath_TransportAddressError(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	// newHandleRegisterServer sets ExternalAddress="localhost" so the server builds.
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	// Now simulate a misconfigured transport address (clears the ExternalAddress).
+	server.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_approve_transport_err",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_approve_transport_err")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"approve path must return HTTP 500 when transport address is misconfigured")
+	assert.Contains(t, rec.Body.String(), "transport address not configured")
+
+	// The failure occurred before the atomic issuance boundary, so correcting
+	// the prerequisite and retrying the same request must still succeed.
+	server.cfg.Transport.ExternalAddress = "localhost"
+	retry := postRegister(server, "cfgms_reg_approve_transport_err")
+	assert.Equal(t, http.StatusOK, retry.Code)
+	assert.Contains(t, retry.Body.String(), "BEGIN CERTIFICATE")
+}
+
+// newHandleRegisterServerWithStewardStore creates a server wired with a real
+// SQLite-backed StewardStore (from the OSS composite storage manager) for device
+// identity persistence tests. No fakes — CFGMS mandates real component testing.
+func newHandleRegisterServerWithStewardStore(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, business.StewardStore) {
+	t.Helper()
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	ss := pkgtesting.SetupTestStorage(t).GetStewardStore()
+	require.NotNil(t, ss, "test storage must provide a StewardStore")
+	server.SetStewardStore(ss)
+	return server, ss
+}
+
+// TestHandleRegister_PersistsDeviceIdentity verifies that after a successful registration
+// the controller has stored the DeviceID and IdentityKeyPub on the StewardRecord.
+func TestHandleRegister_PersistsDeviceIdentity(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_persist_identity",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	deviceID := "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2"
+	identityKeyPub := base64.StdEncoding.EncodeToString([]byte(pub))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:              "cfgms_reg_persist_identity",
+		DeviceID:           deviceID,
+		IdentityKeyPub:     identityKeyPub,
+		CSRPEM:             testValidCSRPEM,
+		KeyProtectionLevel: "tpm",
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), resp.StewardID)
+	require.NoError(t, lookupErr, "StewardRecord must be present in the store after registration")
+	assert.Equal(t, deviceID, stored.DeviceID, "stored DeviceID must match the sent value")
+	assert.Equal(t, []byte(pub), stored.IdentityKeyPub, "stored IdentityKeyPub must match the sent public key bytes")
+	assert.Equal(t, "tpm", stored.KeyProtectionLevel)
+	assert.Equal(t, "test-tenant", stored.TenantID)
+}
+
+// TestHandleRegister_MissingDeviceID_400 verifies that a registration request without
+// a DeviceID returns HTTP 400.
+func TestHandleRegister_MissingDeviceID_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_device_id",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_no_device_id",
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+		// DeviceID intentionally omitted
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "device_id")
+}
+
+// TestHandleRegister_MalformedDeviceID_400 verifies that a registration request with
+// a DeviceID that is not 64 lowercase hex characters returns HTTP 400.
+func TestHandleRegister_MalformedDeviceID_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_bad_device_id",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	for _, badID := range []string{
+		"tooshort",
+		strings.Repeat("a", 63), // 63 chars
+		strings.Repeat("A", 64), // uppercase hex — invalid
+		strings.Repeat("g", 64), // non-hex character
+		strings.Repeat("a", 65), // 65 chars
+	} {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          "cfgms_reg_bad_device_id",
+			DeviceID:       badID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "DeviceID %q must be rejected with 400", badID)
+	}
+}
+
+// TestHandleRegister_MissingIdentityKeyPub_400 verifies that a registration request
+// without an IdentityKeyPub returns HTTP 400.
+func TestHandleRegister_MissingIdentityKeyPub_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_key_pub",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:    "cfgms_reg_no_key_pub",
+		DeviceID: testValidDeviceID,
+		// IdentityKeyPub intentionally omitted
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "identity_key_pub")
+}
+
+// TestHandleRegister_InvalidIdentityKeyPub_400 verifies that a registration request
+// with an IdentityKeyPub that does not decode to 32 bytes returns HTTP 400.
+func TestHandleRegister_InvalidIdentityKeyPub_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_bad_key_pub",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	for _, badPub := range []string{
+		"notbase64!!!",
+		base64.StdEncoding.EncodeToString([]byte("tooshort")), // <32 bytes
+		base64.StdEncoding.EncodeToString(make([]byte, 33)),   // 33 bytes
+		base64.StdEncoding.EncodeToString(make([]byte, 64)),   // 64 bytes (wrong size)
+	} {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          "cfgms_reg_bad_key_pub",
+			DeviceID:       testValidDeviceID,
+			IdentityKeyPub: badPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "IdentityKeyPub %q must be rejected with 400", badPub)
+	}
+}
+
+// TestHandleRegister_MissingCSRPEM_400 verifies that a registration request with
+// csr_pem unset is rejected before any certificate is signed (Issue #3780 AC).
+func TestHandleRegister_MissingCSRPEM_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_csr",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_no_csr",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		// CSRPEM intentionally omitted
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "csr_pem")
+	assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE", "no certificate may be signed when csr_pem is missing")
+}
+
+// TestHandleRegister_CSRContainsPrivateKeyMaterial_400 verifies that a csr_pem body
+// smuggling private key material alongside the CERTIFICATE REQUEST block is rejected
+// (via containsPrivateKeyMaterial) before any certificate is signed (Issue #3780 AC).
+func TestHandleRegister_CSRContainsPrivateKeyMaterial_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_csr_with_key",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	smuggledCSR := testValidCSRPEM + string(keyPEM)
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_csr_with_key",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         smuggledCSR,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "private key material")
+	assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE", "no certificate may be signed when the CSR carries embedded private key material")
+}
+
+// TestHandleRegister_DuplicateDeviceIDWithinTenant_409 verifies that registering the
+// same DeviceID twice in the same tenant is rejected with HTTP 409.
+func TestHandleRegister_DuplicateDeviceIDWithinTenant_409(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_dup_device_id",
+		TenantID:      "tenant-dup",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	// First registration with this DeviceID — must succeed.
+	rec1 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_dup_device_id",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
+	assert.Equal(t, http.StatusOK, rec1.Code, "first registration must succeed")
+
+	// Second registration with the same DeviceID in the same tenant — must be rejected.
+	rec2 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_dup_device_id",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
+	assert.Equal(t, http.StatusConflict, rec2.Code,
+		"duplicate DeviceID within the same tenant must return HTTP 409")
+}
+
+// TestHandleRegister_DuplicateDeviceIDCrossTenant_200 verifies that the same DeviceID
+// may be used in different tenants without conflict (tenant namespaces are independent).
+func TestHandleRegister_DuplicateDeviceIDCrossTenant_200(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tokA := &registration.Token{
+		Token:         "cfgms_reg_cross_tenant_a",
+		TenantID:      "tenant-a",
+		ControllerURL: "grpc://controller:7443",
+	}
+	tokB := &registration.Token{
+		Token:         "cfgms_reg_cross_tenant_b",
+		TenantID:      "tenant-b",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tokA))
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tokB))
+
+	deviceID := "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2"
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	keyPub := base64.StdEncoding.EncodeToString([]byte(pub))
+
+	// Register under tenant-a — must succeed.
+	rec1 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_cross_tenant_a",
+		DeviceID:       deviceID,
+		IdentityKeyPub: keyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
+	assert.Equal(t, http.StatusOK, rec1.Code, "registration under tenant-a must succeed")
+
+	// Register the same DeviceID under tenant-b — must also succeed (different namespace).
+	rec2 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_cross_tenant_b",
+		DeviceID:       deviceID,
+		IdentityKeyPub: keyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
+	assert.Equal(t, http.StatusOK, rec2.Code,
+		"same DeviceID under a different tenant must be accepted (namespaces are independent)")
+}
+
+// TestProvisionedVMRegistration_IPTrustGate covers ADR-010 §3 (Issue #2082):
+// a steward provisioned by the HyperV module registers via the standard
+// POST /api/v1/register endpoint; the IP-trust evaluator (#1694) is the
+// admission gate — the same gate used for all steward registrations. No separate
+// provisioning-registration path exists that bypasses the evaluator.
+//
+// Both admission paths are exercised with real components (real IPTrustStore,
+// real IPTrustApprovalHook, real PendingRegistrationStore, real cert.Manager)
+// to verify end-to-end that the gate is not bypassed for provisioned VMs.
+func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+
+	// Wire real components from the OSS composite storage manager.
+	storageManager := pkgtesting.SetupTestStorage(t)
+	ipTrustStore := storageManager.GetIPTrustStore()
+	require.NotNil(t, ipTrustStore, "test storage must provide an IPTrustStore")
+	pendingStore := storageManager.GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore, "test storage must provide a PendingRegistrationStore")
+
+	// Wire the real IPTrustApprovalHook and durable pending store.
+	server.SetApprovalHook(NewIPTrustApprovalHook(ipTrustStore, logging.NewNoopLogger()))
+	server.SetPendingStore(pendingStore)
+
+	const tenantID = "hv-tenant"
+	const hvTrustedIP = "10.10.0.50"     // HV host's tenant-network IP, added to trust store below
+	const hvUntrustedIP = "198.51.100.1" // not in any trusted range
+
+	// Seed a registration token for the HV tenant (mirrors the join token the
+	// steward bakes into its answer file per ADR-010 §2).
+	tok := &registration.Token{
+		Token:         "cfgms_reg_hv_iptest",
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "hv-vms",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+	trustedTok := &registration.Token{
+		Token:         "cfgms_reg_hv_iptest_trusted",
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "hv-vms",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), trustedTok))
+
+	// sendFrom posts a registration request with the given source IP and returns
+	// the raw response body bytes alongside the recorder so both decoded fields
+	// and raw content (e.g. cert PEM checks) can be verified.
+	sendFrom := func(t *testing.T, sourceIP, tokenStr string) (*httptest.ResponseRecorder, []byte) {
+		t.Helper()
+		body, err := json.Marshal(RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       testValidDeviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = sourceIP + ":54321"
+		rec := httptest.NewRecorder()
+		server.handleRegister(rec, req)
+		return rec, rec.Body.Bytes()
+	}
+
+	t.Run("untrusted_network_requires_manual_approval", func(t *testing.T) {
+		// HV host IP is NOT in the trust store → evaluator returns DecisionQuarantine
+		// → handler returns HTTP 202 Accepted with a pending_id for operator review.
+		rec, rawBody := sendFrom(t, hvUntrustedIP, tok.Token)
+		require.Equal(t, http.StatusAccepted, rec.Code,
+			"provisioned VM registering from an untrusted network must be quarantined (202 Accepted)")
+
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.NewDecoder(bytes.NewReader(rawBody)).Decode(&resp))
+		assert.Equal(t, "pending", resp.Status,
+			"quarantined registration must have status 'pending'")
+		assert.NotEmpty(t, resp.PendingID,
+			"quarantined response must include a pending_id for operator approval")
+		assert.Equal(t, tenantID, resp.TenantID,
+			"quarantined response must reflect the registering tenant")
+
+		// No cert-bundle PEM must appear — issuance is gated on operator approval (Issue #1693).
+		assert.NotContains(t, string(rawBody), "-----BEGIN",
+			"cert PEM must not appear in quarantine response: issuance gated on manual approval")
+
+		// Pending entry must be persisted in durable store for operator action.
+		entry, err := pendingStore.GetPendingByID(context.Background(), resp.PendingID)
+		require.NoError(t, err, "pending entry must be durably persisted for operator review")
+		assert.Equal(t, tenantID, entry.TenantID)
+		assert.Equal(t, business.PendingRegistrationStatusPending, entry.Status,
+			"pending entry must be in 'pending' state awaiting operator approval")
+		assert.Equal(t, hvUntrustedIP, entry.SourceIP,
+			"source IP must be recorded in the pending entry for operator review")
+	})
+
+	// Operator action: seed the HV host's network as trusted
+	// (mirrors 'cfg registration ip-trust add' or the 30-min liveness promotion).
+	require.NoError(t,
+		ipTrustStore.AddTrustedRange(context.Background(), tenantID, hvTrustedIP+"/32", false),
+		"seeding trusted IP range for HV tenant must succeed")
+
+	t.Run("trusted_network_auto_admits", func(t *testing.T) {
+		// HV host IP IS in the trust store → evaluator returns DecisionApprove
+		// → handler returns HTTP 200 with a full mTLS cert bundle.
+		rec, rawBody := sendFrom(t, hvTrustedIP, trustedTok.Token)
+		require.Equal(t, http.StatusOK, rec.Code,
+			"provisioned VM registering from the HV host's trusted network must be auto-admitted (200 OK)")
+
+		var resp RegistrationResponse
+		require.NoError(t, json.NewDecoder(bytes.NewReader(rawBody)).Decode(&resp))
+		assert.NotEmpty(t, resp.ClientCert, "auto-admitted registration must include a client cert")
+		assert.NotEmpty(t, resp.CACert, "auto-admitted registration must include the CA cert")
+		assert.Equal(t, tenantID, resp.TenantID,
+			"auto-admission response must reflect the registering tenant")
+		assert.Equal(t, "hv-vms", resp.Group,
+			"auto-admission response must include the token's fleet group")
+	})
+}
+
+// TestHandleRegister_HostnameSeededBeforeDNASync verifies that a hostname sent at
+// registration is visible in GetStewardInfo immediately after the registration
+// completes — before any SyncDNA call (Issue #2640, AC #1).
+func TestHandleRegister_HostnameSeededBeforeDNASync(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_hostname_seed",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	deviceID := "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3"
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_hostname_seed",
+		DeviceID:       deviceID,
+		IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+		CSRPEM:         testValidCSRPEM,
+		Hostname:       "worker-node-42",
+		OS:             "linux",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "registration with hostname must succeed")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	// No SyncDNA has been called — hostname must be visible solely from registration.
+	info, ok := server.controllerService.GetStewardInfo(resp.StewardID)
+	require.True(t, ok, "registered steward must be present in controller service")
+	require.NotNil(t, info.DNA)
+	flat := service.FlattenDNAFragments(info.DNA.GetFragments())
+	assert.Equal(t, "worker-node-42", flat["hostname"],
+		"hostname must be visible in DNA immediately after registration, before any SyncDNA")
+	assert.Equal(t, "linux", flat["os"],
+		"os must be visible in DNA immediately after registration, before any SyncDNA")
+}
+
+// TestHandleRegister_EmptyHostnameStillRegisters verifies that a registration with no
+// hostname field still succeeds (hostname is optional — Issue #2640, AC #2).
+func TestHandleRegister_EmptyHostnameStillRegisters(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_hostname",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_no_hostname")
+	assert.Equal(t, http.StatusOK, rec.Code, "registration without hostname must still succeed")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	info, ok := server.controllerService.GetStewardInfo(resp.StewardID)
+	require.True(t, ok)
+	require.NotNil(t, info.DNA)
+	assert.Empty(t, service.FlattenDNAFragments(info.DNA.GetFragments())["hostname"],
+		"no hostname fact should be set when none was sent at registration")
+}
+
+// TestHandleListPendingRegistrations_ClusterMode_Returns200Not503 is the REQUIRED TEST for
+// Issue #3401: against a cluster-mode controller — one whose pending-registration store is
+// the PostgreSQL store the database provider returns — GET /api/v1/registration/pending must
+// return 200 rather than the 503 "registration store unavailable" the nil store produced
+// before DatabaseProvider.CreatePendingRegistrationStore was wired.
+//
+// The first subtest is the negative control: it reproduces the pre-fix 503 by leaving the
+// store nil, so a regression that unwires the provider fails here rather than passing
+// silently. The remaining subtests run only when the test database is reachable
+// (make test-integration-db); they are skipped, not failed, when it is not.
+func TestHandleListPendingRegistrations_ClusterMode_Returns200Not503(t *testing.T) {
+	server, ts, _ := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	listPending := func(t *testing.T) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/api/v1/registration/pending", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer reg-approval-key")
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("nil pending store reproduces the pre-fix 503", func(t *testing.T) {
+		server.SetPendingStore(nil)
+		resp := listPending(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode,
+			"a controller with no pending-registration store must return 503 — this is the failure Issue #3401 removes")
+	})
+
+	pendingStore := tryNewDatabasePendingRegistrationStore(t)
+	if pendingStore == nil {
+		t.Skip("PostgreSQL test database not reachable — run `make test-integration-setup && make test-integration-db` to exercise the cluster-mode path")
+	}
+	server.SetPendingStore(pendingStore)
+
+	t.Run("postgres-backed store returns 200", func(t *testing.T) {
+		resp := listPending(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode,
+			"a cluster-mode controller backed by the database provider must return 200, not 503")
+
+		var pending []PendingRegistration
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+	})
+
+	t.Run("postgres-backed store returns entries end to end", func(t *testing.T) {
+		now := time.Now().UTC()
+		// "default" matches the API key's TenantID in newRegistrationApprovalServer, so the
+		// tenant-scoped list returns this entry. The PendingID is unique per run because the
+		// Postgres table is shared across tests and retains rows between them.
+		pendingID := fmt.Sprintf("pending-cluster-%d", now.UnixNano())
+		entry := &business.PendingRegistrationEntry{
+			PendingID:    pendingID,
+			StewardID:    "steward-" + pendingID,
+			TenantID:     "default",
+			TokenStr:     "cfgms_reg_tok_" + pendingID,
+			SourceIP:     "10.20.30.40",
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}
+		require.NoError(t, pendingStore.AddPending(context.Background(), entry))
+		t.Cleanup(func() {
+			_ = pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusDenied)
+		})
+
+		resp := listPending(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var pending []PendingRegistration
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+
+		var found *PendingRegistration
+		for i := range pending {
+			if pending[i].PendingID == pendingID {
+				found = &pending[i]
+				break
+			}
+		}
+		require.NotNil(t, found, "the entry written through the Postgres store must be returned by the handler")
+		assert.Equal(t, "steward-"+pendingID, found.StewardID)
+		assert.Equal(t, "default", found.TenantID)
+		assert.Equal(t, "10.20.30.40", found.SourceIP)
+	})
+}
+
+// ---- Any-node service tests (Issue #3761, ADR-031 Decision 1) ----
+
+// TestRegistrationHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// the approval half of handlers_registration.go. handleApproveRegistration,
+// handleApproveAllRegistrations and handleApproveByCIDR used to return 503 and make
+// no pendingStore writes when the serving node held no lease-backed leadership (the
+// former partition gate, Issue #3471). Any-node service means every cluster node
+// accepts these writes — the shared pending store is the serialization point, not
+// leadership — so each handler, driven against a real and deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired), must reach
+// the existing logic and durably approve the entry.
+func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	// newNonAuthoritativeRegistrationServer wires a real pending store and a real,
+	// deliberately non-authoritative HA manager, then seeds one pending entry.
+	newNonAuthoritativeRegistrationServer := func(t *testing.T, pendingID string) (*Server, business.PendingRegistrationStore) {
+		t.Helper()
+		tokenStore := newTestRegistrationStore(t)
+		server, _ := newHandleRegisterServer(t, tokenStore, nil)
+		pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+		require.NotNil(t, pendingStore)
+		server.SetPendingStore(pendingStore)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		now := time.Now().UTC()
+		require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+			PendingID:    pendingID,
+			StewardID:    "steward-" + pendingID,
+			TenantID:     "test-tenant",
+			TokenStr:     "tok-any-node",
+			SourceIP:     "10.0.0.7",
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}))
+		return server, pendingStore
+	}
+
+	tests := []struct {
+		name   string
+		invoke func(s *Server, pendingID string) *httptest.ResponseRecorder
+	}{
+		{
+			name: "handleApproveRegistration approves the entry",
+			invoke: func(s *Server, pendingID string) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/"+pendingID+"/approve", nil)
+				r = mux.SetURLVars(r, map[string]string{"id": pendingID})
+				// Issue #4336: handleApproveRegistration now reads ctxkeys.TenantScope
+				// directly; this test exercises any-node routing, not tenant scoping, so
+				// it carries a root scope (matching a verified mTLS admin) rather than an
+				// unset one.
+				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+				rec := httptest.NewRecorder()
+				s.handleApproveRegistration(rec, r)
+				return rec
+			},
+		},
+		{
+			name: "handleApproveAllRegistrations approves the entry",
+			invoke: func(s *Server, _ string) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-all", nil)
+				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+				rec := httptest.NewRecorder()
+				s.handleApproveAllRegistrations(rec, r)
+				return rec
+			},
+		},
+		{
+			name: "handleApproveByCIDR approves the entry",
+			invoke: func(s *Server, _ string) *httptest.ResponseRecorder {
+				body := strings.NewReader(`{"cidr":"10.0.0.0/8"}`)
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr", body)
+				r.Header.Set("Content-Type", "application/json")
+				// Issue #4336: handleApproveByCIDR now resolves its tenant list filter
+				// from ctxkeys.TenantScope; see the comment on the approve subtest above.
+				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+				rec := httptest.NewRecorder()
+				s.handleApproveByCIDR(rec, r)
+				return rec
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pendingID := "pending-any-node-1"
+			server, pendingStore := newNonAuthoritativeRegistrationServer(t, pendingID)
+
+			rec := tc.invoke(server, pendingID)
+
+			require.Equal(t, http.StatusOK, rec.Code,
+				"approval must succeed regardless of leadership: %s", rec.Body.String())
+
+			got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+			require.NoError(t, err)
+			assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status,
+				"the approval must be durably recorded from a non-authoritative node")
+		})
+	}
+}
+
+// TestHandleRegister_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for the
+// enrollment path. handleRegister used to reject enrollment with 503 when the serving
+// node held no lease-backed leadership. Under any-node service, a steward enrolling
+// against any cluster node must receive its client certificate and the registration
+// token must be consumed exactly as it would on a leader.
+func TestHandleRegister_SucceedsOnNonAuthoritativeNode(t *testing.T) {
+	const regToken = "cfgms_reg_any_node_tok"
+
+	tokenStore := newTestRegistrationStore(t)
+	// A real cert manager is wired so the test proves inline certificate issuance is
+	// actually reached from a non-authoritative node.
+	server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+	}))
+	server.haManager = newNonAuthoritativeHAManager(t)
+
+	rec := postRegister(server, regToken)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"enrollment must succeed regardless of leadership: %s", rec.Body.String())
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.ClientCert,
+		"a non-authoritative node must still issue the client certificate")
+
+	// The token must have been claimed: the enrollment left the durable side effect a
+	// leader would have left. A second claim for the same identity therefore reports
+	// that the claim already exists rather than creating one.
+	keyBytes, err := base64.StdEncoding.DecodeString(testValidIdentityKeyPub)
+	require.NoError(t, err)
+	created, err := tokenStore.ClaimToken(context.Background(), regToken,
+		registrationClaimID(testValidDeviceID, keyBytes))
+	require.NoError(t, err)
+	assert.False(t, created,
+		"the successful enrollment must already have claimed the registration token")
+}
+
+// TestHandleRegister_SucceedsOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
+// existing enrollment logic unchanged — removing the gate must not have broken the
+// leader path either.
+func TestHandleRegister_SucceedsOnAuthoritativeNode(t *testing.T) {
+	const regToken = "cfgms_reg_authoritative_tok"
+
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+	}))
+	server.haManager = newAuthoritativeHAManager(t)
+
+	rec := postRegister(server, regToken)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"enrollment must succeed on an authoritative node: %s", rec.Body.String())
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.ClientCert, "an authoritative node must still issue the cert")
+}
+
+// TestHandleRegistrationStatus_ClaimSucceedsOnNonAuthoritativeNode covers the second
+// half of the enrollment path. The approved branch of handleRegistrationStatus
+// transitions the entry to "claimed" and mints a client certificate; that branch was
+// the one gated on leadership. Under any-node service the claim is served by whichever
+// node the steward polls, and read-only status polling stays available as before.
+func TestHandleRegistrationStatus_ClaimSucceedsOnNonAuthoritativeNode(t *testing.T) {
+	const regToken = "cfgms_reg_claim_any_node_tok"
+	const tenantID = "test-tenant"
+	const pendingID = "pending-claim-any-node-1"
+
+	// newStatusServer wires a real token store, pending store and cert manager, seeds
+	// an approved pending entry, and puts the node in the non-authoritative state.
+	newStatusServer := func(t *testing.T) *Server {
+		t.Helper()
+		tokenStore := newTestRegistrationStore(t)
+		server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+		pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+		require.NotNil(t, pendingStore)
+		server.SetPendingStore(pendingStore)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+			Token:         regToken,
+			TenantID:      tenantID,
+			ControllerURL: "grpc://controller:7443",
+			Group:         "prod",
+		}))
+
+		now := time.Now().UTC()
+		require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+			PendingID:    pendingID,
+			StewardID:    "steward-claim-any-node-1",
+			TenantID:     tenantID,
+			TokenStr:     regToken,
+			SourceIP:     "10.0.0.1",
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+			CSRPEM:       testValidCSRPEM,
+		}))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID,
+			business.PendingRegistrationStatusApproved))
+		return server
+	}
+
+	pollStatus := func(server *Server, id string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/registration/status/"+id, nil)
+		r.Header.Set("Authorization", "Bearer "+regToken)
+		r = mux.SetURLVars(r, map[string]string{"pending_id": id})
+		rec := httptest.NewRecorder()
+		server.handleRegistrationStatus(rec, r)
+		return rec
+	}
+
+	t.Run("non-authoritative node serves the claim", func(t *testing.T) {
+		server := newStatusServer(t)
+
+		rec := pollStatus(server, pendingID)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"the claim must be served regardless of leadership: %s", rec.Body.String())
+		var body RegistrationStatusResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, body.Status)
+		assert.NotEmpty(t, body.ClientCert,
+			"a non-authoritative node must still mint the client certificate")
+
+		// The approval must have been consumed: the entry is now claimed durably.
+		got, err := server.pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status)
+	})
+
+	t.Run("non-authoritative node still answers a pending status poll", func(t *testing.T) {
+		server := newStatusServer(t)
+		require.NoError(t, server.pendingStore.UpdateStatus(context.Background(), pendingID,
+			business.PendingRegistrationStatusPending))
+
+		rec := pollStatus(server, pendingID)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"read-only status polling must stay available on every node")
+		var body RegistrationStatusResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "pending", body.Status)
+	})
+}
+
+// TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart: AC1 + AC2 —
+// the quarantine→approve→claim flow must write a StewardRecord to the durable
+// StewardStore at claim time (buildClaimResponse), and that record must be visible
+// in the registry after a simulated controller restart (new ControllerService +
+// LoadFromStorage from the same StewardStore), even though the steward never sent
+// a gRPC check-in. Issue #3403.
+func TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	// Use a separate pending store (the default one from newHandleRegisterServer is
+	// replaced here so the claim poll hits the same store as the approve step).
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
 	ts := httptest.NewServer(server.router)
 	defer ts.Close()
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-all", nil)
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
+	const regToken = "cfgms_reg_claim_durable_ac1"
+	const tenantID = "tenant-claim-ac1"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
 
-	resp, err := ts.Client().Do(req)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
+	deviceID := "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4"
+	identityKeyPub := base64.StdEncoding.EncodeToString([]byte(pub))
 
-	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	// Step 1: Register → quarantine (HTTP 202).
+	rec1 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          regToken,
+		DeviceID:       deviceID,
+		IdentityKeyPub: identityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
+	require.Equal(t, http.StatusAccepted, rec1.Code, "quarantine must return 202")
+	var qResp RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &qResp))
+	require.NotEmpty(t, qResp.PendingID, "quarantine response must include a pending_id")
+
+	// Step 2: Operator approves.
+	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+		qResp.PendingID, business.PendingRegistrationStatusApproved))
+
+	// Step 3: Steward polls → claim (cert issued, StewardStore written by buildClaimResponse).
+	pollReq, err := http.NewRequestWithContext(context.Background(), "GET",
+		ts.URL+"/api/v1/registration/status/"+qResp.PendingID, nil)
+	require.NoError(t, err)
+	pollReq.Header.Set("Authorization", "Bearer "+regToken)
+	pollResp, err := ts.Client().Do(pollReq)
+	require.NoError(t, err)
+	defer func() { _ = pollResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, pollResp.StatusCode, "claim poll must return 200")
+
+	var claimBody RegistrationStatusResponse
+	require.NoError(t, json.NewDecoder(pollResp.Body).Decode(&claimBody))
+	require.Equal(t, business.PendingRegistrationStatusClaimed, claimBody.Status,
+		"status must be 'claimed' after successful cert issuance")
+	require.NotEmpty(t, claimBody.StewardID, "claim response must include steward_id")
+
+	// StewardStore must have a durable "registered" record immediately after claim
+	// (before any gRPC check-in).
+	stored, storeErr := stewardSt.GetSteward(context.Background(), claimBody.StewardID)
+	require.NoError(t, storeErr,
+		"StewardStore must contain a record for the steward immediately after cert claim")
+	assert.Equal(t, business.StewardStatusRegistered, stored.Status,
+		"durable status must be 'registered' at enrollment: cert issued, no check-in yet")
+	assert.Equal(t, tenantID, stored.TenantID,
+		"durable record must be scoped to the correct tenant (AC4)")
+	assert.Equal(t, deviceID, stored.DeviceID,
+		"durable record must include the DeviceID from the pending entry (AC2 identity fields)")
+	assert.Equal(t, []byte(pub), stored.IdentityKeyPub,
+		"durable record must include the IdentityKeyPub from the pending entry")
+
+	// Simulate controller restart: fresh ControllerService with no DNA storage,
+	// backed by the same StewardStore. The steward has never sent a gRPC check-in.
+	restarted := service.NewControllerService(logging.NewNoopLogger())
+	restarted.SetStewardStore(stewardSt)
+	require.NoError(t, restarted.LoadFromStorage(context.Background()))
+
+	assert.Equal(t, 1, restarted.GetStewardCount(),
+		"enrolled steward must appear in the new controller's registry after restart (AC1)")
+	info, ok := restarted.GetStewardInfo(claimBody.StewardID)
+	require.True(t, ok, "enrolled steward must be retrievable by ID after restart")
+	assert.Equal(t, tenantID, info.TenantID)
+	assert.Equal(t, string(business.StewardStatusRegistered), info.Status,
+		"status must remain 'registered' in the restarted controller (never connected)")
+}
+
+// TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant verifies that the
+// quarantine→approve→claim route enforces the same tenant-scoped duplicate-device_id
+// guard handleRegister applies to its direct-approval write. Two enrollments asserting
+// one device_id with different identity keys get distinct pending IDs (pendingRegistrationID
+// hashes the token with the device identity), so both pass the register-time 409 gate —
+// no StewardRecord exists yet at that point. The second claim must be refused with 409 and
+// must not mint a certificate or write a sibling StewardRecord, because two records sharing
+// a device_id break GetStewardByDeviceID, the single lookup feeding the refresh revocation
+// gate (ADR-010 §1, §3).
+func TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_claim_dup_device"
+	const tenantID = "tenant-claim-dup"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	// One device_id, two different identity keys — isValidDeviceID never verifies
+	// device_id == SHA-256(identity_key_pub), so this is reachable from the wire.
+	deviceID := "c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5"
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	quarantine := func(identityKeyPub string) string {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          regToken,
+			DeviceID:       deviceID,
+			IdentityKeyPub: identityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "quarantine must return 202")
+		var qResp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &qResp))
+		require.NotEmpty(t, qResp.PendingID)
+		return qResp.PendingID
+	}
+
+	// Both registrations happen before either claim, so no StewardRecord exists to
+	// trip the register-time duplicate gate.
+	pendingA := quarantine(base64.StdEncoding.EncodeToString([]byte(pubA)))
+	pendingB := quarantine(base64.StdEncoding.EncodeToString([]byte(pubB)))
+	require.NotEqual(t, pendingA, pendingB,
+		"distinct identity keys must yield distinct pending entries for the same device_id")
+
+	for _, id := range []string{pendingA, pendingB} {
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			id, business.PendingRegistrationStatusApproved))
+	}
+
+	claim := func(pendingID string) *http.Response {
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			ts.URL+"/api/v1/registration/status/"+pendingID, nil)
+		require.NoError(t, reqErr)
+		req.Header.Set("Authorization", "Bearer "+regToken)
+		resp, doErr := ts.Client().Do(req)
+		require.NoError(t, doErr)
+		return resp
+	}
+
+	// First claim succeeds and writes the durable record.
+	respA := claim(pendingA)
+	require.Equal(t, http.StatusOK, respA.StatusCode, "first claim must succeed")
+	var claimA RegistrationStatusResponse
+	require.NoError(t, json.NewDecoder(respA.Body).Decode(&claimA))
+	require.NoError(t, respA.Body.Close())
+	require.NotEmpty(t, claimA.StewardID)
+
+	// Second claim asserts the same device_id in the same tenant: refused.
+	respB := claim(pendingB)
+	body, readErr := io.ReadAll(respB.Body)
+	require.NoError(t, readErr)
+	require.NoError(t, respB.Body.Close())
+	assert.Equal(t, http.StatusConflict, respB.StatusCode,
+		"a claim asserting a device_id already held in the tenant must be refused")
+	assert.NotContains(t, string(body), "BEGIN CERTIFICATE",
+		"a refused claim must not mint a client certificate")
+
+	// Exactly one steward record carries the device_id, so GetStewardByDeviceID
+	// remains unambiguous for the revocation gate.
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	matching := make([]string, 0, len(all))
+	for _, rec := range all {
+		if rec.DeviceID == deviceID && rec.TenantID == tenantID {
+			matching = append(matching, rec.ID)
+		}
+	}
+	assert.Equal(t, []string{claimA.StewardID}, matching,
+		"only the first claim may hold a StewardRecord for this device_id")
+}
+
+// TestBuildClaimResponse_DuplicateDeviceIDAcrossTenantsAllowed verifies the guard is
+// tenant-scoped: the same device_id enrolled under a different tenant is a distinct
+// namespace and must still be able to claim, matching handleRegister's register-time
+// behaviour (cross-tenant collision allowed).
+func TestBuildClaimResponse_DuplicateDeviceIDAcrossTenantsAllowed(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+
+	const regToken = "cfgms_reg_claim_xtenant"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "tenant-claim-x2",
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	deviceID := "e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7"
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	// An existing record in a *different* tenant holds the same device_id.
+	require.NoError(t, stewardSt.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-other-tenant",
+		TenantID: "tenant-claim-x1",
+		Status:   business.StewardStatusRegistered,
+		DeviceID: deviceID,
+	}))
+
+	resp, err := server.buildClaimResponse(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:      "pend-xtenant",
+		StewardID:      "steward-claim-x2",
+		TenantID:       "tenant-claim-x2",
+		DeviceID:       deviceID,
+		IdentityKeyPub: []byte(pub),
+		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
+	}, regToken)
+	require.NoError(t, err, "a device_id held in another tenant must not block this claim")
+	require.NotNil(t, resp)
+	assert.Contains(t, resp.ClientCert, "BEGIN CERTIFICATE")
+
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), "steward-claim-x2")
+	require.NoError(t, lookupErr, "the cross-tenant claim must still persist its own record")
+	assert.Equal(t, deviceID, stored.DeviceID)
+}
+
+// TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict verifies the guard keys on
+// the steward ID: a concurrent or retried claim poll for the *same* steward re-runs the
+// write path and must not be mistaken for a duplicate-device enrollment.
+func TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+
+	const regToken = "cfgms_reg_claim_reclaim"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "tenant-reclaim",
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	deviceID := "f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8"
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	entry := &business.PendingRegistrationEntry{
+		PendingID:      "pend-reclaim",
+		StewardID:      "steward-reclaim",
+		TenantID:       "tenant-reclaim",
+		DeviceID:       deviceID,
+		IdentityKeyPub: []byte(pub),
+		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
+	}
+
+	_, err = server.buildClaimResponse(context.Background(), entry, regToken)
+	require.NoError(t, err)
+
+	// Second pass over the same entry: the existing record belongs to this steward.
+	_, err = server.buildClaimResponse(context.Background(), entry, regToken)
+	require.NoError(t, err, "re-running the claim for the same steward must not conflict")
+
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	count := 0
+	for _, rec := range all {
+		if rec.DeviceID == deviceID {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "the retried claim must not create a second record")
+}
+
+// TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord is the
+// concurrency case the sequential duplicate-device_id test cannot reach (Issue #3403).
+//
+// The handler's guard is check-then-act: it reads GetStewardByDeviceID, then writes
+// RegisterSteward. Two approved pending entries asserting one device_id, claimed at
+// the same moment, can both complete the read before either commits — the writes key
+// on distinct steward IDs, so nothing makes them conflict at the row level.
+//
+// Exactly one claim must win. Two StewardRecords sharing a device_id would make
+// GetStewardByDeviceID ambiguous, and that lookup is the revocation gate in
+// handlers_registration_refresh.go (ADR-010 §1, §3).
+//
+// Scope note, measured rather than assumed: this test still passes with the
+// (tenant_id, device_id) unique index removed, because the two requests do not
+// reliably interleave between the guard's read and its write. It asserts the
+// end-to-end outcome, NOT the provider-level backstop. The backstop is exercised
+// by TestStewardStoreContract_DeviceIDUniquePerTenant in
+// pkg/storage/interfaces/business/providers_test.go, which covers flatfile, sqlite
+// and database and fails when any provider's enforcement is removed (Issue #3508).
+func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_claim_race_device"
+	const tenantID = "tenant-claim-race"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	deviceID := "f1e2d3c4b5a6978869504132231405f6e7d8c9b0a1928374655463728190abcd"
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	quarantine := func(identityKeyPub string) string {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          regToken,
+			DeviceID:       deviceID,
+			IdentityKeyPub: identityKeyPub,
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "quarantine must return 202")
+		var qResp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &qResp))
+		require.NotEmpty(t, qResp.PendingID)
+		return qResp.PendingID
+	}
+
+	pendingA := quarantine(base64.StdEncoding.EncodeToString([]byte(pubA)))
+	pendingB := quarantine(base64.StdEncoding.EncodeToString([]byte(pubB)))
+	require.NotEqual(t, pendingA, pendingB)
+
+	for _, id := range []string{pendingA, pendingB} {
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			id, business.PendingRegistrationStatusApproved))
+	}
+
+	// Release both claims from a single barrier so their reads interleave ahead of
+	// either write — sequencing them would exercise the check-then-act path only.
+	type claimResult struct {
+		status int
+		body   string
+	}
+	start := make(chan struct{})
+	results := make(chan claimResult, 2)
+	var wg sync.WaitGroup
+	for _, pendingID := range []string{pendingA, pendingB} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			<-start
+			req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet,
+				ts.URL+"/api/v1/registration/status/"+id, nil)
+			if reqErr != nil {
+				results <- claimResult{status: -1, body: reqErr.Error()}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+regToken)
+			resp, doErr := ts.Client().Do(req)
+			if doErr != nil {
+				results <- claimResult{status: -1, body: doErr.Error()}
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, _ := io.ReadAll(resp.Body)
+			results <- claimResult{status: resp.StatusCode, body: string(body)}
+		}(pendingID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	okCount, conflictCount := 0, 0
+	for res := range results {
+		switch res.status {
+		case http.StatusOK:
+			okCount++
+			assert.Contains(t, res.body, "BEGIN CERTIFICATE",
+				"the winning claim must receive a client certificate")
+		case http.StatusConflict:
+			conflictCount++
+			assert.NotContains(t, res.body, "BEGIN CERTIFICATE",
+				"a refused claim must not mint a client certificate")
+		default:
+			t.Errorf("unexpected claim status %d: %s", res.status, res.body)
+		}
+	}
+	assert.Equal(t, 1, okCount, "exactly one concurrent claim may succeed")
+	assert.Equal(t, 1, conflictCount, "the losing concurrent claim must be refused with 409")
+
+	// The durable state is the real assertion: one device_id, one record.
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	matching := make([]string, 0, len(all))
+	for _, rec := range all {
+		if rec.DeviceID == deviceID && rec.TenantID == tenantID {
+			matching = append(matching, rec.ID)
+		}
+	}
+	assert.Len(t, matching, 1,
+		"exactly one StewardRecord may hold this device_id, or GetStewardByDeviceID becomes ambiguous")
+}
+
+// TestGenerateStewardID_DistinctUnderFixedClock is the platform-independent regression
+// guard for the steward ID generator (Issue #3526 AC2b).
+//
+// It calls generateStewardID 1000 times with the clock held constant, confirming that
+// the non-clock random component provides enough uniqueness to prevent collisions even
+// when the wall clock resolves at coarse granularity (as on Windows). The test fails
+// immediately when the generator is reverted to fmt.Sprintf("steward-%d",
+// time.Now().UnixNano()) because a fixed timestamp produces the same string every call.
+func TestGenerateStewardID_DistinctUnderFixedClock(t *testing.T) {
+	const N = 1000
+	fixed := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	seen := make(map[string]struct{}, N)
+	for i := 0; i < N; i++ {
+		id, err := generateStewardID(fixed)
+		require.NoError(t, err, "generateStewardID must not fail")
+		require.NotEmpty(t, id)
+		_, dup := seen[id]
+		assert.False(t, dup, "duplicate steward ID at call %d: %s", i, id)
+		seen[id] = struct{}{}
+	}
+	assert.Len(t, seen, N, "all %d IDs must be distinct", N)
+}
+
+// TestHandleRegistrationStatus_DistinctStewardIDsAcrossConcurrentRegistrations drives
+// N concurrent registrations (each with a distinct device_id and identity key) through
+// the quarantine → approve → claim path and asserts every issued steward ID is unique
+// (Issue #3526 AC2).
+func TestHandleRegistrationStatus_DistinctStewardIDsAcrossConcurrentRegistrations(t *testing.T) {
+	const N = 50
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_distinct_steward_ids"
+	const tenantID = "tenant-distinct-ids"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	// Register N devices sequentially, each with a distinct device_id and key.
+	pendingIDs := make([]string, N)
+	for i := 0; i < N; i++ {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		deviceID := fmt.Sprintf("%064x", i+1)
+
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          regToken,
+			DeviceID:       deviceID,
+			IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+			CSRPEM:         testValidCSRPEM,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "device %d must quarantine: %s", i, rec.Body.String())
+
+		var qResp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &qResp))
+		pendingIDs[i] = qResp.PendingID
+	}
+
+	// Approve all pending entries before releasing claims concurrently.
+	for _, id := range pendingIDs {
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			id, business.PendingRegistrationStatusApproved))
+	}
+
+	// Claim all N concurrently from a single barrier.
+	type claimResult struct {
+		stewardID string
+		status    int
+	}
+	start := make(chan struct{})
+	results := make(chan claimResult, N)
+	var wg sync.WaitGroup
+	for _, pendingID := range pendingIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			<-start
+			req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet,
+				ts.URL+"/api/v1/registration/status/"+id, nil)
+			if reqErr != nil {
+				results <- claimResult{status: -1}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+regToken)
+			resp, doErr := ts.Client().Do(req)
+			if doErr != nil {
+				results <- claimResult{status: -1}
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Logf("claim for %s: status %d body %s", id, resp.StatusCode, body)
+				results <- claimResult{status: resp.StatusCode}
+				return
+			}
+			var statusResp RegistrationStatusResponse
+			if decErr := json.NewDecoder(resp.Body).Decode(&statusResp); decErr != nil {
+				results <- claimResult{status: -1}
+				return
+			}
+			results <- claimResult{status: http.StatusOK, stewardID: statusResp.StewardID}
+		}(pendingID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	seen := make(map[string]bool, N)
+	for res := range results {
+		assert.Equal(t, http.StatusOK, res.status, "every distinct-device claim must succeed")
+		if res.status == http.StatusOK {
+			assert.NotEmpty(t, res.stewardID, "claim response must include steward_id")
+			assert.False(t, seen[res.stewardID],
+				"steward ID %q was issued to more than one device", res.stewardID)
+			seen[res.stewardID] = true
+		}
+	}
+	assert.Len(t, seen, N, "each of the %d devices must receive a unique steward ID", N)
+}
+
+// TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice verifies that
+// buildClaimResponse refuses to mint a certificate when the pending entry's StewardID
+// is already held by a different device (steward ID collision — Issue #3526 AC3).
+//
+// With the old clock-only generator two concurrent registrations on Windows could share
+// one ID; this guard ensures the second claim is refused even if that somehow happens.
+// The refusal keys on the pending entry's DeviceID, not on the steward-record identity,
+// so the benign re-claim path (same steward, same DeviceID) keeps working.
+func TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+
+	const regToken = "cfgms_reg_claim_id_collision"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "tenant-id-collision",
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	deviceIDA := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"
+	deviceIDB := "bbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabb"
+
+	// Two distinct pending entries that were (hypothetically) assigned the same StewardID
+	// — this is the collision scenario the new ID generator prevents in practice.
+	const sharedStewardID = "steward-collision-test"
+	entryA := &business.PendingRegistrationEntry{
+		PendingID:      "pend-collision-a",
+		StewardID:      sharedStewardID,
+		TenantID:       "tenant-id-collision",
+		DeviceID:       deviceIDA,
+		IdentityKeyPub: []byte(pubA),
+		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
+	}
+	entryB := &business.PendingRegistrationEntry{
+		PendingID:      "pend-collision-b",
+		StewardID:      sharedStewardID,
+		TenantID:       "tenant-id-collision",
+		DeviceID:       deviceIDB,
+		IdentityKeyPub: []byte(pubB),
+		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
+	}
+
+	// First claim succeeds: device A wins and its record is written.
+	respA, err := server.buildClaimResponse(context.Background(), entryA, regToken)
+	require.NoError(t, err, "first claim must succeed")
+	require.NotNil(t, respA)
+	assert.Contains(t, respA.ClientCert, "BEGIN CERTIFICATE")
+
+	// Verify the winning record belongs to device A.
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), sharedStewardID)
+	require.NoError(t, lookupErr, "steward record must exist after first claim")
+	assert.Equal(t, deviceIDA, stored.DeviceID)
+
+	// Second claim with a different DeviceID must be refused: the StewardID
+	// already belongs to device A, not device B.
+	_, err = server.buildClaimResponse(context.Background(), entryB, regToken)
+	assert.ErrorIs(t, err, errClaimStewardIDConflict,
+		"a claim whose StewardID belongs to a different device must return errClaimStewardIDConflict")
+
+	// The steward store must still hold exactly one record — device A's.
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	var count int
+	for _, rec := range all {
+		if rec.ID == sharedStewardID {
+			count++
+			assert.Equal(t, deviceIDA, rec.DeviceID, "the winning record must belong to device A")
+		}
+	}
+	assert.Equal(t, 1, count, "exactly one steward record must exist for the shared ID")
 }

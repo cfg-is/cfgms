@@ -9,17 +9,81 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/modules"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	"github.com/cfgis/cfgms/features/steward/factory"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// HungModule is a real test module implementation that blocks indefinitely in
+// Get() until the context is cancelled or times out. Placed here for reuse by
+// downstream tests (S7 assertion gate) that verify the controller-side timeout
+// event pipeline.
+type HungModule struct{}
+
+func (h *HungModule) Get(ctx context.Context, _ string) (modules.ConfigState, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (h *HungModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+// Compile-time check: HungModule implements modules.Module.
+var _ modules.Module = (*HungModule)(nil)
+
+// HungSetModule is a real test module that reports drift on Get() and then
+// blocks indefinitely in Set() until the context is cancelled. Used to cover
+// the module.Set timeout path in executor.go.
+type HungSetModule struct{}
+
+func (h *HungSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	// Return drifted state so the comparator detects drift and the executor calls Set.
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (h *HungSetModule) Set(ctx context.Context, _ string, _ modules.ConfigState) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+var _ modules.Module = (*HungSetModule)(nil)
+
+// HungVerifyModule is a real test module that reports drift on the first Get()
+// call, succeeds on Set(), then blocks indefinitely in the second Get() (the
+// post-Set verification call). Used to cover the verifyChanges timeout path.
+type HungVerifyModule struct {
+	getCalls int
+}
+
+func (h *HungVerifyModule) Get(ctx context.Context, _ string) (modules.ConfigState, error) {
+	h.getCalls++
+	if h.getCalls == 1 {
+		// First call: return drifted state so the executor proceeds to Set().
+		return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+	}
+	// Second call (inside verifyChanges): block until timeout.
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (h *HungVerifyModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+var _ modules.Module = (*HungVerifyModule)(nil)
 
 // testFileConfig returns a file resource config appropriate for the current platform.
 // On Unix, includes permissions (0644 = 420 decimal). On Windows, omits permissions
@@ -580,4 +644,976 @@ func TestApplyConfiguration_ApplyMode_ModeAliasConfigVerifiesClean(t *testing.T)
 	require.NoError(t, readErr)
 	assert.Equal(t, "fleet-managed-content\n", string(got),
 		"drifted resource declared with the mode alias must be re-applied to desired state")
+}
+
+// TestExecuteResource_HungModule_ProducesTimeoutOutcomeEvent verifies that a
+// module whose Get() blocks past the per-call deadline causes ExecuteResource
+// to return (not wedge) and emits a detection+outcome pair where the outcome
+// action is "did-not-finish(timeout)" with the detection event's correlation_id.
+// The HungModule helper defined in this file is placed for reuse by S7 tests.
+func TestExecuteResource_HungModule_ProducesTimeoutOutcomeEvent(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("hung", &HungModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		StewardID:            "test-steward-timeout",
+		EventEmitter:         emitter,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 1, // 1 s for test speed
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-resource",
+		Module: "hung",
+		Config: map[string]interface{}{
+			"state": "present",
+		},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	// ExecuteResource must return rather than wedging.
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"a hung module must produce StatusTimeout")
+	assert.NotEmpty(t, result.Error,
+		"timeout result must carry an error description")
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2,
+		"a hung module must emit exactly detection + timeout outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"],
+		"first entry must be the detection event")
+	assert.NotEmpty(t, detection.CorrelationId,
+		"detection must carry a non-empty correlation_id")
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"],
+		"second entry must be the outcome event")
+	assert.Equal(t, "did-not-finish(timeout)", outcome.Fields["action"],
+		"timeout outcome action must be 'did-not-finish(timeout)'")
+	assert.NotEmpty(t, outcome.Fields["timeout_ms"],
+		"timeout outcome must carry timeout_ms")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and timeout outcome must share the same correlation_id")
+}
+
+// TestExecuteResource_HungSetModule_ProducesTimeoutOutcomeEvent verifies that a
+// module whose Set() blocks past the per-call deadline yields a timeout outcome
+// event and returns StatusTimeout without wedging.
+func TestExecuteResource_HungSetModule_ProducesTimeoutOutcomeEvent(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("hung-set", &HungSetModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		StewardID:            "test-steward-set-timeout",
+		EventEmitter:         emitter,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 1,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-set-resource",
+		Module: "hung-set",
+		Config: map[string]interface{}{
+			"state": "desired",
+		},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"a module whose Set() hangs must produce StatusTimeout")
+	assert.NotEmpty(t, result.Error)
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2, "hung Set must emit detection + timeout outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"])
+	assert.NotEmpty(t, detection.CorrelationId)
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"])
+	assert.Equal(t, "did-not-finish(timeout)", outcome.Fields["action"],
+		"Set timeout must emit did-not-finish(timeout)")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and Set-timeout outcome must share correlation_id")
+}
+
+// TestExecuteResource_HungVerifyModule_ProducesTimeoutOutcomeEvent verifies that
+// a module whose post-Set Get() (inside verifyChanges) blocks past the deadline
+// yields a timeout outcome event and returns StatusTimeout without wedging.
+func TestExecuteResource_HungVerifyModule_ProducesTimeoutOutcomeEvent(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("hung-verify", &HungVerifyModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		StewardID:            "test-steward-verify-timeout",
+		EventEmitter:         emitter,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 1,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-verify-resource",
+		Module: "hung-verify",
+		Config: map[string]interface{}{
+			"state": "desired",
+		},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"a module whose verifyChanges Get() hangs must produce StatusTimeout")
+	assert.NotEmpty(t, result.Error)
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2, "hung verifyChanges must emit detection + timeout outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"])
+	assert.NotEmpty(t, detection.CorrelationId)
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"])
+	assert.Equal(t, "did-not-finish(timeout)", outcome.Fields["action"],
+		"verifyChanges timeout must emit did-not-finish(timeout)")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and verify-timeout outcome must share correlation_id")
+}
+
+// SlowSetModule is a real module implementation that reports drift on the first
+// Get() call, then waits for the given delay in Set() before succeeding. After a
+// successful Set(), subsequent Get() calls report the applied desired state so
+// the post-Set verification step sees no remaining drift.
+// Used to verify that a slow-but-within-budget Set completes when no outer
+// deadline shorter than ModuleCallTimeoutSec is imposed.
+type SlowSetModule struct {
+	delay   time.Duration
+	mu      sync.Mutex
+	applied bool
+}
+
+func (s *SlowSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applied {
+		// Post-Set: return the applied desired state so verification finds no drift.
+		return &mapConfigState{data: map[string]interface{}{"state": "desired"}}, nil
+	}
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (s *SlowSetModule) Set(ctx context.Context, _ string, _ modules.ConfigState) error {
+	select {
+	case <-time.After(s.delay):
+		s.mu.Lock()
+		s.applied = true
+		s.mu.Unlock()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+var _ modules.Module = (*SlowSetModule)(nil)
+
+// warnCapturingLogger captures Warn-level log entries for log-accuracy assertions.
+// It satisfies logging.Logger via embedding NoopLogger.
+type warnCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []warnLogEntry
+}
+
+type warnLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+func (l *warnCapturingLogger) Warn(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, warnLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *warnCapturingLogger) warnEntries() []warnLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]warnLogEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
+func findKV(kvs []interface{}, key string) (interface{}, bool) {
+	for i := 0; i+1 < len(kvs); i += 2 {
+		if k, ok := kvs[i].(string); ok && k == key {
+			return kvs[i+1], true
+		}
+	}
+	return nil, false
+}
+
+// TestExecuteResource_SlowSet_CompletesWithNoOuterDeadline verifies that a
+// module whose Set() takes longer than the old 30s on-connect-sync ceiling
+// completes successfully when the executor is called with context.Background()
+// (no outer deadline). This is the behavioral regression test for the bug where
+// client_transport.go wrapped syncConfigNow in a 30s context, silently cutting
+// off module.Set calls that should have had the full per-call ModuleCallTimeoutSec.
+func TestExecuteResource_SlowSet_CompletesWithNoOuterDeadline(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	// SlowSetModule takes 200ms — longer than the old 30s simulated here by a 100ms
+	// outer ctx, but well within the 2s per-call module timeout.
+	f.RegisterModule("slow-set", &SlowSetModule{delay: 200 * time.Millisecond})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 2, // 2s per-call budget; well above the 200ms Set delay
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "slow-set-resource",
+		Module: "slow-set",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	// context.Background() — no outer deadline — mirrors the fixed client_transport.go
+	// on-connect sync path that now passes context.Background() to syncConfigNow.
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusSuccess, result.Status,
+		"a Set that completes within ModuleCallTimeoutSec must succeed when no outer deadline is imposed")
+	assert.True(t, result.ChangesApplied,
+		"module.Set must be counted as applied on success")
+}
+
+// TestExecuteResource_TimeoutWarn_LogsActualEnforcedBudget verifies that when
+// the ambient context carries a deadline shorter than ModuleCallTimeoutSec, the
+// timeout WARN log records the ACTUAL enforced budget (the outer ctx deadline)
+// rather than the hardcoded e.moduleCallTimeout value. This guards against the
+// mislabeled 120000ms timeout_ms field while a 30s outer context actually fired.
+func TestExecuteResource_TimeoutWarn_LogsActualEnforcedBudget(t *testing.T) {
+	capLog := &warnCapturingLogger{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, capLog)
+	f.RegisterModule("hung-set", &HungSetModule{})
+
+	// Configure a generous per-call module timeout (10s) so only the outer ctx (200ms)
+	// can fire. The log must report ≤1000ms, not 10000ms.
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               capLog,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 10, // 10s configured; outer ctx is much shorter
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-set-budget-check",
+		Module: "hung-set",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	// Outer ctx has a 200ms deadline — shorter than the 10s module timeout.
+	// This simulates the old bug where the on-connect sync imposed a 30s ceiling.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	result := executor.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"outer ctx deadline must cancel the hung Set and produce StatusTimeout")
+
+	warns := capLog.warnEntries()
+	var setTimeoutEntry *warnLogEntry
+	for i := range warns {
+		if warns[i].msg == "module.Set timeout" {
+			setTimeoutEntry = &warns[i]
+			break
+		}
+	}
+	require.NotNil(t, setTimeoutEntry, "a 'module.Set timeout' WARN entry must be emitted")
+
+	timeoutMSVal, ok := findKV(setTimeoutEntry.kvs, "timeout_ms")
+	require.True(t, ok, "timeout WARN must carry a timeout_ms field")
+	timeoutMS, ok := timeoutMSVal.(int64)
+	require.True(t, ok, "timeout_ms must be int64")
+
+	// The outer ctx budget was 200ms; the configured module timeout is 10000ms.
+	// The logged timeout_ms must reflect the outer ctx (≤1000ms), not the config (10000ms).
+	assert.LessOrEqual(t, timeoutMS, int64(1000),
+		"timeout_ms must reflect the actual enforced budget (~200ms outer ctx), not the configured 10000ms module timeout")
+}
+
+// ─── Story #2577: managed-elsewhere short-circuit ──────────────────────────────
+
+// managedElsewhereState is a ConfigState that reports it is managed by another
+// authority (e.g. a clustered HA VM owned by another cluster node). The executor
+// must treat it as compliant with no Compare/Set/Verify.
+type managedElsewhereState struct{ owner string }
+
+func (s *managedElsewhereState) AsMap() map[string]interface{} {
+	return map[string]interface{}{"state": "absent"}
+}
+func (s *managedElsewhereState) ToYAML() ([]byte, error)          { return nil, nil }
+func (s *managedElsewhereState) FromYAML([]byte) error            { return nil }
+func (s *managedElsewhereState) Validate() error                  { return nil }
+func (s *managedElsewhereState) GetManagedFields() []string       { return []string{"state"} }
+func (s *managedElsewhereState) ManagedElsewhere() (bool, string) { return true, s.owner }
+
+var _ modules.ManagedElsewhere = (*managedElsewhereState)(nil)
+
+// managedElsewhereModule.Get reports a managed-elsewhere resource; Set must never
+// run because the executor short-circuits to compliant before it.
+type managedElsewhereModule struct{ setCalled int32 }
+
+func (m *managedElsewhereModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &managedElsewhereState{owner: "NODE2"}, nil
+}
+func (m *managedElsewhereModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	atomic.AddInt32(&m.setCalled, 1)
+	return nil
+}
+
+var _ modules.Module = (*managedElsewhereModule)(nil)
+
+// TestExecuteResource_ManagedElsewhere_CompliantNoSet (Story #2577): when a
+// module's Get reports the resource is managed by another authority, the executor
+// short-circuits to compliant — no drift comparison, no Set, no Verify — even
+// though the desired config would otherwise show drift against the local view.
+func TestExecuteResource_ManagedElsewhere_CompliantNoSet(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	mod := &managedElsewhereModule{}
+	f.RegisterModule("managed-elsewhere", mod)
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		StewardID:     "test-steward-2577",
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	// A desired config that WOULD show drift against the reported "absent" state —
+	// the managed-elsewhere signal must short-circuit before any comparison.
+	resource := stewardconfig.ResourceConfig{
+		Name:   "ha-vm-elsewhere",
+		Module: "managed-elsewhere",
+		Config: map[string]interface{}{"state": "running", "cpu_count": 2},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusNoChange, result.Status,
+		"a managed-elsewhere resource must report compliant (StatusNoChange)")
+	assert.False(t, result.DriftDetected,
+		"no drift comparison is performed for a managed-elsewhere resource")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&mod.setCalled),
+		"Set must never be called for a resource managed on another node")
+}
+
+// ─── Story #2977: reboot-deferred sentinel classification ──────────────────────
+
+// rebootDeferredSetModule is a real test module that reports drift on Get() and then
+// returns a *modules.RebootDeferredError from Set(), simulating a module that
+// withholds a reboot because the current time is outside the reboot_window.
+type rebootDeferredSetModule struct {
+	nextWindow time.Time
+}
+
+func (m *rebootDeferredSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *rebootDeferredSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return modules.NewRebootDeferredError(m.nextWindow)
+}
+
+var _ modules.Module = (*rebootDeferredSetModule)(nil)
+
+// TestExecuteResource_RebootDeferred_ProducesStatusDeferred verifies that when a
+// module's Set() returns a *modules.RebootDeferredError, the executor:
+//   - classifies the result as StatusDeferred (not StatusFailed or StatusSkipped)
+//   - populates DeferredUntil from the error's NextWindow field
+//   - does NOT call verifyChanges (ChangesApplied must remain false)
+func TestExecuteResource_RebootDeferred_ProducesStatusDeferred(t *testing.T) {
+	nextWindow := time.Date(2026, time.January, 12, 2, 0, 0, 0, time.UTC)
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("reboot-deferred", &rebootDeferredSetModule{nextWindow: nextWindow})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "reboot-gated-resource",
+		Module: "reboot-deferred",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusDeferred, result.Status,
+		"a module.Set returning RebootDeferredError must produce StatusDeferred")
+	assert.False(t, result.ChangesApplied,
+		"ChangesApplied must be false when Set returns RebootDeferredError (no change was applied)")
+	assert.Equal(t, nextWindow, result.DeferredUntil,
+		"DeferredUntil must be populated from the RebootDeferredError's NextWindow field")
+	assert.NotEmpty(t, result.Error,
+		"result.Error must carry the deferred error message for operator visibility")
+}
+
+// TestExecuteResource_RebootDeferred_DistinctFromFailed verifies that
+// StatusDeferred is distinct from StatusFailed — a plain non-deferred error from
+// Set must produce StatusFailed, not StatusDeferred.
+func TestExecuteResource_RebootDeferred_DistinctFromFailed(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("set-fail", &plainErrorSetModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "plain-fail-resource",
+		Module: "set-fail",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.NotEqual(t, execution.StatusDeferred, result.Status,
+		"a plain (non-deferred) Set error must NOT produce StatusDeferred")
+	assert.Equal(t, execution.StatusFailed, result.Status,
+		"a plain Set error must produce StatusFailed")
+	assert.True(t, result.DeferredUntil.IsZero(),
+		"DeferredUntil must be zero for a plain (non-deferred) failure")
+}
+
+// plainErrorSetModule reports drift on Get and returns a plain error from Set.
+type plainErrorSetModule struct{}
+
+func (m *plainErrorSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *plainErrorSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return fmt.Errorf("plain set failure — not a reboot deferral")
+}
+
+var _ modules.Module = (*plainErrorSetModule)(nil)
+
+// TestExecuteResource_RebootDeferred_ZeroNextWindow verifies that a
+// RebootDeferredError with a zero NextWindow (no upcoming window known) still
+// produces StatusDeferred with a zero DeferredUntil — no panic, no fallthrough
+// to StatusFailed.
+func TestExecuteResource_RebootDeferred_ZeroNextWindow(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("reboot-deferred-zero", &rebootDeferredSetModule{nextWindow: time.Time{}})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "reboot-gated-zero",
+		Module: "reboot-deferred-zero",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusDeferred, result.Status,
+		"zero NextWindow RebootDeferredError must still produce StatusDeferred")
+	assert.True(t, result.DeferredUntil.IsZero(),
+		"DeferredUntil must be zero when RebootDeferredError carries no next window")
+}
+
+// TestExecuteConfiguration_DeferredCount verifies that StatusDeferred resources
+// are counted in ExecutionReport.DeferredCount and not in FailedCount.
+func TestExecuteConfiguration_DeferredCount(t *testing.T) {
+	nextWindow := time.Date(2026, time.January, 12, 2, 0, 0, 0, time.UTC)
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("reboot-deferred", &rebootDeferredSetModule{nextWindow: nextWindow})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	cfg := stewardconfig.StewardConfig{
+		Resources: []stewardconfig.ResourceConfig{
+			{
+				Name:   "deferred-resource",
+				Module: "reboot-deferred",
+				Config: map[string]interface{}{"state": "desired"},
+			},
+		},
+	}
+
+	report := executor.ExecuteConfiguration(context.Background(), cfg)
+
+	assert.Equal(t, 1, report.TotalResources)
+	assert.Equal(t, 1, report.DeferredCount,
+		"deferred resource must increment DeferredCount")
+	assert.Equal(t, 0, report.FailedCount,
+		"deferred resource must NOT increment FailedCount")
+	assert.Equal(t, 0, report.SkippedCount)
+}
+
+// TestApplyConfiguration_PopulatesApplyOutcomes verifies that ApplyConfiguration
+// writes one ApplyOutcomeRecord per resource to report.ApplyOutcomes, with correct
+// status classification and error detail, without disturbing the Modules aggregation
+// (ADR-022 §6, Issue #3375).
+func TestApplyConfiguration_PopulatesApplyOutcomes(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := logging.ForModule("executor_test")
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		TenantID: "test-tenant",
+		Logger:   logger,
+	})
+	require.NoError(t, err)
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "good-dir",
+      "module": "directory",
+      "config": ` + testDirConfig(filepath.Join(tempDir, "outcomedir")) + `
+    },
+    {
+      "name": "bad-file",
+      "module": "file",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "bad.txt")) + `",
+        "content": "content\n",
+        "permissions": 999999
+      }
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v-outcome-1")
+	require.NoError(t, applyErr, "resource failures must not surface as error return")
+	require.NotNil(t, report)
+
+	// The Modules aggregation must be unchanged.
+	require.NotEmpty(t, report.Modules, "Modules aggregation must still be populated")
+
+	// ApplyOutcomes must contain one record per resource.
+	require.Len(t, report.ApplyOutcomes, 2, "one ApplyOutcomeRecord per resource")
+
+	// Find each record by ResourceID — order is execution order.
+	byID := make(map[string]string) // resourceID → status
+	errByID := make(map[string]string)
+	for _, r := range report.ApplyOutcomes {
+		byID[r.ResourceID] = r.Status
+		errByID[r.ResourceID] = r.Error
+	}
+
+	dirStatus, ok := byID["good-dir"]
+	require.True(t, ok, "good-dir must appear in ApplyOutcomes")
+	assert.Equal(t, "applied", dirStatus, "successful resource must be 'applied'")
+
+	fileStatus, ok := byID["bad-file"]
+	require.True(t, ok, "bad-file must appear in ApplyOutcomes")
+	assert.Equal(t, "failed", fileStatus, "file with invalid permissions must be 'failed'")
+	assert.NotEmpty(t, errByID["bad-file"], "failed resource must carry error detail")
+}
+
+// TestApplyConfiguration_ApplyOutcomeRecordHasTimestamp verifies that each
+// ApplyOutcomeRecord carries a non-zero Timestamp.
+func TestApplyConfiguration_ApplyOutcomeRecordHasTimestamp(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := logging.ForModule("executor_test")
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
+	require.NoError(t, err)
+
+	configJSON := `{
+  "steward": {"id": "ts-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "ts-file",
+      "module": "file",
+      "config": ` + testFileConfig(filepath.Join(tempDir, "ts.txt"), "content\n") + `
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	before := time.Now()
+	report, err := executor.ApplyConfiguration(ctx, []byte(configJSON), "v-ts-1")
+	require.NoError(t, err)
+	require.Len(t, report.ApplyOutcomes, 1)
+	assert.False(t, report.ApplyOutcomes[0].Timestamp.IsZero(),
+		"Timestamp must be set on each ApplyOutcomeRecord")
+	assert.False(t, report.ApplyOutcomes[0].Timestamp.Before(before),
+		"Timestamp must not precede the call to ApplyConfiguration")
+}
+
+// ─── Story #3803: retry-exhausted sentinel classification ─────────────────────
+
+// retryExhaustedSetModule is a real test module that reports drift on Get() and
+// then returns a *modules.RetryExhaustedError from Set(), simulating a module
+// (e.g. hyperv) whose bounded auto-retry has used up its attempt budget on a
+// provably-safe, already-explained gate.
+type retryExhaustedSetModule struct {
+	lastError  string
+	failedFrom string
+}
+
+func (m *retryExhaustedSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *retryExhaustedSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return modules.NewRetryExhaustedError(m.lastError, m.failedFrom)
+}
+
+var _ modules.Module = (*retryExhaustedSetModule)(nil)
+
+// TestExecuteResource_RetryExhausted_ProducesStatusRetryExhausted is the
+// [REQUIRED TEST] proving the retry-exhausted seed-phase-failure case produces
+// the new distinct status end-to-end through ExecuteResource — not just that
+// the sentinel error type exists — and that it emits the ADR-012 §2
+// "retry-exhausted" outcome event (the mechanism that actually reaches the
+// controller's log stream, per Issue #3803).
+func TestExecuteResource_RetryExhausted_ProducesStatusRetryExhausted(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{
+		lastError:  `hyperv: create seed VHDX for VM "stw-01": exit status 1`,
+		failedFrom: "creating",
+	})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		StewardID:     "test-steward-retry-exhausted",
+		EventEmitter:  emitter,
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "retry-exhausted-resource",
+		Module: "retry-exhausted",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusRetryExhausted, result.Status,
+		"a module.Set returning RetryExhaustedError must produce StatusRetryExhausted")
+	assert.False(t, result.ChangesApplied,
+		"ChangesApplied must be false when Set returns RetryExhaustedError (no change was applied)")
+	assert.NotEmpty(t, result.Error,
+		"result.Error must carry the retry-exhausted error message for operator visibility")
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2, "a retry-exhausted resource must emit detection + retry-exhausted outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"])
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"],
+		"second entry must be the outcome event")
+	assert.Equal(t, "retry-exhausted", outcome.Fields["action"],
+		"the outcome event action must be 'retry-exhausted', mirroring the 'deferred' precedent")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and retry-exhausted outcome must share the same correlation_id")
+}
+
+// TestExecuteResource_RetryExhausted_DistinctFromDeferredAndFailed verifies that
+// StatusRetryExhausted is its own value, distinct from both StatusDeferred (which
+// retries automatically) and StatusFailed (an unclassified failure).
+func TestExecuteResource_RetryExhausted_DistinctFromDeferredAndFailed(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{lastError: "boom", failedFrom: "creating"})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "retry-exhausted-resource",
+		Module: "retry-exhausted",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.NotEqual(t, execution.StatusDeferred, result.Status,
+		"a retry-exhausted error must NOT produce StatusDeferred — it will not be retried automatically")
+	assert.NotEqual(t, execution.StatusFailed, result.Status,
+		"a retry-exhausted error must NOT produce StatusFailed — it is a known, already-explained gate")
+	assert.Equal(t, execution.StatusRetryExhausted, result.Status)
+}
+
+// TestExecuteConfiguration_RetryExhaustedCount verifies that StatusRetryExhausted
+// resources are counted in ExecutionReport.RetryExhaustedCount and not in
+// FailedCount or DeferredCount.
+func TestExecuteConfiguration_RetryExhaustedCount(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{lastError: "boom", failedFrom: "creating"})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	cfg := stewardconfig.StewardConfig{
+		Resources: []stewardconfig.ResourceConfig{
+			{
+				Name:   "retry-exhausted-resource",
+				Module: "retry-exhausted",
+				Config: map[string]interface{}{"state": "desired"},
+			},
+		},
+	}
+
+	report := executor.ExecuteConfiguration(context.Background(), cfg)
+
+	assert.Equal(t, 1, report.TotalResources)
+	assert.Equal(t, 1, report.RetryExhaustedCount,
+		"retry-exhausted resource must increment RetryExhaustedCount")
+	assert.Equal(t, 0, report.FailedCount,
+		"retry-exhausted resource must NOT increment FailedCount")
+	assert.Equal(t, 0, report.DeferredCount,
+		"retry-exhausted resource must NOT increment DeferredCount")
+}
+
+// TestApplyConfiguration_RetryExhausted_ReachesConfigStatusReport is the
+// [REQUIRED TEST] proving the distinct status reaches ConfigStatusReport / the
+// heartbeat path — not just the steward's local log — as required by Issue
+// #3803. Before this story, module.Set returning nil for the surface-and-wait
+// case meant nothing abnormal reached the controller at all; this asserts the
+// ApplyOutcomeRecord, per-module status, and top-level report status all now
+// surface the retry-exhausted state distinctly.
+func TestApplyConfiguration_RetryExhausted_ReachesConfigStatusReport(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{
+		lastError:  "exit status 1",
+		failedFrom: "creating",
+	})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "retry-exhausted-resource",
+      "module": "retry-exhausted",
+      "config": {"state": "desired"}
+    }
+  ]
+}`
+
+	report, applyErr := executor.ApplyConfiguration(context.Background(), []byte(configJSON), "v-retry-exhausted-1")
+	require.NoError(t, applyErr, "a retry-exhausted resource must not surface as an ApplyConfiguration error return")
+	require.NotNil(t, report)
+
+	require.Len(t, report.ApplyOutcomes, 1, "one ApplyOutcomeRecord for the retry-exhausted resource")
+	assert.Equal(t, "retry_exhausted", report.ApplyOutcomes[0].Status,
+		"the apply-outcome status must be the distinct 'retry_exhausted' bucket, not 'failed' or 'partial'")
+	assert.NotEmpty(t, report.ApplyOutcomes[0].Error,
+		"the apply-outcome record must carry the retry-exhausted error detail")
+
+	moduleStatus, ok := report.Modules["retry-exhausted"]
+	require.True(t, ok, "the retry-exhausted module must appear in the Modules aggregation")
+	assert.Equal(t, "RETRY_EXHAUSTED", moduleStatus.Status,
+		"the per-module status must be a distinct RETRY_EXHAUSTED, not OK or ERROR")
+
+	assert.Equal(t, "RETRY_EXHAUSTED", report.Status,
+		"the top-level ConfigStatusReport status must surface retry-exhausted distinctly")
+}
+
+// stillDriftedAfterSetModule is a real test module whose Set() succeeds (returns
+// nil) but whose state never actually converges: every Get() call (both the
+// initial drift check and the post-Set verification call inside verifyChanges)
+// reports the same drifted state, so verifyChanges always finds remaining
+// differences and fails with "verification failed: ...".
+type stillDriftedAfterSetModule struct{}
+
+func (m *stillDriftedAfterSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *stillDriftedAfterSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+var _ modules.Module = (*stillDriftedAfterSetModule)(nil)
+
+// TestExecuteResource_VerifyMismatch_UnaffectedByRetryExhaustedChange is the
+// [REQUIRED TEST] proving the generic verifyChanges "verification failed" path
+// is UNCHANGED by Issue #3803 for every other resource type/failure mode — this
+// story must not become a backdoor that silences real drift-verification
+// failures for unrelated modules. Set() returns plain nil (not a
+// RetryExhaustedError), so this must still produce StatusFailed with the
+// original "verification failed" message, exactly as before this story.
+func TestExecuteResource_VerifyMismatch_UnaffectedByRetryExhaustedChange(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("still-drifted", &stillDriftedAfterSetModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "still-drifted-resource",
+		Module: "still-drifted",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusFailed, result.Status,
+		"an unrelated module's genuine verification mismatch must still produce StatusFailed")
+	assert.NotEqual(t, execution.StatusRetryExhausted, result.Status,
+		"a plain verifyChanges mismatch must NOT be reclassified as StatusRetryExhausted")
+	assert.Contains(t, result.Error, "verification failed",
+		"the original verification-failed message must be preserved unchanged")
+	assert.True(t, result.ChangesApplied,
+		"Set succeeded, so ChangesApplied must be true even though verification then failed")
 }

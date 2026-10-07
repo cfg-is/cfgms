@@ -85,7 +85,9 @@ All log entries should include these standardized fields:
 
 - `operation`: High-level operation being performed (e.g., "mymodule_set", "mymodule_get")
 - `resource_id`: The resource being operated on
-- `tenant_id`: Extracted from context for multi-tenant isolation
+- `tenant_id`: Extracted from context via `logging.ExtractTenantFromContext` for log
+  tagging only — never treat this as an authorization check (see the warning under
+  "Multi-Tenant Context" below)
 - `resource_type`: Type of resource (module name)
 
 ### Error Logging Standards
@@ -168,21 +170,39 @@ func (m *complexModule) initializeComponents() {
 }
 ```
 
+`WithField`, `WithFields`, `WithTenant` and `WithSession` **derive** a new logger
+over a copy of the field map; they never write to the receiver. That is what makes
+the two derivations above independent (`processor` and `validator` each keep their
+own `component`), makes a per-request `WithTenant` safe to call from several
+goroutines against one shared logger field, and stops one request's `tenant_id`
+from tagging the next request's log lines. Always use the returned logger —
+`logger.WithField("k", v)` on its own line does nothing.
+
 ## Security Considerations
 
-### Tenant Isolation
+### Tenant Tagging Is Not an Authorization Check
 
-Always extract tenant information from context:
+`logging.ExtractTenantFromContext` (and `logging.WithTenant`) is a logging
+convenience: it reads/writes `ctxkeys.TenantID`, the same key the authentication
+middleware sets, purely so log lines can be tagged and filtered by tenant. It is
+**not** an access-control decision. An empty result means only "no `tenant_id`
+field on this log line" — it must never be treated as "caller is unrestricted" or
+gate any behavior:
 
 ```go
 tenantID := logging.ExtractTenantFromContext(ctx)
-if tenantID == "" {
-    logger.WarnCtx(ctx, "No tenant ID in context",
-        "operation", "mymodule_set",
-        "resource_id", resourceID,
-        "security_warning", "missing_tenant_context")
-}
+logger.InfoCtx(ctx, "Starting module operation",
+    "operation", "mymodule_set",
+    "resource_id", resourceID,
+    "tenant_id", tenantID)
 ```
+
+If a module ever needs to make an authorization decision based on the tenant (rare —
+most modules manage the local host and don't need one), read `ctxkeys.TenantID`
+directly and fail closed when it is absent, rather than branching on
+`ExtractTenantFromContext`'s result. `make check-architecture` fails the build if a
+file reads the tenant from `ExtractTenantFromContext` and also uses it in a
+tenant-equality comparison (Issue #4326).
 
 ### Sensitive Data Protection
 
@@ -393,10 +413,10 @@ logger.InfoCtx(ctx, "Operation started",
 
 See these modules for reference implementations:
 
-- `features/modules/directory/` - Basic logging integration
-- `features/modules/file/` - File operations with error logging
-- `features/modules/script/` - Complex module with audit logging
-- `features/modules/firewall/` - Network operations logging
+- `features/controller/directory/` - Basic logging integration
+- `features/modules/stdlib/file/` - File operations with error logging
+- `features/modules/stdlib/script/` - Complex module with audit logging
+- `features/modules/stdlib/firewall/` - Network operations logging
 
 ## Support
 

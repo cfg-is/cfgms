@@ -7,7 +7,29 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"time"
 )
+
+// NewCertPoolFromPEM builds an x509.CertPool from one or more PEM-encoded CA
+// certificates. It is the single construction point for CA pools in CFGMS: every
+// TLS config helper below routes through it, and callers that need a verification
+// pool for chain building outside a tls.Config (e.g. verifying operator-signed
+// inline command certificates chain to the controller CA) use it instead of
+// duplicating x509.NewCertPool + AppendCertsFromPEM.
+//
+// It returns an error when caCertPEM is empty or contains no parseable
+// certificate, so a caller can never silently end up holding an empty pool that
+// rejects every chain it is asked to verify.
+func NewCertPoolFromPEM(caCertPEM []byte) (*x509.CertPool, error) {
+	if len(caCertPEM) == 0 {
+		return nil, fmt.Errorf("no CA certificate PEM provided")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+	return pool, nil
+}
 
 // LoadTLSCertificate loads a TLS certificate from PEM-encoded certificate and key
 func LoadTLSCertificate(certPEM, keyPEM []byte) (tls.Certificate, error) {
@@ -16,6 +38,69 @@ func LoadTLSCertificate(certPEM, keyPEM []byte) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("failed to load X509 key pair: %w", err)
 	}
 	return cert, nil
+}
+
+// CertPoolFromPEM builds an x509 verification pool from one or more PEM-encoded
+// CA certificates. It is the central-provider entry point for callers that need a
+// verification pool on its own rather than as part of a tls.Config — for example
+// verifying that an operator signing certificate chains to the controller CA.
+// Callers outside pkg/cert must use this instead of constructing pools directly
+// (enforced by make check-architecture).
+//
+// Returns an error when caCertPEM is empty or contains no parseable certificate,
+// so callers can distinguish "no roots configured" from "roots were misconfigured".
+func CertPoolFromPEM(caCertPEM []byte) (*x509.CertPool, error) {
+	if len(caCertPEM) == 0 {
+		return nil, fmt.Errorf("no CA certificate PEM provided")
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate PEM")
+	}
+
+	return pool, nil
+}
+
+// ValidateServerCertificate rejects certificates that cannot currently be used
+// for TLS server authentication. tls.X509KeyPair only proves that the PEM and
+// private key are syntactically valid and match; it does not reject certificates
+// that are expired, not yet valid, or scoped only for a different EKU.
+func ValidateServerCertificate(cert tls.Certificate, now time.Time) (*x509.Certificate, error) {
+	if len(cert.Certificate) == 0 {
+		return nil, fmt.Errorf("server certificate chain is empty")
+	}
+
+	leaf := cert.Leaf
+	if leaf == nil {
+		var err error
+		leaf, err = x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse server certificate: %w", err)
+		}
+	}
+
+	if now.Before(leaf.NotBefore) {
+		return nil, fmt.Errorf("server certificate is not valid before %s", leaf.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if !now.Before(leaf.NotAfter) {
+		return nil, fmt.Errorf("server certificate expired at %s", leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+
+	if len(leaf.ExtKeyUsage) > 0 {
+		serverAuth := false
+		for _, usage := range leaf.ExtKeyUsage {
+			if usage == x509.ExtKeyUsageServerAuth || usage == x509.ExtKeyUsageAny {
+				serverAuth = true
+				break
+			}
+		}
+		if !serverAuth {
+			return nil, fmt.Errorf("server certificate does not permit TLS server authentication")
+		}
+	}
+
+	return leaf, nil
 }
 
 // CreateServerTLSConfig creates a TLS config for a server with mTLS support
@@ -35,6 +120,9 @@ func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVer
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate: %w", err)
 	}
+	if _, err := ValidateServerCertificate(cert, time.Now()); err != nil {
+		return nil, err
+	}
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -43,9 +131,9 @@ func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVer
 
 	// Configure client authentication if CA cert is provided
 	if caCertPEM != nil {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCertPEM) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+		caCertPool, poolErr := NewCertPoolFromPEM(caCertPEM)
+		if poolErr != nil {
+			return nil, poolErr
 		}
 
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
@@ -86,9 +174,9 @@ func CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM []byte, server
 
 	// Load CA certificate for server verification
 	if caCertPEM != nil {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCertPEM) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+		caCertPool, poolErr := NewCertPoolFromPEM(caCertPEM)
+		if poolErr != nil {
+			return nil, poolErr
 		}
 		tlsConfig.RootCAs = caCertPool
 	}
@@ -108,6 +196,9 @@ func CreateBasicTLSConfig(certPEM, keyPEM []byte, minVersion uint16) (*tls.Confi
 		cert, err := LoadTLSCertificate(certPEM, keyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load certificate: %w", err)
+		}
+		if _, err := ValidateServerCertificate(cert, time.Now()); err != nil {
+			return nil, err
 		}
 
 		return &tls.Config{
@@ -147,9 +238,9 @@ func (m *Manager) CreateOnDemandClientTLSConfig(caCertPEM []byte, minVersion uin
 		},
 	}
 	if len(caCertPEM) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caCertPEM) {
-			return nil, fmt.Errorf("failed to append CA certificate to pool")
+		pool, poolErr := NewCertPoolFromPEM(caCertPEM)
+		if poolErr != nil {
+			return nil, fmt.Errorf("failed to append CA certificate to pool: %w", poolErr)
 		}
 		tlsConfig.RootCAs = pool
 	}

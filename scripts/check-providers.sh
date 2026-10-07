@@ -31,8 +31,24 @@ is_allowed() {
     [[ "$file" == test/* ]] && return 0
     [[ "$file" == cmd/controller/main.go ]] && return 0
     [[ "$file" == cmd/cfg/cmd/storage.go ]] && return 0
+    [[ "$file" == pkg/migrate/storage/* ]] && return 0
+    [[ "$file" == pkg/migrate/secrets/* ]] && return 0
+    [[ "$file" == pkg/migrate/blob/* ]] && return 0
     [[ "$file" == features/controller/initialization/initialization.go ]] && return 0
     [[ "$file" == features/controller/server/server.go ]] && return 0
+    # hyperv provision store: NewFlatFileProvisionStore is the durable-store
+    # constructor for the hyperv module's provision store (Issue #2371). It
+    # wraps flatfile directly — analogous to controller initialization files.
+    [[ "$file" == features/modules/hyperv/provision.go ]] && return 0
+    # entra_group workflow-module binary: cmd/main.go registers the flatfile
+    # storage provider that the sops secrets provider layers its encrypted
+    # secret data on (Issue #4420) — a registry-bootstrap entry point, the same
+    # shape as cmd/controller/main.go, for a module binary rather than a
+    # long-running server. Listed as one exact path, not a
+    # features/workflow/modules/m365/*/cmd/main.go glob: a glob would
+    # pre-authorize every future m365 module binary without review, and the
+    # other existing one (entra_user/cmd/main.go) does not need it.
+    [[ "$file" == features/workflow/modules/m365/entra_group/cmd/main.go ]] && return 0
     [[ "$file" == */providers_test.go ]] && return 0
     return 1
 }
@@ -70,8 +86,13 @@ else
     echo "  test/                                                       (integration and e2e tests)"
     echo "  cmd/controller/main.go                                      (registry bootstrap)"
     echo "  cmd/cfg/cmd/storage.go                                      (CLI registry bootstrap)"
+    echo "  pkg/migrate/storage/                                        (migration engine registry bootstrap)"
+    echo "  pkg/migrate/secrets/                                        (migration engine registry bootstrap)"
+    echo "  pkg/migrate/blob/                                           (migration engine registry bootstrap)"
     echo "  features/controller/initialization/initialization.go        (registry bootstrap)"
     echo "  features/controller/server/server.go                        (registry bootstrap)"
+    echo "  features/modules/hyperv/provision.go                        (hyperv durable store constructor, Issue #2371)"
+    echo "  features/workflow/modules/m365/entra_group/cmd/main.go      (entra_group module binary registry bootstrap, Issue #4420)"
     echo "  */providers_test.go                                         (per-package test provider registration)"
     exit 1
 fi

@@ -512,25 +512,31 @@ func TestModuleMetadata_ToYAML(t *testing.T) {
 }
 
 func TestModuleMetadata_FromYAML(t *testing.T) {
-	yamlData := []byte(`name: from-yaml-test
+	t.Run("valid yaml", func(t *testing.T) {
+		yamlData := []byte(`name: from-yaml-test
 version: 1.0.0
 module_dependencies:
   - name: dep1
     version: "^1.0.0"`)
 
-	var metadata ModuleMetadata
-	err := metadata.FromYAML(yamlData)
-	if err != nil {
-		t.Fatalf("failed to parse YAML: %v", err)
-	}
+		var metadata ModuleMetadata
+		if err := metadata.FromYAML(yamlData); err != nil {
+			t.Fatalf("failed to parse YAML: %v", err)
+		}
+		if metadata.Name != "from-yaml-test" {
+			t.Errorf("Name = %v, expected from-yaml-test", metadata.Name)
+		}
+		if len(metadata.ModuleDependencies) != 1 {
+			t.Errorf("ModuleDependencies length = %v, expected 1", len(metadata.ModuleDependencies))
+		}
+	})
 
-	if metadata.Name != "from-yaml-test" {
-		t.Errorf("Name = %v, expected from-yaml-test", metadata.Name)
-	}
-
-	if len(metadata.ModuleDependencies) != 1 {
-		t.Errorf("ModuleDependencies length = %v, expected 1", len(metadata.ModuleDependencies))
-	}
+	t.Run("malformed yaml returns error", func(t *testing.T) {
+		var metadata ModuleMetadata
+		if err := metadata.FromYAML([]byte("name: [unclosed")); err == nil {
+			t.Error("expected error for malformed YAML, got nil")
+		}
+	})
 }
 
 func TestModuleMetadata_Validate(t *testing.T) {
@@ -808,6 +814,7 @@ func TestModuleMetadata_Clone(t *testing.T) {
 			NetworkEgress:            []string{"api.example.com:443"},
 			LolbinUsageJustification: "required",
 		},
+		AlwaysPull: true,
 	}
 
 	// Clone the metadata
@@ -824,6 +831,10 @@ func TestModuleMetadata_Clone(t *testing.T) {
 
 	if clone.Kind != original.Kind {
 		t.Errorf("Clone Kind = %v, expected %v", clone.Kind, original.Kind)
+	}
+
+	if clone.AlwaysPull != original.AlwaysPull {
+		t.Errorf("Clone AlwaysPull = %v, expected %v", clone.AlwaysPull, original.AlwaysPull)
 	}
 
 	if len(clone.Executors) != len(original.Executors) || clone.Executors[0] != original.Executors[0] {
@@ -878,6 +889,576 @@ func TestModuleMetadata_Clone(t *testing.T) {
 	}
 }
 
+func TestParseModuleMetadata_Owns(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantOwns  []OwnershipDeclaration
+		wantCount int
+	}{
+		{
+			name: "no owns field — zero value, backward compatible",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward`,
+			wantOwns:  nil,
+			wantCount: 0,
+		},
+		{
+			name: "single owns entry",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service`,
+			wantOwns:  []OwnershipDeclaration{{Kind: "service"}},
+			wantCount: 1,
+		},
+		{
+			name: "multiple owns entries",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: file
+  - kind: directory`,
+			wantOwns:  []OwnershipDeclaration{{Kind: "file"}, {Kind: "directory"}},
+			wantCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := strings.NewReader(tt.yaml)
+			metadata, err := ParseModuleMetadata(reader)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+
+			if len(metadata.Owns) != tt.wantCount {
+				t.Errorf("Owns length = %d, want %d", len(metadata.Owns), tt.wantCount)
+			}
+
+			for i, want := range tt.wantOwns {
+				if i >= len(metadata.Owns) {
+					t.Errorf("Owns[%d] missing, want kind=%q", i, want.Kind)
+					continue
+				}
+				if metadata.Owns[i].Kind != want.Kind {
+					t.Errorf("Owns[%d].Kind = %q, want %q", i, metadata.Owns[i].Kind, want.Kind)
+				}
+			}
+		})
+	}
+}
+
+func TestModuleMetadata_Clone_Owns(t *testing.T) {
+	original := &ModuleMetadata{
+		Name:      "test",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
+		Kind:      "steward",
+		Owns: []OwnershipDeclaration{
+			{Kind: "service", RequiredFields: []string{"hostname", "os"}},
+			{Kind: "file"},
+		},
+	}
+
+	clone := original.Clone()
+
+	if len(clone.Owns) != len(original.Owns) {
+		t.Fatalf("Clone Owns length = %d, want %d", len(clone.Owns), len(original.Owns))
+	}
+	for i, want := range original.Owns {
+		if clone.Owns[i].Kind != want.Kind {
+			t.Errorf("Clone Owns[%d].Kind = %q, want %q", i, clone.Owns[i].Kind, want.Kind)
+		}
+		if len(clone.Owns[i].RequiredFields) != len(want.RequiredFields) {
+			t.Errorf("Clone Owns[%d].RequiredFields length = %d, want %d", i, len(clone.Owns[i].RequiredFields), len(want.RequiredFields))
+		}
+	}
+
+	// Verify deep copy — mutating clone's Kind and RequiredFields must not affect original.
+	clone.Owns[0].Kind = "mutated"
+	if original.Owns[0].Kind == "mutated" {
+		t.Error("Mutating clone Owns[0].Kind affected original")
+	}
+	clone.Owns[0].RequiredFields[0] = "mutated-field"
+	if original.Owns[0].RequiredFields[0] == "mutated-field" {
+		t.Error("Mutating clone Owns[0].RequiredFields affected original")
+	}
+}
+
+// TestParseModuleMetadata_RequiredFields verifies that required_fields within
+// owns: entries is parsed correctly and that omitting it is backward-compatible.
+func TestParseModuleMetadata_RequiredFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		wantOwns []OwnershipDeclaration
+	}{
+		{
+			name: "owns with required_fields",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service
+    required_fields:
+      - hostname
+      - os`,
+			wantOwns: []OwnershipDeclaration{
+				{Kind: "service", RequiredFields: []string{"hostname", "os"}},
+			},
+		},
+		{
+			name: "owns without required_fields — backward compatible",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service`,
+			wantOwns: []OwnershipDeclaration{
+				{Kind: "service", RequiredFields: nil},
+			},
+		},
+		{
+			name: "mixed — one entry with required_fields, one without",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service
+    required_fields:
+      - hostname
+  - kind: file`,
+			wantOwns: []OwnershipDeclaration{
+				{Kind: "service", RequiredFields: []string{"hostname"}},
+				{Kind: "file", RequiredFields: nil},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := strings.NewReader(tt.yaml)
+			metadata, err := ParseModuleMetadata(reader)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if len(metadata.Owns) != len(tt.wantOwns) {
+				t.Fatalf("Owns length = %d, want %d", len(metadata.Owns), len(tt.wantOwns))
+			}
+			for i, want := range tt.wantOwns {
+				got := metadata.Owns[i]
+				if got.Kind != want.Kind {
+					t.Errorf("Owns[%d].Kind = %q, want %q", i, got.Kind, want.Kind)
+				}
+				if len(got.RequiredFields) != len(want.RequiredFields) {
+					t.Errorf("Owns[%d].RequiredFields = %v, want %v", i, got.RequiredFields, want.RequiredFields)
+					continue
+				}
+				for j, wf := range want.RequiredFields {
+					if got.RequiredFields[j] != wf {
+						t.Errorf("Owns[%d].RequiredFields[%d] = %q, want %q", i, j, got.RequiredFields[j], wf)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestParseModuleMetadata_ObserveWhen verifies observe_when parse success, parse
+// rejection for each malformed predicate shape, and backward-compatibility for
+// module.yaml files that carry no observe_when key.
+func TestParseModuleMetadata_ObserveWhen(t *testing.T) {
+	baseYAML := func(extra string) string {
+		return `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+` + extra
+	}
+
+	t.Run("no observe_when — backward compatible, nil slice", func(t *testing.T) {
+		reader := strings.NewReader(baseYAML(""))
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if metadata.ObserveWhen != nil {
+			t.Errorf("ObserveWhen = %v, want nil for module.yaml with no observe_when key", metadata.ObserveWhen)
+		}
+	})
+
+	t.Run("valid single predicate with contains", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: windows_feature
+    contains: hyperv
+`)
+		reader := strings.NewReader(yaml)
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(metadata.ObserveWhen) != 1 {
+			t.Fatalf("ObserveWhen length = %d, want 1", len(metadata.ObserveWhen))
+		}
+		p := metadata.ObserveWhen[0]
+		if p.Fact != "windows_feature" {
+			t.Errorf("ObserveWhen[0].Fact = %q, want %q", p.Fact, "windows_feature")
+		}
+		if p.Contains != "hyperv" {
+			t.Errorf("ObserveWhen[0].Contains = %q, want %q", p.Contains, "hyperv")
+		}
+		if p.Equals != "" {
+			t.Errorf("ObserveWhen[0].Equals = %q, want empty", p.Equals)
+		}
+	})
+
+	t.Run("valid single predicate with equals", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+`)
+		reader := strings.NewReader(yaml)
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(metadata.ObserveWhen) != 1 {
+			t.Fatalf("ObserveWhen length = %d, want 1", len(metadata.ObserveWhen))
+		}
+		p := metadata.ObserveWhen[0]
+		if p.Fact != "os" {
+			t.Errorf("ObserveWhen[0].Fact = %q, want %q", p.Fact, "os")
+		}
+		if p.Equals != "windows" {
+			t.Errorf("ObserveWhen[0].Equals = %q, want %q", p.Equals, "windows")
+		}
+		if p.Contains != "" {
+			t.Errorf("ObserveWhen[0].Contains = %q, want empty", p.Contains)
+		}
+	})
+
+	t.Run("valid multiple predicates OR'd", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+  - fact: windows_feature
+    contains: hyperv
+`)
+		reader := strings.NewReader(yaml)
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(metadata.ObserveWhen) != 2 {
+			t.Fatalf("ObserveWhen length = %d, want 2", len(metadata.ObserveWhen))
+		}
+	})
+
+	t.Run("error: empty fact", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: ""
+    equals: windows
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for predicate with empty fact, got nil")
+		}
+	})
+
+	t.Run("error: both equals and contains set", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+    contains: win
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for predicate with both equals and contains set, got nil")
+		}
+	})
+
+	t.Run("error: neither equals nor contains set", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for predicate with neither equals nor contains set, got nil")
+		}
+	})
+
+	t.Run("error: second predicate malformed — empty fact", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+  - fact: ""
+    contains: hyperv
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for second predicate with empty fact, got nil")
+		}
+	})
+}
+
+// TestParseModuleMetadata_ObserveWhenRoundTrip verifies that observe_when survives
+// a YAML round-trip through ToYAML + Unmarshal.
+func TestParseModuleMetadata_ObserveWhenRoundTrip(t *testing.T) {
+	input := `name: test-module
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+observe_when:
+  - fact: windows_feature
+    contains: hyperv
+`
+	reader := strings.NewReader(input)
+	metadata, err := ParseModuleMetadata(reader)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	yamlBytes, err := metadata.ToYAML()
+	if err != nil {
+		t.Fatalf("ToYAML() error: %v", err)
+	}
+
+	var reparsed ModuleMetadata
+	if err := yaml.Unmarshal(yamlBytes, &reparsed); err != nil {
+		t.Fatalf("failed to unmarshal round-tripped YAML: %v", err)
+	}
+
+	if len(reparsed.ObserveWhen) != 1 {
+		t.Fatalf("ObserveWhen after round-trip length = %d, want 1", len(reparsed.ObserveWhen))
+	}
+	if reparsed.ObserveWhen[0].Fact != "windows_feature" {
+		t.Errorf("ObserveWhen[0].Fact after round-trip = %q, want %q", reparsed.ObserveWhen[0].Fact, "windows_feature")
+	}
+	if reparsed.ObserveWhen[0].Contains != "hyperv" {
+		t.Errorf("ObserveWhen[0].Contains after round-trip = %q, want %q", reparsed.ObserveWhen[0].Contains, "hyperv")
+	}
+}
+
+// TestModuleMetadata_Clone_ObserveWhen verifies that Clone deep-copies ObserveWhen
+// so mutations to the clone do not affect the original.
+func TestModuleMetadata_Clone_ObserveWhen(t *testing.T) {
+	original := &ModuleMetadata{
+		Name:      "test",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
+		Kind:      "steward",
+		ObserveWhen: []ObservePredicate{
+			{Fact: "os", Equals: "windows"},
+			{Fact: "windows_feature", Contains: "hyperv"},
+		},
+	}
+
+	clone := original.Clone()
+
+	if len(clone.ObserveWhen) != len(original.ObserveWhen) {
+		t.Fatalf("Clone ObserveWhen length = %d, want %d", len(clone.ObserveWhen), len(original.ObserveWhen))
+	}
+
+	clone.ObserveWhen[0].Fact = "mutated"
+	if original.ObserveWhen[0].Fact == "mutated" {
+		t.Error("mutating clone ObserveWhen[0].Fact affected original")
+	}
+}
+
+// TestParseModuleMetadata_AlwaysPull verifies the yaml:"always_pull" parse path
+// (ADR-024 Amendment 2): absent key yields false for backward compatibility,
+// an explicit true/false is honoured, and always_pull composes with observe_when.
+func TestParseModuleMetadata_AlwaysPull(t *testing.T) {
+	baseYAML := func(extra string) string {
+		return `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+` + extra
+	}
+
+	tests := []struct {
+		name           string
+		yaml           string
+		wantAlwaysPull bool
+		wantObserveLen int
+	}{
+		{
+			name:           "no always_pull key — backward compatible, false",
+			yaml:           baseYAML(""),
+			wantAlwaysPull: false,
+		},
+		{
+			name:           "always_pull: true",
+			yaml:           baseYAML("always_pull: true\n"),
+			wantAlwaysPull: true,
+		},
+		{
+			name:           "always_pull: false explicit",
+			yaml:           baseYAML("always_pull: false\n"),
+			wantAlwaysPull: false,
+		},
+		{
+			name: "always_pull alongside observe_when",
+			yaml: baseYAML(`always_pull: true
+observe_when:
+  - fact: os
+    equals: windows
+`),
+			wantAlwaysPull: true,
+			wantObserveLen: 1,
+		},
+		{
+			name: "observe_when only — always_pull stays false",
+			yaml: baseYAML(`observe_when:
+  - fact: windows_feature
+    contains: hyperv
+`),
+			wantAlwaysPull: false,
+			wantObserveLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata, err := ParseModuleMetadata(strings.NewReader(tt.yaml))
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if metadata.AlwaysPull != tt.wantAlwaysPull {
+				t.Errorf("AlwaysPull = %v, want %v", metadata.AlwaysPull, tt.wantAlwaysPull)
+			}
+			if len(metadata.ObserveWhen) != tt.wantObserveLen {
+				t.Errorf("ObserveWhen length = %d, want %d", len(metadata.ObserveWhen), tt.wantObserveLen)
+			}
+		})
+	}
+}
+
+// TestParseModuleMetadata_AlwaysPullRoundTrip verifies always_pull survives a
+// YAML round-trip through ToYAML + Unmarshal, and that the omitempty tag drops
+// the key when false so pre-existing module.yaml files round-trip unchanged.
+func TestParseModuleMetadata_AlwaysPullRoundTrip(t *testing.T) {
+	t.Run("true survives round-trip", func(t *testing.T) {
+		input := `name: osquery
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+always_pull: true
+`
+		metadata, err := ParseModuleMetadata(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+
+		yamlBytes, err := metadata.ToYAML()
+		if err != nil {
+			t.Fatalf("ToYAML() error: %v", err)
+		}
+		if !strings.Contains(string(yamlBytes), "always_pull: true") {
+			t.Errorf("ToYAML() output missing always_pull key:\n%s", yamlBytes)
+		}
+
+		var reparsed ModuleMetadata
+		if err := yaml.Unmarshal(yamlBytes, &reparsed); err != nil {
+			t.Fatalf("failed to unmarshal round-tripped YAML: %v", err)
+		}
+		if !reparsed.AlwaysPull {
+			t.Error("AlwaysPull after round-trip = false, want true")
+		}
+	})
+
+	t.Run("false is omitted by omitempty", func(t *testing.T) {
+		input := `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+`
+		metadata, err := ParseModuleMetadata(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+
+		yamlBytes, err := metadata.ToYAML()
+		if err != nil {
+			t.Fatalf("ToYAML() error: %v", err)
+		}
+		if strings.Contains(string(yamlBytes), "always_pull") {
+			t.Errorf("ToYAML() emitted always_pull for a false value:\n%s", yamlBytes)
+		}
+	})
+}
+
+// TestLoadModuleMetadata_AlwaysPull_OsqueryManifest parses the shipped osquery
+// module.yaml (a real manifest, not a fixture) to confirm the always_pull key it
+// declares is actually recognised by the parser.
+func TestLoadModuleMetadata_AlwaysPull_OsqueryManifest(t *testing.T) {
+	metadata, err := LoadModuleMetadata(filepath.Join("extended", "osquery", "module.yaml"))
+	if err != nil {
+		t.Fatalf("failed to load osquery module.yaml: %v", err)
+	}
+	if !metadata.AlwaysPull {
+		t.Error("osquery manifest AlwaysPull = false, want true (always_pull: true is declared in module.yaml)")
+	}
+	if len(metadata.ObserveWhen) != 0 {
+		t.Errorf("osquery manifest ObserveWhen = %v, want empty (activation is via always_pull)", metadata.ObserveWhen)
+	}
+}
+
+// TestModuleMetadata_Clone_AlwaysPull verifies Clone preserves AlwaysPull for
+// both values and that the copy is independent of the original.
+func TestModuleMetadata_Clone_AlwaysPull(t *testing.T) {
+	for _, alwaysPull := range []bool{true, false} {
+		original := &ModuleMetadata{
+			Name:       "test",
+			Version:    "1.0.0",
+			Publisher:  "cfgms",
+			Executors:  []string{"steward"},
+			Kind:       "steward",
+			AlwaysPull: alwaysPull,
+		}
+
+		clone := original.Clone()
+
+		if clone.AlwaysPull != original.AlwaysPull {
+			t.Errorf("Clone AlwaysPull = %v, want %v", clone.AlwaysPull, original.AlwaysPull)
+		}
+
+		// Mutating the clone must not affect the original.
+		clone.AlwaysPull = !alwaysPull
+		if original.AlwaysPull != alwaysPull {
+			t.Errorf("mutating clone AlwaysPull affected original: original = %v, want %v", original.AlwaysPull, alwaysPull)
+		}
+	}
+}
+
 // Benchmark tests
 func BenchmarkLoadModuleMetadata(b *testing.B) {
 	// Create temporary metadata file
@@ -902,7 +1483,9 @@ interfaces:
   - Get
   - Set`
 
-	_ = os.WriteFile(metadataFile, []byte(yamlContent), 0644) // Ignore error in benchmark setup
+	if err := os.WriteFile(metadataFile, []byte(yamlContent), 0644); err != nil {
+		b.Fatalf("setup: write benchmark file: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

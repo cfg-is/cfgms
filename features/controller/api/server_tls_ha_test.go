@@ -4,8 +4,9 @@ package api
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -28,19 +30,34 @@ import (
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
-// newClusterModeHAManager creates a commercial ha.Manager in ClusterMode with the given CA cert path.
-func newClusterModeHAManager(t *testing.T, caCertPath string) *ha.Manager {
+// newClusterModeHAManager creates an ha.Manager in ClusterMode with the given CA cert path
+// and cert manager. It uses FastElectionConfig so the lease-backed authority check converges
+// in milliseconds (not seconds), preventing timing flakiness under CI CPU contention.
+//
+// Cleanup ordering (LIFO): manager.Stop → sm.Close → goleak.VerifyNone.
+// goleak.IgnoreCurrent snapshots goroutines before the manager is constructed so only
+// goroutines introduced by this helper are checked for leaks.
+func newClusterModeHAManager(t *testing.T, caCertPath string, certMgr *cert.Manager) *ha.Manager {
 	t.Helper()
+
+	// Snapshot pre-existing goroutines; goleak.VerifyNone (registered below, runs last)
+	// will only flag goroutines that are NEW relative to this snapshot.
+	existingGoroutines := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, existingGoroutines) })
+
 	sm, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, sm.Close()) })
 
 	cfg := ha.DefaultConfig()
 	cfg.Mode = ha.ClusterMode
 	cfg.CACertPath = caCertPath
 	cfg.Node.ID = fmt.Sprintf("test-node-%d", time.Now().UnixNano())
+	cfg.Cluster = ha.FastElectionConfig()
 
 	manager, err := ha.NewManager(cfg, logging.GetLogger(), sm)
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 	return manager
 }
 
@@ -58,7 +75,7 @@ func TestSetupManagedTLS_ClusterMode_VerifyClientCertIfGiven(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caPath, caCertPEM, 0600))
 
-	haManager := newClusterModeHAManager(t, caPath)
+	haManager := newClusterModeHAManager(t, caPath, certMgr)
 	server := newMinimalTLSServer(t, certMgr, haManager)
 
 	tlsConfig, err := server.setupManagedTLS()
@@ -82,7 +99,7 @@ func TestSetupManagedTLS_ClusterMode_NoCert_HandshakeSucceeds(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caPath, caCertPEM, 0600))
 
-	haManager := newClusterModeHAManager(t, caPath)
+	haManager := newClusterModeHAManager(t, caPath, certMgr)
 	server := newMinimalTLSServer(t, certMgr, haManager)
 
 	tlsConfig, err := server.setupManagedTLS()
@@ -146,7 +163,7 @@ func TestSetupManagedTLS_ClusterMode_EmptyCACertPath(t *testing.T) {
 	certMgr := newTLSTestCertManager(t)
 
 	// ClusterMode manager with empty CACertPath → GetCACertPEM() returns nil.
-	haManager := newClusterModeHAManager(t, "")
+	haManager := newClusterModeHAManager(t, "", certMgr)
 	server := newMinimalTLSServer(t, certMgr, haManager)
 
 	tlsConfig, err := server.setupManagedTLS()
@@ -172,7 +189,7 @@ func TestSetupManagedTLS_ClusterMode_AdminCertAndHAPeerCertBothVerify(t *testing
 	haCAPath := filepath.Join(t.TempDir(), "ha-ca.pem")
 	require.NoError(t, os.WriteFile(haCAPath, haCACertPEM, 0600))
 
-	haManager := newClusterModeHAManager(t, haCAPath)
+	haManager := newClusterModeHAManager(t, haCAPath, certMgr)
 	server := newMinimalTLSServer(t, certMgr, haManager)
 
 	tlsConfig, err := server.setupManagedTLS()
@@ -213,9 +230,16 @@ func TestSetupManagedTLS_ClusterMode_AdminCertAndHAPeerCertBothVerify(t *testing
 // --- helpers for the cluster-mode HA+admin cert test ---
 
 // makeCommercialTestCA creates an in-memory CA (cert, key, PEM) for test use.
-func makeCommercialTestCA(t *testing.T) (*x509.Certificate, *rsa.PrivateKey, []byte) {
+//
+// Uses an ECDSA P-256 key rather than RSA: key generation is the dominant cost of
+// these TLS handshake tests, and under the FIPS-140 module RSA prime search
+// (Miller-Rabin over Montgomery multiplication) is ~1000× slower than ECDSA curve
+// point generation. P-256 is FIPS-140 approved, so the trust properties under test
+// are unchanged while removing the slow key-generation frame that pushed the
+// package over the 5m test-fast budget (cf. Issue #2591 for the argon2id analog).
+func makeCommercialTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey, []byte) {
 	t.Helper()
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
 	template := &x509.Certificate{
@@ -251,9 +275,10 @@ func makeCommercialTestClientCert(t *testing.T, certMgr *cert.Manager) tls.Certi
 }
 
 // makeCommercialTestClientCertFromCA creates a client cert signed by an arbitrary CA.
-func makeCommercialTestClientCertFromCA(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey) tls.Certificate {
+// ECDSA P-256 for the same key-generation-cost reason as makeCommercialTestCA.
+func makeCommercialTestClientCertFromCA(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) tls.Certificate {
 	t.Helper()
-	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
 	template := &x509.Certificate{
@@ -261,16 +286,19 @@ func makeCommercialTestClientCertFromCA(t *testing.T, caCert *x509.Certificate, 
 		Subject:      pkix.Name{CommonName: "ha-peer"},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &leafKey.PublicKey, caKey)
 	require.NoError(t, err)
 
+	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	require.NoError(t, err)
+
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(leafKey),
+		Type:  "EC PRIVATE KEY",
+		Bytes: keyDER,
 	})
 
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)

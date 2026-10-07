@@ -11,8 +11,16 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
+
+// CommandSignature is the operator signature over inline ad-hoc content. It is
+// carried unchanged from the authenticated HTTP request to steward verification.
+type CommandSignature struct {
+	Algorithm string
+	Value     string
+	PublicKey string
+}
 
 // SynthesizeScriptRun resolves matching devices from the fleet and creates a
 // RunRecord plus one JobRecord per device, each backed by a QueuedExecution.
@@ -43,11 +51,33 @@ func SynthesizeScriptRun(
 	requiredAPIScope []string,
 ) (string, error) {
 	filter.TenantID = tenantID
-
 	devices, err := fleetQuery.Search(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("synthesize script run: fleet search: %w", err)
 	}
+	return SynthesizeScriptRunForDevices(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
+		scriptRef, scriptVersion, shell, runtimeParams, scriptMeta, paramPlatformBindings, requiredAPIScope)
+}
+
+// SynthesizeScriptRunForDevices is SynthesizeScriptRun over an already-resolved
+// device list: the caller that authorized exactly these devices dispatches
+// exactly these devices, with no second fleet search in between (Issue #4554).
+// filter is recorded on the run for display only.
+func SynthesizeScriptRunForDevices(
+	ctx context.Context,
+	manager *Manager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	devices []fleet.StewardResult,
+	tenantID, createdBy string,
+	filter fleet.Filter,
+	scriptRef, scriptVersion string,
+	shell scriptmodule.ShellType,
+	runtimeParams map[string]string,
+	scriptMeta *scriptmodule.ScriptMetadata,
+	paramPlatformBindings map[string]string,
+	requiredAPIScope []string,
+) (string, error) {
+	filter.TenantID = tenantID
 
 	runID := uuid.New().String()
 	now := time.Now().UTC()
@@ -133,6 +163,11 @@ func SynthesizeScriptRun(
 // Runtime params are resolved per-device via ResolveParams. Inline scripts have no
 // declared parameters, so DNA bindings do not apply and runtimeParams are passed
 // through unchanged.
+//
+// targets, nonce, and expiresAt (Issue #3694) are the operator's signed
+// operatorpayload.Envelope coordinates, forwarded into QueuedExecution.Metadata
+// unmodified alongside commandSignature so the dispatcher can pass them on to the
+// steward, which independently verifies target membership, expiry, and nonce replay.
 func SynthesizeCommandRun(
 	ctx context.Context,
 	manager *Manager,
@@ -143,13 +178,40 @@ func SynthesizeCommandRun(
 	inlineContent string,
 	shell scriptmodule.ShellType,
 	params map[string]string,
+	commandSignature *CommandSignature,
+	targets []string,
+	nonce string,
+	expiresAt time.Time,
 ) (string, error) {
 	filter.TenantID = tenantID
-
 	devices, err := fleetQuery.Search(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("synthesize command run: fleet search: %w", err)
 	}
+	return SynthesizeCommandRunForDevices(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
+		inlineContent, shell, params, commandSignature, targets, nonce, expiresAt)
+}
+
+// SynthesizeCommandRunForDevices is SynthesizeCommandRun over an already-resolved
+// device list: the caller that authorized exactly these devices dispatches
+// exactly these devices, with no second fleet search in between (Issue #4554).
+// filter is recorded on the run for display only.
+func SynthesizeCommandRunForDevices(
+	ctx context.Context,
+	manager *Manager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	devices []fleet.StewardResult,
+	tenantID, createdBy string,
+	filter fleet.Filter,
+	inlineContent string,
+	shell scriptmodule.ShellType,
+	params map[string]string,
+	commandSignature *CommandSignature,
+	targets []string,
+	nonce string,
+	expiresAt time.Time,
+) (string, error) {
+	filter.TenantID = tenantID
 
 	runID := uuid.New().String()
 	now := time.Now().UTC()
@@ -192,15 +254,25 @@ func SynthesizeCommandRun(
 			return "", fmt.Errorf("synthesize command run: resolve params for device %s: %w", device.ID, err)
 		}
 
+		metadata := map[string]interface{}{
+			"workflow_run_id":       runID,
+			"job_id":                jobID,
+			"inline_script_content": inlineContent,
+		}
+		if commandSignature != nil {
+			metadata["signature_algorithm"] = commandSignature.Algorithm
+			metadata["signature_value"] = commandSignature.Value
+			metadata["signature_public_key"] = commandSignature.PublicKey
+			metadata["targets"] = targets
+			metadata["nonce"] = nonce
+			metadata["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+		}
+
 		qe := &scriptmodule.QueuedExecution{
 			ExecutionID: executionID,
 			Shell:       shell,
 			Parameters:  resolved,
-			Metadata: map[string]interface{}{
-				"workflow_run_id":       runID,
-				"job_id":                jobID,
-				"inline_script_content": inlineContent,
-			},
+			Metadata:    metadata,
 		}
 		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {

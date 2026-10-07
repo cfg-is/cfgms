@@ -36,6 +36,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/cfgis/cfgms/features/modules"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 )
 
@@ -51,15 +52,17 @@ type DriftEventHandler func(resourceName string, moduleName string, diff *stewar
 
 // ExecutionReport contains the results of configuration execution
 type ExecutionReport struct {
-	StartTime         time.Time
-	EndTime           time.Time
-	TotalResources    int
-	SuccessfulCount   int
-	FailedCount       int
-	SkippedCount      int
-	NonCompliantCount int
-	ResourceResults   []ResourceResult
-	Errors            []string
+	StartTime           time.Time
+	EndTime             time.Time
+	TotalResources      int
+	SuccessfulCount     int
+	FailedCount         int
+	SkippedCount        int
+	NonCompliantCount   int
+	DeferredCount       int
+	RetryExhaustedCount int
+	ResourceResults     []ResourceResult
+	Errors              []string
 }
 
 // ResourceResult contains the result of executing a single resource
@@ -72,6 +75,9 @@ type ResourceResult struct {
 	ExecutionTime  time.Duration
 	Error          string
 	StateDiff      *stewardtesting.StateDiff
+	// DeferredUntil is the next instant at which a deferred reboot-gated action
+	// may be retried. Zero when Status is not StatusDeferred.
+	DeferredUntil time.Time
 }
 
 // ResourceStatus represents the execution status of a resource
@@ -85,7 +91,32 @@ const (
 	// StatusNonCompliant indicates drift was detected in monitor mode.
 	// module.Set() and module.Verify() were NOT called; the drift is reported but not corrected.
 	StatusNonCompliant
+	// StatusTimeout indicates a per-resource module call (Get, Set, or verifyChanges)
+	// exceeded the configured per-call timeout. Treated as a failure in all aggregation
+	// paths. The emitted outcome event carries action=did-not-finish(timeout) (ADR-012 §7).
+	StatusTimeout
+	// StatusDeferred indicates a reboot-gated action was withheld because the current
+	// time falls outside the resource's reboot_window. The deferred action will be retried
+	// on the next convergence pass; ResourceResult.DeferredUntil carries the next window
+	// open time when known. Distinct from StatusFailed (the action is not in error — it is
+	// intentionally deferred) and StatusSkipped (the module did run but could not proceed).
+	StatusDeferred
+	// StatusRetryExhausted indicates a module's Set() returned a
+	// *modules.RetryExhaustedError: a provably-safe, bounded auto-retry has used up its
+	// attempt budget and the resource has settled into a terminal, operator-actionable
+	// state. Distinct from StatusDeferred (which retries automatically on the next
+	// convergence pass) and from StatusFailed (an unclassified failure that may or may
+	// not be safe to keep retrying) — this status is the queryable signal that automatic
+	// remediation already gave up and will not be retried again on its own.
+	StatusRetryExhausted
 )
+
+// NewConfigState creates a ConfigState from a raw configuration map.
+// Used by the steward to build the desired-state argument for Monitor() calls
+// without duplicating the executor's internal createConfigState logic.
+func NewConfigState(data map[string]interface{}) modules.ConfigState {
+	return &genericConfigState{data: data}
+}
 
 // genericConfigState is a simple map-backed ConfigState implementation used
 // when no module-specific state type is needed.
@@ -125,15 +156,24 @@ func (g *genericConfigState) GetManagedFields() []string {
 	// and `tenant_id`; future modules may add their own) plumbs them in
 	// through resource.config and consumes them at Configure-time only.
 	excludedFields := map[string]bool{
-		"path":              true, // resourceID, not state
-		"name":              true, // resource identifier
-		"transport":         true, // module operational: which client to use
-		"tenant_id":         true, // module operational: namespace prefix
-		"steward_id":        true, // module operational: audit subject
-		"audit_manager":     true, // module operational: pointer, never serialised
-		"winrm_host":        true, // module operational: WinRM endpoint
-		"winrm_user_secret": true, // module operational: SecretStore key
-		"winrm_pass_secret": true, // module operational: SecretStore key
+		"path":                     true, // resourceID, not state
+		"name":                     true, // resource identifier
+		"transport":                true, // module operational: which client to use
+		"tenant_id":                true, // module operational: namespace prefix
+		"steward_id":               true, // module operational: audit subject
+		"audit_manager":            true, // module operational: pointer, never serialised
+		"winrm_host":               true, // module operational: WinRM endpoint
+		"winrm_user_secret":        true, // module operational: SecretStore key
+		"winrm_pass_secret":        true, // module operational: SecretStore key
+		"source":                   true, // create-time provisioning directive (existence-gated, ADR-009); never reported by getVM (source: nil), so comparing it drifts every cycle on a provisioned VM
+		"old_name":                 true, // #2776 in-place rename directive: consumed by setVM to locate the source VM, never reported by getVM (which returns the VM under its NEW name), so comparing it drifts every cycle after a completed rename. The rename still triggers — the VM under the new name is absent, so its other fields drift.
+		"enroll_token":             true, // module operational: hyperv create-from-source join token (ADR-010)
+		"enroll_ca_fingerprint":    true, // module operational: controller CA fingerprint for guest TOFU
+		"enroll_steward_path":      true, // module operational: host path to steward binary staged on seed
+		"enroll_launcher_path":     true, // module operational: host path to launcher staged on seed (sibling of enroll_steward_path; ADR-010/#2346)
+		"enroll_ca_path":           true, // module operational: host path to CA cert staged on seed
+		"debug_ssh_authorized_key": true, // create-time: SSH public key injected into a provisioned guest; never observable on the VM
+		"seed_dir":                 true, // module operational: local dir for the provisioning seed VHDX
 	}
 
 	fields := make([]string, 0, len(g.data))

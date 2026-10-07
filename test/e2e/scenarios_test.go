@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
@@ -500,7 +501,10 @@ func (s *E2ETestSuite) TestWorkflowConfigurationIntegration() {
 func (s *E2ETestSuite) TestDNADriftWorkflowIntegration() {
 	err := s.framework.RunTest("dna-drift-workflow-integration", "integration", func() error {
 		// Generate cross-feature test scenario
-		scenario := s.framework.dataGenerator.GenerateDNADriftScenario()
+		scenario, err := s.framework.dataGenerator.GenerateDNADriftScenario()
+		if err != nil {
+			return fmt.Errorf("generate DNA drift scenario: %w", err)
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute) // Allow for 5-minute SLA test
 		defer cancel()
@@ -521,9 +525,10 @@ func (s *E2ETestSuite) TestDNADriftWorkflowIntegration() {
 
 		// Step 2: Establish baseline DNA
 		baselineTime := time.Now()
+		baselineFlat := sdna.FlattenFragments(scenario.BaselineDNA.GetFragments())
 		s.framework.logger.Info("Establishing DNA baseline",
 			"steward_id", scenario.StewardID,
-			"baseline_attributes", len(scenario.BaselineDNA.Attributes))
+			"baseline_attributes", len(baselineFlat))
 
 		// Simulate DNA collection and storage
 		dnaStorage := s.framework.getDNAStorage()
@@ -538,9 +543,10 @@ func (s *E2ETestSuite) TestDNADriftWorkflowIntegration() {
 		time.Sleep(2 * time.Second) // Simulate time passing
 		driftTime := time.Now()
 
+		driftedFlat := sdna.FlattenFragments(scenario.DriftedDNA.GetFragments())
 		s.framework.logger.Info("Simulating system drift",
-			"firewall_enabled", scenario.DriftedDNA.Attributes["firewall_enabled"],
-			"antivirus_status", scenario.DriftedDNA.Attributes["antivirus_status"])
+			"firewall_enabled", driftedFlat["firewall_enabled"],
+			"antivirus_status", driftedFlat["antivirus_status"])
 
 		// Step 4: Trigger drift detection
 		driftDetector := s.framework.getDriftDetector()
@@ -1137,8 +1143,11 @@ func (s *E2ETestSuite) TestDataConsistencyAcrossFeatures() {
 		s.framework.logger.Info("Testing DNA data consistency")
 
 		// Generate DNA data for both stewards
-		_ = s.framework.dataGenerator.GenerateTestDNA("consistency-test-steward-1")
-		_ = s.framework.dataGenerator.GenerateTestDNA("consistency-test-steward-2")
+		for _, consistencySteward := range []string{"consistency-test-steward-1", "consistency-test-steward-2"} {
+			if _, dnaErr := s.framework.dataGenerator.GenerateTestDNA(consistencySteward); dnaErr != nil {
+				return fmt.Errorf("generate DNA for %s: %w", consistencySteward, dnaErr)
+			}
+		}
 
 		// Simulate DNA storage and retrieval
 		dnaStorage := s.framework.getDNAStorage()
@@ -1203,7 +1212,9 @@ func (s *E2ETestSuite) TestDataConsistencyAcrossFeatures() {
 		s.framework.logger.Info("Testing workflow state consistency")
 
 		// Generate workflow scenario for consistency testing
-		_ = s.framework.dataGenerator.GenerateDNADriftScenario()
+		if _, scenarioErr := s.framework.dataGenerator.GenerateDNADriftScenario(); scenarioErr != nil {
+			return fmt.Errorf("generate DNA drift scenario for workflow consistency: %w", scenarioErr)
+		}
 
 		workflowEngine := s.framework.getWorkflowEngine()
 		if workflowEngine == nil {

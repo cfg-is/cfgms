@@ -9,9 +9,12 @@ import (
 	"errors"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // atomicRename renames src → dst on Windows with semantics that match POSIX
@@ -19,29 +22,28 @@ import (
 // keep reading their handle's view of the pre-rename file until they close
 // it.
 //
-// We use ReplaceFileW for the existing-dst path. The Win32 API guarantees:
-//   - atomic from observer perspective (no torn read between unlink + rename)
-//   - succeeds with REPLACEFILE_WRITE_THROUGH while readers have dst open;
-//     they keep their pre-rename view, same as POSIX
-//   - the implementation does the directory-entry swap in a single critical
-//     section inside the filesystem driver
+// First choice: a POSIX-semantics rename (posixRename, Issue #4262). The
+// writer opens only src and asks the filesystem to swap the name in one
+// operation; it never opens dst at all, so a reader opening dst can find the
+// old file or the new one but never a handle it has to share with.
 //
-// For the first-write case (dst does not yet exist), ReplaceFileW returns
-// ERROR_FILE_NOT_FOUND and we fall back to MoveFileEx via os.Rename. That
-// path has no contention risk because there's no destination handle to clash
-// with.
+// ReplaceFileW, the previous first choice, does not have that property. It is
+// several steps inside the API -- it opens the replaced file to carry its
+// attributes and ACLs across before swapping -- and while it holds that open,
+// a reader's CreateFile on dst fails with ERROR_SHARING_VIOLATION even with
+// every share flag set. Measured in CI (PR #4250, windows-latest): all three
+// readers of TestFlatFile_CrossProcess_OneWriterManyReaders exhausted
+// readFile's ~360ms retry budget on "The process cannot access the file
+// because it is being used by another process".
 //
-// This replaces the earlier retry-loop strategy (30 × 100ms backoff). Under
-// the cross-process stress test (#1919) on slow CI runners — 3 readers + 1
-// writer for 5s — every retry attempt could coincide with at least one open
-// reader, and the writer occasionally exhausted the 3.6s budget. The retry
-// path was a workaround for not using ReplaceFileW; this commit switches to
-// the API that was always the correct choice (the previous comment block
-// already acknowledged ReplaceFileW would be "a more elegant solution" but
-// rejected it because of the first-write split — which we handle cleanly via
-// the ERROR_FILE_NOT_FOUND fallback below).
+// Fallback: if posixRename fails for any reason (a filesystem without POSIX
+// rename semantics returns ERROR_INVALID_PARAMETER / ERROR_NOT_SUPPORTED), the
+// previous behaviour runs unchanged: ReplaceFileW for an existing dst, and
+// os.Rename (MoveFileEx) when dst does not exist yet.
 func atomicRename(src, dst string) error {
-	// Fast path: try POSIX-style atomic replace.
+	if err := posixRename(src, dst); err == nil {
+		return nil
+	}
 	if err := replaceFileW(dst, src); err == nil {
 		return nil
 	} else if !errors.Is(err, syscall.Errno(2 /* ERROR_FILE_NOT_FOUND */)) {
@@ -50,6 +52,59 @@ func atomicRename(src, dst string) error {
 	// dst does not exist — first write. Plain rename is safe here because
 	// there's no destination handle to contend with.
 	return os.Rename(src, dst)
+}
+
+// FILE_RENAME_INFO flags for the FileRenameInfoEx class (winbase.h). Not
+// exported by golang.org/x/sys/windows.
+const (
+	fileRenameFlagReplaceIfExists = 0x00000001
+	fileRenameFlagPOSIXSemantics  = 0x00000002
+)
+
+// fileRenameInfo mirrors FILE_RENAME_INFO for the FileRenameInfoEx class,
+// whose union member is the Flags DWORD. FileName is variable length; the
+// buffer handed to SetFileInformationByHandle is sized to hold the whole
+// name plus its terminator.
+type fileRenameInfo struct {
+	Flags          uint32
+	RootDirectory  windows.Handle
+	FileNameLength uint32
+	FileName       [1]uint16
+}
+
+// posixRename renames src over dst with FILE_RENAME_FLAG_POSIX_SEMANTICS:
+// dst's name is replaced in one filesystem operation even while readers hold
+// dst open (they need FILE_SHARE_DELETE, which readFile sets), and those
+// readers keep reading the old file. Only src is opened here.
+func posixRename(src, dst string) error {
+	absDst, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
+	srcW, err := windows.UTF16PtrFromString(src)
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16FromString(absDst) // NUL-terminated
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(srcW,
+		windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+
+	nameOffset := unsafe.Offsetof(fileRenameInfo{}.FileName)
+	buf := make([]byte, nameOffset+uintptr(len(name))*2)
+	info := (*fileRenameInfo)(unsafe.Pointer(&buf[0]))
+	info.Flags = fileRenameFlagReplaceIfExists | fileRenameFlagPOSIXSemantics
+	info.FileNameLength = uint32((len(name) - 1) * 2) // bytes, excluding the NUL
+	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
+	return windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, &buf[0], uint32(len(buf)))
 }
 
 // replaceFileW calls the Win32 ReplaceFileW API. dst must exist; src must
@@ -86,10 +141,9 @@ var (
 
 // jitter returns d randomised by ±50% so concurrent readers/writers retrying
 // against the same target don't fire on aligned millisecond boundaries.
-// Used by readFile's retry on ERROR_SHARING_VIOLATION. The writer side no
-// longer needs retries (ReplaceFileW handles open readers natively) but the
-// reader-side retry is kept as defense-in-depth against transient FS-driver
-// hiccups during the rename window.
+// Used by readFile's retry on ERROR_SHARING_VIOLATION. The writer side does
+// not retry. The reader-side retry is defense-in-depth for the fallback rename
+// path (ReplaceFileW), which can hold dst open while readers try to open it.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -112,4 +166,11 @@ func isRetryableRenameError(err error) bool {
 		return errno == syscall.Errno(5) || errno == syscall.Errno(32)
 	}
 	return false
+}
+
+// isSharingViolation reports ERROR_SHARING_VIOLATION (32): another handle's
+// share mode refused this open. Lets the cross-process test tell that apart
+// from a torn read, which is a different defect (Issue #4262).
+func isSharingViolation(err error) bool {
+	return errors.Is(err, syscall.Errno(32))
 }

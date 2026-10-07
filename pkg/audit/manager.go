@@ -9,32 +9,53 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// StoreRequirements declares the storage stores required by the audit subsystem.
+// Collected by collectActiveStorageRequirements in features/controller/server and validated
+// at startup via interfaces.ValidateStorageRequirements — a missing AuditStore fails
+// closed rather than silently dropping all audit recording when a provider cannot supply it.
+var StoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "audit", Store: interfaces.StoreNameAudit, Severity: interfaces.RequirementRequired},
+}
 
 // RedactedKeys is the deny-list of lower-cased key substrings that trigger value redaction
 // in Details, Changes.Before, Changes.After, and ErrorMessage.
 // Callers may append domain-specific terms before the first call to RecordEvent.
 // Note: appending after NewManager is called is not goroutine-safe.
+//
+// "auth" is matched as a plain substring like every other term, except for the
+// small exact-match allow-list of attribution keys in authAttributionKeys
+// ("author", "authorized_by", ...), so "authorization", "authentication" and
+// "auth_token" are redacted while attribution fields are not.
 var RedactedKeys = []string{
 	"password",
+	"passwd",
 	"secret",
 	"token",
 	"api_key",
 	"apikey",
 	"credential",
 	"private_key",
+	"privatekey",
 	"access_key",
 	"auth",
 }
@@ -42,43 +63,147 @@ var RedactedKeys = []string{
 // redactedValue is the placeholder used in place of sensitive values.
 const redactedValue = "[REDACTED]"
 
-// errorMessageRedactPattern matches key=value pairs where the key contains a sensitive substring.
-var errorMessageRedactPattern = regexp.MustCompile(
-	`(?i)(\w*(?:password|secret|token|api_key|apikey|credential|private_key|access_key|auth)\w*=)([^\s,]+)`,
+// authAttributionKeys is the exact-match allow-list of keys that contain "auth"
+// but carry attribution data — who wrote or approved something — rather than a
+// credential. These are the only keys exempt from the "auth" deny-list term.
+//
+// The exemption is exact-match and therefore fail-closed: any key containing
+// "auth" that is not listed here is redacted. This is deliberate. A previous
+// attempt at Issue #4098 item 7 exempted attribution keys with a token-boundary
+// regexp (`auth(?:[^a-zA-Z]|$)`, i.e. "auth" not followed by a letter), which
+// also stopped redacting "Authorization", "authorization", "authentication" and
+// "AuthHeader" — writing bearer and basic credentials from HTTP header maps into
+// the durable audit store in cleartext. Over-matching an unrecognised attribution
+// key costs a redacted audit detail; under-matching leaks a credential.
+//
+// Keys are compared after lowercasing and stripping non-alphanumeric characters,
+// so "authorized_by", "Authorized-By" and "authorizedBy" all match one entry.
+var authAttributionKeys = map[string]struct{}{
+	"author":         {},
+	"authors":        {},
+	"authoredby":     {},
+	"authorizedby":   {},
+	"authorisedby":   {},
+	"authorname":     {},
+	"authoremail":    {},
+	"authorizedbyid": {},
+}
+
+// nonAlphanumeric matches the separator characters stripped from a key before it
+// is compared against authAttributionKeys.
+var nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]`)
+
+// isAuthAttributionKey reports whether lowerKey is one of the attribution keys
+// exempt from the "auth" deny-list term.
+func isAuthAttributionKey(lowerKey string) bool {
+	_, ok := authAttributionKeys[nonAlphanumeric.ReplaceAllString(lowerKey, "")]
+	return ok
+}
+
+// isSensitiveKey reports whether key's lowercased form matches any deny-list term
+// in RedactedKeys. Every term, "auth" included, is matched as a plain substring;
+// the sole exception is that "auth" does not fire for the exact attribution keys
+// in authAttributionKeys, whose over-matching was Issue #4098 item 7. Other
+// deny-list terms still apply to those keys, so "author_token" is redacted by
+// "token" even though "author" is exempt from "auth".
+func isSensitiveKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, deny := range RedactedKeys {
+		if !strings.Contains(lower, deny) {
+			continue
+		}
+		if deny == "auth" && isAuthAttributionKey(lower) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// errorMessagePatternOnce lazily builds compiledErrorMessagePattern from RedactedKeys
+// on first use — after any caller-side appends to RedactedKeys made before the first
+// RecordEvent call (the documented, single point at which appends are safe), so the
+// ErrorMessage/Details/Changes redaction paths never drift onto different key sets
+// (Issue #4098 item 4: RedactedKeys and the pattern used to be two independently
+// maintained lists).
+var (
+	errorMessagePatternOnce     sync.Once
+	compiledErrorMessagePattern *regexp.Regexp
 )
 
-// redactMap returns a copy of m with string values replaced by [REDACTED] when the
-// lowercased key contains any substring from RedactedKeys. Non-string values are copied as-is.
-// Returns nil when m is nil.
+func errorMessageRedactPattern() *regexp.Regexp {
+	errorMessagePatternOnce.Do(func() {
+		compiledErrorMessagePattern = buildErrorMessageRedactPattern(RedactedKeys)
+	})
+	return compiledErrorMessagePattern
+}
+
+// buildErrorMessageRedactPattern compiles a pattern matching key/value pairs whose
+// key contains any of keys, across three separator shapes (key=value, key: value,
+// "key":"value"). The value alternative prefers a quoted JSON-style string and
+// otherwise consumes everything up to the next comma or newline — not just to the
+// next whitespace — so a value containing a space is redacted in its entirety
+// rather than truncated at the first space (Issue #4098 item 6).
+func buildErrorMessageRedactPattern(keys []string) *regexp.Regexp {
+	escaped := make([]string, len(keys))
+	for i, k := range keys {
+		escaped[i] = regexp.QuoteMeta(k)
+	}
+	keyAlt := strings.Join(escaped, "|")
+	pattern := `(?i)("?\w*(?:` + keyAlt + `)\w*"?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|[^,\n]+)`
+	return regexp.MustCompile(pattern)
+}
+
+// redactMap returns a copy of m with sensitive values replaced by [REDACTED] and
+// nested maps/slices scanned recursively (Issue #4098 item 3): a sensitive key
+// redacts its value outright regardless of Go type, a non-sensitive key holding a
+// nested map or slice is descended into, and a non-sensitive key holding a string
+// has that string scanned for embedded key=value secrets (item 5). Returns nil
+// when m is nil.
 func redactMap(m map[string]interface{}) map[string]interface{} {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]interface{}, len(m))
 	for k, v := range m {
-		lower := strings.ToLower(k)
-		sensitive := false
-		for _, deny := range RedactedKeys {
-			if strings.Contains(lower, deny) {
-				sensitive = true
-				break
-			}
-		}
-		if sensitive {
-			if _, isStr := v.(string); isStr {
-				out[k] = redactedValue
-				continue
-			}
-		}
-		out[k] = v
+		out[k] = redactValue(k, v)
 	}
 	return out
 }
 
-// redactErrorMessage replaces the value portion of key=value pairs in msg where the key
-// matches a sensitive substring from RedactedKeys.
+// redactValue redacts v under key k: a sensitive key always yields redactedValue,
+// whatever v's Go type. Otherwise v is scanned structurally by scanValue.
+func redactValue(k string, v interface{}) interface{} {
+	if isSensitiveKey(k) {
+		return redactedValue
+	}
+	return scanValue(v)
+}
+
+// scanValue recurses into maps and slices, and applies the free-form key=value
+// scan to strings. Other types pass through unchanged.
+func scanValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		return redactMap(val)
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, item := range val {
+			out[i] = scanValue(item)
+		}
+		return out
+	case string:
+		return redactErrorMessage(val)
+	default:
+		return v
+	}
+}
+
+// redactErrorMessage replaces the value portion of key/value pairs in msg where the
+// key matches a sensitive substring from RedactedKeys, across the key=value,
+// key: value, and "key":"value" separator shapes.
 func redactErrorMessage(msg string) string {
-	return errorMessageRedactPattern.ReplaceAllString(msg, "${1}"+redactedValue)
+	return errorMessageRedactPattern().ReplaceAllString(msg, "${1}"+redactedValue)
 }
 
 // SystemTenantID is the sentinel tenant ID used for controller-internal system events.
@@ -89,11 +214,13 @@ const SystemTenantID = "system"
 // TODO(#751): controller identity as a real tenant — replace with proper user identity.
 const SystemUserID = "system"
 
-// defaultQueueCapacity bounds the internal write queue so that a slow or stalled
-// audit store cannot grow memory without bound. When the queue is full, new
-// entries are dropped with a warning log — audit recording MUST NOT block
-// application code paths.
-const defaultQueueCapacity = 1024
+// The queue bounds memory while applying backpressure rather than dropping
+// security records. The drain batches writes so a burst does not turn into one
+// transaction and one chain-head lookup per event.
+const (
+	defaultQueueCapacity  = 1024
+	defaultDrainBatchSize = 256
+)
 
 // ChainBreak describes a single integrity violation found by VerifyChain.
 type ChainBreak struct {
@@ -118,8 +245,9 @@ type Manager struct {
 	// at startup unless a secrets store is provided.
 	hmacKey []byte
 
-	// queue is the bounded write channel feeding the drain goroutine. Entries
-	// that cannot be enqueued within a non-blocking send are dropped (logged).
+	// queue is the bounded write channel feeding the drain goroutine. When it is
+	// full, producers wait for capacity or their context cancellation; entries
+	// are never silently dropped.
 	queue chan *business.AuditEntry
 
 	// flushReq / flushAck implement a channel-based rendezvous with drainLoop.
@@ -137,7 +265,14 @@ type Manager struct {
 	// stopOnce guarantees Stop is idempotent.
 	stopOnce sync.Once
 
-	// logger is used for internal diagnostics (queue full, drain errors).
+	// lostEntries counts entries whose AppendChainedEntry call failed on every
+	// bounded-retry attempt (Issue #4098, AC9). It is cumulative for the
+	// Manager's lifetime and never cleared — Flush and Stop both report it on
+	// every call, not just the first, so a loss cannot be reported into one
+	// caller's return value and then silently vanish for the next.
+	lostEntries atomic.Uint64
+
+	// logger is used for internal storage and drain diagnostics.
 	logger *slog.Logger
 }
 
@@ -145,10 +280,19 @@ type Manager struct {
 type managerOption func(*Manager, context.Context) error
 
 // WithSecretsStore configures the Manager to load its HMAC signing key from
-// the provided secrets store (key name: "audit/hmac-key"). If the key does not
-// exist it is generated and stored. When not provided, a random in-process key
-// is used instead — per-entry integrity is preserved within the process run but
-// the key is not durable across restarts.
+// the provided secrets store (tenant "audit", key "hmac-key"). If the key does
+// not exist it is generated and stored. Corrupt or unavailable durable storage
+// fails construction; silently rotating or using an ephemeral key would make
+// previously persisted chains unverifiable.
+//
+// Adversary bound (ADR-004, Issue #3727): the key loaded here is read from the
+// controller's own secrets store and stays resident in m.hmacKey for the life
+// of the process. It defends the chain against an actor with audit-storage
+// access who does not hold this key — it does NOT defend against the
+// controller process itself, or anyone who compromises the controller host.
+// That actor holds this key by construction and can rewrite audit history
+// into a chain VerifyChain reports as fully consistent. See
+// docs/architecture/decisions/004-audit-chain-integrity.md#adversary-bound-issue-3727.
 func WithSecretsStore(store secretsInterfaces.SecretStore) managerOption {
 	return func(m *Manager, ctx context.Context) error {
 		const keyName = "audit/hmac-key"
@@ -159,19 +303,24 @@ func WithSecretsStore(store secretsInterfaces.SecretStore) managerOption {
 				m.hmacKey = raw
 				return nil
 			}
+			return fmt.Errorf("stored audit HMAC key is invalid")
 		}
-		// Key absent or undecodable — generate and persist.
+		if err != nil && !errors.Is(err, secretsInterfaces.ErrSecretNotFound) {
+			return fmt.Errorf("load audit HMAC key: %w", err)
+		}
+		// Key is absent — generate and persist before accepting audit events.
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			return fmt.Errorf("failed to generate audit HMAC key: %w", err)
 		}
 		if err := store.StoreSecret(ctx, &secretsInterfaces.SecretRequest{
-			Key:         keyName,
+			Key:         "hmac-key",
 			Value:       hex.EncodeToString(key),
 			Description: "HMAC signing key for audit chain integrity",
+			TenantID:    "audit",
+			CreatedBy:   "controller",
 		}); err != nil {
-			m.logger.Warn("failed to persist audit HMAC key; using in-process key",
-				"error", err)
+			return fmt.Errorf("persist audit HMAC key: %w", err)
 		}
 		m.hmacKey = key
 		return nil
@@ -236,7 +385,7 @@ func (m *Manager) drainLoop() {
 	for {
 		select {
 		case entry := <-m.queue:
-			m.writeEntry(entry)
+			m.writeBatch(m.collectBatch(entry))
 
 		case ack := <-m.flushReq:
 			// Drain every entry currently in the queue. New entries that arrive
@@ -262,56 +411,102 @@ func (m *Manager) drainRemaining() {
 	for {
 		select {
 		case entry := <-m.queue:
-			m.writeEntry(entry)
+			m.writeBatch(m.collectBatch(entry))
 		default:
 			return
 		}
 	}
 }
 
-// writeEntry assigns chain fields and persists a single entry to the underlying
-// store. Called exclusively from the drain goroutine so sequence numbers are
-// assigned in-order without database-side sequences. Errors are logged but do
-// not stop the drain loop.
-func (m *Manager) writeEntry(entry *business.AuditEntry) {
-	ctx := context.Background()
-
-	// Assign sequence number and previous checksum from the last stored entry
-	// for this tenant. Because writeEntry is called only from the single drain
-	// goroutine, no concurrent writer can interleave here.
-	last, err := m.store.GetLastAuditEntry(ctx, entry.TenantID)
-	if err != nil {
-		m.logger.Warn("failed to fetch last audit entry for chain linking; using sequence 1",
-			"error", err,
-			"tenant_id", entry.TenantID,
-		)
-		entry.SequenceNumber = 1
-		entry.PreviousChecksum = ""
-	} else if last == nil || last.SequenceNumber == 0 {
-		entry.SequenceNumber = 1
-		entry.PreviousChecksum = ""
-	} else {
-		entry.SequenceNumber = last.SequenceNumber + 1
-		entry.PreviousChecksum = last.Checksum
+func (m *Manager) collectBatch(first *business.AuditEntry) []*business.AuditEntry {
+	batch := make([]*business.AuditEntry, 0, defaultDrainBatchSize)
+	batch = append(batch, first)
+	for len(batch) < defaultDrainBatchSize {
+		select {
+		case entry := <-m.queue:
+			batch = append(batch, entry)
+		default:
+			return batch
+		}
 	}
+	return batch
+}
 
-	entry.Checksum = m.generateChecksum(entry)
+// maxAppendAttempts bounds retry of a failed AppendChainedEntry (Issue #4098,
+// AC9): the initial attempt plus this many total tries before the entry is
+// counted as permanently lost. appendRetryDelay scales linearly per retry
+// (10ms, 20ms) to keep the bound small and deterministic for a background
+// drain goroutine.
+const (
+	maxAppendAttempts = 3
+	appendRetryDelay  = 10 * time.Millisecond
+)
 
-	if err := m.store.StoreAuditEntry(ctx, entry); err != nil {
-		m.logger.Warn("audit write failed",
-			"error", err,
-			"entry_id", entry.ID,
-			"action", entry.Action,
-			"resource_type", entry.ResourceType,
-		)
+// writeBatch persists a group of entries, delegating sequence-number assignment
+// and PreviousChecksum linkage to the store's AppendChainedEntry so that
+// multiple controller nodes writing this tenant's chain against a shared
+// database cannot interleave (ADR-004 amendment, ADR-031 Decision 1, Issue
+// #3754). Entries are appended one at a time: each entry's PreviousChecksum
+// must link to whatever the store durably holds as the chain head at the
+// moment it is appended — which may include an entry another node wrote
+// concurrently — so entries cannot be pre-linked client-side across a batch.
+//
+// A failed append is retried with bounded backoff (appendWithRetry). A failed
+// entry does not abort the rest of the batch. When retries are exhausted the
+// entry is counted in m.lostEntries and logged at Error — RecordEvent already
+// returned successfully for it, so the loss can no longer reach the original
+// caller directly; Flush and Stop surface the cumulative count instead
+// (Issue #4098, AC9).
+func (m *Manager) writeBatch(entries []*business.AuditEntry) {
+	ctx := context.Background()
+	for _, entry := range entries {
+		if err := m.appendWithRetry(ctx, entry); err != nil {
+			m.lostEntries.Add(1)
+			m.logger.Error("audit entry permanently lost after exhausting append retries",
+				"error", logging.SanitizeLogValue(err.Error()),
+				"tenant_id", logging.SanitizeLogValue(entry.TenantID),
+			)
+		}
 	}
 }
 
-// enqueue attempts a non-blocking send on the queue. Returns nil on success or
-// an error if the manager is stopped or the queue is full. On queue full, the
-// entry is dropped with a warning log so that application code is never blocked
-// by a slow audit store.
-func (m *Manager) enqueue(entry *business.AuditEntry) error {
+// appendWithRetry calls AppendChainedEntry up to maxAppendAttempts times,
+// sleeping appendRetryDelay*attempt between tries, and returns the last error
+// if every attempt failed.
+func (m *Manager) appendWithRetry(ctx context.Context, entry *business.AuditEntry) error {
+	var lastErr error
+	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(appendRetryDelay * time.Duration(attempt))
+		}
+		lastErr = m.store.AppendChainedEntry(ctx, entry.TenantID, entry, m.generateChecksum)
+		if lastErr == nil {
+			return nil
+		}
+		m.logger.Warn("audit entry append attempt failed, retrying",
+			"error", logging.SanitizeLogValue(lastErr.Error()),
+			"tenant_id", logging.SanitizeLogValue(entry.TenantID),
+			"attempt", attempt+1,
+		)
+	}
+	return lastErr
+}
+
+// lostEntriesErr returns a non-nil error naming the cumulative count of
+// permanently lost entries, or nil if none have been lost. The count is never
+// cleared, so repeated calls (e.g. a second Stop) report the same total.
+func (m *Manager) lostEntriesErr() error {
+	n := m.lostEntries.Load()
+	if n == 0 {
+		return nil
+	}
+	return fmt.Errorf("audit manager has permanently lost %d entries after exhausting append retries", n)
+}
+
+// enqueue waits for bounded queue capacity, manager shutdown, or caller
+// cancellation. Backpressure is preferable to silently losing authorization
+// evidence; memory remains bounded by defaultQueueCapacity.
+func (m *Manager) enqueue(ctx context.Context, entry *business.AuditEntry) error {
 	select {
 	case <-m.stop:
 		return fmt.Errorf("audit manager is stopped")
@@ -323,16 +518,8 @@ func (m *Manager) enqueue(entry *business.AuditEntry) error {
 		return nil
 	case <-m.stop:
 		return fmt.Errorf("audit manager is stopped")
-	default:
-		// Queue is full — drop the entry and log a warning. Dropping is
-		// intentional: audit recording MUST NOT stall caller goroutines.
-		m.logger.Warn("audit queue full, dropping entry",
-			"entry_id", entry.ID,
-			"action", entry.Action,
-			"resource_type", entry.ResourceType,
-			"queue_capacity", defaultQueueCapacity,
-		)
-		return fmt.Errorf("audit queue full (capacity=%d): entry dropped", defaultQueueCapacity)
+	case <-ctx.Done():
+		return fmt.Errorf("audit enqueue cancelled while waiting for capacity: %w", ctx.Err())
 	}
 }
 
@@ -353,7 +540,7 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
 
-	return m.enqueue(entry)
+	return m.enqueue(ctx, entry)
 }
 
 // RecordBatch records multiple audit events. Each event is enqueued individually;
@@ -383,7 +570,7 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 
 	// Enqueue in order so the drain loop preserves batch ordering.
 	for i, entry := range entries {
-		if err := m.enqueue(entry); err != nil {
+		if err := m.enqueue(ctx, entry); err != nil {
 			return fmt.Errorf("failed to enqueue entry %d: %w", i, err)
 		}
 	}
@@ -397,12 +584,18 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 // Flush is safe to call concurrently with RecordEvent; entries enqueued after
 // the Flush request is observed by drainLoop are NOT guaranteed to be part of
 // this flush (but will be part of a later Flush or Stop).
+//
+// On every successful return (drain completed or manager already stopped),
+// Flush returns a non-nil error naming the cumulative count of entries
+// permanently lost to exhausted append retries (Issue #4098, AC9), or nil if
+// none have been lost. That count is never cleared, so repeated Flush calls
+// report the same total until more entries are lost.
 func (m *Manager) Flush(ctx context.Context) error {
 	// If the manager is already stopped, the queue has already been drained
-	// as part of Stop. Return nil (Flush semantics satisfied trivially).
+	// as part of Stop.
 	select {
 	case <-m.done:
-		return nil
+		return m.lostEntriesErr()
 	default:
 	}
 
@@ -412,7 +605,7 @@ func (m *Manager) Flush(ctx context.Context) error {
 	select {
 	case m.flushReq <- ack:
 	case <-m.done:
-		return nil
+		return m.lostEntriesErr()
 	case <-ctx.Done():
 		return fmt.Errorf("audit flush cancelled while submitting request: %w", ctx.Err())
 	}
@@ -420,27 +613,34 @@ func (m *Manager) Flush(ctx context.Context) error {
 	// Wait for drainLoop to confirm the flush completed.
 	select {
 	case <-ack:
-		return nil
+		return m.lostEntriesErr()
 	case <-m.done:
-		return nil
+		return m.lostEntriesErr()
 	case <-ctx.Done():
 		return fmt.Errorf("audit flush timed out waiting for drain: %w", ctx.Err())
 	}
 }
 
 // Stop flushes pending entries and shuts down the drain goroutine. It is
-// idempotent — repeated calls return nil immediately. Callers should call Stop
-// during graceful shutdown to guarantee audit durability.
+// idempotent — repeated calls are safe and each reports the current cumulative
+// lost-entry count (see Flush), not just the first call.
 //
 // If ctx is cancelled before the flush completes, Stop returns the context
 // error but still signals the drain goroutine to exit. The goroutine will
 // continue draining the queue in the background on a best-effort basis.
 func (m *Manager) Stop(ctx context.Context) error {
-	var flushErr error
+	var ctxErr error
 
 	m.stopOnce.Do(func() {
-		// Attempt a pre-stop flush so callers get synchronous durability.
-		flushErr = m.Flush(ctx)
+		// Attempt a pre-stop flush so callers get synchronous durability. Its
+		// return value already folds in the lost-entry count as of that call,
+		// but Stop recomputes that count fresh below — after the final drain,
+		// which may itself lose entries — so only a genuine ctx-cancellation
+		// error from Flush is preserved here.
+		if err := m.Flush(ctx); err != nil &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			ctxErr = err
+		}
 
 		// Signal drainLoop to exit. It will drain any remaining queued entries
 		// before returning.
@@ -451,13 +651,19 @@ func (m *Manager) Stop(ctx context.Context) error {
 		select {
 		case <-m.done:
 		case <-ctx.Done():
-			if flushErr == nil {
-				flushErr = fmt.Errorf("audit stop timed out waiting for drain goroutine: %w", ctx.Err())
+			if ctxErr == nil {
+				ctxErr = fmt.Errorf("audit stop timed out waiting for drain goroutine: %w", ctx.Err())
 			}
 		}
 	})
 
-	return flushErr
+	if ctxErr != nil {
+		return ctxErr
+	}
+	// Runs on every call, including calls after the first: m.lostEntries is a
+	// live cumulative counter, not a value captured once by stopOnce (Issue
+	// #4098, AC9 — a second Stop must still report an earlier loss).
+	return m.lostEntriesErr()
 }
 
 // GetEntry retrieves an audit entry by ID
@@ -516,27 +722,130 @@ func (m *Manager) validateEntry(entry *business.AuditEntry) error {
 	return nil
 }
 
-// generateChecksum computes an HMAC-SHA256 over the entry's core fields plus
-// its chain fields (SequenceNumber and PreviousChecksum). The HMAC key is the
-// Manager's per-instance or secrets-backed key. Callers must set SequenceNumber
-// and PreviousChecksum on the entry before calling generateChecksum.
+// canonicalDetails nils out an empty (len-0) Details map so its JSON
+// representation is stable whether the map is nil or empty-but-non-nil — see
+// the round-trip note in generateChecksum.
+func canonicalDetails(details map[string]interface{}) map[string]interface{} {
+	if len(details) == 0 {
+		return nil
+	}
+	return details
+}
+
+// canonicalChanges returns a copy of changes with empty Before/After/Fields
+// nilled out, for the same round-trip stability reason as canonicalDetails.
+// The original is not mutated.
+func canonicalChanges(changes *business.AuditChanges) *business.AuditChanges {
+	if changes == nil {
+		return nil
+	}
+	c := *changes
+	if len(c.Before) == 0 {
+		c.Before = nil
+	}
+	if len(c.After) == 0 {
+		c.After = nil
+	}
+	if len(c.Fields) == 0 {
+		c.Fields = nil
+	}
+	return &c
+}
+
+// generateChecksum computes an HMAC-SHA256 over every field of entry except
+// Checksum itself. The HMAC key is the Manager's per-instance or
+// secrets-backed key. Callers must set SequenceNumber and PreviousChecksum on
+// the entry before calling generateChecksum.
+//
+// Issue #4098, AC1: the previous formula hashed 11 of the entry's 27
+// non-Checksum fields, so the other 16 (UserType, SessionID, ResourceName,
+// ErrorCode, ErrorMessage, RequestID, IPAddress, UserAgent, Method, Path,
+// Details, Changes, Tags, Severity, Source, Version) could be rewritten with
+// no checksum break — the chain proved ordering and identity but not what an
+// entry said. This widening is a hard break, not a migration (AC2): entries
+// checksummed under the old formula are reported as a mismatch by
+// VerifyChain, and are not re-signed.
+//
+// Details and Changes are structured values; they are included via
+// json.Marshal, which sorts map keys, so the hash input is deterministic
+// regardless of Go map iteration order.
+//
+// Field framing: each value is written to the MAC as
+// <decimal byte length> ":" <value> (netstring framing), never as values
+// concatenated around a delimiter. That encoding is injective — the length
+// prefix is read up to the first ":", and exactly that many bytes follow, so
+// no byte string can be parsed as two different field assignments. A bare
+// delimiter is not injective: strings.Join([]string{"Mozilla|/etc/passwd",
+// "/x"}, "|") and strings.Join([]string{"Mozilla", "/etc/passwd|/x"}, "|")
+// are byte-identical, so an attacker who plants a "|" in an
+// attacker-influenced field (UserAgent, Path, ResourceName, ErrorMessage —
+// logging.SanitizeLogValue strips only control characters, so "|" survives)
+// could later shift the boundary between two adjacent string fields and the
+// recomputed HMAC would still match. That is precisely the adversary ADR-004
+// claims to detect, so the framing is part of the tamper-evidence property,
+// not a formatting detail.
+//
+// Tags is a slice, so it is written as a length-prefixed element count
+// followed by each tag as its own framed field. Joining tags with a separator
+// would reintroduce the same ambiguity one level down ([]string{"a,b"} and
+// []string{"a", "b"} share an encoding), and the count keeps a trailing tag
+// from being confused with the field that follows the slice.
 func (m *Manager) generateChecksum(entry *business.AuditEntry) string {
-	hashInput := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s|%d|%s",
-		entry.ID,
-		entry.TenantID,
-		entry.Timestamp.Unix(),
-		entry.EventType,
-		entry.Action,
-		entry.UserID,
-		entry.ResourceType,
-		entry.ResourceID,
-		entry.Result,
-		entry.SequenceNumber,
-		entry.PreviousChecksum,
-	)
+	// Details and Changes.{Before,After,Fields} carry `json:"...,omitempty"` on
+	// business.AuditEntry / business.AuditChanges. A store round-trip (the
+	// entry is serialized to persist it, then deserialized by QueryEntries for
+	// VerifyChain) collapses an empty-but-non-nil map/slice to nil, because
+	// omitempty drops the field on encode whichever it was, and decode leaves
+	// the zero value when the key is absent. Left uncanonicalized, that
+	// produces a different json.Marshal byte sequence — and therefore a
+	// different checksum — for the identical entry before and after storage,
+	// which VerifyChain would report as tampering that never happened.
+	// Canonicalizing empty to nil here matches what every round-trip already
+	// converges to, so the hash is stable across it.
+	detailsJSON, _ := json.Marshal(canonicalDetails(entry.Details))
+	changesJSON, _ := json.Marshal(canonicalChanges(entry.Changes))
 
 	mac := hmac.New(sha256.New, m.hmacKey)
-	_, _ = mac.Write([]byte(hashInput))
+
+	// field writes v framed as <decimal byte length> ":" <v>. hash.Hash never
+	// returns an error from Write, per its documented contract.
+	field := func(v string) {
+		_, _ = mac.Write([]byte(strconv.Itoa(len(v))))
+		_, _ = mac.Write([]byte{':'})
+		_, _ = mac.Write([]byte(v))
+	}
+
+	field(entry.ID)
+	field(entry.TenantID)
+	field(strconv.FormatInt(entry.Timestamp.Unix(), 10))
+	field(string(entry.EventType))
+	field(entry.Action)
+	field(entry.UserID)
+	field(string(entry.UserType))
+	field(entry.SessionID)
+	field(entry.ResourceType)
+	field(entry.ResourceID)
+	field(entry.ResourceName)
+	field(string(entry.Result))
+	field(entry.ErrorCode)
+	field(entry.ErrorMessage)
+	field(entry.RequestID)
+	field(entry.IPAddress)
+	field(entry.UserAgent)
+	field(entry.Method)
+	field(entry.Path)
+	field(string(detailsJSON))
+	field(string(changesJSON))
+	field(strconv.Itoa(len(entry.Tags)))
+	for _, tag := range entry.Tags {
+		field(tag)
+	}
+	field(string(entry.Severity))
+	field(entry.Source)
+	field(entry.Version)
+	field(strconv.FormatUint(entry.SequenceNumber, 10))
+	field(entry.PreviousChecksum)
+
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -545,11 +854,25 @@ func (m *Manager) generateChecksum(entry *business.AuditEntry) string {
 // operation — callers are responsible for providing a complete, sorted slice.
 //
 // The following violations are detected:
+//   - Missing sequence number (SequenceNumber == 0 — see below)
 //   - Checksum mismatch (tampering of an entry's fields)
 //   - PreviousChecksum mismatch (entry does not link to the prior entry)
 //   - Sequence gap (a sequence number is missing between two consecutive entries)
 //
-// Entries with SequenceNumber == 0 are pre-chain legacy entries and are skipped.
+// Entries with SequenceNumber == 0 are rejected, not skipped (Issue #4098,
+// AC3): an entry with no assigned sequence number is unverifiable and is
+// reported as a ChainBreak naming that reason. This was previously a silent
+// skip on the theory that such entries were pre-chain legacy data; AC2's hard
+// checksum break removes that legacy class, so there is nothing left to
+// protect by special-casing sequence zero.
+//
+// Adversary bound (ADR-004, Issue #3727): these checks detect an actor who
+// modifies, deletes, or reorders entries WITHOUT recomputing SequenceNumber,
+// PreviousChecksum, and Checksum in order using m.hmacKey — i.e. an actor who
+// does not hold the key. An actor who does hold the key (see WithSecretsStore)
+// can recompute a fully consistent chain over rewritten content, and this
+// function will report zero breaks for it. That is not a defect in this
+// function; it is the documented bound of a keyed hash chain.
 func (m *Manager) VerifyChain(entries []*business.AuditEntry) []ChainBreak {
 	// Sort a working copy by SequenceNumber ascending so callers don't have to.
 	sorted := make([]*business.AuditEntry, len(entries))
@@ -563,8 +886,11 @@ func (m *Manager) VerifyChain(entries []*business.AuditEntry) []ChainBreak {
 
 	for _, e := range sorted {
 		if e.SequenceNumber == 0 {
-			// Pre-chain legacy entry — skip without reporting a break.
-			continue
+			breaks = append(breaks, ChainBreak{
+				EntryID:        e.ID,
+				SequenceNumber: e.SequenceNumber,
+				Reason:         "sequence number missing: entry has no assigned SequenceNumber and cannot be chain-verified",
+			})
 		}
 
 		// Detect sequence gap.
@@ -763,14 +1089,14 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 	entry.SessionID = b.sessionID
 	entry.ResourceType = b.resourceType
 	entry.ResourceID = b.resourceID
-	entry.ResourceName = b.resourceName
+	entry.ResourceName = logging.SanitizeLogValue(b.resourceName)
 	entry.Result = b.result
 	entry.ErrorCode = b.errorCode
 	entry.RequestID = b.requestID
-	entry.IPAddress = b.ipAddress
-	entry.UserAgent = b.userAgent
-	entry.Method = b.method
-	entry.Path = b.path
+	entry.IPAddress = logging.SanitizeLogValue(b.ipAddress)
+	entry.UserAgent = logging.SanitizeLogValue(b.userAgent)
+	entry.Method = logging.SanitizeLogValue(b.method)
+	entry.Path = logging.SanitizeLogValue(b.path)
 	entry.Details = redactMap(b.details)
 	if b.changes != nil {
 		entry.Changes = &business.AuditChanges{
@@ -786,7 +1112,21 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 
 // Predefined audit event builders for common operations
 
-// AuthenticationEvent creates an authentication event builder
+// authOutcomeSeverity maps an AuditResult to the calibrated severity for auth/authz events.
+// Success is Low (routine operation); anything else is High (failure, denial, or error).
+// Call sites that want Critical (e.g. compromised-device or session-hijack indicators) must
+// override with .Severity(business.AuditSeverityCritical) after the constructor.
+func authOutcomeSeverity(result business.AuditResult) business.AuditSeverity {
+	if result == business.AuditResultSuccess {
+		return business.AuditSeverityLow
+	}
+	return business.AuditSeverityHigh
+}
+
+// AuthenticationEvent creates an authentication event builder.
+// Severity is outcome-aware: success → Low, failure/denied/error → High.
+// Call sites for compromise-indicator-grade failures (revoked device, session hijack, invalid PoP)
+// must add .Severity(business.AuditSeverityCritical) to override.
 func AuthenticationEvent(tenantID, userID, action string, result business.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
@@ -795,10 +1135,14 @@ func AuthenticationEvent(tenantID, userID, action string, result business.AuditR
 		User(userID, business.AuditUserTypeHuman).
 		Resource("session", userID, "").
 		Result(result).
-		Severity(business.AuditSeverityHigh)
+		Severity(authOutcomeSeverity(result))
 }
 
-// AuthorizationEvent creates an authorization event builder
+// AuthorizationEvent creates an authorization event builder.
+// Severity is outcome-aware: success → Low, failure/denied/error → High.
+// Call sites for sensitive authorization management actions (permission grants, JIT approvals)
+// must add .Severity(business.AuditSeverityHigh) to override, since those represent
+// security-relevant operations regardless of outcome.
 func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action string, result business.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
@@ -807,7 +1151,7 @@ func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action strin
 		User(userID, business.AuditUserTypeHuman).
 		Resource(resourceType, resourceID, "").
 		Result(result).
-		Severity(business.AuditSeverityHigh)
+		Severity(authOutcomeSeverity(result))
 }
 
 // ConfigurationEvent creates a configuration change event builder

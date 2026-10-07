@@ -18,9 +18,27 @@ func MergeScriptSigningConfig(parent, child ScriptSigningConfig) (ScriptSigningC
 	return stewardtypes.MergeScriptSigningConfig(parent, child)
 }
 
+// ModuleTrustModeLevel delegates to the shared stewardtypes implementation.
+func ModuleTrustModeLevel(mode ModuleTrustMode) int {
+	return stewardtypes.ModuleTrustModeLevel(mode)
+}
+
 // GetConvergeInterval delegates to the shared stewardtypes implementation.
 func GetConvergeInterval(cfg StewardConfig) time.Duration {
 	return stewardtypes.GetConvergeInterval(cfg)
+}
+
+// GetDNARefreshInterval delegates to the shared stewardtypes implementation.
+func GetDNARefreshInterval(cfg StewardConfig) time.Duration {
+	return stewardtypes.GetDNARefreshInterval(cfg)
+}
+
+// DefaultObserveSweepN re-exports the shared Tier-2 observe sweep cadence default.
+const DefaultObserveSweepN = stewardtypes.DefaultObserveSweepN
+
+// GetObserveSweepN delegates to the shared stewardtypes implementation.
+func GetObserveSweepN(cfg StewardConfig) int {
+	return stewardtypes.GetObserveSweepN(cfg)
 }
 
 // GetConfiguredModules delegates to the shared stewardtypes implementation.

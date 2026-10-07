@@ -3,7 +3,6 @@
 package entra_group
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,8 +91,12 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraGroupModule)
 
-	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
+	// requireExecutionTenant (Issue #4420, matching entra_user's Issue #4325
+	// fix) needs the CFGMS execution tenant on ctx. createRealAuthProvider's
+	// OAuth2Provider carries a defaultConfig for M365_TENANT_ID, so any CFGMS
+	// tenant resolves to that same M365 tenant here.
+	ctx := ctxForTenant(tenantID)
 	timestamp := time.Now().Format("20060102-150405")
 
 	// Initial configuration for CREATE
@@ -233,8 +236,12 @@ func TestEntraGroup_Integration_ConfigValidation(t *testing.T) {
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraGroupModule)
 
-	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
+	// requireExecutionTenant (Issue #4420, matching entra_user's Issue #4325
+	// fix) needs the CFGMS execution tenant on ctx. createRealAuthProvider's
+	// OAuth2Provider carries a defaultConfig for M365_TENANT_ID, so any CFGMS
+	// tenant resolves to that same M365 tenant here.
+	ctx := ctxForTenant(tenantID)
 
 	// Test with invalid configuration (missing required fields)
 	invalidConfig := &EntraGroupConfig{
@@ -260,8 +267,12 @@ func TestEntraGroup_Integration_AuthenticationFlow(t *testing.T) {
 	// Create real auth provider
 	authProvider := createRealAuthProvider(t)
 
-	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
+	// requireExecutionTenant (Issue #4420, matching entra_user's Issue #4325
+	// fix) needs the CFGMS execution tenant on ctx. createRealAuthProvider's
+	// OAuth2Provider carries a defaultConfig for M365_TENANT_ID, so any CFGMS
+	// tenant resolves to that same M365 tenant here.
+	ctx := ctxForTenant(tenantID)
 
 	// Test token acquisition
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
@@ -292,8 +303,12 @@ func TestEntraGroup_Integration_MemberOwnerSync(t *testing.T) {
 	graphClient := createRealGraphClient(t)
 	module := New(authProvider, graphClient).(*entraGroupModule)
 
-	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
+	// requireExecutionTenant (Issue #4420, matching entra_user's Issue #4325
+	// fix) needs the CFGMS execution tenant on ctx. createRealAuthProvider's
+	// OAuth2Provider carries a defaultConfig for M365_TENANT_ID, so any CFGMS
+	// tenant resolves to that same M365 tenant here.
+	ctx := ctxForTenant(tenantID)
 	timestamp := time.Now().Format("20060102-150405")
 
 	// Create a test group to work with
@@ -425,8 +440,12 @@ func TestEntraGroup_Integration_TeamOperations(t *testing.T) {
 	graphClient := createRealGraphClient(t)
 	module := New(authProvider, graphClient).(*entraGroupModule)
 
-	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
+	// requireExecutionTenant (Issue #4420, matching entra_user's Issue #4325
+	// fix) needs the CFGMS execution tenant on ctx. createRealAuthProvider's
+	// OAuth2Provider carries a defaultConfig for M365_TENANT_ID, so any CFGMS
+	// tenant resolves to that same M365 tenant here.
+	ctx := ctxForTenant(tenantID)
 	timestamp := time.Now().Format("20060102-150405")
 
 	groupName := fmt.Sprintf("cfgmsteamtest%s", timestamp)

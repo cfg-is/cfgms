@@ -94,7 +94,7 @@ func attachChildToJobObject(cmd *exec.Cmd) error {
 		_ = windows.CloseHandle(job)
 		return fmt.Errorf("OpenProcess(pid=%d): %w", cmd.Process.Pid, err)
 	}
-	defer windows.CloseHandle(processHandle)
+	defer func() { _ = windows.CloseHandle(processHandle) }()
 
 	if err := windows.AssignProcessToJobObject(job, processHandle); err != nil {
 		_ = windows.CloseHandle(job)

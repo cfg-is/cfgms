@@ -296,6 +296,100 @@ ac_detect_no_op() {
     return 0
 }
 
+# ----------------------------------------------------------------------------
+# Headless background-wait stall (Issue #4178)
+# ----------------------------------------------------------------------------
+#
+# In `claude -p` (print) mode, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS covers
+# background SUBAGENTS and WORKFLOWS only. A background BASH task gets a few
+# seconds' grace after the agent ends its turn, and is then killed, and the
+# agent is never re-invoked. An agent that starts `make test` in the background
+# and ends its turn "to wait for the notification" therefore loses everything it
+# had not committed. Observed 5 times on 2026-09-18/19 across dev and fix
+# containers.
+
+# The rule appended to every headless agent prompt.
+AC_HEADLESS_NO_BG_WAIT_RULE='## Headless execution rule (mandatory)
+
+You are running headless (`claude -p`). Your session ENDS the moment you end
+your turn, and you are never woken up again. Any background Bash command
+(`run_in_background`, a background Monitor, `&`) is killed a few seconds after
+your turn ends, and its output is lost.
+
+- Run every command you need the result of (make test, test suites, builds,
+  `gh run watch`) in the FOREGROUND.
+- If a command may exceed the ~10 minute tool limit, split it into smaller
+  foreground commands, or run only the suites your change touches.
+- Commit (and push, if your mode pushes) BEFORE any long command, so progress
+  survives.
+- NEVER end your turn with "waiting for the background task / notification /
+  validation to finish". Nothing will resume you.'
+
+# ac_last_assistant_text <session.jsonl>
+# Prints the text of the last assistant message in a Claude session transcript
+# (empty when the file is missing or has none).
+ac_last_assistant_text() {
+    local jsonl="$1"
+    [[ -f "$jsonl" ]] || return 0
+    python3 - "$jsonl" <<'PY' 2>/dev/null || true
+import json, sys
+last = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") or {}
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        texts = []
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts = [c.get("text", "") for c in content
+                     if isinstance(c, dict) and c.get("type") == "text"]
+        joined = "\n".join(t for t in texts if t)
+        if joined:
+            last = joined
+print(last)
+PY
+}
+
+# ac_detect_ended_turn_waiting <session.jsonl>
+# Returns 0 when the agent's LAST message says it is waiting on background work.
+# Callers combine this with "no PR and HEAD not advanced". On its own, it only
+# says what the agent intended, not that work was lost.
+ac_detect_ended_turn_waiting() {
+    local text
+    text="$(ac_last_assistant_text "$1")"
+    [[ -n "$text" ]] || return 1
+    grep -qiE "(wait|waiting|pause)[^.]{0,80}(notification|background|monitor|validation|to (complete|finish))" <<<"$text"
+}
+
+# ac_classify_outcome <mode> <pr_url> <head_advanced> <session.jsonl>
+# Prints "ended_turn_waiting" or "normal" for agent-result.json.
+#
+# "Nothing landed" differs by mode. fix-pr and resolve-conflict run on a branch
+# that ALREADY has a PR, so PR_URL is always set there and says nothing about
+# this run -- only HEAD advancing does. For the other modes, a new PR also
+# counts as landing work. Gating fix-pr on an empty PR_URL made the check
+# unreachable for the mode behind 3 of the 4 observed stalls.
+ac_classify_outcome() {
+    local mode="$1" pr_url="$2" head_advanced="$3" jsonl="$4" landed="false"
+    if [[ "$head_advanced" == "true" ]]; then
+        landed="true"
+    elif [[ "$mode" != "fix-pr" && "$mode" != "resolve-conflict" && -n "$pr_url" ]]; then
+        landed="true"
+    fi
+    if [[ "$landed" == "false" ]] && ac_detect_ended_turn_waiting "$jsonl"; then
+        echo "ended_turn_waiting"
+    else
+        echo "normal"
+    fi
+}
+
 # ac_no_op_comment_body <container_name>
 # Returns the canonical no-op comment body (used both for posting and for idempotency lookup).
 ac_no_op_comment_body() {
@@ -326,4 +420,114 @@ ac_post_no_op_comment() {
     fi
     gh pr comment "$pr_num" --repo "${owner}/${repo}" --body "$body" >/dev/null 2>&1 || return 1
     return 0
+}
+
+# ----------------------------------------------------------------------------
+# Per-segment model routing (Issue #3030)
+# ----------------------------------------------------------------------------
+
+# ac_resolve_agent_model <segment>
+# Resolves the model + effort to run a container's `claude` invocation on,
+# reading model-routing.yaml (defaults + per-segment overrides).
+# stdout: two lines, "<model>\n<effort>".
+#
+# The config is read from the HARNESS path only, never from /workspace. The
+# branch under dispatch or review must not select the model of the agent that
+# reviews it: /workspace is a checkout of the PR branch (agent-dispatch.sh
+# review-pr), so a branch could otherwise set
+# `segments: acceptance-review: { model: <weak model> }` and weaken the merge
+# gate judging it. Dev and fix agents consume untrusted issue/PR text, so branch
+# content is never a trusted input to harness configuration (same rule as the
+# token reporter, Issue #3041). The image bakes this file
+# (.devcontainer/Dockerfile) and every dispatch path bind-mounts the harness
+# checkout's copy over it read-only, so routing edits need no image rebuild.
+#
+# CFGMS_MODEL_ROUTING_FILE is the host operator's escape hatch (used by the
+# tests below and by benchmark tooling); it is set from host env, not from the
+# repo under review.
+#
+# CFGMS_MODEL_OVERRIDE (forwarded into the container by agent-dispatch.sh)
+# takes precedence over the file's model regardless of config state — this is
+# what the benchmark harness uses to run a fixture across models without
+# mutating committed config. It originates from host operator env, not the
+# branch. It never affects the resolved effort.
+#
+# A missing or malformed config file falls back to the hardcoded values below
+# (today's prior hardcoded defaults) so a parse failure degrades to previous
+# behavior instead of breaking dispatch. The parser only understands the
+# fixed two-level `defaults:`/`segments:` shape declared in the config file's
+# own header comment — it is a keyed lookup, not a general YAML implementation.
+ac_resolve_agent_model() {
+    local segment="$1"
+    local routing_file="${CFGMS_MODEL_ROUTING_FILE:-/usr/local/share/cfgms-agent/model-routing.yaml}"
+    local fallback_model="claude-sonnet-4-6"
+    local fallback_effort="high"
+    local model="$fallback_model"
+    local effort="$fallback_effort"
+
+    if [[ -f "$routing_file" ]]; then
+        local resolved
+        resolved=$(python3 - "$routing_file" "$segment" "$fallback_model" "$fallback_effort" <<'PYEOF'
+import sys
+
+path, segment, fallback_model, fallback_effort = sys.argv[1:5]
+model, effort = fallback_model, fallback_effort
+try:
+    defaults = {}
+    segments = {}
+    section = None
+    with open(path) as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if line == "defaults:":
+                section = "defaults"
+                continue
+            if line == "segments:":
+                section = "segments"
+                continue
+            if not line.startswith(" "):
+                section = None
+                continue
+            if section == "defaults":
+                key, sep, val = stripped.partition(":")
+                if sep:
+                    defaults[key.strip()] = val.strip()
+            elif section == "segments":
+                seg_name, sep, rest = stripped.partition(":")
+                if not sep:
+                    continue
+                rest = rest.strip()
+                fields = {}
+                if rest.startswith("{") and rest.endswith("}"):
+                    for pair in rest[1:-1].split(","):
+                        k, psep, v = pair.partition(":")
+                        if psep:
+                            fields[k.strip()] = v.strip()
+                segments[seg_name.strip()] = fields
+    seg_fields = segments.get(segment, {})
+    model = seg_fields.get("model") or defaults.get("model") or fallback_model
+    effort = seg_fields.get("effort") or defaults.get("effort") or fallback_effort
+except Exception:
+    model, effort = fallback_model, fallback_effort
+print(model)
+print(effort)
+PYEOF
+        ) || resolved=""
+        if [[ -n "$resolved" ]]; then
+            local resolved_model resolved_effort
+            resolved_model=$(sed -n '1p' <<< "$resolved")
+            resolved_effort=$(sed -n '2p' <<< "$resolved")
+            [[ -n "$resolved_model" ]] && model="$resolved_model"
+            [[ -n "$resolved_effort" ]] && effort="$resolved_effort"
+        fi
+    fi
+
+    if [[ -n "${CFGMS_MODEL_OVERRIDE:-}" ]]; then
+        model="$CFGMS_MODEL_OVERRIDE"
+    fi
+
+    printf '%s\n%s\n' "$model" "$effort"
 }

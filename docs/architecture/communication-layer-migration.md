@@ -50,12 +50,14 @@ The unified transport is configured via the `transport` block in `controller.cfg
 
 ```yaml
 transport:
-  listen_addr: "0.0.0.0:4433"   # Single port for all controller-steward traffic
+  listen_addr: "0.0.0.0:4433"   # Single port for the control + data plane (heartbeats, commands, cfg/DNA sync)
   use_cert_manager: true          # Use controller's cert manager for TLS (recommended)
   max_connections: 50000          # Maximum concurrent steward connections
   keepalive_period: 30s           # How often keepalive probes are sent
   idle_timeout: 5m                # Connection idle timeout
 ```
+
+> **Scope of "one port".** The unification above consolidates the **control and data planes** onto a single QUIC port (4433) — it replaced the previous two-protocol/two-port control+data split. It does **not** cover **installer / steward-binary distribution**, which is served over the controller's **HTTPS REST listener** (port 9080), the same channel operators, browsers, and package managers use. Both the controller push and the steward self-fetch (Issue #2833) pull binaries over HTTPS, not QUIC — large-file transfer stays off the control/data-plane streams. A managed steward therefore reaches the controller on both 4433 (QUIC) and 9080 (HTTPS). Moving binary transfer onto the QUIC data plane was considered and deliberately not pursued (it would add a chunked bulk-transfer contract spanning both push and pull directions for little gain, since HTTPS egress is universally available); see the steward-binary distribution notes in `controller-operating-model.md`.
 
 ### Environment Variables
 

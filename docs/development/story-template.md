@@ -6,20 +6,20 @@
 
 ## Dependencies
 
-<One of three forms:>
+<One of two forms:>
 
 <Form 1 — no deps:>
 None
 
-<Form 2 — existing issue deps:>
+<Form 2 — issue deps (siblings included — stories are created in dependency
+order and each create-story call returns its real #NNN immediately, so sibling
+references always use real numbers; placeholder tokens are retired):>
 - #NNN — <reason> — must be merged into develop before this story starts
 - #MMM — <reason> — <when external PR known: (PR: #PPP)>
 
-<Form 3 — sibling deps with placeholders for two-pass create:>
-- #SIBLING-S1 — <reason> — must be merged into develop before this story starts
-- #SIBLING-S2 — <reason> — must be merged before this story starts
-
 <IMPORTANT: PO cron preflight rejects prose without #NNN. Only `None` / `none.` / `n/a` / empty are accepted as empty markers.>
+
+<IMPORTANT: story bodies are world-readable at creation (ADR-015). No secrets, no customer/business specifics, no exploit-grade vulnerability detail — use create-story --defer for bodies that must stay private until dispatch.>
 
 ## Out of Scope
 
@@ -38,6 +38,15 @@ None
 - `docs/path/to/doc.md` — <what to update>
 
 <Use "None — no product-shape change" with justification only if the story genuinely doesn't change observable shape. See ba.md "Documentation & Tests Currency" rule.>
+
+## Environment
+
+<Optional. Omit for ordinary Linux-buildable work (the default). Set `windows`
+(or `macos`) when the story needs that host's environment: (1) native OS behavior
+a Linux container can't build/live-test, OR (2) full end-to-end deployment tests
+and troubleshooting — the Windows host runs the Linux-controller + Linux/Windows-
+minion matrix that a container can't. Routes the story off the Linux orchestrator
+to a host serving that environment (see po.md §7).>
 
 ## Reference Implementation
 

@@ -1,183 +1,95 @@
-# DNA Monitoring - Comprehensive Reporting System
+# Reports
 
-**Story #81 Implementation Complete ✅**
+Report generation for CFGMS DNA monitoring data: compliance reports, executive
+dashboards, and drift analysis, with multi-format export and REST API access.
 
-This package implements comprehensive DNA monitoring and reporting capabilities for CFGMS, delivering all acceptance criteria for Story #81.
-
-## 🎯 Acceptance Criteria Fulfilled
-
-- ✅ **Generate compliance reports showing drift from baselines**
-- ✅ **Create executive dashboards with trend analysis**  
-- ✅ **Export reports in multiple formats (PDF, CSV, JSON)**
-- ✅ **Schedule automated report generation and distribution**
-- ✅ **Include visual charts and graphs for easy interpretation**
-
-## 🏗️ Architecture Overview
+## Architecture
 
 ```
 features/reports/
-├── types.go              # Core types and interfaces
-├── reports.go            # Main service implementation
-├── design.md             # Architecture design document
+├── api/                  # REST API endpoints
+│   └── handlers.go       # Dashboard and report HTTP handlers
 ├── engine/               # Report generation engine
 │   ├── engine.go         # Core report generation logic
-│   └── engine_test.go    # Comprehensive tests
-├── templates/            # Report template processing
-│   └── processor.go      # Built-in templates (compliance, executive, drift)
-├── exporters/            # Multi-format export system
-│   ├── types.go          # Export types and interfaces
-│   └── exporter.go       # JSON, CSV, HTML, PDF export
+│   └── advanced.go       # Audit-integrated, multi-tenant report generation (not yet wired to an API endpoint)
+├── interfaces/           # Shared types and interface contracts
+│   ├── interfaces.go     # Core report types (ReportRequest, Report, DataQuery, ...)
+│   ├── advanced.go       # Advanced/audit-integrated report types
+│   └── custom.go         # Custom and scheduled report type contracts
 ├── provider/             # Data integration layer
-│   └── provider.go       # DNA storage and drift detection integration
-├── api/                  # REST API endpoints
-│   └── handlers.go       # Dashboard and report APIs
-├── cache/                # Report caching system
-│   ├── memory.go         # In-memory cache implementation
-│   └── types.go          # Cache interfaces
-└── example_test.go       # Usage examples and documentation
+│   ├── provider.go       # DNA storage and drift detection integration
+│   └── advanced.go       # Audit data integration and cross-system metrics
+├── templates/            # Built-in report templates (compliance, executive, drift)
+├── exporters/            # Multi-format export (JSON, CSV, HTML, PDF)
+└── cache/                # Report caching
 ```
 
-## 🚀 Key Features
+Only `api`, `engine`, `interfaces`, `provider`, `templates`, `exporters`, and `cache` are
+part of the live report path — every binary in the module reaches report generation
+through `features/reports/api`, which imports `features/reports/interfaces`, with
+`features/reports/engine` behind it.
 
-### Report Generation Engine
-- **Template-based architecture** for flexible report creation
-- **Caching system** for improved performance  
-- **Async processing** with configurable timeouts
-- **Validation** for request parameters and templates
+## Key features
 
-### Built-in Report Types
-- **Compliance Reports**: Drift from baselines, compliance scoring
-- **Executive Dashboards**: KPIs, trend analysis, risk assessment
-- **Drift Analysis**: Detailed event analysis and recommendations
-- **Custom Reports**: User-defined templates via API
+- **Template-based report generation** for compliance, executive, and drift report types
+- **Multi-format export**: JSON, CSV, HTML, PDF
+- **REST API** for dashboard and report access, backed directly by `engine.Engine`
+- **Report caching** for improved performance (write-through, configurable TTL)
+- **Tenant and device scoping** enforced at the API boundary (`api/handlers.go`):
+  a tenant-scoped caller is pinned to its own tenant, and every requested device ID is
+  authorized against that tenant's subtree before it reaches the engine
 
-### Multi-Format Export
-- **JSON**: API integration and data exchange
-- **CSV**: Spreadsheet analysis and data import
-- **HTML**: Web viewing with professional styling
-- **PDF**: Print-ready reports (requires external tools)
+## REST API endpoints
 
-### REST API Endpoints
-- `POST /api/v1/reports/generate` - Generate custom reports
-- `GET /api/v1/reports/dashboard/overview` - Executive KPIs
-- `GET /api/v1/reports/dashboard/trends` - Trend analysis data
-- `GET /api/v1/reports/dashboard/alerts` - Active drift alerts
-- `GET /api/v1/reports/compliance/status` - Compliance status
-- `GET /api/v1/reports/drift/summary` - Drift event summary
+- `POST /api/v1/reports/generate` — generate a report and export it in the requested format
+- `GET /api/v1/reports/templates` — list available report templates
+- `GET /api/v1/reports/templates/{template}` — get a specific template's info
+- `GET /api/v1/reports/dashboard/overview` — executive KPI summary
+- `GET /api/v1/reports/dashboard/trends` — trend charts and analysis
+- `GET /api/v1/reports/dashboard/alerts` — active drift alerts, with acknowledge/silence state
+- `GET /api/v1/reports/compliance/status` — compliance score and summary
+- `GET /api/v1/reports/drift/summary` — drift event summary
 
-### Chart and Visualization Support
-- **Time series charts** for trend analysis
-- **Bar charts** for device counts and categories
-- **Pie charts** for distribution analysis
-- **Data preparation** for frontend integration
+## Integration
 
-## 🔗 Integration
+- **Entity Graph**: `GetDNAData`, `GetDeviceStats`, and `GetDriftEvents` read device
+  identity, observation history, and drift state from
+  `pkg/entitygraph/interfaces.EntityGraphProvider` (ADR-022).
+- **Templates**: `features/reports/templates` processes report templates into
+  `interfaces.Report` values.
+- **REST API**: registered on the controller API server
+  (`features/controller/server/server.go`).
+- **Multi-tenancy**: tenant scope always comes from the authenticated caller, not from a
+  caller-supplied request field; see `api/handlers.go`'s `parseTenantIDs` and
+  `enforceDeviceTenant`.
 
-### Existing System Integration
-- **DNA Storage**: Leverages `storage.Manager` for efficient data queries
-- **Drift Detection**: Integrates with `drift.Detector` for event analysis
-- **Template System**: Extends existing template processing capabilities
-- **REST API**: Integrates with controller API infrastructure
-- **Multi-tenancy**: Supports tenant isolation and RBAC
+### Query scoping
 
-### Performance Optimizations
-- **Content-addressable storage** with 90%+ compression
-- **Report caching** with configurable TTL
-- **Efficient queries** with time-range and device filtering
-- **Streaming support** for large datasets
+Every report read carries exactly one authorization cut, and a read that carries none is
+refused rather than widened (ADR-022 §7):
 
-## 📊 Usage Examples
+- **Device selector** (`DataQuery.DeviceIDs`) — the narrowest cut. Each device ID is
+  authorized against the caller's tenant subtree at the API boundary before the query
+  reaches the data provider, and results cover only those devices.
+- **Tenant scope** (`DataQuery.TenantIDs`) — used when no device is named. Hosts are
+  discovered through `QueryEntities` with `EntityFilter.TenantFilter` set to the tenant
+  subtree, and drift through `ListDrifted` with `DriftFilter.TenantFilter`; several
+  tenants mean one filtered query each, never one unfiltered query.
+- **Neither** — refused. An empty tenant filter means "every tenant" to the entity graph
+  providers, so such a query would return the whole deployment.
 
-### Generate Compliance Report
-```go
-service := reports.NewService(storageManager, driftDetector, cache, logger)
+## Advanced (audit-integrated, multi-tenant) reporting
 
-timeRange := reports.TimeRange{
-    Start: time.Now().Add(-7 * 24 * time.Hour),
-    End:   time.Now(),
-}
+`engine.AdvancedEngine` and `provider.AdvancedProvider` (`engine/advanced.go`,
+`provider/advanced.go`) implement compliance/security/executive/multi-tenant report
+generation with audit-data integration and RBAC-validated tenant access. They are fully
+implemented and tested but are not yet constructed by any server wiring or reachable
+through `features/reports/api` — see Issue #4333 for the tracked follow-up that reaches
+the remaining unimplemented capability (scheduled reports, custom report building, custom
+template management) through this same live path.
 
-reportData, err := service.GenerateComplianceReport(
-    ctx, timeRange, deviceIDs, reports.FormatJSON)
-```
+## Testing
 
-### Executive Dashboard
-```go
-dashboardData, err := service.GenerateExecutiveDashboard(
-    ctx, timeRange, reports.FormatHTML)
-```
-
-### Custom Report via API
-```bash
-curl -X POST /api/v1/reports/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "compliance",
-    "template": "compliance-summary", 
-    "time_range": {
-      "start": "2025-01-24T00:00:00Z",
-      "end": "2025-01-31T00:00:00Z"
-    },
-    "format": "html",
-    "parameters": {
-      "include_details": true
-    }
-  }'
-```
-
-## 🧪 Testing
-
-Comprehensive test suite includes:
-- **Unit tests** for core engine functionality
-- **Integration tests** for data provider and storage
-- **Mock implementations** for isolated testing
-- **Example tests** demonstrating usage patterns
-
-## 📈 Business Value
-
-### For Compliance Officers
-- **Automated compliance reporting** with baseline comparison
-- **Drift trend analysis** showing configuration stability
-- **Risk assessment** with actionable recommendations
-- **Audit-ready reports** in multiple formats
-
-### For Executives
-- **High-level dashboards** with key performance indicators
-- **Trend visualization** showing system health over time
-- **Risk distribution** across device portfolio
-- **ROI metrics** for configuration management investment
-
-### For Operations Teams
-- **Real-time alerts** for critical drift events
-- **Device-specific analysis** for targeted remediation
-- **Historical trend data** for capacity planning
-- **API integration** with existing monitoring tools
-
-## 🛠️ Technical Implementation
-
-### Advanced Features
-- **Template inheritance** and reusable components
-- **Custom template functions** for DNA data access
-- **Report scheduling** with cron-like syntax
-- **Email distribution** and webhook integration
-- **Report versioning** and comparison capabilities
-
-### Security & Compliance
-- **RBAC integration** with existing authentication
-- **Tenant data isolation** for multi-tenant deployments
-- **Audit logging** for report access and generation
-- **PII protection** in exported data
-
-### Scalability
-- **Horizontal scaling** with stateless design
-- **Database sharding** support via existing storage layer
-- **Caching strategies** for frequently accessed reports
-- **Async processing** for large dataset reports
-
-## 🎉 Story #81 - Complete Success
-
-This implementation fully delivers on the acceptance criteria for Story #81, providing a comprehensive, scalable, and feature-rich reporting system that enhances CFGMS's DNA monitoring capabilities with professional-grade reporting and visualization features.
-
-**Total Story Points**: 5 points ✅  
-**Implementation Status**: Complete ✅  
-**All Acceptance Criteria**: Met ✅
+- Unit tests for engine, provider, exporter, cache, and template logic
+- API handler tests, including tenant/device scoping enforcement
+- No mocks — tests use real CFGMS components per CLAUDE.md

@@ -5,7 +5,6 @@
 
 steward:
   id: ""  # Will be set by controller
-  mode: "controller"
 
 resources:
   - name: "test-file-1"

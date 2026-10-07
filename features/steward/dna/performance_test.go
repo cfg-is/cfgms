@@ -14,12 +14,18 @@ import (
 // TestDNACollectionBasic tests core DNA collection functionality quickly
 func TestDNACollectionBasic(t *testing.T) {
 	if !testing.Short() {
-		// In non-short mode, do minimal real collection for validation
+		// In non-short mode, validate assembly (ID derivation, attribute
+		// counting) over the cross-platform sub-collectors. These assertions
+		// are about the collector's assembly logic, not about how deeply a
+		// given OS can be inspected — TestDNACollectionPerformance below keeps
+		// the platform default and asserts the richer real-collect counts.
 		logger := logging.NewLogger("error") // Minimal noise
-		collector := NewCollector(logger)
+		collector := newSnapshotCollector(t, logger)
+
+		ctx := context.Background()
 
 		// Quick validation that collection works
-		dna, err := collector.Collect(context.Background())
+		dna, err := collector.Collect(ctx)
 		if err != nil {
 			t.Fatalf("DNA collection failed: %v", err)
 		}
@@ -29,11 +35,35 @@ func TestDNACollectionBasic(t *testing.T) {
 			t.Error("DNA ID should not be empty")
 		}
 
-		if len(dna.Attributes) < 30 {
-			t.Errorf("Expected at least 30 attributes (fast path), got %d", len(dna.Attributes))
+		// Every fast-path gatherer must have contributed. Assert the keys each
+		// one guarantees — either from the snapshot fixture (hardware, network)
+		// or from the live host (basic info, environment) — rather than a bare
+		// count threshold, which only ever measured how richly a given host's
+		// platform collector happens to report.
+		required := []string{
+			"hostname",                // collectBasicInfo
+			"num_cpu",                 // collectBasicInfo
+			"cpu_count",               // collectHardwareInfo (CollectCPU)
+			"memory_total_kb",         // collectHardwareInfo (CollectMemory)
+			"disk_mount_count",        // collectHardwareInfo (CollectDisk)
+			"kernel_info",             // collectHardwareInfo (CollectMotherboard)
+			"network_interface_count", // collectNetworkInfo (CollectInterfaces)
+			"dns_servers",             // collectNetworkInfo (CollectDNS)
+			"firewall_state",          // collectNetworkInfo (CollectFirewall)
+			"timezone",                // collectEnvironmentInfo
+		}
+		attrs := collector.RawAttributes(ctx)
+		for _, key := range required {
+			if _, ok := attrs[key]; !ok {
+				t.Errorf("Fast-path attributes missing %q", key)
+			}
 		}
 
-		t.Logf("DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
+		if int(dna.AttributeCount) < len(required) {
+			t.Errorf("Expected at least %d attributes (fast path), got %d", len(required), dna.AttributeCount)
+		}
+
+		t.Logf("DNA collection basic validation passed (%d attributes)", dna.AttributeCount)
 		return
 	}
 
@@ -115,7 +145,8 @@ func TestDNACollectionPerformance(t *testing.T) {
 	// only (hardware + network + environment). Software and security data are
 	// collected asynchronously in the background and merged on subsequent calls.
 	// The fast path typically returns 80-100 attributes; full merged data exceeds 120.
-	attributeCount := len(dna.Attributes)
+	// After Issue #3332 the flat Attributes map is not written; use AttributeCount.
+	attributeCount := int(dna.AttributeCount)
 	if attributeCount < 50 {
 		t.Errorf("DNA collection returned only %d attributes, expected >50", attributeCount)
 	} else {
@@ -130,7 +161,9 @@ func TestDNACollectionPerformance(t *testing.T) {
 	t.Logf("Collection timing breakdown:")
 	t.Logf("  Total duration: %v", duration)
 	t.Logf("  Attributes collected: %d", attributeCount)
-	t.Logf("  Average time per attribute: %v", duration/time.Duration(attributeCount))
+	if attributeCount > 0 {
+		t.Logf("  Average time per attribute: %v", duration/time.Duration(attributeCount))
+	}
 }
 
 // TestDNACollectionComponents tests individual collection components

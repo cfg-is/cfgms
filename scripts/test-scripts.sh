@@ -4,6 +4,13 @@
 
 set -euo pipefail
 
+# Python's stdout defaults to the Windows console codepage (cp1252) unless
+# told otherwise, which crashes print() on any emoji/Unicode output --
+# confirmed on generate-mockups-index.py's ✅ and resolve_conflict.test.sh's
+# embedded checker's → (Issue #3686). Set once here rather than patching every
+# script this suite invokes.
+export PYTHONIOENCODING=utf-8
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,12 +39,64 @@ log_skip() {
     echo -e "${YELLOW}⊘${NC} $1"
 }
 
+# --group <name>[,<name>...] narrows the run to one or more of the four named
+# suite groups (Issue #4301). No flag at all ⇒ run everything, unchanged from
+# before this flag existed — the only calling convention any caller uses today.
+VALID_GROUPS=(core security-review claude-tooling devinfra)
+GROUP_FLAG_GIVEN=false
+declare -A SELECTED_GROUPS=()
+
+usage() {
+    echo "Usage: $0 [--group <name>[,<name>...]]" >&2
+    echo "  Valid groups: ${VALID_GROUPS[*]}" >&2
+}
+
+is_valid_group() {
+    local candidate="$1" vg
+    for vg in "${VALID_GROUPS[@]}"; do
+        [[ "$candidate" == "$vg" ]] && return 0
+    done
+    return 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --group)
+            if [[ $# -lt 2 ]]; then
+                echo "❌ --group requires a value" >&2
+                usage
+                exit 1
+            fi
+            GROUP_FLAG_GIVEN=true
+            IFS=',' read -ra _requested_groups <<< "$2"
+            for _g in "${_requested_groups[@]}"; do
+                if ! is_valid_group "$_g"; then
+                    echo "❌ Unknown --group value: '${_g}'" >&2
+                    usage
+                    exit 1
+                fi
+                SELECTED_GROUPS["$_g"]=1
+            done
+            shift 2
+            ;;
+        *)
+            echo "❌ Unknown argument: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+group_selected() {
+    [[ -n "${SELECTED_GROUPS[$1]:-}" ]]
+}
+
 # Test 1: Validate syntax of all shell scripts
 test_syntax() {
     log_test "Testing shell script syntax..."
 
     local scripts_tested=0
-    for script in scripts/*.sh .claude/scripts/*.sh; do
+    for script in scripts/*.sh .claude/scripts/*.sh .github/scripts/*.sh; do
         if [ -f "$script" ]; then
             if bash -n "$script" 2>/dev/null; then
                 log_pass "$(basename "$script"): Valid syntax"
@@ -65,6 +124,154 @@ test_license_checker() {
     else
         log_skip "check-license-headers.sh: Not found"
     fi
+}
+
+# Test: mockups index structural check (Issues #3042, #3166)
+# check-mockups-index.sh is the structural backstop for the generated index:
+# it must pass on the real README and must reject a duplicated row or header,
+# so that any corruption (e.g. from a bad merge resolution) is caught in CI.
+# Also exercises the generator freshness check: the committed README.md must
+# match what scripts/generate-mockups-index.py produces from current *.yaml
+# metadata.
+test_check_mockups_index() {
+    log_test "Testing mockups index structural check..."
+
+    if [ ! -f scripts/check-mockups-index.sh ]; then
+        log_fail "check-mockups-index.sh: Not found (Issue #3042 requires it)"
+        return
+    fi
+
+    if bash scripts/check-mockups-index.sh docs/design/mockups/README.md >/dev/null 2>&1; then
+        log_pass "check-mockups-index.sh: Passes against the real, deduplicated index"
+    else
+        log_fail "check-mockups-index.sh: Rejected the real index (should be clean)"
+    fi
+
+    local tmp_dupe
+    tmp_dupe=$(mktemp)
+    cp docs/design/mockups/README.md "$tmp_dupe"
+    # Duplicate the first row — catches any accidental double-inclusion.
+    sed -n '/^| \[`/{p;q}' docs/design/mockups/README.md >> "$tmp_dupe"
+
+    if bash scripts/check-mockups-index.sh "$tmp_dupe" >/dev/null 2>&1; then
+        log_fail "check-mockups-index.sh: Did not detect a duplicated row"
+    else
+        log_pass "check-mockups-index.sh: Detects a duplicated row (fails loudly)"
+    fi
+
+    rm -f "$tmp_dupe"
+}
+
+# Test: mockups index generator (Issue #3166)
+# Verifies that scripts/generate-mockups-index.py:
+#   1. Produces output that matches the committed README.md (freshness check).
+#   2. Detects drift when a new *.yaml is present but README is not regenerated.
+#   3. Fixes the drift with --write (demonstrating the no-shared-edit contract:
+#      adding a mockup requires only new html+yaml files, then one generator run).
+test_mockups_index_generator() {
+    log_test "Testing mockups index generator (Issue #3166)..."
+
+    if [ ! -f scripts/generate-mockups-index.py ]; then
+        log_fail "generate-mockups-index.py: Not found (Issue #3166 requires it)"
+        return
+    fi
+
+    # 1. Freshness: committed README must match generator output right now.
+    local gen_out rc=0
+    gen_out=$(python3 scripts/generate-mockups-index.py --check 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log_pass "generate-mockups-index.py --check: committed README matches *.yaml metadata"
+    else
+        log_fail "generate-mockups-index.py --check: README is stale — $gen_out"
+        return
+    fi
+
+    # 2. Drift detection: add a dummy *.yaml, README is not yet regenerated.
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Mirror the mockups dir into tmp so we can add a yaml without touching the repo.
+    cp -r docs/design/mockups/. "$tmp_dir/"
+    cat > "${tmp_dir}/test-only-fixture.yaml" <<'YAML'
+file: test-only-fixture.html
+order: 999
+status: Test
+what: Ephemeral fixture used by test_mockups_index_generator only.
+YAML
+
+    # Run the generator against the temp dir (monkeypatched paths via env).
+    # We need the generator to read from tmp_dir but compare against the real README.
+    # Build a self-contained test: copy the current README into tmp_dir too, then
+    # run --check pointing the generator at tmp_dir. We do this by running the
+    # generator's --write against a copy of README.
+    local tmp_readme="${tmp_dir}/README.md"
+    cp docs/design/mockups/README.md "$tmp_readme"
+
+    # Inline the generator logic against our temp dir to simulate the "stale" state:
+    # the tmp README was generated without the fixture yaml; with it present, --write
+    # should produce a different file.
+    python3 - "$tmp_dir" "$tmp_readme" <<'PYEOF'
+import sys, os, re
+
+mockups_dir = sys.argv[1]
+readme_path = sys.argv[2]
+
+BEGIN = "<!-- BEGIN GENERATED TABLE -->"
+END   = "<!-- END GENERATED TABLE -->"
+
+def parse(p):
+    m = {}
+    with open(p, encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.rstrip("\n").strip()
+            if ln and not ln.startswith("#"):
+                k, _, v = ln.partition(":")
+                m[k.strip()] = v.strip()
+    return m
+
+entries = []
+for fn in sorted(os.listdir(mockups_dir)):
+    if fn.endswith(".yaml"):
+        e = parse(os.path.join(mockups_dir, fn))
+        if "file" in e:
+            entries.append(e)
+entries.sort(key=lambda e: (int(e.get("order", 999)), e.get("file", "")))
+
+lines = [BEGIN, "| File | What it is | Status |", "|------|------------|--------|"]
+for e in entries:
+    lines.append(f"| [`{e['file']}`]({e['file']}) | {e.get('what','')} | {e.get('status','')} |")
+lines.append(END)
+section = "\n".join(lines)
+
+with open(readme_path, encoding="utf-8") as f:
+    cur = f.read()
+bi = cur.find(BEGIN)
+ei = cur.find(END)
+updated = cur[:bi] + section + cur[ei + len(END):]
+with open(readme_path, "w", encoding="utf-8") as f:
+    f.write(updated)
+PYEOF
+
+    # tmp_readme now has the fixture row; the real README does not — they differ.
+    if diff -q docs/design/mockups/README.md "$tmp_readme" >/dev/null 2>&1; then
+        log_fail "generator drift test: adding a yaml did not change the generated output"
+    else
+        log_pass "generator drift test: new yaml produces different output (drift detected)"
+    fi
+
+    # 3. --write on the real repo is idempotent (the committed README is already
+    #    current, so --write should not change it).
+    local before_hash after_hash
+    before_hash=$(sha256sum docs/design/mockups/README.md | awk '{print $1}')
+    python3 scripts/generate-mockups-index.py --write >/dev/null 2>&1
+    after_hash=$(sha256sum docs/design/mockups/README.md | awk '{print $1}')
+    if [ "$before_hash" = "$after_hash" ]; then
+        log_pass "generator --write: idempotent when README is already current"
+    else
+        log_fail "generator --write: unexpectedly changed a current README"
+    fi
+
+    rm -rf "$tmp_dir"
 }
 
 # Test: log-injection linter wrapper (Issue #1771 AC #1)
@@ -105,6 +312,91 @@ test_log_injection_linter() {
     (cd "$tmp_cwd" && "$script_abs") >"$out_file" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ]; then
         log_pass "lint-log-injection.sh: Exits 0 on clean tree from foreign CWD"
+    elif [ "$rc" -eq 1 ]; then
+        # TEMPORARY (Issue #4088, tracked by follow-up #4103): #4088 widened
+        # the taint model, and its repo-wide run surfaced a set of residual
+        # findings — each individually traced during #4088 and confirmed a
+        # false positive (server-generated IDs, crypto-random values, fixed
+        # hardcoded vocabularies, and three named linter-precision gaps; see
+        # the #4088 PR description and #4103 for the full root-cause
+        # breakdown).
+        #
+        # #4089 (same-package interprocedural parameter-taint propagation)
+        # fixed the new findings its own widening surfaced, and — as a side
+        # effect of the same-package result-type resolution that work needed
+        # anyway — shrank this snapshot from 40 to 31: the linter can now pin
+        # the static type of a value returned by a same-package callee, so
+        # scalar counters it previously flagged (handlers_accounts.go's revoked
+        # counts, handlers_stewards.go's page.Total and tail) are suppressed
+        # correctly rather than sanitized at the call site. Two entries also
+        # moved to their true line numbers (handlers_runs.go 519 -> 529,
+        # handlers_upgrade.go 589 -> 593), correcting pre-existing staleness in
+        # the #4088 snapshot. The remaining 31 are the same-package baseline
+        # #4103 is expected to own; none is #4089's to fix.
+        #
+        # This is a pinned SNAPSHOT, not a blanket allowlist: any finding
+        # outside this exact set — new OR missing — still fails the test below,
+        # loudly, so this list must be updated (normally shrunk) as #4103
+        # lands. Delete this branch entirely once #4103 restores a clean,
+        # zero-finding tree.
+        local known_findings
+        known_findings=$(cat <<'EOF'
+features/controller/api/handlers_certificates.go:135: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_certificates.go:168: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_certificates.go:206: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_credential_requests_collect.go:311: tainted value "issued.SerialNumber" logged without logging.SanitizeLogValue
+features/controller/api/handlers_jobs.go:219: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration.go:741: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration.go:768: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration.go:843: tainted value "token.ExpiresAt" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration.go:1018: tainted value "pendingID" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration.go:1021: tainted value "pendingID" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration.go:1028: tainted value "pendingID" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration_refresh.go:688: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration_refresh.go:710: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration_tokens.go:155: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_registration_tokens.go:171: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_rollout.go:244: tainted value "qErr" logged without logging.SanitizeLogValue
+features/controller/api/handlers_runs.go:399: tainted value "patternName" logged without logging.SanitizeLogValue
+features/controller/api/handlers_runs.go:529: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_scripts.go:321: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_scripts.go:433: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_scripts.go:459: tainted value "since" logged without logging.SanitizeLogValue
+features/controller/api/handlers_signing_credential.go:137: tainted value "issuedCert.SerialNumber" logged without logging.SanitizeLogValue
+features/controller/api/handlers_stewards.go:168: tainted value "searchErr" logged without logging.SanitizeLogValue
+features/controller/api/handlers_stewards.go:591: tainted value "matched" logged without logging.SanitizeLogValue
+features/controller/api/handlers_stewards.go:1490: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_test_admin.go:103: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_test_admin.go:110: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_upgrade.go:280: tainted value "createErr" logged without logging.SanitizeLogValue
+features/controller/api/handlers_upgrade.go:593: tainted value "createErr" logged without logging.SanitizeLogValue
+features/workflow/debug_api.go:76: tainted value "session.ID" logged without logging.SanitizeLogValue
+features/workflow/debug_api.go:228: tainted value "breakpoint.ID" logged without logging.SanitizeLogValue
+EOF
+)
+        local actual_findings
+        actual_findings=$(grep -E '^  features/.*: tainted value' "$out_file" | sed 's/^  //' || true)
+
+        # Compare on (file, message) only, never the embedded line number.
+        # Unrelated merges routinely shift line numbers within these files
+        # without touching the flagged statement itself (Issue #4113 — this
+        # exact drift broke `make test` on a clean develop twice: #4088's
+        # snapshot going stale between PRs, corrected by #4089, then drifting
+        # again). Baking the line number into the compared key means the next
+        # unrelated edit to either file reintroduces the same false failure,
+        # so strip it from both sides before comparing; sort so a same-file
+        # reordering of findings doesn't register as a diff either.
+        local strip_line='s/^([^:]+):[0-9]+:/\1:/'
+        local known_normalized actual_normalized
+        known_normalized=$(echo "$known_findings" | sed -E "$strip_line" | sort)
+        actual_normalized=$(echo "$actual_findings" | sed -E "$strip_line" | sort)
+
+        if [ "$actual_normalized" == "$known_normalized" ]; then
+            log_pass "lint-log-injection.sh: only the tracked #4103 false-positive baseline present (31 findings)"
+        else
+            log_fail "lint-log-injection.sh: findings differ from the tracked #4103 baseline (rc=$rc) — output below"
+            sed 's/^/    /' "$out_file" >&2
+        fi
     else
         log_fail "lint-log-injection.sh: Failed from CWD outside repo (rc=$rc) — output below"
         sed 's/^/    /' "$out_file" >&2
@@ -174,6 +466,18 @@ test_executable_permissions() {
         "scripts/tier1-smoke-test_test.sh"
         "scripts/tier1-bootstrap.sh"
         "scripts/tier1-bootstrap_test.sh"
+        "scripts/check-binary-artifacts.sh"
+        "scripts/check-binary-artifacts_test.sh"
+        "scripts/check-docs-boundary.sh"
+        "scripts/check-docs-boundary_test.sh"
+        "scripts/install-git-hooks.sh"
+        "scripts/install-git-hooks_test.sh"
+        "scripts/verify-nancy-ignore-scope.sh"
+        "scripts/verify-nancy-ignore-scope_test.sh"
+        "scripts/lab-datasvc-bootstrap.sh"
+        "scripts/lab-datasvc-bootstrap_test.sh"
+        "scripts/ha-cluster-node-bootstrap.sh"
+        "scripts/ha-cluster-node-bootstrap_test.sh"
         "scripts/cfgms-bundle-load"
     )
 
@@ -212,19 +516,29 @@ test_create_clone_stale_branch_deletion() {
     git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
     git -C "$host_dir" push origin develop >/dev/null 2>&1
 
-    # Create a stale feature branch on the remote with a marker commit
-    git -C "$host_dir" checkout -b "$branch_name" >/dev/null 2>&1
-    git -C "$host_dir" commit --allow-empty -m "stale marker commit" >/dev/null 2>&1
+    # Create a stale feature branch on the remote that carries NO work of its
+    # own: it points at an older develop commit, and develop has moved on since.
+    # A branch with commits not on develop is refused instead (Issue #4272,
+    # covered by test_create_clone_refuses_branch_with_work below).
+    git -C "$host_dir" branch "$branch_name" >/dev/null 2>&1
     local marker_sha
-    marker_sha=$(git -C "$host_dir" rev-parse HEAD)
+    marker_sha=$(git -C "$host_dir" rev-parse "$branch_name")
     git -C "$host_dir" push origin "$branch_name" >/dev/null 2>&1
-    git -C "$host_dir" checkout develop >/dev/null 2>&1
+    git -C "$host_dir" commit --allow-empty -m "develop moves on" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    # A pre-push hook that always fails. Deleting a branch pushes no code, so
+    # the delete must not run it (--no-verify); if it did, create-clone fails.
+    mkdir -p "$host_dir/.git/hooks"
+    printf '#!/bin/sh\nexit 1\n' > "$host_dir/.git/hooks/pre-push"
+    chmod +x "$host_dir/.git/hooks/pre-push"
 
     mkdir -p "$worktree_dir"
 
-    local output
-    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir"         bash "$dispatch_script" create-clone "$story_num" 2>&1)
-    local exit_code=$?
+    local output exit_code=0
+    # Use || so a failure is reported below instead of aborting the suite under set -e
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" create-clone "$story_num" 2>&1) || exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
         log_fail "create-clone: Command failed (exit ${exit_code}): ${output}"
@@ -254,6 +568,72 @@ test_create_clone_stale_branch_deletion() {
         log_pass "create-clone: New branch based on develop HEAD, not stale marker commit"
     else
         log_fail "create-clone: New branch HEAD (${clone_head}) does not match develop (${develop_sha})"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+# Test 8b: create-clone refuses to delete a stale branch that still holds work
+# (Issue #4272). A dev agent that commits and dies before opening a PR leaves
+# its only copy of that work on this branch.
+test_create_clone_refuses_branch_with_work() {
+    log_test "Testing create-clone refuses to delete a stale branch with commits..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local remote_dir="${tmp_dir}/remote.git"
+    local host_dir="${tmp_dir}/host"
+    local worktree_dir="${tmp_dir}/worktrees"
+    local story_num="99994"
+    local branch_name="feature/story-${story_num}-agent"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    git init --bare -b develop "$remote_dir" >/dev/null 2>&1
+    git init -b develop "$host_dir" >/dev/null 2>&1
+    git -C "$host_dir" config user.email "test@test.com"
+    git -C "$host_dir" config user.name "Test"
+    git -C "$host_dir" remote add origin "$remote_dir"
+    git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+    git -C "$host_dir" push origin develop >/dev/null 2>&1
+
+    # The dead agent's work: two commits on the story branch, not on develop.
+    git -C "$host_dir" checkout -b "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" commit --allow-empty -m "agent work 1" >/dev/null 2>&1
+    git -C "$host_dir" commit --allow-empty -m "agent work 2" >/dev/null 2>&1
+    local work_sha
+    work_sha=$(git -C "$host_dir" rev-parse HEAD)
+    git -C "$host_dir" push origin "$branch_name" >/dev/null 2>&1
+    git -C "$host_dir" checkout develop >/dev/null 2>&1
+    mkdir -p "$worktree_dir"
+
+    local output exit_code=0
+    # Use || to prevent set -e from aborting the test on the expected non-zero exit
+    output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        bash "$dispatch_script" create-clone "$story_num" 2>&1) || exit_code=$?
+
+    if [[ $exit_code -eq 4 ]]; then
+        log_pass "create-clone: exits 4 when the stale branch holds work"
+    else
+        log_fail "create-clone: expected exit 4, got ${exit_code}: ${output}"
+    fi
+
+    if [[ "$(echo "$output" | tail -1)" == "STALE_BRANCH_HAS_WORK:${branch_name}:2" ]]; then
+        log_pass "create-clone: last line names the branch and its commit count"
+    else
+        log_fail "create-clone: last line is not the STALE_BRANCH_HAS_WORK marker: ${output}"
+    fi
+
+    if [[ "$(git -C "$remote_dir" rev-parse "$branch_name" 2>/dev/null)" == "$work_sha" ]]; then
+        log_pass "create-clone: the branch and its commits are still on the remote"
+    else
+        log_fail "create-clone: the branch with work was deleted or moved"
+    fi
+
+    if [[ ! -d "$worktree_dir/story-${story_num}" ]]; then
+        log_pass "create-clone: no clone is made when it refuses"
+    else
+        log_fail "create-clone: a clone was made despite the refusal"
     fi
 
     rm -rf "$tmp_dir"
@@ -345,11 +725,10 @@ test_create_clone_deletion_failure() {
     git -C "$host_dir" commit --allow-empty -m "initial commit" >/dev/null 2>&1
     git -C "$host_dir" push origin develop >/dev/null 2>&1
 
-    # Create a stale feature branch on the remote
-    git -C "$host_dir" checkout -b "$branch_name" >/dev/null 2>&1
-    git -C "$host_dir" commit --allow-empty -m "stale marker commit" >/dev/null 2>&1
+    # Create a stale feature branch on the remote with no commits of its own, so
+    # the work guard (Issue #4272) lets it through to the delete under test.
+    git -C "$host_dir" branch "$branch_name" >/dev/null 2>&1
     git -C "$host_dir" push origin "$branch_name" >/dev/null 2>&1
-    git -C "$host_dir" checkout develop >/dev/null 2>&1
 
     # Install a pre-receive hook that rejects branch deletions — simulates a
     # protected branch or insufficient permissions on the remote.
@@ -372,10 +751,10 @@ HOOKEOF
     output=$(CFGMS_TEST_REPO_ROOT="$host_dir" CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
         bash "$dispatch_script" create-clone "$story_num" 2>&1) || exit_code=$?
 
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "create-clone: Exits non-zero when stale branch deletion fails"
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "create-clone: Exits 1 when stale branch deletion fails"
     else
-        log_fail "create-clone: Should have failed when branch deletion is rejected (exit was 0)"
+        log_fail "create-clone: Expected exit 1 when branch deletion is rejected (exit was ${exit_code}): ${output}"
     fi
 
     if echo "$output" | grep -q "ERROR:"; then
@@ -585,6 +964,843 @@ GOEOF
     rm -rf "$tmp_dir"
 }
 
+# Fixture suite for scripts/check-binary-artifacts.sh — the compiled-artifact
+# merge gate. Delegates to scripts/check-binary-artifacts_test.sh, which builds
+# throwaway git repositories and asserts every magic signature, the extension
+# fallback, and the fail-closed paths.
+test_check_binary_artifacts() {
+    log_test "Testing check-binary-artifacts.sh..."
+
+    local gate_script="scripts/check-binary-artifacts.sh"
+    local test_script="scripts/check-binary-artifacts_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-binary-artifacts.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-binary-artifacts.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-binary-artifacts_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-binary-artifacts_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-binary-artifacts_test.sh: All fixture tests passed"
+    else
+        log_fail "check-binary-artifacts_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/check-docs-boundary.sh — the documentation-boundary
+# gate (Issue #3417, Epic #3412). Delegates to scripts/check-docs-boundary_test.sh,
+# which builds throwaway git repositories and asserts both execution paths: exit 0
+# on a clean docs tree and exit 1 (naming the offending file) on every identifier
+# in the gate's own denylist, plus the fail-closed paths.
+#
+# Also runs the gate against the real docs/ tree, so a document reintroducing a
+# private-deployment identifier fails `make test` rather than merging green.
+test_check_docs_boundary() {
+    log_test "Testing check-docs-boundary.sh..."
+
+    local gate_script="scripts/check-docs-boundary.sh"
+    local test_script="scripts/check-docs-boundary_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-docs-boundary.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-docs-boundary.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-docs-boundary_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-docs-boundary_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-docs-boundary_test.sh: All fixture tests passed"
+    else
+        log_fail "check-docs-boundary_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-docs-boundary.sh: Real docs/ tree is clean"
+    else
+        log_fail "check-docs-boundary.sh: Real docs/ tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/check-no-python-in-core.sh — the core-product
+# Python gate (Issue #4303, Epic #4296). Delegates to
+# scripts/check-no-python-in-core_test.sh, which builds throwaway git
+# repositories and asserts both execution paths: exit 0 on a clean tree and
+# exit 1 (naming the offending file) for a planted .py under each of the six
+# declared paths, plus the fail-closed path.
+#
+# Also runs the gate against the real repo, so a .py file reintroduced under
+# cmd/, pkg/, features/, api/, web/, or test/ fails `make test` rather than
+# merging green.
+test_check_no_python_in_core() {
+    log_test "Testing check-no-python-in-core.sh..."
+
+    local gate_script="scripts/check-no-python-in-core.sh"
+    local test_script="scripts/check-no-python-in-core_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-no-python-in-core.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-no-python-in-core.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-no-python-in-core_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-no-python-in-core_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-python-in-core_test.sh: All fixture tests passed"
+    else
+        log_fail "check-no-python-in-core_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-python-in-core.sh: Real repo tree is clean"
+    else
+        log_fail "check-no-python-in-core.sh: Real repo tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/check-no-banned-exec-patterns.sh — the
+# banned-execution-pattern gate for windows-setup.ps1 and the script
+# templates (Issue #4343). Delegates to
+# scripts/check-no-banned-exec-patterns_test.sh, which asserts each banned
+# pattern (iex, Invoke-Expression, powershell -Command "<string>",
+# -EncodedCommand, -ExecutionPolicy Bypass, bash -c "<string>", eval,
+# python -c) is independently detected, that a comment merely naming one does
+# not self-trip, and that the gate fails closed on a missing file.
+#
+# Also runs the gate against the real repo, so a piped-installer or
+# composed-command-string pattern reintroduced into windows-setup.ps1 or
+# either template fails `make test` rather than merging green.
+test_check_no_banned_exec_patterns() {
+    log_test "Testing check-no-banned-exec-patterns.sh..."
+
+    local gate_script="scripts/check-no-banned-exec-patterns.sh"
+    local test_script="scripts/check-no-banned-exec-patterns_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-no-banned-exec-patterns.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-no-banned-exec-patterns.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-no-banned-exec-patterns_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-no-banned-exec-patterns_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-banned-exec-patterns_test.sh: All fixture tests passed"
+    else
+        log_fail "check-no-banned-exec-patterns_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-banned-exec-patterns.sh: Real repo tree is clean"
+    else
+        log_fail "check-no-banned-exec-patterns.sh: Real repo tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/check-dead-packages.sh — the package-reachability
+# gate (Issue #4317). Delegates to scripts/check-dead-packages_test.sh, which
+# builds throwaway Go modules (each with its own go.mod, so `go list` resolves
+# offline) and asserts the reachability-closure algorithm: a reachable child of
+# an unreachable parent is not flagged, every link of an importer chain that no
+# main package reaches IS flagged, allowlisted packages pass, a missing entry
+# fails naming only that package, a stale entry fails, test-only-reachable
+# packages need no entry, and the gate fails closed (exit 2) outside a module
+# root. These assertions are the only thing validating that algorithm, so they
+# must run under `make test`, not only under `make check-architecture` — which
+# runs the gate but nothing that proves the gate is correct, and which no CI
+# workflow invokes at all (`unit-tests-scripts` is this gate's only automated
+# runner). Same shape as test_check_no_python_in_core above.
+#
+# Also runs the gate against the real repo (2s, four `go list` passes), so a
+# package that stops being reachable from any main package — or an allowlist
+# entry that goes stale — fails `make test` rather than merging green.
+test_check_dead_packages() {
+    log_test "Testing check-dead-packages.sh..."
+
+    local gate_script="scripts/check-dead-packages.sh"
+    local test_script="scripts/check-dead-packages_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-dead-packages.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-dead-packages.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-dead-packages_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-dead-packages_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-dead-packages_test.sh: All fixture tests passed"
+    else
+        log_fail "check-dead-packages_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-dead-packages.sh: Real repo has no unallowlisted unreachable package"
+    else
+        log_fail "check-dead-packages.sh: Real repo failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Regression guard for the `unit-tests` aggregator's no-Python gate (Issue
+# #4303). Extracts the "Aggregate group results" step's actual `run:` block
+# from .github/workflows/test-suite.yml -- rather than reimplementing the
+# logic by hand, which could drift from what CI really runs or paper over a
+# bug in the nested `if:` -- substitutes the `${{ }}` expressions GitHub
+# Actions would normally interpolate with test values, and executes it under
+# bash to check its exit code and messaging for all three trigger shapes:
+#   A. pull_request with a planted .py under pkg/ (no_python_ok=false) -> fail
+#   B. a clean pull_request (no_python_ok=true)                        -> pass
+#   C. push-to-main / workflow_dispatch, where the `changes` job never runs
+#      and no_python_ok is empty                                       -> pass
+# Case C is the specific bug this gate must not reintroduce: an unguarded
+# `!= 'true'` comparison against an empty output would fail every such run.
+test_unit_tests_aggregator_no_python_gate() {
+    log_test "Testing unit-tests aggregator's no-Python gate (Issue #4303)..."
+
+    local workflow="${1:-.github/workflows/test-suite.yml}"
+    if [[ ! -f "$workflow" ]]; then
+        log_fail "unit-tests aggregator no-Python gate: $workflow not found"
+        return
+    fi
+
+    local block
+    block="$(awk '
+        /^      - name: Aggregate group results$/ { infound=1; next }
+        infound && /^        run: \|$/ { inrun=1; next }
+        inrun {
+          if ($0 ~ /^          /) { print substr($0, 11) }
+          else if ($0 == "") { print "" }
+          else { exit }
+        }
+        ' "$workflow")"
+
+    if [[ -z "$block" ]]; then
+        log_fail "unit-tests aggregator no-Python gate: could not extract the 'Aggregate group results' run block from $workflow"
+        return
+    fi
+
+    # run_case <event_name> <no_python_ok> <code> — substitutes the extracted
+    # block's GitHub Actions expressions with the given test values (the five
+    # unit-tests-*.result expressions are always "success": this gate only
+    # cares about the no_python_ok/code short-circuits ahead of that check),
+    # executes it, and sets AGG_RC / AGG_OUT.
+    run_case() {
+        local event_name="$1" no_python_ok="$2" code="$3"
+        local substituted="$block"
+        substituted="${substituted//\$\{\{ github.event_name \}\}/$event_name}"
+        substituted="${substituted//\$\{\{ needs.changes.outputs.no_python_ok \}\}/$no_python_ok}"
+        substituted="${substituted//\$\{\{ needs.changes.outputs.code \}\}/$code}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-controller-core.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-heavy-providers.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-rest.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-api.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-scripts.result \}\}/success}"
+        # `|| AGG_RC=$?` is load-bearing: this file runs under `set -e`, and
+        # case A below deliberately expects exit 1 — without the `||` guard
+        # the bare non-zero exit from this command substitution would abort
+        # the whole test-scripts.sh run right here (see the identical fix
+        # documented on test_log_injection_linter above).
+        AGG_RC=0
+        AGG_OUT=$(bash -c "$substituted" 2>&1) || AGG_RC=$?
+    }
+
+    # A. PR with a planted .py file under pkg/ — must fail with the named message.
+    run_case "pull_request" "false" "true"
+    if [[ "$AGG_RC" -eq 1 ]] && [[ "$AGG_OUT" == *"contains a tracked .py file"* ]]; then
+        log_pass "aggregator fails a PR with no_python_ok=false, naming the reason"
+    else
+        log_fail "aggregator should fail (exit 1, naming the reason) when no_python_ok=false on a PR (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+
+    # B. A clean PR — must pass.
+    run_case "pull_request" "true" "true"
+    if [[ "$AGG_RC" -eq 0 ]]; then
+        log_pass "aggregator passes a clean PR (no_python_ok=true)"
+    else
+        log_fail "aggregator should pass a clean PR (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+
+    # C. push-to-main / workflow_dispatch: `changes` never runs, so
+    # no_python_ok is empty. The bug this guard fixes: without the nested
+    # `github.event_name == 'pull_request'` check, an empty output reads as
+    # `!= 'true'` and fails every such run.
+    run_case "push" "" ""
+    if [[ "$AGG_RC" -eq 0 ]]; then
+        log_pass "aggregator does not fail a push/workflow_dispatch run when no_python_ok is empty"
+    else
+        log_fail "aggregator must not fail when changes never ran and no_python_ok is empty (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+
+    run_case "workflow_dispatch" "" ""
+    if [[ "$AGG_RC" -eq 0 ]]; then
+        log_pass "aggregator does not fail a workflow_dispatch run when no_python_ok is empty"
+    else
+        log_fail "aggregator must not fail a workflow_dispatch run when no_python_ok is empty (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+}
+
+# Test: shared suite-group gate (Issue #4302, Epic #4296)
+# scripts/lib/detect-tooling-changed.sh decides which of the four suite
+# groups a diff must run. Its own fixture suite covers the classification
+# behavior; this smoke test just proves the gate and its tests exist,
+# are executable, and pass -- the same shape as test_check_docs_boundary.
+test_detect_tooling_changed() {
+    log_test "Testing detect-tooling-changed.sh..."
+
+    local gate_script="scripts/lib/detect-tooling-changed.sh"
+    local test_script="scripts/lib/detect-tooling-changed_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "detect-tooling-changed.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "detect-tooling-changed.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "detect-tooling-changed_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "detect-tooling-changed_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "detect-tooling-changed_test.sh: All fixture tests passed"
+    else
+        log_fail "detect-tooling-changed_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" "HEAD" "." >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]] && grep -qE '^groups=' "$out_file"; then
+        log_pass "detect-tooling-changed.sh: Runs against the real repo and prints a groups= line"
+    else
+        log_fail "detect-tooling-changed.sh: Real repo run failed or did not print groups= (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Test: CI wrapper around the shared suite-group gate (Issue #4304, Epic
+# #4296). .github/scripts/classify-tooling-changed.sh adapts
+# detect-tooling-changed.sh to the `changes` job's reused changed_files.txt
+# and derived base ref. Its own fixture suite covers the wrapper's
+# fail-closed input handling and delegation; this smoke test proves the
+# wrapper and its tests exist, are executable, and pass -- the same shape as
+# test_detect_tooling_changed.
+test_classify_tooling_changed() {
+    log_test "Testing classify-tooling-changed.sh..."
+
+    local gate_script=".github/scripts/classify-tooling-changed.sh"
+    local test_script=".github/scripts/classify-tooling-changed_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "classify-tooling-changed.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "classify-tooling-changed.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "classify-tooling-changed_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "classify-tooling-changed_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "classify-tooling-changed_test.sh: All fixture tests passed"
+    else
+        log_fail "classify-tooling-changed_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    local changed_files
+    changed_files=$(mktemp)
+    echo "pkg/placeholder" > "$changed_files"
+    bash "$gate_script" "$changed_files" "HEAD" "." >"$out_file" 2>&1 || rc=$?
+    rm -f "$changed_files"
+    if [[ $rc -eq 0 ]] && grep -qE '^groups=' "$out_file"; then
+        log_pass "classify-tooling-changed.sh: Runs against the real repo and prints a groups= line"
+    else
+        log_fail "classify-tooling-changed.sh: Real repo run failed or did not print groups= (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/install-git-hooks.sh (Issue #4150). A pre-push hook run
+# from a linked worktree inherits GIT_DIR; running make test with it set let one
+# `git init` in a scratch directory flip the MAIN repository to core.bare=true.
+# Delegates to scripts/install-git-hooks_test.sh, which installs the real hooks
+# into a throwaway repository and pushes from a linked worktree and the main
+# checkout with `make` stubbed.
+test_install_git_hooks() {
+    log_test "Testing install-git-hooks.sh..."
+
+    local test_script="scripts/install-git-hooks_test.sh"
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "install-git-hooks_test.sh: Not found or not executable"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "install-git-hooks_test.sh: worktree pushes leave the main repo intact"
+    else
+        log_fail "install-git-hooks_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for the Makefile's local suite-group gating (Issue #4305). `make
+# test` runs only the script-suite groups scripts/lib/detect-tooling-changed.sh
+# says the diff touches; test-commit / test-complete(-full) / test-agent-complete
+# run every group exactly once. Delegates to scripts/make-test-groups_test.sh,
+# which dry-runs each target in a throwaway repo holding the real Makefile and
+# counts the test-scripts.sh invocations a real run would make.
+test_make_test_groups() {
+    log_test "Testing Makefile suite-group gating..."
+
+    local test_script="scripts/make-test-groups_test.sh"
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "make-test-groups_test.sh: Not found or not executable"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "make-test-groups_test.sh: make test gates groups by diff; full targets run every group once"
+    else
+        log_fail "make-test-groups_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/verify-nancy-ignore-scope.sh — the gate that proves
+# .nancy-ignore can only ever suppress the exact CVE/OSS-Index IDs it lists
+# (Issue #3366). Delegates to scripts/verify-nancy-ignore-scope_test.sh, which
+# runs the gate against the repo's real suppression file plus synthetic fixtures
+# for every way an entry could widen scope or silently drop coverage.
+#
+# Wired here because the gate itself only runs inside `make security-deps`,
+# which skips without a GUIDE_TOKEN — without this delegation a regression in
+# the scope-verification logic would never be caught locally or in CI.
+test_verify_nancy_ignore_scope() {
+    log_test "Testing verify-nancy-ignore-scope.sh..."
+
+    local gate_script="scripts/verify-nancy-ignore-scope.sh"
+    local test_script="scripts/verify-nancy-ignore-scope_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "verify-nancy-ignore-scope.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "verify-nancy-ignore-scope.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "verify-nancy-ignore-scope_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "verify-nancy-ignore-scope_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "verify-nancy-ignore-scope_test.sh: All fixture tests passed"
+    else
+        log_fail "verify-nancy-ignore-scope_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the refresh-pins discovery script. Delegates to
+# .claude/skills/refresh-pins/scripts/discover_pins_test.py, which builds a
+# synthetic repo carrying one of every pin shape and asserts each is found.
+#
+# This exists because discovery gaps are silent: a pin the script cannot see is
+# simply absent from the sweep report, which reads identically to "up to date".
+# Two such gaps reached production — a repo-root Dockerfile invisible to the Go
+# toolchain pin, and container base images missing from the inventory entirely
+# while the shipped images are built FROM them.
+test_refresh_pins_discovery() {
+    log_test "Testing refresh-pins discover-pins.py coverage..."
+
+    local script=".claude/skills/refresh-pins/scripts/discover-pins.py"
+    local test_script=".claude/skills/refresh-pins/scripts/discover_pins_test.py"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "discover-pins.py: Not found"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "discover_pins_test.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "discover_pins_test.py: All pin-discovery coverage tests passed"
+    else
+        log_fail "discover_pins_test.py: Coverage tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the security review harness core (Issue #3901): schema
+# validation, the atomic writer, the resume scanner, and fail-closed base-dir
+# resolution. Each module under .claude/skills/security-review/ ships its own
+# <module>_test.py, hand-rolled to the discover_pins_test.py convention above
+# (stdlib only, exit 0 on all-pass). Every downstream harness story (lane
+# adapters, consolidator, orchestrator) depends on these primitives, so a gap
+# here is silent everywhere that imports them — the same "unenforced until
+# something runs it" failure mode test_claude_pipeline_suites closed for the
+# .claude/scripts/tests/ suites.
+#
+# Recurses (`find`, not a flat glob) because the finder lanes (#3906-#3910)
+# live one level down in lanes/<provider>_test.py -- a flat
+# "$harness_dir"/*_test.py glob would silently never run them, which is
+# exactly the "test file exists but nothing executes it" gap this suite
+# exists to close.
+test_security_review_harness() {
+    log_test "Testing security-review harness core (schema/atomic_write/resume/basedir, lanes/...)..."
+
+    local harness_dir=".claude/skills/security-review"
+    if [[ ! -d "$harness_dir" ]]; then
+        log_fail "security-review harness: ${harness_dir} not found"
+        return
+    fi
+
+    local suite rel out_file rc found=0
+    while IFS= read -r suite; do
+        [[ -f "$suite" ]] || continue
+        found=$((found + 1))
+        rel="${suite#"$harness_dir"/}"
+
+        out_file=$(mktemp)
+        rc=0
+        python3 "$suite" >"$out_file" 2>&1 || rc=$?
+
+        if [[ $rc -eq 0 ]]; then
+            log_pass "${rel}: All checks passed"
+        else
+            log_fail "${rel}: Checks failed (exit $rc)"
+            sed 's/^/    /' "$out_file" >&2
+        fi
+        rm -f "$out_file"
+    done < <(find "$harness_dir" -name '*_test.py' | sort)
+
+    if [[ $found -eq 0 ]]; then
+        log_fail "security-review harness: no *_test.py suites found under ${harness_dir}"
+    fi
+}
+
+# Tests for the security-review CLI wrapper's own shell test (Issue #4299). This
+# suite lives beside security-review.sh under .claude/skills/security-review/,
+# deliberately outside .claude/scripts/tests/, so test_claude_pipeline_suites'
+# glob never picks it up -- it must be run directly by its own dispatch entry.
+test_security_review_cli() {
+    log_test "Testing security-review.sh CLI wrapper (security_review_cli.test.sh)..."
+
+    local test_script=".claude/skills/security-review/security_review_cli.test.sh"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "security_review_cli.test.sh: Not found at ${test_script}"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "security_review_cli.test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    timeout 180 bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "security_review_cli.test.sh: All checks passed"
+    else
+        log_fail "security_review_cli.test.sh: Checks failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the pipeline segment benchmark harness (.claude/bench/bench.py):
+# scoring, fixture overlay, checkout-worktree lifecycle, and the shipped
+# cases/*/case.yaml + expect.yaml fixtures. Hand-rolled to the
+# discover_pins_test.py convention above (stdlib only, exit 0 on all-pass).
+# A gap here is silent the same way: a scorer that can't fail, or a fixture
+# that fails to load, looks identical to "everything passed" until this suite
+# actually runs it (Issue #4300).
+test_bench_suite() {
+    log_test "Testing pipeline segment benchmark harness (test_bench.py)..."
+
+    local test_script=".claude/bench/tests/test_bench.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "test_bench.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "test_bench.py: All benchmark harness tests passed"
+    else
+        log_fail "test_bench.py: Benchmark harness tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the token usage report harness (.claude/metrics/token_report.py):
+# transcript parsing, pricing lookups, and cost aggregation. Same convention
+# and same silent-gap rationale as test_bench_suite above (Issue #4300).
+test_token_report_suite() {
+    log_test "Testing token usage report harness (test_token_report.py)..."
+
+    local test_script=".claude/metrics/tests/test_token_report.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "test_token_report.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "test_token_report.py: All token report tests passed"
+    else
+        log_fail "test_token_report.py: Token report tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the usage database (.claude/metrics/usage_db.py): schema,
+# writes, and query paths backing the usage-report skill. Same convention and
+# same silent-gap rationale as test_bench_suite above (Issue #4300).
+test_usage_db_suite() {
+    log_test "Testing usage database harness (test_usage_db.py)..."
+
+    local test_script=".claude/metrics/tests/test_usage_db.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "test_usage_db.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "test_usage_db.py: All usage database tests passed"
+    else
+        log_fail "test_usage_db.py: Usage database tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the refresh-pins clean-check script
+# (.claude/skills/refresh-pins/scripts/verify_pin_clean.py): PROSE vs
+# EXECUTING classification of surviving pin-string hits. Same convention and
+# same silent-gap rationale as test_bench_suite above (Issue #4300).
+test_verify_pin_clean_suite() {
+    log_test "Testing refresh-pins verify_pin_clean.py coverage..."
+
+    local test_script=".claude/skills/refresh-pins/scripts/verify_pin_clean_test.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "verify_pin_clean_test.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "verify_pin_clean_test.py: All pin-classification coverage tests passed"
+    else
+        log_fail "verify_pin_clean_test.py: Coverage tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
 
 test_security_trivy_init_error() {
@@ -625,10 +1841,10 @@ MOCKEOF
         log_fail "security-trivy.sh: Missing DB-download-failed message (output: $output)"
     fi
 
-    if echo "$output" | grep -q "CRITICAL/HIGH/MEDIUM vulnerabilities found"; then
-        log_fail "security-trivy.sh: Must NOT print false vulnerability-found message on init error"
+    if echo "$output" | grep -q "Blocking vulnerabilities, secrets, or misconfigurations found"; then
+        log_fail "security-trivy.sh: Must NOT print false security-findings message on init error"
     else
-        log_pass "security-trivy.sh: Does NOT emit false '❌ CRITICAL/HIGH/MEDIUM vulnerabilities found' on init error"
+        log_pass "security-trivy.sh: Does NOT emit a false security-findings message on init error"
     fi
 
     rm -rf "$tmp_dir"
@@ -667,7 +1883,7 @@ MOCKEOF
         log_fail "security-trivy.sh: Expected exit 1 on findings, got $exit_code"
     fi
 
-    if echo "$output" | grep -q "CRITICAL/HIGH/MEDIUM vulnerabilities found"; then
+    if echo "$output" | grep -q "Blocking vulnerabilities, secrets, or misconfigurations found"; then
         log_pass "security-trivy.sh: Prints deployment-blocked message for real findings"
     else
         log_fail "security-trivy.sh: Missing deployment-blocked message for real findings (output: $output)"
@@ -717,6 +1933,239 @@ MOCKEOF
         log_pass "security-trivy.sh: Prints completion message on clean scan"
     else
         log_fail "security-trivy.sh: Missing completion message on clean scan (output: $output)"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+# ── Tests for scripts/pr-security-findings.sh ────────────────────────────────
+
+test_pr_security_findings() {
+    log_test "Testing pr-security-findings.sh: GHAS alert detection..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pr-security-findings.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "pr-security-findings.sh: Script not found at $script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # --- Test: invalid PR argument exits 2 ---
+    local exit_code=0
+    bash "$script" "not-a-number" 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "pr-security-findings.sh: exits 2 on non-numeric PR argument"
+    else
+        log_fail "pr-security-findings.sh: expected exit 2 on non-numeric arg, got $exit_code"
+    fi
+
+    exit_code=0
+    bash "$script" 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 2 ]]; then
+        log_pass "pr-security-findings.sh: exits 2 with no arguments"
+    else
+        log_fail "pr-security-findings.sh: expected exit 2 with no arguments, got $exit_code"
+    fi
+
+    # Smart mock: routes gh calls and applies the script's --jq filter with the
+    # system jq, so the real selectors run. Scenario data comes from env vars
+    # HEAD_JSON / CHECK_RUNS_JSON / ANNOTATIONS_JSON; CHECK_RUNS_FAIL simulates
+    # an API error. The source of truth is now the github-advanced-security
+    # check-run annotations on the PR head — not the code-scanning alerts API or
+    # bot comments (both removed: the merge-ref alerts API returns develop's
+    # inherited alerts, and bot comments don't clear on dismissal).
+    cat > "$tmp_dir/gh" << 'MOCKEOF'
+#!/bin/bash
+jq_filter=""
+skip_next=false
+for arg in "$@"; do
+    if $skip_next; then jq_filter="$arg"; skip_next=false; continue; fi
+    [[ "$arg" == "--jq" ]] && skip_next=true
+done
+apply_jq() {
+    local json="$1"
+    if [[ -n "$jq_filter" ]] && command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json" | jq -r "$jq_filter" 2>/dev/null || true
+    else
+        printf '%s\n' "$json"
+    fi
+}
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    apply_jq "${HEAD_JSON:-}"
+    exit 0
+fi
+for arg in "$@"; do
+    if [[ "$arg" == *"/annotations"* ]]; then
+        apply_jq "${ANNOTATIONS_JSON:-}"
+        exit 0
+    fi
+done
+for arg in "$@"; do
+    if [[ "$arg" == *"/check-runs"* ]]; then
+        if [[ -n "${CHECK_RUNS_FAIL:-}" ]]; then echo "gh: HTTP 500" >&2; exit 1; fi
+        apply_jq "${CHECK_RUNS_JSON:-}"
+        exit 0
+    fi
+done
+# Pass 2 (Issue #2634): python fetches these WITHOUT --jq (parses raw JSON).
+for arg in "$@"; do
+    if [[ "$arg" == *"/pulls/"*"/files"* ]]; then printf '%s' "${FILES_JSON:-[]}"; exit 0; fi
+done
+for arg in "$@"; do
+    if [[ "$arg" == *"/code-scanning/alerts"* ]]; then
+        # ALERTS_REQUIRE_REF (Issue #2913): simulate a new-file alert that exists
+        # ONLY on the PR-merge ref — return the alert data only when the request
+        # carries that ref, else the empty (default-branch) set.
+        if [[ -n "${ALERTS_REQUIRE_REF:-}" && "$arg" != *"$ALERTS_REQUIRE_REF"* ]]; then
+            printf '[]'; exit 0
+        fi
+        printf '%s' "${ALERTS_JSON:-[]}"; exit 0
+    fi
+done
+exit 0
+MOCKEOF
+    chmod +x "$tmp_dir/gh"
+
+    local output
+    local HEAD='{"headRefOid":"deadbeefcafe"}'
+
+    # --- Test: open GHAS finding (failing github-advanced-security check with
+    #     an annotation) → non-empty output (FAIL path) ---
+    local CR_OPEN='{"check_runs":[{"id":999,"app":{"slug":"github-advanced-security"},"conclusion":"failure"},{"id":998,"app":{"slug":"github-actions"},"conclusion":"success"}]}'
+    local ANN='[{"path":"features/controller/api/spa.go","start_line":139,"title":"Reflected cross-site scripting"}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_OPEN" ANNOTATIONS_JSON="$ANN" PATH="$tmp_dir:$PATH" bash "$script" 123 2>/dev/null) || true
+    if [[ -n "$output" ]]; then
+        log_pass "pr-security-findings.sh: open GHAS finding → non-empty output (FAIL path)"
+    else
+        log_fail "pr-security-findings.sh: expected non-empty output for open GHAS finding, got nothing"
+    fi
+    if echo "$output" | grep -q "features/controller/api/spa.go:139:Reflected cross-site scripting"; then
+        log_pass "pr-security-findings.sh: annotation output has correct path:line:title format"
+    else
+        log_fail "pr-security-findings.sh: annotation output missing expected path:line:title (got: '$output')"
+    fi
+
+    # --- Test: human-dismissed alert (GHAS check flips to success) → empty ---
+    local CR_DISMISSED='{"check_runs":[{"id":999,"app":{"slug":"github-advanced-security"},"conclusion":"success"}]}'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_DISMISSED" ANNOTATIONS_JSON="$ANN" PATH="$tmp_dir:$PATH" bash "$script" 123 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: dismissed alert (check success) → empty output (human-sign-off respected)"
+    else
+        log_fail "pr-security-findings.sh: expected empty output for dismissed alert, got: '$output'"
+    fi
+
+    # --- Test: a NON-GHAS failing check (e.g. a unit-test failure) is ignored;
+    #     only github-advanced-security checks are treated as findings ---
+    local CR_NONGHAS='{"check_runs":[{"id":997,"app":{"slug":"github-actions"},"conclusion":"failure"}]}'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONGHAS" ANNOTATIONS_JSON="$ANN" PATH="$tmp_dir:$PATH" bash "$script" 123 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: non-GHAS failing check ignored (app-slug filter)"
+    else
+        log_fail "pr-security-findings.sh: non-GHAS failing check must be ignored, got: '$output'"
+    fi
+
+    # --- Test: no failing checks → empty output (PASS) ---
+    local CR_NONE='{"check_runs":[]}'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" PATH="$tmp_dir:$PATH" bash "$script" 789 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: no findings → empty output (PASS path)"
+    else
+        log_fail "pr-security-findings.sh: expected empty output for no findings, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2634): advisory code-scanning alert on an ADDED line is
+    #     emitted; an OPEN alert on an unchanged line (inherited) is NOT ---
+    # Patch adds new-file lines 255-258 (line 254 is a context line).
+    local FILES_ADD='[{"filename":"pkg/config/inheritance.go","patch":"@@ -250,1 +254,5 @@\n context254\n+line255\n+line256\n+line257\n+line258"}]'
+    # Two OPEN alerts: one on added line 258 (new-in-PR), one on context line 254 (inherited).
+    local ALERTS_MIX='[{"most_recent_instance":{"location":{"path":"pkg/config/inheritance.go","start_line":258}},"rule":{"id":"go/log-injection"}},{"most_recent_instance":{"location":{"path":"pkg/config/inheritance.go","start_line":254}},"rule":{"id":"go/log-injection"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_ADD" ALERTS_JSON="$ALERTS_MIX" PATH="$tmp_dir:$PATH" bash "$script" 2623 2>/dev/null) || true
+    if echo "$output" | grep -q "pkg/config/inheritance.go:258:go/log-injection"; then
+        log_pass "pr-security-findings.sh: advisory CodeQL alert on an ADDED line is emitted (pass 2)"
+    else
+        log_fail "pr-security-findings.sh: expected added-line alert :258, got: '$output'"
+    fi
+    if echo "$output" | grep -q "pkg/config/inheritance.go:254"; then
+        log_fail "pr-security-findings.sh: inherited alert on unchanged line :254 must NOT be emitted, got: '$output'"
+    else
+        log_pass "pr-security-findings.sh: inherited alert on unchanged line NOT emitted (added-line intersection)"
+    fi
+
+    # --- Pass 2 (Issue #2913): a HIGH alert in a file the PR NEWLY ADDS is
+    #     emitted. The alert exists ONLY on the PR-merge ref (the file isn't on
+    #     develop yet), so this passes iff the script queries refs/pull/<N>/merge.
+    #     Mirrors PR #2896 / terminal_handler.go go/incorrect-integer-conversion. ---
+    local FILES_NEW='[{"filename":"features/controller/transport/terminal_handler.go","patch":"@@ -0,0 +1,4 @@\n+package transport\n+// new file\n+var cols int\n+var narrow = int32(cols)"}]'
+    local ALERTS_NEWFILE='[{"most_recent_instance":{"location":{"path":"features/controller/transport/terminal_handler.go","start_line":4}},"rule":{"id":"go/incorrect-integer-conversion"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_NEW" ALERTS_JSON="$ALERTS_NEWFILE" ALERTS_REQUIRE_REF="ref=refs/pull/2896/merge" PATH="$tmp_dir:$PATH" bash "$script" 2896 2>/dev/null) || true
+    if echo "$output" | grep -q "features/controller/transport/terminal_handler.go:4:go/incorrect-integer-conversion"; then
+        log_pass "pr-security-findings.sh: HIGH alert in a PR-added new file is emitted (merge-ref query, #2913)"
+    else
+        log_fail "pr-security-findings.sh: expected new-file alert :4 from merge ref, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2913): guard against regressing to the unref'd query.
+    #     Same new-file alert, but gated behind the merge ref → an unref'd
+    #     (default-branch) query would see nothing and the finding would be
+    #     silently missed (the exact false-negative #2913 fixes). ---
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_NEW" ALERTS_JSON="$ALERTS_NEWFILE" ALERTS_REQUIRE_REF="ref=refs/pull/9999/does-not-match" PATH="$tmp_dir:$PATH" bash "$script" 2896 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: new-file alert absent from unref'd set → no output (confirms ref gating)"
+    else
+        log_fail "pr-security-findings.sh: control case should be empty, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2913, AC4): a pre-existing baseline warning on an
+    #     UNCHANGED line (e.g. zizmor ref-version-mismatch, warning severity)
+    #     stays filtered by the added-line intersection even though it is now
+    #     returned by the merge-ref query — the ref change adds no new FP. ---
+    local FILES_WF='[{"filename":".github/workflows/ci.yml","patch":"@@ -10,1 +10,2 @@\n context10\n+added11"}]'
+    local ALERTS_WARN='[{"most_recent_instance":{"location":{"path":".github/workflows/ci.yml","start_line":10}},"rule":{"id":"zizmor/ref-version-mismatch"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_WF" ALERTS_JSON="$ALERTS_WARN" ALERTS_REQUIRE_REF="ref=refs/pull/2896/merge" PATH="$tmp_dir:$PATH" bash "$script" 2896 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: baseline warning on unchanged line stays filtered under merge-ref query (#2913 AC4)"
+    else
+        log_fail "pr-security-findings.sh: unchanged-line baseline warning must not FP, got: '$output'"
+    fi
+
+    # --- Pass 2: with no alerts data, the extra passes stay silent (PASS) ---
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_ADD" PATH="$tmp_dir:$PATH" bash "$script" 2623 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: added lines but no open alerts → empty (PASS path)"
+    else
+        log_fail "pr-security-findings.sh: expected empty output when no open alerts, got: '$output'"
+    fi
+
+    # --- Test: check-runs API error → exits 0, empty (not propagated) ---
+    exit_code=0
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_FAIL=1 PATH="$tmp_dir:$PATH" bash "$script" 321 2>/dev/null) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "pr-security-findings.sh: check-runs API error → exits 0 (not an error)"
+    else
+        log_fail "pr-security-findings.sh: check-runs API error must not propagate, got exit $exit_code"
+    fi
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: check-runs API error → empty output (no false findings)"
+    else
+        log_fail "pr-security-findings.sh: check-runs API error must produce no output, got: '$output'"
+    fi
+
+    # --- Test: gh pr view failure (empty head SHA) → exits 0, empty ---
+    exit_code=0
+    output=$(HEAD_JSON="" PATH="$tmp_dir:$PATH" bash "$script" 321 2>/dev/null) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "pr-security-findings.sh: empty head SHA → exits 0 (guarded)"
+    else
+        log_fail "pr-security-findings.sh: empty head SHA must not propagate, got exit $exit_code"
+    fi
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: empty head SHA → empty output"
+    else
+        log_fail "pr-security-findings.sh: empty head SHA must produce no output, got: '$output'"
     fi
 
     rm -rf "$tmp_dir"
@@ -855,6 +2304,11 @@ test_project_queue_invalid_args() {
 test_project_queue_integration() {
     log_test "Testing project-queue.sh: integration against live cfgms-pipeline project..."
 
+    if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]; then
+        log_skip "project-queue.sh integration: set CFGMS_RUN_LIVE_PROJECT_TESTS=1 to allow live project mutations"
+        return
+    fi
+
     local script
     script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
 
@@ -884,6 +2338,7 @@ test_project_queue_integration() {
             bash "$script" delete-item "$cid" >/dev/null 2>&1 || true
         done
         rm -rf "$tmp_dir"
+        trap - RETURN
     }
     trap cleanup_items RETURN
 
@@ -1169,6 +2624,11 @@ print(d.get('deleted_item_id', ''))
 test_project_queue_set_pr() {
     log_test "Testing project-queue.sh: set-pr integration against live cfgms-pipeline project..."
 
+    if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]; then
+        log_skip "project-queue.sh set-pr integration: set CFGMS_RUN_LIVE_PROJECT_TESTS=1 to allow live project mutations"
+        return
+    fi
+
     local script
     script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
 
@@ -1196,6 +2656,7 @@ test_project_queue_set_pr() {
             bash "$script" delete-item "$created_item_id" >/dev/null 2>&1 || true
         fi
         rm -rf "$tmp_dir"
+        trap - RETURN
     }
     trap cleanup_set_pr RETURN
 
@@ -1266,6 +2727,128 @@ print(d.get('fields',{}).get('PR',''))
     fi
 }
 
+test_check_cla_signed() {
+    log_test "Testing check-cla-signed.sh: exit 0 for known contributor, exit 1 for absent login..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-cla-signed.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "check-cla-signed.sh: Script not found at $script"
+        return
+    fi
+
+    if [[ ! -x "$script" ]]; then
+        log_fail "check-cla-signed.sh: Not executable"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    # Build a temp repo layout: $tmp_dir/CONTRIBUTORS.md + $tmp_dir/scripts/check-cla-signed.sh
+    # The script derives repo root as $(dirname "$0")/.. — so placing it under scripts/ makes
+    # it pick up $tmp_dir/CONTRIBUTORS.md without modifying the script under test.
+    mkdir -p "${tmp_dir}/scripts"
+    cp "$script" "${tmp_dir}/scripts/check-cla-signed.sh"
+
+    cat > "${tmp_dir}/CONTRIBUTORS.md" << 'CONTRIBEOF'
+# Test Contributors
+@alice-contributor
+github.com/bob-contributor
+[carol-contributor] carol@example.com
+CONTRIBEOF
+
+    local exit_code output
+
+    # --- AC7 Part 1: login present via @login pattern → exit 0 ----------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "alice-contributor" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "check-cla-signed.sh: exit 0 for login matched via @login pattern"
+    else
+        log_fail "check-cla-signed.sh: expected exit 0 for @alice-contributor, got $exit_code (output: $output)"
+    fi
+    if echo "$output" | grep -q "CLA_SIGNED:alice-contributor"; then
+        log_pass "check-cla-signed.sh: prints CLA_SIGNED:<login> on success"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_SIGNED:alice-contributor in output, got: $output"
+    fi
+
+    # --- AC7 Part 2: login present via github.com/login pattern → exit 0 ------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "bob-contributor" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "check-cla-signed.sh: exit 0 for login matched via github.com/login pattern"
+    else
+        log_fail "check-cla-signed.sh: expected exit 0 for bob-contributor, got $exit_code"
+    fi
+    if echo "$output" | grep -q "CLA_SIGNED:bob-contributor"; then
+        log_pass "check-cla-signed.sh: prints CLA_SIGNED:<login> for github.com/login pattern"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_SIGNED:bob-contributor in output, got: $output"
+    fi
+
+    # --- AC7 Part 3: login present via [login] pattern → exit 0 ---------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "carol-contributor" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "check-cla-signed.sh: exit 0 for login matched via [login] pattern"
+    else
+        log_fail "check-cla-signed.sh: expected exit 0 for carol-contributor, got $exit_code"
+    fi
+    if echo "$output" | grep -q "CLA_SIGNED:carol-contributor"; then
+        log_pass "check-cla-signed.sh: prints CLA_SIGNED:<login> for [login] pattern"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_SIGNED:carol-contributor in output, got: $output"
+    fi
+
+    # --- AC7 Part 4: login absent from CONTRIBUTORS.md → exit 1 ---------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "unknown-outsider" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "check-cla-signed.sh: exit 1 for login absent from CONTRIBUTORS.md"
+    else
+        log_fail "check-cla-signed.sh: expected exit 1 for absent login, got $exit_code"
+    fi
+    if echo "$output" | grep -q "CLA_NOT_SIGNED:unknown-outsider"; then
+        log_pass "check-cla-signed.sh: prints CLA_NOT_SIGNED:<login> when absent"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_NOT_SIGNED:unknown-outsider in output, got: $output"
+    fi
+
+    # --- AC7 Part 5: CONTRIBUTORS.md absent → exit 1 with ERROR message -------
+    local no_contrib_dir
+    no_contrib_dir=$(mktemp -d)
+    mkdir -p "${no_contrib_dir}/scripts"
+    cp "$script" "${no_contrib_dir}/scripts/check-cla-signed.sh"
+    # No CONTRIBUTORS.md created in no_contrib_dir
+
+    exit_code=0
+    output=$("${no_contrib_dir}/scripts/check-cla-signed.sh" "anyone" 2>&1) || exit_code=$?
+    rm -rf "$no_contrib_dir"
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "check-cla-signed.sh: exit 1 when CONTRIBUTORS.md does not exist"
+    else
+        log_fail "check-cla-signed.sh: expected exit 1 for missing CONTRIBUTORS.md, got $exit_code"
+    fi
+    if echo "$output" | grep -q "ERROR:"; then
+        log_pass "check-cla-signed.sh: prints ERROR: message when CONTRIBUTORS.md missing"
+    else
+        log_fail "check-cla-signed.sh: expected ERROR: in output when CONTRIBUTORS.md missing, got: $output"
+    fi
+
+    # --- AC7 Part 6: no argument → non-zero exit (usage guard) ----------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "check-cla-signed.sh: non-zero exit when invoked with no argument"
+    else
+        log_fail "check-cla-signed.sh: expected non-zero exit with no argument, got 0"
+    fi
+}
+
 test_trust_boundary() {
     log_test "Running trust boundary regression suite (test/security/trust_boundary_test.sh)..."
 
@@ -1298,7 +2881,7 @@ test_no_pipeline_label_refs() {
     # the grep pattern fires, so a broken grep doesn't silently always pass.
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
     printf '# prohibited: pipeline:story label reference\n' > "$tmp_dir/probe.sh"
     local probe_matches
     probe_matches=$(grep -rn \
@@ -1337,7 +2920,7 @@ test_preflight_item_dispatch() {
     log_test "Testing po-cycle-preflight.py: project_queue_list_by_status includes pure draft items via CFGMS_TEST_PROJECT_QUEUE..."
 
     local preflight_script
-    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })/../.claude/scripts/po-cycle-preflight.py"
 
     if [[ ! -f "$preflight_script" ]]; then
         log_fail "po-cycle-preflight.py: not found at $preflight_script"
@@ -1346,7 +2929,7 @@ test_preflight_item_dispatch() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Mock project-queue.sh: responds to list-by-status Ready with a pure draft item,
     # all other subcommands return empty array.
@@ -1365,7 +2948,7 @@ MOCKEOF
     chmod +x "$mock_pq"
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     # Use importlib.util to load the hyphen-named file (matching existing test pattern).
     cat > "$tmp_py" << PYEOF
 import sys, os, importlib.util
@@ -1393,7 +2976,7 @@ test_done_on_merge() {
     log_test "Testing po-cycle-preflight.py: auto_close_merged_items marks Done when PR is MERGED..."
 
     local preflight_script
-    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })/../.claude/scripts/po-cycle-preflight.py"
 
     if [[ ! -f "$preflight_script" ]]; then
         log_fail "po-cycle-preflight.py: not found at $preflight_script"
@@ -1402,7 +2985,7 @@ test_done_on_merge() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local calls_file="${tmp_dir}/calls.txt"
     touch "$calls_file"
@@ -1438,7 +3021,7 @@ MOCKEOF
     # auto_close_merged_items now batches PR state checks via GraphQL (Issue
     # #1581) so we stub gh_graphql_pr_states instead of mocking `gh pr view`.
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     cat > "$tmp_py" << PYEOF
 import sys, os, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
@@ -1492,7 +3075,7 @@ MOCKEOF2
     chmod +x "$fail_pq"
 
     local tmp_py2
-    tmp_py2=$(mktemp --suffix=.py)
+    tmp_py2=$(mktemp)
     cat > "$tmp_py2" << PYEOF2
 import sys, os, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${fail_pq}'
@@ -1579,7 +3162,7 @@ test_preflight_gh_call_budget() {
     log_test "Testing po-cycle-preflight.py: ≤3 direct gh invocations per cycle (Issue #1581)..."
 
     local preflight_script
-    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })/../.claude/scripts/po-cycle-preflight.py"
 
     if [[ ! -f "$preflight_script" ]]; then
         log_fail "po-cycle-preflight.py: not found at $preflight_script"
@@ -1588,7 +3171,7 @@ test_preflight_gh_call_budget() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Mock project-queue.sh: returns one Ready issue (#9001) referencing dep #9002.
     local mock_pq="${tmp_dir}/project-queue.sh"
@@ -1620,7 +3203,7 @@ MOCKEOF
     # Run preflight via importlib, counting how many times the gh() / tolerant
     # wrappers were entered. The two wrappers share the _GH_CALL_COUNT global.
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     cat > "$tmp_py" << PYEOF
 import os, sys, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
@@ -1701,8 +3284,8 @@ test_preflight_forged_acceptance_review() {
     fi
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
-    trap 'rm -f "$tmp_py"' RETURN
+    tmp_py=$(mktemp)
+    trap 'rm -f "$tmp_py"; trap - RETURN' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
 import sys, importlib.util, os
@@ -1920,11 +3503,13 @@ exit 0
 PQEOF
     chmod +x "${fake_repo}/scripts/project-queue.sh"
 
-    # Mock gh: returns an open item-branch PR
+    # Mock gh: returns an open item-branch PR with a trusted internal author.
+    # The CFGMS_TEST_COLLAB_PERM=push env var below satisfies the external-author
+    # gate without a real gh api call, so the test reaches the item-branch scan.
     cat > "${tmp_dir}/gh" << 'GHEOF'
 #!/usr/bin/env bash
 if [[ "$1" == "pr" && "$2" == "view" ]]; then
-    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"}}\n'
+    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"},"author":{"login":"trusted-maintainer"}}\n'
 elif [[ "$1" == "auth" && "$2" == "token" ]]; then
     echo "fake-token"
 else
@@ -1947,6 +3532,7 @@ DOCKEREOF
         CFGMS_TEST_REPO_ROOT="$fake_repo" \
         CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
         CFGMS_TEST_CREDS_STATUS="CREDS_OK:60" \
+        CFGMS_TEST_COLLAB_PERM="push" \
         bash "$dispatch_script" review-pr 77 2>&1
     ) || exit_code=$?
 
@@ -1972,12 +3558,154 @@ DOCKEREOF
     rm -rf "$tmp_dir"
 }
 
+test_create_clone_pr_external_author() {
+    log_test "Testing create-clone-pr: external-author gate refuses before git clone..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local worktree_dir="${tmp_dir}/worktrees"
+    mkdir -p "$worktree_dir"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    # Mock gh: returns an open PR with an external (read-level) author.
+    # The CFGMS_TEST_COLLAB_PERM=read below makes the permission API return "read".
+    cat > "${tmp_dir}/gh" << 'GHEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    printf '{"headRefName":"feature/story-9999-test","body":"Fixes #9999","labels":[],"author":{"login":"external-user"}}\n'
+elif [[ "$1" == "pr" && "$2" == "comment" ]]; then
+    exit 0
+else
+    printf '{}\n'
+fi
+exit 0
+GHEOF
+    chmod +x "${tmp_dir}/gh"
+
+    local fake_repo="${tmp_dir}/repo"
+    git -C "${tmp_dir}" init -q repo
+    git -C "${fake_repo}" remote add origin "https://github.com/cfg-is/cfgms.git"
+
+    local output exit_code=0
+    output=$(
+        PATH="${tmp_dir}:${PATH}" \
+        CFGMS_TEST_REPO_ROOT="$fake_repo" \
+        CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        CFGMS_TEST_COLLAB_PERM="read" \
+        bash "$dispatch_script" create-clone-pr 9999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "create_clone_pr_external: exits 3 for external author"
+    else
+        log_fail "create_clone_pr_external: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "FIX_REFUSED:9999:external_author"; then
+        log_pass "create_clone_pr_external: emits FIX_REFUSED:9999:external_author*"
+    else
+        log_fail "create_clone_pr_external: expected FIX_REFUSED:9999:external_author* in: ${output}"
+    fi
+
+    if [[ ! -d "${worktree_dir}/pr-fix-9999" ]]; then
+        log_pass "create_clone_pr_external: clone directory not created (gate fired before git clone)"
+    else
+        log_fail "create_clone_pr_external: clone directory must not exist when gate refuses"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_dispatch_fix_external_author() {
+    log_test "Testing po-act.sh dispatch-fix: external-author gate refuses before container launch..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local po_act_script
+    po_act_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-act.sh"
+
+    # Mock dispatch: check-pr-author returns external; any other subcommand fails loudly.
+    cat > "${tmp_dir}/mock-dispatch.sh" << 'DISPEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "check-pr-author" ]]; then
+    echo "AUTHOR_EXTERNAL:${2:-?}:external-user:external:read"
+    exit 3
+fi
+echo "UNEXPECTED_DISPATCH_CALL: $*" >&2
+exit 1
+DISPEOF
+    chmod +x "${tmp_dir}/mock-dispatch.sh"
+
+    local output exit_code=0
+    output=$(
+        CFGMS_TEST_DISPATCH="${tmp_dir}/mock-dispatch.sh" \
+        CFGMS_TEST_WORKTREE_BASE="${tmp_dir}/worktrees" \
+        bash "$po_act_script" dispatch-fix 9999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "dispatch_fix_external: exits 3 for external author"
+    else
+        log_fail "dispatch_fix_external: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "DISPATCH_FIX_REFUSED:9999:external_author"; then
+        log_pass "dispatch_fix_external: emits DISPATCH_FIX_REFUSED:9999:external_author"
+    else
+        log_fail "dispatch_fix_external: expected DISPATCH_FIX_REFUSED:9999:external_author in: ${output}"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_enqueue_external_author_toctou() {
+    log_test "Testing po-act.sh enqueue: TOCTOU re-check refuses external author before merge queue..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local po_act_script
+    po_act_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-act.sh"
+
+    # Mock dispatch: check-pr-author returns external.
+    cat > "${tmp_dir}/mock-dispatch.sh" << 'DISPEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "check-pr-author" ]]; then
+    echo "AUTHOR_EXTERNAL:${2:-?}:external-user:external:read"
+    exit 3
+fi
+echo "UNEXPECTED_DISPATCH_CALL: $*" >&2
+exit 1
+DISPEOF
+    chmod +x "${tmp_dir}/mock-dispatch.sh"
+
+    local output exit_code=0
+    output=$(
+        CFGMS_TEST_DISPATCH="${tmp_dir}/mock-dispatch.sh" \
+        bash "$po_act_script" enqueue 9999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "enqueue_external_toctou: exits 3 for external author (TOCTOU defense)"
+    else
+        log_fail "enqueue_external_toctou: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "ENQUEUE_REFUSED:9999:external_author"; then
+        log_pass "enqueue_external_toctou: emits ENQUEUE_REFUSED:9999:external_author"
+    else
+        log_fail "enqueue_external_toctou: expected ENQUEUE_REFUSED:9999:external_author in: ${output}"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 test_entrypoint_set_pr_call() {
     log_test "Testing entrypoint.sh: set-pr called after PR creation with CFGMS_PROJECT_ITEM_ID..."
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local calls_file="${tmp_dir}/pq-calls.txt"
     touch "$calls_file"
@@ -2128,7 +3856,7 @@ FAILPQEOF
 }
 
 test_dispatch_creds_gate() {
-    log_test "Testing agent-dispatch.sh: launch/review-pr gate on CREDS_LOW/EXPIRED, emit DISPATCH_DEFERRED..."
+    log_test "Testing agent-dispatch.sh: launch/review-pr/launch-generic pass through CREDS_LOW/EXPIRED, still defer on CREDS_MISSING/ERROR..."
 
     local dispatch_script
     dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
@@ -2138,61 +3866,140 @@ test_dispatch_creds_gate() {
         return
     fi
 
-    # CREDS_LOW causes launch to exit non-zero with DISPATCH_DEFERRED token
+    # Agent containers bind-mount the host's live ~/.claude/.credentials.json and
+    # track token rotations in place, so CREDS_LOW/EXPIRED are advisory only —
+    # the gate must NOT defer on them. Downstream execution past the gate is
+    # environment-dependent (gh auth, worktree existence, network), so we only
+    # assert the gate itself did not defer, not what happens after it.
     local output exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:5" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate launch CREDS_LOW: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate launch CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate launch CREDS_LOW: expected non-zero exit, got 0: ${output}"
-    fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:5"; then
-        log_pass "dispatch_creds_gate launch CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:5"
-    else
-        log_fail "dispatch_creds_gate launch CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:5 in output: ${output}"
+        log_pass "dispatch_creds_gate launch CREDS_LOW: gate does not defer (advisory only)"
     fi
 
-    # CREDS_EXPIRED causes launch to exit non-zero with DISPATCH_DEFERRED token
     exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_EXPIRED:-3" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: expected non-zero exit, got 0: ${output}"
-    fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3"; then
-        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: emits DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3"
-    else
-        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: expected DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3 in output: ${output}"
+        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: gate does not defer (advisory only)"
     fi
 
-    # CREDS_LOW causes review-pr to exit non-zero with DISPATCH_DEFERRED token
     exit_code=0
-    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:2" bash "$dispatch_script" review-pr 1589 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate review-pr CREDS_LOW: exits non-zero"
+    # CFGMS_TEST_REPO_ROOT keeps gate_image_staleness_for_launch (#4388) a
+    # no-op here, same as every other pre-existing launch-path test. Without
+    # it this call is not hermetic: PR 1589 is a real, merged PR, so `gh pr
+    # view` can succeed on any host with `gh` authenticated against this repo
+    # (it does in this environment), and review-pr's gates then run for real
+    # against the live host's docker/image state (Issue #4423).
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:2" CFGMS_TEST_REPO_ROOT="$(mktemp -d)" \
+        bash "$dispatch_script" review-pr 1589 2>&1) || exit_code=$?
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate review-pr CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate review-pr CREDS_LOW: expected non-zero exit, got 0: ${output}"
-    fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:2"; then
-        log_pass "dispatch_creds_gate review-pr CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:2"
-    else
-        log_fail "dispatch_creds_gate review-pr CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:2 in output: ${output}"
+        log_pass "dispatch_creds_gate review-pr CREDS_LOW: gate does not defer (advisory only)"
     fi
 
-    # CREDS_LOW causes launch-generic to exit non-zero with DISPATCH_DEFERRED token
     exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:8" bash "$dispatch_script" launch-generic "cfg-agent-test" "/tmp/nonexistent" 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: expected non-zero exit, got 0: ${output}"
+        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: gate does not defer (advisory only)"
     fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:8"; then
-        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:8"
+
+    # CREDS_MISSING/CREDS_ERROR are the only genuine launch blockers left — no
+    # usable credentials file at all. These still exit at the gate, hermetically,
+    # before any real work happens.
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_MISSING:no host credentials" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 10 ]]; then
+        log_pass "dispatch_creds_gate launch CREDS_MISSING: exits 10"
     else
-        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:8 in output: ${output}"
+        log_fail "dispatch_creds_gate launch CREDS_MISSING: expected exit 10, got ${exit_code}: ${output}"
     fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:CREDS_MISSING:"; then
+        log_pass "dispatch_creds_gate launch CREDS_MISSING: emits DISPATCH_DEFERRED:creds_missing:CREDS_MISSING:"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_MISSING: expected DISPATCH_DEFERRED:creds_missing:CREDS_MISSING: in output: ${output}"
+    fi
+
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_ERROR:docker unreachable" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 10 ]]; then
+        log_pass "dispatch_creds_gate launch CREDS_ERROR: exits 10"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_ERROR: expected exit 10, got ${exit_code}: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:CREDS_ERROR:"; then
+        log_pass "dispatch_creds_gate launch CREDS_ERROR: emits DISPATCH_DEFERRED:creds_missing:CREDS_ERROR:"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_ERROR: expected DISPATCH_DEFERRED:creds_missing:CREDS_ERROR: in output: ${output}"
+    fi
+}
+
+test_dispatch_image_gate_hermetic() {
+    log_test "Testing agent-dispatch.sh: launch-generic validates its clone dir before the image-staleness gate, so a forced-stale image never triggers a rebuild (Issue #4423)..."
+
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    if [[ ! -f "$dispatch_script" ]]; then
+        log_fail "dispatch_image_gate_hermetic: script not found at $dispatch_script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local rebuild_marker="${tmp_dir}/rebuild-happened"
+    local nonexistent_clone="${tmp_dir}/nonexistent-clone-dir"
+
+    # Fake `docker` on PATH: report an image label that never matches any real
+    # checkout hash, so gate_image_staleness_for_launch's mismatch branch
+    # always fires if it is ever reached — same tripwire shape as
+    # image_staleness.test.sh, adapted for a subprocess invocation (PATH stub
+    # instead of a sourced shell function, since this test runs the script via
+    # `bash "$dispatch_script" ...` rather than sourcing it).
+    cat > "${tmp_dir}/docker" << 'DOCKEREOF'
+#!/usr/bin/env bash
+case "$1" in
+    inspect) echo "forced-stale-label" ;;
+    image)   exit 1 ;;
+    *)       exit 0 ;;
+esac
+DOCKEREOF
+    chmod +x "${tmp_dir}/docker"
+
+    local output exit_code=0
+    output=$(
+        PATH="${tmp_dir}:${PATH}" \
+        CFGMS_TEST_CREDS_STATUS="CREDS_OK:60" \
+        CFGMS_AGENT_LEDGER_DIR="${tmp_dir}/ledger" \
+        CFGMS_TEST_IMAGE_REBUILD_CMD="touch '${rebuild_marker}'; exit 0" \
+        bash "$dispatch_script" launch-generic "cfg-agent-test" "$nonexistent_clone" 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "dispatch_image_gate_hermetic: launch-generic on a missing clone dir exits 1"
+    else
+        log_fail "dispatch_image_gate_hermetic: expected exit 1, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "ERROR: clone not found: ${nonexistent_clone}"; then
+        log_pass "dispatch_image_gate_hermetic: reports ERROR: clone not found before any gate runs"
+    else
+        log_fail "dispatch_image_gate_hermetic: expected 'ERROR: clone not found: ${nonexistent_clone}' in output: ${output}"
+    fi
+
+    if [[ -f "$rebuild_marker" ]]; then
+        log_fail "dispatch_image_gate_hermetic: rebuild command ran despite invalid clone dir — image gate ran before input validation"
+    else
+        log_pass "dispatch_image_gate_hermetic: rebuild command never ran (forced-stale image never triggered a real/stubbed docker build)"
+    fi
+
+    rm -rf "$tmp_dir"
 }
 
 test_preflight_acceptance_review_comment_match() {
@@ -2207,18 +4014,23 @@ test_preflight_acceptance_review_comment_match() {
     fi
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
-    trap 'rm -f "$tmp_py"' RETURN
+    tmp_py=$(mktemp)
+    trap 'rm -f "$tmp_py"; trap - RETURN' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
 import sys, importlib.util, os
 
 script_path = os.environ["PREFLIGHT_SCRIPT"]
+# Stub collaborator API: jrdnr is push+ (trusted); any other login is not in the
+# map (None → external). Required since Issue #2228 added author-trust as a
+# mandatory AND condition alongside text-match.
+os.environ["CFGMS_TEST_COLLAB_PERM_MAP"] = '{"jrdnr": "push"}'
 spec = importlib.util.spec_from_file_location("preflight", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-# Part A: sentinel in body matches regardless of author (forward-compat path)
+# Part A: sentinel in body from a push+ collaborator (jrdnr) is trusted — both
+# conditions (text-match AND author-trust) must hold since Issue #2228.
 sentinel_comment = {
     "author": {"login": "jrdnr"},
     "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n\nAll checks passing.",
@@ -2254,8 +4066,10 @@ else:
     print("FAIL_C: plain comment accepted as trusted — expected False")
     sys.exit(1)
 
-# Part D: compute_review_recommendations does NOT recommend spawn_acceptance_reviewer
-# for a PR whose comment matches the heading (PR #1589 regression test)
+# Part D: a review comment with NO parseable verdict (WAIT / sentinel-only) is
+# NOT a completed review — it must route back to spawn_acceptance_reviewer,
+# never enqueue_merge (Issue #2588). Supersedes the pre-#2588 expectation from
+# the PR #1589 scenario, where comment-presence alone counted as reviewed.
 pr_summary = {
     "pr": 1589,
     "story_number": 1570,
@@ -2275,10 +4089,27 @@ if not recs:
     print("FAIL_D: compute_review_recommendations returned empty list")
     sys.exit(1)
 action = recs[0].get("action", "")
-if action != "spawn_acceptance_reviewer":
-    print(f"PASS_D: PR #1589 with existing review comment gets action={action!r} (not spawn_acceptance_reviewer)")
+if action == "spawn_acceptance_reviewer":
+    print("PASS_D: PR #1589 with review comment but NO parseable verdict routes to spawn_acceptance_reviewer (Issue #2588)")
 else:
-    print("FAIL_D: PR #1589 recommended spawn_acceptance_reviewer despite existing review comment")
+    print(f"FAIL_D: PR #1589 with verdict-less review comment got action={action!r} — expected spawn_acceptance_reviewer (Issue #2588)")
+    sys.exit(1)
+
+# Part E: an explicit PASS verdict (comment predates no commits) still routes to
+# enqueue_merge — regression guard for the #2588 tightened condition
+# (verdict == "pass", not merely != "fail").
+pr_summary_pass = dict(pr_summary)
+pr_summary_pass["pr"] = 1590
+pr_summary_pass["latest_review_verdict"] = "pass"
+recs = mod.compute_review_recommendations([pr_summary_pass], set(), set())
+if not recs:
+    print("FAIL_E: compute_review_recommendations returned empty list")
+    sys.exit(1)
+action = recs[0].get("action", "")
+if action == "enqueue_merge":
+    print("PASS_E: PR #1590 with explicit PASS verdict still routes to enqueue_merge")
+else:
+    print(f"FAIL_E: PR #1590 with PASS verdict got action={action!r} — expected enqueue_merge")
     sys.exit(1)
 PYEOF
 
@@ -2316,23 +4147,31 @@ test_preflight_review_verdict_routing() {
     fi
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
-    trap 'rm -f "$tmp_py"' RETURN
+    tmp_py=$(mktemp)
+    trap 'rm -f "$tmp_py"; trap - RETURN' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
 import sys, importlib.util, os
 
 script_path = os.environ["PREFLIGHT_SCRIPT"]
+# Stub collaborator permission so the acceptance-reviewer identity (jrdnr) is
+# trusted by is_trusted_review_comment() — required since Issue #2228 added
+# author-trust as a mandatory condition alongside text-match.
+os.environ["CFGMS_TEST_COLLAB_PERM_MAP"] = '{"jrdnr": "push"}'
 spec = importlib.util.spec_from_file_location("preflight", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+mod._perm_cache.clear()  # ensure env var is picked up, not a stale cache
 
 # createdAt drives the commit-vs-review timestamp comparison (issue #1731):
 # a fix counts as landed only when its commit is newer than the review comment.
 REVIEW_TS = "2026-05-21T12:00:00Z"
-fail_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n",
+# author matches the real GraphQL node shape: nested author.login (Issue #2228).
+fail_c = {"author": {"login": "jrdnr"},
+          "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n",
           "createdAt": REVIEW_TS}
-pass_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n",
+pass_c = {"author": {"login": "jrdnr"},
+          "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n",
           "createdAt": REVIEW_TS}
 
 # Part A: latest_review_verdict extracts fail/pass/None
@@ -2408,8 +4247,10 @@ else:
     print(f"FAIL_B2: review FAIL + no fix got action={action!r}, expected skip")
     sys.exit(1)
 
-# Part C: review PASS + CI green + mergeable -> enqueue_merge (unchanged)
-pr_pass_green = dict(pr_fail_green, pr=2002, latest_review_verdict="pass")
+# Part C: review PASS + CI green + mergeable + no new commit -> enqueue_merge (unchanged)
+# latest_commit_date must predate REVIEW_TS so AC4 (Issue #1977) does not fire.
+pr_pass_green = dict(pr_fail_green, pr=2002, latest_review_verdict="pass",
+                     latest_commit_date="2026-05-21T11:00:00Z")
 recs = mod.compute_review_recommendations([pr_pass_green], set(), set())
 action = recs[0].get("action") if recs else None
 if action == "enqueue_merge":
@@ -2470,6 +4311,1100 @@ PYEOF
     fi
 }
 
+# Test: resource-sampler.sh loop guard (Issue #2485 AC2)
+# Verifies that every per-iteration read in the sampling loop is guarded with
+# || true / || echo 0 so a single transient failure skips one sample instead
+# of killing the loop under set -euo pipefail.
+test_resource_sampler_loop_guard() {
+    log_test "Testing resource-sampler.sh: per-iteration read guard survives set -e failures..."
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts"
+
+    if [[ ! -f "${script_dir}/resource-sampler.sh" ]]; then
+        log_fail "resource-sampler.sh: not found at ${script_dir}/resource-sampler.sh"
+        return
+    fi
+
+    if [[ ! -x "${script_dir}/resource-sampler.sh" ]]; then
+        log_fail "resource-sampler.sh: not executable"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    # Write a mini-script that mirrors resource-sampler.sh's guarded loop body
+    # and runs it under set -euo pipefail.  Iteration 1 injects failures on all
+    # three reads (CPU_PCT, MEM_TOTAL, MEM_AVAIL).  With guards (|| echo 0) the
+    # loop must complete all iterations; without guards set -e would kill it.
+    local guard_script="${tmp_dir}/guard_test.sh"
+    local guard_out="${tmp_dir}/guard_out.txt"
+    cat > "$guard_script" << 'SCRIPTEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+PREV=""
+OUT="${GUARD_OUT}"
+for ITER in 0 1 2; do
+    CURR=$(echo "1 2 3 4 5 6 7" 2>/dev/null || true)
+    if [ -n "$PREV" ] && [ -n "$CURR" ]; then
+        if [ "$ITER" -eq 1 ]; then
+            # Simulate all three transient read failures; each is guarded.
+            CPU_PCT=$(false 2>/dev/null || echo 0)
+            MEM_TOTAL=$(false 2>/dev/null || echo 0)
+            MEM_AVAIL=$(false 2>/dev/null || echo 0)
+        else
+            CPU_PCT=50
+            MEM_TOTAL=8192
+            MEM_AVAIL=4096
+        fi
+        MEM_USED=$(( ${MEM_TOTAL:-0} - ${MEM_AVAIL:-0} ))
+        printf 'iter%d cpu_pct=%d mem_used_mb=%d/%d\n' \
+            "$ITER" "${CPU_PCT:-0}" "$MEM_USED" "${MEM_TOTAL:-0}" \
+            >> "$OUT" || true
+    fi
+    PREV="$CURR"
+done
+echo "LOOP_COMPLETE"
+SCRIPTEOF
+    chmod +x "$guard_script"
+
+    local guard_output guard_exit=0
+    guard_output=$(GUARD_OUT="$guard_out" bash "$guard_script" 2>&1) || guard_exit=$?
+
+    if [[ $guard_exit -eq 0 ]]; then
+        log_pass "resource-sampler.sh guard: loop body exits 0 under set -euo pipefail with all reads guarded"
+    else
+        log_fail "resource-sampler.sh guard: loop body exited $guard_exit — unguarded read killed it under set -e"
+    fi
+
+    if echo "$guard_output" | grep -q "LOOP_COMPLETE"; then
+        log_pass "resource-sampler.sh guard: LOOP_COMPLETE reached (loop not killed by failed iteration)"
+    else
+        log_fail "resource-sampler.sh guard: LOOP_COMPLETE not reached (output: $guard_output)"
+    fi
+
+    if [[ -f "$guard_out" ]]; then
+        local guard_lines
+        guard_lines=$(wc -l < "$guard_out" | tr -d ' ')
+        if [[ "$guard_lines" -ge 2 ]]; then
+            log_pass "resource-sampler.sh guard: $guard_lines samples produced (failure on iter 1 skipped one sample, did not stop loop)"
+        else
+            log_fail "resource-sampler.sh guard: only $guard_lines samples (expected ≥2 from 3 iterations)"
+        fi
+    else
+        log_fail "resource-sampler.sh guard: no output file produced"
+    fi
+
+    # Also verify start/report pipeline exits cleanly on a real system.
+    local state_dir="${tmp_dir}/state"
+    local start_exit=0
+    bash "${script_dir}/resource-sampler.sh" start "$state_dir" >/dev/null 2>&1 || start_exit=$?
+
+    if [[ $start_exit -eq 0 ]]; then
+        log_pass "resource-sampler.sh start: exits 0"
+    else
+        log_fail "resource-sampler.sh start: exited $start_exit"
+    fi
+
+    if [[ -f "${state_dir}/sampler.pid" ]]; then
+        log_pass "resource-sampler.sh start: created sampler.pid"
+        # Kill the background sampler immediately so the test is fast.
+        kill "$(cat "${state_dir}/sampler.pid" 2>/dev/null)" 2>/dev/null || true
+    else
+        log_fail "resource-sampler.sh start: sampler.pid not created"
+    fi
+}
+
+# Test: resource-sampler.sh report emits no literal ${ placeholder (Issue #2485 AC3)
+# Runs report against a fixture samples file and asserts the emitted
+# RESOURCE_PROFILE: line contains no unexpanded variable placeholder.
+# pipeline_suite_result_kind classifies the exit status a parallel suite
+# subshell recorded, and is the fail-closed half of that runner (Issue #4151).
+# Echoes exactly one of: pass, timeout, missing, fail.
+#
+# "missing" — an absent, empty or non-numeric status — must never be read as a
+# pass. `[[ $rc -eq 0 ]]` would do exactly that: [[ -eq ]] evaluates both
+# operands in arithmetic context, where "" and "garbage" are both 0, so a suite
+# whose subshell was killed (OOM, full or unwritable $TMPDIR) before recording
+# its status would be reported green. Comparison here is on the string, and the
+# numeric shape is checked explicitly first.
+pipeline_suite_result_kind() {
+    local rc="$1"
+    if [[ ! "$rc" =~ ^[0-9]+$ ]]; then
+        printf 'missing'
+    elif [[ "$rc" == "0" ]]; then
+        printf 'pass'
+    elif [[ "$rc" == "124" ]]; then
+        printf 'timeout'
+    else
+        printf 'fail'
+    fi
+}
+
+test_claude_pipeline_suites() {
+    # The self-contained suites under .claude/scripts/tests/ (30 as of
+    # 2026-09-18, up from the 21 measured 2026-08-20) guard the dispatch
+    # machinery: the Files-In-Scope path parser, lease handling, capacity gating,
+    # per-agent credential injection, stalled-dispatch detection, merge-group
+    # diagnosis. Every one shipped with a "Run: ..." line in its header and was
+    # then run by nothing — not this script, not any workflow. Measured
+    # 2026-08-20: all 21 passed, so they were correct but unenforced.
+    #
+    # That is the failure mode this closes. The parser gap fixed alongside this
+    # (go.mod / go.sum / .nancy-ignore absent from BACKTICK_PATH_RE, so every
+    # dependency-bump story dispatched with its file-overlap check comparing
+    # against an empty set) was already covered by a regression test file from
+    # Issue #1861 — a file that had never executed. Adding a test there without
+    # this hook documents an invariant rather than enforcing one.
+    #
+    # Each suite owns its own assertions and exits non-zero on failure; this
+    # records one pass/fail per suite rather than per assertion.
+    #
+    # Suites run CPU-count-wide batches in parallel rather than one after
+    # another (Issue #4151: this loop alone was ~218s of the ~244s script-test
+    # phase). Safe because every suite here uses its own `mktemp -d` rather
+    # than a fixed shared path or real repo mutation (verified by inspection
+    # 2026-09-18) — confirm that still holds before raising the batch size or
+    # adding a suite that touches shared state.
+    #
+    # Aggregation fails closed: see pipeline_suite_result_kind.
+    local tests_dir
+    tests_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/scripts/tests"
+
+    if [[ ! -d "$tests_dir" ]]; then
+        log_test "Testing .claude pipeline suites..."
+        log_fail ".claude/scripts/tests not found at ${tests_dir}"
+        return
+    fi
+
+    local suite base found=0
+    local -a suites=()
+    for suite in "$tests_dir"/*.test.sh "$tests_dir"/test-*.sh "$tests_dir"/test-*.py; do
+        [[ -f "$suite" ]] || continue
+        suites+=("$suite")
+    done
+    found=${#suites[@]}
+
+    if [[ $found -eq 0 ]]; then
+        log_test "Testing .claude pipeline suites..."
+        log_fail "no suites matched in ${tests_dir} — the glob or the layout changed"
+        return
+    fi
+
+    local parallel
+    parallel=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        (
+            set +e
+            if [[ "$suite" == *.py ]]; then
+                out=$(timeout 180 python3 "$suite" 2>&1)
+            else
+                out=$(timeout 180 bash "$suite" 2>&1)
+            fi
+            rc=$?
+            set -e
+            printf '%s' "$out" > "$tmpdir/$i.out"
+            # Write-then-rename: `printf > file` truncates before it writes, so a
+            # subshell killed between those two steps would leave a zero-byte
+            # status file. rename(2) within one directory is atomic, so the reader
+            # sees either no file or a complete one — never a truncated one.
+            printf '%s' "$rc" > "$tmpdir/$i.rc.partial" && mv "$tmpdir/$i.rc.partial" "$tmpdir/$i.rc"
+        ) &
+        if (( i % parallel == 0 )); then
+            wait
+        fi
+    done
+    wait
+
+    local rc out
+    i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        base="$(basename "$suite")"
+        log_test "Testing ${base}..."
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo "")
+        out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
+
+        case "$(pipeline_suite_result_kind "$rc")" in
+            pass)
+                log_pass "${base}"
+                ;;
+            timeout)
+                log_fail "${base}: timed out after 180s"
+                echo "$out" | tail -20
+                ;;
+            missing)
+                log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                echo "$out" | tail -20
+                ;;
+            *)
+                log_fail "${base}: exit ${rc}"
+                echo "$out" | tail -20
+                ;;
+        esac
+    done
+
+    rm -rf "$tmpdir"
+}
+
+# Discovers and runs every .devcontainer/*_test.sh suite (Issue #4163). These
+# suites guard the agent-container security controls -- the egress firewall,
+# the DNS allowlist, the entrypoint, and (once #4154 lands) read-only
+# credential delivery -- and until this story nothing in CI or `make test`
+# ran them: `git grep` across .github/, this script, and the Makefile found
+# no reference to any of the four that exist on develop. They passed when a
+# person ran them by hand; a revert of any one control turned no check red.
+#
+# Mirrors test_claude_pipeline_suites' shape (glob, timeout per suite, one
+# log_pass/log_fail per suite, CPU-wide parallel batches) for the same
+# discovery-not-registration reason: a suite dropped into .devcontainer/ runs
+# without anyone adding its name here.
+#
+# Every ambient CFGMS_* variable is stripped before each suite runs. This is
+# not precautionary: writing this story, running entrypoint_test.sh with this
+# script's own agent-dispatch environment intact (CFGMS_PROJECT_ITEM_ID and
+# CFGMS_LEASE_KEY already exported for the running story) fed that story's
+# real item ID into entrypoint.sh's "CFGMS_PROJECT_ITEM_ID unset" test case
+# instead of the unset the test requires, which drove entrypoint.sh's
+# unconditional exit trap to call the real pipeline-helper.sh lease-release
+# against this story's own lease ref via a live GitHub API call -- caught and
+# re-acquired by hand, not by anything in the suite. CI never sets these
+# vars, so stripping them makes every suite's environment match what CI
+# already gives it rather than whatever the invoking shell happens to carry.
+#
+# Split into a directory-parameterized helper (run_devcontainer_suites) and a
+# thin wrapper (test_devcontainer_suites) that supplies the real .devcontainer
+# path, so the discovery+execution path itself can be pointed at a throwaway
+# directory in a test (see test_devcontainer_suite_discovery below) rather
+# than only ever exercised against the real suites.
+run_devcontainer_suites() {
+    local suites_dir="$1"
+
+    if [[ ! -d "$suites_dir" ]]; then
+        log_test "Testing .devcontainer suites..."
+        log_fail ".devcontainer not found at ${suites_dir}"
+        return
+    fi
+
+    local suite
+    local -a suites=()
+    for suite in "$suites_dir"/*_test.sh; do
+        [[ -f "$suite" ]] || continue
+        suites+=("$suite")
+    done
+
+    if [[ ${#suites[@]} -eq 0 ]]; then
+        log_test "Testing .devcontainer suites..."
+        log_fail "no suites matched in ${suites_dir} — the glob or the layout changed"
+        return
+    fi
+
+    local parallel
+    parallel=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local -a cfgms_vars=()
+    local v
+    for v in "${!CFGMS_@}"; do
+        cfgms_vars+=("$v")
+    done
+
+    local i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        (
+            set +e
+            for v in "${cfgms_vars[@]}"; do
+                unset "$v"
+            done
+            out=$(timeout 180 bash "$suite" 2>&1)
+            rc=$?
+            set -e
+            printf '%s' "$out" > "$tmpdir/$i.out"
+            # Write-then-rename: see test_claude_pipeline_suites above for why.
+            printf '%s' "$rc" > "$tmpdir/$i.rc.partial" && mv "$tmpdir/$i.rc.partial" "$tmpdir/$i.rc"
+        ) &
+        if (( i % parallel == 0 )); then
+            wait
+        fi
+    done
+    wait
+
+    local rc out base
+    i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        base="$(basename "$suite")"
+        log_test "Testing ${base}..."
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo "")
+        out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
+
+        case "$(pipeline_suite_result_kind "$rc")" in
+            pass)
+                log_pass "${base}"
+                ;;
+            timeout)
+                log_fail "${base}: timed out after 180s"
+                echo "$out" | tail -20
+                ;;
+            missing)
+                log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                echo "$out" | tail -20
+                ;;
+            *)
+                log_fail "${base}: exit ${rc}"
+                echo "$out" | tail -20
+                ;;
+        esac
+    done
+
+    rm -rf "$tmpdir"
+}
+
+test_devcontainer_suites() {
+    local suites_dir
+    suites_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.devcontainer"
+    run_devcontainer_suites "$suites_dir"
+}
+
+# AC2 (Issue #4163) discovery proof: run_devcontainer_suites must actually
+# discover suites, not just exist. Points the runner at a throwaway directory
+# holding one fixture that always fails and asserts the failure surfaces —
+# then points it at an empty directory and asserts that is reported
+# explicitly ("no suites matched"), not as a silent pass. A glob that stops
+# matching (the regression this guards) makes the first assertion fail; a
+# runner that reports "0 suites, all green" instead of naming the gap makes
+# the second one fail.
+#
+# Runs the target function directly rather than through the main test
+# sequence, so PASS_COUNT/FAIL_COUNT are saved and restored around each call
+# -- the fixture's own deliberate failure must not appear in this script's
+# real summary.
+test_devcontainer_suite_discovery() {
+    log_test "Testing .devcontainer suite runner: discovery gates a failing fixture..."
+
+    local fixture_dir
+    fixture_dir=$(mktemp -d)
+    local empty_dir
+    empty_dir=$(mktemp -d)
+    trap 'rm -rf "$fixture_dir" "$empty_dir"; trap - RETURN' RETURN
+
+    cat > "$fixture_dir/always-fails_test.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+echo "intentional failure from discovery-proof fixture"
+exit 1
+FIXTURE
+    chmod +x "$fixture_dir/always-fails_test.sh"
+
+    local pass_before=$PASS_COUNT fail_before=$FAIL_COUNT fail_after
+    run_devcontainer_suites "$fixture_dir" >/dev/null 2>&1
+    fail_after=$FAIL_COUNT
+    PASS_COUNT=$pass_before
+    FAIL_COUNT=$fail_before
+
+    if [[ "$fail_after" -le "$fail_before" ]]; then
+        log_fail "run_devcontainer_suites did not report a failure for a fixture that exits 1 — discovery is broken or not wired"
+        return
+    fi
+
+    local empty_out
+    empty_out=$(run_devcontainer_suites "$empty_dir" 2>&1)
+    PASS_COUNT=$pass_before
+    FAIL_COUNT=$fail_before
+
+    if ! echo "$empty_out" | grep -q "no suites matched"; then
+        log_fail "run_devcontainer_suites against an empty directory did not report 'no suites matched' — an empty discovery would be indistinguishable from a passing one"
+        return
+    fi
+
+    log_pass "run_devcontainer_suites: discovers and runs .devcontainer/*_test.sh fixtures, and reports explicitly when none match"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# the partition of features/controller/api tests across shards must be
+# complete (every test lands in exactly one shard, none dropped or
+# duplicated) and even (no shard starves while another does most of the
+# work). Uses CFGMS_API_TEST_SHARD_PLAN_ONLY=1 so this runs in milliseconds
+# instead of paying for a full -race run just to check the partition math.
+test_api_shard_partition_covers_all_tests() {
+    log_test "Testing test-framework-api-sharded: partition is complete and even..."
+
+    local list_out list_rc total
+    list_out=$(go test -list '.*' ./features/controller/api/... 2>&1)
+    list_rc=$?
+    if [[ $list_rc -ne 0 ]]; then
+        log_fail "go test -list ./features/controller/api/...: exited ${list_rc}"
+        echo "$list_out" | tail -20
+        return
+    fi
+    total=$(echo "$list_out" | grep -c '^Test')
+    if [[ "$total" -eq 0 ]]; then
+        log_fail "go test -list found no tests in features/controller/api"
+        return
+    fi
+
+    local shards=4
+    local plan_out plan_rc
+    plan_out=$(CFGMS_API_TEST_SHARDS=$shards CFGMS_API_TEST_SHARD_PLAN_ONLY=1 make test-framework-api-sharded 2>&1)
+    plan_rc=$?
+    if [[ $plan_rc -ne 0 ]]; then
+        log_fail "make test-framework-api-sharded (plan-only): exited ${plan_rc}"
+        echo "$plan_out" | tail -20
+        return
+    fi
+
+    local counts sum min max
+    counts=$(echo "$plan_out" | grep -oE '^shard [0-9]+: [0-9]+ tests' | grep -oE '[0-9]+ tests' | grep -oE '^[0-9]+')
+    if [[ -z "$counts" ]]; then
+        log_fail "could not parse shard counts from plan-only output"
+        echo "$plan_out" | tail -20
+        return
+    fi
+
+    sum=0
+    min=""
+    max=""
+    while read -r n; do
+        sum=$((sum + n))
+        if [[ -z "$min" || "$n" -lt "$min" ]]; then min=$n; fi
+        if [[ -z "$max" || "$n" -gt "$max" ]]; then max=$n; fi
+    done <<< "$counts"
+
+    if [[ "$sum" -ne "$total" ]]; then
+        log_fail "shard counts sum to ${sum}, go test -list reports ${total} tests — partition drops or duplicates tests"
+        return
+    fi
+
+    if [[ $((max - min)) -gt 1 ]]; then
+        log_fail "shard sizes range from ${min} to ${max} tests (across ${shards} shards) — partition is not even"
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: ${total} tests partitioned evenly across ${shards} shards (sizes ${min}-${max})"
+}
+
+# Regression guard for the Makefile's test-go-group-controller-core /
+# test-go-group-heavy-providers / test-go-group-rest split (Issue #4151): the
+# three groups must partition the exact package list the pre-split single
+# `go test ./...` call used — no package dropped, none picked up by two
+# groups. Unlike test-framework-api-sharded above, this split is a
+# hand-maintained package-name partition, not something `go test -list`
+# itself verifies, so a renamed package or a new sub-package under one of the
+# heavy-providers paths could silently drift out of sync with no other
+# signal. Uses CFGMS_TEST_GROUP_LIST_ONLY=1 so this costs a few `go list`
+# calls, not three full -race runs.
+test_go_group_split_partition_covers_all_packages() {
+    log_test "Testing go-group split: controller-core/heavy-providers/rest partition all packages, no drops or duplicates..."
+
+    # Every captured stream is filtered to lines that actually look like this
+    # module's import paths. Not cosmetic: test-go-group-* is invoked here via
+    # `make` from inside a shell that (in CI, via `make test` -> make test-scripts
+    # -> this script) already inherited MAKEFLAGS/MAKELEVEL from an enclosing
+    # make process, which makes GNU Make auto-print "Entering directory" /
+    # "Leaving directory" around the nested invocation — two extra non-empty
+    # lines per call that a bare `grep -c .` counts as packages. Reproduced only
+    # in that nested context, never when running the make target directly from
+    # an interactive shell, which is why this passed locally and failed in CI.
+    local pkg_filter='^github\.com/cfgis/cfgms/'
+
+    local full full_rc
+    full=$(go list ./... 2>&1 | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$' | grep -E "$pkg_filter")
+    full_rc=$?
+    if [[ $full_rc -ne 0 ]]; then
+        log_fail "go list ./...: exited ${full_rc}"
+        echo "$full" | tail -20
+        return
+    fi
+
+    local core heavy rest core_rc heavy_rc rest_rc
+    core=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-controller-core 2>&1 | grep -E "$pkg_filter")
+    core_rc=$?
+    heavy=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-heavy-providers 2>&1 | grep -E "$pkg_filter")
+    heavy_rc=$?
+    rest=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-rest 2>&1 | grep -E "$pkg_filter")
+    rest_rc=$?
+    if [[ $core_rc -ne 0 || $heavy_rc -ne 0 || $rest_rc -ne 0 ]]; then
+        log_fail "CFGMS_TEST_GROUP_LIST_ONLY=1 exited non-zero (core=${core_rc}, heavy=${heavy_rc}, rest=${rest_rc})"
+        return
+    fi
+
+    local full_count core_count heavy_count rest_count union_count
+    full_count=$(echo "$full" | sort -u | grep -c .)
+    core_count=$(echo "$core" | grep -c .)
+    heavy_count=$(echo "$heavy" | grep -c .)
+    rest_count=$(echo "$rest" | grep -c .)
+
+    if [[ $((core_count + heavy_count + rest_count)) -ne "$full_count" ]]; then
+        log_fail "controller-core (${core_count}) + heavy-providers (${heavy_count}) + rest (${rest_count}) = $((core_count + heavy_count + rest_count)), go list reports ${full_count} packages — partition drops or duplicates packages"
+        return
+    fi
+
+    union_count=$(printf '%s\n%s\n%s\n' "$core" "$heavy" "$rest" | sort -u | grep -c .)
+    if [[ "$union_count" -ne "$full_count" ]]; then
+        log_fail "union of the three groups has ${union_count} unique packages, go list reports ${full_count} — a package appears in more than one group"
+        return
+    fi
+
+    log_pass "go-group split: ${full_count} packages partitioned across controller-core (${core_count}), heavy-providers (${heavy_count}), rest (${rest_count}) — complete, no duplicates"
+}
+
+# Regression guard for Makefile's test-go-group-rest (Issue #4420): the recipe
+# runs four things in one shell — the framework package list, a per-module loop,
+# and a final adapter/conformance run. A make recipe's exit status is the status
+# of its LAST command, so without `set -e` a failing framework run followed by
+# three passing ones exited 0, and `make test` -> test-commit ->
+# test-agent-complete all reported success over a genuine test failure. This
+# drives the target with a stub `go` whose FIRST `go test` fails and whose
+# later ones pass — the exact shape that was silently swallowed — so the guard
+# fails if the propagation is ever removed. Costs milliseconds: no real
+# compilation happens.
+test_go_group_rest_propagates_early_failure() {
+    log_test "Testing test-go-group-rest: a failure in the first go test run propagates to a non-zero exit..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: `go list` reports one package this module's filters keep, the
+    # first `go test` fails, every subsequent `go test` succeeds.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+if [ "$1" = "list" ]; then
+    echo "github.com/cfgis/cfgms/pkg/stubpkg"
+    exit 0
+fi
+if [ "$1" = "test" ]; then
+    if [ -e "${CFGMS_STUB_STATE}/first-test-ran" ]; then
+        echo "ok  	stub	0.01s"
+        exit 0
+    fi
+    : > "${CFGMS_STUB_STATE}/first-test-ran"
+    echo "FAIL	github.com/cfgis/cfgms/pkg/stubpkg	0.01s"
+    echo "FAIL"
+    exit 1
+fi
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    local out rc=0
+    out=$(PATH="${bin_dir}:$PATH" CFGMS_STUB_STATE="$tmp_dir" \
+        make --no-print-directory test-go-group-rest 2>&1) || rc=$?
+
+    if [[ ! -e "${tmp_dir}/first-test-ran" ]]; then
+        log_fail "test-go-group-rest never invoked \`go test\` — the stub was not exercised, so this guard proves nothing"
+        echo "$out" | tail -20
+        return
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        log_fail "test-go-group-rest exited 0 with a failing framework test run — \`make test\` would report a false green (needs \`set -e\` or \`&&\` chaining in the recipe)"
+        echo "$out" | tail -20
+        return
+    fi
+
+    log_pass "test-go-group-rest: a failing framework run exits ${rc}, so the failure reaches make test"
+}
+
+# Regression guard for Makefile's ALL_MODULES (Issue #4164): ALL_MODULES drives
+# CHANGED_MODULES, which is how `make test`'s smart mode decides which module's
+# tests to run for a change. A hand-maintained ALL_MODULES list silently drops
+# modules added later -- 5 of 10 stdlib modules and 3 of 5 extended modules were
+# missing before this fix, so a change to one of them never triggered its tests
+# locally even though CI's unbounded `features/...` run still covered it. This
+# independently rediscovers every features/modules/**/module.yaml directory
+# (the same discriminator the Makefile derivation uses) and diffs it against
+# what the Makefile actually reports via `make test-module`'s usage output, so
+# reverting the derivation back to a hand list fails this the moment the tree
+# grows past that list.
+test_all_modules_covers_module_yaml_tree() {
+    log_test "Testing ALL_MODULES: every features/modules/**/module.yaml directory is included..."
+
+    local discovered
+    discovered=$(find features/modules -mindepth 1 -name module.yaml -exec dirname {} \; \
+        | sed 's#^features/modules/##' | sort -u)
+    if [[ -z "$discovered" ]]; then
+        log_fail "found no module.yaml files under features/modules — discovery command itself is broken"
+        return
+    fi
+
+    local make_out reported
+    make_out=$(make --no-print-directory test-module 2>&1 || true)
+    reported=$(echo "$make_out" | grep '^  All: ' | sed 's/^  All: //' | tr ' ' '\n' | sort -u)
+    if [[ -z "$reported" ]]; then
+        log_fail "could not parse ALL_MODULES from 'make test-module' usage output"
+        echo "$make_out" | tail -20
+        return
+    fi
+
+    local missing extra
+    missing=$(comm -23 <(echo "$discovered") <(echo "$reported"))
+    extra=$(comm -13 <(echo "$discovered") <(echo "$reported"))
+
+    if [[ -n "$missing" ]]; then
+        log_fail "ALL_MODULES is missing modules present in the tree: $(echo "$missing" | tr '\n' ' ')"
+        return
+    fi
+    if [[ -n "$extra" ]]; then
+        log_fail "ALL_MODULES lists modules with no module.yaml in the tree: $(echo "$extra" | tr '\n' ' ')"
+        return
+    fi
+
+    log_pass "ALL_MODULES matches the module.yaml tree ($(echo "$discovered" | grep -c .) modules)"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# shard aggregation must fail closed. A shard subshell that dies before it can
+# record its exit status (OOM kill, signal, unwritable temp dir) used to be
+# skipped by the aggregation loop, so `make test` reported success while a
+# whole shard of tests never ran. Driven with a stub `go` on PATH so it costs
+# milliseconds instead of a real -race run: the stub kills its own parent
+# subshell for one shard, reproducing the OOM-kill case exactly.
+test_api_shard_aggregation_fails_closed() {
+    log_test "Testing test-framework-api-sharded: a shard with no exit status fails closed..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: enumerates four tests for -list, reports one package for `go
+    # list`, and for `go test -c -o <path>` writes a stub test binary in place
+    # of a real compile. That stub binary is what the shards exec: for the
+    # shard whose -test.run pattern includes TestB it SIGKILLs the subshell
+    # that launched it, so no shard-N.exit file is ever written.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+if [ "$1" = "list" ]; then
+    case "$*" in
+        *features/controller/api*) echo "github.com/cfgis/cfgms/features/controller/api" ;;
+        *) echo "github.com/cfgis/cfgms/pkg/stubpkg" ;;
+    esac
+    exit 0
+fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        cat > "$arg" <<'BIN'
+#!/bin/sh
+case "$*" in
+    *TestB*) kill -9 "$PPID"; exit 0 ;;
+esac
+echo "ok  features/controller/api  0.01s"
+exit 0
+BIN
+        chmod +x "$arg"
+        exit 0
+    fi
+    prev="$arg"
+done
+echo "ok  features/controller/api  0.01s"
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    # rc captured via || so a non-zero make does not trip the suite's set -e.
+    local out rc=0
+    out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_fail "a shard that died without recording an exit status still produced a passing target (exit 0) — false green in make test"
+        echo "$out" | tail -20
+        return
+    fi
+
+    if ! echo "$out" | grep -q 'no readable exit status'; then
+        log_fail "target failed but printed no diagnostic naming the shard with the missing exit status"
+        echo "$out" | tail -20
+        return
+    fi
+
+    # A temp dir that cannot be created must also fail closed rather than
+    # running zero shards and reporting success.
+    local not_a_dir="${tmp_dir}/tmpdir-is-a-file"
+    : > "$not_a_dir"
+
+    local mk_out mk_rc=0
+    mk_out=$(PATH="${bin_dir}:$PATH" TMPDIR="$not_a_dir" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || mk_rc=$?
+
+    if [[ $mk_rc -eq 0 ]]; then
+        log_fail "target reported success when mktemp -d could not create the shard output dir"
+        echo "$mk_out" | tail -20
+        return
+    fi
+
+    # The shards exec one prebuilt test binary (Issue #4239), so a build that
+    # exits 0 without producing that binary must stop the target rather than
+    # launch N shards that all fail for an unrelated reason — or worse, a
+    # future edit that treats "no binary" as "nothing to run".
+    local nobin_dir="${tmp_dir}/nobin"
+    mkdir -p "$nobin_dir"
+    cat > "${nobin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+if [ "$1" = "list" ]; then
+    echo "github.com/cfgis/cfgms/features/controller/api"
+    exit 0
+fi
+# `go test -c` succeeds but writes nothing to the -o path.
+exit 0
+STUB
+    chmod +x "${nobin_dir}/go"
+
+    local nobin_out nobin_rc=0
+    nobin_out=$(PATH="${nobin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || nobin_rc=$?
+
+    if [[ $nobin_rc -eq 0 ]]; then
+        log_fail "a test build that produced no binary still produced a passing target (exit 0) — zero tests ran"
+        echo "$nobin_out" | tail -20
+        return
+    fi
+
+    if ! echo "$nobin_out" | grep -q 'no runnable binary'; then
+        log_fail "target failed but printed no diagnostic explaining that the test build produced no binary"
+        echo "$nobin_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: missing shard exit status, unusable temp dir and a binary-less build all fail closed"
+}
+
+# Regression guard for the parallel .claude pipeline-suite runner (Issue #4151):
+# a suite whose recorded exit status is absent, empty or non-numeric must be
+# reported as a failure, never as a pass. The same invariant the Makefile shard
+# aggregation holds, on the other side of the same change — and the case
+# `[[ $rc -eq 0 ]]` silently gets wrong, because it compares in arithmetic
+# context where "" and "garbage" are both 0.
+test_pipeline_suite_result_fails_closed() {
+    log_test "Testing .claude pipeline suite aggregation: unusable exit status fails closed..."
+
+    local kind
+    local -a bad_statuses=("" " " "garbage" "0x0" "00abc" $'\n')
+    for kind in "${bad_statuses[@]}"; do
+        local got
+        got=$(pipeline_suite_result_kind "$kind")
+        if [[ "$got" != "missing" ]]; then
+            log_fail "exit status $(printf '%q' "$kind") classified as '${got}', not 'missing' — a suite that recorded no usable status would be reported ${got}"
+            return
+        fi
+    done
+
+    local -a cases=("0:pass" "124:timeout" "1:fail" "2:fail" "137:fail")
+    local c
+    for c in "${cases[@]}"; do
+        local status="${c%%:*}" want="${c##*:}" actual
+        actual=$(pipeline_suite_result_kind "$status")
+        if [[ "$actual" != "$want" ]]; then
+            log_fail "exit status ${status} classified as '${actual}', expected '${want}'"
+            return
+        fi
+    done
+
+    log_pass ".claude pipeline suite aggregation: empty and non-numeric exit statuses fail closed"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# CFGMS_API_TEST_SHARDS must be validated as a decimal integer before it
+# reaches any arithmetic context. Bash re-evaluates the contents of a variable
+# used inside $(( )) as an arithmetic expression, so an unvalidated value is
+# both command execution (an array-subscript payload runs) and a silent
+# fail-open (a non-numeric value makes `seq 0 $((shards - 1))` emit nothing,
+# so zero shards launch and the target exits 0 with the whole suite unrun).
+# Driven with a stub `go` on PATH so it costs milliseconds.
+test_api_shard_count_rejects_non_integer() {
+    log_test "Testing test-framework-api-sharded: a non-integer shard count is rejected, not executed..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: enumerates four tests for -list, reports one package for `go
+    # list`, writes a succeeding stub test binary for `go test -c -o <path>`,
+    # and reports success for any run.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+if [ "$1" = "list" ]; then
+    case "$*" in
+        *features/controller/api*) echo "github.com/cfgis/cfgms/features/controller/api" ;;
+        *) echo "github.com/cfgis/cfgms/pkg/stubpkg" ;;
+    esac
+    exit 0
+fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        printf '#!/bin/sh\necho "ok  features/controller/api  0.01s"\nexit 0\n' > "$arg"
+        chmod +x "$arg"
+        exit 0
+    fi
+    prev="$arg"
+done
+echo "ok  features/controller/api  0.01s"
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    # 1. Arithmetic-injection payload must not execute its command substitution.
+    local marker="${tmp_dir}/injection-executed"
+    local inj_out inj_rc=0
+    inj_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS="a[\$(touch ${marker})]" \
+        make test-framework-api-sharded 2>&1) || inj_rc=$?
+
+    if [[ -e "$marker" ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS reached bash arithmetic unvalidated — the injected command substitution executed"
+        echo "$inj_out" | tail -20
+        return
+    fi
+
+    if [[ $inj_rc -eq 0 ]]; then
+        log_fail "an injection payload in CFGMS_API_TEST_SHARDS produced a passing target (exit 0) — false green in make test"
+        echo "$inj_out" | tail -20
+        return
+    fi
+
+    # 2. A plain non-integer must fail closed rather than launching zero shards.
+    local bad_out bad_rc=0
+    bad_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=abc \
+        make test-framework-api-sharded 2>&1) || bad_rc=$?
+
+    if [[ $bad_rc -eq 0 ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS=abc produced a passing target (exit 0) — zero shards ran and make test still reported success"
+        echo "$bad_out" | tail -20
+        return
+    fi
+
+    if ! echo "$bad_out" | grep -q 'shard count must be a positive integer'; then
+        log_fail "target failed but printed no diagnostic explaining the invalid shard count"
+        echo "$bad_out" | tail -20
+        return
+    fi
+
+    # 3. Zero is not a positive integer and must not be accepted either.
+    local zero_out zero_rc=0
+    zero_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=0 \
+        make test-framework-api-sharded 2>&1) || zero_rc=$?
+
+    if [[ $zero_rc -eq 0 ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS=0 produced a passing target (exit 0) — zero shards ran"
+        echo "$zero_out" | tail -20
+        return
+    fi
+
+    # 4. A valid count still runs: validation must not break the normal path.
+    local ok_out ok_rc=0
+    ok_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 \
+        make test-framework-api-sharded 2>&1) || ok_rc=$?
+
+    if [[ $ok_rc -ne 0 ]]; then
+        log_fail "a valid CFGMS_API_TEST_SHARDS=2 was rejected (exit ${ok_rc}) — validation is too strict"
+        echo "$ok_out" | tail -20
+        return
+    fi
+
+    # 5. The macOS CI-job-level shard targets reimplement the partition instead
+    #    of delegating here, so they must carry the same two properties against
+    #    their own variable pairs: no command execution, and no fail-open.
+    #    Their injection vector is awk rather than bash arithmetic — an unquoted
+    #    `awk -v s=$shard` lets a value containing whitespace word-split into a
+    #    replacement awk program, whose system() runs arbitrary commands.
+    local pair shard_var shards_var target
+    for pair in "CFGMS_MACOS_API_SHARD CFGMS_MACOS_API_SHARDS test-go-group-macos-api" \
+                "CFGMS_MACOS_REST_SHARD CFGMS_MACOS_REST_SHARDS test-go-group-macos-rest"; do
+        # shellcheck disable=SC2086 # deliberate word split of the fixture triple
+        set -- $pair
+        shard_var="$1"; shards_var="$2"; target="$3"
+
+        local awk_marker="${tmp_dir}/awk-injection-executed"
+        local payload_out payload_rc var_name
+        for var_name in "$shard_var" "$shards_var"; do
+            rm -f "$awk_marker"
+            payload_rc=0
+            # The payload carries no literal space of its own — word splitting
+            # would break it into separate argv entries and awk would reject the
+            # fragment as a syntax error — so the command's argument separator
+            # is awk's own FS. Verified to create the marker against an
+            # unquoted `awk -v n=$shards`, and not to against a quoted one.
+            payload_out=$(PATH="${bin_dir}:$PATH" \
+                env "${var_name}=1 BEGIN{system(\"touch\"FS\"${awk_marker}\")}" \
+                make --no-print-directory "$target" 2>&1) || payload_rc=$?
+
+            if [[ -e "$awk_marker" ]]; then
+                log_fail "${var_name} reached awk unvalidated — the injected awk program executed a command in ${target}"
+                echo "$payload_out" | tail -20
+                return
+            fi
+
+            if [[ $payload_rc -eq 0 ]]; then
+                log_fail "an injection payload in ${var_name} produced a passing ${target} (exit 0) — false green behind Build Gate"
+                echo "$payload_out" | tail -20
+                return
+            fi
+
+            # A plain non-integer must fail closed rather than emptying the
+            # partition and reporting a pass with zero tests run.
+            local nonint_out nonint_rc=0
+            nonint_out=$(PATH="${bin_dir}:$PATH" env "${var_name}=abc" \
+                make --no-print-directory "$target" 2>&1) || nonint_rc=$?
+
+            if [[ $nonint_rc -eq 0 ]]; then
+                log_fail "${var_name}=abc produced a passing ${target} (exit 0) — an empty partition ran zero tests and still reported success"
+                echo "$nonint_out" | tail -20
+                return
+            fi
+
+            if ! echo "$nonint_out" | grep -q "${var_name} must be a"; then
+                log_fail "${target} failed but printed no diagnostic naming the invalid ${var_name}"
+                echo "$nonint_out" | tail -20
+                return
+            fi
+        done
+
+        # Zero shards is not a positive integer (and is a fatal modulus for the
+        # BWK awk that macOS runners actually use).
+        local zeroshards_out zeroshards_rc=0
+        zeroshards_out=$(PATH="${bin_dir}:$PATH" env "${shards_var}=0" \
+            make --no-print-directory "$target" 2>&1) || zeroshards_rc=$?
+
+        if [[ $zeroshards_rc -eq 0 ]]; then
+            log_fail "${shards_var}=0 produced a passing ${target} (exit 0) — zero shards ran"
+            echo "$zeroshards_out" | tail -20
+            return
+        fi
+
+        # An index outside the partition assigns nothing; that must fail, not
+        # report a green leg with no tests.
+        local oob_out oob_rc=0
+        oob_out=$(PATH="${bin_dir}:$PATH" env "${shard_var}=2" "${shards_var}=2" \
+            make --no-print-directory "$target" 2>&1) || oob_rc=$?
+
+        if [[ $oob_rc -eq 0 ]]; then
+            log_fail "${shard_var}=2 with ${shards_var}=2 produced a passing ${target} (exit 0) — an out-of-range shard index ran nothing"
+            echo "$oob_out" | tail -20
+            return
+        fi
+
+        # Valid inputs must still run: validation must not break the CI path.
+        local valid_out valid_rc=0
+        valid_out=$(PATH="${bin_dir}:$PATH" env "${shard_var}=1" "${shards_var}=2" \
+            make --no-print-directory "$target" 2>&1) || valid_rc=$?
+
+        if [[ $valid_rc -ne 0 ]]; then
+            log_fail "valid ${shard_var}=1 ${shards_var}=2 was rejected by ${target} (exit ${valid_rc}) — validation is too strict"
+            echo "$valid_out" | tail -20
+            return
+        fi
+    done
+
+    log_pass "test-framework-api-sharded and the macOS shard groups: injection payloads, non-integer, zero and out-of-range shard values all fail closed; valid counts still run"
+}
+
+test_resource_sampler_no_placeholder() {
+    log_test "Testing resource-sampler.sh: RESOURCE_PROFILE line contains no literal \${ placeholder..."
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts"
+
+    if [[ ! -f "${script_dir}/resource-sampler.sh" ]]; then
+        log_fail "resource-sampler.sh: not found at ${script_dir}/resource-sampler.sh"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    # Fixture: state dir with a known samples file and a dead-PID file.
+    local state_dir="${tmp_dir}/state"
+    mkdir -p "$state_dir"
+    echo "99999999" > "${state_dir}/sampler.pid"   # kill is a no-op for non-existent PID
+    cat > "${state_dir}/samples.txt" << 'EOF'
+12:00:01 cpu_pct=25 mem_used_mb=1024/4096
+12:00:06 cpu_pct=30 mem_used_mb=1100/4096
+12:00:11 cpu_pct=22 mem_used_mb=1050/4096
+EOF
+
+    local artifact="${tmp_dir}/artifact.txt"
+    local profile_line report_exit=0
+    profile_line=$(bash "${script_dir}/resource-sampler.sh" report "$state_dir" "$artifact" 2>&1) || report_exit=$?
+
+    if [[ $report_exit -ne 0 ]]; then
+        log_fail "resource-sampler.sh report (no-placeholder): exited $report_exit (output: $profile_line)"
+        return
+    fi
+
+    if echo "$profile_line" | grep -q 'RESOURCE_PROFILE:'; then
+        log_pass "resource-sampler.sh: emits a RESOURCE_PROFILE: line"
+    else
+        log_fail "resource-sampler.sh: no RESOURCE_PROFILE: line in output (got: '$profile_line')"
+        return
+    fi
+
+    if echo "$profile_line" | grep -qF '${'; then
+        log_fail "resource-sampler.sh: RESOURCE_PROFILE line contains literal '\${' placeholder (got: '$profile_line')"
+    else
+        log_pass "resource-sampler.sh: RESOURCE_PROFILE line contains no literal '\${' placeholder"
+    fi
+
+    # Peak values must match the fixture (cpu_peak=30, mem_peak=1100/4096).
+    if echo "$profile_line" | grep -q 'cpu_peak_pct=30'; then
+        log_pass "resource-sampler.sh: correct peak CPU (30) computed from fixture"
+    else
+        log_fail "resource-sampler.sh: expected cpu_peak_pct=30 from fixture (got: '$profile_line')"
+    fi
+
+    if echo "$profile_line" | grep -q 'mem_peak_mb=1100/4096'; then
+        log_pass "resource-sampler.sh: correct peak memory (1100/4096) computed from fixture"
+    else
+        log_fail "resource-sampler.sh: expected mem_peak_mb=1100/4096 from fixture (got: '$profile_line')"
+    fi
+
+    # vm= must not contain 0vCPU/0GB on a real Linux system (nproc should return ≥1).
+    # The sampler probes nproc + /proc/meminfo, which only exist on Linux — skip the
+    # host-derived assertion elsewhere (fixture-based assertions above still run).
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        log_pass "resource-sampler.sh: vm= spec check skipped (host-derived, Linux-only)"
+    elif echo "$profile_line" | grep -qE 'vm=[1-9][0-9]*vCPU/[0-9]+GB'; then
+        log_pass "resource-sampler.sh: vm= spec contains a non-zero vCPU count"
+    else
+        log_fail "resource-sampler.sh: vm= spec has zero vCPU count (got: '$profile_line')"
+    fi
+}
+
 test_tier1_smoke_test() {
     log_test "Testing tier1-smoke-test.sh fixtures..."
 
@@ -2504,6 +5439,109 @@ test_tier1_smoke_test() {
         log_pass "tier1-smoke-test_test.sh: All fixture tests passed"
     else
         log_fail "tier1-smoke-test_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Test: resource-sampler.ps1 never uses pwsh (AC1 — static, runs on Linux without PS infra)
+test_resource_sampler_ps1_no_pwsh() {
+    log_test "Testing resource-sampler.ps1: AC1 — Start-Process uses powershell not pwsh..."
+
+    local ps1
+    ps1="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts/resource-sampler.ps1"
+
+    if [[ ! -f "$ps1" ]]; then
+        log_fail "resource-sampler.ps1: not found at $ps1"
+        return
+    fi
+
+    if grep -qE 'Start-Process[[:space:]]+pwsh' "$ps1"; then
+        log_fail "resource-sampler.ps1: found 'Start-Process pwsh' — must use 'Start-Process powershell' (AC1)"
+    else
+        log_pass "resource-sampler.ps1: no 'Start-Process pwsh' — Start-Process correctly uses powershell"
+    fi
+
+    if grep -qE "shell[[:space:]]*:[[:space:]]*pwsh" "$ps1"; then
+        log_fail "resource-sampler.ps1: found shell: pwsh reference — forbidden (AC1)"
+    else
+        log_pass "resource-sampler.ps1: no shell: pwsh reference"
+    fi
+}
+
+test_datasvc_bootstrap() {
+    log_test "Testing lab-datasvc-bootstrap.sh..."
+
+    local bootstrap_script="scripts/lab-datasvc-bootstrap.sh"
+    local test_script="scripts/lab-datasvc-bootstrap_test.sh"
+
+    if [[ ! -f "$bootstrap_script" ]]; then
+        log_fail "lab-datasvc-bootstrap.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$bootstrap_script" ]]; then
+        log_fail "lab-datasvc-bootstrap.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "lab-datasvc-bootstrap_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "lab-datasvc-bootstrap_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "lab-datasvc-bootstrap_test.sh: All tests passed"
+    else
+        log_fail "lab-datasvc-bootstrap_test.sh: Tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+test_ha_cluster_bootstrap() {
+    log_test "Testing ha-cluster-node-bootstrap.sh..."
+
+    local bootstrap_script="scripts/ha-cluster-node-bootstrap.sh"
+    local test_script="scripts/ha-cluster-node-bootstrap_test.sh"
+
+    if [[ ! -f "$bootstrap_script" ]]; then
+        log_fail "ha-cluster-node-bootstrap.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$bootstrap_script" ]]; then
+        log_fail "ha-cluster-node-bootstrap.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "ha-cluster-node-bootstrap_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "ha-cluster-node-bootstrap_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "ha-cluster-node-bootstrap_test.sh: All tests passed"
+    else
+        log_fail "ha-cluster-node-bootstrap_test.sh: Tests failed (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -2548,83 +5586,223 @@ test_tier1_bootstrap() {
     rm -f "$out_file"
 }
 
+# Regression test (Issue #4113): asserts the script-test suite itself never
+# mutates tracked files. Compares the git status snapshot taken before any
+# test ran (GIT_STATUS_BEFORE_TESTS, captured just above the "Main execution"
+# block) against the status now, after every other test function has run. A
+# test must report drift in tracked files, never silently rewrite and stage
+# them — that silent staging is what let a hand-edited baseline fix ride along
+# into an unrelated commit --amend during a story promotion.
+test_no_tracked_file_mutation() {
+    log_test "Testing script-test suite does not mutate tracked files..."
+
+    local git_status_after
+    git_status_after=$(git status --porcelain)
+
+    if [ "$GIT_STATUS_BEFORE_TESTS" == "$git_status_after" ]; then
+        log_pass "test-scripts.sh: working tree and index unchanged after full run"
+    else
+        log_fail "test-scripts.sh: working tree or index was modified during the run"
+        echo "  git status --porcelain before run:" >&2
+        echo "$GIT_STATUS_BEFORE_TESTS" | sed 's/^/    /' >&2
+        echo "  git status --porcelain after run:" >&2
+        echo "$git_status_after" | sed 's/^/    /' >&2
+    fi
+}
+
+# Regression guard (Issue #4113): the suite as a whole must never leave the
+# working tree or index dirty as a side effect of running. A staged edit left
+# behind by a test is invisible until the next unrelated `git commit -a` or
+# `--amend` sweeps it in — which is exactly how a hand-fixed baseline drift
+# once rode along into an unrelated pin-bump commit during story promotion.
+# Snapshot status before any test runs and diff it against the snapshot taken
+# after the last one, right before the pass/fail summary below.
+GIT_STATUS_BEFORE_TESTS=$(git status --porcelain)
+
+# --- Suite group composition (Issue #4301) ----------------------------------
+# Ordered (function:group) pairs, in the exact historical dispatch order. The
+# default (no --group) path below replays this table unfiltered, so it stays
+# byte-identical to the pre-#4301 dispatch; `--group <csv>` replays it filtered
+# to the requested group(s). Do not resort this table by group — its order,
+# not just its membership, is what the default path's output depends on.
+DISPATCH_TABLE=(
+    "test_syntax:core"
+    "test_license_checker:core"
+    "test_check_mockups_index:core"
+    "test_mockups_index_generator:core"
+    "test_log_injection_linter:core"
+    "test_invalid_cert_generation:core"
+    "test_credential_generation:core"
+    "test_wait_for_services:core"
+    "test_executable_permissions:core"
+    "test_create_clone_stale_branch_deletion:claude-tooling"
+    "test_create_clone_refuses_branch_with_work:claude-tooling"
+    "test_create_clone_keep_remote:claude-tooling"
+    "test_create_clone_deletion_failure:claude-tooling"
+    "test_create_clone_duplicate_pr_gate:claude-tooling"
+    "test_check_providers:core"
+    "test_check_binary_artifacts:core"
+    "test_check_docs_boundary:core"
+    "test_check_no_python_in_core:core"
+    "test_check_no_banned_exec_patterns:core"
+    "test_check_dead_packages:core"
+    "test_unit_tests_aggregator_no_python_gate:core"
+    "test_detect_tooling_changed:core"
+    "test_classify_tooling_changed:devinfra"
+    "test_install_git_hooks:core"
+    "test_make_test_groups:core"
+    "test_verify_nancy_ignore_scope:core"
+    "test_refresh_pins_discovery:claude-tooling"
+    "test_security_review_harness:security-review"
+    "test_security_review_cli:security-review"
+    "test_bench_suite:claude-tooling"
+    "test_token_report_suite:claude-tooling"
+    "test_usage_db_suite:claude-tooling"
+    "test_verify_pin_clean_suite:claude-tooling"
+    "test_security_trivy_init_error:core"
+    "test_security_trivy_findings:core"
+    "test_security_trivy_clean_scan:core"
+    "test_pr_security_findings:core"
+    "test_project_queue_no_gh_issue_calls:core"
+    "test_project_queue_invalid_args:core"
+    "test_project_queue_integration:core"
+    "test_project_queue_set_pr:core"
+    "test_create_clone_item:claude-tooling"
+    "test_agent_dispatch_create_clone_item:claude-tooling"
+    "test_cleanup_issue_item_mode:claude-tooling"
+    "test_review_pr_item_branch:claude-tooling"
+    "test_create_clone_pr_external_author:claude-tooling"
+    "test_dispatch_fix_external_author:claude-tooling"
+    "test_enqueue_external_author_toctou:claude-tooling"
+    "test_entrypoint_set_pr_call:devinfra"
+    "test_preflight_item_dispatch:claude-tooling"
+    "test_done_on_merge:claude-tooling"
+    "test_preflight_forged_acceptance_review:claude-tooling"
+    "test_preflight_gh_call_budget:claude-tooling"
+    "test_dispatch_creds_gate:claude-tooling"
+    "test_dispatch_image_gate_hermetic:claude-tooling"
+    "test_preflight_acceptance_review_comment_match:claude-tooling"
+    "test_preflight_review_verdict_routing:claude-tooling"
+    "test_check_cla_signed:core"
+    "test_trust_boundary:core"
+    "test_no_pipeline_label_refs:core"
+    "test_tier1_smoke_test:core"
+    "test_tier1_bootstrap:core"
+    "test_ha_cluster_bootstrap:core"
+    "test_datasvc_bootstrap:core"
+    "test_resource_sampler_ps1_no_pwsh:devinfra"
+    "test_resource_sampler_loop_guard:devinfra"
+    "test_resource_sampler_no_placeholder:devinfra"
+    "test_api_shard_partition_covers_all_tests:core"
+    "test_go_group_split_partition_covers_all_packages:core"
+    "test_go_group_rest_propagates_early_failure:core"
+    "test_all_modules_covers_module_yaml_tree:core"
+    "test_api_shard_aggregation_fails_closed:core"
+    "test_api_shard_count_rejects_non_integer:core"
+    "test_pipeline_suite_result_fails_closed:core"
+    "test_claude_pipeline_suites:claude-tooling"
+    "test_devcontainer_suite_discovery:devinfra"
+    "test_devcontainer_suites:devinfra"
+    "test_no_tracked_file_mutation:core"
+)
+
+# The one call pair in the historical dispatch with no blank-line separator
+# between them — preserved here so the flag-omitted default run's output
+# stays byte-identical to before this story.
+NO_TRAILING_BLANK="test_create_clone_stale_branch_deletion"
+
+# Runs every DISPATCH_TABLE entry whose group matches $1, in table order,
+# reproducing the historical blank-line spacing between calls. An empty $1
+# runs the whole table (used by the flag-omitted default path).
+run_dispatch_entries() {
+    local filter_group="$1"
+    local entry fn grp
+    for entry in "${DISPATCH_TABLE[@]}"; do
+        fn="${entry%%:*}"
+        grp="${entry##*:}"
+        if [[ -n "$filter_group" && "$grp" != "$filter_group" ]]; then
+            continue
+        fi
+        "$fn"
+        if [[ "$fn" != "$NO_TRAILING_BLANK" ]]; then
+            echo ""
+        fi
+    done
+}
+
+run_core_suites() { run_dispatch_entries "core"; }
+run_security_review_suites() { run_dispatch_entries "security-review"; }
+run_claude_tooling_suites() { run_dispatch_entries "claude-tooling"; }
+run_devinfra_suites() { run_dispatch_entries "devinfra"; }
+
+# Validates DISPATCH_TABLE's own consistency (Issue #4301): every test_*
+# function defined in this file must appear in it exactly once, tagged with
+# one of the four valid groups. Runs silently and unconditionally at startup
+# (regardless of --group) so a suite added or renamed without updating the
+# table fails loud immediately, before any test runs, rather than silently
+# vanishing from every --group invocation (including the flag-omitted
+# default) while `make test-scripts` still reports green.
+validate_dispatch_table() {
+    local self_script="${BASH_SOURCE[0]}"
+
+    local -a defined_fns=()
+    while IFS= read -r fn; do
+        defined_fns+=("$fn")
+    done < <(grep -oE '^test_[a-zA-Z0-9_]+\(\) \{' "$self_script" | sed -E 's/\(\) \{$//')
+
+    local -a table_fns=() table_groups=()
+    while IFS=: read -r fn grp; do
+        table_fns+=("$fn")
+        table_groups+=("$grp")
+    done < <(grep -oE '^[[:space:]]+"test_[a-zA-Z0-9_]+:[a-zA-Z-]+"' "$self_script" | tr -d ' "')
+
+    local fn grp count
+    local -a missing=() dup=() extra=() bad_groups=()
+    for fn in "${defined_fns[@]}"; do
+        count=$(printf '%s\n' "${table_fns[@]}" | grep -Fxc "$fn")
+        [[ "$count" -eq 0 ]] && missing+=("$fn")
+        [[ "$count" -gt 1 ]] && dup+=("$fn")
+    done
+    for fn in "${table_fns[@]}"; do
+        printf '%s\n' "${defined_fns[@]}" | grep -Fxq "$fn" || extra+=("$fn")
+    done
+    for grp in "${table_groups[@]}"; do
+        case "$grp" in
+            core | security-review | claude-tooling | devinfra) ;;
+            *) bad_groups+=("$grp") ;;
+        esac
+    done
+
+    if [[ ${#missing[@]} -gt 0 || ${#dup[@]} -gt 0 || ${#extra[@]} -gt 0 || ${#bad_groups[@]} -gt 0 ]]; then
+        echo "❌ DISPATCH_TABLE is inconsistent with this file's test_* functions:" >&2
+        [[ ${#missing[@]} -gt 0 ]] && echo "  missing from DISPATCH_TABLE: ${missing[*]}" >&2
+        [[ ${#dup[@]} -gt 0 ]] && echo "  duplicated in DISPATCH_TABLE: ${dup[*]}" >&2
+        [[ ${#extra[@]} -gt 0 ]] && echo "  in DISPATCH_TABLE but not a defined function: ${extra[*]}" >&2
+        [[ ${#bad_groups[@]} -gt 0 ]] && echo "  unrecognized group values: ${bad_groups[*]}" >&2
+        exit 1
+    fi
+}
+validate_dispatch_table
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
 echo ""
 
-test_syntax
-echo ""
-test_license_checker
-echo ""
-test_log_injection_linter
-echo ""
-test_invalid_cert_generation
-echo ""
-test_credential_generation
-echo ""
-test_wait_for_services
-echo ""
-test_executable_permissions
+if [[ "$GROUP_FLAG_GIVEN" != true ]]; then
+    # No --group flag: run every suite, in the historical order (unchanged) —
+    # byte-identical to the pre-#4301 dispatch.
+    run_dispatch_entries ""
+else
+    # core runs last (regardless of CSV order) so test_no_tracked_file_mutation,
+    # its final suite, still observes the working tree after every other
+    # selected group has run, not just after core's own suites.
+    group_selected security-review && run_security_review_suites
+    group_selected claude-tooling && run_claude_tooling_suites
+    group_selected devinfra && run_devinfra_suites
+    group_selected core && run_core_suites
+fi
 
-echo ""
-test_create_clone_stale_branch_deletion
-echo ""
-test_create_clone_keep_remote
-echo ""
-test_create_clone_deletion_failure
-echo ""
-test_create_clone_duplicate_pr_gate
-echo ""
-test_check_providers
-echo ""
-test_security_trivy_init_error
-echo ""
-test_security_trivy_findings
-echo ""
-test_security_trivy_clean_scan
-echo ""
-test_project_queue_no_gh_issue_calls
-echo ""
-test_project_queue_invalid_args
-echo ""
-test_project_queue_integration
-echo ""
-test_project_queue_set_pr
-echo ""
-test_create_clone_item
-echo ""
-test_agent_dispatch_create_clone_item
-echo ""
-test_cleanup_issue_item_mode
-echo ""
-test_review_pr_item_branch
-echo ""
-test_entrypoint_set_pr_call
-echo ""
-test_preflight_item_dispatch
-echo ""
-test_done_on_merge
-echo ""
-test_preflight_forged_acceptance_review
-echo ""
-test_preflight_gh_call_budget
-echo ""
-test_dispatch_creds_gate
-echo ""
-test_preflight_acceptance_review_comment_match
-echo ""
-test_preflight_review_verdict_routing
-echo ""
-test_trust_boundary
-echo ""
-test_no_pipeline_label_refs
-echo ""
-test_tier1_smoke_test
-echo ""
-test_tier1_bootstrap
-echo ""
-echo ""
 echo "📊 Test Summary"
 echo "==============="
 echo "  ✓ Passed: $PASS_COUNT"

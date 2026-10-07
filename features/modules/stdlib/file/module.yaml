@@ -1,0 +1,43 @@
+name: file
+version: 0.2.0
+description: >
+  Manages file, directory, and symlink resources on the system.
+  Supports reading, writing, and validating file contents (type: file),
+  creating and managing directories with ownership and permissions
+  (type: directory). Symlink management (type: symlink) is planned for a
+  future story and returns ErrSymlinkNotSupported in this version.
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local resource management on steward systems
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "128MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: file  # authority over file:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
+
+# observe_when: omitted — file domain is content-bearing and unbounded; declared
+# resources live in config + drift only, never enumerated into DNA (ADR-024 §3).
+
+security:
+  requires_root: false
+  capabilities: []
+  ports: []
+
+documentation:
+  api: "docs/modules/file.md"
+  examples: "docs/modules/file.md"

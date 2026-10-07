@@ -6,11 +6,16 @@ package config
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -26,6 +31,38 @@ type configSourceRouter interface {
 	cfgconfig.ConfigStore
 	// SnapshotSources resolves the config source for every tenant in tenantPath atomically.
 	SnapshotSources(ctx context.Context, tenantPath []string) (map[string]*ConfigSourceInfo, error)
+}
+
+// clusterMembership is the minimal interface InheritanceResolver requires to look up
+// which clusters a steward belongs to. Defined locally (same pattern as configSourceRouter)
+// to avoid importing features/controller/clusterregistry into pkg/config, which would
+// create a circular dependency. The concrete *clusterregistry.Registry in
+// features/controller/clusterregistry satisfies this interface by duck-typing.
+type clusterMembership interface {
+	// MemberClusters returns the sorted cluster names that stewardID belongs to.
+	// Returns nil when the steward has no cluster membership.
+	MemberClusters(stewardID string) []string
+}
+
+// RoleFragment pairs a role's name with its StewardConfig fragment for merge ordering.
+// Returned by roleConfigProvider.MatchingRoleFragments, sorted alphabetically by Name
+// so that multiple matching roles produce a deterministic merge order.
+type RoleFragment struct {
+	Name   string
+	Config stewardconfig.StewardConfig
+}
+
+// roleConfigProvider is the minimal interface InheritanceResolver requires to fetch
+// role config fragments that match a steward's DNA + tags. Defined locally (same
+// pattern as clusterMembership) to avoid importing features/controller/fleet into
+// pkg/config, which would create a circular dependency. The concrete
+// *roleConfigAdapter in features/controller/service satisfies this by duck-typing.
+type roleConfigProvider interface {
+	// MatchingRoleFragments returns the role config fragments whose selectors match
+	// stewardID, sorted alphabetically by role name. Returns nil, nil when no roles
+	// match. A non-nil error is non-fatal to the caller — the resolver logs and
+	// skips the role layer entirely rather than failing resolution.
+	MatchingRoleFragments(ctx context.Context, stewardID string) ([]RoleFragment, error)
 }
 
 // cfgStoreAsRouter wraps a plain ConfigStore to satisfy configSourceRouter.
@@ -48,6 +85,44 @@ type InheritanceResolver struct {
 	configStore       configSourceRouter
 	clientTenantStore business.ClientTenantStore
 	tenantStore       business.TenantStore
+	clusterRegistry   clusterMembership  // optional; nil means no cluster-policies cascade
+	roleProvider      roleConfigProvider // optional; nil means no role-policies cascade
+	logger            logging.Logger     // never nil after construction; see log()
+	auditManager      *audit.Manager     // optional; nil means posture-downgrade refusals are logged but not audited
+}
+
+// log returns the resolver's logger, defaulting to a NoopLogger when the resolver
+// was constructed without one (e.g. a zero-value struct in a test). This guarantees
+// the cluster cascade can always emit a warning without a nil-pointer panic.
+func (ir *InheritanceResolver) log() logging.Logger {
+	if ir.logger == nil {
+		return logging.NewNoopLogger()
+	}
+	return ir.logger
+}
+
+// WithLogger returns the resolver with logger installed as its warning/error sink.
+// Passing nil restores the default (a real stdout logger). Callers use this to route
+// inheritance diagnostics (e.g. corrupt cluster-policies documents) into their own
+// logging pipeline instead of the process default.
+func (ir *InheritanceResolver) WithLogger(logger logging.Logger) *InheritanceResolver {
+	if logger == nil {
+		logger = logging.NewLogger("info")
+	}
+	ir.logger = logger
+	return ir
+}
+
+// WithAuditManager installs m as the sink for security-posture-downgrade audit
+// events (Issue #4324): a tenant-hierarchy level that attempts to weaken
+// module_trust.mode or relax script_signing relative to its ancestors. Passing
+// nil disables audit recording — the refusal is still enforced and still
+// logged via WithLogger's sink, only the durable audit trail is skipped. Audit
+// recording is optional because InheritanceResolver runs in contexts (e.g. a
+// steward-side or test caller) that have no durable audit store to write to.
+func (ir *InheritanceResolver) WithAuditManager(m *audit.Manager) *InheritanceResolver {
+	ir.auditManager = m
+	return ir
 }
 
 // NewInheritanceResolver creates an InheritanceResolver backed by a ConfigSourceRouter.
@@ -58,6 +133,7 @@ func NewInheritanceResolver(configStore configSourceRouter, clientTenantStore bu
 		configStore:       configStore,
 		clientTenantStore: clientTenantStore,
 		tenantStore:       tenantStore,
+		logger:            logging.NewLogger("info"),
 	}
 }
 
@@ -70,6 +146,36 @@ func NewInheritanceResolverWithStorageManager(storageManager *interfaces.Storage
 		configStore:       &cfgStoreAsRouter{ConfigStore: storageManager.GetConfigStore()},
 		clientTenantStore: storageManager.GetClientTenantStore(),
 		tenantStore:       storageManager.GetTenantStore(),
+		logger:            logging.NewLogger("info"),
+	}
+}
+
+// NewInheritanceResolverWithClusters creates an InheritanceResolver with a cluster
+// membership provider wired in. When registry is non-nil, ResolveConfiguration applies
+// cluster-policies configs after the tenant hierarchy and before device-level config.
+// Pass nil for registry to get byte-identical behavior to NewInheritanceResolver.
+func NewInheritanceResolverWithClusters(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership) *InheritanceResolver {
+	return &InheritanceResolver{
+		configStore:       configStore,
+		clientTenantStore: clientTenantStore,
+		tenantStore:       tenantStore,
+		clusterRegistry:   registry,
+		logger:            logging.NewLogger("info"),
+	}
+}
+
+// NewInheritanceResolverWithRoles creates an InheritanceResolver with both a cluster
+// membership provider and a role config provider wired in. Pass nil for either to
+// disable that cascade layer. Role fragments are applied after cluster-policies and
+// before device-level config (precedence order: cluster < role < device).
+func NewInheritanceResolverWithRoles(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership, roles roleConfigProvider) *InheritanceResolver {
+	return &InheritanceResolver{
+		configStore:       configStore,
+		clientTenantStore: clientTenantStore,
+		tenantStore:       tenantStore,
+		clusterRegistry:   registry,
+		roleProvider:      roles,
+		logger:            logging.NewLogger("info"),
 	}
 }
 
@@ -107,6 +213,10 @@ const (
 // hierarchy uses the same generation of source routing decisions — preventing a
 // mid-cascade source redirect from causing partial data from two different stores.
 func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantID, stewardID string) (*EffectiveConfiguration, error) {
+	if err := ir.authorizeTenant(ctx, tenantID); err != nil {
+		return nil, err
+	}
+
 	// Get tenant hierarchy path
 	tenantPath, err := ir.getTenantPath(ctx, tenantID)
 	if err != nil {
@@ -136,6 +246,55 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 		}
 	}
 
+	// Apply cluster-policies after tenant hierarchy and before device config.
+	// Cluster membership is a device-level concept: the config key uses tenantID
+	// (the device's own tenant), not any ancestor tenantID from the loop above.
+	// A registry hiccup must not fail resolution — log and treat as no membership.
+	if ir.clusterRegistry != nil {
+		clusterNames := ir.clusterRegistry.MemberClusters(stewardID)
+		for _, clusterName := range clusterNames {
+			if err := ir.applyClusterConfiguration(ctx, effective, tenantID, clusterName); err != nil {
+				// Non-fatal: parse failure for one cluster must not block others.
+				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
+				// so an error here signals a corrupt document that must be surfaced, not swallowed.
+				stewardID = strings.ReplaceAll(stewardID, "\n", "_")
+				stewardID = strings.ReplaceAll(stewardID, "\r", "_")
+				tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+				tenantID = strings.ReplaceAll(tenantID, "\r", "_")
+				clusterName = strings.ReplaceAll(clusterName, "\n", "_")
+				clusterName = strings.ReplaceAll(clusterName, "\r", "_")
+				ir.log().WarnCtx(ctx, "skipping cluster-policies config for cluster; treating as no membership",
+					"steward_id", stewardID,
+					"tenant_id", tenantID,
+					"cluster", clusterName,
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+	}
+
+	// Apply role-policies after cluster-policies and before device config.
+	// Each role whose selector matches this steward contributes a config fragment.
+	// Fragments are applied in alphabetical role-name order so multiple matching
+	// roles produce a deterministic merge (later name overrides earlier for the same
+	// resource). A provider hiccup must not fail resolution — log and treat as no roles.
+	if ir.roleProvider != nil {
+		fragments, err := ir.roleProvider.MatchingRoleFragments(ctx, stewardID)
+		if err != nil {
+			stewardID = strings.ReplaceAll(stewardID, "\n", "_")
+			stewardID = strings.ReplaceAll(stewardID, "\r", "_")
+			tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+			tenantID = strings.ReplaceAll(tenantID, "\r", "_")
+			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
+				"steward_id", stewardID,
+				"tenant_id", tenantID,
+				"error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			for _, frag := range fragments {
+				ir.applyRoleFragment(ctx, effective, tenantID, frag)
+			}
+		}
+	}
+
 	// Apply device-specific configuration last (highest priority)
 	if err := ir.applyDeviceConfiguration(ctx, effective, tenantID, stewardID); err != nil {
 		return nil, fmt.Errorf("failed to apply device configuration: %w", err)
@@ -147,6 +306,35 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 // getTenantPath returns the tenant hierarchy path from root to the specified tenant
 func (ir *InheritanceResolver) getTenantPath(ctx context.Context, tenantID string) ([]string, error) {
 	return ir.tenantStore.GetTenantPath(ctx, tenantID)
+}
+
+// authorizeTenant answers "may this caller resolve configuration for tenantID"
+// (Issue #4340). Configuration inheritance walks only tenantID's own ancestor
+// chain (getTenantPath), so nothing here ever reads a sibling's data by
+// construction — but without this check, any caller could still pass an
+// arbitrary tenantID (a sibling, or an ancestor outside its own subtree) and
+// have this resolver walk and return that tenant's effective configuration.
+//
+// This check only fires when ctx carries an explicit ctxkeys.TenantScope — set
+// by the HTTP API's authentication middleware. Internal/data-plane callers
+// (e.g. the steward gRPC sync path) do not set it and perform their own
+// tenant-containment check upstream against a server-resolved tenant, so an
+// absent scope here is not fail-open for those paths — it is simply out of
+// this check's jurisdiction. A present tenant scope is fail-closed: it must
+// equal or be an ancestor of tenantID's subtree. Root scope always allows.
+func (ir *InheritanceResolver) authorizeTenant(ctx context.Context, tenantID string) error {
+	scope, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !ok || scope.IsUnset() {
+		return nil
+	}
+	if scope.IsRoot() {
+		return nil
+	}
+	if scope.IsTenant() && scope.Path() != "" &&
+		(tenantID == scope.Path() || strings.HasPrefix(tenantID, scope.Path()+"/")) {
+		return nil
+	}
+	return fmt.Errorf("tenant %q is outside the caller's authorized scope", tenantID)
 }
 
 // applyConfigurationLevel applies configuration from a specific hierarchy level.
@@ -203,9 +391,57 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	}
 
 	// Apply configuration using declarative merging (named resources replace entirely)
-	ir.applyConfigurationWithSource(effective, &levelConfig, inheritSrc)
+	ir.applyConfigurationWithSource(ctx, effective, &levelConfig, inheritSrc)
 
 	return nil
+}
+
+// applyClusterConfiguration looks up cluster-policies/<clusterName> for the given tenant
+// and merges it into effective. Missing cluster configs are non-fatal (same as missing
+// tenant-level configs in applyConfigurationLevel). The config key uses the device's own
+// tenantID so that cluster membership is scoped to the device's tenant, not any ancestor.
+func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, effective *EffectiveConfiguration, tenantID, clusterName string) error {
+	configKey := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "cluster-policies",
+		Name:      clusterName,
+	}
+
+	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
+	if err != nil {
+		// No cluster-policies document for this cluster is non-fatal.
+		return nil
+	}
+
+	var clusterConfig stewardconfig.StewardConfig
+	if err := yaml.Unmarshal(configEntry.Data, &clusterConfig); err != nil {
+		return fmt.Errorf("failed to parse cluster configuration for %q: %w", clusterName, err)
+	}
+
+	inheritSrc := &InheritanceSource{
+		Level:      int(LevelGroup) + 1, // between Group(2) and Device(3) in merge order
+		TenantID:   tenantID,
+		ConfigName: clusterName,
+		Version:    configEntry.Version,
+		UpdatedAt:  configEntry.UpdatedAt,
+		Source:     fmt.Sprintf("Cluster (cluster-policies/%s)", clusterName),
+	}
+
+	ir.applyConfigurationWithSource(ctx, effective, &clusterConfig, inheritSrc)
+	return nil
+}
+
+// applyRoleFragment merges a single role config fragment into effective. The
+// InheritanceSource level (LevelGroup+2) places role fragments between
+// cluster-policies (LevelGroup+1) and device-level (LevelDevice) in source metadata.
+func (ir *InheritanceResolver) applyRoleFragment(ctx context.Context, effective *EffectiveConfiguration, tenantID string, frag RoleFragment) {
+	inheritSrc := &InheritanceSource{
+		Level:      int(LevelGroup) + 2, // between cluster-policies and device in merge order
+		TenantID:   tenantID,
+		ConfigName: frag.Name,
+		Source:     fmt.Sprintf("Role (role-policies/%s)", frag.Name),
+	}
+	ir.applyConfigurationWithSource(ctx, effective, &frag.Config, inheritSrc)
 }
 
 // applyDeviceConfiguration applies device-specific configuration
@@ -239,13 +475,13 @@ func (ir *InheritanceResolver) applyDeviceConfiguration(ctx context.Context, eff
 	}
 
 	// Apply device configuration (highest priority)
-	ir.applyConfigurationWithSource(effective, &deviceConfig, source)
+	ir.applyConfigurationWithSource(ctx, effective, &deviceConfig, source)
 
 	return nil
 }
 
 // applyConfigurationWithSource applies configuration and tracks inheritance sources
-func (ir *InheritanceResolver) applyConfigurationWithSource(effective *EffectiveConfiguration, config *stewardconfig.StewardConfig, source *InheritanceSource) {
+func (ir *InheritanceResolver) applyConfigurationWithSource(ctx context.Context, effective *EffectiveConfiguration, config *stewardconfig.StewardConfig, source *InheritanceSource) {
 	// Initialize effective config if needed
 	if effective.Config == nil {
 		effective.Config = &stewardconfig.StewardConfig{
@@ -254,32 +490,40 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		}
 	}
 
-	// Apply resources using declarative merging (named resources replace entirely)
-	resourceMap := make(map[string]stewardconfig.ResourceConfig)
-	for _, resource := range effective.Config.Resources {
-		resourceMap[resource.Name] = resource
+	// Apply resources using declarative merging (named resources replace
+	// entirely), PRESERVING declaration order. Inter-resource ordering is
+	// load-bearing for dependency chains: a vSwitch must be created before the
+	// VM that attaches to it, and on teardown the VM must be deleted before its
+	// vSwitch (Hyper-V refuses to remove a switch still in use by a running VM).
+	// The steward executor applies resources in slice order, so rebuilding the
+	// slice from a Go map here (whose iteration order is randomised) made those
+	// chains converge in a non-deterministic order and fail intermittently —
+	// e.g. a delete cycle attempting Remove-VMSwitch before the VM was removed.
+	// A child config that overrides a base resource keeps the base resource's
+	// position; genuinely new resources append in declaration order.
+	indexByName := make(map[string]int, len(effective.Config.Resources)+len(config.Resources))
+	merged := make([]stewardconfig.ResourceConfig, 0, len(effective.Config.Resources)+len(config.Resources))
+	upsert := func(resource stewardconfig.ResourceConfig) {
+		if i, ok := indexByName[resource.Name]; ok {
+			merged[i] = resource // override in place, preserving position
+			return
+		}
+		indexByName[resource.Name] = len(merged)
+		merged = append(merged, resource)
 	}
-
+	for _, resource := range effective.Config.Resources {
+		upsert(resource)
+	}
 	for _, resource := range config.Resources {
-		resourceMap[resource.Name] = resource
+		upsert(resource)
 		effective.Sources[fmt.Sprintf("resource.%s", resource.Name)] = source
 	}
-
-	// Convert map back to slice
-	effective.Config.Resources = make([]stewardconfig.ResourceConfig, 0, len(resourceMap))
-	for _, resource := range resourceMap {
-		effective.Config.Resources = append(effective.Config.Resources, resource)
-	}
+	effective.Config.Resources = merged
 
 	// Apply steward settings
 	if config.Steward.ID != "" {
 		effective.Config.Steward.ID = config.Steward.ID
 		effective.Sources["steward.id"] = source
-	}
-
-	if config.Steward.Mode != "" {
-		effective.Config.Steward.Mode = config.Steward.Mode
-		effective.Sources["steward.mode"] = source
 	}
 
 	if len(config.Steward.ModulePaths) > 0 {
@@ -288,7 +532,7 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 	}
 
 	// ConvergeInterval and DriftMode are scalar steward settings that follow
-	// the same later-overrides-earlier rule as ID/Mode/ModulePaths. Without
+	// the same later-overrides-earlier rule as ID/ModulePaths. Without
 	// this, a cascade-enabled tenant loses the configured interval and the
 	// steward falls back to its 30-minute default — breaking drift-correction
 	// SLAs inside any tenant hierarchy.
@@ -302,15 +546,26 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.drift_mode"] = source
 	}
 
+	// Upgrade settings — carry desired_version and allow_downgrade through the
+	// tenant hierarchy so MSP-level upgrade policy propagates to child stewards.
+	if config.Steward.Upgrade.DesiredVersion != "" {
+		effective.Config.Steward.Upgrade.DesiredVersion = config.Steward.Upgrade.DesiredVersion
+		effective.Sources["steward.upgrade.desired_version"] = source
+	}
+	// allow_downgrade uses "more-permissive-wins" semantics (a child cannot
+	// revoke a parent-granted permission within a single inheritance pass).
+	// This matches the existing bool-inheritance pattern in this function and
+	// is intentional: MSPs opt tenants into downgrade by setting it true;
+	// steward-level override is not supported for this field.
+	if config.Steward.Upgrade.AllowDowngrade {
+		effective.Config.Steward.Upgrade.AllowDowngrade = true
+		effective.Sources["steward.upgrade.allow_downgrade"] = source
+	}
+
 	// Apply logging settings
 	if config.Steward.Logging.Level != "" {
 		effective.Config.Steward.Logging.Level = config.Steward.Logging.Level
 		effective.Sources["steward.logging.level"] = source
-	}
-
-	if config.Steward.Logging.Format != "" {
-		effective.Config.Steward.Logging.Format = config.Steward.Logging.Format
-		effective.Sources["steward.logging.format"] = source
 	}
 
 	// Apply error handling settings
@@ -329,6 +584,56 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.error_handling.configuration_error"] = source
 	}
 
+	if config.Steward.TenantDefaultTimezone != "" {
+		effective.Config.Steward.TenantDefaultTimezone = config.Steward.TenantDefaultTimezone
+		effective.Sources["steward.tenant_default_timezone"] = source
+	}
+
+	if config.Steward.RebootWindow != nil {
+		effective.Config.Steward.RebootWindow = config.Steward.RebootWindow
+		effective.Sources["steward.reboot_window"] = source
+	}
+
+	// ScriptSigning and ModuleTrust are steward security posture (Issue #4324,
+	// CLAUDE.md threat model): a descendant tenant may tighten either but never
+	// loosen it. MergeScriptSigningConfig enforces the script_signing
+	// tightening-only rule; module_trust enforces the same for Mode, with an
+	// explicit authorize_downgrade escape hatch (mirroring the more-permissive-
+	// wins precedent of Upgrade.AllowDowngrade above) for an intentional
+	// relaxation. A refused transition keeps the already-accumulated (stronger)
+	// value rather than failing the whole cascade, so the rest of this level's
+	// config still applies — the config push itself is refused, not the entire
+	// resolution.
+	if scriptSigningDeclared(config.Steward.ScriptSigning) {
+		merged, err := stewardconfig.MergeScriptSigningConfig(effective.Config.Steward.ScriptSigning, config.Steward.ScriptSigning)
+		if err != nil {
+			ir.refusePostureDowngrade(ctx, config, source, "script_signing", err)
+		} else {
+			effective.Config.Steward.ScriptSigning = merged
+			effective.Sources["steward.script_signing"] = source
+		}
+	}
+
+	if config.Steward.ModuleTrust.Mode != "" {
+		prevMode := effective.Config.Steward.ModuleTrust.Mode
+		isDowngrade := prevMode != "" && stewardconfig.ModuleTrustModeLevel(config.Steward.ModuleTrust.Mode) < stewardconfig.ModuleTrustModeLevel(prevMode)
+		if isDowngrade && !config.Steward.ModuleTrust.AuthorizeDowngrade {
+			err := fmt.Errorf("module_trust mode downgrade from %q to %q refused: set authorize_downgrade to permit", prevMode, config.Steward.ModuleTrust.Mode)
+			ir.refusePostureDowngrade(ctx, config, source, "module_trust", err)
+		} else {
+			if isDowngrade {
+				ir.recordPostureDowngradeAuthorized(ctx, config, source, "module_trust")
+			}
+			effective.Config.Steward.ModuleTrust.Mode = config.Steward.ModuleTrust.Mode
+			effective.Sources["steward.module_trust.mode"] = source
+		}
+	}
+
+	if len(config.Steward.ModuleTrust.AdditionalPublishers) > 0 {
+		effective.Config.Steward.ModuleTrust.AdditionalPublishers = config.Steward.ModuleTrust.AdditionalPublishers
+		effective.Sources["steward.module_trust.additional_publishers"] = source
+	}
+
 	// Apply module mappings
 	if effective.Config.Modules == nil {
 		effective.Config.Modules = make(map[string]string)
@@ -337,6 +642,76 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 	for moduleName, modulePath := range config.Modules {
 		effective.Config.Modules[moduleName] = modulePath
 		effective.Sources[fmt.Sprintf("modules.%s", moduleName)] = source
+	}
+}
+
+// scriptSigningDeclared reports whether a level's config actually sets any
+// script_signing field, so applyConfigurationWithSource does not attribute an
+// inheritance source (or re-run the merge guard) for a level that never
+// mentioned script_signing at all. TrustedKeys makes the type non-comparable
+// with ==, hence the explicit field check.
+func scriptSigningDeclared(c stewardconfig.ScriptSigningConfig) bool {
+	return c.Policy != "" || c.TrustMode != "" || len(c.TrustedKeys) > 0 || c.AllowPublicCA || c.RequireSignedAdhoc
+}
+
+// cfgDeclaredResourceID returns the resource id declared by the configuration
+// itself (steward:<cfg.Steward.ID>), falling back to the inheritance source's
+// config name when the level doesn't declare a steward ID (e.g. an MSP- or
+// client-wide policy fragment). This is deliberately never a live/runtime
+// value such as a reported hostname — see Issue #4324 Implementation Notes.
+func cfgDeclaredResourceID(cfg *stewardconfig.StewardConfig, source *InheritanceSource) string {
+	if cfg.Steward.ID != "" {
+		return "steward:" + cfg.Steward.ID
+	}
+	return "steward:" + source.ConfigName
+}
+
+// refusePostureDowngrade logs and audits a security-posture transition that
+// applyConfigurationWithSource refused because it would weaken module_trust or
+// script_signing without explicit authorization (Issue #4324).
+func (ir *InheritanceResolver) refusePostureDowngrade(ctx context.Context, cfg *stewardconfig.StewardConfig, source *InheritanceSource, setting string, cause error) {
+	resourceID := cfgDeclaredResourceID(cfg, source)
+	// resourceID and source.Source are config-store-derived (the tenant-supplied
+	// steward ID / config name), and cause wraps them back out, so all three are
+	// sanitized before they reach the log line — CLAUDE.md requires
+	// SanitizeLogValue for error values unconditionally.
+	ir.log().WarnCtx(ctx, "security posture downgrade refused",
+		"setting", setting,
+		"resource_id", logging.SanitizeLogValue(resourceID),
+		"source", logging.SanitizeLogValue(source.Source),
+		"error", logging.SanitizeLogValue(cause.Error()))
+	ir.recordPostureAuditEvent(ctx, resourceID, setting, source, business.AuditResultDenied, cause.Error())
+}
+
+// recordPostureDowngradeAuthorized audits a security-posture downgrade that was
+// permitted because the level explicitly set authorize_downgrade (Issue #4324).
+func (ir *InheritanceResolver) recordPostureDowngradeAuthorized(ctx context.Context, cfg *stewardconfig.StewardConfig, source *InheritanceSource, setting string) {
+	resourceID := cfgDeclaredResourceID(cfg, source)
+	ir.recordPostureAuditEvent(ctx, resourceID, setting, source, business.AuditResultSuccess,
+		"downgrade explicitly authorized via authorize_downgrade")
+}
+
+// recordPostureAuditEvent writes a security_event audit entry via the optional
+// auditManager (nil when the resolver was constructed without WithAuditManager,
+// e.g. a steward-side or test caller with no durable audit store — see
+// WithAuditManager's doc comment).
+func (ir *InheritanceResolver) recordPostureAuditEvent(ctx context.Context, resourceID, setting string, source *InheritanceSource, result business.AuditResult, message string) {
+	if ir.auditManager == nil {
+		return
+	}
+	builder := audit.NewEventBuilder().
+		Tenant(source.TenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action("steward_config.security_posture_downgrade").
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("steward_config", resourceID, resourceID).
+		Result(result).
+		Detail("setting", setting).
+		Detail("source", source.Source).
+		Detail("message", message)
+	if err := ir.auditManager.RecordEvent(ctx, builder); err != nil {
+		// err carries the tainted resourceID and tenant back out of RecordEvent.
+		ir.log().WarnCtx(ctx, "failed to record security posture audit event", "setting", setting, "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -451,13 +826,32 @@ func (ir *InheritanceResolver) getConfigValue(config *stewardconfig.StewardConfi
 	return nil
 }
 
+// ResolveRebootWindowTimezone resolves the effective timezone for a reboot window
+// using precedence: explicit (cfg.Timezone) → tenantDefault → device ("").
+//
+// "device" as cfg.Timezone or as the return value signals the steward-side consumer
+// (Story 3) to substitute its own host zone. This package has no access to the host's
+// local zone, so the caller is responsible for that final fallback.
+//
+// Return value:
+//   - an explicit IANA name or "device" when cfg carries one
+//   - tenantDefault when cfg has no explicit timezone and tenantDefault is non-empty
+//   - "" when neither source provides a timezone (steward falls back to host zone)
+func ResolveRebootWindowTimezone(cfg *maintenanceschedule.Config, tenantDefault string) string {
+	if cfg != nil && cfg.Timezone != "" {
+		return cfg.Timezone
+	}
+	if tenantDefault != "" {
+		return tenantDefault
+	}
+	return ""
+}
+
 // getPathDescription returns a human-readable description of a configuration path
 func (ir *InheritanceResolver) getPathDescription(path string) string {
 	descriptions := map[string]string{
-		"steward.id":             "Unique identifier for this steward instance",
-		"steward.mode":           "Operation mode (standalone or controller)",
-		"steward.logging.level":  "Logging verbosity level",
-		"steward.logging.format": "Log output format",
+		"steward.id":            "Unique identifier for this steward instance",
+		"steward.logging.level": "Logging verbosity level",
 		"steward.error_handling.module_load_failure": "How to handle module loading errors",
 		"steward.error_handling.resource_failure":    "How to handle resource execution errors",
 		"steward.error_handling.configuration_error": "How to handle configuration validation errors",

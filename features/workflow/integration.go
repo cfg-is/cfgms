@@ -5,7 +5,9 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/factory"
@@ -23,7 +25,7 @@ type Manager struct {
 // NewManager creates a new workflow manager
 func NewManager(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Manager {
 	return &Manager{
-		engine: NewEngine(moduleFactory, logger, nil),
+		engine: NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil),
 		parser: NewParser(),
 		logger: logger,
 		workflowPaths: []string{
@@ -72,25 +74,7 @@ type ExtendedStewardConfig struct {
 
 // LoadWorkflow loads a workflow from a file
 func (m *Manager) LoadWorkflow(workflowFile string) (Workflow, error) {
-	// Try to find the workflow file in search paths
-	var fullPath string
-	var found bool
-
-	if filepath.IsAbs(workflowFile) {
-		fullPath = workflowFile
-		found = true
-	} else {
-		// Search in workflow paths
-		for _, searchPath := range m.workflowPaths {
-			candidate := filepath.Join(searchPath, workflowFile)
-			if fileExists(candidate) {
-				fullPath = candidate
-				found = true
-				break
-			}
-		}
-	}
-
+	fullPath, found := resolveWorkflowFilePath(workflowFile, m.workflowPaths)
 	if !found {
 		return Workflow{}, fmt.Errorf("workflow file not found: %s", workflowFile)
 	}
@@ -99,6 +83,40 @@ func (m *Manager) LoadWorkflow(workflowFile string) (Workflow, error) {
 		"file", fullPath)
 
 	return m.parser.ParseFile(fullPath)
+}
+
+// resolveWorkflowFilePath decides whether workflowFile is already rooted (honored
+// verbatim) or must be searched for under searchPaths. Extracted as a pure function so
+// the platform-rootedness decision is directly unit-testable without a YAML fixture.
+//
+// isRootedPath, not filepath.IsAbs: a WorkflowExecutionConfig.WorkflowFile is a
+// steward-config value that, like the controller's cert_path/data_dir (Issue #3460),
+// can be authored as a POSIX path and parsed on any platform the steward runs on.
+// filepath.IsAbs answers for the running platform only — on Windows a path needs a
+// volume name — so a POSIX-rooted workflowFile would fall through to the search branch,
+// where filepath.Join can produce a path that never exists (silent "not found") or,
+// worse, collide with an unrelated same-named file under a search path.
+func resolveWorkflowFilePath(workflowFile string, searchPaths []string) (fullPath string, found bool) {
+	if isRootedPath(workflowFile) {
+		return workflowFile, true
+	}
+	for _, searchPath := range searchPaths {
+		candidate := filepath.Join(searchPath, workflowFile)
+		if fileExists(candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// isRootedPath reports whether p is already anchored to a filesystem root. Mirrors
+// features/controller/config.IsRootedPath's rationale (Issue #3460) — duplicated rather
+// than imported to avoid a steward-tier package reaching into controller-tier config.
+func isRootedPath(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
 }
 
 // ExecuteWorkflow executes a workflow with given variables
@@ -134,8 +152,8 @@ func (m *Manager) ExecuteWorkflowConfigs(ctx context.Context, workflowConfigs []
 			if loadErr != nil {
 				m.logger.Error("Failed to load workflow from file",
 					"workflow", workflowConfig.Name,
-					"file", workflowConfig.WorkflowFile,
-					"error", loadErr)
+					"file", logging.SanitizeLogValue(workflowConfig.WorkflowFile),
+					"error", logging.SanitizeLogValue(loadErr.Error()))
 				continue
 			}
 
@@ -200,10 +218,6 @@ func (m *Manager) ExecuteResourcesAsWorkflow(ctx context.Context, resources []co
 
 // fileExists checks if a file exists
 func fileExists(filename string) bool {
-	info, err := filepath.Abs(filename)
-	if err != nil {
-		return false
-	}
-	_, err = filepath.Abs(info)
+	_, err := os.Stat(filename)
 	return err == nil
 }

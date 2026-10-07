@@ -15,6 +15,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // --- in-memory IPTrustStore for testing ---
@@ -188,114 +189,36 @@ func normalizeCIDRForTest(cidr string) (string, error) {
 	return ipNet.String(), nil
 }
 
-// --- in-memory TenantStore for testing ---
+// --- real TenantStore for testing ---
 
-type memTenantStore struct {
-	mu      sync.RWMutex
-	tenants []*business.TenantData
-
-	// error injection for testing error paths
-	listErr error
+// newTenantStore returns a real SQLite-backed TenantStore from the shared test
+// storage manager. CFGMS mandates real component testing, so the expiry job
+// enumerates tenants through the production store rather than a hand-written
+// double.
+func newTenantStore(t *testing.T) business.TenantStore {
+	t.Helper()
+	return pkgtesting.SetupTestStorage(t).GetTenantStore()
 }
-
-func (s *memTenantStore) CreateTenant(_ context.Context, t *business.TenantData) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := *t
-	s.tenants = append(s.tenants, &cp)
-	return nil
-}
-
-func (s *memTenantStore) GetTenant(_ context.Context, tenantID string) (*business.TenantData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, t := range s.tenants {
-		if t.ID == tenantID {
-			cp := *t
-			return &cp, nil
-		}
-	}
-	return nil, nil
-}
-
-func (s *memTenantStore) UpdateTenant(_ context.Context, t *business.TenantData) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, existing := range s.tenants {
-		if existing.ID == t.ID {
-			cp := *t
-			s.tenants[i] = &cp
-			return nil
-		}
-	}
-	return nil
-}
-
-func (s *memTenantStore) DeleteTenant(_ context.Context, tenantID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, t := range s.tenants {
-		if t.ID == tenantID {
-			s.tenants = append(s.tenants[:i], s.tenants[i+1:]...)
-			return nil
-		}
-	}
-	return nil
-}
-
-func (s *memTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.listErr != nil {
-		return nil, s.listErr
-	}
-	out := make([]*business.TenantData, len(s.tenants))
-	for i, t := range s.tenants {
-		cp := *t
-		out[i] = &cp
-	}
-	return out, nil
-}
-
-func (s *memTenantStore) GetTenantHierarchy(_ context.Context, _ string) (*business.TenantHierarchy, error) {
-	return nil, nil
-}
-
-func (s *memTenantStore) GetChildTenants(_ context.Context, _ string) ([]*business.TenantData, error) {
-	return nil, nil
-}
-
-func (s *memTenantStore) GetTenantPath(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-
-func (s *memTenantStore) IsTenantAncestor(_ context.Context, _, _ string) (bool, error) {
-	return false, nil
-}
-
-func (s *memTenantStore) Initialize(_ context.Context) error { return nil }
-func (s *memTenantStore) Close() error                       { return nil }
-
-var _ business.TenantStore = (*memTenantStore)(nil)
 
 // --- helpers ---
 
-func seedTenant(ts *memTenantStore, id string) {
-	_ = ts.CreateTenant(context.Background(), &business.TenantData{
+func seedTenant(t *testing.T, ts business.TenantStore, id string) {
+	t.Helper()
+	require.NoError(t, ts.CreateTenant(context.Background(), &business.TenantData{
 		ID:     id,
 		Name:   id,
 		Status: business.TenantStatusActive,
-	})
+	}))
 }
 
 // TestIPTrustExpiry_StaleEntryRevoked verifies that an entry with LastActivity
 // older than the dark window is revoked and an entry with recent activity is not.
 func TestIPTrustExpiry_StaleEntryRevoked(t *testing.T) {
 	store := &memIPTrustStore{}
-	ts := &memTenantStore{}
+	ts := newTenantStore(t)
 	ctx := context.Background()
 
-	seedTenant(ts, "tenant-1")
+	seedTenant(t, ts, "tenant-1")
 
 	now := time.Now()
 	darkWindow := 30 * 24 * time.Hour
@@ -330,10 +253,10 @@ func TestIPTrustExpiry_StaleEntryRevoked(t *testing.T) {
 // zero LastActivity is never auto-revoked by the expiry job.
 func TestIPTrustExpiry_PreSeededNotExpired(t *testing.T) {
 	store := &memIPTrustStore{}
-	ts := &memTenantStore{}
+	ts := newTenantStore(t)
 	ctx := context.Background()
 
-	seedTenant(ts, "tenant-1")
+	seedTenant(t, ts, "tenant-1")
 
 	// Pre-seeded entry: zero LastActivity (operator-owned, never had a steward).
 	require.NoError(t, store.AddTrustedRange(ctx, "tenant-1", "10.0.0.0/8", true))
@@ -358,10 +281,10 @@ func TestIPTrustExpiry_PreSeededNotExpired(t *testing.T) {
 // that is already revoked is not processed again by the expiry job.
 func TestIPTrustExpiry_AlreadyRevokedEntrySkipped(t *testing.T) {
 	store := &memIPTrustStore{}
-	ts := &memTenantStore{}
+	ts := newTenantStore(t)
 	ctx := context.Background()
 
-	seedTenant(ts, "tenant-1")
+	seedTenant(t, ts, "tenant-1")
 
 	// Add an entry that would be stale, then manually revoke it.
 	require.NoError(t, store.AddTrustedRange(ctx, "tenant-1", "10.0.0.0/24", false))
@@ -394,7 +317,13 @@ var errTestRevoke = errString("injected revoke error")
 // ListTenants returns an error rather than panicking or looping.
 func TestIPTrustExpiry_ListTenantsError(t *testing.T) {
 	store := &memIPTrustStore{}
-	ts := &memTenantStore{listErr: errString("injected list tenants error")}
+
+	// Close the real tenant store so every ListTenants call returns a genuine
+	// backend error — no injected failure, no double.
+	ts := newTenantStore(t)
+	require.NoError(t, ts.Close())
+	_, listErr := ts.ListTenants(context.Background(), nil)
+	require.Error(t, listErr, "closed store must report a real ListTenants error")
 
 	shortJob := registration.NewIPTrustExpiryJob(registration.IPTrustExpiryConfig{
 		Store:         store,
@@ -414,9 +343,9 @@ func TestIPTrustExpiry_ListTenantsError(t *testing.T) {
 // next tenant when ListTrustedRanges returns an error.
 func TestIPTrustExpiry_ListRangesError(t *testing.T) {
 	store := &memIPTrustStore{listErr: errString("injected list ranges error")}
-	ts := &memTenantStore{}
+	ts := newTenantStore(t)
 
-	seedTenant(ts, "tenant-1")
+	seedTenant(t, ts, "tenant-1")
 
 	shortJob := registration.NewIPTrustExpiryJob(registration.IPTrustExpiryConfig{
 		Store:         store,

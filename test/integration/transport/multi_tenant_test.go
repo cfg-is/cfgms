@@ -43,16 +43,24 @@ func (s *MultiTenantTestSuite) TestSimultaneousTenants() {
 		{"tenant3", "integration-test"},
 	}
 
-	var wg sync.WaitGroup
-	registrations := make(chan *RegistrationResponse, len(tenants))
+	type registrationResult struct {
+		resp *RegistrationResponse
+		err  error
+	}
 
+	var wg sync.WaitGroup
+	registrations := make(chan registrationResult, len(tenants))
+
+	// Workers must not call a Fatal-family method: the testing package requires
+	// FailNow/Fatal/Fatalf to be called only from the test goroutine. Failures are
+	// carried back over the channel and asserted below.
 	for _, tenant := range tenants {
 		wg.Add(1)
 		go func(tenantID, group string) {
 			defer wg.Done()
-			token := s.helper.CreateToken(s.T(), tenantID, group)
-			resp := s.helper.RegisterSteward(s.T(), token)
-			registrations <- resp
+			token := s.helper.CreateToken(tenantID, group)
+			resp, err := s.helper.RegisterSteward(token)
+			registrations <- registrationResult{resp: resp, err: err}
 		}(tenant.tenantID, tenant.group)
 	}
 
@@ -61,9 +69,10 @@ func (s *MultiTenantTestSuite) TestSimultaneousTenants() {
 
 	stewardIDs := make(map[string]bool)
 	for reg := range registrations {
-		s.NotEmpty(reg.StewardID, "Each tenant registration should produce a steward ID")
-		s.NotEmpty(reg.TransportAddress, "Each steward should receive transport address")
-		stewardIDs[reg.StewardID] = true
+		s.Require().NoError(reg.err, "Each tenant registration should succeed")
+		s.NotEmpty(reg.resp.StewardID, "Each tenant registration should produce a steward ID")
+		s.NotEmpty(reg.resp.TransportAddress, "Each steward should receive transport address")
+		stewardIDs[reg.resp.StewardID] = true
 	}
 
 	s.Equal(len(tenants), len(stewardIDs), "All tenant registrations should produce unique steward IDs")
@@ -77,11 +86,13 @@ func (s *MultiTenantTestSuite) TestConnectionIsolation() {
 	s.T().Log("AC2/AC3: Testing connection isolation via unique steward IDs")
 
 	// Register two stewards
-	token1 := s.helper.CreateToken(s.T(), "tenant1", "integration-test")
-	resp1 := s.helper.RegisterSteward(s.T(), token1)
+	token1 := s.helper.CreateToken("tenant1", "integration-test")
+	resp1, err := s.helper.RegisterSteward(token1)
+	s.Require().NoError(err, "Steward registration should succeed")
 
-	token2 := s.helper.CreateToken(s.T(), "tenant2", "integration-test")
-	resp2 := s.helper.RegisterSteward(s.T(), token2)
+	token2 := s.helper.CreateToken("tenant2", "integration-test")
+	resp2, err := s.helper.RegisterSteward(token2)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	// Each steward has a unique transport address and steward ID
 	// The connection registry uses steward ID as the key, ensuring isolation
@@ -100,12 +111,14 @@ func (s *MultiTenantTestSuite) TestConfigRoutingBoundaries() {
 	s.T().Log("AC4: Testing config routing tenant boundary enforcement")
 
 	// Register stewards in different "tenants" (via different group labels)
-	token1 := s.helper.CreateToken(s.T(), "tenant-a", "integration-test")
-	resp1 := s.helper.RegisterSteward(s.T(), token1)
+	token1 := s.helper.CreateToken("tenant-a", "integration-test")
+	resp1, err := s.helper.RegisterSteward(token1)
+	s.Require().NoError(err, "Steward registration should succeed")
 	s.NotEmpty(resp1.StewardID)
 
-	token2 := s.helper.CreateToken(s.T(), "tenant-b", "integration-test")
-	resp2 := s.helper.RegisterSteward(s.T(), token2)
+	token2 := s.helper.CreateToken("tenant-b", "integration-test")
+	resp2, err := s.helper.RegisterSteward(token2)
+	s.Require().NoError(err, "Steward registration should succeed")
 	s.NotEmpty(resp2.StewardID)
 
 	// Config routing boundaries are enforced by the controller's tenant path matching.
@@ -125,15 +138,22 @@ func (s *MultiTenantTestSuite) TestHeartbeatIsolation() {
 	type registration struct {
 		stewardID string
 		tenant    string
+		err       error
 	}
 
 	results := make(chan registration, numTenants)
 
+	// Workers report errors over the channel instead of calling a Fatal-family
+	// method, which the testing package permits only on the test goroutine.
 	for i := 0; i < numTenants; i++ {
 		go func(idx int) {
 			tenantID := fmt.Sprintf("heartbeat-tenant-%d", idx)
-			token := s.helper.CreateToken(s.T(), tenantID, "integration-test")
-			resp := s.helper.RegisterSteward(s.T(), token)
+			token := s.helper.CreateToken(tenantID, "integration-test")
+			resp, err := s.helper.RegisterSteward(token)
+			if err != nil {
+				results <- registration{tenant: tenantID, err: err}
+				return
+			}
 			results <- registration{stewardID: resp.StewardID, tenant: tenantID}
 		}(i)
 	}
@@ -141,6 +161,7 @@ func (s *MultiTenantTestSuite) TestHeartbeatIsolation() {
 	seen := make(map[string]bool)
 	for i := 0; i < numTenants; i++ {
 		r := <-results
+		s.Require().NoErrorf(r.err, "Registration for tenant %s should succeed", r.tenant)
 		s.NotEmpty(r.stewardID, "Each tenant should have a steward ID")
 		s.False(seen[r.stewardID], "Each steward ID should be unique (isolation via connection registry)")
 		seen[r.stewardID] = true
@@ -157,15 +178,22 @@ func (s *MultiTenantTestSuite) TestCrossTenantsProduceUniqueIDs() {
 	const numConcurrent = 10
 	type result struct {
 		stewardID string
+		err       error
 	}
 
 	results := make(chan result, numConcurrent)
 
+	// Workers report errors over the channel instead of calling a Fatal-family
+	// method, which the testing package permits only on the test goroutine.
 	for i := 0; i < numConcurrent; i++ {
 		go func(idx int) {
 			tenantID := fmt.Sprintf("cross-tenant-%d", idx%3) // 3 different tenants
-			token := s.helper.CreateToken(s.T(), tenantID, fmt.Sprintf("group-%d", idx))
-			resp := s.helper.RegisterSteward(s.T(), token)
+			token := s.helper.CreateToken(tenantID, fmt.Sprintf("group-%d", idx))
+			resp, err := s.helper.RegisterSteward(token)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
 			results <- result{stewardID: resp.StewardID}
 		}(i)
 	}
@@ -173,6 +201,7 @@ func (s *MultiTenantTestSuite) TestCrossTenantsProduceUniqueIDs() {
 	seen := make(map[string]bool)
 	for i := 0; i < numConcurrent; i++ {
 		r := <-results
+		s.Require().NoErrorf(r.err, "Concurrent registration %d should succeed", i)
 		s.NotEmpty(r.stewardID)
 		s.False(seen[r.stewardID], "Steward ID must be globally unique across all tenants")
 		seen[r.stewardID] = true

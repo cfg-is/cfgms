@@ -8,6 +8,12 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+
+	// stewardosquery is imported here following the same pattern as
+	// features/controller/transport importing features/steward/dna: the
+	// controller-side stream handler (HandleGRPC) and the steward-side execution
+	// path (Execute) share one type. Splitting them is tracked as future work.
+	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"google.golang.org/grpc"
 )
@@ -15,33 +21,69 @@ import (
 // compositeTransportServer delegates StewardTransport RPCs to the appropriate
 // handler. Control plane RPCs go to the CP handler; SyncConfig is handled
 // directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
-// by the bulk handler. Future RPCs (TaskStream, Terminal, LogStream) fall
-// through to the Unimplemented base.
+// by the bulk handler; LogStream by the log stream handler; TelemetryStream
+// by the telemetry handler; Terminal by the terminal handler; OsqueryQuery
+// by the osquery handler. Future RPCs fall through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
-	cpHandler     transportpb.StewardTransportServer // Register, Ping, ControlChannel
-	configHandler *controllerTransport.ConfigHandler // SyncConfig (direct handling)
-	dnaHandler    *controllerTransport.DNAHandler    // SyncDNA (direct handling)
-	bulkHandler   *controllerTransport.BulkHandler   // BulkTransfer (direct handling)
-	logger        logging.Logger
+	cpHandler        transportpb.StewardTransportServer    // Register, Ping, ControlChannel
+	configHandler    *controllerTransport.ConfigHandler    // SyncConfig (direct handling)
+	dnaHandler       *controllerTransport.DNAHandler       // SyncDNA (direct handling)
+	bulkHandler      *controllerTransport.BulkHandler      // BulkTransfer (direct handling)
+	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
+	telemetryHandler *controllerTransport.TelemetryHandler // TelemetryStream (direct handling)
+	terminalHandler  *controllerTransport.TerminalHandler  // Terminal (direct handling)
+	osqueryHandler   *stewardosquery.OsqueryHandler        // OsqueryQuery (direct handling)
+	logger           logging.Logger
 }
 
-// newCompositeTransportServer creates a composite handler that delegates RPCs.
+// newCompositeTransportServer creates a composite handler with the always-required
+// CP handler and logger. Wire optional data-plane handlers via SetConfigHandler,
+// SetDNAHandler, SetBulkHandler, and SetLogStreamHandler before serving.
 func newCompositeTransportServer(
 	cpHandler transportpb.StewardTransportServer,
-	dnaHandler *controllerTransport.DNAHandler,
-	bulkHandler *controllerTransport.BulkHandler,
-	configHandler *controllerTransport.ConfigHandler,
 	logger logging.Logger,
 ) *compositeTransportServer {
 	return &compositeTransportServer{
-		cpHandler:     cpHandler,
-		configHandler: configHandler,
-		dnaHandler:    dnaHandler,
-		bulkHandler:   bulkHandler,
-		logger:        logger,
+		cpHandler: cpHandler,
+		logger:    logger,
 	}
+}
+
+// SetConfigHandler sets the SyncConfig handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetConfigHandler(h *controllerTransport.ConfigHandler) {
+	c.configHandler = h
+}
+
+// SetDNAHandler sets the SyncDNA handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetDNAHandler(h *controllerTransport.DNAHandler) {
+	c.dnaHandler = h
+}
+
+// SetBulkHandler sets the BulkTransfer handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetBulkHandler(h *controllerTransport.BulkHandler) {
+	c.bulkHandler = h
+}
+
+// SetLogStreamHandler sets the LogStream handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetLogStreamHandler(h *controllerTransport.LogStreamHandler) {
+	c.logStreamHandler = h
+}
+
+// SetTelemetryHandler sets the TelemetryStream handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetTelemetryHandler(h *controllerTransport.TelemetryHandler) {
+	c.telemetryHandler = h
+}
+
+// SetTerminalHandler sets the Terminal bidi RPC handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetTerminalHandler(h *controllerTransport.TerminalHandler) {
+	c.terminalHandler = h
+}
+
+// SetOsqueryHandler sets the OsqueryQuery bidi RPC handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetOsqueryHandler(h *stewardosquery.OsqueryHandler) {
+	c.osqueryHandler = h
 }
 
 // --- Control Plane RPCs (delegated to CP handler) ---
@@ -87,4 +129,46 @@ func (c *compositeTransportServer) BulkTransfer(stream grpc.BidiStreamingServer[
 		return c.bulkHandler.HandleGRPC(stream)
 	}
 	return c.UnimplementedStewardTransportServer.BulkTransfer(stream)
+}
+
+// LogStream is handled directly by the log stream handler. Each ingested
+// LogEntry is CN-matched against the authenticated mTLS peer, tenant-derived
+// server-side from the fleet registry, rate-limited per steward, and written
+// via the dedicated steward-event LoggingManager.
+func (c *compositeTransportServer) LogStream(stream grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse]) error {
+	if c.logStreamHandler != nil {
+		return c.logStreamHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.LogStream(stream)
+}
+
+// TelemetryStream is handled directly by the telemetry handler. Received
+// TelemetrySnapshot frames are fanned out to browser WebSocket subscribers;
+// TelemetryRequest frames (subscribe/unsubscribe/interval) are sent upstream
+// on 0→1 and 1→0 browser subscriber transitions.
+func (c *compositeTransportServer) TelemetryStream(stream grpc.BidiStreamingServer[transportpb.TelemetrySnapshot, transportpb.TelemetryRequest]) error {
+	if c.telemetryHandler != nil {
+		return c.telemetryHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.TelemetryStream(stream)
+}
+
+// Terminal is handled directly by the terminal handler. The steward opens this
+// bidi stream after receiving COMMAND_TYPE_OPEN_TERMINAL; the handler correlates
+// the stream to the pending browser WebSocket session by session_id.
+func (c *compositeTransportServer) Terminal(stream grpc.BidiStreamingServer[transportpb.TerminalData, transportpb.TerminalData]) error {
+	if c.terminalHandler != nil {
+		return c.terminalHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.Terminal(stream)
+}
+
+// OsqueryQuery is handled directly by the osquery handler. The steward opens
+// this bidi stream to receive ad-hoc catalog query requests from the controller
+// and return result rows. The handler enforces mTLS peer authentication.
+func (c *compositeTransportServer) OsqueryQuery(stream grpc.BidiStreamingServer[transportpb.OsqueryQueryResponse, transportpb.OsqueryQueryRequest]) error {
+	if c.osqueryHandler != nil {
+		return c.osqueryHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.OsqueryQuery(stream)
 }

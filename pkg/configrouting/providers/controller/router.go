@@ -90,6 +90,11 @@ func NewControllerRouterWithGit(
 	}
 }
 
+// Close stops the background cache cleanup goroutine. Call on shutdown or after tests.
+func (r *controllerRouter) Close() {
+	r.sourceCache.Close()
+}
+
 // GetEffectiveConfigSource resolves the config source for tenantID, walking the tenant
 // path leaf-to-root and returning the first ancestor (inclusive) that has
 // config_source_type in its metadata. Results are cached for sourceCacheTTL.
@@ -231,17 +236,30 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 }
 
 // checkCrossTenant returns an error if the context tenant cannot access tenantID's config.
-// Rules (skip check when either side is unset/default for backward compatibility):
+// Rules (skip check when the context carries no tenant at all, for backward
+// compatibility with internal callers that never wire per-request tenant
+// context — e.g. background reconciliation, migration jobs):
 //   - same tenant → allowed
 //   - tenantID is an ancestor of the context tenant → allowed (cascade reads ancestors)
 //   - otherwise → cross-tenant denied
+//
+// No tenant ID — "default" and "root" included — is treated as a bypass value
+// here: each is a genuine tenant ID, not a sentinel for "unauthenticated." A
+// caller actually authenticated as such a tenant is subject to the same
+// same-tenant/ancestor rules as any other tenant; treating it as an automatic
+// passthrough would let that principal read any other tenant's config,
+// including tenants with no ancestor relationship to it at all — the gap this
+// function exists to close.
 func (r *controllerRouter) checkCrossTenant(ctx context.Context, tenantID string) error {
 	if tenantID == "" {
 		return nil // empty TenantID is handled as "route to controllerStore" elsewhere
 	}
-	ctxTenant, ok := ctx.Value(ctxkeys.TenantID).(string)
-	if !ok || ctxTenant == "" || ctxTenant == "default" {
-		return nil // no authenticated context tenant — backward-compat passthrough
+	ctxTenant, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
+	if !ok {
+		return fmt.Errorf("cross-tenant access denied: caller has no tenant scope for tenant %q", tenantID)
+	}
+	if unrestricted {
+		return nil // root-scoped caller or system-internal context (Issue #4665)
 	}
 	if ctxTenant == tenantID {
 		return nil

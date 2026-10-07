@@ -13,6 +13,8 @@ import (
 // 0750: owner rwx (service binary), group rx (service group), no world access.
 // #nosec G302 -- binary requires execute permission; root-owned install, no world access
 func copyBinary(src, dst string) error {
+	// #nosec G304 -- src is the installer-selected steward artifact; reading
+	// and copying that explicit local path is this privileged helper's purpose.
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -20,7 +22,9 @@ func copyBinary(src, dst string) error {
 	defer func() { _ = in.Close() }()
 
 	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0750) // #nosec G302 -- see function comment
+	// #nosec G302,G304 -- tmp is derived from the validated service destination;
+	// 0750 is required for the root-owned binary and its service group.
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0750)
 	if err != nil {
 		return err
 	}

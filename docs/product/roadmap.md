@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-05-25
+**Last Updated**: 2026-09-22
 
 ## Versioning Strategy
 
@@ -104,7 +104,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 **Results**: 12 new E2E tests (100% pass rate), 81 files changed (+5,513/-509 lines), QUICK_START.md validated and corrected
 
-#### v0.8.0 Go public
+#### v0.8.0 Go public - ✅ COMPLETED
 
 - [x] Create security scanning configuration files (`.gitleaks.toml`, `.gosec.json`) (issue #279) ✅ COMPLETED
 - [x] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280) ✅ COMPLETED
@@ -116,7 +116,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Convert repository to public and activate GitHub Advanced Security features (issue #282) ✅ COMPLETED
 - [x] Update documentation with security badges and public links (issue #284) ✅ COMPLETED
 
-#### v0.8.1 Bug fixes and test completion
+#### v0.8.1 Bug fixes and test completion - ✅ COMPLETED
 
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
 - [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
@@ -127,7 +127,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 ### v0.9.x Series — Production Stability & Foundation
 
-v0.9.0–v0.9.5 work has shipped to `develop` but no v0.9.x tags have been cut.
+v0.9.0–v0.9.6 work is tagged (`v0.9.6`, 2026-05-27). v0.9.7 merged to `main` 2026-06-16 (PR #2024) but was never tagged/released — see the release-process note below. v0.9.8 onward remains on `develop`, unreleased.
 
 #### v0.9.0 — Test & Architecture Foundation ✅ COMPLETED
 
@@ -154,7 +154,7 @@ Test infrastructure, breaking changes, and communication layer architecture — 
   - [x] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) ✅
 - [x] v0.9.x Project Housekeeping (Issue #392) ✅
 
-#### v0.9.1 — Security Baseline & Stability (~15-20 pts, ~1-2 weeks)
+#### v0.9.1 — Security Baseline & Stability (~15-20 pts, ~1-2 weeks) ✅ COMPLETED
 
 Minimum security hygiene before deploying on a real network.
 
@@ -163,7 +163,7 @@ Minimum security hygiene before deploying on a real network.
 - [x] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [x] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
-#### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints)
+#### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints) ✅ COMPLETED
 
 Transition from interactive Claude Code sessions to headless agent dispatch in Docker containers. Adapts Stripe's "Minion" model for solo developer workflow: architect writes PRDs/stories, agents implement in sandboxed containers, developer reviews PRs and merges. See [Agent Dispatch PRD](../archive/prd-agent-dispatch.md).
 
@@ -185,7 +185,7 @@ Transition from interactive Claude Code sessions to headless agent dispatch in D
 - [x] Skill: `/agent-setup` one-time bootstrap (Issue #444 - 5 points) - Replaces setup.sh; image build, credential setup, label creation, directory setup
 - [x] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
 
-#### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints)
+#### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints) ✅ COMPLETED
 
 Split oversized Go source files into cohesive, single-responsibility modules. 183 of 598 source files (31%) exceed 500 lines. This milestone targets the 7 worst offenders (1,233–3,110 lines each) that violate SRP with multiple unrelated concerns in a single file. Pure mechanical refactoring — no behavior changes, no API changes.
 
@@ -208,8 +208,8 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: self-install subcommand with interactive mode for GUI launch (Issue #472 - 8-13 points) - `install`/`uninstall`/`status` subcommands, interactive token prompt on double-click, native Windows Service/systemd/launchd registration
 
 **E2E validation:**
-- [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
-- [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
+- [ ] End-to-end deployment validation on real VMs - Deferred to v0.9.13; the original tracking issue (#390) was repurposed into the Phase 2 Hyper-V dev-infrastructure epic and closed 2026-06-25
+- [x] Beta deployment guide (Issue #391 - 3-5 points) ✅ - Production-like deployment documentation beyond dev-focused QUICK_START.md
 
 **Post-validation (discovered gaps, do not block #390):**
 - [x] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Single code path, 30-min default converge_interval, controller as additive overlay
@@ -229,14 +229,14 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: implement Windows ACL support for file/directory modules (Issue #553) - Created, future work
 
 **Post-E2E infrastructure:**
-- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - Linux + Windows runners, 3x CI speed improvement, dog-food validation
-- [ ] GitHub Actions dispatch — trigger agent containers from label changes (Issue #596) - Depends on #565, replaces manual `/dispatch` with Actions workflows triggered by `agent:ready`/`pipeline:fix` labels on self-hosted runners
+- [x] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) ✅ - Closed 2026-07-10 as a completed spike: App-token-minted self-hosted Linux+Windows runners proven end-to-end; measurements showed self-hosted Windows ~2x slower than hosted (retired, Windows CI is hosted) and unit-tests faster hosted under queue bursts (routed back to `ubuntu-latest`), while integration-tests stay self-hosted (2-3.5x faster). Ephemeral checkpoint-revert pool scoped out as a separate future epic if self-hosted footprint grows again
+- Issue #596 (GitHub Actions dispatch from label changes) - Closed not-planned 2026-06-19: the label-based queue it depended on was decommissioned (board Status is the only queue signal; dispatch is owned by the PO cron cycle)
 
-**Deferred to v0.10.0:**
-- [ ] Controller: implement multi-node orchestration (Issue #415) - Rolling updates, cluster quorum, dependency awareness
-- [ ] Controller: per-tenant config source routing Phases 2-3 (Issue #428) - External git integration, observability
+**Deferred to v0.10.0 (both since delivered):**
+- [x] Controller: implement multi-node orchestration (Issue #415) ✅ - Closed 2026-07-02
+- [x] Controller: per-tenant config source routing Phases 2-3 (Issue #428) ✅ - Closed 2026-05-20
 
-#### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
+#### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks) ✅ COMPLETED
 
 Proper certificate separation for production security.
 
@@ -249,10 +249,10 @@ Proper certificate separation for production security.
 Authorization hardening + fixes from deployment validation.
 
 - [x] Authorization Memory Management & Circuit Breaker Implementation (Issue #380 - 21 points) - Implement multi-tier circuit breakers (IP, Tenant, Global) with rate limiting and memory management to prevent DoS via resource exhaustion
-- [ ] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
+- [x] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
 - [ ] Deployment validation fixes (TBD based on v0.9.2 findings)
 
-#### v0.9.5 — Steward-First Controller Bootstrap (~18 pts, ~2 weeks)
+#### v0.9.5 — Steward-First Controller Bootstrap (~18 pts, ~2 weeks) ✅ COMPLETED
 
 Controller nodes managed by stewards — clean separation of node management from fleet orchestration. See [ADR-002](../architecture/decisions/002-steward-bootstrap-for-controllers.md).
 
@@ -260,7 +260,7 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
 - [x] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
 
-#### Post-v0.9.5 epics on develop (untagged)
+#### Post-v0.9.5 epics — shipped in v0.9.6 ✅ COMPLETED
 
 - [x] Epic #786 — CI: pre-merge validation runs against branch state
 - [x] Epic #1414 — mTLS admin authentication for controller REST API
@@ -270,76 +270,126 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Epic #1550 — Post-audit follow-ups
 - [x] Epic #1664 — Steward registration trust model (perennial tokens, IP-trust)
 - [x] Epic #1714 — Fleet resilience (restart-recovery, cert-reuse, drift)
-- [ ] Epic #1661 — Steward provisioning installer + trust bootstrap (in flight)
-- [ ] Epic #1754 — Decouple controller from steward-internal packages (in flight)
+- [x] Epic #1661 — Steward provisioning installer + trust bootstrap
+- [x] Epic #1754 — Decouple controller from steward-internal packages
 
-#### v0.9.6 — Consolidation + AGPL Governance Release
+#### v0.9.6 — Consolidation + AGPL Governance Release ✅ COMPLETED
 
-- [ ] Epic #1716 — Migrate licensing model to AGPL-3.0 single license (in flight)
+- [x] Epic #1716 — Migrate licensing model to AGPL-3.0 single license
 
-#### v0.9.7 — Tier 1 Hyper-V controller bringup
+#### v0.9.7 — Tier 1 Hyper-V controller bringup ✅ COMPLETED
 
-- [ ] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
+- [x] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
 
-#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity
+#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity ✅ COMPLETED
 
-- [ ] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
+- [x] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
 
-#### v0.9.9 — Hyper-V management module
+#### v0.9.9 — Hyper-V management module ✅ COMPLETED
 
-- [ ] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
+- [x] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
 
-#### v0.9.10 — Stewards on Hyper-V hosts
+#### v0.9.10 — Stewards on Hyper-V hosts ✅ COMPLETED
 
-- [ ] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
+- [x] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
 
-#### v0.9.11 — Phase 2 dev-agent conventions
+#### v0.9.11 — Phase 2 dev-agent conventions — CLOSED (not planned)
 
-- [ ] Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1
+- Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1 — closed not-planned 2026-06-25 alongside the Phase 2 epic closeout
 
-#### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
+#### Post-Phase-2 epics on develop (untagged, shipped) ✅ COMPLETED
 
-- [ ] Epic #1792 — each dispatched agent runs against its own ephemeral controller + steward VMs built from its branch
+- [x] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership. Closed 2026-07-10 (Layer 1 — convergence components proven in isolation)
+- [x] Epic #2657 — workflow-driven Hyper-V role promotion (standalone → FC-role): `cfg workflow promote-hv-role` writes `ha_role`, soaks for steward convergence, migrates the resource to cluster scope; live-validated on the validation lab cluster (`test/e2e/hyperv/promote_role_test.go`, runbook `docs/testing/hyperv-role-promotion-runbook.md`, #2671)
+- [x] Epic #2359 — Operator-first CLI targeting: hostname & attribute selectors across `cfg steward` verbs. Closed 2026-07-10
+- [x] Epic #2576 — idiomatic HA cluster management (Layer 2 of #2418): cascaded `ha_role` config through the InheritanceResolver, CNO-only convergence, declarative FC load-balancing/placement, live re-balance under load, idiomatic member leave. Closed 2026-07-21
+
+#### v0.9.12 — Ephemeral per-agent dev infrastructure — CLOSED (not planned)
+
+- Epic #1792 — each dispatched agent runs against its own ephemeral controller + steward VMs built from its branch — closed not-planned 2026-07-19
 
 #### v0.9.13 — Beta deployment validation on real VMs
 
 Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock. New issue to be filed when ready.
 
-#### v0.10.0 - Web Interface Foundation
+#### v0.10.0 - Web Interface Foundation ✅ COMPLETED
 
-**Deferred from v0.9.x** (functional but not on beta critical path):
-- [ ] Workflow management REST API (engine works internally, API needed for Web UI)
-- [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
-- [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
+**Controller REST APIs** — Epic #2343, closed:
+- [x] Workflow management REST API (endpoint coverage + reference docs via #2369/#2374; route registration made handler-order-independent in #2373)
+- [x] Config broadcast push API (Issue #2366 - selector targeting + push-status read)
+- [x] Session/connection monitoring API (Issues #2367, #2368 - transport + admin-session read APIs)
 
-**Web Interface**:
-- [ ] Web UI framework and authentication
-- [ ] Dashboard with fleet overview
-- [ ] Configuration management interface
-- [ ] User and role management
-- [ ] Workflow Management
-- [ ] Basic reporting and visualization
+**Web Interface** — Epic #2344, closed. Controller-served React+TS SPA with session-token auth
+(ADR-018), app shell, tenant switcher, global search, and seven live routes: fleet overview (`/`),
+asset page (`/stewards/:id`), `/config`, `/modules`, `/workflows`, `/accounts`, `/audit`.
+- [x] Web UI framework and authentication
+- [x] Dashboard with fleet overview
+- [x] Configuration management interface (list, editor, push, rollback)
+- [x] User and role management (accounts create/delete; roles read-only)
+- [x] Workflow Management (workflow + trigger CRUD, execution view)
+
+"Basic reporting and visualization" was scoped into this milestone but never started — no
+reporting surface exists in the SPA. It is **carried forward into v0.10.1 as Epic #2860** rather
+than counted here.
+
+#### v0.10.1 - Web UI operational build-out ✅ COMPLETED
+
+The foundation shipped a usable *viewer*. A 2026-07-21 gap analysis against the live controller
+REST surface found the backend substantially ahead of the UI: most day-to-day operator actions
+have working endpoints the SPA never calls. These four epics close the gap to a console an
+operator can run daily. Ordered by how much each unblocks basic operation.
+
+- [x] Epic #2857 — **Enrollment & fleet operations**: registration console (tokens, approvals,
+      IP-trust, installer artifacts), steward row and bulk actions (tag, move-tenant,
+      decommission, refresh, logs, modules), auth session probe on mount. Predominantly UI
+      against live APIs. *Without this a device cannot be onboarded from the web UI at all, and
+      the fleet table offers no action on any row.*
+- [x] Epic #2858 — **Tenant & access administration**: tenant list/update/delete API + tenant
+      tree UI, account update API + edit/password/disable UI, role write surfaces and
+      subject↔role binding, certificate lifecycle. Needs real API work — the tenant surface is
+      genuinely incomplete server-side, so no tenant tree can be rendered today.
+- [x] Epic #2859 — **Operator completeness**: config create + structured diff + per-steward push
+      results, workflow step authoring beyond a raw-JSON textarea, execute-with-parameters,
+      per-step logs, trigger schedule/webhook configuration, script and job execution surface,
+      audit detail and export.
+- [x] Epic #2860 — **Visibility surfaces**: reports dashboard, compliance views, monitoring
+      surfaces, alert center with acknowledge/silence, and the design-system chart and stat-tile
+      conventions later surfaces inherit. Also fixes the dead `POST /api/v1/webhooks/git-push`
+      route (registered after the SPA catch-all, so it 404s).
+
+**Design gate:** net-new surfaces (registration console, tenant administration, certificate
+lifecycle, reports dashboard) require a reference mockup or an explicit "reuses app shell +
+design tokens" declaration before any story reaches Ready. Every UI PR holds for founder
+rendered-review — no auto-merge.
+
+**Running alongside:** Epic #2738 (remote shell + live steward telemetry) — the asset page's
+Shell and Config tabs are inert placeholders until it lands.
 
 #### v0.10.5 - Security Maturation & Web Frontend Security
 
 **Goal**: Enhance security posture with advanced tooling and prepare web interface security foundations
 
-**Backend Security Enhancements**:
+Engineering scope is tracked as **Epic #2861**. A 2026-07-21 verification pass found most of the
+web-frontend block already delivered during the Web UI Foundation work — the remaining
+engineering gaps are narrower than this section originally assumed.
+
+**Backend Security Enhancements** (untouched):
 
 - [ ] OpenSSF Scorecard optimization (target score: 9.0+)
 - [ ] Go native fuzzing integration for critical packages
-- [ ] Evaluate and integrate Snyk (if beneficial beyond existing coverage)
-- [ ] Evaluate and integrate SonarCloud (if beneficial beyond staticcheck)
+- [x] Evaluate and integrate Snyk (if beneficial beyond existing coverage) — **DROP**: see [security-workflow-guide.md §9](../development/security-workflow-guide.md#9-snyk--sonarcloud--tool-evaluation)
+- [x] Evaluate and integrate SonarCloud (if beneficial beyond staticcheck) — **DROP**: see [security-workflow-guide.md §9](../development/security-workflow-guide.md#9-snyk--sonarcloud--tool-evaluation)
 - [ ] Security testing automation improvements
 
-**Web Frontend Security Preparation**:
+**Web Frontend Security** — mostly delivered:
 
-- [ ] Evaluate web application security scanners (OWASP ZAP, Burp Suite Community)
-- [ ] Plan Content Security Policy (CSP) implementation
-- [ ] Evaluate frontend dependency scanning tools (npm audit, Snyk for JavaScript)
-- [ ] Plan XSS/CSRF protection strategies
-- [ ] Evaluate SAST tools for frontend code (ESLint security plugins, semgrep for JavaScript)
-- [ ] Document web security requirements and tooling strategy
+- [x] Content Security Policy — strict CSP on all SPA responses (`features/controller/api/spa.go`): `default-src 'self'`, `frame-ancestors 'none'`, `base-uri 'none'`, `object-src 'none'`
+- [x] XSS/CSRF protection — session-bound double-submit CSRF on unsafe methods, `SameSite=Strict` + HttpOnly + Secure session cookie, pre-session CSRF endpoint (ADR-018, Issue #2493)
+- [x] Frontend dependency scanning — `npm audit --audit-level=high` gated in `frontend-ci.yml`
+- [x] Frontend SAST — `eslint-plugin-security` in the lint gate
+- [ ] Dependabot coverage for `web/` — `.github/dependabot.yml` declares `gomod`, `github-actions` and `docker` only; npm dependencies receive no automated bump PRs
+- [ ] CodeQL for TypeScript — `codeql-analysis.yml` runs `language: [ 'go' ]`; the SPA gets no semantic analysis
+- [ ] DAST — evaluate an OWASP ZAP baseline (or equivalent) against a containerised controller
 
 **Security Policy & Process**:
 
@@ -349,6 +399,35 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 - [ ] Enhance security testing documentation
 
 **Rationale**: After Web Interface Foundation (v0.10.0), we need to mature our security tooling and establish web-specific security practices before deploying web frontend to production. This ensures we maintain our excellent security posture (9/10) as the system grows in complexity.
+
+#### Post-v0.10.0 epics on develop (untagged, shipped) ✅ COMPLETED
+
+Opened after this document's 2026-07-21 pass; not yet placed in a named milestone.
+
+- [x] Epic #2737 — Identity assurance levels and step-up authentication (ADR-021): replaces the single `IsAdmin` bit with graduated assurance levels maintained by silent cryptographic device proof, requiring a fresh human-presence gesture for fleet-wide-blast-radius actions
+- [x] Epic #2931 — WebAuthn step-up (implements #2737 for the web session): gives a password-authenticated web operator a path to `AssuranceStrong` so privileged enrollment/fleet actions stop 401'ing with `WWW-Authenticate: CFGMS-StepUp`
+- [x] Epic #2890 — Capability-driven observe DNA (ADR-024): decouples DNA observation from convergence so a steward reports rich state for everything it can see, not only what it's told to manage. `twin`
+- [x] Epic #2911 — DNA clean-break: `commonpb.DNA.attributes` removed (Issue #3331); retires the legacy flat `DNARecord` store once all consumers are re-homed onto the fragment model / entity graph — deferred tail of #2852. `twin`
+- [x] Epic #2898 — Reboot windows: policy-declared device-scoped reboot gating with tenant inheritance and structured schedules, closing the silent-noop left by #2892 rejecting `maintenance.window` at validation. `cms`
+
+**Web console MFA — delivered and superseded; no further work scheduled.** A 2026-07-04 proposal
+(follow-on to #2344) asked for a phishing-resistant WebAuthn *second* factor behind the existing
+password login, plus recovery codes and a require-MFA policy. It was overtaken by a stronger
+outcome and is retired unbuilt. Verified on `origin/develop` 2026-09-10:
+
+- **There is no password to phish.** Password login was removed by Issue #2993;
+  `POST /api/v1/web/login` returns 404, asserted in
+  `features/controller/api/handlers_web_session_test.go`.
+- **Web login is passkey-only**, not password-plus-factor —
+  `features/controller/api/handlers_passkey_login.go` (discoverable login, no credential
+  enumeration, session issued at `AssuranceStrong` per ADR-021 Decision 3).
+- **Enrollment shipped** — `web/src/pages/Enroll.tsx`, `web/src/passkeys/PasskeysView.tsx`.
+- **Per-action MFA shipped** as step-up rather than a login-time policy flag — Epic #2737
+  (assurance levels, ADR-021) and Epic #2931 (`web/src/auth/StepUpModal.tsx`).
+- **Recovery codes were deliberately not built.** ADR-021 §7 routes recovery through the mTLS
+  admin cert — `cfg`, cert, register passkey — the same flow as bootstrap, so a shared-secret
+  recovery path never enters the system.
+- **CSP already covers the ceremony** (see the v0.10.5 Web Frontend Security block).
 
 #### v0.11.0 - Outpost Foundation
 
@@ -431,12 +510,38 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 
 **Goal**: Realize the full potential of DNA-based system identification and expand into advanced resource management and specialized capabilities.
 
-#### Digital Twin Implementation
+#### Digital Twin & Digital Employee Experience (DEX) — Tiered Rollout
 
-- [ ] Implement comprehensive Digital Twin model
-- [ ] Add support for real-time asset inventory
-- [ ] Develop predictive analytics capabilities
-- [ ] Implement root cause analysis based on Digital Twin
+The twin and DEX share the same foundations and ship as **layers threaded across the timeline**, not as monolithic milestones. The rule: bake data-model commitments in early (cheap now, brutal to retrofit); build the reason layer late (needs the foundation mature). Neither is a prerequisite for the other — but DEX is the twin's first paying consumer, the concrete use case that pulls the foundation into existence. The foundation itself lives in the Captured Backlog module/DNA chain above; this section is the end-state those foundations build toward. **Guard:** none of this jumps the Hyper-V beta bringup queue (v0.9.6–v0.9.13); Tier 1 is schema discipline inside already-scheduled DNA work, so it carries no schedule cost.
+
+**Tier 1 — data-model commitments** (land with the baseline-DNA epic; no separate milestone). Detailed on that Captured Backlog entry. `twin` `dex` `cms`
+- [ ] Per-fragment/entity provenance & freshness `{source, observed_at, authority, confidence}`
+- [ ] Stable **typed entity id** per managed object (identity primitive for edges + history)
+- [ ] Controller **retains versioned fragment history** — per-entity state queryable over time
+- [ ] DEX signals attach to the typed device/app entity as an extensible, timestamped, provenanced attribute set
+
+**Tier 2 — first visible surfaces** (Web-UI window, ~v0.10.x). `twin` `dex` `web`
+- [ ] Temporal query surface — "what was true at time T", diff two points, correlate a change with its effect
+- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Fully designed:** model + access contract in [ADR-022](../architecture/decisions/022-entity-graph-model-and-access-contract.md) (Entity Graph — companion to ADR-017 Amendment 1, records Amendment 2), storage shape in [ADR-023](../architecture/decisions/023-entity-graph-storage-shape.md) (relational observation-log store; subsumes DNA fragment history). Design gates cleared — remaining sequence is epic work. Build order per the epic bodies (2026-07-21): **#2851 Entity Graph store foundation** (no dependencies — buildable against current develop) → **#2852 DNA composition** (fragment history targets that store rather than extending the flat `DNARecord` store) → then **#2855 OSquery** and **#2853 Entity Graph population** in parallel, both gated on #2852 → **#2854 troubleshooting cockpit MVP** (shell/case stories need only #2851; evidence-card wiring needs #2853). All five filed, none decomposed as of 2026-07-21.
+
+> This supersedes the earlier "OSquery → DNA-composition → entity-graph foundation" ordering, which predates [ADR-023](../architecture/decisions/023-entity-graph-storage-shape.md). Once the observation-log store subsumed DNA fragment history, the store became the root of the chain rather than a later consumer. The original intent — that DNA build *on* osquery's host facts rather than reinvent them — survives as a design constraint on #2852's authority resolver, not as a build-order constraint.
+- [ ] Unified entity query API — "every entity of type X related to Z" (the model surface the Web UI renders)
+- [ ] DEX collection v0 + single-device **experience timeline** — per-process/service streams (asset-page views) + "pull up Bob's machine"
+
+**Tier 3 — reason layer & rolling DEX track** (v0.11+; each item dependency-gated).
+
+> **DEX collection — settled architecture (research 2026-07-07).** Collection is **pure usermode, ETW-centric — no kernel-mode driver.** Proof: Microsoft's own Intune Endpoint Analytics derives boot/login/GP/sign-in-responsiveness/app-reliability (and top-processes-at-boot with per-process CPU) driver-free from in-box ETW; per-process CPU/mem/disk is the usermode WinRT `ProcessDiagnosticInfo` API (or classic Win32 `GetProcess*`). The DEX market leader (Nexthink) ships a kernel driver, but its only advantage is anti-tamper — a security property irrelevant to DEX fidelity — and the post-CrowdStrike (Jul 2024) platform direction is decisively *out* of the kernel (Windows Endpoint Security Platform), so a new DEX driver would run against Microsoft's own trajectory. **Language: Go across all three OSes.** Windows + Linux are pure-Go (ETW via `x/sys/windows`+`syscall.NewCallback`, proven by Velociraptor; Linux `/proc`+`/sys`+PSI file reads); **macOS is the one cgo case** (IOKit/libproc) → **implies a macOS CI build runner not yet in #565 (Linux+Windows only).** Design note: run the steward's **own** ETW sessions against `Microsoft-Windows-Diagnostics-Performance` et al. — do **not** depend on the DiagTrack service (breaks if an enterprise sets telemetry to Security/Off). No Rust/Zig required for any signal in scope.
+
+- [ ] **DEX de-risking spike (do FIRST, before committing the collection architecture)** — a Go PoC ETW consumer on Windows that (a) captures the not-yet-independently-verified signals from in-box providers (app-hang/UI-responsiveness via Win32k, SMART via WMI `MSStorageDriver`, thermal via `MSAcpi`, disk queue depth, hard-fault paging, network/DNS/Wi-Fi) and (b) measures **sustained CPU under the chosen provider selection against the sub-1% budget** (the one Go-specific unknown: ETW callback cost). Converts "high-plausibility" → "verified for CFGMS". `dex`
+- [ ] DEX **collection track** — *rolling, not a release*; one probe at a time (usermode ETW / WMI / PDH / WinRT, per the architecture note above): app-hang/ETW stalls, boot/login/profile-load duration, disk I/O wait & queue depth, paging pressure, SMART/storage health, thermal throttling, network latency/jitter/DNS. `dex`
+- [ ] Experience scoring & normalization model. `dex`
+- [ ] Fleet **baselines & percentiles** — "devices where QuickBooks is in the 30th percentile" (needs Tier-1 temporal). `dex` `twin`
+- [ ] **Root-cause / correlation** — "Bob is slow *because* X", including causes that never surface in Task Manager (needs Tier-2 graph). `dex` `twin`
+- [ ] **Predictive analytics & refresh recommendation** — degradation forecast, replace-by-experience-not-age (needs temporal + scoring). `twin` `dex`
+- [ ] **Experience-driven remediation** — degraded experience triggers a workflow-engine fix (kill runaway process, push config). The config-management moat pure-observability DEX vendors can't match. `dex` `workflow` `cms`
+- [ ] Twin **simulation / what-if** — "if I push this config / if this host dies, what breaks?" against the model, not production (needs graph + temporal + desired/actual). `twin` `cms`
+- [ ] **Discovery of the undeclared** — reflect unmanaged/rogue reality (network scan, cloud inventory); OSquery is the seed, overlaps Outpost (v0.11.0). `twin`
+- [ ] Cross-fleet anonymized baselines — requires an explicit tenant consent/aggregation model (parked decision; must not block collection). `dex`
 
 #### LLM Integration Evaluation
 
@@ -447,9 +552,70 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 #### Further Expansion & Specialization
 
 - [ ] Implement advanced resource management capabilities
-- [ ] Develop Digital Employee Experience (DEX) monitoring
 - [ ] Implement Cluster-Aware Patching
 - [ ] Explore further specialized integrations and features
+
+*(DEX monitoring moved to the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) above — it is a layered track, not a single feature.)*
+
+## Capability Tags
+
+Feature work is tagged with the **product capability that consumes it** — the end-in-mind, not the topic. Tags are **multi-valued**: a story that serves several capabilities carries all of them, and a multi-tag story is a signal that it is *foundational* — its schema/interface must satisfy every listed consumer at once. This is how the twin's and DEX's Tier-1 data-model commitments get built in early instead of retrofitted.
+
+Controlled vocabulary (grows deliberately, not ad hoc):
+
+- `cms` — core config management: desired-state convergence, drift, modules
+- `twin` — digital twin: entity model, topology graph, temporal state, simulation
+- `dex` — digital employee experience: endpoint experience signals, baselines, root-cause
+- `workflow` — automation / workflow engine
+- `directory` — identity & directory services (M365, AD/Entra)
+- `web` — web UI and visualization surfaces
+- `msp` — MSP tool integrations (PSA / RMM / documentation)
+
+Applied going forward (backlog + future work); pure hygiene/infra (CI, refactors, security sweeps) carries no capability tag. Roadmap items carry these tags inline; the parallel **`cap:*` GitHub label namespace** (orthogonal to Projects-V2 work-queue state, purely descriptive, multi-valued) is live end-to-end — created by `/agent-setup`, applied at epic/story creation via `pipeline-helper.sh create-epic|create-story --cap`, inherited epic→story at decomposition (`.claude/agents/po.md` §7, `ba.md`), and carried issue→PR by `lock-sweep`. A capability tag names the *consumer* of the work, never queue state. It coexists with the community **component** labels (`workflow`, `dna`, `security`, `api`, `modules` in `docs/development/issue-triage.md`), which are a distinct *topic* axis — cap = who consumes it, component = what it's about.
+
+## Captured Backlog (unscheduled)
+
+Founder-captured todos awaiting placement in a versioned milestone. Each carries enough context to decompose later; suggested homes are notes, not commitments.
+
+**Status 2026-07-21: every entry below is now placed.** The module-foundation work shipped under
+Epic #2460 (closed); the remaining four are filed epics awaiting decomposition. Entries are kept
+for the design context they carry — the epic body is authoritative for scope.
+
+> **Design status:** the module and DNA items below are now designed in **[ADR-016](../architecture/decisions/016-steward-module-foundation.md)** (steward module foundation) and **[ADR-017](../architecture/decisions/017-dna-composition-and-sync.md)** (DNA composition & sync), both *Accepted 2026-07-08*. Those ADRs are authoritative for the specifics; the entries here are the roadmap placeholders. Sequencing settled during design: **module foundation → OSquery → baseline DNA → asset page**, with OSquery deliberately *before* baseline DNA so DNA is built on osquery rather than reinventing it.
+>
+> **Twin/DEX foundation:** the module → OSquery → baseline-DNA → asset-page chain below **is** the Tier-1/Tier-2 foundation of the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) in Future Features. Entries are tagged with their downstream consumer(s) and tier so the foundation work is built for its end-state, not as isolated plumbing.
+
+### Captured 2026-09-22 — gaps moved out of the docs
+
+Documentation describes only what exists. The 2026-09-21 documentation cleanup removed every "not yet implemented / planned / not possible" note from live docs; the ones that describe real, wanted capability are captured here. Each is capture-now/decompose-later. Suggested homes are notes, not commitments.
+
+- [ ] **Controller state backup and restore CLI** — `cfg backup` / `cfg restore` for the full controller state (config store, secrets, audit, blob) across the flatfile, sqlite and database providers, usable online. Today the documented path is a cold copy of the data directory with the controller stopped. Suggested home: v0.10.5 or the next operations milestone. `cms`
+- [ ] **Steward failover across controller cluster peers** — a steward holds exactly one controller URL (baked at build time) and retries that node indefinitely; there is no failover to a cluster peer. Needs a peer-list discovery mechanism consistent with the any-node service model (ADR-031) and the baked-URL trust anchor (ADR-013). Suggested home: after the cluster beta. `cms`
+- [ ] **Rollback: progressive rollback, retry, approval and verification** — the unbuilt half of the original rollback design: canary/progressive rollback across rings with auto-halt and rollback-of-rollback; automatic retry with backoff, fallback and alerts; resume after network failure; multi-level time-limited approval workflow with per-rollback-type permissions and emergency override; post-rollback health and service verification with anomaly alerts; steward-reported progress; controller rollback reports; batched multi-device execution with pre-staging; chaos and performance test programmes. What shipped is described in `docs/architecture/rollback-design.md`; this entry is the remainder. `cms`
+- [ ] **Workflow debug: rollback and live WebSocket debugging** — the workflow debug system has execution tracing; add step-level rollback and a live WebSocket debug stream for the Workflow Studio. `workflow`
+- [ ] **Advanced configuration inheritance** — conditional inheritance (apply a fragment when a predicate on the target's DNA holds), config templates, and dynamic environment expressions. Depends on the DNA/twin foundation for the predicate source. `cms` `twin`
+- [ ] **`user` module credential distribution** — a secrets-distribution design so the `user` module can set and rotate local account passwords from cfg without cleartext on disk anywhere. Ties to ADR-030 (secret material at rest) and the steward keychain. `cms`
+- [ ] **`network_activedirectory` write path** — the module has no buildable binary today (no `cmd/main.go`, and no Makefile target builds one) and does not run at all; it is a steward-kind module per its own `module.yaml` (`executors: [steward]`), not outpost — the outpost runtime this module was once slated for does not exist yet. Wiring it to a buildable, runnable state is the prerequisite for any write path; once that lands, add create/modify for users, groups and OUs, plus the Exchange object, ADFS and DirSync-notification surfaces the module README described. `directory`
+- [ ] **Terminal session administration** — list and terminate remote-shell sessions from `cfg` and the REST API, and a controller config key for the session cap and idle timeout. `cms` `web`
+- [ ] **Windows Credential Manager path for the admin bundle** — the Tier-1 bringup doc assumed a Windows keychain path that does not exist; the `cfg` credential store on Windows needs a Credential Manager backend equal to the macOS/Linux keychain path. Windows-first priority applies. `cms`
+- [ ] **Stdlib module platform coverage** — `firewall` has no Windows or macOS backend (stdlib, Windows-first: high priority); `patch` has no Linux or macOS backend; `cert_trust` has no RPM-family trust-store backend; `file` has no `type: symlink`. One story per backend. `cms`
+- [ ] **`script` module publisher PKI verification** — signature verification in the module is basic; bring it to the full publisher chain described in `docs/guides/script-signing-ci.md` and ADR-006, so the two documents describe the same mechanism. `cms`
+- [ ] **`github_runner` module on Linux and macOS** — the executor exists for Windows only. `cms`
+- [ ] **`activedirectory` module custom schema extensions** — support custom AD schema attributes in the steward-kind AD module. `directory`
+- [ ] **DNA collector attribute gaps** — Windows motherboard serial, Linux firewall state, macOS `domain_joined` / `domain_name`, a unified `encryption_state`, macOS AV products, Linux `certificate_info`. One story each, or one small epic under the observe-DNA work (ADR-024). `twin` `dex`
+- [ ] **RBAC: roles as the enforced grant source** — resolve subject-role assignments into effective permissions on the API request path, so removing a role assignment revokes access. Today `account.Permissions` is the enforced set and role assignments are modelling only. `cms` `web`
+- [ ] **Zero-custody operator signing** — cut the inline-command signing credential over from the controller-issued admin-bundle key to a WebAuthn assertion the controller can never custody. `OperatorCredentialVerifier` is the seam. `cms`
+- [ ] **Mutually authenticated enrollment** — the steward enrollment exchange authenticates the controller only; add steward-side proof so a spoofed registration endpoint trusted by the steward's trust store cannot complete enrollment. `cms`
+
+- [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* these live views are **telemetry, not DNA** (ADR-017 excludes ephemeral state from the hashed DNA); live service read/control also overlaps the `service` module's desired-state enforcement — clarify the boundary. *Filed as:* **Epic #2738** (Web UI live operations — remote shell + live steward telemetry), decomposed. The read side shipped early: the asset page's Live Activity tab streams the process table and service list over `/api/v1/telemetry/ws/{id}`; the control side (kill process, start/stop/restart service) and the Shell tab remain. · **Tags:** `dex`, `twin`, `web` · **Tier 2** — this is DEX collection v0 (the endpoint experience-signal seed).
+
+- [x] **Full OSquery support** — Integrate osquery as the **unmanaged-host-fact** data source for DNA plus ad-hoc fleet queries. Per ADR-017, osquery feeds DNA only through a **curated stable-fact allowlist** (`host:*` fragments, observe-only) — never its dynamic tables — and the specific query list is gated on the stdlib set being confirmed (ADR-016). Decisions remaining: bundled vs. host-detected binary, scheduling, security envelope. *Filed as:* **Epic #2855** (OSquery integration — observe-only host facts via curated allowlist + ad-hoc fleet queries), awaiting decomposition; sequenced **before** baseline DNA. · **Tags:** `twin`, `cms` · **Tier 1–2** — host-fact source feeds both baseline DNA and later twin *discovery of the undeclared*.
+
+- [ ] **Define & build the standard-library steward modules** — **Decided in ADR-016:** a closed **10-module** stdlib set — `file`, `service`, `package`, `script`, `firewall`, `patch`, **`user`, `cert_trust`, `time`, `hostname`**. Six exist (patch needs a `module.yaml` + stub resolution); **four are net-new cross-platform builds** (`user`, `cert_trust`, `time`, `hostname`). Also adds the `Get`→canonical-DNA-fragment contract, atomic object-level ownership declaration, and a stdlib completeness gate. *This is a build epic, not an audit* — likely splits into (a) reorg + contract + gate + `patch`, and (b) the four new modules. *Filed as:* **Epic #2460** (Steward module foundation — stdlib set, stdlib/extended split, DNA-fragment contract), **closed**. · **Tags:** `cms` · **Tier 1** — module `Get`→canonical-DNA-fragment contract is the substrate all twin/DEX state hangs on.
+
+- [ ] **Split non-stdlib modules into an on-demand directory** — **Decided in ADR-016:** `features/modules/stdlib/` (installer payload) ↔ `features/modules/extended/` (CFGMS-authored, non-stdlib, pulled on demand per ADR-006), with a build-enforced installer-payload boundary. Registry/scheduled_task/network/mount/sysctl/env are the excluded-from-stdlib candidates that live under `extended/` when built. *Filed as:* **Epic #2460**, **closed** — same module-foundation epic as the stdlib work above. · **Tags:** `cms` · **Tier 1**.
+
+- [ ] **Controller baseline DNA per steward** — **Designed in ADR-017:** DNA becomes a fragment set (managed fragments from module `Get`, observe-only host facts from osquery), with object-canonical ids, a module-preempts-osquery authority resolver, a two-level per-fragment + aggregate-root hash, and delta-based partial-sync validation. *Filed as:* **Epic #2852** (DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph), awaiting decomposition; **downstream of both** the module foundation and OSquery. · **Tags:** `twin`, `dex`, `cms` · **Tier 1 — carries the twin/DEX data-model commitments.** This epic must land the four bake-in-now decisions or they become expensive retrofits: (1) per-fragment `{source, observed_at, authority, confidence}` provenance; (2) stable **typed entity id** per managed object; (3) controller **retains versioned fragment history** (per-entity state queryable over time — restores the DNA "memory" that current-state-only sync would discard); (4) DEX signals attach to the typed device/app entity as an extensible, timestamped, provenanced attribute set. See the [tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) for how these unlock Tier 2/3.
 
 ## Architectural Concepts
 
@@ -499,8 +665,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.0
-- **Last Updated**: 2026-05-25
+- **Document Version**: 4.6
+- **Last Updated**: 2026-09-22
 
 ### Related Documentation
 

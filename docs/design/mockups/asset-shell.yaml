@@ -1,0 +1,4 @@
+file: asset-shell.html
+order: 8
+status: **Reference**
+what: The asset interactive shell tab — terminal emulator panel with WebSocket-backed session, command history, and resize handling. Both themes.

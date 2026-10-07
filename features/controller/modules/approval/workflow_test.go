@@ -5,6 +5,7 @@ package approval_test
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // testKeys holds an Ed25519 key pair for a named publisher.
@@ -179,6 +181,45 @@ func TestApprovalWorkflow_EvaluateAndStore_AutoApprove(t *testing.T) {
 	assert.Equal(t, cache.ApprovalStatusApproved, status)
 }
 
+// [REQUIRED TEST] TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement
+// verifies that a manifest whose Publisher/Name/Version disagrees with the
+// identity actually bound to a previously-verified content hash is refused —
+// not cached or approved under the manifest's claimed identity (Issue #4341).
+// The forged bundle reuses the genuine bundle's ContentHash and Signature
+// verbatim (both verify fine on their own terms) but swaps in a different
+// module name, simulating an attacker replaying a real publisher's signed
+// artifact under a different claimed identity.
+func TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	store := makeTrustStore(keys)
+
+	genuine := makeSignedBundle(t, keys, "hyperv", "0.2.1")
+	decision, err := wf.EvaluateAndStore(genuine, store)
+	require.NoError(t, err)
+	assert.Equal(t, approval.AutoApprove, decision)
+
+	forged := &bundle.Bundle{
+		Manifest: &modules.ModuleMetadata{
+			Name:      "not-hyperv",
+			Version:   genuine.Manifest.Version,
+			Publisher: genuine.Manifest.Publisher,
+			Executors: []string{"steward"},
+		},
+		Binaries:    genuine.Binaries,
+		Signatures:  genuine.Signatures,
+		ContentHash: genuine.ContentHash,
+	}
+
+	_, err = wf.EvaluateAndStore(forged, store)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, cache.ErrContentHashIdentityConflict)
+
+	// The forged identity must never have been recorded as approved.
+	_, statusErr := c.GetApprovalStatus(forged.ContentAddress())
+	assert.ErrorIs(t, statusErr, cache.ErrBundleNotFound)
+}
+
 // TestApprovalWorkflow_EvaluateAndStore_QueueForReview persists pending status correctly.
 func TestApprovalWorkflow_EvaluateAndStore_QueueForReview(t *testing.T) {
 	wf, c := makeWorkflow(t)
@@ -222,4 +263,222 @@ func TestApprovalWorkflow_Evaluate_NilBundle(t *testing.T) {
 	decision, err := wf.Evaluate(nil, store)
 	assert.Equal(t, approval.Reject, decision)
 	assert.Error(t, err)
+}
+
+// TestApprovalWorkflow_RejectPending_TransitionsToRejected verifies that
+// an admin can reject a bundle in pending state.
+func TestApprovalWorkflow_RejectPending_TransitionsToRejected(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "unknown-vendor")
+	b := makeSignedBundle(t, keys, "tool", "1.0.0")
+
+	require.NoError(t, c.Put(b))
+	addr := b.ContentAddress()
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status)
+
+	require.NoError(t, wf.RejectPending(addr))
+
+	status, err = c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, status)
+}
+
+// TestApprovalWorkflow_RejectPending_AlreadyApproved returns ErrNotQueued.
+func TestApprovalWorkflow_RejectPending_AlreadyApproved(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	b := makeSignedBundle(t, keys, "mod", "1.0.0")
+	require.NoError(t, c.Put(b))
+	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
+
+	err := wf.RejectPending(b.ContentAddress())
+	assert.ErrorIs(t, err, approval.ErrNotQueued)
+}
+
+// TestApprovalWorkflow_RejectPending_AlreadyRejected returns ErrNotQueued.
+func TestApprovalWorkflow_RejectPending_AlreadyRejected(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	b := makeSignedBundle(t, keys, "mod", "2.0.0")
+	require.NoError(t, c.Put(b))
+	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusRejected))
+
+	err := wf.RejectPending(b.ContentAddress())
+	assert.ErrorIs(t, err, approval.ErrNotQueued)
+}
+
+// TestApprovalWorkflow_RejectPending_NotFound returns ErrBundleNotFound.
+func TestApprovalWorkflow_RejectPending_NotFound(t *testing.T) {
+	wf, _ := makeWorkflow(t)
+	addr := bundle.ContentAddress{Publisher: "cfgms", Name: "missing", Version: "1.0.0", ContentHash: "nohash"}
+	err := wf.RejectPending(addr)
+	assert.ErrorIs(t, err, cache.ErrBundleNotFound)
+}
+
+// TestApprovalWorkflow_ConcurrentApproveRejectConverges is the workflow-level
+// [REQUIRED TEST] closing the TOCTOU race Issue #3886 exists to fix:
+// Approve/RejectPending previously did a separate Get then Set, so a decision
+// racing in between could be silently overwritten. Two ApprovalWorkflow
+// instances (simulating two controller nodes) share one ModuleApprovalStore
+// and race an Approve against a RejectPending for the same bundle. Exactly one
+// must win, and the loser must observe ErrNotQueued rather than clobbering the
+// winner. Run with -race.
+func TestApprovalWorkflow_ConcurrentApproveRejectConverges(t *testing.T) {
+	sharedStore := pkgtesting.SetupTestModuleApprovalStore()
+
+	cacheA, err := cache.New(t.TempDir() + "/module-cache-a")
+	require.NoError(t, err)
+	cacheA.SetApprovalStore(sharedStore)
+	wfA := approval.New(cacheA)
+
+	cacheB, err := cache.New(t.TempDir() + "/module-cache-b")
+	require.NoError(t, err)
+	cacheB.SetApprovalStore(sharedStore)
+	wfB := approval.New(cacheB)
+
+	keys := generateKeys(t, "unknown-vendor")
+	b := makeSignedBundle(t, keys, "tool", "1.0.0")
+	// Both simulated nodes need the bundle content locally; Put is
+	// deterministic so both calls produce identical content and only the
+	// first actually seeds the shared store's pending record.
+	require.NoError(t, cacheA.Put(b))
+	require.NoError(t, cacheB.Put(b))
+	addr := b.ContentAddress()
+
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results <- wfA.Approve(addr)
+	}()
+	go func() {
+		defer wg.Done()
+		results <- wfB.RejectPending(addr)
+	}()
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case assert.ErrorIs(t, err, approval.ErrNotQueued):
+			conflicts++
+		}
+	}
+	assert.Equal(t, 1, successes, "exactly one of the concurrent approve/reject decisions must win")
+	assert.Equal(t, 1, conflicts, "the losing decision must observe ErrNotQueued, not silently overwrite the winner")
+
+	statusA, err := cacheA.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	statusB, err := cacheB.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, statusA, statusB, "both simulated nodes must observe the same winning status through the shared store")
+	assert.NotEqual(t, cache.ApprovalStatusPending, statusA, "the bundle must have been decided, not left pending")
+}
+
+// TestApprovalWorkflow_EvaluateAndStore_PreservesRejectionAcrossNodes is the
+// regression test for the ingestion path erasing a decision. EvaluateAndStore is
+// the push-time path (cfg upload → module resolution), so it runs on whichever
+// controller node serves the upload and runs again for every later push naming
+// the same module. With a shared approval store, an ingestion that unconditionally
+// wrote "pending" would erase an operator's rejection made on a peer node and then
+// auto-approve the bundle afresh, cluster-wide, because that store is authoritative
+// for every node.
+func TestApprovalWorkflow_EvaluateAndStore_PreservesRejectionAcrossNodes(t *testing.T) {
+	sharedStore := pkgtesting.SetupTestModuleApprovalStore()
+
+	cacheA, err := cache.New(t.TempDir() + "/module-cache-a")
+	require.NoError(t, err)
+	cacheA.SetApprovalStore(sharedStore)
+	wfA := approval.New(cacheA)
+
+	cacheB, err := cache.New(t.TempDir() + "/module-cache-b")
+	require.NoError(t, err)
+	cacheB.SetApprovalStore(sharedStore)
+	wfB := approval.New(cacheB)
+
+	// A trusted publisher with a valid signature: re-evaluation on node B would
+	// auto-approve if the standing decision were not consulted.
+	keys := generateKeys(t, "cfgms")
+	b := makeSignedBundle(t, keys, "hyperv", "0.2.1")
+	trustStore := makeTrustStore(keys)
+	addr := b.ContentAddress()
+
+	// Node A ingests it as pending (publisher not yet trusted there) and the
+	// operator rejects it.
+	decision, err := wfA.EvaluateAndStore(b, makeTrustStore())
+	require.NoError(t, err)
+	require.Equal(t, approval.QueueForReview, decision)
+	require.NoError(t, wfA.RejectPending(addr))
+
+	// Node B ingests the same bundle from a later cfg push.
+	decision, err = wfB.EvaluateAndStore(b, trustStore)
+	require.NoError(t, err)
+	assert.Equal(t, approval.Reject, decision,
+		"re-ingestion must report the standing rejection so resolution keeps blocking the deployment")
+
+	statusB, err := cacheB.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, statusB,
+		"re-ingestion on a peer node must not reset an operator's rejection to pending")
+
+	statusA, err := cacheA.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, statusA,
+		"the node that recorded the rejection must still enforce it")
+}
+
+// TestApprovalWorkflow_EvaluateAndStore_PreservesRejectionOnReingestion is the
+// single-node form of the same guarantee: a bundle an operator rejected stays
+// rejected when the next cfg push re-ingests it, rather than being re-evaluated
+// into an auto-approval.
+func TestApprovalWorkflow_EvaluateAndStore_PreservesRejectionOnReingestion(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	b := makeSignedBundle(t, keys, "hyperv", "0.2.1")
+	trustStore := makeTrustStore(keys)
+	addr := b.ContentAddress()
+
+	decision, err := wf.EvaluateAndStore(b, makeTrustStore())
+	require.NoError(t, err)
+	require.Equal(t, approval.QueueForReview, decision)
+	require.NoError(t, wf.RejectPending(addr))
+
+	decision, err = wf.EvaluateAndStore(b, trustStore)
+	require.NoError(t, err)
+	assert.Equal(t, approval.Reject, decision)
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, status)
+}
+
+// TestApprovalWorkflow_EvaluateAndStore_ReportsExistingApproval covers the
+// converse: an operator's approval of a bundle from a publisher this node does
+// not trust is a decision too, so re-ingestion reports AutoApprove instead of
+// queueing the bundle for a second review.
+func TestApprovalWorkflow_EvaluateAndStore_ReportsExistingApproval(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "unknown-vendor")
+	b := makeSignedBundle(t, keys, "tool", "1.0.0")
+	addr := b.ContentAddress()
+
+	decision, err := wf.EvaluateAndStore(b, makeTrustStore())
+	require.NoError(t, err)
+	require.Equal(t, approval.QueueForReview, decision)
+	require.NoError(t, wf.Approve(addr))
+
+	decision, err = wf.EvaluateAndStore(b, makeTrustStore())
+	require.NoError(t, err)
+	assert.Equal(t, approval.AutoApprove, decision)
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusApproved, status)
 }

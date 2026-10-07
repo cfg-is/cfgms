@@ -9,6 +9,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,7 +62,7 @@ func TestTranslateRollbackRequestSkipValidation(t *testing.T) {
 func TestRollbackConfiguration_NilManager(t *testing.T) {
 	svc := &ConfigurationServiceV2{}
 
-	_, err := svc.RollbackConfiguration(context.Background(), &config.RollbackRequest{
+	_, err := svc.RollbackConfiguration(ctxkeys.WithSystem(context.Background()), &config.RollbackRequest{
 		StewardID:     "s1",
 		TargetVersion: 1,
 	})

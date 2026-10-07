@@ -111,7 +111,7 @@ The **Cloud Steward** is a specialized component for managing cloud environments
 **Key Characteristics:**
 
 - Specialized for cloud environment management
-- Supports multiple cloud platforms (e.g., AWS, Azure, GCP)
+- Supports multiple cloud platforms
 - Manages various cloud resource types:
 
   - Virtual Machines
@@ -238,27 +238,18 @@ CFGMS is designed to be both simple to get started with and capable of scaling t
 
 ### DNA (System-Specific Metadata)
 
-DNA refers to system-specific metadata used for targeting and identification, creating a comprehensive digital twin of the physical environment. This includes:
+DNA is CFGMS's deterministic, hashable representation of a host's **stable, desired-comparable state** — the foundation the Digital Twin and DEX build on, not the twin itself. (The Digital Twin is **Model + Sync + Reason**, delivered as a tiered rollout; DNA is the state half of its Model + Sync foundation. See the roadmap's Digital Twin & DEX rollout and ADR-017.)
 
-- Hardware information (CPU, memory, storage, network interfaces)
-- Operating system details (version, patches, installed software)
-- Network configuration (IP addresses, DNS, routing)
-- Physical location and environment (datacenter, rack, room)
-- System relationships and dependencies
-- Performance metrics and health status
-- Custom attributes and business context
-- Historical state and change tracking
-- Security posture and compliance status
-- Resource utilization and capacity planning data
+DNA is a **set of addressable fragments** rather than a flat attribute map (ADR-016 / ADR-017). Each fragment carries an object-canonical **typed entity id** (`service:sshd`, `file:/etc/hosts`, `host:cpu`), a single resolved **authority** (a managing module, or osquery for observe-only host facts), canonical bytes, and a per-fragment hash. Each also carries a **provenance envelope** (`source`, `observed_at`, `confidence`) that travels alongside the fragment but is excluded from its hash. DNA fragments include:
 
-The DNA system continuously updates this digital twin through:
+- Managed object state from module `Get` (services, files, users, packages, firewall, …) — enforceable, drift-corrected
+- Observe-only host facts from osquery via a curated stable-fact allowlist (CPU model, total memory, BIOS, OS build) — report-only
+- The **typed entity identity** shared with the topology graph and DEX telemetry (the common join key)
+- Security posture and compliance state where expressed as managed/observed objects
 
-- Real-time monitoring and state detection
-- Automated discovery of system changes
-- Integration with external data sources
-- Historical tracking of configuration changes
-- Relationship mapping between systems
-- Performance and health metrics collection
+DNA is **not** telemetry. Ephemeral runtime values — live CPU/memory utilisation, uptime, PIDs, per-process resource use, health metrics — are **excluded from DNA** (ADR-017 clause 4); they flow on the separate, unhashed monitor-stream / DEX pipe. That exclusion is what keeps the DNA hash stable instead of flapping every second.
+
+The controller retains DNA as **versioned, append-only** per-entity history (ADR-017 Amendment A1.3): state is queryable over time ("what was `service:sshd` on a given date", "when did this fragment last change"), and partial sync validates the controller's copy against the steward's via a two-level (per-fragment + aggregate-root) hash, transferring only changed fragments.
 
 ### Module
 
@@ -272,7 +263,7 @@ A **module bundle** is a signed archive containing the module binary (cross-comp
 
 ### Module contract
 
-The **module contract** is the gRPC API that every CFGMS module must implement. It is defined in `api/proto/modules/` and documented in [`docs/architecture/modules/interface.md`](modules/interface.md). The contract has two variants: `ModuleService` (steward and outpost modules) and `WorkflowModuleService` (workflow modules). The only difference is the `Handshake` message, which carries the calling context. `Get`, `Set`, `Test`, and `Shutdown` messages are shared.
+The **module contract** is the gRPC API that every CFGMS module must implement. It is defined in `api/proto/modules/` and documented in [`docs/architecture/modules/interface.md`](architecture/modules/interface.md). The contract has two variants: `ModuleService` (steward and outpost modules) and `WorkflowModuleService` (workflow modules). The only difference is the `Handshake` message, which carries the calling context. `Get`, `Set`, `Test`, and `Shutdown` messages are shared.
 
 ### Module runtime
 
@@ -302,7 +293,7 @@ An **outpost module** is a module with `executors: [outpost]` in `module.yaml`. 
 
 A **pluggable provider** is a backend implementation of a central CFGMS infrastructure interface (storage, logging, secrets, directory, control-plane transport, data-plane transport). Pluggable providers live under `pkg/*/providers/` and are selected via YAML configuration at runtime. They register themselves at startup via `init()`.
 
-**Disambiguation from Module**: "Pluggable provider" refers strictly to the central-provider pattern described in `pkg/README.md` and [`docs/architecture/provider-architecture.md`](provider-architecture.md). Modules are a distinct concept: they manage endpoint resources, run out-of-process, and use a different interface (`ModuleService` gRPC). The terms "provider", "plugin", and "pluggable" in CFGMS documentation always refer to the central-provider pattern unless the surrounding context explicitly says "module."
+**Disambiguation from Module**: "Pluggable provider" refers strictly to the central-provider pattern described in `pkg/README.md` and [`docs/architecture/provider-architecture.md`](architecture/provider-architecture.md). Modules are a distinct concept: they manage endpoint resources, run out-of-process, and use a different interface (`ModuleService` gRPC). The terms "provider", "plugin", and "pluggable" in CFGMS documentation always refer to the central-provider pattern unless the surrounding context explicitly says "module."
 
 ### Configuration-Data
 

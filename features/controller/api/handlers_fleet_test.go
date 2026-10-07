@@ -6,16 +6,213 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ── handleFleetHealth ─────────────────────────────────────────────────────────
+
+func getFleetHealth(server *Server) *httptest.ResponseRecorder {
+	req := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil), "")
+	rec := httptest.NewRecorder()
+	server.handleFleetHealth(rec, req)
+	return rec
+}
+
+func getFleetHealthWithTenant(server *Server, tenantID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil)
+	req = req.WithContext(withCallerTenant(req.Context(), tenantID))
+	rec := httptest.NewRecorder()
+	server.handleFleetHealth(rec, req)
+	return rec
+}
+
+// fleetHealthData mirrors FleetHealthResponse for test unmarshaling.
+type fleetHealthData struct {
+	Healthy     int `json:"healthy"`
+	Degraded    int `json:"degraded"`
+	Unreachable int `json:"unreachable"`
+}
+
+func extractFleetHealth(t *testing.T, rec *httptest.ResponseRecorder) fleetHealthData {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var h fleetHealthData
+	require.NoError(t, json.Unmarshal(raw, &h))
+	return h
+}
+
+func TestHandleFleetHealth_EmptyFleet_ReturnsZeroCounts(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery()
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 0, h.Healthy)
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable)
+}
+
+func TestHandleFleetHealth_ClassifiesByStatusAndHeartbeat(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			// healthy: active + heartbeat within DegradedHeartbeatAge (5 min)
+			{ID: "s1", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s2", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-4 * time.Minute)},
+			// degraded: active + heartbeat older than DegradedHeartbeatAge
+			{ID: "s3", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-6 * time.Minute)},
+			{ID: "s4", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-30 * time.Minute)},
+			// unreachable: lost
+			{ID: "s5", TenantID: "t", Status: "lost", LastHeartbeat: now.Add(-2 * time.Hour)},
+			// not counted: other lifecycle states
+			{ID: "s6", TenantID: "t", Status: "registered", LastHeartbeat: time.Time{}},
+			{ID: "s7", TenantID: "t", Status: "archived", LastHeartbeat: now.Add(-24 * time.Hour)},
+			{ID: "s8", TenantID: "t", Status: "deregistered", LastHeartbeat: now.Add(-48 * time.Hour)},
+		},
+	})
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 2, h.Healthy, "2 active stewards with fresh heartbeats")
+	assert.Equal(t, 2, h.Degraded, "2 active stewards with stale heartbeats")
+	assert.Equal(t, 1, h.Unreachable, "1 lost steward")
+}
+
+// TestHandleFleetHealth_TenantIsolation is the REQUIRED acceptance-criteria test:
+// a caller scoped to tenant-a must never see tenant-b counts in the aggregate.
+func TestHandleFleetHealth_TenantIsolation(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			// tenant-a stewards (caller's tenant — must appear)
+			{ID: "ta-1", TenantID: "tenant-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "ta-2", TenantID: "tenant-a", Status: "active", LastHeartbeat: now.Add(-2 * time.Minute)},
+			// tenant-b stewards (different tenant — must NOT appear)
+			{ID: "tb-1", TenantID: "tenant-b", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "tb-2", TenantID: "tenant-b", Status: "lost", LastHeartbeat: now.Add(-2 * time.Hour)},
+		},
+	})
+
+	rec := getFleetHealthWithTenant(server, "tenant-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 2, h.Healthy, "tenant-a must only see its own 2 healthy stewards")
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable, "tenant-b lost steward must not appear in tenant-a response")
+}
+
+// TestHandleFleetHealth_SubtreeIncludesDescendants verifies that a caller scoped
+// to an ancestor tenant also sees stewards in descendant tenants.
+func TestHandleFleetHealth_SubtreeIncludesDescendants(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s-root", TenantID: "msp-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s-child", TenantID: "msp-a/client-1", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s-other", TenantID: "msp-b", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+		},
+	})
+
+	rec := getFleetHealthWithTenant(server, "msp-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 2, h.Healthy, "msp-a parent must see its own steward and child tenant's steward")
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable)
+}
+
+// TestHandleFleetHealth_AdminSeesFull verifies that an unauthenticated (admin mTLS)
+// caller with no tenant in context sees the full fleet.
+func TestHandleFleetHealth_AdminSeesFull(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s1", TenantID: "tenant-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s2", TenantID: "tenant-b", Status: "lost", LastHeartbeat: now.Add(-2 * time.Hour)},
+		},
+	})
+
+	rec := getFleetHealth(server) // no tenant in context = admin
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 1, h.Healthy)
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 1, h.Unreachable)
+}
+
+func TestHandleFleetHealth_FleetQueryError_Returns500(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = &failingFleetQuery{}
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "INTERNAL_ERROR", resp.Error.Code)
+}
+
+// controlCharFleetQuery is a real implementation of fleet.FleetQuery that always
+// fails with a caller-configured error, used to prove a control-character payload
+// in that error cannot reach the logger unsanitized (Issue #4073 site 2).
+type controlCharFleetQuery struct {
+	err error
+}
+
+func (f *controlCharFleetQuery) Search(_ context.Context, _ fleet.Filter) ([]fleet.StewardResult, error) {
+	return nil, f.err
+}
+
+func (f *controlCharFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, error) {
+	return 0, f.err
+}
+
+// TestHandleFleetHealth_FleetQueryError_SanitizesErrorLog guards Issue #4073
+// site 2: handleFleetHealth logged "error", err bare from s.fleetQuery.Search.
+// This must fail if the sanitization is ever reverted.
+func TestHandleFleetHealth_FleetQueryError_SanitizesErrorLog(t *testing.T) {
+	// Injected at construction, not assigned onto a running server -- see the
+	// note in handlers_audit_test.go's equivalent test.
+	capLogger := &capturingLogger{}
+	server := setupTestServerWithLogger(t, capLogger)
+	const ctrlPayload = "fleet query failure\nInjected: fake log line\rtrailer"
+	server.fleetQuery = &controlCharFleetQuery{err: errors.New(ctrlPayload)}
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	errorValues := capLogger.loggedValuesForKey("error")
+	require.NotEmpty(t, errorValues, "expected the error log call to have fired")
+	for _, v := range errorValues {
+		assert.NotContains(t, v, "\n", "raw newline from the fleet query error reached the logger unsanitized")
+		assert.NotContains(t, v, "\r", "raw carriage return from the fleet query error reached the logger unsanitized")
+	}
+}
 
 // fleetTestStewardProvider backs MemoryQuery with a fixed steward list for resolve tests.
 type fleetTestStewardProvider struct {
@@ -46,22 +243,29 @@ func seededFleetQuery(stewards ...fleet.StewardData) fleet.FleetQuery {
 	return fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: stewards})
 }
 
+// postResolveSelector simulates an unrestricted (root-scoped, mTLS admin) caller —
+// carries ctxkeys.TenantScope as root (Issue #4335) so tests that don't care about
+// tenant scoping aren't refused by the unset-scope fail-closed check.
 func postResolveSelector(server *Server, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
 		bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 	rec := httptest.NewRecorder()
 	server.handleResolveSelector(rec, req)
 	return rec
 }
 
+// postResolveSelectorWithTenant carries both ctxkeys.TenantID and the corresponding
+// ctxkeys.TenantScope (Issue #4335): an empty tenantID means root (mirrors
+// scopeForVerifiedAdminCert), a non-empty one means a tenant scope.
 func postResolveSelectorWithTenant(server *Server, body, tenantID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
 		bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	if tenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
-	}
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, tenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(tenantID))
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	server.handleResolveSelector(rec, req)
 	return rec
@@ -159,6 +363,38 @@ func TestHandleResolveSelector_OS_Filter(t *testing.T) {
 	assert.Equal(t, "linux", dna["os"])
 }
 
+// TestHandleResolveSelector_Fragments_PresentInResponse verifies that
+// steward.DNA.Fragments (ADR-017) round-trip through the /api/v1/fleet/resolve
+// response. This is the wire path the CLI's deriveHVPromoteCluster relies on
+// to derive cluster candidates via clusterregistry.ClustersFromFragments
+// (Issue #3317) — without it, steward.DNA.Fragments deserializes to nil on
+// every CLI invocation regardless of what fragments the steward actually has.
+func TestHandleResolveSelector_Fragments_PresentInResponse(t *testing.T) {
+	server := setupTestServer(t)
+	seed := makeSeedSteward("s1", "es-hv01", "linux", "amd64", "prod")
+	seed.DNAFragments = []*commonpb.Fragment{
+		{FragmentId: "cluster:cfg-lab.membership"},
+	}
+	server.fleetQuery = seededFleetQuery(seed)
+
+	rec := postResolveSelector(server, `{"selector":"all"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1)
+
+	item := list[0].(map[string]interface{})
+	dna := item["dna"].(map[string]interface{})
+	fragments, ok := dna["fragments"].([]interface{})
+	require.True(t, ok, "dna.fragments must be present in the resolve response")
+	require.Len(t, fragments, 1)
+	frag := fragments[0].(map[string]interface{})
+	assert.Equal(t, "cluster:cfg-lab.membership", frag["fragment_id"])
+}
+
 func TestHandleResolveSelector_Combined_NarrowsToOne(t *testing.T) {
 	server := setupTestServer(t)
 	server.fleetQuery = seededFleetQuery(
@@ -194,9 +430,293 @@ func TestHandleResolveSelector_FleetQueryError_Returns500(t *testing.T) {
 	assert.Equal(t, "INTERNAL_ERROR", resp.Error.Code)
 }
 
+// ── handleResolveSelector: id: selector ──────────────────────────────────────
+
+// TestHandleResolveSelector_IDSelector_SingleMatch verifies that id:<steward-id>
+// returns the one matching steward and nothing else (exact match semantics).
+func TestHandleResolveSelector_IDSelector_SingleMatch(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-1780659937223058807", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-other", "host-b", "linux", "arm64", "dev"),
+	)
+
+	rec := postResolveSelector(server, `{"selector":"id:steward-1780659937223058807"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1, "only the targeted steward should be returned")
+
+	item := list[0].(map[string]interface{})
+	assert.Equal(t, "steward-1780659937223058807", item["id"])
+}
+
+// TestHandleResolveSelector_IDSelector_NoMatch verifies that id: with an unknown
+// steward ID returns an empty result set without error (not 404).
+func TestHandleResolveSelector_IDSelector_NoMatch(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-known", "host-a", "linux", "amd64", "prod"),
+	)
+
+	rec := postResolveSelector(server, `{"selector":"id:steward-nonexistent"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, list, "unknown steward ID must return empty result set, not an error")
+}
+
+// TestHandleResolveSelector_IDSelector_MultiValue verifies that id:a,b uses OR
+// semantics — a steward matching either ID is included.
+func TestHandleResolveSelector_IDSelector_MultiValue(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-abc", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-def", "host-b", "windows", "amd64", "prod"),
+		makeSeedSteward("steward-other", "host-c", "linux", "arm64", "dev"),
+	)
+
+	rec := postResolveSelector(server, `{"selector":"id:steward-abc,steward-def"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 2, "both comma-separated IDs should be returned")
+
+	ids := make([]string, len(list))
+	for i, item := range list {
+		ids[i] = item.(map[string]interface{})["id"].(string)
+	}
+	assert.ElementsMatch(t, []string{"steward-abc", "steward-def"}, ids)
+}
+
+// TestHandleResolveSelector_IDSelector_AND_WithOS verifies AND semantics when
+// id: is combined with another key — the steward must satisfy both.
+func TestHandleResolveSelector_IDSelector_AND_WithOS(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-linux", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-win", "host-b", "windows", "amd64", "prod"),
+	)
+
+	// steward-linux + os:windows → no match (AND semantics across keys).
+	rec := postResolveSelector(server, `{"selector":"id:steward-linux os:windows"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, list, "id: and os: must be AND-combined — no match expected")
+}
+
+// TestHandleResolveSelector_IDSelector_UnknownKeyStillRejected verifies that other
+// unknown keys remain rejected now that id: is in the accepted set.
+func TestHandleResolveSelector_IDSelector_UnknownKeyStillRejected(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postResolveSelector(server, `{"selector":"unknownkey:value"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "INVALID_SELECTOR", resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "id", "error message must list id in the valid key set")
+}
+
+// ── handleResolveSelector: subtree boundary enforcement ──────────────────────
+
+// postResolveSelectorWithPrincipal sends a resolve request with both a principal
+// and a tenant ID in context, simulating an authenticated operator session.
+func postResolveSelectorWithPrincipal(server *Server, body, tenantID string, isAdmin bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := req.Context()
+	if tenantID != "" {
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+	}
+	if isAdmin {
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{Assurance: session.AssuranceBasic, TenantID: ""})
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	} else {
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{Assurance: session.AssuranceMachine, TenantID: tenantID})
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(tenantID))
+	}
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleResolveSelector(rec, req)
+	return rec
+}
+
+// multiTenantFleet returns a fleet with stewards in several tenant positions for
+// subtree boundary tests.
+func multiTenantFleet() []fleet.StewardData {
+	return []fleet.StewardData{
+		{ID: "s-msp-a-client-1", TenantID: "msp-a/client-1", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "host-1"}},
+		{ID: "s-msp-a-client-1-web", TenantID: "msp-a/client-1/servers/web", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "web-1"}},
+		{ID: "s-msp-a-client-2", TenantID: "msp-a/client-2", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "host-2"}},
+		{ID: "s-msp-b-client-1", TenantID: "msp-b/client-1", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "host-3"}},
+	}
+}
+
+// resolveIDs unmarshals the response steward list and returns their IDs.
+func resolveIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	ids := make([]string, len(list))
+	for i, item := range list {
+		ids[i] = item.(map[string]interface{})["id"].(string)
+	}
+	return ids
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_DefaultSubtree verifies that an
+// operator with no explicit tenant prefix in the selector sees their entire
+// subtree (exact tenant + descendants), not just the exact tenant.
+func TestHandleResolveSelector_SubtreeBoundary_DefaultSubtree(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 with "all" selector — should see client-1 AND client-1/servers/web.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1", "exact tenant must be included")
+	assert.Contains(t, ids, "s-msp-a-client-1-web", "descendant tenant must be included")
+	assert.NotContains(t, ids, "s-msp-a-client-2", "sibling tenant must be excluded")
+	assert.NotContains(t, ids, "s-msp-b-client-1", "different MSP must be excluded")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_ExplicitDescendantAllowed verifies
+// that an operator may explicitly target a descendant tenant in their selector.
+func TestHandleResolveSelector_SubtreeBoundary_ExplicitDescendantAllowed(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a targets descendant msp-a/client-1/servers/web explicitly.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/servers/web/all"}`, "msp-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1-web")
+	assert.NotContains(t, ids, "s-msp-a-client-1")
+	assert.NotContains(t, ids, "s-msp-a-client-2")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_SiblingRejected verifies that an
+// operator cannot target a sibling tenant — the request returns 403.
+func TestHandleResolveSelector_SubtreeBoundary_SiblingRejected(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 attempts to target msp-a/client-2 — must be 403.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-2/all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "CROSS_TENANT", resp.Error.Code)
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_UnrelatedTenantRejected verifies
+// that targeting a completely unrelated tenant returns 403.
+func TestHandleResolveSelector_SubtreeBoundary_UnrelatedTenantRejected(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 attempts to target msp-b/client-1 — must be 403.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-b/client-1/all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "CROSS_TENANT", resp.Error.Code)
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_ParentTargetsDescendant verifies
+// that a parent operator can explicitly target a child or grandchild tenant.
+func TestHandleResolveSelector_SubtreeBoundary_ParentTargetsDescendant(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a (parent) targets msp-a/client-1 (child).
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/all"}`, "msp-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1")
+	assert.Contains(t, ids, "s-msp-a-client-1-web")
+	assert.NotContains(t, ids, "s-msp-a-client-2")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_AdminUnrestricted verifies that an
+// admin caller (empty tenant, IsAdmin=true) is not limited by subtree boundaries.
+func TestHandleResolveSelector_SubtreeBoundary_AdminUnrestricted(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Admin with "all" — must see everything.
+	rec := postResolveSelectorWithPrincipal(server, `{"selector":"all"}`, "", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Len(t, ids, len(multiTenantFleet()), "admin must see all stewards")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_ExplicitOwnTenantAllowed verifies
+// that a caller may explicitly name their own tenant as the selector prefix.
+func TestHandleResolveSelector_SubtreeBoundary_ExplicitOwnTenantAllowed(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 explicitly targets msp-a/client-1 (themselves).
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1")
+	assert.Contains(t, ids, "s-msp-a-client-1-web")
+}
+
 // TestHandleResolveSelector_TenantIsolation verifies that a caller authenticated
 // as tenant-a cannot see tenant-b stewards even when the selector would otherwise
 // match them (e.g. "all"). The authenticated tenant is always AND-ed onto the filter.
+// TestHandleResolveSelector_UnsetTenantScope_Refused is the [REQUIRED TEST] for Issue
+// #4335: a request whose ctxkeys.TenantScope was never established (the plumbing-bug
+// signature) must be refused, not silently resolved fleet-wide the way a raw
+// ctxkeys.TenantID=="" comparison would treat it.
+func TestHandleResolveSelector_UnsetTenantScope_Refused(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
+		bytes.NewBufferString(`{"selector":"all"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Deliberately no ctxkeys.TenantScopeKey in context.
+	rec := httptest.NewRecorder()
+	server.handleResolveSelector(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"an unset tenant scope must be refused, not resolved fleet-wide: %s", rec.Body.String())
+}
+
 func TestHandleResolveSelector_TenantIsolation(t *testing.T) {
 	server := setupTestServer(t)
 	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
@@ -230,4 +750,90 @@ func TestHandleResolveSelector_TenantIsolation(t *testing.T) {
 
 	item := list[0].(map[string]interface{})
 	assert.Equal(t, "tenant-a-steward", item["id"])
+}
+
+// TestHandleResolveSelector_TenantIDPresentInResponse verifies that the
+// tenant_id field is populated on each resolved StewardInfo entry, completing
+// the contract the CLI-side StewardInfo type already declares.
+func TestHandleResolveSelector_TenantIDPresentInResponse(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-123", "hv01", "linux", "amd64", "prod"),
+	)
+	// makeSeedSteward hard-codes TenantID = "tenant-a" in the fleet data;
+	// the handler must now forward it in the JSON response.
+
+	rec := postResolveSelector(server, `{"selector":"all"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1)
+
+	item := list[0].(map[string]interface{})
+	assert.Equal(t, "tenant-a", item["tenant_id"],
+		"tenant_id must be present in the resolve response so the CLI can derive it without a second round-trip")
+}
+
+// TestHandleFleetHealth_HiddenExcludedFromCounts verifies that a hidden active steward
+// is NOT counted in Healthy/Degraded but IS counted in the non-suppressible Hidden field.
+func TestHandleFleetHealth_HiddenExcludedFromCounts(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			// visible active steward — counted Healthy
+			{ID: "s-visible", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			// hidden active steward — must NOT be counted Healthy; counted in Hidden
+			{ID: "s-hidden", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute), Hidden: true},
+		},
+	})
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var h struct {
+		Healthy     int `json:"healthy"`
+		Degraded    int `json:"degraded"`
+		Unreachable int `json:"unreachable"`
+		Hidden      int `json:"hidden"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &h))
+
+	assert.Equal(t, 1, h.Healthy, "only visible active steward counted Healthy")
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable)
+	assert.Equal(t, 1, h.Hidden, "hidden steward must be counted in hidden field")
+}
+
+// TestHandleFleetHealth_HiddenCountNonSuppressible verifies that the hidden count appears
+// in the response regardless of any include_hidden param (it is non-suppressible by design).
+func TestHandleFleetHealth_HiddenCountNonSuppressible(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s-hidden-2", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute), Hidden: true},
+		},
+	})
+
+	// No include_hidden param — hidden count must still be present.
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var h struct {
+		Hidden int `json:"hidden"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &h))
+	assert.Equal(t, 1, h.Hidden, "hidden count must be in health response even without include_hidden")
 }

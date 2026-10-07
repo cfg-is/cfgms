@@ -33,6 +33,24 @@ func (s *SQLitePushStore) Close() error {
 // CreatePush inserts a new push record. Returns an error if a record with the
 // same ID already exists.
 func (s *SQLitePushStore) CreatePush(ctx context.Context, record *business.PushRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to begin create push tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := sqliteInsertPushRecord(ctx, tx, record); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// sqliteInsertPushRecord inserts a single push_records row within tx. Shared
+// by SQLitePushStore.CreatePush and SQLiteCommandStore.CreatePushAndCommandRecords
+// (Issue #3757, ADR-031 Decision 2) so both paths persist identically and so
+// the push row and its delivery records can share one transaction.
+func sqliteInsertPushRecord(ctx context.Context, tx *sql.Tx, record *business.PushRecord) error {
 	if record == nil {
 		return fmt.Errorf("sqlite: push record cannot be nil")
 	}
@@ -50,7 +68,7 @@ func (s *SQLitePushStore) CreatePush(ctx context.Context, record *business.PushR
 		createdAt = now
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO push_records
 			(id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

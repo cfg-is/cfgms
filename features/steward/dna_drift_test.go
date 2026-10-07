@@ -13,6 +13,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	steward "github.com/cfgis/cfgms/features/steward"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -37,6 +38,7 @@ func TestDNACollectorInitializedInStandaloneMode(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -57,6 +59,7 @@ func TestDriftDetectorInitializedInStandaloneMode(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -65,15 +68,18 @@ func TestDriftDetectorInitializedInStandaloneMode(t *testing.T) {
 	realDNA := steward.GetPreviousDNA(s)
 	require.NotNil(t, realDNA, "first convergence must capture DNA")
 
-	// Inject a previousDNA with the same stable ID but an extra sentinel attribute.
-	// The drift detector compares prev vs current; the sentinel attribute is present
-	// in prev but absent in current → generates a ChangeTypeRemoved drift event.
+	// Inject a previousDNA with the same stable ID but an extra sentinel fragment.
+	// The drift detector compares prev vs current Fragments; the sentinel fragment is
+	// present in prev but absent in current → generates a ChangeTypeRemoved drift event.
 	// If driftDetector is nil, detectUnmanagedDNADrift returns (nil, nil) immediately
 	// after the ID comparison, so events would be empty.
 	sentinelDNA := &commonpb.DNA{
 		Id: realDNA.Id, // same ID — avoids the ID-mismatch early-return path
-		Attributes: map[string]string{
-			"__drift_detector_init_sentinel__": "present_in_prev_only",
+		Fragments: []*commonpb.Fragment{
+			{
+				FragmentId:   "__drift_detector_init_sentinel__",
+				FragmentHash: "present_in_prev_only",
+			},
 		},
 	}
 	steward.SetPreviousDNA(s, sentinelDNA)
@@ -93,6 +99,7 @@ func TestDNASnapshotCapturedAfterConvergence(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Before Start, no DNA snapshot exists.
 	prevDNA := steward.GetPreviousDNA(s)
@@ -109,7 +116,7 @@ func TestDNASnapshotCapturedAfterConvergence(t *testing.T) {
 
 	assert.NotNil(t, prevDNA, "DNA snapshot should be captured after initial convergence")
 	assert.NotEmpty(t, prevDNA.Id, "DNA snapshot should have a non-empty ID")
-	assert.NotEmpty(t, prevDNA.Attributes, "DNA snapshot should have attributes")
+	assert.NotEmpty(t, prevDNA.Fragments, "DNA snapshot should have fragments for drift detection (Issue #3332: Collect() writes host:* fragments)")
 
 	require.NoError(t, s.Stop(context.Background()))
 }
@@ -122,6 +129,7 @@ func TestRunConvergenceCapturesDNASnapshot(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -145,6 +153,7 @@ func TestRunConvergenceDetectsDNADriftOnSecondRun(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -199,11 +208,14 @@ func TestDetectUnmanagedDNADrift_NilDriftDetector(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Set a previous snapshot so we reach the driftDetector nil check.
+	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"test": "value"})
+	require.NoError(t, err)
 	steward.SetPreviousDNA(s, &commonpb.DNA{
-		Id:         "same-id",
-		Attributes: map[string]string{"test": "value"},
+		Id:        "same-id",
+		Fragments: []*commonpb.Fragment{prevFrag},
 	})
 
 	// Override drift detector with nil — DNA collector still runs but detection is skipped.
@@ -228,11 +240,14 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
-	// Inject a previous DNA with a different ID than the real system DNA will produce.
+	// Inject a previous DNA with a different ID than the DNA collector will produce.
+	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"fake": "previous"})
+	require.NoError(t, err)
 	steward.SetPreviousDNA(s, &commonpb.DNA{
-		Id:         "different-id-that-will-not-match-real-system",
-		Attributes: map[string]string{"fake": "previous"},
+		Id:        "different-id-that-will-not-match-real-system",
+		Fragments: []*commonpb.Fragment{prevFrag},
 	})
 
 	ctx := context.Background()
@@ -241,12 +256,110 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 		_, _ = steward.DetectUnmanagedDNADrift(s, ctx)
 	})
 
-	// Snapshot should be updated to the current (real) DNA despite the mismatch.
+	// Snapshot should be updated to the current (freshly collected) DNA despite the mismatch.
 	updatedDNA := steward.GetPreviousDNA(s)
 
 	assert.NotNil(t, updatedDNA)
 	assert.NotEqual(t, "different-id-that-will-not-match-real-system", updatedDNA.Id,
-		"snapshot should be updated to the real system DNA after ID mismatch")
+		"snapshot should be updated to the freshly collected DNA after ID mismatch")
+
+	require.NoError(t, s.Stop(context.Background()))
+}
+
+// TestDetectUnmanagedDNADrift_ReportsHostFactChange is the functional regression
+// guard for Issue #3332 (host-fact fragments) and Issue #3320 (Fragment-aware
+// drift detection): the unmanaged-drift path must still SEE host facts, now
+// diffed via DNA.Fragments, which replaced the removed flat attribute map.
+//
+// pkg/dna/drift compares Fragments by FragmentId/FragmentHash and has no
+// awareness of the flat attribute map, so if Collect() ever stopped writing
+// host:* fragments the detector would silently compare two empty fragment
+// sets and report "no drift" forever — a detection control that fails open
+// on a host the threat model assumes may be compromised. Asserting on
+// FragmentCount cannot catch that; only driving a real change through the
+// real detector can.
+//
+// The mutation removes the host:os fragment (which carries the observed
+// hostname, Issue #3319/#3358) from the PREVIOUS snapshot. That is
+// deliberate: the resulting "added" change can only be reported if the
+// CURRENT snapshot carries host-fact fragments, so the test fails if the
+// drift path ever stops populating them again.
+func TestDetectUnmanagedDNADrift_ReportsHostFactChange(t *testing.T) {
+	logger := logging.NewLogger("info")
+	dir := t.TempDir()
+	cfgPath := writeMinimalCfgForDNA(t, dir, "dna-hostfact-drift-steward")
+
+	s, err := steward.NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	collector := newSnapshotDNACollector(t, logger)
+	steward.SetDNACollector(s, collector)
+
+	ctx := context.Background()
+
+	// Warm up background collection (software/security attributes, including
+	// the "os"/"os_name"/... keys that make up most of the host:os fragment)
+	// before the baseline capture below. Collect() only merges background data
+	// that has already completed by the time it runs; with the slow platform
+	// collector, background collection never finished within a single test's
+	// Collect() calls, so every call consistently saw fast data only.
+	// The cross-platform collectors complete background collection almost
+	// instantly, so without this warm-up, whether it finishes before the first
+	// or the second DetectUnmanagedDNADrift call becomes a race — sometimes the
+	// baseline is fast-data-only (host:os carries just "hostname") and the
+	// second snapshot is fully merged, making their host:os hashes differ for a
+	// reason unrelated to what this test actually exercises. Warming up first
+	// makes every subsequent Collect() call see the same fully merged set.
+	_, err = collector.Collect(ctx)
+	require.NoError(t, err)
+	collector.WaitForBackground(ctx)
+
+	// First call captures the baseline snapshot (no previous snapshot to compare).
+	events, err := steward.DetectUnmanagedDNADrift(s, ctx)
+	require.NoError(t, err)
+	require.Empty(t, events, "the first run has no previous snapshot to compare against")
+
+	baseline := steward.GetPreviousDNA(s)
+	require.NotNil(t, baseline)
+	require.NotEmpty(t, baseline.Fragments,
+		"the drift path must capture host-fact fragments (Issue #3332)")
+
+	var hostOS *commonpb.Fragment
+	for _, f := range baseline.Fragments {
+		if f.FragmentId == "host:os" {
+			hostOS = f
+		}
+	}
+	require.NotNil(t, hostOS, "host:os fragment (carries the observed hostname) must be present")
+
+	// Replay the baseline with the host:os fragment removed; the fresh snapshot
+	// taken by the next call must report it as an added fragment.
+	mutated := make([]*commonpb.Fragment, 0, len(baseline.Fragments))
+	for _, f := range baseline.Fragments {
+		if f.FragmentId == "host:os" {
+			continue
+		}
+		mutated = append(mutated, f)
+	}
+	steward.SetPreviousDNA(s, &commonpb.DNA{Id: baseline.Id, Fragments: mutated})
+
+	events, err = steward.DetectUnmanagedDNADrift(s, ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, events,
+		"a host-fact change must produce at least one drift event")
+
+	var sawHostOS bool
+	for _, evt := range events {
+		for _, change := range evt.Changes {
+			if change.Attribute == "host:os" {
+				sawHostOS = true
+				assert.Equal(t, hostOS.FragmentHash, change.CurrentValue,
+					"the drift event must carry the fragment hash from the freshly collected snapshot")
+			}
+		}
+	}
+	assert.True(t, sawHostOS,
+		"the host:os fragment change must appear in the reported drift changes")
 
 	require.NoError(t, s.Stop(context.Background()))
 }

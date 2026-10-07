@@ -21,8 +21,6 @@ import (
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 
 	"github.com/stretchr/testify/require"
 )

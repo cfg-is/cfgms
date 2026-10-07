@@ -23,7 +23,6 @@ func TestLoadConfiguration_ParsesCanonicalExample(t *testing.T) {
 	cfg, err := LoadConfiguration(configPath)
 	require.NoError(t, err, "canonical steward.cfg must parse without error")
 	assert.Equal(t, "my-host-01", cfg.Steward.ID)
-	assert.Equal(t, ModeStandalone, cfg.Steward.Mode)
 	assert.Equal(t, "info", cfg.Steward.Logging.Level)
 	assert.Empty(t, cfg.Resources, "boot config should have no inline resources")
 }

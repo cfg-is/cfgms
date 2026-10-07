@@ -51,14 +51,22 @@ func DefaultConfig() *Config {
 			GracePeriod:         10 * time.Second,
 			MaxSessionMigration: 1000,
 		},
-		SplitBrain: &SplitBrainConfig{
-			Enabled:            true,
-			DetectionInterval:  15 * time.Second,
-			QuorumCheck:        true,
-			AutoResolve:        true,
-			QuorumInterval:     30 * time.Second,
-			ResolutionStrategy: "quorum-based",
-		},
+	}
+}
+
+// ModeFromString parses a deployment mode string into a DeploymentMode.
+// Valid values (case-insensitive): "single", "blue-green", "cluster".
+// Returns SingleServerMode and an error for unrecognised values.
+func ModeFromString(s string) (DeploymentMode, error) {
+	switch strings.ToLower(s) {
+	case "single":
+		return SingleServerMode, nil
+	case "blue-green":
+		return BlueGreenMode, nil
+	case "cluster":
+		return ClusterMode, nil
+	default:
+		return SingleServerMode, fmt.Errorf("invalid HA mode: %s", s)
 	}
 }
 
@@ -66,16 +74,11 @@ func DefaultConfig() *Config {
 func (c *Config) LoadFromEnvironment() error {
 	// Load deployment mode
 	if mode := os.Getenv("CFGMS_HA_MODE"); mode != "" {
-		switch strings.ToLower(mode) {
-		case "single":
-			c.Mode = SingleServerMode
-		case "blue-green":
-			c.Mode = BlueGreenMode
-		case "cluster":
-			c.Mode = ClusterMode
-		default:
-			return fmt.Errorf("invalid HA mode: %s", mode)
+		m, err := ModeFromString(mode)
+		if err != nil {
+			return err
 		}
+		c.Mode = m
 	}
 
 	// Load CA certificate path for TLS verification between HA nodes
@@ -193,13 +196,6 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
-	// Load split-brain configuration
-	if splitBrainEnabled := os.Getenv("CFGMS_HA_SPLIT_BRAIN_ENABLED"); splitBrainEnabled != "" {
-		if enabled, err := strconv.ParseBool(splitBrainEnabled); err == nil {
-			c.SplitBrain.Enabled = enabled
-		}
-	}
-
 	return nil
 }
 
@@ -231,6 +227,21 @@ func (c *Config) Validate() error {
 
 		if c.Cluster.Discovery == nil {
 			return fmt.Errorf("discovery configuration is required for cluster mode")
+		}
+
+		// Validate the ADR-029 lease bound: leaseDuration must be strictly less
+		// than ElectionTimeout and strictly greater than HeartbeatInterval.
+		// The 0.8× ratio always satisfies this for valid timing values, but
+		// we validate explicitly so future ratio changes cannot silently violate it.
+		leaseDuration := c.Cluster.LeaseDuration()
+		if leaseDuration <= 0 {
+			return fmt.Errorf("derived lease duration must be positive (ElectionTimeout=%v)", c.Cluster.ElectionTimeout)
+		}
+		if leaseDuration >= c.Cluster.ElectionTimeout {
+			return fmt.Errorf("derived lease duration (%v) must be less than ElectionTimeout (%v)", leaseDuration, c.Cluster.ElectionTimeout)
+		}
+		if leaseDuration <= c.Cluster.HeartbeatInterval {
+			return fmt.Errorf("derived lease duration (%v) must exceed HeartbeatInterval (%v) so a renewal cycle can refresh it", leaseDuration, c.Cluster.HeartbeatInterval)
 		}
 	}
 
@@ -281,6 +292,32 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// LeaseDuration returns the leader lease duration derived from ElectionTimeout
+// per ADR-029 Decision 1: leaseDuration = 0.8 × ElectionTimeout.
+//
+// The lease must expire strictly before ElectionTimeout so that a new leader
+// cannot be elected while the outgoing leader still believes it is authoritative.
+// The 0.2× margin covers scheduling pauses (GC, hypervisor descheduling).
+func (c *ClusterConfig) LeaseDuration() time.Duration {
+	return time.Duration(float64(c.ElectionTimeout) * 0.8)
+}
+
+// FastElectionConfig returns a ClusterConfig with test-scale timings. Use in
+// place of DefaultConfig().Cluster in tests so the derived lease duration
+// (LeaseDuration, 0.8 × ElectionTimeout) converges in milliseconds rather than
+// seconds, preventing timing flakiness under CI CPU contention.
+func FastElectionConfig() ClusterConfig {
+	return ClusterConfig{
+		ExpectedSize:      3,
+		MinQuorum:         2,
+		ElectionTimeout:   200 * time.Millisecond,
+		HeartbeatInterval: 40 * time.Millisecond,
+		Discovery: &DiscoveryConfig{
+			Config: make(map[string]interface{}),
+		},
+	}
 }
 
 // GetModeString returns the deployment mode as a string

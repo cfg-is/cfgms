@@ -12,11 +12,129 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 
 	// Import providers for testing
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 )
+
+// TestExtractTenantID_AgreesWithAuthenticationMiddlewareKey proves the two tenant
+// context namespaces this story unifies now agree (Issue #4326 required test): a
+// tenant set the way the authentication middleware sets it — under ctxkeys.TenantID
+// — is visible to the logging path, and WithTenant's context write round-trips
+// through the same key. Before the fix, pkg/logging read its own package-local
+// tenantIDKey, which the middleware never wrote, so this context would have
+// produced "" no matter what the caller was authenticated as.
+func TestExtractTenantID_AgreesWithAuthenticationMiddlewareKey(t *testing.T) {
+	t.Run("a tenant set under ctxkeys.TenantID is visible via extractTenantID", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-mw")
+		assert.Equal(t, "tenant-mw", extractTenantID(ctx))
+		assert.Equal(t, "tenant-mw", ExtractTenantFromContext(ctx))
+	})
+
+	t.Run("WithTenant writes under ctxkeys.TenantID, not a package-local key", func(t *testing.T) {
+		ctx := WithTenant(context.Background(), "tenant-injected")
+		tenantID, ok := ctx.Value(ctxkeys.TenantID).(string)
+		require.True(t, ok, "WithTenant must store under ctxkeys.TenantID")
+		assert.Equal(t, "tenant-injected", tenantID)
+		assert.Equal(t, "tenant-injected", extractTenantID(ctx))
+	})
+
+	t.Run("a context with no tenant set produces an empty string, not a panic", func(t *testing.T) {
+		assert.Empty(t, extractTenantID(context.Background()))
+	})
+}
+
+// TestLoggingManager_AsyncClose_NoBatchingRoutineRace verifies that Close() waits
+// for the batchingRoutine goroutine to finish before closing shared resources.
+// Without the batchingWg fix, this test exposes a race between the goroutine's
+// final flushBatch→provider.WriteBatch and Close()'s provider.Close() when run
+// with -race.
+func TestLoggingManager_AsyncClose_NoBatchingRoutineRace(t *testing.T) {
+	cfg := &LoggingConfig{
+		Provider: "file",
+		Config: map[string]interface{}{
+			"directory":        t.TempDir(),
+			"file_prefix":      "race-test",
+			"max_file_size":    1024 * 1024,
+			"retention_days":   1,
+			"compress_rotated": false,
+		},
+		Level:         "DEBUG",
+		ServiceName:   "race-test",
+		Component:     "test",
+		BatchSize:     2,         // small batch so batchingRoutine starts
+		FlushInterval: time.Hour, // long interval so Close() triggers the stop path
+		AsyncWrites:   true,
+		BufferSize:    16,
+	}
+
+	manager, err := NewLoggingManager(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	// Fill the batch buffer so the batchingRoutine has work to do during Close.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "INFO",
+			Message:   "async-close-race",
+		}))
+	}
+
+	// Close() must drain the batchingRoutine before touching the provider;
+	// the race detector will catch any concurrent WriteBatch/Close on the provider.
+	require.NoError(t, manager.Close())
+}
+
+// TestLoggingManager_FactoryProducesDistinctProviders verifies that factory-registered
+// providers give each LoggingManager its own independent instance. Closing one manager
+// must not race with the other manager's batchingRoutine (pre-fix root cause of the
+// TestControllerLifecycle / TestControllerSingleHTTPServer data race).
+func TestLoggingManager_FactoryProducesDistinctProviders(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	makeCfg := func(dir, svc string) *LoggingConfig {
+		return &LoggingConfig{
+			Provider: "file",
+			Config: map[string]interface{}{
+				"directory": dir, "file_prefix": svc,
+				"retention_days": 1, "compress_rotated": false,
+			},
+			Level: "INFO", ServiceName: svc, Component: "comp",
+			BatchSize: 2, FlushInterval: time.Hour, AsyncWrites: true, BufferSize: 16,
+		}
+	}
+
+	mgr1, err := NewLoggingManager(makeCfg(dir1, "mgr1"))
+	require.NoError(t, err)
+
+	mgr2, err := NewLoggingManager(makeCfg(dir2, "mgr2"))
+	require.NoError(t, err)
+
+	// Core invariant: each manager must own a distinct provider instance.
+	require.False(t, mgr1.GetProvider() == mgr2.GetProvider(),
+		"factory must produce independent provider instances for each LoggingManager")
+
+	ctx := context.Background()
+	// Write entries so both batchingRoutines are active.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, mgr1.WriteEntry(ctx, interfaces.LogEntry{Level: "INFO", Message: "entry"}))
+		require.NoError(t, mgr2.WriteEntry(ctx, interfaces.LogEntry{Level: "INFO", Message: "entry"}))
+	}
+
+	// Closing mgr2 while mgr1's batchingRoutine is active must not race on shared provider
+	// state. The race detector will catch any concurrent reads/writes on p.initialized.
+	require.NoError(t, mgr2.Close())
+
+	// mgr1's write path must remain functional after mgr2 is closed.
+	err = mgr1.WriteEntry(ctx, interfaces.LogEntry{Level: "INFO", Message: "written after mgr2 closed"})
+	assert.NoError(t, err, "mgr1 writes must succeed after mgr2 is independently closed")
+
+	require.NoError(t, mgr1.Close())
+}
 
 func TestLoggingManager_BasicFunctionality(t *testing.T) {
 	// Create temporary directory for test logs

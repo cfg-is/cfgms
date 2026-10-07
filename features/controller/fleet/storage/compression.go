@@ -113,16 +113,17 @@ func (c *GzipCompressor) Decompress(data []byte) (*commonpb.DNA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer func() {
-		if err := reader.Close(); err != nil {
-			// Log error but continue - decompression already completed
-			_ = err // Explicitly ignore close errors after successful decompression
-		}
-	}()
 
 	var decompressed bytes.Buffer
 	if _, err := decompressed.ReadFrom(reader); err != nil {
+		_ = reader.Close()
 		return nil, fmt.Errorf("failed to decompress data: %w", err)
+	}
+
+	// Close validates the gzip CRC32 checksum; an error means the decompressed bytes
+	// are corrupt and must not be returned as valid data.
+	if err := reader.Close(); err != nil {
+		return nil, fmt.Errorf("gzip checksum validation failed: %w", err)
 	}
 
 	// Deserialize back to DNA structure
@@ -354,16 +355,10 @@ func (c *LZ4Compressor) updateStats(originalSize, compressedSize int64, duration
 	}
 }
 
-// OptimizedDNACompressor implements optimized compression specifically for DNA data
-//
-// This compressor takes advantage of DNA data characteristics:
-// - Many repeated attribute keys across devices
-// - Similar attribute values (OS versions, software versions, etc.)
-// - Predictable data structure patterns
+// OptimizedDNACompressor implements optimized compression specifically for DNA data.
+// Attribute dict encoding has been retired (Issue #3329); only the non-attribute
+// metadata fields (ID, timestamps, ConfigHash, etc.) are optimized.
 type OptimizedDNACompressor struct {
-	attributeDict  map[string]int // Dictionary for attribute keys
-	valueDict      map[string]int // Dictionary for common values
-	dictMutex      sync.RWMutex
 	baseCompressor Compressor // Underlying compressor
 	stats          *CompressionStats
 	statsMutex     sync.RWMutex
@@ -377,8 +372,6 @@ func NewOptimizedDNACompressor(algorithm string, level int) (*OptimizedDNACompre
 	}
 
 	return &OptimizedDNACompressor{
-		attributeDict:  make(map[string]int),
-		valueDict:      make(map[string]int),
 		baseCompressor: baseCompressor,
 		stats: &CompressionStats{
 			Algorithm: "optimized_" + algorithm,
@@ -390,9 +383,7 @@ func NewOptimizedDNACompressor(algorithm string, level int) (*OptimizedDNACompre
 // OptimizedDNAData represents DNA data optimized for compression
 type OptimizedDNAData struct {
 	ID                string `json:"id"`
-	AttributeKeys     []int  `json:"attribute_keys"`   // Indices into attribute dictionary
-	AttributeValues   []int  `json:"attribute_values"` // Indices into value dictionary
-	LastUpdated       int64  `json:"last_updated"`     // Unix timestamp seconds
+	LastUpdated       int64  `json:"last_updated"` // Unix timestamp seconds
 	LastUpdatedNanos  int32  `json:"last_updated_nanos,omitempty"`
 	ConfigHash        string `json:"config_hash"`
 	LastSyncTime      int64  `json:"last_sync_time"` // Unix timestamp seconds
@@ -402,35 +393,20 @@ type OptimizedDNAData struct {
 }
 
 // serializedOptimizedPayload is the on-wire format produced by OptimizedDNACompressor.
-// It embeds the reverse dictionaries so each payload is self-contained.
 type serializedOptimizedPayload struct {
-	Data          *OptimizedDNAData `json:"d"`
-	AttributeDict []string          `json:"ak"` // index → attribute key string
-	ValueDict     []string          `json:"vk"` // index → value string
+	Data *OptimizedDNAData `json:"d"`
 }
 
-// Compress compresses DNA data using dictionary-based optimization
+// Compress compresses DNA data using metadata-field optimization.
+// Attribute dict encoding is retired (Issue #3329); only non-attribute metadata
+// is optimized.
 func (c *OptimizedDNACompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 	start := time.Now()
 
 	optimized := c.optimizeDNA(dna)
 
-	// Build reverse dictionaries to embed in the payload so Decompress is self-contained.
-	c.dictMutex.RLock()
-	attrDict := make([]string, len(c.attributeDict))
-	for k, idx := range c.attributeDict {
-		attrDict[idx] = k
-	}
-	valDict := make([]string, len(c.valueDict))
-	for k, idx := range c.valueDict {
-		valDict[idx] = k
-	}
-	c.dictMutex.RUnlock()
-
 	payload := &serializedOptimizedPayload{
-		Data:          optimized,
-		AttributeDict: attrDict,
-		ValueDict:     valDict,
+		Data: optimized,
 	}
 
 	payloadData, err := json.Marshal(payload)
@@ -470,11 +446,17 @@ func (c *OptimizedDNACompressor) Decompress(data []byte) (*commonpb.DNA, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer func() { _ = reader.Close() }()
 
 	var raw bytes.Buffer
 	if _, err := raw.ReadFrom(reader); err != nil {
+		_ = reader.Close()
 		return nil, fmt.Errorf("failed to decompress optimized DNA payload: %w", err)
+	}
+
+	// Close validates the gzip CRC32 checksum; an error means the decompressed bytes
+	// are corrupt and must not be returned as valid data.
+	if err := reader.Close(); err != nil {
+		return nil, fmt.Errorf("gzip checksum validation failed: %w", err)
 	}
 
 	var payload serializedOptimizedPayload
@@ -508,26 +490,6 @@ func (c *OptimizedDNACompressor) Decompress(data []byte) (*commonpb.DNA, error) 
 		}
 	}
 
-	// Reverse the dictionary optimization to reconstruct the attributes map.
-	if len(optimized.AttributeKeys) > 0 {
-		if len(optimized.AttributeKeys) != len(optimized.AttributeValues) {
-			return nil, fmt.Errorf("attribute keys/values length mismatch: %d keys, %d values",
-				len(optimized.AttributeKeys), len(optimized.AttributeValues))
-		}
-
-		dna.Attributes = make(map[string]string, len(optimized.AttributeKeys))
-		for i, keyIdx := range optimized.AttributeKeys {
-			if keyIdx < 0 || keyIdx >= len(payload.AttributeDict) {
-				return nil, fmt.Errorf("attribute key index %d out of range (dict size %d)", keyIdx, len(payload.AttributeDict))
-			}
-			valueIdx := optimized.AttributeValues[i]
-			if valueIdx < 0 || valueIdx >= len(payload.ValueDict) {
-				return nil, fmt.Errorf("attribute value index %d out of range (dict size %d)", valueIdx, len(payload.ValueDict))
-			}
-			dna.Attributes[payload.AttributeDict[keyIdx]] = payload.ValueDict[valueIdx]
-		}
-	}
-
 	return dna, nil
 }
 
@@ -558,9 +520,6 @@ func (c *OptimizedDNACompressor) Close() error {
 }
 
 func (c *OptimizedDNACompressor) optimizeDNA(dna *commonpb.DNA) *OptimizedDNAData {
-	c.dictMutex.Lock()
-	defer c.dictMutex.Unlock()
-
 	optimized := &OptimizedDNAData{
 		ID:              dna.Id,
 		ConfigHash:      dna.ConfigHash,
@@ -578,38 +537,7 @@ func (c *OptimizedDNACompressor) optimizeDNA(dna *commonpb.DNA) *OptimizedDNADat
 		optimized.LastSyncTimeNanos = dna.LastSyncTime.Nanos
 	}
 
-	// Convert attributes using dictionaries
-	for key, value := range dna.Attributes {
-		// Get or create key index
-		keyIndex := c.getOrCreateKeyIndex(key)
-		optimized.AttributeKeys = append(optimized.AttributeKeys, keyIndex)
-
-		// Get or create value index
-		valueIndex := c.getOrCreateValueIndex(value)
-		optimized.AttributeValues = append(optimized.AttributeValues, valueIndex)
-	}
-
 	return optimized
-}
-
-func (c *OptimizedDNACompressor) getOrCreateKeyIndex(key string) int {
-	if index, exists := c.attributeDict[key]; exists {
-		return index
-	}
-
-	index := len(c.attributeDict)
-	c.attributeDict[key] = index
-	return index
-}
-
-func (c *OptimizedDNACompressor) getOrCreateValueIndex(value string) int {
-	if index, exists := c.valueDict[value]; exists {
-		return index
-	}
-
-	index := len(c.valueDict)
-	c.valueDict[value] = index
-	return index
 }
 
 func (c *OptimizedDNACompressor) updateStats(originalSize, compressedSize int64, duration time.Duration) {

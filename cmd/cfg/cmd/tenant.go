@@ -17,6 +17,7 @@ var (
 	tenantCreateParent string
 	tenantAPIURL       string
 	tenantTLSInsecure  bool
+	tenantServerName   string
 )
 
 // tenantCmd is the parent command for tenant management operations.
@@ -29,10 +30,11 @@ Tenant operations require admin mTLS authentication via an admin bundle file.
 The bundle path can be provided via --bundle or the CFGMS_ADMIN_BUNDLE environment variable.
 
 Examples:
-  # Create a root tenant
-  cfg tenant create --tenant-id=team-root
+  # Create the root tenant: a deployment's single tenant with no parent
+  cfg tenant create --tenant-id=root
 
-  # Create a child tenant
+  # Create tenants beneath it
+  cfg tenant create --tenant-id=team-root --parent=root
   cfg tenant create --tenant-id=agent-test --parent=team-root`,
 }
 
@@ -49,8 +51,12 @@ The tenant ID must conform to Kubernetes RFC 1123 DNS label rules:
 
 The command is idempotent: re-running it on an existing tenant exits 0.
 
+A deployment has exactly one tenant with no parent, its root; every other tenant
+needs --parent. Creating a second tenant without one fails.
+
 Examples:
-  cfg tenant create --tenant-id=team-root
+  cfg tenant create --tenant-id=root
+  cfg tenant create --tenant-id=team-root --parent=root
   cfg tenant create --tenant-id=agent-test --parent=team-root`,
 	RunE: runTenantCreate,
 }
@@ -58,6 +64,7 @@ Examples:
 func init() {
 	tenantCmd.PersistentFlags().StringVar(&tenantAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	tenantCmd.PersistentFlags().BoolVar(&tenantTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	tenantCmd.PersistentFlags().StringVar(&tenantServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	tenantCreateCmd.Flags().StringVar(&tenantCreateID, "tenant-id", "", "Tenant ID (Kubernetes-compatible, required)")
 	tenantCreateCmd.Flags().StringVar(&tenantCreateParent, "parent", "", "Parent tenant ID (optional)")
@@ -72,7 +79,13 @@ func getTenantAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
+	tlsInsecure := tenantTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := tenantServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -84,12 +97,7 @@ func getTenantAPIClient() (*APIClient, error) {
 		apiURL = "http://localhost:9080"
 	}
 
-	tlsInsecure := tenantTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
-	}
-
-	return newClientFromFlags(apiURL, "", "", tlsInsecure)
+	return newClientFromFlags(apiURL, "", tlsInsecure)
 }
 
 func runTenantCreate(_ *cobra.Command, _ []string) error {

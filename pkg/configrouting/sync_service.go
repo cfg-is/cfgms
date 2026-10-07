@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	configroutingiface "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -91,7 +92,10 @@ func (s *SyncService) Run(ctx context.Context) {
 		s.mu.Unlock()
 		return
 	}
-	s.runCtx, s.runCancel = context.WithCancel(ctx)
+	// The sync loop is system-internal work across every registered tenant; mark it
+	// so tenant-guarded reads below it are not refused for want of a caller
+	// (Issue #4665).
+	s.runCtx, s.runCancel = context.WithCancel(ctxkeys.WithSystem(ctx))
 	s.started = true
 	s.mu.Unlock()
 
@@ -284,6 +288,13 @@ func (s *SyncService) syncOnce(ctx context.Context, tenantID string, info *pkgco
 // findGitTenants returns IDs of all tenants under rootTenantID with a git config source,
 // walking the hierarchy recursively.
 func (s *SyncService) findGitTenants(ctx context.Context) ([]string, error) {
+	// No resolvable root (no tenants, or several top-level tenants): there is no
+	// single-root subtree to sync. Walking children of "" would instead list every
+	// top-level tenant (Issue #4542).
+	if s.rootTenantID == "" {
+		return nil, nil
+	}
+
 	var result []string
 
 	rootInfo, _ := s.router.GetEffectiveConfigSource(ctx, s.rootTenantID)

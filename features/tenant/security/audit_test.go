@@ -225,7 +225,12 @@ func TestTenantSecurityAuditLogger_CapEviction(t *testing.T) {
 		require.NoError(t, err)
 
 		if (i+1)%batchSize == 0 {
-			midFlushCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			// 10s is ~300x the measured cost of draining a batch: the flatfile
+			// store caches each tenant's chain head, so an append is one file
+			// write rather than a re-scan of every entry written so far
+			// (Issue #3797). A flush that needs longer than this is a
+			// regression back to the O(N^2) append, not a slow runner.
+			midFlushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			require.NoError(t, auditMgr.Flush(midFlushCtx))
 			cancel()
 		}
@@ -238,10 +243,9 @@ func TestTenantSecurityAuditLogger_CapEviction(t *testing.T) {
 	assert.Equal(t, defaultInMemoryAuditCap, inMemoryLen,
 		"in-memory window should be capped at %d after %d writes", defaultInMemoryAuditCap, writeCount)
 
-	// Durable store must contain all 1100 entries.
-	// Use a 60-second timeout to match mid-batch flushes; macOS CI flatfile I/O
-	// is slow enough that 10 seconds is insufficient for this volume.
-	flushCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// Durable store must contain all 1100 entries. The timeout matches the
+	// mid-batch flushes above.
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	require.NoError(t, auditMgr.Flush(flushCtx))
 

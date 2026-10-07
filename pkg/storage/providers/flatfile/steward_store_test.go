@@ -243,3 +243,277 @@ func TestFlatFileStewardStore_DeregisterNotFound(t *testing.T) {
 	err = store.DeregisterSteward(context.Background(), "ghost")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
+
+func TestFlatFileStewardStore_GetStewardByDeviceID(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	const deviceID = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	rec := testStewardRecord("s-dvc")
+	rec.DeviceID = deviceID
+	rec.IdentityKeyPub = []byte{0xde, 0xad}
+	rec.KeyProtectionLevel = "file"
+	rec.LastProvenanceJSON = `{"hostname":"host-s-dvc"}`
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	got, err := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, err)
+	assert.Equal(t, "s-dvc", got.ID)
+	assert.Equal(t, deviceID, got.DeviceID)
+	assert.Equal(t, []byte{0xde, 0xad}, got.IdentityKeyPub)
+	assert.Equal(t, "file", got.KeyProtectionLevel)
+	assert.Equal(t, `{"hostname":"host-s-dvc"}`, got.LastProvenanceJSON)
+
+	_, err = store.GetStewardByDeviceID(ctx, "0000000000000000000000000000000000000000000000000000000000000000")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+func TestFlatFileStewardStore_GetStewardByDeviceID_EmptyID(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	_, err = store.GetStewardByDeviceID(context.Background(), "")
+	require.Error(t, err, "empty device ID must return an error")
+}
+
+// TestFlatFileStewardStore_GetStewardByDeviceIDForTenant_CrossTenantCollision is
+// the flatfile leg of the [REQUIRED TEST] from Issue #4350: two stewards in
+// different tenants share one device_id (allowed by design). An authenticated
+// caller in tenant A must resolve only tenant A's record via the scoped lookup,
+// never tenant B's, even though both share device_id.
+func TestFlatFileStewardStore_GetStewardByDeviceIDForTenant_CrossTenantCollision(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	const deviceID = "collide00000000000000000000000000000000000000000000000000000000"
+
+	a := testStewardRecord("steward-a")
+	a.TenantID = "tenant-a"
+	a.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, a))
+
+	b := testStewardRecord("steward-b")
+	b.TenantID = "tenant-b"
+	b.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, b))
+
+	got, err := store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-a")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-a", got.ID)
+	assert.Equal(t, "tenant-a", got.TenantID)
+
+	got, err = store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-b")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-b", got.ID)
+	assert.Equal(t, "tenant-b", got.TenantID)
+
+	_, err = store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-c")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound,
+		"a device_id match in a different tenant must not be returned")
+}
+
+// TestFlatFileStewardStore_GetStewardByDeviceID_DeterministicAcrossCollision
+// verifies the unscoped lookup used by the pre-authentication refresh handshake
+// is deterministic under a cross-tenant collision (lexicographically smallest
+// ID), not dependent on incidental file-listing order.
+func TestFlatFileStewardStore_GetStewardByDeviceID_DeterministicAcrossCollision(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	const deviceID = "collide11111111111111111111111111111111111111111111111111111111"
+
+	z := testStewardRecord("steward-z")
+	z.TenantID = "tenant-z"
+	z.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, z))
+
+	a := testStewardRecord("steward-a")
+	a.TenantID = "tenant-a"
+	a.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, a))
+
+	for i := 0; i < 5; i++ {
+		got, err := store.GetStewardByDeviceID(ctx, deviceID)
+		require.NoError(t, err)
+		assert.Equal(t, "steward-a", got.ID, "must deterministically resolve to the smallest ID")
+	}
+}
+
+func TestFlatFileStewardStore_UpdateStewardTenant(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	rec := testStewardRecord("s-move")
+	rec.TenantID = "tenant-src"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	// Move to a new tenant.
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move", "tenant-src", "tenant-dst"))
+
+	got, err := store.GetSteward(ctx, "s-move")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst", got.TenantID)
+	// Status must not change.
+	assert.Equal(t, business.StewardStatusRegistered, got.Status)
+}
+
+func TestFlatFileStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	err = store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-src", "tenant-dst")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestFlatFileStewardStore_UpdateStewardTenant_StaleExpectedTenantLoses is the
+// [REQUIRED TEST] regression coverage for Issue #3895 at the storage layer: a
+// CAS write whose expectedTenantID no longer matches the record's current
+// tenant (a concurrent writer already moved it) must lose cleanly
+// (ErrStewardNotFound) without applying.
+func TestFlatFileStewardStore_UpdateStewardTenant_StaleExpectedTenantLoses(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	rec := testStewardRecord("s-move-cas")
+	rec.TenantID = "tenant-src"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move-cas", "tenant-src", "tenant-dst-a"))
+
+	err = store.UpdateStewardTenant(ctx, "s-move-cas", "tenant-src", "tenant-dst-b")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound, "a stale expectedTenantID CAS must lose cleanly")
+
+	got, err := store.GetSteward(ctx, "s-move-cas")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst-a", got.TenantID, "the winner's destination must survive; the loser's must never apply")
+}
+
+func TestFlatFileStewardStore_SetStewardHidden(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRecord("s-hide")))
+
+	// Default: not hidden.
+	got, err := store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "freshly registered steward must not be hidden")
+
+	// Hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-hide", true))
+	got, err = store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.True(t, got.Hidden, "GetSteward must reflect hidden=true after SetStewardHidden")
+
+	// Un-hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-hide", false))
+	got, err = store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "GetSteward must reflect hidden=false after SetStewardHidden")
+}
+
+func TestFlatFileStewardStore_SetStewardHidden_NotFound(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	err = store.SetStewardHidden(context.Background(), "ghost", true)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestFlatFileStewardStore_DeviceIDUniquePerTenant verifies that RegisterSteward
+// enforces tenant-scoped device_id uniqueness, matching the sqlite and database providers.
+// See Issue #3403 for the motivating CI failure and Issue #3506 for this fix.
+//
+// The check-then-act sequence in the registration handler means two concurrent claims can
+// both pass the handler's GetStewardByDeviceID lookup; only the store-level guard decides
+// the winner. This test exercises the guard directly.
+func TestFlatFileStewardStore_DeviceIDUniquePerTenant(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	const deviceID = "device-shared-1"
+
+	first := testStewardRecord("steward-dup-a")
+	first.TenantID = "tenant-1"
+	first.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, first))
+
+	// A different steward asserting the same device_id in the same tenant must be rejected.
+	second := testStewardRecord("steward-dup-b")
+	second.TenantID = "tenant-1"
+	second.DeviceID = deviceID
+	err = store.RegisterSteward(ctx, second)
+	require.Error(t, err, "a second steward must not take a device_id already held in the tenant")
+	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict,
+		"the conflict must be reported as ErrStewardDeviceIDConflict, not the benign ErrStewardAlreadyExists")
+
+	// Cross-tenant is a separate namespace and must still be allowed.
+	other := testStewardRecord("steward-dup-c")
+	other.TenantID = "tenant-2"
+	other.DeviceID = deviceID
+	assert.NoError(t, store.RegisterSteward(ctx, other),
+		"the same device_id under a different tenant is a distinct namespace")
+
+	// Empty device_id means "not asserted" and must not collide with itself.
+	blankA := testStewardRecord("steward-blank-a")
+	blankA.TenantID = "tenant-1"
+	blankA.DeviceID = ""
+	blankB := testStewardRecord("steward-blank-b")
+	blankB.TenantID = "tenant-1"
+	blankB.DeviceID = ""
+	require.NoError(t, store.RegisterSteward(ctx, blankA))
+	assert.NoError(t, store.RegisterSteward(ctx, blankB),
+		"rows with no device_id must be excluded from the uniqueness check")
+
+	// Re-registering the SAME steward is still the benign duplicate, not a device conflict.
+	dupSelf := testStewardRecord("steward-dup-a")
+	dupSelf.TenantID = "tenant-1"
+	dupSelf.DeviceID = deviceID
+	selfErr := store.RegisterSteward(ctx, dupSelf)
+	require.Error(t, selfErr)
+	assert.ErrorIs(t, selfErr, business.ErrStewardAlreadyExists,
+		"the same steward written twice stays ErrStewardAlreadyExists so idempotent retries remain benign")
+
+	// GetStewardByDeviceID stays unambiguous within the tenant — the property
+	// the revocation gate in handlers_registration_refresh.go depends on.
+	got, getErr := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, getErr)
+	require.NotNil(t, got)
+}
+
+func TestFlatFileStewardStore_UpdateStewardTenant_TenantPersistedInFile(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFlatFileStewardStore(dir)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	rec := testStewardRecord("s-persist")
+	rec.TenantID = "original-tenant"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-persist", "original-tenant", "new-tenant"))
+
+	// Re-open the store — the new tenant ID must survive a reload from disk.
+	store2, err := NewFlatFileStewardStore(dir)
+	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
+
+	got, err := store2.GetSteward(ctx, "s-persist")
+	require.NoError(t, err)
+	assert.Equal(t, "new-tenant", got.TenantID)
+}

@@ -5,22 +5,30 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -44,7 +52,7 @@ var bannedPatterns = []struct {
 // allowedShells is the set of shells accepted by POST /api/v1/runs/command.
 // Any value outside this set is rejected with UNSUPPORTED_SHELL.
 // The set is kept in lockstep with the steward executor's accepted shells
-// (features/modules/script/executor.go). Valid taxonomy per platform:
+// (features/modules/stdlib/script/executor.go). Valid taxonomy per platform:
 //   - Unix:    bash, sh
 //   - Windows: powershell (Windows PowerShell 5.1), pwsh (PowerShell Core), cmd
 //   - pwsh is also valid on Unix (PowerShell Core is cross-platform).
@@ -87,41 +95,214 @@ type postRunScriptRequest struct {
 
 // postRunCommandRequest is the body of POST /api/v1/runs/command.
 // Content is the inline script body, base64-encoded.
+//
+// Targets, Nonce, and ExpiresAt (Issue #3694) are the client-resolved, signed
+// coordinates of the operator's operatorpayload.Envelope: Targets is the frozen list
+// of steward IDs the signature authorizes, Nonce is a single-use replay token, and
+// ExpiresAt (RFC3339) bounds the envelope's validity. All three are forwarded to the
+// steward unmodified — the controller never re-signs or strips them.
 type postRunCommandRequest struct {
-	Target    string                `json:"target"`    // fleet selector string
-	Content   string                `json:"content"`   // base64-encoded inline script
-	Shell     string                `json:"shell"`     // shell to use (e.g. "bash")
-	Params    map[string]string     `json:"params"`    // script parameters
-	Signature *execCommandSignature `json:"signature"` // optional mTLS signing envelope
+	Target    string                `json:"target"`     // fleet selector string
+	Content   string                `json:"content"`    // base64-encoded inline script
+	Shell     string                `json:"shell"`      // shell to use (e.g. "bash")
+	Params    map[string]string     `json:"params"`     // script parameters
+	Signature *execCommandSignature `json:"signature"`  // operator signing envelope (mandatory)
+	Targets   []string              `json:"targets"`    // resolved steward IDs the signature binds
+	Nonce     string                `json:"nonce"`      // single-use replay-prevention token
+	ExpiresAt string                `json:"expires_at"` // RFC3339 envelope expiry
+}
+
+// validatePublicBetaCommandSignature verifies the operator signature over the
+// reconstructed operatorpayload.Envelope canonical bytes (content, shell, targets,
+// nonce, expiry) — never over content alone. It runs unconditionally for every caller
+// of POST /api/v1/runs/command (Issue #3694): the prior SecurityProfilePublicBeta gate
+// is gone, so this now changes behavior for every deployment, not just public-beta
+// ones. It performs cryptographic verification plus operator-credential trust
+// (CA chain, payload-signing marker, revocation); expiry and nonce-replay enforcement
+// are the steward's responsibility (independent of the outer command's own replay
+// window), not re-checked here.
+//
+// The marker requirement is HasPayloadSigningMarker, not HasAdminMarker (Issue #3696).
+// This endpoint sits on the trust boundary between the two ends of the signed ad-hoc
+// path, and all three must agree on one credential type: cfg signs with the zero-custody
+// CSR credential (signCommandContent, cmd/cfg/cmd/steward.go), this check mediates the
+// submission, and the steward re-verifies on delivery (verifyOperatorCert,
+// features/steward/commands/execute_script.go). An admin transport bundle authenticates
+// mTLS; it does not authorize signing an operator payload.
+// It returns the operator signing certificate's serial number on success — the
+// signing-credential identifier the Issue #3698 audit trail records — so callers
+// never need to re-parse sig.PublicKey just to learn which credential authorized
+// the dispatch.
+func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) (string, error) {
+	if sig == nil || sig.Algorithm == "" || sig.Value == "" || sig.PublicKey == "" {
+		return "", fmt.Errorf("ad-hoc execution requires an operator signature")
+	}
+	if s.certManager == nil {
+		return "", fmt.Errorf("ad-hoc execution requires loaded controller signing roots")
+	}
+
+	envelope := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: expiresAt,
+	}
+	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
+	if err != nil {
+		return "", fmt.Errorf("invalid operator envelope: %w", err)
+	}
+
+	scriptSig := &scriptmodule.ScriptSignature{
+		Algorithm: sig.Algorithm,
+		Signature: sig.Value,
+		PublicKey: sig.PublicKey,
+	}
+	if err := scriptmodule.VerifyScriptSignature(
+		canonicalBytes,
+		scriptSig,
+		scriptmodule.ShellType(shell),
+		scriptmodule.ModuleSigningConfig{TrustMode: scriptmodule.TrustModeAnyValid},
+	); err != nil {
+		return "", fmt.Errorf("invalid operator signature: %w", err)
+	}
+
+	caPEM, err := s.certManager.GetCACertificate()
+	if err != nil {
+		return "", fmt.Errorf("controller signing roots unavailable: %w", err)
+	}
+	// Build the verification pool through pkg/cert, the single construction point
+	// for CA pools in CFGMS (CLAUDE.md §Central Provider System). The helper fails
+	// closed on empty or unparseable PEM, so this can never hold an empty pool that
+	// would reject every operator chain it is asked to verify.
+	roots, err := cert.NewCertPoolFromPEM(caPEM)
+	if err != nil {
+		return "", fmt.Errorf("controller signing roots are invalid: %w", err)
+	}
+	block, _ := pem.Decode([]byte(sig.PublicKey))
+	if block == nil {
+		return "", fmt.Errorf("operator signing certificate is not valid PEM")
+	}
+	operatorCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("operator signing certificate is invalid: %w", err)
+	}
+	if _, err := operatorCert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return "", fmt.Errorf("operator signing certificate is not trusted by the controller CA: %w", err)
+	}
+	if !cert.HasPayloadSigningMarker(operatorCert) {
+		return "", fmt.Errorf("operator signing certificate is not a payload-signing certificate")
+	}
+	revoked, err := s.certManager.IsRevoked(operatorCert.SerialNumber.String())
+	if err != nil {
+		return "", fmt.Errorf("failed to check operator signing certificate revocation status: %w", err)
+	}
+	if revoked {
+		return "", fmt.Errorf("operator signing certificate is revoked")
+	}
+	return operatorCert.SerialNumber.String(), nil
 }
 
 // authRunAccess authenticates a request to the ad-hoc run API and returns the
-// principal and its tenant scope. Admin mTLS principals carry global
+// principal and its tenant scope. Admin mTLS and session principals carry global
 // (cross-tenant) scope with an empty TenantID (middleware.go); the run path is
 // designed for that — an empty tenant yields an unscoped fleet search, the
 // dispatch RBAC check is skipped, and the audit uses the system-tenant sentinel.
-// Only a NON-admin principal with no tenant is a genuine auth failure. On failure
-// it writes the 401 and returns ok=false (Issue #1990).
+// Only a machine (API-key) principal with no tenant is a genuine auth failure.
+//
+// This deliberately checks principal.Assurance == session.AssuranceMachine rather
+// than !principal.GlobalScope: Assurance is the direct signal for machine-authenticated
+// principals; GlobalScope models tenant-visibility breadth — an orthogonal axis that
+// must not be collapsed with authentication method (see Principal doc comment). Both
+// session paths now compute GlobalScope from actual scope (web-session: acct.RootScope
+// at middleware.go:433; cfg-CLI Bearer: sess.TenantID=="" at middleware.go:357), so
+// !GlobalScope is no longer a dead check — but it would answer the wrong question.
+//
+// On failure it writes the 401 and returns ok=false (Issue #1990).
 func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principal *Principal, tenantID string, ok bool) {
 	principal, hasPrincipal := r.Context().Value(principalContextKey).(*Principal)
 	if !hasPrincipal || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
-	tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" && !principal.IsAdmin {
+	tenantID = callerTenantFilter(r.Context())
+	if tenantID == "" && principal.Assurance == session.AssuranceMachine { //architecture:allow-root-scope -- refuses a machine credential with no tenant; not a grant
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
 	return principal, tenantID, true
 }
 
-// runVisibleTo reports whether the principal may read/cancel the given run. Admin
-// mTLS principals have global access; tenant-scoped callers may access only runs
-// owned by their tenant. Callers return 404 (not 403) on false to avoid leaking
-// cross-tenant run existence (Issue #1990).
-func runVisibleTo(principal *Principal, run *controllerrun.RunRecord, tenantID string) bool {
-	return principal.IsAdmin || run.TenantID == tenantID
+// resolveAuthorizedRunTargets resolves an ad-hoc run's targets — the filter
+// scoped to the caller's tenant — and returns exactly the devices to dispatch,
+// so the list authorized here is the list synthesized, with no second fleet
+// search in between (Issue #4554).
+//
+// For a caller subject to ADR-025's tenant-crossing boundary (a root-scoped
+// principal) every matched steward's tenant must pass authorizeTenantAccess:
+// the root tenant itself, or a tenant covered by an active crossing. A steward
+// with no tenant is denied. A run that would reach any other tenant is refused
+// whole, never silently narrowed: the crossing challenge when a crossing would
+// admit it, 404 otherwise. Each tenant decision is evaluated (and audited)
+// through authorizeTenantAccess, as for config push. Callers not subject to the
+// boundary keep their existing checks.
+//
+// It writes the response and returns ok=false on refusal.
+func (s *Server) resolveAuthorizedRunTargets(w http.ResponseWriter, r *http.Request, principal *Principal, tenantID string, filter fleet.Filter) ([]fleet.StewardResult, bool) {
+	if s.fleetQuery == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	filter.TenantID = tenantID
+	devices, err := s.fleetQuery.Search(r.Context(), filter)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	if !subjectToTenantCrossingBoundary(principal) {
+		return devices, true
+	}
+	if s.tenantManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	checked := make(map[string]bool, len(devices))
+	for _, device := range devices {
+		if device.TenantID == "" {
+			// authorizeTenantAccess treats an empty resource tenant as allowed; a
+			// dispatch target must belong to a tenant, so deny it here.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return nil, false
+		}
+		if checked[device.TenantID] {
+			continue
+		}
+		checked[device.TenantID] = true
+		switch s.authorizeTenantAccess(r.Context(), principal, device.TenantID) {
+		case tenantAuthAllowed:
+		case tenantAuthNeedsCrossing:
+			s.writeTenantCrossingChallenge(w, device.TenantID)
+			return nil, false
+		default:
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return nil, false
+		}
+	}
+	return devices, true
+}
+
+// runAccess decides whether the caller may read/cancel the given run, using the
+// caller's ctxkeys.TenantScope (Issue #4335) rather than the raw tenantID string:
+// an unset scope is refused (not treated as root), a tenant scope is checked via
+// subtree containment, and a root caller subject to the ADR-025 crossing boundary
+// needs a crossing for a run in a tenant below root (Issue #4665). Callers answer
+// tenantAuthDenied with 404 (not 403) to avoid leaking cross-tenant run existence
+// (Issue #1990), and tenantAuthNeedsCrossing with the crossing challenge.
+func (s *Server) runAccess(ctx context.Context, scope ctxkeys.TenantScope, run *controllerrun.RunRecord, route string) tenantAuthDecision {
+	return s.tenantAccessForScope(ctx, scope, run.TenantID, route)
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.
@@ -158,6 +339,44 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tenant scope check for explicit id: targets (Issue #4335), mirroring
+	// handlePostRunCommand's enforceExecTenantScope gate — a root-scoped caller
+	// (mTLS admin) is unrestricted; a tenant-scoped caller may only target stewards
+	// within its own subtree. selector.Parse populates filter.IDs (comma-OR list);
+	// filter.DeviceID is the legacy query-param path only.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !scope.IsRoot() { //architecture:allow-root-scope -- a root caller's targets pass the crossing in resolveAuthorizedRunTargets below
+		for _, targetID := range filter.IDs {
+			switch s.enforceExecTenantScopeForCallerScope(r.Context(), targetID, scope) {
+			case execScopeForbidden:
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+				return
+			}
+		}
+		if filter.DeviceID != "" {
+			switch s.enforceExecTenantScopeForCallerScope(r.Context(), filter.DeviceID, scope) {
+			case execScopeForbidden:
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+				return
+			}
+		}
+	}
+
+	// Resolve the run's targets once and authorize them against ADR-025's
+	// tenant-crossing boundary; exactly this list is dispatched (Issue #4554).
+	devices, ok := s.resolveAuthorizedRunTargets(w, r, principal, tenantID, filter)
+	if !ok {
+		return
+	}
+
 	// Look up script metadata for per-steward parameter resolution. Non-fatal if
 	// the repo is unavailable or the script is not found — params resolve from
 	// runtime overrides and defaults only.
@@ -177,7 +396,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// store with an empty tenant key (which is undefined/store-dependent) — Issue #1990.
 	var paramPlatformBindings map[string]string
 	var requiredAPIScope []string
-	if s.privilegeStore != nil && tenantID != "" {
+	if s.privilegeStore != nil && tenantID != "" { //architecture:allow-root-scope -- skips per-tenant privilege metadata for root; not a grant
 		meta, loadErr := s.loadPrivilegeMetadata(r.Context(), tenantID, req.ScriptID)
 		if loadErr == nil && meta != nil {
 			paramPlatformBindings = meta.ParamPlatformBindings
@@ -185,11 +404,11 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runID, err := controllerrun.SynthesizeScriptRun(
+	runID, err := controllerrun.SynthesizeScriptRunForDevices(
 		r.Context(),
 		s.runManager,
 		s.runExecutionQueue,
-		s.fleetQuery,
+		devices,
 		tenantID,
 		principal.ID,
 		filter,
@@ -204,7 +423,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to synthesize script run",
 			"script_id", logging.SanitizeLogValue(req.ScriptID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create run", "INTERNAL_ERROR")
 		return
@@ -252,6 +471,31 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "content must be base64-encoded", "INVALID_CONTENT")
 		return
 	}
+	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "expires_at must be RFC3339", "INVALID_EXPIRES_AT")
+		return
+	}
+	credentialID, err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+		return
+	}
+
+	// Blast-radius bound (Issue #3698): a hard reject at admission, checked against the
+	// operator-signed, already-resolved Targets list — after signature verification (so a
+	// malformed or forged request is never what trips this check) and before dispatch. A
+	// good signature does not exempt an oversized target set: the bound is a compensating
+	// control for a compromised-controller UI-trust gap, not a defense against forgery.
+	if maxTargets := s.resolveMaxTargetsForTenant(r.Context(), tenantID); len(req.Targets) > maxTargets {
+		s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
+			credentialID, req.Targets, "", business.AuditResultDenied,
+			fmt.Sprintf("resolved target count %d exceeds tenant bound of %d", len(req.Targets), maxTargets))
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("resolved target count %d exceeds the maximum of %d targets allowed for this tenant", len(req.Targets), maxTargets),
+			"BLAST_RADIUS_EXCEEDED")
+		return
+	}
 
 	// Banned-pattern enforcement — controller-side (defense-in-depth; steward also checks).
 	if patternName, found := containsBannedPattern(string(inlineContent)); found {
@@ -272,52 +516,136 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
-	// steward.tenant_path. Applied only when the principal has a non-empty TenantID
-	// (API key users). Admin mTLS principals (TenantID="") have global access.
-	if filter.DeviceID != "" && principal.TenantID != "" {
-		if forbidden := s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID); forbidden {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"access denied: steward is not in your tenant scope", "FORBIDDEN")
-			return
+	// steward.tenant_path. Applied to every caller that is not root-scoped; a root
+	// caller has fleet-wide reach (Issue #4665).
+	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
+	// legacy query-param path only.
+	if execTenant := callerTenantFilter(r.Context()); execTenant != "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
+		for _, targetID := range filter.IDs {
+			switch s.enforceExecTenantScope(r.Context(), targetID, execTenant) {
+			case execScopeForbidden:
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				// Scope could not be verified — deny, distinguishably from the
+				// genuine out-of-scope denial above (Issue #4091 AC1).
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+				return
+			}
+		}
+		if filter.DeviceID != "" {
+			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, execTenant) {
+			case execScopeForbidden:
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+				return
+			}
 		}
 	}
 
-	runID, err := controllerrun.SynthesizeCommandRun(
+	// Resolve the run's targets once and authorize them against ADR-025's
+	// tenant-crossing boundary; exactly this list is dispatched (Issue #4554).
+	devices, ok := s.resolveAuthorizedRunTargets(w, r, principal, tenantID, filter)
+	if !ok {
+		return
+	}
+
+	var commandSignature *controllerrun.CommandSignature
+	if req.Signature != nil {
+		commandSignature = &controllerrun.CommandSignature{
+			Algorithm: req.Signature.Algorithm,
+			Value:     req.Signature.Value,
+			PublicKey: req.Signature.PublicKey,
+		}
+	}
+
+	runID, err := controllerrun.SynthesizeCommandRunForDevices(
 		r.Context(),
 		s.runManager,
 		s.runExecutionQueue,
-		s.fleetQuery,
+		devices,
 		tenantID,
 		principal.ID,
 		filter,
 		string(inlineContent),
 		scriptmodule.ShellType(req.Shell),
 		req.Params,
+		commandSignature,
+		req.Targets,
+		req.Nonce,
+		expiresAt,
 	)
 	if err != nil {
 		s.logger.Error("Failed to synthesize command run",
 			"shell", logging.SanitizeLogValue(req.Shell),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create run", "INTERNAL_ERROR")
 		return
 	}
 
-	// Audit dispatch for single-steward exec (id: target). command_hash and
-	// output_hash are computed here; exit_code and output are not yet available.
-	if filter.DeviceID != "" {
-		commandHash := sha256.Sum256(inlineContent)
-		sigID := ""
-		if req.Signature != nil {
-			sigBytes, _ := base64.StdEncoding.DecodeString(req.Signature.Value)
-			h := sha256.Sum256(sigBytes)
-			sigID = hex.EncodeToString(h[:])
-		}
-		s.emitExecCommandAudit(r.Context(), tenantID, principal.ID, filter.DeviceID,
-			hex.EncodeToString(commandHash[:]), sigID, runID)
-	}
+	// Audit every accepted dispatch (Issue #3698) — literal payload text, the full
+	// operator-signed target list, the signing credential id, and the caller identity.
+	s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
+		credentialID, req.Targets, runID, business.AuditResultSuccess, "")
 
 	s.writeSuccessResponse(w, map[string]string{"run_id": runID})
+}
+
+// handleListRuns handles GET /api/v1/runs.
+// Returns a tenant-scoped, paginated list of runs. TenantID is always sourced
+// from the authenticated principal's context — any tenant_id query param supplied
+// by the caller is silently discarded. Global-scope (admin mTLS) principals
+// receive runs across all tenants.
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	if s.runManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Run service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	_, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			if l < 1 {
+				l = 1
+			}
+			if l > 500 {
+				l = 500
+			}
+			limit = l
+		}
+	}
+
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	runs, err := s.runManager.ListRuns(r.Context(), tenantID, limit, offset)
+	if err != nil {
+		s.logger.Error("Failed to list runs",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err,
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list runs", "INTERNAL_ERROR")
+		return
+	}
+
+	if runs == nil {
+		runs = []*controllerrun.RunRecord{}
+	}
+	s.writeSuccessResponse(w, runs)
 }
 
 // handleGetRun handles GET /api/v1/runs/{run_id}.
@@ -327,7 +655,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -345,14 +673,17 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get run", "INTERNAL_ERROR")
 		return
 	}
 
 	// Tenant isolation: return 404 (not 403) to avoid leaking existence across tenants.
-	if !runVisibleTo(principal, run, tenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.runAccess(r.Context(), scope, run, "GET /api/v1/runs/{run_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -366,7 +697,7 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -385,18 +716,21 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
 		return
 	}
-	if !runVisibleTo(principal, run, tenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.runAccess(r.Context(), scope, run, "GET /api/v1/runs/{run_id}/jobs"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
 	jobs, err := s.runManager.ListRunJobs(r.Context(), runID)
 	if err != nil {
-		s.logger.Error("Failed to list run jobs", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to list run jobs", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
 		return
 	}
@@ -415,7 +749,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -435,12 +769,15 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get run for cancel", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to get run for cancel", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel run", "INTERNAL_ERROR")
 		return
 	}
-	if !runVisibleTo(principal, run, tenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.runAccess(r.Context(), scope, run, "DELETE /api/v1/runs/{run_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -459,7 +796,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusConflict, "Run is already in a terminal state", "ALREADY_TERMINAL")
 			return
 		}
-		s.logger.Error("Failed to cancel run", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to cancel run", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel run", "INTERNAL_ERROR")
 		return
 	}
@@ -469,26 +806,69 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 
 // parseRunTarget converts an optional fleet selector string to a fleet.Filter.
 // An empty target matches all stewards (within the caller's tenant, enforced by synthesis).
+// The tenant path extracted by selector.Parse is discarded here; exec tenant enforcement
+// uses enforceExecTenantScope (device-ID prefix check) rather than Filter.TenantSubtree.
 func parseRunTarget(target string) (fleet.Filter, error) {
 	if target == "" || target == "all" {
 		return fleet.Filter{}, nil
 	}
-	return fleet.ParseTargetSelector(target)
+	f, _, err := selector.Parse(target)
+	return f, err
+}
+
+// execTenantScopeDecision is the three-outcome result of enforceExecTenantScope.
+// A plain bool cannot distinguish "checked and denied" from "could not check" —
+// collapsing the two into one "forbidden" value means the error path either fails
+// open (if mapped to allowed) or is indistinguishable from a genuine out-of-scope
+// denial (if mapped to forbidden). Both are wrong: "I checked and you may not" and
+// "I could not check" are different facts, and the caller must be able to tell them
+// apart (Issue #4091).
+type execTenantScopeDecision int
+
+const (
+	// execScopeAllowed means the caller is in scope, or the steward was not found —
+	// the latter is a deliberate allow (synthesis yields zero jobs; steward IDs are
+	// not secret, admins get them via cfg steward list), not a stand-in for the
+	// error case below.
+	execScopeAllowed execTenantScopeDecision = iota
+	// execScopeForbidden means the steward was found but is outside the principal's
+	// tenant scope — a genuine authorization denial.
+	execScopeForbidden
+	// execScopeIndeterminate means scope could not be established because the fleet
+	// query dependency is absent or the query itself failed. An error is not an
+	// absence: the check cannot tell whether the steward is in scope, so it must
+	// deny rather than permit.
+	execScopeIndeterminate
+)
+
+// enforceExecTenantScopeForCallerScope is the ctxkeys.TenantScope-based counterpart to
+// enforceExecTenantScope (Issue #4335): root scope always allows; an unset scope (or a
+// tenant scope with an empty path) always denies — fail closed, unlike a raw
+// principalTenantID=="" comparison, which cannot distinguish a genuine root caller from
+// a plumbing bug that lost the caller's tenant; a tenant scope defers to the same
+// fleet-lookup/prefix logic as enforceExecTenantScope.
+func (s *Server) enforceExecTenantScopeForCallerScope(ctx context.Context, deviceID string, scope ctxkeys.TenantScope) execTenantScopeDecision {
+	switch {
+	case scope.IsRoot(): //architecture:allow-root-scope -- root callers are decided by their caller, which applies resolveAuthorizedRunTargets
+		return execScopeAllowed
+	case scope.IsTenant() && scope.Path() != "":
+		return s.enforceExecTenantScope(ctx, deviceID, scope.Path())
+	default:
+		return execScopeForbidden
+	}
 }
 
 // enforceExecTenantScope checks whether the principal's tenantID is a path-prefix
-// (or exact match) of the target steward's tenantID. Returns true (forbidden) when
-// the steward is found but is outside the principal's tenant scope.
-// Returns false (allowed) when the steward is not found — synthesis will create a
-// zero-job run, and we return 200 with an empty result rather than 404, because
-// steward IDs are not secret (admins get them via cfg steward list).
-func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principalTenantID string) bool {
+// (or exact match) of the target steward's tenantID. See execTenantScopeDecision
+// for the meaning of each outcome. Callers must deny on execScopeIndeterminate,
+// not treat it as execScopeAllowed.
+func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principalTenantID string) execTenantScopeDecision {
 	if s.fleetQuery == nil {
-		return false
+		return execScopeIndeterminate
 	}
 	results, err := s.fleetQuery.Search(ctx, fleet.Filter{DeviceID: deviceID})
 	if err != nil {
-		return false
+		return execScopeIndeterminate
 	}
 	for _, sr := range results {
 		if sr.ID != deviceID {
@@ -496,20 +876,100 @@ func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principal
 		}
 		// Steward found — check tenant path prefix.
 		if sr.TenantID == principalTenantID {
-			return false
+			return execScopeAllowed
 		}
 		if strings.HasPrefix(sr.TenantID, principalTenantID+"/") {
-			return false
+			return execScopeAllowed
 		}
-		return true // steward exists but outside tenant scope
+		return execScopeForbidden // steward exists but outside tenant scope
 	}
-	return false // steward not found — allow, synthesis yields zero jobs
+	return execScopeAllowed // steward not found — allow, synthesis yields zero jobs
 }
 
-// emitExecCommandAudit records the dispatch of a single-steward exec command.
-// It is a no-op when auditManager is nil. commandHash and signatureID are hex
-// SHA-256 digests; the raw command string and output are never stored.
-func (s *Server) emitExecCommandAudit(ctx context.Context, tenantID, adminCN, stewardID, commandHash, signatureID, runID string) {
+// defaultMaxOperatorPayloadTargets is the blast-radius bound applied when no tenant
+// along the root-to-leaf path (including the root) has configured a narrower
+// override (Issue #3698). It is a flat count, never a percentage-of-fleet — a
+// percentage grows exactly as the fleet gets more dangerous — and it is the
+// deliberately chosen enforced primitive for the epic, not a placeholder for a
+// future percentage-based or more elaborate policy engine.
+const defaultMaxOperatorPayloadTargets = 1000
+
+// resolveMaxTargetsForTenant resolves the per-tenant maximum-target-count bound for
+// operator payload dispatch (Issue #3698), walking the tenant path root-to-leaf and
+// taking the MINIMUM MaxTargets set anywhere along that path — not the last value
+// seen. This is the control the threat model names for bounding the blast radius of
+// a compromised admin or controller (Issue #4091 AC3): a descendant tenant may lower
+// the bound inherited from an ancestor, but must never be able to raise it above a
+// bound the ancestor set. Overwriting the running value on each iteration (last-wins)
+// would let a leaf tenant's policy widen a bound its ancestor deliberately narrowed,
+// which defeats the purpose of the control. When blastRadiusPolicyStore or tenantStore is nil,
+// or tenantID is empty, it returns defaultMaxOperatorPayloadTargets unchanged —
+// preserving safe behavior for bare Server instances built without these stores.
+//
+// GetTenantPath or GetPolicy errors are logged at Warn. A storage hiccup must never
+// turn into an unbounded blast radius (fail-open past the default) or a fleet-wide
+// dispatch outage (treating the error as "reject everything"), but "fall back to the
+// default" is conservative only for a tenant that never configured a narrower bound.
+// For a tenant that did, defaultMaxOperatorPayloadTargets (1000) is a WIDENING of the
+// bound it set, not a ceiling — so a GetPolicy error partway through the walk does not
+// abandon it: the walk stops at the failure and returns the narrowest MaxTargets
+// already resolved from the path elements visited before it (Issue #4099), which the
+// min-across-path walk above guarantees is never wider than the default. GetTenantPath
+// failing, or the FIRST GetPolicy in the walk failing, means nothing has been resolved
+// yet — there is no narrower bound to clamp to, and rejecting the dispatch is ruled out
+// by the fleet-wide-outage concern above — so those two cases resolve to the default.
+func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string) int {
+	if s.blastRadiusPolicyStore == nil || s.tenantStore == nil || tenantID == "" {
+		return defaultMaxOperatorPayloadTargets
+	}
+
+	path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
+	if err != nil {
+		s.logger.Warn("resolveMaxTargetsForTenant: failed to get tenant path; using default bound",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		return defaultMaxOperatorPayloadTargets
+	}
+
+	result := defaultMaxOperatorPayloadTargets
+	for _, t := range path {
+		policy, err := s.blastRadiusPolicyStore.GetPolicy(ctx, t)
+		if err != nil {
+			s.logger.Warn("resolveMaxTargetsForTenant: failed to get blast-radius policy; using narrowest bound resolved so far",
+				"tenant_id", logging.SanitizeLogValue(t),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+			break
+		}
+		if policy.MaxTargets != nil && *policy.MaxTargets < result {
+			result = *policy.MaxTargets
+		}
+	}
+	return result
+}
+
+// emitOperatorPayloadDispatchAudit records an operator payload dispatch attempt —
+// accepted or rejected, either credential path — via audit.NewEventBuilder, mirroring
+// emitOsqueryAudit's field shape (handlers_osquery.go). It is a no-op when auditManager
+// is nil.
+//
+// The payload is recorded as a SHA-256 digest and a byte length, never as literal
+// text. Issue #3698 makes the blast-radius bound and this audit trail the compensating
+// controls for the epic's accepted UI-trust residual risk (a compromised controller
+// could show an operator one payload and sign another), and a digest discharges that:
+// an investigator holding a candidate payload can prove or disprove that it is the one
+// dispatched. Storing the text itself cannot be reconciled with the project rule against
+// writing secrets to disk — an operator payload is arbitrary operator-authored script
+// text and routinely carries credentials inline. Redaction was attempted and rejected:
+// a filter over free-form script text in any shell leaks on the shapes it does not
+// model, so the digest is the enforced form rather than a best-effort scrub.
+//
+// Every steward reference in targets is already a cfg-declared resource id (steward ID),
+// never a live hostname. Target entries beyond the first 10 are counted but not
+// individually recorded, to keep audit record size bounded — the same cap
+// emitOsqueryAudit applies.
+func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID, callerID, payloadText, credentialID string, targets []string, runID string, result business.AuditResult, rejectionReason string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -518,19 +978,61 @@ func (s *Server) emitExecCommandAudit(ctx context.Context, tenantID, adminCN, st
 	if auditTenantID == "" {
 		auditTenantID = audit.SystemTenantID
 	}
+
+	severity := business.AuditSeverityHigh
+	if result != business.AuditResultSuccess {
+		severity = business.AuditSeverityCritical
+	}
+
+	// The payload is identified by digest, never stored. hex.EncodeToString of a
+	// sha256 sum is fixed-width and contains no operator-supplied bytes, so it needs
+	// no sanitizing before it reaches the audit record.
+	digest := sha256.Sum256([]byte(payloadText))
+	payloadDigest := hex.EncodeToString(digest[:])
+
+	// AuditEntry.ResourceID is a required, non-empty field (Manager.validateEntry) — but
+	// the WebAuthn path's begin-time blast-radius rejection has no credential yet (the
+	// operator has not authenticated an assertion), so credentialID can legitimately be
+	// "". Recording that absence must not silently drop the whole audit event: the
+	// resource identifier falls back to a sentinel, while the actual (possibly empty)
+	// credential id is always recorded verbatim in the "credential_id" detail — the field
+	// the AC requires.
+	resourceID := credentialID
+	if resourceID == "" {
+		resourceID = "unresolved"
+	}
+
 	b := audit.NewEventBuilder().
 		Tenant(auditTenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("steward.exec.dispatched").
-		User(adminCN, business.AuditUserTypeHuman).
-		Resource("steward", stewardID, "").
-		Result(business.AuditResultSuccess).
-		Severity(business.AuditSeverityHigh).
-		Detail("command_hash", commandHash).
-		Detail("signature_id", signatureID).
+		Action("operator_payload.dispatch").
+		User(callerID, business.AuditUserTypeHuman).
+		Resource("operator_credential", logging.SanitizeLogValue(resourceID), "").
+		Result(result).
+		Severity(severity).
+		Detail("payload_sha256", payloadDigest).
+		Detail("payload_bytes", fmt.Sprintf("%d", len(payloadText))).
+		Detail("credential_id", logging.SanitizeLogValue(credentialID)).
+		Detail("target_count", fmt.Sprintf("%d", len(targets))).
 		Detail("run_id", runID)
+	if rejectionReason != "" {
+		b = b.Detail("rejection_reason", rejectionReason)
+	}
+
+	for i, target := range targets {
+		if i >= 10 {
+			// Cap per-target detail entries to avoid unbounded audit record size.
+			b = b.Detail("targets_truncated", "true")
+			break
+		}
+		b = b.Detail(fmt.Sprintf("target_%d", i), logging.SanitizeLogValue(target))
+	}
+
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit exec command audit event", "error", err, "run_id", runID)
+		s.logger.Warn("Failed to emit operator payload dispatch audit event",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"run_id", logging.SanitizeLogValue(runID),
+		)
 	}
 }
 

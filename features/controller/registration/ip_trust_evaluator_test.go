@@ -4,6 +4,7 @@ package registration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -24,6 +25,11 @@ type recordingIPTrustStore struct {
 	entries []*business.IPTrustEntry
 	seq     int
 	calls   []string // records AddTrustedRange cidr arguments for assertion
+
+	// listTrustedRangesErr, when set, is returned by ListTrustedRanges instead of
+	// its normal result — used to exercise RecordLiveness's error-propagation path
+	// when the revocation check itself fails (e.g. a storage backend outage).
+	listTrustedRangesErr error
 }
 
 func (s *recordingIPTrustStore) AddTrustedRange(_ context.Context, tenantID, cidr string, preSeeded bool) error {
@@ -82,6 +88,9 @@ func (s *recordingIPTrustStore) IsTrusted(_ context.Context, tenantID, ip string
 func (s *recordingIPTrustStore) ListTrustedRanges(_ context.Context, tenantID string) ([]*business.IPTrustEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.listTrustedRangesErr != nil {
+		return nil, s.listTrustedRangesErr
+	}
 	var out []*business.IPTrustEntry
 	for _, e := range s.entries {
 		if e.TenantID == tenantID {
@@ -153,10 +162,17 @@ func TestIPTrustEvaluator_ThresholdNotMet_NoTrust(t *testing.T) {
 	// Start the liveness clock.
 	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", "10.0.0.1", true))
 
-	// Simulate multiple healthy calls but back-date firstSeen to just under threshold.
+	// Back-date firstSeen to the middle of the window. The margin is deliberately
+	// large: the evaluator measures with time.Since against the wall clock, so a
+	// margin near the boundary asserts a distinction finer than the platform's
+	// timer can resolve. This test previously used threshold-1ms and failed on
+	// Windows, whose timer granularity is ~15.6 ms — the evaluator was correct
+	// (it logged elapsed=5.0004936s against a 5s threshold), the assertion was
+	// not. Testing the exact boundary needs an injectable clock, not a tighter
+	// margin.
 	ev.mu.Lock()
 	key := "tenant-1\x0010.0.0.1"
-	ev.timers[key] = time.Now().Add(-(threshold - time.Millisecond))
+	ev.timers[key] = time.Now().Add(-threshold / 2)
 	ev.mu.Unlock()
 
 	// One more healthy call — elapsed is still < threshold.
@@ -291,6 +307,70 @@ func TestIPTrustEvaluator_DefaultThreshold(t *testing.T) {
 	ev, _ := newTestEvaluator(t, 0)
 	assert.Equal(t, defaultIPTrustThreshold, ev.threshold,
 		"zero threshold must default to 30 minutes")
+}
+
+// TestIPTrustEvaluator_RevokedNotRestoredByLiveness verifies that a CIDR an
+// operator has revoked is not re-promoted to trusted by a subsequent liveness
+// record reaching the threshold. This is the required test for Issue #4346:
+// RecordLiveness must re-check current revocation state before promoting,
+// not merely re-arm whatever decision the in-memory timer recorded.
+func TestIPTrustEvaluator_RevokedNotRestoredByLiveness(t *testing.T) {
+	threshold := 5 * time.Second
+	ev, store := newTestEvaluator(t, threshold)
+	ctx := context.Background()
+
+	// Seed a trusted range and then revoke it, as an operator would after
+	// discovering the source was compromised.
+	require.NoError(t, store.AddTrustedRange(ctx, "tenant-1", "10.0.0.1/32", false))
+	require.NoError(t, store.RevokeTrustedRange(ctx, "tenant-1", "10.0.0.1/32"))
+
+	// The steward keeps heartbeating (healthy) from the revoked IP — e.g. an
+	// operator revoked trust without also isolating the host.
+	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", "10.0.0.1", true))
+
+	ev.mu.Lock()
+	key := "tenant-1\x0010.0.0.1"
+	ev.timers[key] = time.Now().Add(-threshold)
+	ev.mu.Unlock()
+
+	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", "10.0.0.1", true))
+
+	// Only the two seeding calls above should be recorded; the evaluator itself
+	// must not have called AddTrustedRange again.
+	calls := store.addTrustedRangeCalls()
+	assert.Len(t, calls, 1, "the evaluator must not re-add a revoked CIDR to trust")
+
+	entries, err := store.ListTrustedRanges(ctx, "tenant-1")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.True(t, entries[0].Revoked, "the CIDR must remain revoked after a subsequent liveness record")
+}
+
+// TestIPTrustEvaluator_RevocationCheckErrorPropagates verifies that a failure
+// in the revocation check itself (e.g. a storage backend outage) is returned
+// to the caller and does not silently fall through to promotion.
+func TestIPTrustEvaluator_RevocationCheckErrorPropagates(t *testing.T) {
+	threshold := 5 * time.Second
+	ev, store := newTestEvaluator(t, threshold)
+	ctx := context.Background()
+
+	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", "10.0.0.1", true))
+
+	ev.mu.Lock()
+	key := "tenant-1\x0010.0.0.1"
+	ev.timers[key] = time.Now().Add(-threshold)
+	ev.mu.Unlock()
+
+	injectedErr := errors.New("storage backend unreachable")
+	store.mu.Lock()
+	store.listTrustedRangesErr = injectedErr
+	store.mu.Unlock()
+
+	err := ev.RecordLiveness(ctx, "tenant-1", "steward-1", "10.0.0.1", true)
+	require.ErrorIs(t, err, injectedErr)
+
+	assert.Empty(t, store.addTrustedRangeCalls(),
+		"promotion must not proceed when the revocation check itself fails")
 }
 
 // TestIPTrustEvaluator_MultiTenantIsolation verifies that two tenants sharing

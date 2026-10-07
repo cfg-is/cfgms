@@ -556,7 +556,10 @@ func (p *TimescaleProvider) updateStats(entriesWritten int, latency time.Duratio
 	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs * 0.9) + (newLatencyMs * 0.1)
 }
 
-// init registers the timescale provider
+// init registers the timescale provider factory so each LoggingManager gets its own
+// TimescaleProvider instance with independent state.
 func init() {
-	interfaces.RegisterLoggingProvider(&TimescaleProvider{})
+	interfaces.RegisterLoggingProviderFactory(func() interfaces.LoggingProvider {
+		return &TimescaleProvider{}
+	})
 }

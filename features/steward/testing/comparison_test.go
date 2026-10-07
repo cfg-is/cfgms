@@ -288,3 +288,71 @@ func TestStateDiff_EventType(t *testing.T) {
 	assert.Equal(t, "drift.detected.monitor", diff.EventType,
 		"drift.detected.monitor must be storable for monitor-mode telemetry")
 }
+
+// TestCompareStates_DesiredMapPopulated asserts that CompareStates exposes the full
+// managed desired-field map on the returned StateDiff (Issue #3373).
+//
+// This is load-bearing, not incidental: drift-diff records report the FULL compared
+// field set, matching fields included, and CompareStates only records fields that
+// differ. DesiredMap is the sole path by which a matching field is recoverable, so a
+// nil or partial map produces a drift record with fields missing.
+func TestCompareStates_DesiredMapPopulated(t *testing.T) {
+	comparator := NewStateComparator()
+
+	managedFields := []string{"content", "mode", "owner"}
+	current := &testConfigState{
+		data: map[string]interface{}{
+			"content":   "actual",
+			"mode":      "0644",
+			"unmanaged": "ignored",
+		},
+		managedFields: managedFields,
+	}
+	desired := &testConfigState{
+		data: map[string]interface{}{
+			"content":   "expected",
+			"mode":      "0644",
+			"owner":     "root",
+			"unmanaged": "also ignored",
+		},
+		managedFields: managedFields,
+	}
+
+	driftDetected, diff := comparator.CompareStates(current, desired)
+	assert.True(t, driftDetected)
+
+	// Every managed field present in the desired state must appear, with its desired
+	// value — including "mode", which matches and therefore appears in none of
+	// ChangedFields / AddedFields / RemovedFields.
+	assert.Equal(t, map[string]interface{}{
+		"content": "expected",
+		"mode":    "0644",
+		"owner":   "root",
+	}, diff.DesiredMap, "DesiredMap must carry every managed desired field")
+
+	// Unmanaged fields must not leak into the map: the record would otherwise report
+	// drift on state the cfg never claimed.
+	assert.NotContains(t, diff.DesiredMap, "unmanaged")
+
+	// Cross-check the classification the drift-diff builder depends on.
+	assert.Contains(t, diff.ChangedFields, "content")
+	assert.Contains(t, diff.AddedFields, "owner")
+	assert.NotContains(t, diff.ChangedFields, "mode")
+	assert.NotContains(t, diff.AddedFields, "mode")
+}
+
+// TestCompareStates_DesiredMapPopulatedWithoutDrift asserts DesiredMap is populated
+// even when no drift is detected, so a caller cannot rely on drift as a precondition.
+func TestCompareStates_DesiredMapPopulatedWithoutDrift(t *testing.T) {
+	comparator := NewStateComparator()
+
+	managedFields := []string{"field1"}
+	shared := map[string]interface{}{"field1": "value1"}
+	current := &testConfigState{data: shared, managedFields: managedFields}
+	desired := &testConfigState{data: shared, managedFields: managedFields}
+
+	driftDetected, diff := comparator.CompareStates(current, desired)
+
+	assert.False(t, driftDetected)
+	assert.Equal(t, map[string]interface{}{"field1": "value1"}, diff.DesiredMap)
+}

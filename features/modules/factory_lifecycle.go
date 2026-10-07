@@ -129,7 +129,7 @@ func (laf *LifecycleAwareModuleFactory) LoadModule(moduleName string) (Module, e
 		// Unregister on failure
 		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
 			// Log the unregister error but don't change the return error
-			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", unregErr)
+			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", logging.SanitizeLogValue(unregErr.Error()))
 		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}
@@ -174,7 +174,7 @@ func (laf *LifecycleAwareModuleFactory) LoadModuleWithConfig(moduleName string, 
 		// Unregister on failure
 		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
 			// Log the unregister error but don't change the return error
-			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", unregErr)
+			laf.logger.Warn("failed to unregister module after load failure", "module", moduleName, "error", logging.SanitizeLogValue(unregErr.Error()))
 		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}

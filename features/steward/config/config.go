@@ -30,10 +30,8 @@
 //
 //	steward:
 //	  id: hostname
-//	  mode: standalone
 //	  logging:
 //	    level: info
-//	    format: text
 //	  error_handling:
 //	    module_load_failure: continue
 //	    resource_failure: warn
@@ -58,11 +56,12 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
 
 // Type aliases — re-export from stewardtypes so existing callers compile unchanged.
@@ -78,7 +77,6 @@ type (
 	ScriptSigningPolicy = stewardtypes.ScriptSigningPolicy
 	ScriptTrustMode     = stewardtypes.ScriptTrustMode
 	TrustedKeyRef       = stewardtypes.TrustedKeyRef
-	OperationMode       = stewardtypes.OperationMode
 	ErrorAction         = stewardtypes.ErrorAction
 	ModuleTrustConfig   = stewardtypes.ModuleTrustConfig
 	ModuleTrustMode     = stewardtypes.ModuleTrustMode
@@ -94,8 +92,6 @@ const (
 	TrustModeAnyValid             = stewardtypes.TrustModeAnyValid
 	TrustModeTrustedKeys          = stewardtypes.TrustModeTrustedKeys
 	TrustModeTrustedKeysAndPublic = stewardtypes.TrustModeTrustedKeysAndPublic
-	ModeStandalone                = stewardtypes.ModeStandalone
-	ModeController                = stewardtypes.ModeController
 	DriftModeApply                = stewardtypes.DriftModeApply
 	DriftModeMonitor              = stewardtypes.DriftModeMonitor
 	ActionContinue                = stewardtypes.ActionContinue
@@ -112,6 +108,10 @@ var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
 
 // envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
 var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
+
+// ErrNoConfiguration reports that none of the default steward configuration
+// search paths contained a file.
+var ErrNoConfiguration = errors.New("no configuration file found")
 
 // validateEnvVars checks that all referenced environment variables (without defaults) are set.
 // This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
@@ -190,7 +190,7 @@ func LoadConfiguration(configPath string) (StewardConfig, error) {
 		}
 	}
 
-	return config, fmt.Errorf("no configuration file found in search paths")
+	return config, fmt.Errorf("%w in search paths", ErrNoConfiguration)
 }
 
 // loadFromPath loads configuration from a specific file path
@@ -301,16 +301,8 @@ func getConfigSearchPaths() []string {
 // applyDefaults sets default values for configuration fields
 func applyDefaults(config *StewardConfig) {
 	// Set default steward settings
-	if config.Steward.Mode == "" {
-		config.Steward.Mode = ModeStandalone
-	}
-
 	if config.Steward.Logging.Level == "" {
 		config.Steward.Logging.Level = "info"
-	}
-
-	if config.Steward.Logging.Format == "" {
-		config.Steward.Logging.Format = "text"
 	}
 
 	// Set default error handling
@@ -344,6 +336,16 @@ func applyDefaults(config *StewardConfig) {
 			config.Steward.ID = "unknown"
 		}
 	}
+
+	// Default poll timeout for manual-review registration: 24h (Issue #1899).
+	if config.Steward.RegistrationPollTimeout == 0 {
+		config.Steward.RegistrationPollTimeout = 24 * time.Hour
+	}
+
+	// Default DNA refresh interval: 30m (Issue #1915).
+	if config.Steward.DNARefreshInterval == "" {
+		config.Steward.DNARefreshInterval = "30m"
+	}
 }
 
 // validateScriptSigningConfig delegates to the shared stewardtypes validator.
@@ -355,6 +357,13 @@ func validateScriptSigningConfig(cfg ScriptSigningConfig) error {
 // BuildModuleSigningConfig converts a steward ScriptSigningConfig into the
 // script.ModuleSigningConfig consumed by the script module and the steward
 // command handler's pre-dispatch signature verification (Issue #1671).
+//
+// Policy carries the steward-wide signing floor through to the module, which
+// combines it with each script's own signing_policy via
+// ScriptConfig.EffectiveSigningPolicy — the floor may be tightened per script
+// but never loosened (Issue #4399). An empty/absent Policy maps to
+// script.SigningPolicy(""), which EffectiveSigningPolicy treats as no floor,
+// preserving pre-#4399 behavior for deployments that don't set it.
 //
 // It is used by both standalone-mode wiring (steward.go) and controller-connected
 // wiring (client.TransportClient) so the two paths cannot diverge.
@@ -368,6 +377,7 @@ func BuildModuleSigningConfig(cfg ScriptSigningConfig) script.ModuleSigningConfi
 		}
 	}
 	return script.ModuleSigningConfig{
+		Policy:        script.SigningPolicy(cfg.Policy),
 		TrustMode:     script.TrustMode(cfg.TrustMode),
 		TrustedKeys:   entries,
 		AllowPublicCA: cfg.AllowPublicCA,

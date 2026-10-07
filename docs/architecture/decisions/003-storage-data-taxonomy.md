@@ -1,6 +1,6 @@
 # ADR 003: Storage Data Taxonomy
 
-**Status**: Proposed
+**Status**: Accepted (recorded 2026-09-21; the five-type taxonomy is implemented under `pkg/storage/interfaces/` and is the decision `storage-architecture.md` walks through)
 
 **Date**: 2026-04-13
 
@@ -153,7 +153,7 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 ### Mitigations
 
 - **Backup guidance**: flat-file provider ships with a documented `cfg backup` CLI helper that wraps standard tools (tar, restic). Listed in the provider's README.
-- **Migration tool**: sub-issue B delivers `cfg storage migrate --from git --to flatfile|postgres` before the git provider is removed.
+- **Migration tool**: sub-issue B delivers `cfg migrate --provider storage --from git --to flatfile|postgres` (also available as `cfg storage migrate --from git --to flatfile|postgres`) before the git provider is removed.
 - **Git-sync reliability**: idempotent imports, per-scope error isolation, exponential backoff on origin failure. Covered in the git-sync sub-issue's acceptance criteria.
 
 ## Alternatives Considered
@@ -236,7 +236,7 @@ Acceptance criteria for those stories **must include** a "Docs updated" checkbox
 
 No controller-side storage, logging, or persistence interface may live under `features/steward/*` when this epic closes. Known offenders the sweep must relocate (non-exhaustive — sub-story I is responsible for the full audit):
 
-- `features/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface (redundant with the canonical `pkg/storage/interfaces/ClientTenantStore`; must be unified)
+- `features/workflow/modules/m365/auth/admin_consent_flow.go` — duplicate `ClientTenantStore` interface (redundant with the canonical `pkg/storage/interfaces/ClientTenantStore`; must be unified)
 
 Rule of thumb: **if a steward does not use the interface, it does not belong under `features/steward/`.** Sub-story I includes an exhaustive audit and relocation pass, and the story's acceptance criteria must include `grep` evidence that no controller-only interfaces remain under `features/steward/*`.
 

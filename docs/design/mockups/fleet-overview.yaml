@@ -1,0 +1,4 @@
+file: fleet-overview.html
+order: 4
+status: **Reference**
+what: The read-only fleet overview inside the app shell — tenant-scope switcher, live-filter search, sort, saved views, selectable **device-DNA columns**, scale-aware pagination, and a row drill-in **asset-DNA drawer**. Both themes; Ready / Loading / Error / Empty states.

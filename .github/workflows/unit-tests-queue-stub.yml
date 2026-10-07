@@ -1,0 +1,44 @@
+name: Unit Tests (merge queue stub)
+
+# Queue-side half of the required `unit-tests` context, split out of
+# test-suite.yml.
+#
+# `unit-tests` is PR-real: test-suite.yml runs the fast suite as matrix legs
+# and posts the context from an aggregator job that `needs:` every leg. That
+# aggregator's check run does not exist until the slowest leg finishes. The
+# queue stub used to live in test-suite.yml behind
+# `if: github.event_name == 'merge_group'`, but a job whose `if` is false still
+# posts a check run with conclusion `skipped` -- on every pull_request run --
+# and GitHub accepts a `skipped` run as satisfying a required status check.
+# So each PR had a skipped `unit-tests` from the moment its run started, while
+# the real aggregator was still waiting on its legs: the requirement was met
+# before the unit tests finished, and even if they failed.
+#
+# Observed on PR #4155's head 5647d2f3: `unit-tests` skipped at 23:57:34Z; the
+# real aggregator's success at 00:03:15Z. Same shape as the `Build Gate` hole
+# that merged failing builds (see cross-platform-build-pr.yml and the
+# "Stub exclusivity" section of CLAUDE.md).
+#
+# A workflow with no `pull_request` trigger cannot post anything on a PR --
+# not even a skipped run. That is an invariant of the trigger list, not of an
+# `if:` expression a later edit can weaken.
+#
+# DO NOT add `pull_request:` to this file. The PR-side `unit-tests` must be
+# posted only by test-suite.yml's aggregator job.
+
+on:
+  merge_group:
+
+# Deny by default; the stub needs no token scope.
+permissions: {}
+
+jobs:
+  unit-tests-mq-stub:
+    name: unit-tests
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge-queue stub (real run already validated this diff on the PR)
+        run: |
+          echo "unit-tests: already validated for real on the source PR (#2595)."
+          echo "This merge-queue stub posts the required context without paying for the fast suite twice."

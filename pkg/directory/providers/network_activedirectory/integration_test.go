@@ -374,44 +374,30 @@ func TestADProviderIntegration(t *testing.T) {
 		})
 	})
 
+	// Issue #4448: QueryTrustedDomain, QueryForest and ValidateCrossDomainTrust
+	// compose a resourceID the activedirectory module can never honor — the
+	// module has no "forest"/"validate_trust" operation and silently drops the
+	// domain segment of a cross-domain "query". All three now fail fast in the
+	// provider with a capability error rather than round-tripping through a
+	// mock that assumed a steward capability that was never actually
+	// implemented; see advanced_operations.go and advanced_operations_test.go.
 	t.Run("Multi-Domain Operations", func(t *testing.T) {
 		t.Run("Cross-Domain User Query", func(t *testing.T) {
-			result, err := provider.QueryTrustedDomain(ctx, "dev.contoso.com", "user", "jane.smith")
-			require.NoError(t, err, "Cross-domain query should succeed")
-
-			// Verify cross-domain result structure
-			assert.True(t, result["success"].(bool))
-			assert.Equal(t, "user", result["query_type"])
-
-			userObj := result["user"].(map[string]interface{})
-			assert.Equal(t, "jane.smith@dev.contoso.com", userObj["user_principal_name"])
-			assert.Equal(t, "dev.contoso.com", userObj["source_domain"])
-			assert.True(t, userObj["cross_domain_query"].(bool))
+			_, err := provider.QueryTrustedDomain(ctx, "dev.contoso.com", "user", "jane.smith")
+			require.Error(t, err, "Cross-domain queries are not supported by the activedirectory module")
+			assert.Contains(t, err.Error(), "design decision")
 		})
 
 		t.Run("Forest-Wide Search", func(t *testing.T) {
-			result, err := provider.QueryForest(ctx, "user", "admin.user")
-			require.NoError(t, err, "Forest search should succeed")
-
-			// Verify forest search results
-			assert.True(t, result["success"].(bool))
-			assert.Equal(t, "forest_user", result["query_type"])
-			assert.Equal(t, 2, result["total_count"])
-
-			users := result["users"].([]interface{})
-			assert.Len(t, users, 2, "Should find admin.user in multiple domains")
-
-			// Verify each result has forest search markers
-			for _, userInterface := range users {
-				user := userInterface.(map[string]interface{})
-				assert.True(t, user["forest_search"].(bool))
-				assert.NotEmpty(t, user["source_domain"])
-			}
+			_, err := provider.QueryForest(ctx, "user", "admin.user")
+			require.Error(t, err, "Forest-wide search is not supported by the activedirectory module")
+			assert.Contains(t, err.Error(), "design decision")
 		})
 
 		t.Run("Trust Validation", func(t *testing.T) {
 			err := provider.ValidateCrossDomainTrust(ctx, "dev.contoso.com")
-			require.NoError(t, err, "Trust validation should succeed for configured domain")
+			require.Error(t, err, "Trust validation is not supported by the activedirectory module")
+			assert.Contains(t, err.Error(), "design decision")
 		})
 	})
 

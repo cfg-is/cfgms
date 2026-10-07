@@ -10,10 +10,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
+
+// ctxForTenant returns a context authenticated as the given CFGMS tenant, the
+// shape every Set/Get call in this file must carry since Issue #4420 wired in
+// requireExecutionTenant (matching entra_user, Issue #4325).
+func ctxForTenant(cfgmsTenantID string) context.Context {
+	return context.WithValue(context.Background(), ctxkeys.TenantID, cfgmsTenantID)
+}
 
 // MockAuthProvider is a mock implementation of auth.Provider
 type MockAuthProvider struct {
@@ -695,7 +706,7 @@ func TestEntraGroupModule_Set_CreateNewGroup(t *testing.T) {
 		TenantID:        "test-tenant-id",
 	}
 
-	err := module.Set(context.Background(), "test-tenant-id:new-group", config)
+	err := module.Set(ctxForTenant("test-tenant-id"), "test-tenant-id:new-group", config)
 	assert.NoError(t, err)
 	mockAuth.AssertExpectations(t)
 	mockGraph.AssertExpectations(t)
@@ -719,7 +730,7 @@ func TestEntraGroupModule_Set_AuthError(t *testing.T) {
 		TenantID:        "test-tenant-id",
 	}
 
-	err := module.Set(context.Background(), "test-tenant-id:some-group", config)
+	err := module.Set(ctxForTenant("test-tenant-id"), "test-tenant-id:some-group", config)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "auth failure")
 	mockAuth.AssertExpectations(t)
@@ -976,7 +987,7 @@ func TestEntraGroupModule_Set_GroupSearch_UsesListGroupsFilter(t *testing.T) {
 		TenantID:        "tenant-1",
 	}
 	m := &entraGroupModule{authProvider: ap, graphClient: gc, propagationDelay: 0}
-	err := m.Set(context.Background(), "tenant-1:new-gid", config)
+	err := m.Set(ctxForTenant("tenant-1"), "tenant-1:new-gid", config)
 	assert.NoError(t, err)
 	assert.True(t, listGroupsCalled, "ListGroups must be called as fallback display-name search")
 }
@@ -1021,7 +1032,7 @@ func TestEntraGroupModule_Get_TeamsEnabled_PopulatesTeamFields(t *testing.T) {
 	}
 	ap := &stubEntraGroupAP{token: token}
 	m := &entraGroupModule{authProvider: ap, graphClient: gc}
-	state, err := m.Get(context.Background(), "tenant-1:group-1")
+	state, err := m.Get(ctxForTenant("tenant-1"), "tenant-1:group-1")
 	assert.NoError(t, err)
 
 	cfg, ok := state.(*EntraGroupConfig)
@@ -1240,4 +1251,139 @@ func (s *stubEntraGroupGC) CreateTeam(_ context.Context, _ *auth.AccessToken, _ 
 }
 func (s *stubEntraGroupGC) UpdateTeamSettings(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.UpdateTeamSettingsRequest) error {
 	return nil
+}
+
+// seedGroupTenant stores a real OAuth2Config and a valid, non-expired
+// AccessToken for cfgmsTenantID, addressed by the real CFGMS tenant per Issue
+// #4325/#4420 (never by m365TenantID). GetAccessToken(ctx, cfgmsTenantID)
+// then returns this token from the credential store without any network call.
+func seedGroupTenant(t *testing.T, credStore auth.CredentialStore, cfgmsTenantID, m365TenantID, tokenValue string) {
+	t.Helper()
+	require.NoError(t, credStore.StoreConfig(cfgmsTenantID, &auth.OAuth2Config{
+		ClientID:             "client-" + cfgmsTenantID,
+		TenantID:             m365TenantID,
+		UseClientCredentials: true,
+	}))
+	require.NoError(t, credStore.StoreToken(cfgmsTenantID, &auth.AccessToken{
+		Token:     tokenValue,
+		TokenType: "Bearer",
+		TenantID:  m365TenantID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+}
+
+// groupTenantIsolationFixture bundles the real credential store and the
+// isolation test's token-tracking state alongside the module under test.
+type groupTenantIsolationFixture struct {
+	mod        *entraGroupModule
+	credStore  auth.CredentialStore
+	tokensUsed []string
+	groups     map[string]*graph.Group
+}
+
+func newTenantIsolationTestModule(t *testing.T) *groupTenantIsolationFixture {
+	t.Helper()
+	sp := &stewardprovider.StewardProvider{}
+	store, err := sp.CreateSecretStore(map[string]interface{}{"secrets_dir": t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	credStore := auth.NewSecretStoreCredentialStore(store)
+	authProvider := auth.NewOAuth2Provider(credStore, nil, logging.NewNoopLogger())
+
+	fixture := &groupTenantIsolationFixture{credStore: credStore, groups: make(map[string]*graph.Group)}
+	gc := &stubEntraGroupGC{
+		getGroupFn: func(_ context.Context, token *auth.AccessToken, groupID string) (*graph.Group, error) {
+			fixture.tokensUsed = append(fixture.tokensUsed, token.Token)
+			g, ok := fixture.groups[groupID]
+			if !ok {
+				return nil, &graph.GraphError{StatusCode: 404, Code: "Request_ResourceNotFound", Message: "not found"}
+			}
+			return g, nil
+		},
+		createGroupFn: func(_ context.Context, token *auth.AccessToken, req *graph.CreateGroupRequest) (*graph.Group, error) {
+			fixture.tokensUsed = append(fixture.tokensUsed, token.Token)
+			g := &graph.Group{ID: "id-" + req.DisplayName, DisplayName: req.DisplayName, MailNickname: req.MailNickname}
+			fixture.groups[g.ID] = g
+			return g, nil
+		},
+		getTeamFn: func(_ context.Context, _ *auth.AccessToken, _ string) (*graph.Team, error) {
+			return nil, &graph.GraphError{StatusCode: 404, Code: "Request_ResourceNotFound", Message: "not found"}
+		},
+	}
+
+	fixture.mod = New(authProvider, gc).(*entraGroupModule)
+	return fixture
+}
+
+// [REQUIRED TEST] Issue #4420: a workflow execution owned by CFGMS tenant A
+// cannot read or overwrite tenant B's stored M365 credentials, and cannot act
+// on tenant B's M365 tenant — the same defect Issue #4325 fixed in entra_user,
+// now closed in entra_group.
+func TestEntraGroupModule_TenantIsolation(t *testing.T) {
+	f := newTenantIsolationTestModule(t)
+
+	seedGroupTenant(t, f.credStore, "tenant-a", "m365-org-a", "tok-a")
+	seedGroupTenant(t, f.credStore, "tenant-b", "m365-org-b", "tok-b")
+
+	f.groups["group-a-id"] = &graph.Group{ID: "group-a-id", DisplayName: "Group A", MailNickname: "groupa"}
+	f.groups["group-b-id"] = &graph.Group{ID: "group-b-id", DisplayName: "Group B", MailNickname: "groupb"}
+
+	t.Run("tenant A reading its own M365 tenant succeeds and uses tenant A's token", func(t *testing.T) {
+		state, err := f.mod.Get(ctxForTenant("tenant-a"), "m365-org-a:group-a-id")
+		require.NoError(t, err)
+		cfg := state.(*EntraGroupConfig)
+		assert.Equal(t, "Group A", cfg.DisplayName)
+		assert.Equal(t, "m365-org-a", cfg.TenantID)
+		assert.Contains(t, f.tokensUsed, "tok-a")
+		assert.NotContains(t, f.tokensUsed, "tok-b")
+	})
+
+	t.Run("tenant A cannot read tenant B's M365 tenant via a forged resource ID", func(t *testing.T) {
+		before := len(f.tokensUsed)
+		_, err := f.mod.Get(ctxForTenant("tenant-a"), "m365-org-b:group-b-id")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match the M365 tenant configured")
+		// The mismatch must be refused before ever reaching Microsoft Graph —
+		// tenant A's Get must never present tenant B's group ID to any token.
+		assert.Equal(t, before, len(f.tokensUsed), "refused request must not call Microsoft Graph")
+	})
+
+	t.Run("tenant A cannot act on tenant B's M365 tenant via a forged tenant_id in Set", func(t *testing.T) {
+		originalB, err := f.credStore.GetToken("tenant-b")
+		require.NoError(t, err)
+
+		forged := &EntraGroupConfig{
+			DisplayName:     "Mallory Group",
+			MailNickname:    "mallorygroup",
+			SecurityEnabled: true,
+			TenantID:        "m365-org-b", // claims tenant B's M365 org
+		}
+		err = f.mod.Set(ctxForTenant("tenant-a"), "mallory-resource", forged)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match the M365 tenant configured")
+
+		// Tenant B's stored credential must be byte-for-byte unchanged.
+		afterB, err := f.credStore.GetToken("tenant-b")
+		require.NoError(t, err)
+		assert.Equal(t, originalB.Token, afterB.Token)
+
+		// No group must have been created under tenant B's M365 tenant.
+		_, existed := f.groups["id-Mallory Group"]
+		assert.False(t, existed, "Set must not reach Microsoft Graph on tenant mismatch")
+	})
+
+	t.Run("missing execution tenant context is refused, not treated as unrestricted", func(t *testing.T) {
+		_, err := f.mod.Get(context.Background(), "m365-org-a:group-a-id")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tenant context required")
+	})
+
+	t.Run("tenant B reading its own M365 tenant succeeds independently of tenant A", func(t *testing.T) {
+		state, err := f.mod.Get(ctxForTenant("tenant-b"), "m365-org-b:group-b-id")
+		require.NoError(t, err)
+		cfg := state.(*EntraGroupConfig)
+		assert.Equal(t, "Group B", cfg.DisplayName)
+		assert.Contains(t, f.tokensUsed, "tok-b")
+	})
 }

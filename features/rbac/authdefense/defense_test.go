@@ -382,3 +382,64 @@ func TestDefense_WithTenantExtractor(t *testing.T) {
 	assert.False(t, allowed)
 	assert.Equal(t, "tenant_circuit_open", reason)
 }
+
+// A handler that writes a body without ever calling WriteHeader has returned
+// 200, and the wrapper must record it as a success. This is why statusCapture
+// deliberately does not override Write: without that override the response body
+// never passes through middleware code, so wrapping every route does not turn
+// this one method into a sink for every handler's output.
+func TestDefense_Middleware_RecordsImplicitSuccessWithoutWriteOverride(t *testing.T) {
+	clock := NewTestClock(time.Time{})
+	cfg := DefaultConfig()
+	cfg.IPRateLimit = 2
+	cfg.IPRingSize = 2
+	cfg.IPRateWindow = 1 * time.Minute
+	cfg.GCTriggerThreshold = 1_000_000
+
+	logger := newTestLogger(t)
+	d := New(cfg, logger, WithClock(clock), WithIPExtractor(&staticIPExtractor{ip: "6.6.6.6"}))
+	defer d.Stop()
+
+	// Body only — no WriteHeader call anywhere in the handler.
+	handler := d.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write([]byte("ok"))
+		require.NoError(t, err)
+	}))
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "implicit status must reach the client as 200")
+		require.Equal(t, "ok", rec.Body.String(), "the body must pass through untouched")
+	}
+
+	// Had these been recorded as auth failures, the third request would have
+	// tripped the two-failure rate limit and returned 429 above.
+	assert.Zero(t, d.GetMetrics().TotalBlocked, "successful requests must not be counted as failures")
+}
+
+// The wrapper must not let a handler's late WriteHeader be mistaken for the
+// status actually sent: net/http ignores a superfluous WriteHeader after a
+// body write, so the client still sees 200.
+func TestDefense_Middleware_WriteHeaderIsIdempotent(t *testing.T) {
+	clock := NewTestClock(time.Time{})
+	cfg := DefaultConfig()
+	cfg.GCTriggerThreshold = 1_000_000
+
+	logger := newTestLogger(t)
+	d := New(cfg, logger, WithClock(clock), WithIPExtractor(&staticIPExtractor{ip: "7.7.7.7"}))
+	defer d.Stop()
+
+	handler := d.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.WriteHeader(http.StatusOK) // ignored — the first status wins
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}

@@ -4,17 +4,44 @@ package config
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// seedSiblingClients creates root → msp → {client-a, client-b} in the store, so
+// tests can verify a caller scoped to one child cannot reach the other.
+func seedSiblingClients(t *testing.T, ctx context.Context, sm interface{ GetTenantStore() business.TenantStore }) {
+	t.Helper()
+	ts := sm.GetTenantStore()
+	require.NotNil(t, ts)
+
+	for _, td := range []*business.TenantData{
+		{ID: "root", Name: "Root", Status: business.TenantStatusActive},
+		{ID: "msp", Name: "MSP", ParentID: "root", Status: business.TenantStatusActive},
+		{ID: "client-a", Name: "Client A", ParentID: "msp", Status: business.TenantStatusActive},
+		{ID: "client-b", Name: "Client B", ParentID: "msp", Status: business.TenantStatusActive},
+	} {
+		require.NoError(t, ts.CreateTenant(ctx, td))
+	}
+}
 
 // seedThreeLevelTenants creates root → msp → client tenant hierarchy in the store.
 func seedThreeLevelTenants(t *testing.T, ctx context.Context, sm interface{ GetTenantStore() business.TenantStore }) {
@@ -80,9 +107,9 @@ func TestResolveConfiguration_3LevelHierarchy(t *testing.T) {
 		Data: marshalStewardConfig(t, rootCfg),
 	}))
 
-	// Level 1 (msp, LevelClient): overrides Steward.Mode
+	// Level 1 (msp, LevelClient): overrides Steward.ConvergeInterval
 	mspCfg := stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{Mode: stewardconfig.ModeController},
+		Steward: stewardconfig.StewardSettings{ConvergeInterval: "45m"},
 	}
 	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
 		Key:  &cfgconfig.ConfigKey{TenantID: "msp", Namespace: "client-policies", Name: "msp"},
@@ -106,7 +133,7 @@ func TestResolveConfiguration_3LevelHierarchy(t *testing.T) {
 
 	// All 3 levels must have contributed.
 	assert.Equal(t, "inherited-id", effective.Config.Steward.ID, "root level must contribute Steward.ID")
-	assert.Equal(t, stewardconfig.ModeController, effective.Config.Steward.Mode, "msp level must contribute Steward.Mode")
+	assert.Equal(t, "45m", effective.Config.Steward.ConvergeInterval, "msp level must contribute Steward.ConvergeInterval")
 	require.Len(t, effective.Config.Resources, 1, "client level must contribute the resource")
 	assert.Equal(t, "client-resource", effective.Config.Resources[0].Name)
 }
@@ -246,4 +273,1139 @@ func TestResolveConfiguration_PropagatesDriftModeFromParent(t *testing.T) {
 		"drift_mode set at parent tenant must cascade to descendant stewards")
 	assert.NotNil(t, effective.Sources["steward.drift_mode"],
 		"inheritance source for drift_mode must be recorded")
+}
+
+func resourceNames(resources []stewardconfig.ResourceConfig) []string {
+	names := make([]string, len(resources))
+	for i, r := range resources {
+		names[i] = r.Name
+	}
+	return names
+}
+
+// TestApplyConfigurationWithSource_PreservesResourceOrder pins that resource
+// declaration order survives inheritance merging. The order is load-bearing for
+// dependency chains: the steward executor applies resources in slice order, so a
+// vSwitch must come before the VM that attaches to it (create) and a VM must come
+// before its vSwitch (delete — Hyper-V refuses to remove an in-use switch).
+// Rebuilding the slice from a Go map (the prior implementation) randomised the
+// order and made those chains fail intermittently. Eight resources make a
+// stale-map regression astronomically unlikely to pass by chance (1/8!).
+func TestApplyConfigurationWithSource_PreservesResourceOrder(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+	src := &InheritanceSource{Source: "test"}
+
+	declared := []string{"sw-a", "sw-b", "vm-1", "vm-2", "vm-3", "vm-4", "vm-5", "vm-6"}
+	resources := make([]stewardconfig.ResourceConfig, len(declared))
+	for i, name := range declared {
+		resources[i] = stewardconfig.ResourceConfig{Name: name, Module: "hyperv.vm"}
+	}
+
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{Resources: resources}, src)
+
+	assert.Equal(t, declared, resourceNames(effective.Config.Resources),
+		"resource declaration order must be preserved through inheritance merging")
+}
+
+// TestApplyConfigurationWithSource_OverrideKeepsPositionAppendsNew verifies the
+// declarative-merge semantics under order preservation: a later layer that
+// overrides an existing resource replaces it IN PLACE (keeping the base
+// position), while genuinely new resources append in declaration order.
+func TestApplyConfigurationWithSource_OverrideKeepsPositionAppendsNew(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	// Base layer (e.g. parent tenant): switch then VM.
+	base := &stewardconfig.StewardConfig{Resources: []stewardconfig.ResourceConfig{
+		{Name: "sw-a", Module: "hyperv.vswitch"},
+		{Name: "vm-1", Module: "hyperv.vm"},
+	}}
+	ir.applyConfigurationWithSource(context.Background(), effective, base, &InheritanceSource{Source: "base"})
+
+	// Child layer: overrides vm-1 and adds a new vm-2.
+	child := &stewardconfig.StewardConfig{Resources: []stewardconfig.ResourceConfig{
+		{Name: "vm-1", Module: "hyperv.vm", Config: map[string]interface{}{"cpu_count": 4}},
+		{Name: "vm-2", Module: "hyperv.vm"},
+	}}
+	ir.applyConfigurationWithSource(context.Background(), effective, child, &InheritanceSource{Source: "child"})
+
+	assert.Equal(t, []string{"sw-a", "vm-1", "vm-2"}, resourceNames(effective.Config.Resources),
+		"override must keep the base position; new resources append")
+	// The override must have taken effect (child value), not the base.
+	var vm1 stewardconfig.ResourceConfig
+	for _, r := range effective.Config.Resources {
+		if r.Name == "vm-1" {
+			vm1 = r
+		}
+	}
+	assert.Equal(t, 4, vm1.Config["cpu_count"], "child layer must override the base resource in place")
+}
+
+// TestResolveConfiguration_PropagatesDesiredVersionFromParent verifies that
+// steward.upgrade.desired_version set at a parent tenant cascades to child
+// stewards via applyConfigurationWithSource. (Issue #2260)
+func TestResolveConfiguration_PropagatesDesiredVersionFromParent(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	// Parent (root) sets desired_version; child tenant has no upgrade config.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				Upgrade: stewardconfig.UpgradeConfig{DesiredVersion: "v0.5.21"},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
+		"desired_version set at parent tenant must cascade to descendant stewards")
+	assert.NotNil(t, effective.Sources["steward.upgrade.desired_version"],
+		"inheritance source for desired_version must be recorded")
+}
+
+// TestApplyConfigurationWithSource_DesiredVersionInherited verifies the
+// applyConfigurationWithSource primitive: a parent config's desired_version is
+// carried into the effective config and its source is tracked. (Issue #2260)
+func TestApplyConfigurationWithSource_DesiredVersionInherited(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	parentSrc := &InheritanceSource{Source: "parent", TenantID: "root"}
+	parentCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			Upgrade: stewardconfig.UpgradeConfig{
+				DesiredVersion: "v0.5.21",
+				AllowDowngrade: true,
+			},
+		},
+	}
+	ir.applyConfigurationWithSource(context.Background(), effective, parentCfg, parentSrc)
+
+	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
+		"desired_version must be applied from parent config")
+	assert.True(t, effective.Config.Steward.Upgrade.AllowDowngrade,
+		"allow_downgrade must be applied from parent config")
+	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.desired_version"],
+		"desired_version source must be tracked")
+	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.allow_downgrade"],
+		"allow_downgrade source must be tracked")
+
+	// A child config with no desired_version must not clobber the inherited value.
+	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
+	childCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{ID: "child-steward"},
+	}
+	ir.applyConfigurationWithSource(context.Background(), effective, childCfg, childSrc)
+
+	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
+		"child with empty desired_version must not clobber inherited value")
+}
+
+// TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins pins the
+// intentional "more-permissive-wins" semantics: once a parent sets allow_downgrade=true
+// a child that sets allow_downgrade=false cannot revoke it within the same inheritance
+// pass. This is consistent with other bool fields in applyConfigurationWithSource and
+// is deliberate policy for this security control. (Issue #2260)
+func TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	parentSrc := &InheritanceSource{Source: "root", TenantID: "root"}
+	parentCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			Upgrade: stewardconfig.UpgradeConfig{AllowDowngrade: true},
+		},
+	}
+	ir.applyConfigurationWithSource(context.Background(), effective, parentCfg, parentSrc)
+	require.True(t, effective.Config.Steward.Upgrade.AllowDowngrade, "parent sets allow_downgrade=true")
+
+	// Child explicitly sets allow_downgrade=false (zero-value for bool) — it cannot
+	// revoke the parent-granted permission via applyConfigurationWithSource.
+	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
+	childCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			Upgrade: stewardconfig.UpgradeConfig{AllowDowngrade: false},
+		},
+	}
+	ir.applyConfigurationWithSource(context.Background(), effective, childCfg, childSrc)
+
+	assert.True(t, effective.Config.Steward.Upgrade.AllowDowngrade,
+		"more-permissive-wins: child false cannot revoke parent true")
+	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.allow_downgrade"],
+		"source must remain the parent that set the permissive value")
+}
+
+// --- Cluster cascade tests (Issue #2425) ---
+
+// buildClusterRegistry constructs a real *clusterregistry.Registry from the given
+// steward DNA, exercising the production BuildRegistry parse path (no stubs). It
+// marks stewardID as a member of each named cluster by attaching a cluster:<name>
+// ADR-017 fragment, built through sdna.NewFragment — the same production path the
+// steward's monitor bridge uses (Issue #2908).
+func buildClusterRegistry(t *testing.T, stewardID string, clusters ...string) *clusterregistry.Registry {
+	t.Helper()
+	frags := make([]*commonpb.Fragment, 0, len(clusters))
+	for _, c := range clusters {
+		frag, err := sdna.NewFragment("cluster:"+c, "hyperv", sdna.MapState{"name": c})
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
+	return clusterregistry.BuildRegistry([]fleet.StewardData{
+		{ID: stewardID, DNAFragments: frags},
+	})
+}
+
+// TestResolveConfiguration_ClusterCascade_MemberReceivesResources verifies the required
+// AC: a steward reported as a member of cluster "cfg-lab" by the registry receives the
+// merged resources from cluster-policies/cfg-lab, positioned after Group-level and before
+// Device-level (a device-level resource of the same name still wins).
+func TestResolveConfiguration_ClusterCascade_MemberReceivesResources(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Group-level sets a resource "base-resource"
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "group"}},
+			},
+		}),
+	}))
+
+	// Cluster-level sets "cluster-resource" and overrides "base-resource"
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "cluster-resource", Module: "file", Config: map[string]interface{}{"value": "cluster"}},
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "cluster-override"}},
+			},
+		}),
+	}))
+
+	// Device-level overrides "base-resource" — device must win over cluster
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "stewards", Name: "steward-1"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "device-wins"}},
+			},
+		}),
+	}))
+
+	registry := buildClusterRegistry(t, "steward-1", "cfg-lab")
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	// cluster-resource must be present (from cluster-policies/cfg-lab)
+	resourcesByName := make(map[string]stewardconfig.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+	clusterRes, ok := resourcesByName["cluster-resource"]
+	require.True(t, ok, "cluster-resource must be present in effective config")
+	assert.Equal(t, "cluster", clusterRes.Config["value"], "cluster-resource must come from cluster-policies")
+
+	// device-level must win over cluster-level for the same resource name
+	baseRes, ok := resourcesByName["base-resource"]
+	require.True(t, ok, "base-resource must be present")
+	assert.Equal(t, "device-wins", baseRes.Config["value"], "device-level must override cluster-level for same resource")
+
+	// inheritance source for cluster-resource must show the cluster origin
+	src, ok := effective.Sources["resource.cluster-resource"]
+	require.True(t, ok, "cluster-resource source must be tracked")
+	assert.Contains(t, src.Source, "cluster-policies", "source must identify cluster-policies namespace")
+}
+
+// TestResolveConfiguration_NoMembership_Unchanged verifies that a steward with no cluster
+// membership (registry returns nil) produces byte-identical EffectiveConfiguration output
+// to an InheritanceResolver with no registry wired at all. This is the nil-registry /
+// empty-membership no-op guarantee.
+func TestResolveConfiguration_NoMembership_Unchanged(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Seed a cluster-policies doc that must NOT appear for a non-member steward.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "cluster-only-resource", Module: "file"},
+			},
+		}),
+	}))
+
+	// Group-level config for baseline
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file"},
+			},
+		}),
+	}))
+
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+
+	// Resolve with no registry wired
+	irNoRegistry := NewInheritanceResolver(router, sm.GetClientTenantStore(), sm.GetTenantStore())
+	effectiveNoRegistry, err := irNoRegistry.ResolveConfiguration(ctx, "client", "steward-2")
+	require.NoError(t, err)
+
+	// Resolve with registry wired but steward has no membership
+	emptyRegistry := buildClusterRegistry(t, "other-steward", "cfg-lab")
+	irWithRegistry := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), emptyRegistry)
+	effectiveWithRegistry, err := irWithRegistry.ResolveConfiguration(ctx, "client", "steward-2")
+	require.NoError(t, err)
+
+	// Resources must be identical — no cluster-only-resource leaked in
+	assert.Equal(t, len(effectiveNoRegistry.Config.Resources), len(effectiveWithRegistry.Config.Resources),
+		"non-member steward must have identical resource count regardless of registry wiring")
+	for _, r := range effectiveWithRegistry.Config.Resources {
+		assert.NotEqual(t, "cluster-only-resource", r.Name,
+			"cluster-only-resource must not appear for a non-member steward")
+	}
+
+	// Sources must have the same keys
+	assert.Equal(t, len(effectiveNoRegistry.Sources), len(effectiveWithRegistry.Sources),
+		"non-member steward must have identical source count regardless of registry wiring")
+}
+
+// TestResolveConfiguration_ClusterLeave_DropsResources verifies that when a steward's
+// registry membership is removed (cluster leave), the cluster.cfg resources are absent
+// from the next ResolveConfiguration call — no stale merge.
+func TestResolveConfiguration_ClusterLeave_DropsResources(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "cluster-vm", Module: "hyperv.vm"},
+			},
+		}),
+	}))
+
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+
+	// First call: steward IS a member — cluster-vm must appear
+	memberRegistry := buildClusterRegistry(t, "steward-1", "cfg-lab")
+	irMember := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), memberRegistry)
+	effectiveMember, err := irMember.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	memberResourceNames := make(map[string]bool)
+	for _, r := range effectiveMember.Config.Resources {
+		memberResourceNames[r.Name] = true
+	}
+	assert.True(t, memberResourceNames["cluster-vm"],
+		"cluster-vm must appear when steward is a member of cfg-lab")
+
+	// Second call: steward has LEFT the cluster (registry returns nil) — cluster-vm must be gone
+	leftRegistry := buildClusterRegistry(t, "other-steward", "cfg-lab")
+	irLeft := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), leftRegistry)
+	effectiveLeft, err := irLeft.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	leftResourceNames := make(map[string]bool)
+	for _, r := range effectiveLeft.Config.Resources {
+		leftResourceNames[r.Name] = true
+	}
+	assert.False(t, leftResourceNames["cluster-vm"],
+		"cluster-vm must be absent after steward leaves cfg-lab (no stale merge)")
+}
+
+// TestResolveConfiguration_CorruptClusterConfig_DoesNotFailResolution verifies that a
+// corrupt (non-YAML) cluster-policies document causes a warning log but does NOT fail
+// ResolveConfiguration. The steward must still receive its non-cluster config, and the
+// corrupt cluster doc must contribute no resources (the error is non-fatal by design).
+func TestResolveConfiguration_CorruptClusterConfig_DoesNotFailResolution(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Store a valid group-level config
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "group-resource", Module: "file"},
+			},
+		}),
+	}))
+
+	// Store a corrupt (non-YAML) cluster-policies document to trigger the parse-error path.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "bad-cluster"},
+		Data: []byte("{{{{this is not valid YAML: [[["),
+	}))
+
+	registry := buildClusterRegistry(t, "steward-1", "bad-cluster")
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+
+	// Resolution must succeed despite the corrupt cluster config document.
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err, "corrupt cluster-policies document must not fail ResolveConfiguration")
+
+	// The group-level resource must still appear (cluster corruption is isolated).
+	resourceNames := make(map[string]bool)
+	for _, r := range effective.Config.Resources {
+		resourceNames[r.Name] = true
+	}
+	assert.True(t, resourceNames["group-resource"],
+		"group-level resource must appear even when cluster config is corrupt")
+}
+
+// TestWithLogger_InstallsRealLogger verifies WithLogger installs the provided
+// logger as the resolver's diagnostic sink: after the call, both the unexported
+// logger field and the log() accessor return the exact logger that was passed in.
+func TestWithLogger_InstallsRealLogger(t *testing.T) {
+	ir := &InheritanceResolver{}
+
+	realLogger := logging.NewLogger("info")
+	require.NotNil(t, realLogger, "test precondition: NewLogger must return a real logger")
+
+	returned := ir.WithLogger(realLogger)
+
+	assert.Same(t, ir, returned, "WithLogger must return the same resolver for chaining")
+	assert.Same(t, realLogger, ir.logger, "WithLogger must install the provided logger")
+	assert.Same(t, realLogger, ir.log(), "log() must return the installed real logger")
+}
+
+// TestWithLogger_NilDefaultsToNonNilLogger verifies the nil-guard branch: passing
+// nil to WithLogger installs a real default logger (never leaves the field nil and
+// never routes through the Noop fallback in log()). This exercises lines 83-85.
+func TestWithLogger_NilDefaultsToNonNilLogger(t *testing.T) {
+	// Start from a resolver that already has a logger to prove nil resets to a
+	// fresh default rather than being ignored.
+	ir := (&InheritanceResolver{}).WithLogger(logging.NewLogger("info"))
+
+	returned := ir.WithLogger(nil)
+
+	assert.Same(t, ir, returned, "WithLogger(nil) must return the same resolver for chaining")
+	require.NotNil(t, ir.logger, "WithLogger(nil) must install a non-nil default logger")
+	require.NotNil(t, ir.log(), "log() must return a non-nil logger after WithLogger(nil)")
+}
+
+// TestResolveConfiguration_ClusterConfigError_LogValueSanitized verifies that stewardID
+// and clusterName values containing newline/CR injection characters are stripped before
+// they appear in the WarnCtx call at inheritance.go:241 (the applyClusterConfiguration
+// error path). Also confirms a clean value (no control chars) passes through unchanged.
+func TestResolveConfiguration_ClusterConfigError_LogValueSanitized(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Store corrupt YAML for the cluster to trigger the WarnCtx error path.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "bad-cluster"},
+		Data: []byte("{{{{this is not valid YAML: [[["),
+	}))
+
+	// stewardID containing newline and CR that must be stripped at the log call site.
+	injectedStewardID := "steward\n123\rinjected"
+	registry := buildClusterRegistry(t, injectedStewardID, "bad-cluster")
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+
+	capture := logging.NewCapturingLogger()
+	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+	ir.WithLogger(capture)
+
+	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
+	require.NoError(t, err, "corrupt cluster-policies document must not fail ResolveConfiguration")
+	require.Len(t, capture.WarnEntries, 1, "exactly one WarnCtx entry expected for the corrupt cluster")
+
+	entry := capture.WarnEntries[0]
+
+	stewardIDVal, ok := entry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in the log entry")
+	assert.NotContains(t, stewardIDVal, "\n", "steward_id must not contain raw newline in logged field")
+	assert.NotContains(t, stewardIDVal, "\r", "steward_id must not contain raw carriage-return in logged field")
+	assert.Equal(t, "steward_123_injected", stewardIDVal,
+		"newline and CR in steward_id must be replaced with underscore before logging")
+
+	// A clean value (no control chars) must pass through unchanged.
+	cleanStewardID := "clean-steward-456"
+	cleanRegistry := buildClusterRegistry(t, cleanStewardID, "bad-cluster")
+	cleanCapture := logging.NewCapturingLogger()
+	irClean := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), cleanRegistry)
+	irClean.WithLogger(cleanCapture)
+
+	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)
+	require.NoError(t, err)
+	require.Len(t, cleanCapture.WarnEntries, 1, "exactly one WarnCtx entry expected for clean-value test")
+
+	cleanEntry := cleanCapture.WarnEntries[0]
+	cleanVal, ok := cleanEntry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in clean-value log entry")
+	assert.Equal(t, cleanStewardID, cleanVal, "clean value must pass through unchanged")
+}
+
+// --- Role cascade tests (NewInheritanceResolverWithRoles / applyRoleFragment) ---
+
+// fixedRoleProvider is a real roleConfigProvider implementation for tests that
+// returns a predetermined fragment list or a predetermined error. It never
+// delegates to a stub — it IS the implementation.
+type fixedRoleProvider struct {
+	fragments []RoleFragment
+	err       error
+}
+
+func (p *fixedRoleProvider) MatchingRoleFragments(_ context.Context, _ string) ([]RoleFragment, error) {
+	return p.fragments, p.err
+}
+
+// TestNewInheritanceResolverWithRoles_WiresClusterAndRoleProviders verifies that the
+// constructor stores both the cluster registry and the role provider on the resolver,
+// so the cascade layers are active when ResolveConfiguration runs.
+func TestNewInheritanceResolverWithRoles_WiresClusterAndRoleProviders(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
+	registry := buildClusterRegistry(t, "steward-1", "cluster-a")
+	roles := &fixedRoleProvider{}
+
+	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry, roles)
+
+	require.NotNil(t, ir, "constructor must return a non-nil resolver")
+	assert.Same(t, registry, ir.clusterRegistry, "clusterRegistry must be wired by the constructor")
+	assert.Same(t, roles, ir.roleProvider, "roleProvider must be wired by the constructor")
+}
+
+// TestResolveConfiguration_RoleCascade_FragmentsApplied verifies that role fragments
+// returned by the provider are merged into the effective config via applyRoleFragment.
+// Role fragments must appear after cluster-policies and before device-level config
+// (cluster < role < device precedence): a device-level resource of the same name wins.
+func TestResolveConfiguration_RoleCascade_FragmentsApplied(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Role fragment contributes role-resource and would override base-resource,
+	// but device-level must still win for base-resource.
+	roleFrags := []RoleFragment{
+		{
+			Name: "admin-role",
+			Config: stewardconfig.StewardConfig{
+				Resources: []stewardconfig.ResourceConfig{
+					{Name: "role-resource", Module: "file", Config: map[string]interface{}{"value": "from-role"}},
+					{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "role-override"}},
+				},
+			},
+		},
+	}
+
+	// Device-level must win over role for base-resource.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "stewards", Name: "steward-1"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "device-wins"}},
+			},
+		}),
+	}))
+
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, &fixedRoleProvider{fragments: roleFrags})
+
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	resourcesByName := make(map[string]stewardconfig.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+
+	// role-resource must be present from the role fragment.
+	roleRes, ok := resourcesByName["role-resource"]
+	require.True(t, ok, "role-resource must appear from the role fragment")
+	assert.Equal(t, "from-role", roleRes.Config["value"], "role-resource value must come from the role fragment")
+
+	// device-level must win for the same resource name.
+	baseRes, ok := resourcesByName["base-resource"]
+	require.True(t, ok, "base-resource must appear in effective config")
+	assert.Equal(t, "device-wins", baseRes.Config["value"], "device-level must override role-level for same resource")
+
+	// Inheritance source must record the role origin.
+	src, ok := effective.Sources["resource.role-resource"]
+	require.True(t, ok, "role-resource source must be tracked")
+	assert.Contains(t, src.Source, "role-policies", "source must identify role-policies namespace")
+	assert.Equal(t, "admin-role", src.ConfigName, "source ConfigName must be the role name")
+}
+
+// TestResolveConfiguration_RoleProviderError_LogValueSanitized verifies that
+// stewardID values containing newline/CR injection characters are stripped before
+// they appear in the WarnCtx call at inheritance.go:258 (the role provider error
+// path). Also confirms a clean value (no control chars) passes through unchanged.
+func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
+	brokenRoles := &fixedRoleProvider{err: errors.New("simulated role provider failure")}
+
+	injectedStewardID := "steward\n456\rinjected"
+	capture := logging.NewCapturingLogger()
+	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, brokenRoles)
+	ir.WithLogger(capture)
+
+	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
+	require.NoError(t, err, "role provider error must not fail ResolveConfiguration")
+	require.Len(t, capture.WarnEntries, 1, "exactly one WarnCtx entry expected for the role provider error")
+
+	entry := capture.WarnEntries[0]
+
+	stewardIDVal, ok := entry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in the log entry")
+	assert.NotContains(t, stewardIDVal, "\n", "steward_id must not contain raw newline in logged field")
+	assert.NotContains(t, stewardIDVal, "\r", "steward_id must not contain raw carriage-return in logged field")
+	assert.Equal(t, "steward_456_injected", stewardIDVal,
+		"newline and CR in steward_id must be replaced with underscore before logging")
+
+	// A clean value must pass through unchanged.
+	cleanStewardID := "clean-steward-789"
+	cleanCapture := logging.NewCapturingLogger()
+	irClean := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, brokenRoles)
+	irClean.WithLogger(cleanCapture)
+
+	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)
+	require.NoError(t, err)
+	require.Len(t, cleanCapture.WarnEntries, 1, "exactly one WarnCtx entry expected for clean-value test")
+
+	cleanEntry := cleanCapture.WarnEntries[0]
+	cleanVal, ok := cleanEntry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in clean-value log entry")
+	assert.Equal(t, cleanStewardID, cleanVal, "clean value must pass through unchanged")
+}
+
+// --- RebootWindow cascade tests (Issue #2976) ---
+
+// makeWeeklyWindow returns a *maintenanceschedule.Config describing a weekly window
+// on the given days for use in cascade tests.
+func makeWeeklyWindow(tz string, days ...time.Weekday) *maintenanceschedule.Config {
+	return &maintenanceschedule.Config{
+		Timezone: tz,
+		Schedules: []maintenanceschedule.Schedule{
+			{
+				Freq:  maintenanceschedule.FreqWeekly,
+				Days:  days,
+				Start: maintenanceschedule.TimeOfDay{Hour: 2, Minute: 0},
+				End:   maintenanceschedule.TimeOfDay{Hour: 4, Minute: 0},
+			},
+		},
+	}
+}
+
+func makeMonthlyWindow(tz string, weekday time.Weekday, nth int) *maintenanceschedule.Config {
+	n := nth
+	return &maintenanceschedule.Config{
+		Timezone: tz,
+		Schedules: []maintenanceschedule.Schedule{
+			{
+				Freq:    maintenanceschedule.FreqMonthly,
+				Weekday: weekday,
+				Nth:     &n,
+				Start:   maintenanceschedule.TimeOfDay{Hour: 22, Minute: 0},
+				End:     maintenanceschedule.TimeOfDay{EndOfDay: true},
+			},
+		},
+	}
+}
+
+// TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins is the REQUIRED TEST
+// from acceptance criteria: a three-level cascade where MSP declares a monthly window,
+// Client overrides with a more-frequent weekly window, and Device overrides again with
+// a looser monthly window. The lowest declaring level wins in each case, proving that
+// override works in both directions (tighter-at-child AND looser-at-child).
+func TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	mspSrc := &InheritanceSource{Source: "msp", TenantID: "msp"}
+	clientSrc := &InheritanceSource{Source: "client", TenantID: "client"}
+	deviceSrc := &InheritanceSource{Source: "device", TenantID: "client"}
+
+	// MSP: monthly window on 1st Saturday (looser/less-frequent)
+	mspWindow := makeMonthlyWindow("America/New_York", time.Saturday, 1)
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: mspWindow},
+	}, mspSrc)
+
+	assert.Equal(t, mspWindow, effective.Config.Steward.RebootWindow,
+		"after MSP pass, MSP window must be the effective window")
+	assert.Equal(t, mspSrc, effective.Sources["steward.reboot_window"])
+	assert.Equal(t, maintenanceschedule.FreqMonthly, effective.Config.Steward.RebootWindow.Schedules[0].Freq,
+		"MSP window must be monthly")
+
+	// Client: weekly Mon+Thu (tighter / more-frequent than MSP monthly)
+	clientWindow := makeWeeklyWindow("America/Chicago", time.Monday, time.Thursday)
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: clientWindow},
+	}, clientSrc)
+
+	assert.Equal(t, clientWindow, effective.Config.Steward.RebootWindow,
+		"client window (more-frequent) must override MSP window — tighter-at-child must win")
+	assert.Equal(t, clientSrc, effective.Sources["steward.reboot_window"])
+	assert.Equal(t, maintenanceschedule.FreqWeekly, effective.Config.Steward.RebootWindow.Schedules[0].Freq,
+		"effective window must be weekly after client override")
+
+	// Device: monthly 1st Wednesday (looser than client weekly)
+	deviceWindow := makeMonthlyWindow("UTC", time.Wednesday, 1)
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: deviceWindow},
+	}, deviceSrc)
+
+	assert.Equal(t, deviceWindow, effective.Config.Steward.RebootWindow,
+		"device window (looser/less-frequent) must override client window — looser-at-child must win")
+	assert.Equal(t, deviceSrc, effective.Sources["steward.reboot_window"])
+	assert.Equal(t, maintenanceschedule.FreqMonthly, effective.Config.Steward.RebootWindow.Schedules[0].Freq,
+		"effective window must be monthly after device override")
+}
+
+// TestApplyConfigurationWithSource_RebootWindowNilDoesNotClobber verifies that a nil
+// RebootWindow at a child level does not clear an inherited window.
+func TestApplyConfigurationWithSource_RebootWindowNilDoesNotClobber(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	parentSrc := &InheritanceSource{Source: "parent", TenantID: "msp"}
+	parentWindow := makeWeeklyWindow("America/New_York", time.Monday)
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: parentWindow},
+	}, parentSrc)
+
+	// Child has no RebootWindow (nil) — must not clear the inherited value.
+	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{ID: "child-id"},
+	}, childSrc)
+
+	assert.Equal(t, parentWindow, effective.Config.Steward.RebootWindow,
+		"nil RebootWindow at child must not clobber inherited parent window")
+	assert.Equal(t, parentSrc, effective.Sources["steward.reboot_window"],
+		"source must remain the parent that set the window")
+}
+
+// TestResolveConfiguration_RebootWindowCascadeViaStore verifies end-to-end that
+// a reboot_window set at MSP level cascades to a descendant steward via the full
+// store-backed resolution path.
+func TestResolveConfiguration_RebootWindowCascadeViaStore(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	mspWindow := makeWeeklyWindow("America/Chicago", time.Tuesday, time.Friday)
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{RebootWindow: mspWindow},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	require.NotNil(t, effective.Config.Steward.RebootWindow,
+		"reboot_window set at MSP must cascade to descendant steward")
+	assert.Equal(t, "America/Chicago", effective.Config.Steward.RebootWindow.Timezone)
+	require.NotNil(t, effective.Sources["steward.reboot_window"],
+		"inheritance source for reboot_window must be recorded")
+}
+
+// TestApplyConfigurationWithSource_TenantDefaultTimezoneCascade verifies that
+// TenantDefaultTimezone follows the same later-overrides-earlier merge rule.
+func TestApplyConfigurationWithSource_TenantDefaultTimezoneCascade(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	rootSrc := &InheritanceSource{Source: "root", TenantID: "root"}
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{TenantDefaultTimezone: "America/New_York"},
+	}, rootSrc)
+	assert.Equal(t, "America/New_York", effective.Config.Steward.TenantDefaultTimezone)
+	assert.Equal(t, rootSrc, effective.Sources["steward.tenant_default_timezone"])
+
+	clientSrc := &InheritanceSource{Source: "client", TenantID: "client"}
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{TenantDefaultTimezone: "Europe/London"},
+	}, clientSrc)
+	assert.Equal(t, "Europe/London", effective.Config.Steward.TenantDefaultTimezone,
+		"client-level TenantDefaultTimezone must override root-level")
+	assert.Equal(t, clientSrc, effective.Sources["steward.tenant_default_timezone"])
+}
+
+// --- ResolveRebootWindowTimezone tests (Issue #2976) ---
+
+// TestResolveRebootWindowTimezone_ExplicitWins is the REQUIRED TEST from acceptance
+// criteria: all three cases are verified (explicit set, explicit absent+tenantDefault
+// set, both absent).
+func TestResolveRebootWindowTimezone_AllCases(t *testing.T) {
+	t.Run("explicit timezone wins over tenant default and device", func(t *testing.T) {
+		cfg := &maintenanceschedule.Config{Timezone: "America/New_York"}
+		got := ResolveRebootWindowTimezone(cfg, "Europe/London")
+		assert.Equal(t, "America/New_York", got,
+			"explicit cfg.Timezone must take highest precedence")
+	})
+
+	t.Run("tenant default used when explicit is absent", func(t *testing.T) {
+		cfg := &maintenanceschedule.Config{Timezone: ""} // not set
+		got := ResolveRebootWindowTimezone(cfg, "Europe/London")
+		assert.Equal(t, "Europe/London", got,
+			"tenant default must be used when cfg.Timezone is empty")
+	})
+
+	t.Run("returns empty string when both are absent (device fallback)", func(t *testing.T) {
+		cfg := &maintenanceschedule.Config{Timezone: ""}
+		got := ResolveRebootWindowTimezone(cfg, "")
+		assert.Equal(t, "", got,
+			`"" signals the steward consumer to fall back to host zone`)
+	})
+}
+
+// TestResolveRebootWindowTimezone_NilConfig verifies that a nil cfg falls back to
+// tenantDefault (no panic).
+func TestResolveRebootWindowTimezone_NilConfig(t *testing.T) {
+	got := ResolveRebootWindowTimezone(nil, "Asia/Tokyo")
+	assert.Equal(t, "Asia/Tokyo", got,
+		"nil cfg must fall back to tenantDefault")
+}
+
+// TestResolveRebootWindowTimezone_NilConfigNilDefault verifies that nil cfg and
+// empty tenantDefault return "".
+func TestResolveRebootWindowTimezone_NilConfigNilDefault(t *testing.T) {
+	got := ResolveRebootWindowTimezone(nil, "")
+	assert.Equal(t, "", got, `nil cfg + empty tenantDefault must return ""`)
+}
+
+// TestResolveRebootWindowTimezone_DeviceExplicit verifies that the literal "device"
+// value in cfg.Timezone is returned as-is (not treated as absent).
+func TestResolveRebootWindowTimezone_DeviceExplicit(t *testing.T) {
+	cfg := &maintenanceschedule.Config{Timezone: "device"}
+	got := ResolveRebootWindowTimezone(cfg, "America/New_York")
+	assert.Equal(t, "device", got,
+		`explicit "device" timezone must be returned as-is, not overridden by tenantDefault`)
+}
+
+// --- Security posture downgrade guard (Issue #4324) ---
+
+// [REQUIRED TEST] TestResolveConfiguration_ScriptSigningRelaxation_RefusedThroughMergePath
+// verifies AC item 4: MergeScriptSigningConfig is invoked on the real cascade
+// merge path (applyConfigurationWithSource), and a child tenant attempting to
+// relax a parent's signing requirement is refused there — not merely in an
+// isolated unit test of MergeScriptSigningConfig itself.
+func TestResolveConfiguration_ScriptSigningRelaxation_RefusedThroughMergePath(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyRequired},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyNone},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err, "resolution itself must not fail — only the weakening delta is refused")
+
+	assert.Equal(t, stewardconfig.ScriptSigningPolicyRequired, effective.Config.Steward.ScriptSigning.Policy,
+		"a child tenant's attempt to relax script_signing must be refused, keeping the parent's tightened policy")
+}
+
+// TestResolveConfiguration_ScriptSigningTightening_Allowed is the control case:
+// a child level tightening script_signing beyond the parent's policy must apply.
+func TestResolveConfiguration_ScriptSigningTightening_Allowed(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyOptional},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyRequired},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.ScriptSigningPolicyRequired, effective.Config.Steward.ScriptSigning.Policy,
+		"a child tenant tightening script_signing beyond the parent's policy must apply")
+}
+
+// [REQUIRED TEST] TestResolveConfiguration_ModuleTrustDowngrade_RefusedWithoutAuthorization
+// verifies AC item 6 for module_trust: strict→controller is refused unless the
+// downgrading level explicitly sets authorize_downgrade.
+func TestResolveConfiguration_ModuleTrustDowngrade_RefusedWithoutAuthorization(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeController},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.ModuleTrustModeStrict, effective.Config.Steward.ModuleTrust.Mode,
+		"an unauthorized strict→controller downgrade must be refused, keeping the parent's stricter mode")
+}
+
+// TestResolveConfiguration_ModuleTrustDowngrade_AllowedWithAuthorization verifies
+// that authorize_downgrade set on the downgrading level permits the transition.
+func TestResolveConfiguration_ModuleTrustDowngrade_AllowedWithAuthorization(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeController, AuthorizeDowngrade: true},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.ModuleTrustModeController, effective.Config.Steward.ModuleTrust.Mode,
+		"an explicitly authorized downgrade must apply")
+}
+
+// [REQUIRED TEST] TestResolveConfiguration_PostureDowngradeRefused_RecordsAuditEvent
+// verifies AC item 6's audit requirement end to end: a refused module_trust
+// downgrade is recorded via pkg/audit.Manager.RecordEvent, keyed by the
+// cfg-declared resource id (steward:<cfg.Steward.ID>) rather than the stewardID
+// argument passed to ResolveConfiguration.
+func TestResolveConfiguration_PostureDowngradeRefused_RecordsAuditEvent(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	auditManager, err := audit.NewManager(sm.GetAuditStore(), "test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditManager.Stop(stopCtx)
+	})
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	// The cfg-declared steward ID ("device-declared-1") deliberately differs from
+	// the stewardID argument passed to ResolveConfiguration below, so the test
+	// proves the audit resource id comes from the cfg, not the live call.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ID:          "device-declared-1",
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeBypass},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm).WithAuditManager(auditManager)
+	_, err = ir.ResolveConfiguration(ctx, "client", "steward-live-id")
+	require.NoError(t, err)
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditManager.Flush(flushCtx))
+
+	trail, err := auditManager.GetResourceAuditTrail(context.Background(), "steward_config", "steward:device-declared-1", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, trail, "a refused module_trust downgrade must be recorded in the audit log")
+
+	found := false
+	for _, entry := range trail {
+		if entry.Action == "steward_config.security_posture_downgrade" && entry.Result == business.AuditResultDenied {
+			found = true
+			assert.Equal(t, "module_trust", entry.Details["setting"])
+		}
+	}
+	assert.True(t, found, "expected a denied steward_config.security_posture_downgrade audit entry")
+}
+
+// Tenant-boundary tests (Issue #4340): a caller scoped to one tenant cannot use
+// ResolveConfiguration to read a sibling's configuration, and — because a
+// child-scoped caller cannot resolve any tenantID outside its own subtree at
+// all — cannot reach or influence what an ancestor tenant resolves to either.
+
+func TestResolveConfiguration_ChildCannotReadSiblingConfiguration(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client-b", Namespace: "group-policies", Name: "client-b-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{{Name: "client-b-secret-resource", Module: "directory"}},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+
+	// A caller scoped to client-a asks to resolve client-b (a sibling).
+	scopedCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-a"))
+	_, err := ir.ResolveConfiguration(scopedCtx, "client-b", "steward-1")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the caller's authorized scope")
+}
+
+func TestResolveConfiguration_ChildCannotOverrideParentViaResolvedChain(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "msp", Namespace: "client-policies", Name: "msp"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{Steward: stewardconfig.StewardSettings{ConvergeInterval: "45m"}}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+
+	// A root-scoped resolution of the parent ("msp") is the baseline.
+	rootScoped := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	before, err := ir.ResolveConfiguration(rootScoped, "msp", "steward-parent")
+	require.NoError(t, err)
+	assert.Equal(t, "45m", before.Config.Steward.ConvergeInterval)
+
+	// A caller scoped to the child ("client-a") cannot resolve the parent's
+	// tenantID at all — there is no path through this API for a child to read
+	// or influence the parent's resolution.
+	childScoped := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-a"))
+	_, err = ir.ResolveConfiguration(childScoped, "msp", "steward-parent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the caller's authorized scope")
+
+	// The parent's own resolution is unaffected by the denied attempt.
+	after, err := ir.ResolveConfiguration(rootScoped, "msp", "steward-parent")
+	require.NoError(t, err)
+	assert.Equal(t, before.Config.Steward.ConvergeInterval, after.Config.Steward.ConvergeInterval)
+}
+
+func TestResolveConfiguration_AllowedForOwnTenantScope(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+
+	scopedCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-a"))
+	_, err := ir.ResolveConfiguration(scopedCtx, "client-a", "steward-1")
+	require.NoError(t, err)
+}
+
+func TestResolveConfiguration_NoScopeOnContextIsUnaffected(t *testing.T) {
+	// Callers that never set an explicit TenantScope (e.g. the mTLS data-plane
+	// sync path, which does its own server-side tenant resolution) are not
+	// bound by this check — it is out of its jurisdiction, not fail-open.
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	_, err := ir.ResolveConfiguration(ctx, "client-b", "steward-1")
+	require.NoError(t, err)
 }

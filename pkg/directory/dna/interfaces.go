@@ -30,7 +30,6 @@ import (
 	"context"
 	"time"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -558,53 +557,6 @@ type HierarchicalDNA struct {
 // Collection and Drift Detection Statistics
 
 // Utility Functions and Helpers
-
-// ToDNA converts a DirectoryDNA to a standard DNA structure for compatibility.
-func (d *DirectoryDNA) ToDNA() *commonpb.DNA {
-	// Design decision: the Attributes map carries string-encoded values only; timestamps
-	// are encoded in dedicated proto fields, not duplicated in the attributes map.
-	var lastUpdated *timestamppb.Timestamp
-	if d.LastUpdated != nil {
-		lastUpdated = timestamppb.New(*d.LastUpdated)
-	}
-	var lastSyncTime *timestamppb.Timestamp
-	if d.LastSyncTime != nil {
-		lastSyncTime = timestamppb.New(*d.LastSyncTime)
-	}
-	return &commonpb.DNA{
-		Id:              d.ID,
-		Attributes:      d.Attributes,
-		ConfigHash:      d.ConfigHash,
-		AttributeCount:  d.AttributeCount,
-		SyncFingerprint: d.SyncFingerprint,
-		LastUpdated:     lastUpdated,
-		LastSyncTime:    lastSyncTime,
-	}
-}
-
-// FromDNA creates a DirectoryDNA from a standard DNA structure.
-func FromDNA(dna *commonpb.DNA, objectID string, objectType interfaces.DirectoryObjectType) *DirectoryDNA {
-	return &DirectoryDNA{
-		ObjectID:        objectID,
-		ObjectType:      objectType,
-		ID:              dna.Id,
-		Attributes:      dna.Attributes,
-		LastUpdated:     convertTimestamp(dna.LastUpdated),
-		ConfigHash:      dna.ConfigHash,
-		LastSyncTime:    convertTimestamp(dna.LastSyncTime),
-		AttributeCount:  dna.AttributeCount,
-		SyncFingerprint: dna.SyncFingerprint,
-	}
-}
-
-// convertTimestamp converts a *timestamppb.Timestamp to a *time.Time.
-func convertTimestamp(ts *timestamppb.Timestamp) *time.Time {
-	if ts == nil {
-		return nil
-	}
-	t := ts.AsTime()
-	return &t
-}
 
 // convertProtobufToTime converts an interface{} protobuf Timestamp to *time.Time.
 // The interface{} parameter is kept to avoid breaking existing callers.

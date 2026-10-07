@@ -100,6 +100,8 @@ func secureSubprocess(userCommand string) error {
 // VULNERABLE EXAMPLE 5: File Inclusion via Variable (G304)
 func vulnerableFileRead(userPath string) ([]byte, error) {
 	// VULNERABLE: Reading file with user-controlled path
+	// #nosec G304 -- deliberately vulnerable teaching example in an isolated
+	// examples package; production code neither imports nor executes it.
 	return ioutil.ReadFile(userPath) // This will trigger G304
 }
 
@@ -119,11 +121,15 @@ func secureFileRead(userPath string, allowedBasePath string) ([]byte, error) {
 // VULNERABLE EXAMPLE 6: Insecure File Permissions (G301, G302, G306)
 func vulnerableFileOperations(dir, file string, data []byte) error {
 	// VULNERABLE: Too permissive directory permissions
+	// #nosec G301 -- deliberately vulnerable teaching example in an isolated
+	// examples package; production code neither imports nor executes it.
 	if err := os.MkdirAll(dir, 0755); err != nil { // This will trigger G301
 		return err
 	}
 
 	// VULNERABLE: Too permissive file permissions
+	// #nosec G302,G304 -- deliberately vulnerable teaching example in an
+	// isolated examples package; production code neither imports nor executes it.
 	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0644) // This will trigger G302
 	if err != nil {
 		return err
@@ -131,6 +137,8 @@ func vulnerableFileOperations(dir, file string, data []byte) error {
 	f.Close()
 
 	// VULNERABLE: Too permissive WriteFile permissions
+	// #nosec G306 -- deliberately vulnerable teaching example in an isolated
+	// examples package; production code neither imports nor executes it.
 	return ioutil.WriteFile(file, data, 0644) // This will trigger G306
 }
 
@@ -142,6 +150,8 @@ func secureFileOperations(dir, file string, data []byte) error {
 	}
 
 	// SECURE: Restrictive file permissions
+	// #nosec G304 -- this companion teaching example demonstrates restrictive
+	// creation mode; its caller intentionally supplies the example output path.
 	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0600) // Fixed G302
 	if err != nil {
 		return err

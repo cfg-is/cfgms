@@ -4,7 +4,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,118 +21,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- test-double TenantStore ---
+// --- real TenantStore for router tests ---
 
-// simpleTenantStore is a test-double TenantStore backed by an in-memory map.
-// Not a mock — uses real logic to walk the parent chain.
-type simpleTenantStore struct {
-	tenants map[string]*business.TenantData
+// newTenantStore returns a real SQLite-backed TenantStore. CFGMS mandates real
+// component testing, so every router test resolves tenant hierarchy through the
+// production tenant store rather than a hand-written double.
+func newTenantStore(t *testing.T, tenants ...*business.TenantData) business.TenantStore {
+	t.Helper()
+	dir := t.TempDir()
+	p := sqlite.NewSQLiteProvider(dir)
+	store, err := p.CreateTenantStore(map[string]interface{}{"path": filepath.Join(dir, "tenants.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	for _, td := range tenants {
+		require.NoError(t, store.CreateTenant(ctxkeys.WithSystem(context.Background()), td))
+	}
+	return store
 }
 
-func newSimpleTenantStore() *simpleTenantStore {
-	return &simpleTenantStore{tenants: make(map[string]*business.TenantData)}
-}
-
-func (s *simpleTenantStore) add(id, parentID string, metadata map[string]string) {
-	s.tenants[id] = &business.TenantData{
+// addTenant persists a tenant in the real store.
+func addTenant(t *testing.T, ts business.TenantStore, id, parentID string, metadata map[string]string) {
+	t.Helper()
+	require.NoError(t, ts.CreateTenant(ctxkeys.WithSystem(context.Background()), &business.TenantData{
 		ID:       id,
 		Name:     id,
 		ParentID: parentID,
 		Metadata: metadata,
 		Status:   business.TenantStatusActive,
-	}
-}
-
-func (s *simpleTenantStore) Initialize(_ context.Context) error { return nil }
-func (s *simpleTenantStore) Close() error                       { return nil }
-
-func (s *simpleTenantStore) CreateTenant(_ context.Context, t *business.TenantData) error {
-	s.tenants[t.ID] = t
-	return nil
-}
-func (s *simpleTenantStore) GetTenant(_ context.Context, id string) (*business.TenantData, error) {
-	t, ok := s.tenants[id]
-	if !ok {
-		return nil, fmt.Errorf("tenant not found: %s", id)
-	}
-	return t, nil
-}
-func (s *simpleTenantStore) UpdateTenant(_ context.Context, t *business.TenantData) error {
-	s.tenants[t.ID] = t
-	return nil
-}
-func (s *simpleTenantStore) DeleteTenant(_ context.Context, id string) error {
-	delete(s.tenants, id)
-	return nil
-}
-func (s *simpleTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
-	out := make([]*business.TenantData, 0, len(s.tenants))
-	for _, t := range s.tenants {
-		out = append(out, t)
-	}
-	return out, nil
-}
-func (s *simpleTenantStore) GetTenantHierarchy(_ context.Context, id string) (*business.TenantHierarchy, error) {
-	path, err := s.GetTenantPath(context.Background(), id)
-	if err != nil {
-		return nil, err
-	}
-	return &business.TenantHierarchy{TenantID: id, Path: path, Depth: len(path) - 1}, nil
-}
-func (s *simpleTenantStore) GetChildTenants(_ context.Context, parentID string) ([]*business.TenantData, error) {
-	var children []*business.TenantData
-	for _, t := range s.tenants {
-		if t.ParentID == parentID {
-			children = append(children, t)
-		}
-	}
-	return children, nil
-}
-
-// GetTenantPath returns the path from root to tenantID by walking parent links.
-func (s *simpleTenantStore) GetTenantPath(_ context.Context, tenantID string) ([]string, error) {
-	var path []string
-	cur := tenantID
-	seen := make(map[string]bool)
-	for {
-		if seen[cur] {
-			return nil, fmt.Errorf("cycle detected in tenant hierarchy for %q", tenantID)
-		}
-		seen[cur] = true
-		path = append([]string{cur}, path...)
-		t, ok := s.tenants[cur]
-		if !ok {
-			return nil, fmt.Errorf("tenant not found: %s", cur)
-		}
-		if t.ParentID == "" {
-			break
-		}
-		cur = t.ParentID
-	}
-	return path, nil
-}
-
-// IsTenantAncestor returns true if ancestorID is a (transitive) ancestor of descendantID.
-func (s *simpleTenantStore) IsTenantAncestor(_ context.Context, ancestorID, descendantID string) (bool, error) {
-	cur := descendantID
-	seen := make(map[string]bool)
-	for {
-		if seen[cur] {
-			return false, nil
-		}
-		seen[cur] = true
-		t, ok := s.tenants[cur]
-		if !ok {
-			return false, nil
-		}
-		if t.ParentID == ancestorID {
-			return true, nil
-		}
-		if t.ParentID == "" {
-			return false, nil
-		}
-		cur = t.ParentID
-	}
+	}))
 }
 
 // --- test-double ConfigStore ---
@@ -196,59 +111,59 @@ func (r *recordingConfigStore) GetConfigStats(_ context.Context) (*cfgconfig.Con
 
 // ctxWithTenant returns a context carrying the given tenant ID.
 func ctxWithTenant(tenantID string) context.Context {
-	return context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	return context.WithValue(ctxkeys.WithSystem(context.Background()), ctxkeys.TenantID, tenantID)
 }
 
 // --- unit tests ---
 
 func TestGetEffectiveConfigSource_DefaultController(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", nil)
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	info, err := router.GetEffectiveConfigSource(context.Background(), "root")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "root")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
 
 func TestGetEffectiveConfigSource_InheritsParent(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", map[string]string{
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", map[string]string{
 		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
 	})
-	ts.add("child", "root", nil) // child has no metadata — inherits root
+	addTenant(t, ts, "child", "root", nil) // child has no metadata — inherits root
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	info, err := router.GetEffectiveConfigSource(context.Background(), "child")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "child")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
 
 func TestGetEffectiveConfigSource_ChildOverridesParent(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", map[string]string{
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", map[string]string{
 		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
 	})
 	// child has its own metadata — should be returned first (leaf-to-root walk)
-	ts.add("child", "root", map[string]string{
+	addTenant(t, ts, "child", "root", map[string]string{
 		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
 	})
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
 	// The child-level entry is resolved first because we walk leaf-to-root.
-	info, err := router.GetEffectiveConfigSource(context.Background(), "child")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "child")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
 
 func TestGetEffectiveConfigSource_EmptyTenantIDRoutesToController(t *testing.T) {
 	cs := &recordingConfigStore{}
-	ts := newSimpleTenantStore()
+	ts := newTenantStore(t)
 	router := NewControllerRouter(cs, ts)
 
 	// GetConfig with empty TenantID must route to controllerStore without a cross-tenant error.
 	key := &cfgconfig.ConfigKey{TenantID: "", Namespace: "ns", Name: "cfg"}
-	_, err := router.GetConfig(context.Background(), key)
+	_, err := router.GetConfig(ctxkeys.WithSystem(context.Background()), key)
 	// ErrConfigNotFound is expected (recordingConfigStore returns it) — not a routing error.
 	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound)
 	assert.Equal(t, int64(1), cs.calls(), "store must be called for empty TenantID")
@@ -256,9 +171,9 @@ func TestGetEffectiveConfigSource_EmptyTenantIDRoutesToController(t *testing.T) 
 
 func TestConfigSourceRouter_CrossTenantRejected(t *testing.T) {
 	cs := &recordingConfigStore{}
-	ts := newSimpleTenantStore()
-	ts.add("tenant-a", "", nil)
-	ts.add("tenant-b", "", nil) // no relationship with tenant-a
+	ts := newTenantStore(t)
+	addTenant(t, ts, "tenant-a", "", nil)
+	addTenant(t, ts, "tenant-b", "", nil) // no relationship with tenant-a
 
 	router := NewControllerRouter(cs, ts)
 	ctx := ctxWithTenant("tenant-a")
@@ -270,12 +185,58 @@ func TestConfigSourceRouter_CrossTenantRejected(t *testing.T) {
 	assert.Equal(t, int64(0), cs.calls(), "underlying store must never be called on cross-tenant rejection")
 }
 
+// TestConfigSourceRouter_DefaultTenantCallerStillCrossTenantChecked is a
+// REQUIRED test (Issue #4348): a caller authenticated as the "default" tenant
+// (a genuine, reserved tenant ID — features/tenant/manager.go's
+// ErrCannotSuspendRoot — not a sentinel for "unauthenticated") must still
+// be subject to the same same-tenant/ancestor rule as any other tenant.
+// Before the fix, checkCrossTenant treated ctxTenant == "default" as an
+// unconditional bypass, so a "default"-tenant caller could read any other
+// tenant's config regardless of ancestry.
+func TestConfigSourceRouter_DefaultTenantCallerStillCrossTenantChecked(t *testing.T) {
+	cs := &recordingConfigStore{}
+	ts := newTenantStore(t)
+	addTenant(t, ts, "default", "", nil)
+	addTenant(t, ts, "unrelated-tenant", "", nil) // no ancestry relationship with "default"
+
+	router := NewControllerRouter(cs, ts)
+	ctx := ctxWithTenant("default")
+
+	key := &cfgconfig.ConfigKey{TenantID: "unrelated-tenant", Namespace: "ns", Name: "cfg"}
+	_, err := router.GetConfig(ctx, key)
+	require.Error(t, err, "a 'default'-tenant caller must not bypass the cross-tenant check")
+	assert.Contains(t, err.Error(), "cross-tenant access denied")
+	assert.Equal(t, int64(0), cs.calls(), "underlying store must never be called on cross-tenant rejection")
+}
+
+// TestConfigSourceRouter_DefaultTenantCallerCanReadOwnAncestor verifies the
+// fix does not over-correct: a "default"-tenant caller can still read its own
+// tenant's config and any genuine ancestor's config, exactly like any other
+// tenant.
+func TestConfigSourceRouter_DefaultTenantCallerCanReadOwnAncestor(t *testing.T) {
+	cs := &recordingConfigStore{}
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", nil)
+	addTenant(t, ts, "default", "root", nil)
+
+	router := NewControllerRouter(cs, ts)
+	ctx := ctxWithTenant("default")
+
+	// Same tenant.
+	_, err := router.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "default", Namespace: "ns", Name: "cfg"})
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound, "same-tenant read must reach the store")
+
+	// Ancestor tenant.
+	_, err = router.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root", Namespace: "ns", Name: "cfg"})
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound, "ancestor read must reach the store")
+}
+
 func TestConfigSourceRouter_CacheInvalidatedOnTenantUpdate(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", nil)
 
 	r := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	// Prime the cache.
 	info1, err := r.GetEffectiveConfigSource(ctx, "root")
@@ -288,9 +249,12 @@ func TestConfigSourceRouter_CacheInvalidatedOnTenantUpdate(t *testing.T) {
 	assert.Equal(t, 0, r.sourceCache.Size(), "cache entry must be evicted")
 
 	// Mutate the tenant metadata to confirm fresh resolution occurs.
-	ts.tenants["root"].Metadata = map[string]string{
+	updated, err := ts.GetTenant(ctx, "root")
+	require.NoError(t, err)
+	updated.Metadata = map[string]string{
 		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
 	}
+	require.NoError(t, ts.UpdateTenant(ctx, updated))
 	info2, err := r.GetEffectiveConfigSource(ctx, "root")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info2.Type)
@@ -298,15 +262,15 @@ func TestConfigSourceRouter_CacheInvalidatedOnTenantUpdate(t *testing.T) {
 }
 
 func TestSnapshotSources_AtomicResolution(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", map[string]string{
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", map[string]string{
 		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
 	})
-	ts.add("msp", "root", nil)
-	ts.add("client", "msp", nil)
+	addTenant(t, ts, "msp", "root", nil)
+	addTenant(t, ts, "client", "msp", nil)
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	tenantPath := []string{"root", "msp", "client"}
 	snapshot, err := router.SnapshotSources(ctx, tenantPath)
@@ -321,11 +285,11 @@ func TestSnapshotSources_AtomicResolution(t *testing.T) {
 }
 
 func TestSnapshotSources_DeepCopyNoSharedRefs(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("root", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", nil)
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	snapshot, err := router.SnapshotSources(ctx, []string{"root"})
 	require.NoError(t, err)
@@ -342,10 +306,10 @@ func TestSnapshotSources_DeepCopyNoSharedRefs(t *testing.T) {
 
 func TestWriteMethodsAlwaysUseControllerStore(t *testing.T) {
 	cs := &recordingConfigStore{}
-	ts := newSimpleTenantStore()
+	ts := newTenantStore(t)
 
 	router := NewControllerRouter(cs, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	entry := &cfgconfig.ConfigEntry{
 		Key:  &cfgconfig.ConfigKey{TenantID: "t", Namespace: "ns", Name: "cfg"},
@@ -361,14 +325,12 @@ func TestWriteMethodsAlwaysUseControllerStore(t *testing.T) {
 
 func TestGetEffectiveConfigSource_Cached(t *testing.T) {
 	pathCallCount := 0
-	ts := &callCountingTenantStore{
-		inner:     newSimpleTenantStore(),
-		pathCalls: &pathCallCount,
-	}
-	ts.inner.add("root", "", nil)
+	inner := newTenantStore(t)
+	addTenant(t, inner, "root", "", nil)
+	ts := &callCountingTenantStore{TenantStore: inner, pathCalls: &pathCallCount}
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	// First call must hit the tenant store.
 	_, err := router.GetEffectiveConfigSource(ctx, "root")
@@ -381,78 +343,39 @@ func TestGetEffectiveConfigSource_Cached(t *testing.T) {
 	assert.Equal(t, 1, pathCallCount, "cache must prevent a second GetTenantPath call")
 }
 
-// callCountingTenantStore wraps simpleTenantStore and counts GetTenantPath calls.
+// callCountingTenantStore decorates a real TenantStore and counts GetTenantPath
+// calls so the source cache can be verified. Every other method — including the
+// pending-deletion pipeline — is served by the embedded real store.
 type callCountingTenantStore struct {
-	inner     *simpleTenantStore
+	business.TenantStore
 	pathCalls *int
 }
 
-func (s *callCountingTenantStore) Initialize(_ context.Context) error { return nil }
-func (s *callCountingTenantStore) Close() error                       { return nil }
-func (s *callCountingTenantStore) CreateTenant(ctx context.Context, t *business.TenantData) error {
-	return s.inner.CreateTenant(ctx, t)
-}
-func (s *callCountingTenantStore) GetTenant(ctx context.Context, id string) (*business.TenantData, error) {
-	return s.inner.GetTenant(ctx, id)
-}
-func (s *callCountingTenantStore) UpdateTenant(ctx context.Context, t *business.TenantData) error {
-	return s.inner.UpdateTenant(ctx, t)
-}
-func (s *callCountingTenantStore) DeleteTenant(ctx context.Context, id string) error {
-	return s.inner.DeleteTenant(ctx, id)
-}
-func (s *callCountingTenantStore) ListTenants(ctx context.Context, f *business.TenantFilter) ([]*business.TenantData, error) {
-	return s.inner.ListTenants(ctx, f)
-}
-func (s *callCountingTenantStore) GetTenantHierarchy(ctx context.Context, id string) (*business.TenantHierarchy, error) {
-	return s.inner.GetTenantHierarchy(ctx, id)
-}
-func (s *callCountingTenantStore) GetChildTenants(ctx context.Context, id string) ([]*business.TenantData, error) {
-	return s.inner.GetChildTenants(ctx, id)
-}
 func (s *callCountingTenantStore) GetTenantPath(ctx context.Context, id string) ([]string, error) {
 	*s.pathCalls++
-	return s.inner.GetTenantPath(ctx, id)
-}
-func (s *callCountingTenantStore) IsTenantAncestor(ctx context.Context, a, d string) (bool, error) {
-	return s.inner.IsTenantAncestor(ctx, a, d)
-}
-
-// newSQLiteTSForIntegration creates a real SQLite-backed TenantStore populated with the given tenants.
-// Used by integration tests to validate the router against the production SQLite component.
-func newSQLiteTSForIntegration(t *testing.T, tenants []*business.TenantData) business.TenantStore {
-	t.Helper()
-	dir := t.TempDir()
-	p := sqlite.NewSQLiteProvider(dir)
-	store, err := p.CreateTenantStore(map[string]interface{}{"path": filepath.Join(dir, "tenants.db")})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-	for _, td := range tenants {
-		require.NoError(t, store.CreateTenant(context.Background(), td))
-	}
-	return store
+	return s.TenantStore.GetTenantPath(ctx, id)
 }
 
 // --- integration test: real FlatFileConfigStore + SQLite TenantStore across 3-level hierarchy ---
 
 func TestIntegration_RouterWith3LevelHierarchy(t *testing.T) {
-	ts := newSQLiteTSForIntegration(t, []*business.TenantData{
-		{
+	ts := newTenantStore(t,
+		&business.TenantData{
 			ID: "root", Name: "root", Status: business.TenantStatusActive,
 			Metadata: map[string]string{
 				pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
 			},
 		},
-		{ID: "msp", Name: "msp", ParentID: "root", Status: business.TenantStatusActive},
-		{ID: "client", Name: "client", ParentID: "msp", Status: business.TenantStatusActive},
-	})
+		&business.TenantData{ID: "msp", Name: "msp", ParentID: "root", Status: business.TenantStatusActive},
+		&business.TenantData{ID: "client", Name: "client", ParentID: "msp", Status: business.TenantStatusActive},
+	)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
 	require.NoError(t, err)
 
 	router := NewControllerRouter(cs, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	// Write via the write path (always controllerStore).
 	entry := &cfgconfig.ConfigEntry{
@@ -485,10 +408,10 @@ func TestIntegration_RouterWith3LevelHierarchy(t *testing.T) {
 }
 
 func TestIntegration_CrossTenantRejectedRealFlatfileStore(t *testing.T) {
-	ts := newSQLiteTSForIntegration(t, []*business.TenantData{
-		{ID: "org-a", Name: "org-a", Status: business.TenantStatusActive},
-		{ID: "org-b", Name: "org-b", Status: business.TenantStatusActive}, // completely separate root — no relationship
-	})
+	ts := newTenantStore(t,
+		&business.TenantData{ID: "org-a", Name: "org-a", Status: business.TenantStatusActive},
+		&business.TenantData{ID: "org-b", Name: "org-b", Status: business.TenantStatusActive}, // completely separate root — no relationship
+	)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)

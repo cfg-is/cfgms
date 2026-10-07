@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Firewall for agent containers: default-deny with DNS allowlist and HTTPS.
-# Runs as root via sudo from entrypoint, then drops back to agent user.
+#
+# Runs as root ONLY: every caller (entrypoint.sh, setup-env.sh,
+# investigator-entrypoint.sh) invokes this directly as root, before dropping
+# to the unprivileged `agent` user for the rest of the container's life. The
+# `agent` user has no sudoers entry and no other escalation path (Issue
+# #4343), so this script never runs via sudo and never runs again once the
+# drop has happened -- the network restriction is enforced entirely outside
+# the agent's reach, not by a grant it could itself invoke or revoke.
 #
 # Security layers:
 #   1. iptables default-deny — only loopback, DNS (Quad9), and HTTPS allowed
@@ -12,50 +19,103 @@ echo "Initializing container firewall..."
 
 # --- iptables: default-deny with allowlist ---
 
-sudo iptables -F OUTPUT
-sudo iptables -F INPUT
-sudo iptables -P OUTPUT DROP
-sudo iptables -P INPUT DROP
+iptables -F OUTPUT
+iptables -F INPUT
+iptables -P OUTPUT DROP
+iptables -P INPUT DROP
 
 # Allow loopback (required for dnsmasq on 127.0.0.1)
-sudo iptables -A OUTPUT -o lo -j ACCEPT
-sudo iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
 
 # Allow established/related connections
-sudo iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-sudo iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Allow dnsmasq to reach upstream DNS (Quad9 only)
-sudo iptables -A OUTPUT -p udp --dport 53 -d 9.9.9.9 -j ACCEPT
-sudo iptables -A OUTPUT -p tcp --dport 53 -d 9.9.9.9 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -d 9.9.9.9 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -d 9.9.9.9 -j ACCEPT
 
 # Block DNS to any other resolver (prevents bypassing dnsmasq)
-sudo iptables -A OUTPUT -p udp --dport 53 -j DROP
-sudo iptables -A OUTPUT -p tcp --dport 53 -j DROP
+iptables -A OUTPUT -p udp --dport 53 -j DROP
+iptables -A OUTPUT -p tcp --dport 53 -j DROP
 
 # Allow all outbound HTTPS (port 443)
 # Domain filtering happens at DNS layer — unresolvable domains can't be reached
-sudo iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
 
 # Log blocked connections (rate-limited)
-sudo iptables -A OUTPUT -m limit --limit 1/min \
+iptables -A OUTPUT -m limit --limit 1/min \
     -j LOG --log-prefix "AGENT-BLOCKED: " --log-level warning
 
 # Drop IPv6 entirely
-sudo ip6tables -F OUTPUT 2>/dev/null || true
-sudo ip6tables -F INPUT 2>/dev/null || true
-sudo ip6tables -P OUTPUT DROP 2>/dev/null || true
-sudo ip6tables -P INPUT DROP 2>/dev/null || true
-sudo ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
-sudo ip6tables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
+ip6tables -F OUTPUT 2>/dev/null || true
+ip6tables -F INPUT 2>/dev/null || true
+ip6tables -P OUTPUT DROP 2>/dev/null || true
+ip6tables -P INPUT DROP 2>/dev/null || true
+ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+ip6tables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
 
 # --- Start dnsmasq with domain allowlist ---
 
-# Point system DNS at our filtered resolver
-echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf >/dev/null
+# Point system DNS at our filtered resolver. CFGMS_TEST_RESOLV_CONF_PATH lets
+# init-firewall_test.sh redirect this write at a fixture file it controls --
+# same override-for-testability convention investigator-entrypoint.sh's own
+# post-condition check already uses, needed now that this runs as a plain
+# redirect (root-only script, no more `sudo tee` to stub on PATH).
+resolv_conf_path="${CFGMS_TEST_RESOLV_CONF_PATH:-/etc/resolv.conf}"
+echo "nameserver 127.0.0.1" > "$resolv_conf_path"
 
-# Start dnsmasq as a daemon (backgrounds itself)
-sudo dnsmasq --conf-file=/etc/dnsmasq-allowlist.conf \
+# --- Per-harness egress fragment selection (Issue #3932, epic #3927's C2) ---
+#
+# One investigator image, harness selected at launch (founder decision) means
+# credential and tool separation are per-launch, but the egress allowlist was
+# not: every container resolved every provider's domain regardless of which
+# one it authenticated to, so a Claude lane could reach OpenAI/Ollama
+# endpoints and vice versa. That is the one real cross-harness bleed the
+# single-image model has, and this is where it's closed.
+#
+# The baked allowlist is split into a base file (everything that is not a
+# model provider -- unchanged) plus per-harness fragments under
+# /etc/dnsmasq-allowlist.d/<harness>.conf. Exactly one fragment is loaded,
+# named by CFGMS_SECURITY_REVIEW_HARNESS -- the same env var
+# agent-dispatch.sh launch-investigator's --harness flag sets in the
+# container (Issue #3932). Every existing dev/review/fix agent container --
+# and plan mode's own investigator invocation, which never passes --harness
+# either -- never sets that variable and falls back to "claude": every one of
+# those containers runs Claude Code, so resolving exactly the Claude harness's
+# own domains is the correct default, not a legacy compatibility shim (Issue
+# #3933 retired the old "legacy" fragment, which existed only for the three
+# REST lanes deleted by that story, along with api.openai.com/ollama.com from
+# every fragment and the base file).
+#
+# An unrecognized harness value aborts the container: fail closed, never
+# fall back to loading every fragment (which would silently reopen the
+# cross-harness bleed this mechanism exists to close). The harness value is
+# validated against the same strict shape launch-investigator's own --mode
+# already enforces before it is ever used to build a path, so a value
+# containing `/` or `..` cannot escape the allowlist directory.
+firewall_harness="${CFGMS_SECURITY_REVIEW_HARNESS:-claude}"
+if [[ ! "$firewall_harness" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ || "$firewall_harness" == *".."* ]]; then
+    echo "ERROR: invalid harness value '${firewall_harness}'; refusing to start" >&2
+    exit 1
+fi
+# CFGMS_TEST_DNSMASQ_BASE_CONF / CFGMS_TEST_DNSMASQ_FRAGMENT_DIR let
+# init-firewall_test.sh exercise this selection logic against the repo's own
+# conf files without root or a real /etc -- unset in every real container,
+# where the Dockerfile bakes both at the paths defaulted below.
+firewall_base_conf="${CFGMS_TEST_DNSMASQ_BASE_CONF:-/etc/dnsmasq-allowlist-base.conf}"
+firewall_fragment_dir="${CFGMS_TEST_DNSMASQ_FRAGMENT_DIR:-/etc/dnsmasq-allowlist.d}"
+firewall_fragment_conf="${firewall_fragment_dir}/${firewall_harness}.conf"
+if [[ ! -f "$firewall_fragment_conf" ]]; then
+    echo "ERROR: no egress allowlist fragment for harness '${firewall_harness}' at ${firewall_fragment_conf}; refusing to start" >&2
+    exit 1
+fi
+
+# Start dnsmasq as a daemon (backgrounds itself). Exactly two --conf-file
+# arguments: the shared base, plus the one fragment selected above -- never
+# more than one fragment for any single launch.
+dnsmasq --conf-file="$firewall_base_conf" --conf-file="$firewall_fragment_conf" \
     --listen-address=127.0.0.1 --port=53 2>/dev/null
 
 # Verify dnsmasq is running

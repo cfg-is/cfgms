@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -29,7 +28,8 @@ type FileProvider struct {
 	stats        interfaces.ProviderStats
 	initialized  bool
 	stopRotation chan struct{}
-	closeOnce    sync.Once
+	bgWg         sync.WaitGroup // tracks backgroundMaintenance goroutine and compressOldFiles goroutines
+	compressMu   sync.Mutex     // serializes compressOldFiles passes; see rotation.go
 }
 
 // FileConfig holds configuration for the file-based logging provider
@@ -149,17 +149,29 @@ func (p *FileProvider) Initialize(config map[string]interface{}) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
+	// Mark the provider open *before* the first rotation: rotateLogFile refuses
+	// to open a file handle unless p.initialized is true (see rotation.go), which
+	// is what stops a write racing Close() from resurrecting the log file. The
+	// initial rotation here is the one legitimate open on a not-yet-serving
+	// provider, so the flag is set first and rolled back if the open fails.
+	p.stopRotation = make(chan struct{})
+	p.initialized = true
+
 	// Open initial log file (rotateLogFile expects mutex to be held)
 	if err := p.rotateLogFile(); err != nil {
+		p.initialized = false
+		p.stopRotation = nil
 		p.mutex.Unlock()
 		return fmt.Errorf("failed to create initial log file: %w", err)
 	}
-	p.stopRotation = make(chan struct{})
-	p.initialized = true
 	flushInterval := p.config.FlushInterval
 	p.mutex.Unlock()
 
-	go p.backgroundMaintenance(flushInterval)
+	p.bgWg.Add(1)
+	go func() {
+		defer p.bgWg.Done()
+		p.backgroundMaintenance(flushInterval)
+	}()
 	p.stats = interfaces.ProviderStats{
 		OldestEntry:    time.Now(),
 		LatestEntry:    time.Now(),
@@ -170,117 +182,68 @@ func (p *FileProvider) Initialize(config map[string]interface{}) error {
 	return nil
 }
 
-// Close shuts down the provider and closes files
+// Close shuts down the provider and closes files.
+// Safe to call multiple times and safe to call after a subsequent Initialize
+// (each *FileProvider instance is independently reusable across an
+// Initialize/Close/Initialize cycle -- the registered factory in init() gives
+// each LoggingManager its own instance, so there is no cross-instance sharing
+// to worry about here, only the same instance's own lifecycle).
 func (p *FileProvider) Close() error {
-	var err error
-	p.closeOnce.Do(func() {
-		// Stop background tasks first, then mark as closing
-		p.mutex.Lock()
-		if !p.initialized {
-			p.mutex.Unlock()
-			return
-		}
-
-		// Mark as closing and get the stop channel
-		p.initialized = false
-		stopChan := p.stopRotation
-		p.stopRotation = nil // Prevent further usage
-		p.mutex.Unlock()
-
-		// Stop background tasks if they were started
-		if stopChan != nil {
-			close(stopChan)
-			// Give background goroutines time to finish cleanly
-			time.Sleep(200 * time.Millisecond)
-		}
-
-		// Now safely close resources
-		p.mutex.Lock()
-		defer p.mutex.Unlock()
-
-		// Close resources
-		if p.writer != nil {
-			_ = p.writer.Flush() // Ignore flush error during cleanup
-			p.writer = nil
-		}
-
-		if p.currentFile != nil {
-			_ = p.currentFile.Close() // Ignore close error during cleanup
-
-			// On Windows, wait for file handle to be released before clearing pointer
-			// This prevents "file in use" errors during test cleanup
-			// Must be called while p.currentFile is still set so we can get the path
-			if runtime.GOOS == "windows" {
-				p.mutex.Unlock() // Release lock during wait
-				p.waitForFileHandleRelease()
-				p.mutex.Lock() // Re-acquire before clearing
-			}
-
-			p.currentFile = nil
-		}
-	})
-
-	return err
-}
-
-// waitForFileHandleRelease waits for Windows to release file handles using exponential backoff
-// This is necessary because Windows releases file handles asynchronously
-func (p *FileProvider) waitForFileHandleRelease() {
-	if runtime.GOOS != "windows" {
-		return
-	}
-
-	// Get the file path before it's cleared
-	p.mutex.RLock()
-	var filePath string
-	if p.currentFile != nil {
-		filePath = p.currentFile.Name()
-	}
-	p.mutex.RUnlock()
-
-	if filePath == "" {
-		return
-	}
-
-	// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms, 1600ms = ~3.15s max
-	delay := 50 * time.Millisecond
-	maxDelay := 1600 * time.Millisecond
-	totalWait := time.Duration(0)
-	maxTotalWait := 3 * time.Second
-
-	for totalWait < maxTotalWait {
-		time.Sleep(delay)
-		totalWait += delay
-
-		// Try to open the file exclusively to check if handle is released
-		// #nosec G304 - filePath is from our own currentFile.Name()
-		testFile, err := os.OpenFile(filePath, os.O_RDWR, 0)
-		if err == nil {
-			// Successfully opened, handle is released
-			_ = testFile.Close()
-			return
-		}
-
-		// Double the delay for next iteration, cap at maxDelay
-		delay *= 2
-		if delay > maxDelay {
-			delay = maxDelay
-		}
-	}
-	// If we get here, we've waited max time and handle may still be locked
-	// This is acceptable as we've done our best effort
-}
-
-// WriteEntry writes a single log entry to the file
-func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry) error {
+	// Atomically transition initialized → false and capture the stop channel.
+	// Using p.mutex (not a sync.Once) so that Initialize() can reset the state
+	// for re-use; a fired sync.Once would make Close a no-op on the second call.
+	p.mutex.Lock()
 	if !p.initialized {
-		return fmt.Errorf("provider not initialized")
+		p.mutex.Unlock()
+		return nil
+	}
+	p.initialized = false
+	stopChan := p.stopRotation
+	p.stopRotation = nil
+	p.mutex.Unlock()
+
+	// Signal backgroundMaintenance to exit.
+	if stopChan != nil {
+		close(stopChan)
 	}
 
+	// Wait for backgroundMaintenance AND any in-flight compressOldFiles
+	// goroutine (spawned by rotateLogFile, tracked in bgWg since both use it)
+	// to fully exit before closing the file, so no goroutine holds a file
+	// handle when we close it.
+	//
+	// p.initialized is already false at this point, so no new write can start a
+	// rotation (rotateLogFile refuses to open a file on a closed provider) and
+	// therefore no new goroutine can be added to bgWg while we wait here.
+	p.bgWg.Wait()
+
+	// Flush and close resources under the write lock.
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	if p.writer != nil {
+		_ = p.writer.Flush()
+		p.writer = nil
+	}
+
+	if p.currentFile != nil {
+		_ = p.currentFile.Close()
+		p.currentFile = nil
+	}
+
+	return nil
+}
+
+// WriteEntry writes a single log entry to the file.
+//
+// The "is the provider still open?" check is made under p.mutex, together with
+// the write itself. Checking it before taking the lock was the cause of Issue
+// #4145: a writer could observe initialized==true, block on p.mutex while
+// Close() ran to completion, then proceed against a closed provider, where
+// needsRotation() sees a nil currentFile and rotateLogFile() opens a brand-new
+// log file that nothing ever closes again.
+func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry) error {
 	start := time.Now()
-	defer func() {
-		p.updateStats(1, time.Since(start))
-	}()
 
 	// Serialize entry to JSON
 	jsonBytes, err := json.Marshal(entry)
@@ -290,6 +253,14 @@ func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry
 
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
+
+	if !p.initialized {
+		return fmt.Errorf("provider not initialized")
+	}
+
+	defer func() {
+		p.updateStatsLocked(1, time.Since(start))
+	}()
 
 	// Check if rotation is needed before writing
 	if p.needsRotation() {
@@ -310,8 +281,17 @@ func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry
 	return nil
 }
 
-// WriteBatch writes multiple log entries efficiently
+// WriteBatch writes multiple log entries efficiently.
+//
+// As in WriteEntry, the initialized check is made under p.mutex so that a batch
+// racing Close() cannot reach rotateLogFile() and re-open the log file (Issue
+// #4145).
 func (p *FileProvider) WriteBatch(ctx context.Context, entries []interfaces.LogEntry) error {
+	start := time.Now()
+
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	if !p.initialized {
 		return fmt.Errorf("provider not initialized")
 	}
@@ -320,13 +300,9 @@ func (p *FileProvider) WriteBatch(ctx context.Context, entries []interfaces.LogE
 		return nil
 	}
 
-	start := time.Now()
 	defer func() {
-		p.updateStats(len(entries), time.Since(start))
+		p.updateStatsLocked(len(entries), time.Since(start))
 	}()
-
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
 
 	// Check if rotation is needed before batch write
 	if p.needsRotation() {
@@ -507,14 +483,17 @@ func (p *FileProvider) GetStats(ctx context.Context) (interfaces.ProviderStats, 
 	return stats, nil
 }
 
-// Flush forces buffered writes to disk
+// Flush forces buffered writes to disk.
+//
+// The initialized check is under p.mutex for the same reason as in WriteEntry:
+// read outside the lock it races Close()'s write of the same field.
 func (p *FileProvider) Flush(ctx context.Context) error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	if !p.initialized {
 		return fmt.Errorf("provider not initialized")
 	}
-
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
 
 	if p.writer != nil {
 		if err := p.writer.Flush(); err != nil {
@@ -647,7 +626,10 @@ func (p *FileProvider) buildSecureFilePath(filename string) (string, error) {
 	return fullPath, nil
 }
 
-// init registers the file provider
+// init registers the file provider factory so each LoggingManager gets its own
+// FileProvider instance with independent state (no shared initialized flag or file handles).
 func init() {
-	interfaces.RegisterLoggingProvider(&FileProvider{})
+	interfaces.RegisterLoggingProviderFactory(func() interfaces.LoggingProvider {
+		return &FileProvider{}
+	})
 }

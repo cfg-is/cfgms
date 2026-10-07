@@ -26,13 +26,20 @@ func NewDockerComposeHelper() *DockerComposeHelper {
 
 // StartStandalone starts the standalone steward using Docker Compose
 func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
-	// Step 1: Clean up any existing containers
-	fmt.Println("Step 1/3: Cleaning up existing Docker resources...")
+	// Step 1: Remove this suite's own container from a previous run.
+	//
+	// Scoped to steward-true-standalone. `down -v --remove-orphans` is
+	// project-wide regardless of --profile: it tore down the HA cluster, the
+	// shared database and the standalone controller belonging to
+	// test/integration/{ha,controller,logging}, which run concurrently against
+	// this same Compose project, and `-v` took their volumes with it.
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"--profile", "standalone",
-		"down", "-v", "--remove-orphans")
+		"rm", "-f", "-s", "-v", "steward-true-standalone")
 
 	cleanupOutput, err := cleanupCmd.CombinedOutput()
 	if err != nil {
@@ -41,12 +48,21 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 	}
 
 	// Step 2: Build the steward image
+	//
+	// No --pull: cmd/steward/Dockerfile's FROM images are pinned by digest, so
+	// there is never a newer version for --pull to fetch — only a repeat
+	// network call to re-verify a digest that can't have changed. That refetch
+	// is exactly the anonymous Docker Hub token dependency that evicted PR
+	// #4207 (Issue #4212); the CI workflow pre-pulls the pinned digests once,
+	// with retry, before this runs.
 	fmt.Println("Step 2/3: Building steward Docker image...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"--profile", "standalone",
-		"build", "--pull")
+		"build")
 
 	buildOutput, err := buildCmd.CombinedOutput()
 	if err != nil {
@@ -55,11 +71,13 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 
 	// Step 3: Start the standalone steward
 	fmt.Println("Step 3/3: Starting standalone steward...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"--profile", "standalone",
-		"up", "-d")
+		"up", "-d", "--force-recreate", "--no-deps", "steward-true-standalone")
 
 	startOutput, err := startCmd.CombinedOutput()
 	if err != nil {
@@ -73,11 +91,14 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 // StopStandalone stops the standalone steward and cleans up resources
 func (h *DockerComposeHelper) StopStandalone(ctx context.Context) error {
 	fmt.Println("Stopping standalone steward and cleaning up...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
+	// Scoped for the same reason as the cleanup in StartStandalone.
 	stopCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"--profile", "standalone",
-		"down", "-v")
+		"rm", "-f", "-s", "-v", "steward-true-standalone")
 
 	stopOutput, err := stopCmd.CombinedOutput()
 	if err != nil {
@@ -92,14 +113,24 @@ func (h *DockerComposeHelper) ExecInContainer(ctx context.Context, command ...st
 	args := []string{"compose", "-f", h.ComposeFile, "-p", h.ProjectName, "exec", "-T", "steward-true-standalone"}
 	args = append(args, command...)
 
+	// #nosec G204 -- integration-only Docker invocation; args are assembled by
+	// this isolated harness from its local Compose file and project name.
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
 
-// GetLogs retrieves logs from the standalone steward container
+// GetLogs retrieves the standalone steward's log output.
+//
+// The steward runs with the file logging provider (CFGMS_LOG_PROVIDER=file), so
+// its structured records go to CFGMS_LOG_DIR inside the container and its
+// container stdout carries only a single startup banner. Reading the log files
+// is therefore the only way to observe what the steward actually did; asserting
+// against `docker compose logs` could only ever see that banner.
 func (h *DockerComposeHelper) GetLogs(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", h.ComposeFile, "-p", h.ProjectName, "logs", "steward-true-standalone")
-	output, err := cmd.CombinedOutput()
-	return string(output), err
+	logs, err := h.ExecInContainer(ctx, "sh", "-c", "cat /tmp/cfgms/*.log")
+	if err != nil {
+		return logs, fmt.Errorf("failed to read steward log files: %w\nOutput: %s", err, logs)
+	}
+	return logs, nil
 }

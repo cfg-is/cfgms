@@ -17,6 +17,12 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
+// DatabaseConfigStore implements ConfigStore using PostgreSQL for persistence.
+// It also implements cfgconfig.ConditionalConfigStore: PostgreSQL can decide a
+// version comparison and a write in one statement, which is what makes a
+// cross-node compare-and-set possible on this backend (Issue #3775).
+var _ cfgconfig.ConditionalConfigStore = (*DatabaseConfigStore)(nil)
+
 // DatabaseConfigStore implements ConfigStore using PostgreSQL for persistence
 type DatabaseConfigStore struct {
 	db      *sql.DB
@@ -26,28 +32,8 @@ type DatabaseConfigStore struct {
 }
 
 // NewDatabaseConfigStore creates a new PostgreSQL-based configuration store
-func NewDatabaseConfigStore(dsn string, config map[string]interface{}) (*DatabaseConfigStore, error) {
-	// Open database connection with connection pooling
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	// Configure connection pool
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+// backed by the shared connection pool db (owned by DatabaseProvider).
+func NewDatabaseConfigStore(db *sql.DB, config map[string]interface{}) (*DatabaseConfigStore, error) {
 	store := &DatabaseConfigStore{
 		db:      db,
 		config:  config,
@@ -56,7 +42,6 @@ func NewDatabaseConfigStore(dsn string, config map[string]interface{}) (*Databas
 
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 
@@ -225,6 +210,161 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *cfgconfig
 	return nil
 }
 
+// CompareAndSwapConfig implements cfgconfig.ConditionalConfigStore (Issue #3775).
+//
+// The version comparison and the write happen inside a single SQL statement, so
+// the guarantee holds across controller nodes and not merely within this process:
+//
+//   - expectedVersion 0 uses INSERT ... ON CONFLICT DO NOTHING. Two nodes racing to
+//     create the same key both attempt the insert; PostgreSQL admits exactly one and
+//     returns no row to the other, whatever the isolation level.
+//   - expectedVersion > 0 uses UPDATE ... WHERE version = $expected. Under READ
+//     COMMITTED a second node's UPDATE blocks on the first node's row lock and then
+//     re-evaluates its WHERE clause against the committed row, where version has
+//     already moved on — so it matches nothing and reports ok=false.
+//
+// This is what StoreConfig cannot offer: StoreConfig reads the current version and
+// then upserts with EXCLUDED.version, so two concurrent callers can both read
+// version N and both commit N+1 — a lost update in which both callers believe they
+// won. Anything building a compare-and-set on top of a ConfigStore must use this
+// method, never StoreConfig bracketed by a lock.
+func (s *DatabaseConfigStore) CompareAndSwapConfig(ctx context.Context, config *cfgconfig.ConfigEntry, expectedVersion int64) (int64, bool, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if err := s.validateConfigEntry(config); err != nil {
+		return 0, false, err
+	}
+	if expectedVersion < 0 {
+		return 0, false, fmt.Errorf("expected version cannot be negative")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+	if config.CreatedAt.IsZero() {
+		config.CreatedAt = now
+	}
+	config.UpdatedAt = now
+	config.Format = cfgconfig.ConfigFormatYAML
+
+	hasher := sha256.New()
+	hasher.Write(config.Data)
+	config.Checksum = hex.EncodeToString(hasher.Sum(nil))
+
+	config.Version = expectedVersion + 1
+
+	metadataJSON, err := serializeMetadata(config.Metadata)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to serialize metadata: %w", err)
+	}
+
+	var (
+		configID  int
+		operation string
+	)
+	if expectedVersion == 0 {
+		operation = "create"
+		const insertQuery = `
+			INSERT INTO configs (tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, updated_at, created_by, updated_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ON CONFLICT (tenant_id, namespace, name, scope) DO NOTHING
+			RETURNING id
+		`
+		err = tx.QueryRowContext(ctx, insertQuery,
+			config.Key.TenantID,
+			config.Key.Namespace,
+			config.Key.Name,
+			config.Key.Scope,
+			config.Version,
+			string(config.Format),
+			string(config.Data),
+			config.Checksum,
+			metadataJSON,
+			pq.Array(config.Tags),
+			config.Source,
+			config.CreatedAt,
+			config.UpdatedAt,
+			config.CreatedBy,
+			config.UpdatedBy,
+		).Scan(&configID)
+	} else {
+		operation = "update"
+		const updateQuery = `
+			UPDATE configs SET
+				version = $5,
+				format = $6,
+				data = $7,
+				checksum = $8,
+				metadata = $9,
+				tags = $10,
+				source = $11,
+				updated_at = $12,
+				updated_by = $13
+			WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4 AND version = $14
+			RETURNING id
+		`
+		err = tx.QueryRowContext(ctx, updateQuery,
+			config.Key.TenantID,
+			config.Key.Namespace,
+			config.Key.Name,
+			config.Key.Scope,
+			config.Version,
+			string(config.Format),
+			string(config.Data),
+			config.Checksum,
+			metadataJSON,
+			pq.Array(config.Tags),
+			config.Source,
+			config.UpdatedAt,
+			config.UpdatedBy,
+			expectedVersion,
+		).Scan(&configID)
+	}
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// The conditional write matched nothing: another writer holds the key at a
+			// different version. A lost race, not a storage failure.
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("failed to compare-and-swap configuration: %w", err)
+	}
+
+	const historyQuery = `
+		INSERT INTO config_history (config_id, tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by, operation)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	`
+	if _, err := tx.ExecContext(ctx, historyQuery,
+		configID,
+		config.Key.TenantID,
+		config.Key.Namespace,
+		config.Key.Name,
+		config.Key.Scope,
+		config.Version,
+		string(config.Format),
+		string(config.Data),
+		config.Checksum,
+		metadataJSON,
+		pq.Array(config.Tags),
+		config.Source,
+		config.CreatedAt,
+		config.CreatedBy,
+		operation,
+	); err != nil {
+		return 0, false, fmt.Errorf("failed to store configuration history: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return config.Version, true, nil
+}
+
 // GetConfig retrieves a configuration entry from the database
 func (s *DatabaseConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	s.mutex.RLock()
@@ -380,6 +520,8 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig
 	orderClause := buildConfigOrderByClause(filter)
 	limitClause := buildConfigLimitOffsetClause(filter)
 
+	// #nosec G202 -- helper-produced clauses use fixed/allowlisted structure and
+	// bind every caller-controlled value through args.
 	query := baseQuery + " " + whereClause + " " + orderClause + limitClause
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -910,9 +1052,8 @@ func (s *DatabaseConfigStore) deleteConfigInTransaction(ctx context.Context, tx 
 }
 
 // Close closes the database connection
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseConfigStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }

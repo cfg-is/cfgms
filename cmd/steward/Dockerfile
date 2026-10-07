@@ -1,5 +1,9 @@
+# No `# syntax=` pragma: the BuildKit frontend bundled with the Docker Engine
+# that runs this already supports RUN --mount cache mounts, and resolving
+# `docker/dockerfile:1` from Docker Hub was an anonymous-token network
+# dependency this build doesn't need (Issue #4212).
 # Build stage
-FROM golang:1.26.4-alpine3.23 AS builder
+FROM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -11,19 +15,22 @@ WORKDIR /src
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source code
 COPY . .
 
-# Build steward with compile-time controller URL
+# Build steward with compile-time controller URL (GOCACHE + module cache mounts warm
+# across builds; CGO_ENABLED=0 already yields a static binary, so -a/-installsuffix
+# are unneeded and only force cold recompiles)
 ARG STEWARD_CONTROLLER_URL=https://localhost:9080
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X main.ControllerURL=${STEWARD_CONTROLLER_URL}" \
     -o steward ./cmd/steward
 
-# Final stage - pinned to Alpine 3.23 (latest stable as of 2025-12)
-FROM alpine:3.23
+# Final stage - pinned to Alpine 3.24 (latest stable as of 2026-09)
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Install runtime dependencies and apply security patches
 RUN apk --no-cache upgrade && apk --no-cache add ca-certificates netcat-openbsd

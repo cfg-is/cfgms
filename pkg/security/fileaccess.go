@@ -100,18 +100,22 @@ func SecureOpenFile(basePath, userPath string, flag int, perm os.FileMode) (*os.
 //  1. Cleans the user path using filepath.Clean()
 //  2. Resolves both paths to absolute paths
 //  3. Eval-symlinks the base path so the final containment comparison uses canonical paths.
-//     The pre-resolution form (rawAbsBasePath) is preserved for the preliminary check in
-//     the non-existent-path branch so both sides are in the same (unresolved) form.
-//  4. Resolves symlinks in the user path; for non-existent targets, walks up to the
+//     The pre-resolution form (rawAbsBasePath) is kept for the raw-form containment checks
+//     so both sides are compared in the same (unresolved) form.
+//  4. Performs a preliminary containment check in raw form BEFORE touching the filesystem:
+//     a path already outside the base is rejected as a traversal attempt without calling
+//     EvalSymlinks on it (so out-of-base, possibly access-restricted, files are never
+//     touched and are reported as traversal rather than as a permission error — #2120)
+//  5. Resolves symlinks in the user path; for non-existent targets, walks up to the
 //     deepest existing ancestor, eval-symlinks it, and re-joins the non-existing remainder
-//  5. Validates containment after symlink resolution using filepath.Rel (not strings.HasPrefix)
+//  6. Validates containment after symlink resolution using filepath.Rel (not strings.HasPrefix)
 //     to prevent sibling-prefix attacks (e.g. /base_extra/secret incorrectly matching /base)
-//     and symlink-escape attacks
+//     and symlink-escape attacks (an in-base symlink that resolves outside the base)
 //
 // On macOS /tmp is a symlink to /private/tmp, so t.TempDir() paths under /var/folders
 // resolve to /private/var/folders after EvalSymlinks. On Windows, short path names
-// (RUNNER~1) expand to long names (runneradmin). The preliminary check in the
-// non-existent-path branch uses the pre-resolution base so both sides match.
+// (RUNNER~1) expand to long names (runneradmin). The raw-form containment checks use the
+// pre-resolution base so both sides match.
 //
 // Returns the validated, canonicalized absolute path.
 func ValidateAndCleanPath(basePath, userPath string) (string, error) {
@@ -142,6 +146,21 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		// Join with rawAbsBasePath so both sides of the preliminary containment check
 		// are in the same pre-symlink-resolved form.
 		absUserPath = filepath.Join(rawAbsBasePath, cleanUserPath)
+	}
+
+	// Preliminary containment check in raw (pre-symlink-resolution) form, BEFORE
+	// touching the filesystem. If the path is already outside the base, it is a
+	// traversal attempt — reject it now rather than calling EvalSymlinks on a path
+	// outside the sandbox. This both (a) avoids touching out-of-base files at all,
+	// and (b) ensures an out-of-base path that exists but is inaccessible (e.g. an
+	// ACL-protected file on Windows such as C:\Windows\System32\config\sam) is
+	// reported as a traversal attempt instead of an incidental "permission denied"
+	// from EvalSymlinks (#2120). A symlink inside the base that escapes is still
+	// caught by the final containmentCheck after resolution below.
+	if rawRel, rawRelErr := filepath.Rel(rawAbsBasePath, absUserPath); rawRelErr != nil ||
+		rawRel == ".." || strings.HasPrefix(rawRel, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(rawRel) {
+		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
 	}
 
 	// Resolve symlinks in the user path, with fallback for non-existent targets.

@@ -26,6 +26,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -267,6 +268,59 @@ func TestDispatch_RejectsCrossTenantSelector(t *testing.T) {
 	assert.Contains(t, body, "CROSS_TENANT")
 }
 
+// TestDispatch_ExplicitTenantPrefix_OutsideSubtreeRejected verifies that a
+// non-admin caller whose selector carries an explicit tenant-path prefix outside
+// their authorized subtree is rejected with 403 CROSS_TENANT by the early-return
+// branch (handlers_upgrade.go:137-144), before the fleet query or approval gate.
+// The existing TestDispatch_RejectsCrossTenantSelector uses a prefix-less selector
+// and hits the len(stewards)==0 path instead, leaving this branch uncovered.
+func TestDispatch_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, _ := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	// Caller tenant-a, but the selector prefix targets tenant-b (outside subtree).
+	rec := doDispatchUpgrade(server, "tenant-a", "tenant-b/id:steward-1", "v0.5.12", "linux", "amd64")
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CROSS_TENANT")
+}
+
+// TestDispatch_ExplicitTenantPrefix_ScopesToSubtree verifies that a valid
+// in-subtree tenant-path prefix drives filter.TenantSubtree = parsedTenantPath
+// (handlers_upgrade.go:145): dispatch resolves only stewards at or below the
+// prefixed sub-tenant, excluding sibling sub-tenants under the caller's tenant.
+func TestDispatch_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-c1", TenantID: "tenant-a/client-1", Status: "online"},
+		{ID: "steward-c2", TenantID: "tenant-a/client-2", Status: "online"},
+	}
+	server, upgradeStore := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	// Caller tenant-a targets only the client-1 subtree via an explicit prefix.
+	rec := doDispatchUpgrade(server, "tenant-a", "tenant-a/client-1/all", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	count, _ := data["steward_count"].(float64)
+	assert.Equal(t, float64(1), count,
+		"explicit prefix must scope to tenant-a/client-1, excluding sibling client-2")
+
+	// The in-subtree steward must have a record; the sibling must have none.
+	c1records, err := upgradeStore.ListUpgradesBySteward(context.Background(), "steward-c1")
+	require.NoError(t, err)
+	assert.Len(t, c1records, 1, "in-subtree steward must receive an upgrade record")
+	c2records, err := upgradeStore.ListUpgradesBySteward(context.Background(), "steward-c2")
+	require.NoError(t, err)
+	assert.Empty(t, c2records, "sibling-subtree steward must not receive an upgrade record")
+}
+
 // TestDispatch_RejectsUnapprovedBlob verifies that a blob in published state
 // (approved_by label absent) returns 403.
 func TestDispatch_RejectsUnapprovedBlob(t *testing.T) {
@@ -495,9 +549,11 @@ func TestUpgradeStatus_Returns200WithRecord(t *testing.T) {
 	assert.Equal(t, "dispatched", statusData["Status"])
 }
 
-// TestUpgradeStatus_CrossTenantReturns403 verifies that a tenant cannot query
-// another tenant's upgrade record.
-func TestUpgradeStatus_CrossTenantReturns403(t *testing.T) {
+// TestUpgradeStatus_CrossTenantReturns404 verifies that a tenant cannot query
+// another tenant's upgrade record, and that the rejection is a 404 — indistinguishable
+// from a genuinely unknown upgrade_id — rather than a 403 that would disclose the
+// record's existence across tenants (Issue #4091 AC4/AC5).
+func TestUpgradeStatus_CrossTenantReturns404(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
 	}
@@ -514,7 +570,12 @@ func TestUpgradeStatus_CrossTenantReturns403(t *testing.T) {
 
 	// tenant-b must not see tenant-a's record.
 	statusRec := doUpgradeStatus(server, "tenant-b", upgradeID)
-	assert.Equal(t, http.StatusForbidden, statusRec.Code)
+	assert.Equal(t, http.StatusNotFound, statusRec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &resp))
+	assert.Equal(t, "UPGRADE_NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "Upgrade record not found", resp.Error.Message)
 }
 
 // TestUpgradeStatus_NotFoundReturns404 verifies 404 for unknown upgrade_id.
@@ -628,9 +689,11 @@ func TestUpgradeRollback_MissingTenantReturns401(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-// TestUpgradeRollback_CrossTenantReturns403 verifies that a tenant cannot roll
-// back another tenant's upgrade record.
-func TestUpgradeRollback_CrossTenantReturns403(t *testing.T) {
+// TestUpgradeRollback_CrossTenantReturns404 verifies that a tenant cannot roll
+// back another tenant's upgrade record, and that the rejection is a 404 —
+// indistinguishable from a genuinely unknown upgrade_id — rather than a 403 that
+// would disclose the record's existence across tenants (Issue #4091 AC4/AC5).
+func TestUpgradeRollback_CrossTenantReturns404(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
 	}
@@ -655,7 +718,12 @@ func TestUpgradeRollback_CrossTenantReturns403(t *testing.T) {
 
 	// tenant-b attempts rollback of tenant-a's record.
 	rollbackRec := doUpgradeRollback(server, "tenant-b", "upgrade-tenant-a", "v0.5.11")
-	assert.Equal(t, http.StatusForbidden, rollbackRec.Code)
+	assert.Equal(t, http.StatusNotFound, rollbackRec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rollbackRec.Body.Bytes(), &resp))
+	assert.Equal(t, "UPGRADE_NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "Upgrade record not found", resp.Error.Message)
 }
 
 // TestUpgradeRollback_BinaryNotFoundReturns404 verifies 404 when the rollback
@@ -905,9 +973,10 @@ func TestUpgradeStatus_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "AUTHENTICATION_REQUIRED")
 }
 
-// TestUpgradeStatus_NonAdminCrossTenant_StillForbidden verifies that the existing
-// cross-tenant isolation is preserved for scoped (non-admin) callers (Issue #1999).
-func TestUpgradeStatus_NonAdminCrossTenant_StillForbidden(t *testing.T) {
+// TestUpgradeStatus_NonAdminCrossTenant_StillBlocked verifies that the existing
+// cross-tenant isolation is preserved for scoped (non-admin) callers (Issue #1999),
+// now surfaced as 404 rather than 403 to avoid existence disclosure (Issue #4091).
+func TestUpgradeStatus_NonAdminCrossTenant_StillBlocked(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
 	}
@@ -920,9 +989,9 @@ func TestUpgradeStatus_NonAdminCrossTenant_StillForbidden(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	upgradeID := resp.Data.(map[string]interface{})["upgrade_id"].(string)
 
-	// tenant-b (scoped non-admin) must still be forbidden from viewing tenant-a's record.
+	// tenant-b (scoped non-admin) must still be blocked from viewing tenant-a's record.
 	statusRec := doUpgradeStatus(server, "tenant-b", upgradeID)
-	assert.Equal(t, http.StatusForbidden, statusRec.Code)
+	assert.Equal(t, http.StatusNotFound, statusRec.Code)
 }
 
 // TestUpgradeRollback_AdminEmptyTenant_NotUnauthorized verifies that an admin mTLS
@@ -1110,7 +1179,7 @@ func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
 	content := []byte("cfgms-steward-binary-e2e-admin")
 	fix := newStewardBinaryFixture(t)
 	server.stewardBinaryTrustStore = fix.store
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v0.5.12", "linux", "amd64")
 	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v0.5.12", "linux", "amd64", sigBase64, content)
 	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())
 
@@ -1143,4 +1212,122 @@ func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
 		"public download with tenant=default must return the published binary: %s", getRec.Body.String())
 	assert.Equal(t, approvedContent, getRec.Body.Bytes(),
 		"public download must return the exact bytes published under default")
+}
+
+// ── Tenant isolation regression test — Issue #2781 ───────────────────────────
+
+// TestUpgradeStatus_AssuranceBoundary is a table-driven regression test
+// confirming that the Assurance-based tenant-isolation gates in handlers_upgrade.go
+// are byte-for-byte equivalent to the deleted IsAdmin-based checks:
+//   - AssuranceBasic (admin) principal gets global read access regardless of the record's tenant.
+//   - AssuranceMachine (API key) principal sees only same-tenant records (404 otherwise,
+//     Issue #4091 — was 403, which disclosed cross-tenant record existence).
+func TestUpgradeStatus_AssuranceBoundary(t *testing.T) {
+	const recordTenant = "tenant-a"
+
+	stewards := []fleet.StewardData{{ID: "steward-1", TenantID: recordTenant, Status: "online"}}
+	server, _ := setupUpgradeServer(t, recordTenant, stewards)
+	publishApprovedBinary(t, server, recordTenant, "v0.5.12", "linux", "amd64")
+
+	// Create one upgrade record owned by tenant-a.
+	dispRec := doDispatchUpgrade(server, recordTenant, "id:steward-1", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, dispRec.Code)
+	var dispResp APIResponse
+	require.NoError(t, json.Unmarshal(dispRec.Body.Bytes(), &dispResp))
+	upgradeID := dispResp.Data.(map[string]interface{})["upgrade_id"].(string)
+
+	cases := []struct {
+		name       string
+		tenantID   string
+		isAdmin    bool
+		wantStatus int
+	}{
+		{
+			name:       "AssuranceBasic_admin_any_tenant",
+			tenantID:   "",
+			isAdmin:    true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "AssuranceMachine_same_tenant",
+			tenantID:   recordTenant,
+			isAdmin:    false,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "AssuranceMachine_cross_tenant_404",
+			tenantID:   "tenant-b",
+			isAdmin:    false,
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var rec *httptest.ResponseRecorder
+			if tc.isAdmin {
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/"+upgradeID, nil)
+				req = withAdminPrincipal(req)
+				req = mux.SetURLVars(req, map[string]string{"upgrade_id": upgradeID})
+				rec = httptest.NewRecorder()
+				server.handleUpgradeStatus(rec, req)
+			} else {
+				rec = doUpgradeStatus(server, tc.tenantID, upgradeID)
+			}
+			assert.Equal(t, tc.wantStatus, rec.Code,
+				"tenantID=%q isAdmin=%v accessing upgrade record in %q", tc.tenantID, tc.isAdmin, recordTenant)
+		})
+	}
+}
+
+// ── [REQUIRED TEST] Session-principal cross-tenant isolation (Issue #3143) ───
+
+// TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked verifies the Issue #3143
+// fix for handlers_upgrade.go: a web-session caller has GlobalScope=true set by
+// middleware even when scoped to a specific tenant. Before the fix, this caused the
+// cross-tenant guard to pass and the session caller could read any tenant's upgrade
+// record. After the fix, callerTenantID from ctxkeys.TenantID governs access.
+// Issue #4091: the block is now a 404 (existence-disclosure closed), not a 403.
+func TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	const recordTenant = "tenant-a"
+
+	stewards := []fleet.StewardData{{ID: "steward-sess", TenantID: recordTenant, Status: "online"}}
+	server, upgradeStore := setupUpgradeServer(t, recordTenant, stewards)
+
+	// Create an upgrade record owned by tenant-a directly (bypassing dispatch so we
+	// control the TenantID without needing a published binary for this test).
+	fakeSig := make([]byte, 64)
+	record := &business.UpgradeRecord{
+		ID:              "upgrade-tenant-a-session-test",
+		StewardID:       "steward-sess",
+		TenantID:        recordTenant,
+		Version:         "v0.5.12",
+		Platform:        "linux",
+		Arch:            "amd64",
+		Status:          business.UpgradeStatusDispatched,
+		Publisher:       "cfgms",
+		BundleSignature: fakeSig,
+		CreatedAt:       time.Now().UTC(),
+		OperationNonce:  make([]byte, 32),
+	}
+	require.NoError(t, upgradeStore.CreateUpgrade(context.Background(), record))
+
+	// Build a session principal exactly as authenticationMiddleware does: GlobalScope=true
+	// is hardcoded regardless of the account's actual tenant scope (middleware.go:429).
+	sessionCaller := &Principal{
+		ID:          "web-acct-sess",
+		GlobalScope: true, // the middleware bug — scoped accounts should not bypass tenant checks
+		TenantID:    "tenant-b",
+		Assurance:   session.AssuranceBasic,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/"+record.ID, nil)
+	req = withPrincipal(req, sessionCaller)
+	req = mux.SetURLVars(req, map[string]string{"upgrade_id": record.ID})
+	rec := httptest.NewRecorder()
+	server.handleUpgradeStatus(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"session principal scoped to tenant-b must not read tenant-a's upgrade record (body: %s)", rec.Body.String())
 }

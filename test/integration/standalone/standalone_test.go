@@ -120,16 +120,23 @@ func (s *StandaloneTestSuite) TestStewardLogs() {
 	logs, err := s.docker.GetLogs(ctx)
 	require.NoError(s.T(), err, "Should be able to retrieve logs")
 
-	// Verify logs show steward started (basic sanity check)
-	// Note: Specific log format depends on implementation details
 	assert.NotEmpty(s.T(), logs, "Logs should not be empty")
 
-	// Logs should show provider registration (proves steward started)
-	assert.True(s.T(),
-		strings.Contains(logs, "provider") || strings.Contains(logs, "Registered"),
-		"Logs should show provider registration")
+	// Assert on what the steward actually records.
+	//
+	// This previously looked for provider-registration chatter, which no longer
+	// exists: pkg/logging/interfaces routes registration messages to a no-op
+	// sink by default, precisely so libraries stop writing to process stdout.
+	// The assertion could not pass, and because it only checked for the word
+	// "provider" it would not have proven the steward did any work if it had.
+	assert.Contains(s.T(), logs, "Starting steward in standalone mode",
+		"Logs should show the steward entered standalone mode")
+	assert.Contains(s.T(), logs, "Convergence run completed",
+		"Logs should show a convergence run finished")
+	assert.NotContains(s.T(), logs, "Resource execution failed",
+		"No resource in standalone.yaml should fail to converge")
 
-	s.T().Log("Steward logs validated - container started and ran successfully")
+	s.T().Log("Steward logs validated - container started and converged successfully")
 }
 
 // TestIdempotency validates that running steward multiple times doesn't break things

@@ -3,6 +3,8 @@
 package trigger
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/logging"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // registers the "file" provider used by TestHTTPWebhookHandler_SanitizesRemoteAddrAndUserAgentInLogFile
 )
 
 func TestHTTPWebhookHandler_NewHTTPWebhookHandler(t *testing.T) {
@@ -751,6 +756,160 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHTTPWebhookHandler_SanitizesRemoteAddrAndUserAgentInLogFile covers the
+// log-injection findings at webhook.go:417-418 (Issue #4087): the
+// "Received webhook request" InfoCtx call logs r.RemoteAddr and
+// r.Header.Get("User-Agent") directly off the inbound request, before any
+// trigger lookup or auth check.
+//
+// HTTPWebhookHandler.logger is a concrete *logging.ModuleLogger with no
+// injectable interface, and NewHTTPWebhookHandler takes no logger parameter,
+// so — following #4086's debug_api_test.go pattern rather than
+// constructor-injecting a fake — this points the global logging manager at a
+// real file provider and reads back the written JSON line, exercising the
+// real ModuleLogger -> LoggingManager -> FileProvider path end to end.
+//
+// Honesty note on what this test can and cannot prove, discovered while
+// writing it and worth recording rather than silently working around: unlike
+// debug_api.go's DebugAction field (a distinct named type,
+// features/workflow/debug_api_test.go), r.RemoteAddr and
+// r.Header.Get("User-Agent") are plain Go `string` values. Every field value
+// passed through a *logging.ModuleLogger's *Ctx methods is independently run
+// through pkg/logging's own sanitizeValueRecursive
+// (logWithProvider -> keysAndValuesToMap -> sanitizeMapValues, pkg/logging/
+// logger.go and sanitize.go), whose type switch already calls
+// SanitizeLogValue on any bare `string` -- regardless of whether the call
+// site itself wraps the value. Verified directly: temporarily reverting the
+// webhook.go:417-418 wraps back to bare r.RemoteAddr / r.Header.Get(...) and
+// re-running this exact scenario still produces a sanitized
+// "10.0.0.1_evil:1234" / "ua_evil" in the log file, not the raw
+// control-character input. So this test cannot fail on revert of the
+// call-site wrap alone (the same limitation #4086 already documented for
+// this file's execution_id/error-shaped fields) -- the wrap remains required
+// because `make lint-log-injection` is a static syntactic check with no
+// knowledge of this runtime sanitization, and as defense-in-depth if the
+// value ever flows through a path that skips ModuleLogger's own sanitizer.
+// What this test DOES verify, genuinely: the field reaches the log file
+// sanitized end-to-end, which is real regression coverage against breaking
+// SanitizeLogValue or ModuleLogger's sanitization pipeline itself.
+//
+// Global logging state is process-wide; this test cannot run t.Parallel()
+// and must be the only test in this package touching it.
+func TestHTTPWebhookHandler_SanitizesRemoteAddrAndUserAgentInLogFile(t *testing.T) {
+	if manager := logging.GetGlobalLoggingManager(); manager != nil {
+		_ = manager.Close()
+	}
+	logging.InitializeGlobalLoggerFactory("", "")
+
+	tmpDir := t.TempDir()
+	loggingConfig := &logging.LoggingConfig{
+		Provider:      "file",
+		Level:         "DEBUG",
+		ServiceName:   "test-service",
+		Component:     "workflow-trigger-webhook",
+		AsyncWrites:   false,
+		BatchSize:     1,
+		FlushInterval: time.Second,
+		Config: map[string]interface{}{
+			"directory":        tmpDir,
+			"file_prefix":      "test",
+			"max_file_size":    1024 * 1024,
+			"max_files":        5,
+			"compress_rotated": false,
+		},
+	}
+	require.NoError(t, logging.InitializeGlobalLogging(loggingConfig))
+	logging.InitializeGlobalLoggerFactory("test-service", "workflow-trigger-webhook")
+
+	t.Cleanup(func() {
+		if manager := logging.GetGlobalLoggingManager(); manager != nil {
+			_ = manager.Close()
+		}
+		logging.InitializeGlobalLoggerFactory("", "")
+	})
+
+	// CFGMS mandates real-component testing, so the webhook handler is wired
+	// with the genuine TriggerManagerImpl (real in-memory storage provider and
+	// real workflow trigger) rather than a mock of the TriggerManager /
+	// WorkflowTrigger interfaces — matching how api_test.go exercises the
+	// sibling API-handler path.
+	workflowTrigger := NewTestWorkflowTrigger()
+	handler := NewHTTPWebhookHandler(
+		NewControllerTriggerManager(NewTestStorageProvider(), workflowTrigger),
+		workflowTrigger,
+		"localhost",
+		8080,
+	)
+
+	const controlRemoteAddr = "10.0.0.1\x07evil:1234"
+	const controlUserAgent = "ua\x07evil"
+
+	req, err := http.NewRequest(http.MethodPost, "/webhook/nonexistent-trigger", strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.RemoteAddr = controlRemoteAddr
+	req.Header.Set("User-Agent", controlUserAgent)
+
+	rr := httptest.NewRecorder()
+	handler.router.ServeHTTP(rr, req)
+	// The trigger doesn't exist, so the handler 404s after logging the
+	// request -- expected, and irrelevant to what this test is checking.
+	require.Equal(t, http.StatusNotFound, rr.Code)
+
+	require.NoError(t, logging.GetGlobalLoggingManager().Flush(context.Background()))
+
+	entries := readWebhookLogEntries(t, tmpDir)
+	found := false
+	for _, e := range entries {
+		if e["message"] != "Received webhook request" {
+			continue
+		}
+		fields, _ := e["fields"].(map[string]interface{})
+		remoteAddr, _ := fields["remote_addr"].(string)
+		userAgent, _ := fields["user_agent"].(string)
+		found = true
+
+		if strings.Contains(remoteAddr, controlRemoteAddr) || strings.ContainsAny(remoteAddr, "\x07") {
+			t.Fatalf("log entry contains the raw control-character remote_addr: %q", remoteAddr)
+		}
+		if strings.Contains(userAgent, controlUserAgent) || strings.ContainsAny(userAgent, "\x07") {
+			t.Fatalf("log entry contains the raw control-character user_agent: %q", userAgent)
+		}
+		require.Equal(t, logging.SanitizeLogValue(controlRemoteAddr), remoteAddr)
+		require.Equal(t, logging.SanitizeLogValue(controlUserAgent), userAgent)
+	}
+	require.True(t, found, "expected a 'Received webhook request' log entry")
+}
+
+// readWebhookLogEntries reads every JSON-lines log file under dir and decodes
+// each line into a generic map for field-level assertions.
+func readWebhookLogEntries(t *testing.T, dir string) []map[string]interface{} {
+	t.Helper()
+	files, err := os.ReadDir(dir)
+	require.NoError(t, err)
+
+	var entries []map[string]interface{}
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		file, err := os.Open(filepath.Join(dir, f.Name()))
+		require.NoError(t, err)
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			var entry map[string]interface{}
+			require.NoError(t, json.Unmarshal(line, &entry))
+			entries = append(entries, entry)
+		}
+		require.NoError(t, scanner.Err())
+		require.NoError(t, file.Close())
+	}
+	return entries
 }
 
 func TestHTTPWebhookHandler_HealthCheck(t *testing.T) {

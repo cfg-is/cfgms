@@ -57,7 +57,7 @@ type ReportRequest struct {
 ### 2. Template System Integration (`features/reports/templates/`)
 
 **Leverage Existing Templates:**
-- Extend existing `features/templates/` system
+- Extend existing `features/reports/templates/` system
 - Add DNA-specific template functions
 - Support conditional logic for different report types
 
@@ -105,7 +105,7 @@ const (
 - **Excel**: XLSX generation for complex data tables
 - **HTML**: Direct template rendering
 
-### 4. Scheduling System (`features/reports/scheduler/`)
+### 4. Scheduling System
 
 **Automated Generation:**
 ```go
@@ -131,7 +131,7 @@ type ReportSchedule struct {
 - **File System**: Save to configured directories
 - **API Integration**: Push to external monitoring tools
 
-### 5. Dashboard APIs (`features/reports/dashboard/`)
+### 5. Dashboard APIs
 
 **Real-time Monitoring Endpoints:**
 ```go
@@ -146,7 +146,7 @@ GET  /api/v1/reports/schedules                 # List scheduled reports
 POST /api/v1/reports/schedules                 # Create report schedule
 ```
 
-### 6. Visualization Support (`features/reports/charts/`)
+### 6. Visualization Support
 
 **Chart Data Preparation:**
 ```go

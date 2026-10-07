@@ -40,15 +40,15 @@ var (
 	configUploadStewardID   string
 	configUploadJSONOutput  bool
 	configUploadURL         string
-	configUploadAPIKey      string
 	configUploadTLSCACert   string
 	configUploadTLSInsecure bool
+	configUploadServerName  string
 
 	// Shared persistent connection flags for all config subcommands
 	configAPIURL      string
-	configAPIKey      string
 	configTLSCACert   string
 	configTLSInsecure bool
+	configServerName  string
 
 	// List command flags
 	configListTenantID string
@@ -160,22 +160,21 @@ Examples:
 
 var configUploadCmd = &cobra.Command{
 	Use:   "upload <file>",
-	Short: "Upload a YAML config to a steward",
-	Long: `Upload a YAML configuration file to a registered steward.
+	Short: "Upload a .cfg file to a steward",
+	Long: `Upload a .cfg file to a registered steward.
 
-Reads the file from disk and issues PUT /api/v1/stewards/{id}/config
-with Content-Type: application/yaml. Auth uses the admin bundle
-(mTLS auto-discovery) by default.
+Reads the file from disk and issues PUT /api/v1/stewards/{id}/config.
+Auth uses the admin bundle (mTLS auto-discovery) by default.
 
 Examples:
   # Upload a fleet config to a steward
-  cfg config upload fleet-config.yaml --steward steward-abc123
+  cfg config upload fleet-config.cfg --steward steward-abc123
 
   # Upload with JSON response output
-  cfg config upload fleet-config.yaml --steward steward-abc123 --json
+  cfg config upload fleet-config.cfg --steward steward-abc123 --json
 
   # Upload using explicit controller URL
-  cfg config upload fleet-config.yaml --steward steward-abc123 --url=https://ctrl.example.com:9080`,
+  cfg config upload fleet-config.cfg --steward steward-abc123 --url=https://ctrl.example.com:9080`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigUpload,
 }
@@ -206,55 +205,55 @@ func init() {
 	configUploadCmd.Flags().StringVar(&configUploadStewardID, "steward", "", "Steward ID to upload the config to (required)")
 	configUploadCmd.Flags().BoolVar(&configUploadJSONOutput, "json", false, "Emit raw API response JSON instead of human-readable text")
 	configUploadCmd.Flags().StringVar(&configUploadURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
-	configUploadCmd.Flags().StringVar(&configUploadAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configUploadCmd.Flags().StringVar(&configUploadTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configUploadCmd.Flags().BoolVar(&configUploadTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configUploadCmd.Flags().StringVar(&configUploadServerName, "server-name", "", "Override TLS server name for certificate verification")
 	_ = configUploadCmd.MarkFlagRequired("steward")
 
 	// List command flags
 	configListCmd.Flags().StringVar(&configListTenantID, "tenant", "", "Filter by tenant ID (optional)")
 	configListCmd.Flags().BoolVar(&configListJSON, "json", false, "Emit raw JSON instead of human-readable table")
 	configListCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	configListCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configListCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configListCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configListCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Show command flags (connection flags share vars with list/delete)
 	configShowCmd.Flags().BoolVar(&configShowJSON, "json", false, "Emit raw JSON instead of human-readable output")
 	configShowCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	configShowCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configShowCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configShowCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configShowCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Delete command flags
 	configDeleteCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	configDeleteCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configDeleteCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeleteCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configDeleteCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Deployments command flags
 	configDeploymentsCmd.Flags().BoolVar(&configDeploymentsJSON, "json", false, "Emit raw JSON instead of human-readable output")
 	configDeploymentsCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	configDeploymentsCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configDeploymentsCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeploymentsCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configDeploymentsCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Diff command flags
 	configDiffCmd.Flags().BoolVar(&configDiffJSON, "json", false, "Emit JSON diff format instead of human-readable text")
 	configDiffCmd.Flags().BoolVar(&configDiffIncludeSecrets, "include-secrets", false, "Include raw secret values (skips redaction of token/secret/password/credential/api_key keys)")
 	configDiffCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	configDiffCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configDiffCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDiffCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configDiffCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Rollback command flags
 	configRollbackCmd.Flags().StringVar(&configRollbackTo, "to", "", "Version (commit SHA) to roll back to; omit to list available rollback points")
 	configRollbackCmd.Flags().BoolVar(&configRollbackDryRun, "dry-run", false, "Preview the rollback without executing (calls /rollback/preview)")
 	configRollbackCmd.Flags().BoolVar(&configRollbackJSON, "json", false, "Emit raw JSON instead of human-readable output")
 	configRollbackCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	configRollbackCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	configRollbackCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configRollbackCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	configRollbackCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	configCmd.AddCommand(configUploadCmd)
 	configCmd.AddCommand(configListCmd)
@@ -271,30 +270,13 @@ func getConfigClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := configUploadAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := configUploadTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := configUploadServerName
 
-	tlsCACertPath := configUploadTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // getConfigAPIClient creates an API client for list/show/delete config operations.
@@ -304,34 +286,13 @@ func getConfigAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	if apiURL == "" {
-		apiURL = "http://localhost:9080"
-	}
-
-	apiKey := configAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := configTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := configServerName
 
-	tlsCACertPath := configTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // APIConfigSummary represents a stored configuration summary in API responses.

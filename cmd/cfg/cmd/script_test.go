@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // ---------------------------------------------------------------------------
@@ -821,4 +823,14 @@ func TestScriptSetPrivilege_InvalidParamBinding(t *testing.T) {
 // containsStr is a helper that checks whether substr appears in s.
 func containsStr(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+// TestScriptLibCmds_ServerNameFlagRegistered verifies that --server-name is
+// registered on every script library subcommand alongside --tls-insecure (Issue #3174).
+func TestScriptLibCmds_ServerNameFlagRegistered(t *testing.T) {
+	for _, cmd := range []*cobra.Command{scriptListCmd, scriptShowCmd, scriptSetPrivilegeCmd} {
+		if cmd.Flags().Lookup("server-name") == nil {
+			t.Errorf("--server-name flag must be registered on script %s", cmd.Name())
+		}
+	}
 }

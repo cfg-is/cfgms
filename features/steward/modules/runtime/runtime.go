@@ -63,15 +63,22 @@ func NewModuleRuntimeWithEnforcer(runtimeDir string, enforcer *stewardtrust.Stew
 // waits for it to start listening, dials gRPC, and returns a ModuleHandle ready
 // for RPC calls.
 //
+// additionalPublisherNames is steward.cfg's module_trust.additional_publishers
+// list (plain publisher names). It is resolved to key material only when mode
+// is strict — the only mode that consults it — matching where
+// StewardTrustEnforcer.VerifyForLoad itself consults the list.
+//
 // Error precedence:
 //  1. ErrWrongModuleKind — bundle.Manifest.Kind != "steward"
-//  2. pkgtrust.ErrPublisherNotTrusted — trust verification failed (strict mode)
-//  3. binary not found in bundle.Binaries for current os-arch
-//  4. fork/exec, socket, or gRPC errors
+//  2. stewardtrust.ErrAdditionalPublisherUnresolvable — an additional_publishers
+//     entry has no known key material (strict mode only)
+//  3. pkgtrust.ErrPublisherNotTrusted — trust verification failed (strict mode)
+//  4. binary not found in bundle.Binaries for current os-arch
+//  5. fork/exec, socket, or gRPC errors
 func (r *ModuleRuntime) Start(
 	b *bundle.Bundle,
 	mode stewardtypes.ModuleTrustMode,
-	additionalPublishers []stewardtrust.PublisherIdentity,
+	additionalPublisherNames []string,
 ) (*ModuleHandle, error) {
 	// 1. Kind gate — must be first; steward runtime hosts only steward-kind modules.
 	if b.Manifest == nil || b.Manifest.Kind != "steward" {
@@ -82,7 +89,18 @@ func (r *ModuleRuntime) Start(
 		return nil, fmt.Errorf("%w: got %q", ErrWrongModuleKind, got)
 	}
 
-	// 2. Trust enforcement — must happen before any fork/exec.
+	// 2. Trust enforcement — must happen before any fork/exec. Resolution runs
+	// only in strict mode: controller and bypass modes never consult
+	// additional_publishers, so an unresolvable name must not block a load that
+	// wouldn't have looked at the list anyway.
+	var additionalPublishers []stewardtrust.PublisherIdentity
+	if mode == stewardtypes.ModuleTrustModeStrict {
+		resolved, err := r.enforcer.ResolveAdditionalPublishers(additionalPublisherNames)
+		if err != nil {
+			return nil, err
+		}
+		additionalPublishers = resolved
+	}
 	if err := r.enforcer.VerifyForLoad(b, mode, additionalPublishers); err != nil {
 		return nil, err
 	}
@@ -112,29 +130,75 @@ func (r *ModuleRuntime) Start(
 		return nil, fmt.Errorf("fork/exec module %q (%s): %w", b.Manifest.Name, binPath, err)
 	}
 
-	// 6. Wait for the module to start listening on its socket (up to 30 s).
+	// 6. Reap the child from the moment it exists — not after the handshake — so
+	// every later step can tell "not listening yet" from "already dead". A module
+	// fails closed when it cannot create its own listener (a Windows pipe-name
+	// collision, for instance, which is exactly the case where something else
+	// holds the name); without this the runtime would poll, handshake and trust
+	// whatever else answers on that address.
+	waitCh := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(waitCh)
+	}()
+
+	// childExited reports the child's exit as an error if it has already been
+	// reaped, or nil if it is still running. Safe to read waitErr: waitCh's
+	// close orders the reaping goroutine's write before this read.
+	childExited := func() error {
+		select {
+		case <-waitCh:
+			if waitErr != nil {
+				return fmt.Errorf("module %q exited before it was ready: %w", b.Manifest.Name, waitErr)
+			}
+			return fmt.Errorf("module %q exited before it was ready", b.Manifest.Name)
+		default:
+			return nil
+		}
+	}
+
+	// terminate kills the child (no-op if already reaped), waits for the
+	// reaping goroutine, and removes the socket.
+	terminate := func() {
+		_ = cmd.Process.Kill()
+		<-waitCh
+		_ = os.Remove(socketPath)
+	}
+
+	// 7. Wait for the module to start listening on its socket (up to 30 s).
 	startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := waitForSocket(startCtx, socketPath); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(socketPath)
+	// Cut the wait short when the child dies, so a module that failed to listen
+	// reports that instead of burning the whole deadline.
+	go func() {
+		select {
+		case <-waitCh:
+			cancel()
+		case <-startCtx.Done():
+		}
+	}()
+
+	if err := waitForSocket(startCtx, socketPath, cmd.Process.Pid); err != nil {
+		exitErr := childExited()
+		terminate()
+		if exitErr != nil {
+			return nil, exitErr
+		}
 		return nil, fmt.Errorf("module %q did not start listening: %w", b.Manifest.Name, err)
 	}
 
-	// 7. Dial gRPC over the local socket.
-	conn, err := dialGRPCSocket(socketPath)
+	// 8. Dial gRPC over the local socket.
+	conn, err := dialGRPCSocket(socketPath, cmd.Process.Pid)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(socketPath)
+		terminate()
 		return nil, fmt.Errorf("dial gRPC for module %q: %w", b.Manifest.Name, err)
 	}
 
 	client := proto.NewModuleServiceClient(conn)
 
-	// 8. Perform the module handshake to confirm the gRPC session.
+	// 9. Perform the module handshake to confirm the gRPC session.
 	hsCtx, hsCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer hsCancel()
 
@@ -145,18 +209,15 @@ func (r *ModuleRuntime) Start(
 		HostRuntime:   "steward",
 	}); err != nil {
 		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(socketPath)
+		// Read the exit state before terminate kills the child, or the kill
+		// would make every handshake failure look like an early exit.
+		exitErr := childExited()
+		terminate()
+		if exitErr != nil {
+			return nil, exitErr
+		}
 		return nil, fmt.Errorf("handshake with module %q: %w", b.Manifest.Name, err)
 	}
-
-	// 9. Start a goroutine to collect the process exit status.
-	waitCh := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(waitCh)
-	}()
 
 	h := &ModuleHandle{
 		Name:       b.Manifest.Name,

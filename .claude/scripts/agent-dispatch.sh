@@ -7,6 +7,745 @@ set -euo pipefail
 REPO_ROOT="${CFGMS_TEST_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 WORKTREE_BASE="${CFGMS_TEST_WORKTREE_BASE:-$(cd "$REPO_ROOT/.." && pwd)/worktrees}"
 
+# Reuse ac_resolve_agent_model (Issue #3030) to predict the model a dispatched
+# container will resolve to, for the ledger's launch record below. Pure
+# function definitions only — see agent-context.sh's own "do not exit from
+# here" docstring — safe to source unconditionally.
+#
+# Resolved from THIS SCRIPT's own real location (BASH_SOURCE[0]), never from
+# REPO_ROOT: hermetic tests point CFGMS_TEST_REPO_ROOT at a throwaway bare
+# repo with no .devcontainer/ tree, and this file must still source cleanly
+# when they do (verified by scripts/test-scripts.sh's create-clone fixtures).
+_agent_dispatch_self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -f "${_agent_dispatch_self_root}/.devcontainer/agent-context.sh" ]]; then
+  # shellcheck source=../../.devcontainer/agent-context.sh
+  source "${_agent_dispatch_self_root}/.devcontainer/agent-context.sh"
+fi
+
+# Base directory for per-agent API key tmpfs files.
+# Override CFGMS_TEST_CRED_BASE in hermetic tests.
+AGENT_CRED_BASE="${CFGMS_TEST_CRED_BASE:-/run/cfgms/agent-cred}"
+
+# Host directory where agent container session transcripts are persisted
+# (Issue #3028). Containers run with --rm and create ~/.claude inside
+# themselves, so without this bind mount every dev-agent and reviewer
+# transcript dies with the container and its token spend is unmeasurable.
+# Lives under $HOME/.cache rather than /tmp: /tmp permissions do not persist
+# on this host.
+#
+# Mounted at /agent-sessions, NOT directly at ~/.claude/projects. Docker
+# creates a bind mount's missing parent as root, and the image ships no
+# ~/.claude -- mounting inside it would leave ~/.claude root-owned and break
+# the bind-mounted ~/.claude/.credentials.json below, failing authentication
+# for every agent. setup-env.sh symlinks ~/.claude/projects -> /agent-sessions
+# instead, which needs no image rebuild.
+AGENT_SESSIONS_BASE="${CFGMS_AGENT_SESSIONS_BASE:-${HOME}/.cache/cfgms-agent-sessions}"
+AGENT_SESSIONS_RETENTION_DAYS="${CFGMS_AGENT_SESSIONS_RETENTION_DAYS:-30}"
+AGENT_SESSIONS_MOUNT="/agent-sessions"
+
+# Token reporter mount (Issue #3041). Every entrypoint resolves the reporter
+# from ${AGENT_METRICS_MOUNT} only, never from /workspace: the branch under
+# dispatch or review must not be able to disable its own accounting by lacking,
+# editing or deleting .claude/metrics.
+#
+# The image bakes a copy at the same path (.devcontainer/Dockerfile), so this
+# bind mount is not what makes the control exist -- it is what keeps every
+# dispatch path on the *harness checkout's* reporter without waiting for an
+# image rebuild, the same no-rebuild pattern already used for setup-env.sh,
+# review-entrypoint.sh and agent-context.sh.
+#
+# A mounted entrypoint MUST be mounted together with the helper library it
+# sources (Issue #4194). review-entrypoint.sh is mounted from the harness
+# checkout but sources agent-context.sh, which resolves to a *sibling* under
+# /usr/local/bin/ -- so leaving the helper baked pairs a new script with an
+# old library. When ae5474eb (#4191) added AC_HEADLESS_NO_BG_WAIT_RULE to the
+# helper, every review container died on `unbound variable` under `set -u`
+# two seconds in, and no PR could be reviewed or merged until the image was
+# rebuilt. The pairing is asserted by .devcontainer/agent-context-mount_test.sh.
+# Mounting is conditional on the source existing: Docker
+# would otherwise create an empty host directory and shadow the baked copy with
+# nothing, turning a working control into reporter_missing.
+AGENT_METRICS_MOUNT="/usr/local/share/cfgms-metrics"
+AGENT_METRICS_MOUNT_ARGS=()
+if [ -d "${REPO_ROOT}/.claude/metrics" ]; then
+  AGENT_METRICS_MOUNT_ARGS=(-v "${REPO_ROOT}/.claude/metrics:${AGENT_METRICS_MOUNT}:ro")
+fi
+
+# Model-routing mount (Issue #3030), same rule as the reporter above:
+# ac_resolve_agent_model reads ${AGENT_MODEL_ROUTING_MOUNT} only, never
+# /workspace. /workspace is a checkout of the branch under dispatch or review,
+# so reading routing from there would let a PR branch pick the model of the
+# acceptance reviewer deciding whether it merges, and dev/fix agents run on
+# untrusted issue/PR text. The image bakes a copy at the same path
+# (.devcontainer/Dockerfile); this bind mount keeps every dispatch path on the
+# *harness checkout's* routing config without waiting for an image rebuild.
+# Conditional on the source existing as a file: Docker would otherwise create an
+# empty host directory at that path and shadow the baked config, silently
+# dropping every dispatch to the hardcoded fallback.
+AGENT_MODEL_ROUTING_MOUNT="/usr/local/share/cfgms-agent/model-routing.yaml"
+AGENT_MODEL_ROUTING_MOUNT_ARGS=()
+if [ -f "${REPO_ROOT}/.claude/model-routing.yaml" ]; then
+  AGENT_MODEL_ROUTING_MOUNT_ARGS=(-v "${REPO_ROOT}/.claude/model-routing.yaml:${AGENT_MODEL_ROUTING_MOUNT}:ro")
+fi
+
+# Prepare the host-side transcript directory for a container and record what the
+# run was for. meta.json is written *before* launch so a container that dies
+# early is still attributable; container labels are gone once it is pruned.
+# Echoes the directory path. Never fatal: telemetry must not block dispatch.
+prepare_session_dir() {
+  local container_name="$1" mode="$2" issue="$3" pr="$4" branch="$5"
+  local dir="${AGENT_SESSIONS_BASE}/${container_name}"
+
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "WARN: could not create session dir ${dir} — transcript will not persist" >&2
+    return 1
+  fi
+
+  cat > "${dir}/meta.json" <<META || true
+{
+  "container": "${container_name}",
+  "mode": "${mode}",
+  "issue": ${issue:-null},
+  "pr": ${pr:-null},
+  "branch": "${branch}",
+  "started_at": "$(date -Iseconds)"
+}
+META
+
+  printf '%s\n' "$dir"
+}  # end prepare_session_dir
+
+# ---------------------------------------------------------------------------
+# Durable dispatch ledger (Issue #3052).
+#
+# Every container launch and exit appends one JSON line here, so agent counts
+# and per-run outcomes outlive both session-transcript retention (Issue #3028's
+# 30-day prune) and every cleanup routine below. Lives in its own directory,
+# deliberately never touched by cleanup-issue/cleanup-container/cleanup-stale/
+# cleanup-stale-reviews or AGENT_SESSIONS_RETENTION_DAYS pruning — this is an
+# execution log, not a queue, and not backfilled for historical runs.
+#
+# Who writes the exit record: the HOST always does (a container that dies
+# mid-run — hard-killed, OOM, host reboot — cannot be relied on to write its
+# own record), reading whatever the container itself already left behind in
+# its session-mounted agent-result.json (Issue #3028/#3051) when a caller
+# passes one in (source=agent-result: exit code, duration, PR URL, validation
+# outcome, head-advanced flag, token usage), falling back to `docker inspect`
+# alone otherwise (source=docker-inspect-only). That fallback is what makes a
+# hard-killed run distinguishable from one that reported cleanly — the
+# documented hybrid: the container supplies the rich fields when it can, the
+# host reconciles what's missing when it can't.
+#
+# Best-effort throughout — every function here degrades to a silent no-op
+# rather than propagate a failure; a ledger write must never block or fail a
+# dispatch.
+AGENT_LEDGER_DIR="${CFGMS_AGENT_LEDGER_DIR:-${HOME}/.cache/cfgms-agent-ledger}"
+AGENT_LEDGER_FILE="${AGENT_LEDGER_DIR}/ledger.jsonl"
+
+# _cfgms_locked_do <lockfile> <timeout_secs> <body_fn>
+# Best-effort mutual exclusion around <body_fn> (a shell function name, called
+# with bash's normal dynamic scoping so it sees the caller's locals). Prefers
+# flock (atomic FD lock). When the flock binary is absent — not installed in
+# this host's Git-Bash/MSYS usr/bin; its "command not found" (exit 127) was
+# being swallowed identically to lock contention by a bare `|| exit 0`, so
+# every guarded write silently never happened (Issue #3686) — falls back to an
+# mkdir-based spinlock, atomic on every filesystem bash runs on. Either way:
+# best-effort, matching every caller's existing contract that a lock-guarded
+# write must never block or fail the caller beyond the timeout.
+_cfgms_locked_do() {
+  local lockfile="$1" timeout="$2" body_fn="$3"
+  if command -v flock >/dev/null 2>&1; then
+    (
+      flock -w "$timeout" 200 || exit 0
+      "$body_fn"
+    ) 200>>"$lockfile" 2>/dev/null || true
+  else
+    local lockdir="${lockfile}.d" waited=0 max_waits=$((timeout * 5))
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      waited=$((waited + 1))
+      [[ $waited -gt $max_waits ]] && return 0
+      sleep 0.2
+    done
+    "$body_fn" 2>/dev/null || true
+    rmdir "$lockdir" 2>/dev/null || true
+  fi
+}
+
+# _ledger_write_line <json_line>
+# Appends one already-serialized JSON line, lock-guarded against concurrent
+# writers on this host (JSONL lines are small enough for an atomic O_APPEND
+# write, but flock removes any doubt). Not shared cross-host by default —
+# CFGMS_AGENT_LEDGER_DIR would need to point at shared storage for that, which
+# this story does not assume.
+_ledger_write_line() {
+  local line="$1"
+  [[ -n "$line" ]] || return 0
+  mkdir -p "$AGENT_LEDGER_DIR" 2>/dev/null || return 0
+  _cfgms_locked_do "${AGENT_LEDGER_FILE}.lock" 2 _ledger_write_line__append
+}
+_ledger_write_line__append() {
+  printf '%s\n' "$line" >> "$AGENT_LEDGER_FILE"
+}
+
+# ledger_resolve_model <segment>
+# Predicts the model a dispatched container will resolve to: reads the SAME
+# harness-checkout routing file the container gets baked/mounted from (Issue
+# #3030), a host-side prediction rather than a live read of the container.
+ledger_resolve_model() {
+  local segment="$1"
+  CFGMS_MODEL_ROUTING_FILE="${REPO_ROOT}/.claude/model-routing.yaml" \
+    ac_resolve_agent_model "$segment" 2>/dev/null | sed -n '1p'
+}
+
+# ledger_append_launch <container> <mode> <issue> <pr> <branch> <segment> <lease_key>
+# Appends a launch record. Called right before `docker run`, so a launch
+# record exists even when the run itself then fails — see
+# ledger_append_launch_failed for that terminal case.
+ledger_append_launch() {
+  local container="$1" mode="$2" issue="$3" pr="$4" branch="$5" segment="$6" lease_key="$7"
+  local model
+  model=$(ledger_resolve_model "$segment")
+  local line
+  line=$(python3 -c '
+import json, sys
+ts, container, mode, issue, pr, branch, model, lease_key = sys.argv[1:9]
+def num(v):
+    return int(v) if v.isdigit() else None
+print(json.dumps({
+    "event": "launch", "ts": ts, "container": container, "mode": mode,
+    "issue": num(issue), "pr": num(pr), "branch": (branch or None),
+    "model": (model or None), "lease_key": (lease_key or None),
+}, separators=(",", ":")))
+' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$container" "$mode" "${issue:-}" "${pr:-}" \
+    "${branch:-}" "${model:-}" "${lease_key:-}" 2>/dev/null) || return 0
+  _ledger_write_line "$line"
+}
+
+# ledger_append_launch_failed <container> <mode>
+# `docker run` itself returned nonzero — no container ever existed, so no exit
+# path will ever fire for it. Writes the terminal record directly so this run
+# is distinguishable from both a clean exit and a hard-killed one.
+ledger_append_launch_failed() {
+  local container="$1" mode="$2"
+  local line
+  line=$(python3 -c '
+import json, sys
+ts, container, mode = sys.argv[1:4]
+print(json.dumps({
+    "event": "exit", "ts": ts, "container": container, "mode": mode,
+    "exit_code": None, "source": "launch-failed",
+}, separators=(",", ":")))
+' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$container" "$mode" 2>/dev/null) || return 0
+  _ledger_write_line "$line"
+}
+
+# ledger_has_exit <container>
+# True if an exit record for this container name already exists. Guards
+# ledger_reconcile_exit against duplicate records when a cleanup routine
+# inspects the same exited container more than once before it is removed.
+ledger_has_exit() {
+  local container="$1"
+  [[ -f "$AGENT_LEDGER_FILE" ]] || return 1
+  python3 -c '
+import json, sys
+container, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("event") == "exit" and rec.get("container") == container:
+                sys.exit(0)
+except FileNotFoundError:
+    pass
+sys.exit(1)
+' "$container" "$AGENT_LEDGER_FILE"
+}
+
+# _ledger_docker_inspect <go_template> <container>
+# Thin wrapper around `docker inspect` so tests can stub it without a real
+# container.
+_ledger_docker_inspect() {
+  docker inspect --format "$1" "$2" 2>/dev/null || echo ""
+}
+
+# ledger_reconcile_exit <container> [result_json_path]
+# The host-side reaper half of the hybrid. Called by every cleanup routine at
+# the point it already inspects/removes an exited container. Idempotent
+# (skips if an exit record already exists for this container). Reads
+# `docker inspect` for exit code + finish time — always available, even for a
+# hard-killed container — and layers in the container's own agent-result.json
+# when the caller found one on disk.
+ledger_reconcile_exit() {
+  local container="$1" result_file="${2:-}"
+  ledger_has_exit "$container" && return 0
+
+  local exit_code finished_at
+  exit_code=$(_ledger_docker_inspect '{{.State.ExitCode}}' "$container")
+  finished_at=$(_ledger_docker_inspect '{{.State.FinishedAt}}' "$container")
+
+  local result_json="{}"
+  local source="docker-inspect-only"
+  if [[ -n "$result_file" ]] && [[ -s "$result_file" ]]; then
+    if result_json=$(cat "$result_file" 2>/dev/null) && [[ -n "$result_json" ]]; then
+      source="agent-result"
+    else
+      result_json="{}"
+    fi
+  fi
+
+  local line
+  line=$(python3 -c '
+import json, sys
+container, exit_code, finished_at, source, result_raw = sys.argv[1:6]
+try:
+    result = json.loads(result_raw) if result_raw.strip() else {}
+    if not isinstance(result, dict):
+        result = {}
+except Exception:
+    result = {}
+rec = {
+    "event": "exit",
+    "ts": finished_at or None,
+    "container": container,
+    "mode": result.get("mode"),
+    "exit_code": int(exit_code) if exit_code.lstrip("-").isdigit() else None,
+    "source": source,
+    "duration_seconds": result.get("agent_duration_seconds"),
+    "pr_url": result.get("pr_url") or None,
+    "validation_passed": result.get("validation_passed"),
+    "head_advanced": result.get("head_advanced"),
+    "usage": result.get("usage"),
+}
+print(json.dumps(rec, separators=(",", ":")))
+' "$container" "${exit_code:-}" "${finished_at:-}" "$source" "$result_json" 2>/dev/null) || return 0
+  _ledger_write_line "$line"
+}
+
+# ---------------------------------------------------------------------------
+# Resource-based admission gate (replaces the hand-tuned container count).
+# A new agent container is admitted only if launching one keeps the host within
+# its ceilings: RAM and disk under 90% utilization (reservation-based — a
+# container holds its memory/disk for its whole life), and the measured 1-min
+# CPU load average under 90% of cores (utilization-based — agents are bursty, so
+# a static per-core reservation caps the host far below real capacity). Per-host
+# and self-tuning — a big box runs more, a laptop fewer, and it adapts to
+# whatever else is already running. A coarse 2×ncpu count ceiling is a
+# runaway-loop backstop, not the primary limit.
+#
+# All thresholds are env-overridable; the per-agent RAM/disk figures default to
+# the docker run reservations (--memory=4g, plus a disk allowance covering the
+# clone + go build/mod cache growth). The CPU gate uses CFGMS_AGENT_CPU_LOAD
+# (expected sustained cores per agent, ~1.5) against live load, not the
+# container's --cpus limit.
+# ---------------------------------------------------------------------------
+_capacity_compute() {
+  # _capacity_compute <line|json>
+  # Prints CAPACITY_OK:slots=<n> / CAPACITY_FULL:<reason>:slots=0 (line mode) or a
+  # JSON object (json mode). Returns 0 when at least one slot is free, else 1.
+  local mode="${1:-line}" running docker_root
+  # Where docker is absent (CI lint/test containers, a non-Docker host) there are
+  # by definition zero agent containers running. Guard the probe: without the
+  # guard the missing binary exits 127 mid-pipeline and `set -e` aborts the whole
+  # function before it prints a CAPACITY_ line, turning "no docker" into "no
+  # answer" for every caller of `agent-dispatch.sh capacity`.
+  if command -v docker >/dev/null 2>&1; then
+    running=$(docker ps --filter "label=cfg-agent=true" -q 2>/dev/null | wc -l | tr -d ' ')
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+  else
+    running=0
+    docker_root=/var/lib/docker
+  fi
+  CAP_MODE="$mode" CAP_RUNNING="${running:-0}" CAP_DOCKER_ROOT="$docker_root" \
+  CAP_WORKTREE="$WORKTREE_BASE" python3 - <<'PY'
+import os
+import shutil
+def f(k, d):
+    try: return float(os.environ[k])
+    except Exception: return d
+per_mem  = f("CFGMS_AGENT_MEM_MB", 4096) * 1024 * 1024
+per_cpu  = f("CFGMS_AGENT_CPUS", 4)
+per_disk = f("CFGMS_AGENT_DISK_GB", 8) * 1024**3
+mem_ceil  = f("CFGMS_AGENT_MEM_CEIL", 0.90)
+disk_ceil = f("CFGMS_AGENT_DISK_CEIL", 0.90)
+cpu_ceil  = f("CFGMS_AGENT_CPU_CEIL", 0.90)
+running = int(float(os.environ.get("CAP_RUNNING", "0") or 0))
+ncpu = os.cpu_count() or 1
+
+# Memory (skip the gate where /proc/meminfo is absent, e.g. a non-Linux host —
+# those don't launch containers anyway).
+mt = ma = 0
+try:
+    for ln in open("/proc/meminfo"):
+        if ln.startswith("MemTotal:"):     mt = int(ln.split()[1]) * 1024
+        elif ln.startswith("MemAvailable:"): ma = int(ln.split()[1]) * 1024
+except Exception:
+    pass
+
+def slots_for(budget, used, per):
+    # how many more `per`-sized units fit under `budget` given current `used`
+    if per <= 0: return 999
+    return int((budget - used) // per)
+
+slots = {}
+# RAM: bind on the worse of live utilisation and agent reservation (the latter
+# guards a from-idle thundering herd where current usage hasn't ballooned yet).
+if mt > 0:
+    used_mem = max(mt - ma, running * per_mem)
+    slots["mem"] = max(0, slots_for(mem_ceil * mt, used_mem, per_mem))
+# Disk: worst filesystem among the clone dir and the docker data root.
+# Neither path is guaranteed to exist yet — the worktree base is created on the
+# first clone, and the docker data root is absent wherever docker isn't
+# installed. shutil.disk_usage on a missing path raises, and swallowing that
+# left the disk dimension at its 999 sentinel, i.e. silently ungated on
+# exactly the first run. Measure the nearest existing ancestor instead: that
+# is the filesystem the directory would be created on, so its free space is
+# the figure the gate wants. shutil.disk_usage (not os.statvfs, which does not
+# exist on Windows and left this gate permanently unbounded there — Issue
+# #3686) is the cross-platform stdlib call for total/used/free bytes.
+def nearest_existing(path):
+    path = os.path.abspath(path)
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path: return None
+        path = parent
+    return path
+
+disk_slot = 999
+for raw in {os.environ.get("CAP_WORKTREE", ""), os.environ.get("CAP_DOCKER_ROOT", "")}:
+    if not raw: continue
+    p = nearest_existing(raw)
+    if not p: continue
+    try:
+        du = shutil.disk_usage(p)
+        disk_slot = min(disk_slot, max(0, slots_for(disk_ceil * du.total, du.used, per_disk)))
+    except Exception:
+        pass
+slots["disk"] = disk_slot
+# CPU: utilization-based, NOT a static per-agent core reservation. Agent
+# containers are bursty (short build/test spikes) and mostly I/O- and
+# network-bound (git clone, waiting on CI), so reserving a full `--cpus=4`
+# slice each caps the host far below real capacity — a 16-core box that ran
+# 5-7 agents fine would refuse a 4th. Instead gate on the measured 1-min load
+# average (actual run-queue depth). `per_cpu_load` is the expected *sustained*
+# load one agent contributes (bursty, ~1.5 cores), and blending with
+# `running * per_cpu_load` guards the same-cycle thundering herd: load average
+# lags fresh launches by ~1 min, so the estimate keeps a burst of dispatches in
+# one cron cycle from all reading the same stale-low load. Falls back to the
+# reservation estimate where getloadavg is unavailable (non-Linux).
+per_cpu_load = f("CFGMS_AGENT_CPU_LOAD", 1.5)
+try:
+    load1 = os.getloadavg()[0]
+except Exception:
+    load1 = running * per_cpu_load
+used_cpu = max(load1, running * per_cpu_load)
+slots["cpu"] = max(0, slots_for(cpu_ceil * ncpu, used_cpu, per_cpu_load))
+# Runaway backstop: never more than 2×ncpu agents regardless of headroom.
+slots["count"] = max(0, int(2 * ncpu) - running)
+
+free = min(slots.values()) if slots else 0
+reason = min(slots, key=slots.get) if slots else "unknown"
+if os.environ.get("CAP_MODE") == "json":
+    import json
+    print(json.dumps({"can_launch": free >= 1, "free_slots": free,
+                      "binding": reason, "running": running, "per_slot": slots}))
+else:
+    if free >= 1:
+        print(f"CAPACITY_OK:slots={free}")
+    else:
+        print(f"CAPACITY_FULL:{reason}:slots=0")
+raise SystemExit(0 if free >= 1 else 1)
+PY
+}
+
+# _capacity_gate <skip_label> <emit_prefix>
+#   Admission gate for a launch path. On capacity, returns 0 silently. When full,
+#   prints "<emit_prefix>:<label>:resources (<reason>)" and returns 1 — the caller
+#   should exit cleanly (defer to a later cycle/host). Bypass with
+#   CFGMS_AGENT_CAPACITY_GATE=off (e.g. tests).
+_capacity_gate() {
+  local label="$1" prefix="$2" out
+  [[ "${CFGMS_AGENT_CAPACITY_GATE:-on}" == "off" ]] && return 0
+  out=$(_capacity_compute line 2>/dev/null) || {
+    echo "${prefix}:${label}:resources (${out:-capacity full})"
+    return 1
+  }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Tier 1 credential lifecycle helpers (Issue #2124)
+# ---------------------------------------------------------------------------
+
+# _tier1_curl <method> <path> [curl-args...]
+# Authenticated curl call to the Tier 1 controller REST API.
+# Auth: uses CFGMS_TIER1_ADMIN_KEY (Bearer token) when set, otherwise extracts
+# mTLS cert+key from CFGMS_ADMIN_BUNDLE and uses --cert/--key.
+# Returns: curl output on stdout; curl exit code propagated.
+#
+# Test hook: set CFGMS_TEST_MOCK_TIER1_DIR to a directory containing mock
+# response files named <METHOD>_<sanitized-path> (e.g. POST__api_v1_tenants).
+# Non-alphanumeric chars in path are replaced with underscores. If a matching
+# file exists, its content is echoed and the function returns 0 — no real HTTP.
+_tier1_curl() {
+  local method="$1"; shift
+  local path="$1"; shift
+  local tier1_url="${CFGMS_TIER1_URL:-}"
+
+  # Test hook: file-based mock responses avoid bash variable-name constraints.
+  if [[ -n "${CFGMS_TEST_MOCK_TIER1_DIR:-}" && -d "${CFGMS_TEST_MOCK_TIER1_DIR}" ]]; then
+    local safe_path
+    safe_path=$(echo "$path" | tr -c 'a-zA-Z0-9' '_')
+    local mock_file="${CFGMS_TEST_MOCK_TIER1_DIR}/${method}_${safe_path}"
+    if [[ -f "$mock_file" ]]; then
+      cat "$mock_file"
+      return 0
+    fi
+    # No matching mock file → simulate connection error (controller unreachable).
+    echo "mock:no_response_for:${method}:${path}" >&2
+    return 1
+  fi
+
+  if [[ -z "$tier1_url" ]]; then
+    echo "CFGMS_TIER1_URL not set" >&2
+    return 1
+  fi
+
+  local curl_auth=()
+  local admin_key="${CFGMS_TIER1_ADMIN_KEY:-}"
+  if [[ -n "$admin_key" ]]; then
+    curl_auth=(-H "Authorization: Bearer ${admin_key}")
+  elif [[ -n "${CFGMS_ADMIN_BUNDLE:-}" ]] && [[ -f "${CFGMS_ADMIN_BUNDLE}" ]]; then
+    # Extract cert, key, CA from the bundle YAML into temp files.
+    local tmp_cert tmp_key tmp_ca
+    tmp_cert=$(mktemp /tmp/cfgms-dispatch-cert-XXXXXX.pem)
+    tmp_key=$(mktemp /tmp/cfgms-dispatch-key-XXXXXX.pem)
+    tmp_ca=$(mktemp /tmp/cfgms-dispatch-ca-XXXXXX.pem)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_cert' '$tmp_key' '$tmp_ca'" RETURN
+    python3 - "${CFGMS_ADMIN_BUNDLE}" "$tmp_cert" "$tmp_key" "$tmp_ca" <<'PY'
+import sys, re
+bundle_path, cert_out, key_out, ca_out = sys.argv[1:]
+text = open(bundle_path).read()
+def extract(name):
+    m = re.search(r'(?m)^' + name + r':\s*\|\s*\n((?:  .+\n?)*)', text)
+    if not m:
+        raise SystemExit(f"field {name} not found in bundle")
+    return re.sub(r'(?m)^  ', '', m.group(1))
+open(cert_out, 'w').write(extract('cert_pem'))
+open(key_out, 'w').write(extract('key_pem'))
+open(ca_out, 'w').write(extract('ca_pem'))
+PY
+    curl_auth=(--cert "$tmp_cert" --key "$tmp_key" --cacert "$tmp_ca")
+  else
+    echo "no auth available — set CFGMS_TIER1_ADMIN_KEY or CFGMS_ADMIN_BUNDLE" >&2
+    return 1
+  fi
+
+  curl -sf -X "$method" \
+    "${tier1_url}${path}" \
+    -H "Content-Type: application/json" \
+    "${curl_auth[@]}" \
+    "$@"
+}
+
+# restrict_to_owner <mode> <path>
+# Makes <path> readable by its owner only.
+#
+# chmod alone does not deliver that on every host this dispatcher runs on.
+# Under Git-Bash/MSYS the POSIX mode bits are synthesized, not stored: `chmod
+# 600` on a credential file leaves stat reporting 644 and, more importantly,
+# leaves the file's real access control — the NTFS DACL — untouched, so the
+# inherited "Users"/"Authenticated Users" read ACEs survive. A minted API key
+# written that way is readable by every local account on the box. Applying the
+# mode AND, on Windows, replacing the DACL with a single owner ACE makes the
+# guarantee the comments claim true on both platforms.
+restrict_to_owner() {
+  local mode="$1" path="$2"
+  chmod "$mode" "$path"
+  case "$OSTYPE" in
+    msys*|cygwin*|win32*)
+      # (OI)(CI) so a directory's restriction is inherited by the credential
+      # files created inside it. MSYS2_ARG_CONV_EXCL stops the msys argument
+      # mangler rewriting icacls' /inheritance and /grant switches into
+      # filesystem paths.
+      local ace="(F)"
+      [[ -d "$path" ]] && ace="(OI)(CI)(F)"
+      MSYS2_ARG_CONV_EXCL='*' icacls "$(cygpath -w "$path")" \
+        /inheritance:r /grant:r "$(whoami):${ace}" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+# agent_trust_file <slug>
+# Writes a minimal per-container ~/.claude.json marking /workspace as trusted and
+# echoes its path, for mounting at /home/agent/.claude.json.
+#
+# Without this file a headless agent logs
+#   "Ignoring N permissions.allow entries from .claude/settings.json:
+#    this workspace has not been trusted"
+# and runs with its entire allowlist discarded, so routine calls hit the
+# permission classifier. The interactive paths (launch-interactive, po-live)
+# never showed the symptom because they mount the host's real ~/.claude.json,
+# which already carries the trust entry.
+#
+# Deliberately NOT mounting the host's ~/.claude.json here. Two reasons:
+#   1. It is the founder's full project history (tens of KB, every repo they
+#      have opened) and autonomous containers have no business reading it.
+#   2. It is mounted read-write, so N concurrent agents plus the host session
+#      race on one file. That is how the /workspace entry went missing in the
+#      first place: four containers on 2026-09-16 logged the untrusted warning
+#      while the host file did carry the entry by the time it was inspected.
+# A per-container file removes the race entirely — nothing else writes it.
+agent_trust_file() {
+  local slug="$1"
+  # NOT under AGENT_CRED_BASE: that is /run/cfgms/agent-cred, root-owned 0755,
+  # so mkdir there fails for the dispatching user. It failed quietly enough that
+  # the launch still proceeded, and docker then created a *directory* at the
+  # mount target — leaving /home/agent/.claude.json as a directory, which is
+  # worse than the missing-trust bug this helper exists to fix.
+  local dir="${CFGMS_AGENT_TRUST_BASE:-${HOME}/.cache/cfgms-agent-trust}/${slug}"
+
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "ERROR: cannot create agent trust dir: ${dir}" >&2
+    return 1
+  fi
+
+  # Claude writes session state back to this file, so it must be writable and
+  # must not be shared between containers.
+  if ! printf '{"projects":{"/workspace":{"hasTrustDialogAccepted":true}}}\n' > "${dir}/.claude.json" 2>/dev/null; then
+    echo "ERROR: cannot write agent trust file: ${dir}/.claude.json" >&2
+    return 1
+  fi
+  chmod 600 "${dir}/.claude.json"
+  printf '%s' "${dir}/.claude.json"
+}
+
+# mint_agent_creds <num>
+# Creates agent-test/<num> sub-tenant (idempotent) and issues an agent.dev-scoped
+# API key. Writes key value to ${AGENT_CRED_BASE}/<num>/api.key (0600) and the
+# key ID to ${AGENT_CRED_BASE}/<num>/api.key.id (0600).
+# On failure: emits CRED_MINT_FAILED:<reason> and returns non-zero.
+mint_agent_creds() {
+  local num="$1"
+  local cred_dir="${AGENT_CRED_BASE}/${num}"
+  local tenant_id="agent-test/${num}"
+
+  # Create and secure the per-agent cred dir.
+  mkdir -p "$cred_dir"
+  restrict_to_owner 700 "$cred_dir"
+
+  # 1. Create agent-test sub-tenant (idempotent — 409 is success).
+  local create_resp http_code
+  create_resp=$(_tier1_curl POST /api/v1/tenants \
+    -d "{\"id\":\"${num}\",\"name\":\"Agent Test ${num}\",\"parent_id\":\"agent-test\"}" 2>&1) || {
+    # Check if it was a 409 conflict — tenant already exists, continue.
+    if echo "$create_resp" | grep -q "TENANT_EXISTS\|409\|already exists"; then
+      : # idempotent
+    else
+      rm -rf "$cred_dir"
+      echo "CRED_MINT_FAILED:tenant_create:${create_resp}"
+      return 1
+    fi
+  }
+
+  # 2. Issue agent.dev-scoped API key bound to agent-test/<num>.
+  local key_resp key_value key_id
+  key_resp=$(_tier1_curl POST /api/v1/api-keys \
+    -d "{\"name\":\"agent-${num}\",\"role_id\":\"agent.dev\",\"tenant_id\":\"${tenant_id}\"}" 2>&1) || {
+    rm -rf "$cred_dir"
+    echo "CRED_MINT_FAILED:apikey_create:${key_resp}"
+    return 1
+  }
+
+  # Extract key value and ID from the response envelope.
+  key_value=$(echo "$key_resp" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('data', {}).get('key', '') or d.get('key', ''))
+" 2>/dev/null || true)
+  key_id=$(echo "$key_resp" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('data', {}).get('id', '') or d.get('id', ''))
+" 2>/dev/null || true)
+
+  if [[ -z "$key_value" || -z "$key_id" ]]; then
+    rm -rf "$cred_dir"
+    local missing_fields=""
+    [[ -z "$key_value" ]] && missing_fields+="key,"
+    [[ -z "$key_id" ]] && missing_fields+="id,"
+    echo "CRED_MINT_FAILED:apikey_parse:missing=${missing_fields%,}"
+    return 1
+  fi
+
+  # 3. Write credential files (600 — no world or group read).
+  printf '%s' "$key_value" > "${cred_dir}/api.key"
+  restrict_to_owner 600 "${cred_dir}/api.key"
+  printf '%s' "$key_id" > "${cred_dir}/api.key.id"
+  restrict_to_owner 600 "${cred_dir}/api.key.id"
+
+  echo "CRED_MINTED:${num}:${key_id}"
+}
+
+# revoke_agent_creds <num>
+# Deletes the API key and suspends the agent-test/<num> sub-tenant.
+# Idempotent: missing cred dir emits INFO:no_cred_to_revoke:<num> and returns 0.
+# Controller-unreachable: records failure to revoke-failed.txt (0600); never blocks cleanup.
+revoke_agent_creds() {
+  local num="$1"
+  local cred_dir="${AGENT_CRED_BASE}/${num}"
+  local tenant_id="agent-test/${num}"
+
+  if [[ ! -d "$cred_dir" ]]; then
+    echo "INFO:no_cred_to_revoke:${num}"
+    return 0
+  fi
+
+  local key_id_file="${cred_dir}/api.key.id"
+  local revoke_failed_file="${cred_dir}/revoke-failed.txt"
+  local errors=()
+
+  # 1. Delete the API key (key lookup miss → immediate 401, no cache flush needed).
+  if [[ -f "$key_id_file" ]]; then
+    local key_id
+    key_id=$(cat "$key_id_file")
+    local del_resp
+    del_resp=$(_tier1_curl DELETE "/api/v1/api-keys/${key_id}" 2>&1) || {
+      local ts
+      ts=$(date -u +%s 2>/dev/null || echo "unknown")
+      errors+=("${key_id} ${ts} apikey_delete:${del_resp}")
+    }
+    if [[ ${#errors[@]} -eq 0 ]]; then
+      echo "CRED_REVOKED:apikey:${key_id}"
+    fi
+  else
+    echo "INFO:no_key_id_file:${num}"
+  fi
+
+  # 2. Suspend the agent sub-tenant.
+  local susp_resp
+  susp_resp=$(_tier1_curl POST "/api/v1/tenants/${tenant_id}/suspend" 2>&1) || {
+    local ts
+    ts=$(date -u +%s 2>/dev/null || echo "unknown")
+    errors+=("${tenant_id} ${ts} tenant_suspend:${susp_resp}")
+  }
+  if [[ ${#errors[@]} -eq 0 || ( ${#errors[@]} -eq 1 && "${errors[0]}" != *"tenant_suspend"* ) ]]; then
+    echo "CRED_REVOKED:tenant:${tenant_id}"
+  fi
+
+  # Record any revocation failures for manual follow-up (never block cleanup).
+  if [[ ${#errors[@]} -gt 0 ]]; then
+    printf '%s\n' "${errors[@]}" >> "$revoke_failed_file"
+    restrict_to_owner 600 "$revoke_failed_file"
+    for err in "${errors[@]}"; do
+      echo "WARN:revoke_failed:${num}:${err}"
+    done
+  fi
+}
+
 # Ensure clone is based on latest remote develop, not stale local state.
 # Called inside fresh clones after setting the remote URL.
 sync_to_remote_develop() {
@@ -26,6 +765,177 @@ validate_branch() {
 # Sanitize branch name for use in container/directory names: / → --
 sanitize_branch() {
   echo "$1" | sed 's|/|--|g'
+}
+
+# _review_refusal_hint <reason>
+#   Static reason -> recovery-hint lookup for review-pr's REVIEW_REFUSED
+#   output. Keeping this table in code (not in dispatch.md/po.md prose) means
+#   the explanation ships in the same line the caller already has to read to
+#   decide what to do next — no standing doc token cost paid every cycle for
+#   refusals that mostly don't happen — and it can't drift out of sync with
+#   the reasons the script actually emits the way the prose version did.
+#   Every reason token below is a fixed, unconditional fact about what
+#   happened; genuinely diagnostic questions ("why did CI fail on this PR",
+#   "why was this PR evicted from the merge queue") are deliberately NOT
+#   handled here — those need an agent to read logs/timelines and judge, so
+#   they stay on the `po-act.sh diagnose` / `investigate_queue_failures` path.
+# Args: <reason>  (a REVIEW_REFUSED reason token, wildcard suffixes allowed)
+# Stdout: a short recovery hint, or empty string if none is defined.
+_review_refusal_hint() {
+  local reason="$1"
+  case "$reason" in
+    pr_not_found)
+      echo "PR does not exist, or the API lookup failed." ;;
+    pr_state_*)
+      echo "PR is not OPEN (closed or merged) — nothing to review." ;;
+    fork_branch_*)
+      echo "PR is from a fork — fork PR reviews aren't supported (no push rights)." ;;
+    external_author_*)
+      echo "author isn't a trusted push+/maintain/admin collaborator; a quarantine comment was posted. Needs a maintainer to apply human-reviewed:ok before this is retried." ;;
+    no_story_link)
+      echo "no Fixes/Closes/Resolves #N in the body and no feature/story-N branch — manually associate a story or skip." ;;
+    no_project_item_for_story_*)
+      echo "story number resolved but no matching project item was found — check the project board." ;;
+    already_in_flight)
+      echo "a review container for this PR is still running — another review is genuinely in progress. Check /isoagents; no action needed." ;;
+    container_exists)
+      echo "a review container for this PR exited NON-ZERO (crashed) and is kept for diagnosis — inspect it with './.claude/scripts/agent-dispatch.sh inspect-container cfg-agent-review-pr-<PR>', then clear it with 'cleanup-container cfg-agent-review-pr-<PR>' and retry. (A cleanly-exited container is reaped automatically and never reaches this refusal.)" ;;
+    lease_held)
+      echo "another host holds the pr-<N> lease (reviewing/fixing/rebasing this PR) — wait for it to release." ;;
+    lease_error)
+      echo "lease acquisition failed unexpectedly — check './scripts/pipeline-helper.sh lease-acquire' directly." ;;
+    no_new_commit_since_review)
+      echo "head is unchanged since the last acceptance review — a re-review would re-reach the same verdict. Dispatch a fix (po-act.sh dispatch-fix <PR>) so a commit lands first, or pass --force if the acceptance criteria changed rather than the code." ;;
+    merge_conflicts)
+      echo "PR conflicts with develop (mergeStateStatus=DIRTY), so GitHub builds no merge ref and NO pull_request workflow runs for it — a reviewer would judge it with zero CI evidence. Clear the conflict first: './.claude/scripts/rebase-pr.sh <PR>', escalating to resolve-conflict on REBASE_CONFLICT, then review." ;;
+    *)
+      echo "" ;;
+  esac
+}
+
+# _review_is_stale <pr_num>
+#   Exit 0 when the PR already carries an acceptance-review comment and no
+#   commit has landed since it — i.e. a re-review would evaluate the exact same
+#   tree and necessarily reach the same verdict. Exit 1 otherwise (reviewable).
+#
+# Why this lives here and not only in the preflight: po-cycle-preflight.py
+# already skips this case, but it is advisory — a direct `review-pr <N>` call
+# bypasses it entirely. Three of six review dispatches in one cron cycle
+# re-confirmed an identical FAIL on an unmoved head because of exactly that
+# bypass, and each wasted review also risks tripping the reviewer's
+# second-failure escalation to Blocked. The dispatcher is the enforcement point.
+#
+# Staleness is decided by comparing the newest commit's committedDate against
+# the newest trusted review comment's createdAt — the same signal
+# fix_landed_after_review() uses in the preflight, kept deliberately identical
+# so the two layers cannot disagree. Trust requires BOTH the machine sentinel
+# (or the legacy '## Acceptance Review' heading) AND a push+ author, mirroring
+# is_trusted_review_comment(): a text match alone would let any commenter forge
+# a review and permanently wedge a PR out of review.
+#
+# Fails OPEN (returns "not stale") whenever the data is missing or unparseable.
+# A wrongly-allowed review costs one cycle; a wrongly-refused one strands a PR.
+_review_is_stale() {
+  local pr_num="$1"
+  local pr_json latest_commit latest_review
+
+  pr_json=$(gh pr view "$pr_num" --repo cfg-is/cfgms \
+    --json comments,commits 2>/dev/null) || return 1
+  [[ -n "$pr_json" ]] || return 1
+
+  latest_commit=$(echo "$pr_json" | jq -r '[.commits[].committedDate] | max // empty' 2>/dev/null || echo "")
+  [[ -n "$latest_commit" ]] || return 1
+
+  # Newest comment that is both sentinel/heading-matched and push+ authored.
+  latest_review=""
+  local c_date c_author c_body
+  while IFS=$'\t' read -r c_date c_author c_body; do
+    [[ -n "$c_date" ]] || continue
+    case "$c_body" in
+      *"<!-- cfgms-acceptance-review -->"*|*"## acceptance review"*) ;;
+      *) continue ;;
+    esac
+    [[ "$(_check_author_permission "$c_author" "$pr_num" "")" == "internal" ]] || continue
+    [[ "$c_date" > "$latest_review" ]] && latest_review="$c_date"
+  done < <(echo "$pr_json" | jq -r '.comments[] | [.createdAt, (.author.login // ""), (.body | ascii_downcase | gsub("\t|\n";" "))] | @tsv' 2>/dev/null)
+
+  [[ -n "$latest_review" ]] || return 1
+
+  # ISO-8601 UTC sorts lexicographically. Stale when no commit is newer.
+  [[ "$latest_commit" > "$latest_review" ]] && return 1
+  return 0
+}
+
+# _emit_review_refused <pr_num> <reason>
+#   Prints "REVIEW_REFUSED:<pr>:<reason>" with its hint appended when one
+#   exists, then exits 3. Centralizes the format so every review-pr refusal
+#   site stays consistent and self-explanatory without a doc lookup.
+_emit_review_refused() {
+  local pr_num="$1" reason="$2" hint
+  hint=$(_review_refusal_hint "$reason")
+  if [[ -n "$hint" ]]; then
+    echo "REVIEW_REFUSED:${pr_num}:${reason}: ${hint}"
+  else
+    echo "REVIEW_REFUSED:${pr_num}:${reason}"
+  fi
+  exit 3
+}
+
+# Classify an existing cfg-agent-review-pr-<N> container's `docker ps`
+# `.State` value into the REVIEW_REFUSED reason review-pr should emit.
+#
+# Args: <docker_state> [exit_code]
+#   docker_state — e.g. "running", "exited", "restarting", "created"
+#   exit_code    — the container's `.State.ExitCode`; optional. Omit it (or pass
+#                  a non-zero/unknown value) to get the conservative answer.
+# Stdout, one of:
+#   already_in_flight — still alive; the caller should wait, not act
+#   reap_clean        — exited 0: finished its review, posted its comment, and
+#                       released its lease. Nothing to preserve — the caller
+#                       should remove it and proceed.
+#   container_exists  — exited non-zero (or state unknown): a crash. Preserve it
+#                       for inspection and refuse.
+#
+# Why `reap_clean` exists: `cleanup-stale-reviews` only reaps review containers
+# that exited more than 30 minutes ago, so for 30 minutes after ANY successful
+# review the same PR could not be re-reviewed — and the `container_exists` hint
+# pointed at `cleanup-stale-reviews`, which is guaranteed to no-op inside that
+# window. During an active drain a PR routinely gets a fix or rebase well inside
+# 30 minutes, so this blocked legitimate re-reviews (hit on PR #3150). The
+# 30-minute grace exists to keep a *crashed* container around for diagnosis; a
+# clean exit has already produced its artifact and has nothing to diagnose.
+#
+# Split out so the distinction is a plain lookup instead of an inline
+# conditional a caller has to re-derive from `docker ps` output — and so it's
+# unit-testable without a live docker daemon.
+_classify_review_container_state() {
+  local state="$1"
+  local exit_code="${2-}"
+  case "$state" in
+    running|restarting|created) echo "already_in_flight" ;;
+    exited)
+      if [[ "$exit_code" == "0" ]]; then echo "reap_clean"; else echo "container_exists"; fi ;;
+    *)                          echo "container_exists" ;;
+  esac
+}
+
+# _container_safe_to_reap <docker_state>
+#   True (exit 0) only when a container's `docker ps` `.State` is exactly
+#   "exited" — the coarser two-way split (reap vs. do-not-touch) used by
+#   launch paths that have no crash-diagnosis need of their own. Every other
+#   value — running, restarting, created, or anything unrecognized — fails
+#   CONSERVATIVE: false, i.e. "leave it alone."
+#
+# Why this doesn't reuse _classify_review_container_state's three-way split
+# (Issue #3930): that function preserves a non-zero-exit container for human
+# inspection (review-pr posts no completion signal anywhere else, so the
+# container is the only crash evidence). An investigator's crash is already
+# captured by ledger_append_launch_failed and its own session directory, so
+# nothing is lost by reaping it unconditionally on the next launch attempt —
+# and requiring a clean exit before reaping would leave a sweep's `resume`
+# permanently stuck on any lane whose prior attempt happened to crash.
+_container_safe_to_reap() {
+  [[ "$1" == "exited" ]]
 }
 
 # Resolve which story or project item a PR belongs to from its branch name
@@ -61,6 +971,41 @@ resolve_pr_story_or_item() {
   fi
   echo "REFUSED:no_story_link"
   return 0
+}
+
+# Delete a leftover remote story branch before a fresh dispatch -- but only when
+# it carries no work. A dev agent that commits and then dies before opening a PR
+# (e.g. a revoked OAuth token mid-run) leaves its only copy of that work on this
+# branch; deleting it on re-dispatch destroys the work (Issue #4272). So:
+#   - commits not on origin/develop -> print STALE_BRANCH_HAS_WORK:<branch>:<n>
+#     and return 4 without deleting. Salvage it into a PR instead.
+#   - the count cannot be established -> treat as work (return 4). A wrongly
+#     kept branch costs a manual look; a wrongly deleted one loses the work.
+#   - no commits ahead -> delete with --no-verify. A deletion pushes no code,
+#     so the host's pre-push hook (a full `make test`) has nothing to check,
+#     and letting it run stalled dispatch for minutes and failed it outright
+#     whenever that test run failed.
+# Returns 0 when the branch is absent or was deleted, 1 when the delete failed.
+delete_stale_remote_branch() {
+  local branch="$1" ahead
+  git -C "$REPO_ROOT" ls-remote --heads origin "$branch" 2>/dev/null | grep -q . || return 0
+  if ! git -C "$REPO_ROOT" fetch -q origin develop \
+        "+refs/heads/${branch}:refs/remotes/origin/${branch}" 2>/dev/null \
+     || ! ahead=$(git -C "$REPO_ROOT" rev-list --count \
+        "origin/develop..origin/${branch}" 2>/dev/null); then
+    echo "ERROR: could not count commits on '${branch}' ahead of develop; keeping it."
+    echo "STALE_BRANCH_HAS_WORK:${branch}:unknown"
+    return 4
+  fi
+  if [[ "$ahead" != "0" ]]; then
+    echo "ERROR: '${branch}' has ${ahead} commit(s) not on develop. Refusing to delete it."
+    echo "       Open a PR from it and dispatch a fix agent, or delete it by hand if it is junk."
+    # Marker last: callers read this through `| tail -1`.
+    echo "STALE_BRANCH_HAS_WORK:${branch}:${ahead}"
+    return 4
+  fi
+  echo "Cleaning stale remote branch: ${branch}"
+  git -C "$REPO_ROOT" push --no-verify origin --delete "$branch" 2>&1 || return 1
 }
 
 # Emit OPEN_PR_EXISTS:<ISSUE>:<PR>:<TITLE> for each open PR that references
@@ -104,28 +1049,138 @@ check_existing_prs_for_issue() {
   return 0
 }
 
-# Refresh agent credentials from the host's Claude session.
-# Copies ~/.claude/.credentials.json into the claude-creds Docker volume
-# so agents always start with a fresh token. No interactive OAuth needed.
-refresh_creds_from_host() {
-  local host_creds="$HOME/.claude/.credentials.json"
-  if [ ! -f "$host_creds" ]; then
-    echo "WARN: No host credentials at $host_creds — agents may fail auth"
+# ---------------------------------------------------------------------------
+# External-author trust gate helpers (Issue #1786)
+# ---------------------------------------------------------------------------
+
+# _check_author_permission <login> [<pr_num>] [<pr_labels_newline_separated>]
+# Classifies a PR author as "internal" or "external:<reason>".
+# Trusts only push/maintain/admin collaborators (fail-closed on any API error).
+# When external and the release marker human-reviewed:ok is present (and was
+# applied by a push+ actor), returns "internal" (PR has been released).
+#
+# Test hooks (all env vars, only active when set):
+#   CFGMS_TEST_COLLAB_PERM   — override the author's permission lookup
+#   CFGMS_TEST_ACTOR_LOGIN   — override the GraphQL actor-login lookup (set to
+#                              empty to simulate "no actor found"; use +x check)
+#   CFGMS_TEST_ACTOR_PERM    — override the label-actor's permission lookup;
+#                              falls back to CFGMS_TEST_COLLAB_PERM if unset
+_check_author_permission() {
+  local login="$1"
+  local pr_num="${2:-}"
+  local pr_labels_str="${3:-}"
+
+  if [[ -z "$login" ]]; then
+    echo "external:null_author"
     return 0
   fi
-  docker run --rm --entrypoint bash \
-    -v claude-creds:/persist \
-    -v "$host_creds:/host-creds.json:ro" \
-    cfg-agent:latest \
-    -c "cp /host-creds.json /persist/.credentials.json" 2>/dev/null \
-    && echo "Refreshed agent credentials from host session" \
-    || echo "WARN: Failed to refresh credentials from host"
+
+  local perm
+  if [[ -n "${CFGMS_TEST_COLLAB_PERM:-}" ]]; then
+    perm="$CFGMS_TEST_COLLAB_PERM"
+  else
+    perm=$(gh api "repos/cfg-is/cfgms/collaborators/${login}/permission" \
+      --jq '.permission // ""' 2>/dev/null || echo "")
+  fi
+
+  if [[ "$perm" == "push" || "$perm" == "maintain" || "$perm" == "admin" ]]; then
+    echo "internal"
+    return 0
+  fi
+
+  # External author — check for a valid human-reviewed:ok release marker (AC5).
+  # Only the label presence is checked here; actor affiliation is verified below.
+  if [[ -n "$pr_num" ]] && echo "$pr_labels_str" | grep -qx "human-reviewed:ok" 2>/dev/null; then
+    local actor_login
+    if [[ -n "${CFGMS_TEST_ACTOR_LOGIN+x}" ]]; then
+      actor_login="${CFGMS_TEST_ACTOR_LOGIN}"
+    else
+      local tl_gql
+      tl_gql="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { timelineItems(itemTypes: [LABELED_EVENT], first: 50) { nodes { ... on LabeledEvent { label { name } actor { login } } } } } } }"
+      actor_login=$(gh api graphql -f "query=${tl_gql}" \
+        --jq '[.data.repository.pullRequest.timelineItems.nodes[] | select(.label.name == "human-reviewed:ok") | .actor.login] | last // ""' \
+        2>/dev/null || echo "")
+    fi
+    if [[ -n "$actor_login" ]]; then
+      local actor_perm
+      if [[ -n "${CFGMS_TEST_ACTOR_PERM+x}" ]]; then
+        actor_perm="${CFGMS_TEST_ACTOR_PERM}"
+      elif [[ -n "${CFGMS_TEST_COLLAB_PERM:-}" ]]; then
+        actor_perm="$CFGMS_TEST_COLLAB_PERM"
+      else
+        actor_perm=$(gh api "repos/cfg-is/cfgms/collaborators/${actor_login}/permission" \
+          --jq '.permission // ""' 2>/dev/null || echo "")
+      fi
+      if [[ "$actor_perm" == "push" || "$actor_perm" == "maintain" || "$actor_perm" == "admin" ]]; then
+        echo "internal"  # Released by push+ collaborator (AC5)
+        return 0
+      fi
+    fi
+  fi
+
+  echo "external:${perm:-api_error}"
+  return 0
 }
 
-# Gate on credential validity before launching any agent container.
-# Threshold: 30 minutes (raised from 15; a 401 was observed at 27 min remaining).
+# _post_quarantine_comment <pr_num> <author_login>
+# Posts a best-effort quarantine notice on the PR. Idempotent (duplicate comments
+# are harmless). Uses || true so a failed comment never aborts the caller.
+_post_quarantine_comment() {
+  local pr_num="$1"
+  local author_login="${2:-unknown}"
+  gh pr comment "$pr_num" --repo cfg-is/cfgms \
+    --body "**External-author PR quarantined.** Author \`${author_login}\` is not a trusted (\`push\`/\`maintain\`/\`admin\`) repository collaborator. The autonomous pipeline will not fetch, review, rebase, fix, or merge this PR until a maintainer applies the \`human-reviewed:ok\` label (verified to push+ actor). See \`docs/development/external-contributors.md\` for the contributor triage and release process." \
+    2>/dev/null || true
+}
+
+# _branch_author_gate <branch>
+#   External-author gate for create-clone-branch (Issue #1786, closed for this
+#   path by #4343). create-clone-pr and review-pr both check trust BEFORE any
+#   clone/fetch of PR content; create-clone-branch had no such check, even
+#   though it is reachable with a bare branch name from the "dispatch
+#   interactive <branch>" path (.claude/commands/dispatch.md) -- a PR opened
+#   from an external/untrusted branch could be cloned and handed straight to
+#   `claude` there. A branch with no open PR (the common case: the agent's own
+#   fresh work, or a human-named branch with nothing to quarantine) needs no
+#   check -- nothing about it is "a pull request's own branch" yet.
+#
+# Stdout: "internal" (no open PR, or PR author is trusted -- proceed) or
+#   "external:<pr_num>:<author_login>:<trust>" (PR author gate failed --
+#   caller must quarantine and refuse). Never fails the caller: a `gh`/`jq`
+#   error resolves to "internal" (fail OPEN on the lookup itself) exactly like
+#   the branch-has-no-PR case, since the alternative -- refusing every branch
+#   dispatch whenever `gh` has a transient hiccup -- would break the common,
+#   safe case (the agent's own branch) far more often than it would catch a
+#   genuine external PR.
+_branch_author_gate() {
+  local branch="$1"
+  local pr_meta pr_num pr_author trust
+  pr_meta=$(gh pr list --repo cfg-is/cfgms --head "$branch" --state open \
+    --json number,author --jq '.[0] // empty' 2>/dev/null || echo "")
+  [[ -n "$pr_meta" ]] || { echo "internal"; return 0; }
+  pr_num=$(echo "$pr_meta" | jq -r '.number')
+  pr_author=$(echo "$pr_meta" | jq -r '.author.login // empty')
+  trust=$(_check_author_permission "$pr_author" "$pr_num" "")
+  if [[ "$trust" != "internal" ]]; then
+    echo "external:${pr_num}:${pr_author}:${trust}"
+  else
+    echo "internal"
+  fi
+}
+
+# Gate on credential availability before launching any agent container.
+#
+# Agent containers bind-mount the host's live ~/.claude/.credentials.json
+# (see the launch paths) — the same file the host and po-live use. They track
+# host token rotations live and refresh the token in place, exactly like an
+# interactive session. So a LOW or even EXPIRED token is NOT a launch blocker:
+# the agent's entrypoint refreshes it on startup and stays current thereafter.
+# Only a genuinely missing or unparseable creds file actually blocks a launch.
+#
+# This replaces the old copy-into-claude-creds-volume model, where a launched
+# agent held a frozen copy that the host's next token rotation silently
+# invalidated — the 401s observed on cfg-agent-1570 / review-pr-1589 (#1594).
 # Sets CFGMS_TEST_CREDS_STATUS to inject a synthetic result in hermetic tests.
-# Exits 10 with DISPATCH_DEFERRED:creds_low:<result> if creds are insufficient.
 gate_credentials_for_launch() {
   local creds_status
   if [[ -n "${CFGMS_TEST_CREDS_STATUS:-}" ]]; then
@@ -134,16 +1189,488 @@ gate_credentials_for_launch() {
     creds_status=$(bash "$0" check-creds 2>/dev/null)
   fi
   case "$creds_status" in
-    CREDS_OK:*) ;;
-    CREDS_LOW:*|CREDS_EXPIRED:*|CREDS_MISSING:*|CREDS_ERROR:*)
-      echo "DISPATCH_DEFERRED:creds_low:${creds_status}"
+    CREDS_OK:*|CREDS_LOW:*|CREDS_EXPIRED:*) ;;
+    CREDS_MISSING:*|CREDS_ERROR:*)
+      echo "DISPATCH_DEFERRED:creds_missing:${creds_status}"
       exit 10
       ;;
     *)
-      echo "DISPATCH_DEFERRED:creds_low:check_creds_unknown:${creds_status}"
+      echo "DISPATCH_DEFERRED:creds_missing:check_creds_unknown:${creds_status}"
       exit 10
       ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# Build-inputs staleness gate (Issue #4388).
+#
+# Nothing rebuilds cfg-agent:latest when .devcontainer/ changes on develop.
+# Some of the scripts that image runs (review-entrypoint.sh,
+# investigator-entrypoint.sh, agent-context.sh, setup-env.sh) are ALSO
+# bind-mounted fresh from this checkout at every launch, so a merge that
+# changes their contract can combine a new mounted script with an old image.
+# That is exactly what happened on 2026-09-28: PR #4378 moved the entrypoint
+# to root-then-drop, the mounted review-entrypoint.sh started running as
+# uid 1000 against an image still on Config.User=agent, and every review
+# container died silently for ~50 minutes until a manual rebuild.
+#
+# cfg-agent:latest carries a `cfgms.build_inputs_hash` label — the git tree
+# hash of `.devcontainer` at HEAD (the Dockerfile's own COPY sources and the
+# exact directory every runtime-mounted script above lives under). The
+# documented build command in .claude/commands/agent-setup.md sets it.
+# ---------------------------------------------------------------------------
+IMAGE_REBUILD_LOCK="${CFGMS_TEST_IMAGE_REBUILD_LOCK:-${AGENT_LEDGER_DIR}/image-rebuild.lock}"
+
+# _image_build_inputs_hash — this checkout's build-inputs identity. Empty if
+# REPO_ROOT is not a git checkout (never true in production).
+_image_build_inputs_hash() {
+  git -C "$REPO_ROOT" rev-parse "HEAD:.devcontainer" 2>/dev/null || true
+}
+
+# _image_build_inputs_label — cfg-agent:latest's recorded build-inputs
+# identity. Empty if the image or the label is absent.
+_image_build_inputs_label() {
+  docker inspect cfg-agent:latest \
+    --format '{{index .Config.Labels "cfgms.build_inputs_hash"}}' 2>/dev/null || true
+}
+
+# _resolve_claude_code_version — the npm `stable` dist-tag for
+# @anthropic-ai/claude-code, resolved once per rebuild so the
+# CLAUDE_CODE_VERSION_OVERRIDE build-arg passed to `docker build` and the
+# `cfgms.claude_code_version` label it stamps always agree (Issue #4473:
+# Claude Code is exempt from the pin-and-cooldown policy every other tool in
+# .devcontainer/Dockerfile follows -- it installs whatever is current at
+# build time instead of a hand-maintained version). Pinning the resolved
+# value via the override build-arg, rather than leaving the Dockerfile's own
+# `@stable` resolution to run unobserved inside the RUN step, is what makes
+# the label trustworthy: a label can only be set from a value this shell
+# already knows, and a plain `docker build` with no args has no way to learn
+# what `@stable` resolved to inside the layer.
+#
+# Falls back to the literal string "stable" if the registry can't be
+# resolved from this host -- the build must not fail just because this host
+# (not the build's own network) can't reach npm; passing "stable" through
+# unchanged lets the Dockerfile's own `@stable` install path (used by a bare
+# `docker build` too) resolve it the normal way, and the label will truthfully
+# read "stable" rather than claim a version this shell never actually verified.
+_resolve_claude_code_version() {
+  local resolved
+  resolved=$(curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code" 2>/dev/null \
+    | jq -r '.["dist-tags"].stable // empty' 2>/dev/null) || true
+  if [[ -z "$resolved" || "$resolved" == "null" ]]; then
+    echo "stable"
+    return 0
+  fi
+  echo "$resolved"
+}
+
+# _image_rebuild__body <checkout_hash> — the guarded section of a rebuild:
+# re-checks freshness (another launch may have rebuilt while this one waited
+# on the lock), tags the current image as a timestamped backup so a bad build
+# can be rolled back by hand, then rebuilds. Echoes REBUILD_OK or
+# REBUILD_FAILED; never raises — the caller decides what a failure means.
+#
+# Test hook: CFGMS_TEST_IMAGE_REBUILD_CMD replaces `docker build` for
+# hermetic tests, same shape as CFGMS_TEST_SMOKE_RUN_CMD above.
+_image_rebuild__body() {
+  local checkout_hash="$1"
+
+  local current_label
+  current_label=$(_image_build_inputs_label)
+  if [[ -n "$current_label" && "$current_label" == "$checkout_hash" ]]; then
+    echo "REBUILD_OK"
+    return 0
+  fi
+
+  if docker image inspect cfg-agent:latest >/dev/null 2>&1; then
+    docker tag cfg-agent:latest "cfg-agent:backup-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+  fi
+
+  local build_exit=0
+  if [[ -n "${CFGMS_TEST_IMAGE_REBUILD_CMD:-}" ]]; then
+    bash -c "${CFGMS_TEST_IMAGE_REBUILD_CMD}" >&2 || build_exit=$?
+  else
+    local cc_version
+    cc_version=$(_resolve_claude_code_version)
+    docker build \
+      --label "cfgms.build_inputs_hash=${checkout_hash}" \
+      --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${cc_version}" \
+      --label "cfgms.claude_code_version=${cc_version}" \
+      -t cfg-agent:latest \
+      -f "${REPO_ROOT}/.devcontainer/Dockerfile" \
+      "${REPO_ROOT}" >&2 || build_exit=$?
+  fi
+
+  if [[ $build_exit -ne 0 ]]; then
+    echo "REBUILD_FAILED"
+    return 1
+  fi
+  echo "REBUILD_OK"
+}
+
+# Liveness probing below runs once per 0.2s spin iteration, for up to the full
+# 3000-iteration budget, so every helper here answers through shell builtins
+# and shared state rather than a command substitution or an external binary.
+# That is a correctness requirement, not a micro-optimisation: the first cut of
+# this code forked sed three times plus hostname, ps and tr on every iteration,
+# which measured ~71ms of probe cost per iteration on a container host — the
+# budget that is supposed to bound the wait at 3000 x 0.2s = 600s (matching the
+# flock branch's -w 600) instead bounded it at ~810s, and a test that spins the
+# budget with sleep stubbed out still took >210s of pure fork overhead.
+_IMAGE_REBUILD_HOSTNAME=""
+_IMAGE_REBUILD_PROC_START=""
+_IMAGE_REBUILD_HOLDER_PID=""
+_IMAGE_REBUILD_HOLDER_HOST=""
+_IMAGE_REBUILD_HOLDER_START=""
+
+# _image_rebuild_hostname — best-effort host identity for the fallback lock's
+# holder record, published in _IMAGE_REBUILD_HOSTNAME rather than on stdout so
+# that reading it costs no command substitution. Resolved once per process and
+# memoised: a host does not rename itself mid-rebuild. Never fails the caller —
+# falls back to a fixed string if neither hostname(1) nor `uname -n` resolves.
+_image_rebuild_hostname() {
+  if [[ -z "$_IMAGE_REBUILD_HOSTNAME" ]]; then
+    _IMAGE_REBUILD_HOSTNAME=$(hostname 2>/dev/null || uname -n 2>/dev/null || true)
+    [[ -n "$_IMAGE_REBUILD_HOSTNAME" ]] || _IMAGE_REBUILD_HOSTNAME="unknown-host"
+  fi
+  return 0
+}
+
+# _image_rebuild_proc_start <pid> — a fingerprint of <pid>'s start time,
+# published in _IMAGE_REBUILD_PROC_START. Used to tell a live process that
+# legitimately still holds the fallback lock apart from an unrelated process
+# later assigned the same pid.
+#
+# Reads /proc/<pid>/stat field 22 (starttime, in clock ticks since boot) with
+# builtins where procfs exists, and only falls back to ps(1) where it does not
+# (macOS/BSD — `ps -o lstart=` is supported there and on Linux, and between
+# them they cover every host the mkdir fallback actually runs on; see the
+# flock-absence comment on _image_rebuild below). The two forms are never
+# compared against each other: a fingerprint is only ever compared with another
+# fingerprint taken by this same function on this same host.
+#
+# Empty on any failure — callers treat "can't verify" as "assume live", so a
+# lookup failure can never falsely reclaim a live holder's lock.
+_image_rebuild_proc_start() {
+  local pid="$1"
+  # Field splitting below (both the `read -a` and the `${fields[*]}` join) is
+  # done against a known IFS rather than whatever the caller left set.
+  local IFS=$' \t\n'
+  _IMAGE_REBUILD_PROC_START=""
+
+  local stat_line=""
+  if [[ -r "/proc/${pid}/stat" ]]; then
+    { read -r stat_line < "/proc/${pid}/stat"; } 2>/dev/null || stat_line=""
+  fi
+
+  local -a fields=()
+  if [[ -n "$stat_line" ]]; then
+    # Field 2 (comm) is parenthesised and may itself contain spaces; every
+    # field after the final ')' is fixed position, so count from there.
+    # fields[0] is field 3 (state), which puts starttime at index 19.
+    read -r -a fields <<< "${stat_line##*') '}"
+    # Numeric or it did not parse (a comm containing ") " would shift the
+    # columns), in which case fall through to ps rather than fingerprint the
+    # process with a wrong column.
+    if [[ "${fields[19]:-}" =~ ^[0-9]+$ ]]; then
+      _IMAGE_REBUILD_PROC_START="${fields[19]}"
+      return 0
+    fi
+  fi
+
+  local lstart=""
+  lstart=$(ps -o lstart= -p "$pid" 2>/dev/null) || lstart=""
+  fields=()
+  read -r -a fields <<< "$lstart"
+  _IMAGE_REBUILD_PROC_START="${fields[*]:-}"
+  return 0
+}
+
+# _image_rebuild_write_holder <lockdir> — records this process's identity
+# (pid, host, start time) into a just-acquired fallback lock directory. Called
+# once, immediately after the mkdir that wins the lock, so the window where
+# the lock directory exists without a holder record is as small as possible.
+#
+# Records $BASHPID, not $$: the gate calls _image_rebuild inside a command
+# substitution, so $$ names the dispatch script while $BASHPID names the
+# subshell that actually runs the build and removes the directory. A dead
+# holder is exactly that subshell being gone.
+_image_rebuild_write_holder() {
+  local lockdir="$1"
+  _image_rebuild_hostname
+  _image_rebuild_proc_start "$BASHPID"
+  {
+    printf 'pid=%s\n' "$BASHPID"
+    printf 'host=%s\n' "$_IMAGE_REBUILD_HOSTNAME"
+    printf 'start=%s\n' "$_IMAGE_REBUILD_PROC_START"
+  } >"${lockdir}/holder" 2>/dev/null || true
+}
+
+# _image_rebuild_read_holder <holder_file> — parses a holder record into
+# _IMAGE_REBUILD_HOLDER_{PID,HOST,START}. Returns non-zero when there is no
+# usable record (absent, unreadable, mid-write, or a non-numeric pid), which
+# every caller treats as "cannot judge this lock".
+_image_rebuild_read_holder() {
+  local holder="$1"
+  _IMAGE_REBUILD_HOLDER_PID=""
+  _IMAGE_REBUILD_HOLDER_HOST=""
+  _IMAGE_REBUILD_HOLDER_START=""
+  [[ -f "$holder" ]] || return 1
+
+  # Initialised, not merely declared: the loop's `|| [[ -n "$line" ]]` (which
+  # catches a final line with no trailing newline) reads $line on the path
+  # where read returned non-zero, and under `set -u` a declared-but-unset
+  # local is an unbound variable — fatal to the whole dispatch script, not
+  # just this function. It survives today only because bash's read assigns the
+  # empty partial line before failing; an empty or truncated holder file is a
+  # routine input here (a record caught mid-write is exactly what this
+  # function must fail closed on), so it does not rest on that.
+  local line="" key="" value=""
+  {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      key="${line%%=*}"
+      value="${line#*=}"
+      case "$key" in
+        pid)   _IMAGE_REBUILD_HOLDER_PID="$value" ;;
+        host)  _IMAGE_REBUILD_HOLDER_HOST="$value" ;;
+        start) _IMAGE_REBUILD_HOLDER_START="$value" ;;
+      esac
+    done < "$holder"
+  } 2>/dev/null || true
+
+  [[ "$_IMAGE_REBUILD_HOLDER_PID" =~ ^[0-9]+$ ]]
+}
+
+# _image_rebuild_lock_stale <lockdir> — true if <lockdir>'s recorded holder is
+# provably no longer running it, so a waiter may reclaim it instead of
+# spinning out the full budget (Issue #4419: a holder that dies mid-build --
+# OOM-killed docker build, kill -9, host reboot -- never removes the
+# directory, and nothing else did either). Fails closed at every ambiguous
+# step -- no holder record yet, a record from a different host, or a start
+# time that can't be compared -- by reporting "not stale": a wrongly reclaimed
+# live lock breaks the one guarantee this lock exists for (two concurrent
+# docker builds), while a wrongly retained dead lock only costs the waiter the
+# bounded spin budget.
+_image_rebuild_lock_stale() {
+  local lockdir="$1"
+  _image_rebuild_read_holder "${lockdir}/holder" || return 1
+
+  _image_rebuild_hostname
+  [[ "$_IMAGE_REBUILD_HOLDER_HOST" == "$_IMAGE_REBUILD_HOSTNAME" ]] || return 1
+
+  kill -0 "$_IMAGE_REBUILD_HOLDER_PID" 2>/dev/null || return 0
+
+  local recorded_start="$_IMAGE_REBUILD_HOLDER_START"
+  _image_rebuild_proc_start "$_IMAGE_REBUILD_HOLDER_PID"
+  [[ -n "$recorded_start" && -n "$_IMAGE_REBUILD_PROC_START" \
+     && "$recorded_start" != "$_IMAGE_REBUILD_PROC_START" ]]
+}
+
+# _image_rebuild_reclaim <lockdir> — take a lock directory away from a holder
+# that is provably dead. Returns 0 only when this process now holds a freshly
+# created <lockdir> (holder record written); non-zero means keep waiting.
+#
+# Removing and re-creating the directory has to be one indivisible step. Two
+# waiters that independently judge the same directory stale otherwise
+# interleave as remove / create / remove / create and BOTH end up believing
+# they hold the lock — the concurrent `docker build` this lock exists to
+# prevent, and a likelier interleaving than it looks, since waiters spin in
+# lockstep on the same 0.2s cadence. A nested lock directory
+# (<lockdir>.reclaim, held for the handful of syscalls below and nothing else)
+# admits one reclaimer at a time, and re-checking liveness inside it means a
+# waiter that queued behind the reclaimer sees the new, live holder and goes
+# back to waiting instead of deleting it.
+_image_rebuild_reclaim() {
+  local lockdir="$1" reclaim="${lockdir}.reclaim"
+  _image_rebuild_lock_stale "$lockdir" || return 1
+
+  if ! mkdir "$reclaim" 2>/dev/null; then
+    # Either another waiter is mid-reclaim (leave it to them), or a previous
+    # reclaimer died holding this directory. The same liveness check that
+    # recovers the main lock recovers this one, so that one dead reclaimer
+    # cannot disable stale-lock recovery on the host until someone deletes the
+    # directory by hand.
+    _image_rebuild_lock_stale "$reclaim" || return 1
+    rm -rf "$reclaim" 2>/dev/null || true
+    mkdir "$reclaim" 2>/dev/null || return 1
+  fi
+  _image_rebuild_write_holder "$reclaim"
+
+  local held=1
+  if _image_rebuild_lock_stale "$lockdir"; then
+    rm -rf "$lockdir" 2>/dev/null || true
+    if mkdir "$lockdir" 2>/dev/null; then
+      _image_rebuild_write_holder "$lockdir"
+      held=0
+    fi
+  fi
+  rm -rf "$reclaim" 2>/dev/null || true
+  return $held
+}
+
+# _image_rebuild <checkout_hash> — serializes _image_rebuild__body so two
+# concurrent launches never build at the same time. Prefers flock (the kernel
+# releases an FD lock when its holder dies, so a crash can't strand it); falls
+# back to the same mkdir spinlock _cfgms_locked_do uses when flock is absent.
+# Unlike _cfgms_locked_do this is NOT best-effort — a rebuild that is silently
+# skipped under lock contention would let the caller launch on the stale image
+# it was trying to replace, so a lock timeout is itself a rebuild failure. On
+# the mkdir fallback specifically, a dead holder's directory is never removed
+# by the kernel, so every waiter checks holder liveness each time mkdir loses
+# the race and reclaims the directory (_image_rebuild_reclaim) instead of
+# spinning out the budget against a lock nobody is going to release.
+_image_rebuild() {
+  local checkout_hash="$1"
+  mkdir -p "$(dirname "$IMAGE_REBUILD_LOCK")" 2>/dev/null || true
+
+  if command -v flock >/dev/null 2>&1; then
+    (
+      flock -w 600 200 || { echo "REBUILD_FAILED"; exit 1; }
+      _image_rebuild__body "$checkout_hash"
+    ) 200>"$IMAGE_REBUILD_LOCK"
+  else
+    local lockdir="${IMAGE_REBUILD_LOCK}.d" waited=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      # Reclaim hands back a lock directory this process now holds, so there is
+      # nothing left to race for — break out rather than re-entering mkdir.
+      if _image_rebuild_reclaim "$lockdir"; then
+        break
+      fi
+      waited=$((waited + 1))
+      if [[ $waited -gt 3000 ]]; then
+        echo "REBUILD_FAILED"
+        return 1
+      fi
+      sleep 0.2
+    done
+    _image_rebuild_write_holder "$lockdir"
+    local rc=0
+    _image_rebuild__body "$checkout_hash" || rc=$?
+    rm -rf "$lockdir" 2>/dev/null || true
+    return $rc
+  fi
+}
+
+# gate_image_staleness_for_launch — refuses to launch a container from an
+# image built from stale .devcontainer inputs (Issue #4388). Called
+# immediately before every `docker run` that starts an agent container.
+#
+# No docker binary at all means no container is starting regardless of what
+# this gate decides (the docker run right after would fail the same way), so
+# it is a no-op rather than a second, earlier failure mode for that case.
+#
+# Hermetic dispatch tests set CFGMS_TEST_REPO_ROOT to keep every path off of
+# live git/docker state (see REPO_ROOT above); by default this gate is a
+# no-op under that flag too, so the many launch-path tests that predate this
+# gate don't need to know about it. image_staleness.test.sh, which exercises
+# this gate for real against a disposable git fixture and a stubbed `docker`,
+# opts back in with CFGMS_TEST_IMAGE_STALENESS_CHECK=1.
+gate_image_staleness_for_launch() {
+  command -v docker >/dev/null 2>&1 || return 0
+  if [[ -n "${CFGMS_TEST_REPO_ROOT:-}" && -z "${CFGMS_TEST_IMAGE_STALENESS_CHECK:-}" ]]; then
+    return 0
+  fi
+
+  local checkout_hash image_hash
+  checkout_hash=$(_image_build_inputs_hash)
+  image_hash=$(_image_build_inputs_label)
+
+  if [[ -n "$checkout_hash" && -n "$image_hash" && "$checkout_hash" == "$image_hash" ]]; then
+    return 0
+  fi
+
+  # Missing label counts as a mismatch (empty image_hash never equals a
+  # non-empty checkout_hash above).
+  echo "IMAGE_STALE:${image_hash:-none}:${checkout_hash:-none}"
+
+  local rebuild_result
+  rebuild_result=$(_image_rebuild "$checkout_hash") || true
+  if [[ "$rebuild_result" == "REBUILD_OK" ]]; then
+    return 0
+  fi
+
+  echo "IMAGE_REBUILD_FAILED:${IMAGE_REBUILD_LOCK}"
+  exit 11
+}
+
+# Stream an investigator container's log to disk for the container's lifetime.
+#
+# Writes to <sweep_dir>/container-logs/<mode>.log, where sweep_dir is whatever
+# the CALLER passed as --sweep-dir. Five dispatch sites, and `plan` mode is
+# split across both shapes -- planner.py is one file with two behaviours:
+#
+#   security-review.sh:724  finder lane    sweep root
+#   planner.py:874          legacy planner sweep root
+#   planner.py:921          multi-planner  <sweep>/planners/<lane>
+#   verify.py:180           verifier       <sweep>/verification
+#   adjudicate.py:187       adjudicator    <sweep>/adjudication
+#
+# The sub-sweep layout is what makes the fixed <mode>.log filename
+# collision-free: every multi-planner lane writes plan.log, kept apart solely
+# by its own sub-directory.
+#
+# A container's log lives exactly as long as the container, and an investigator
+# container's lifetime is not the sweep's to decide. This `docker run -d`
+# carries NO `--rm` -- see the container-conflict gate's own comment further
+# down -- but three paths remove an exited one anyway, none of which waits for
+# anyone to have read the log:
+#
+#   1. the conflict gate reaps one (`docker rm -f`) before reusing its name,
+#      which is what makes `resume` work rather than refuse forever;
+#   2. the stale-investigator reaper in the `cleanup-stale` arm (Issue #4055)
+#      removes any exited `cfg-agent-investigator-*` past a grace window
+#      (`CFGMS_INVESTIGATOR_REAP_MINUTES`, default 30) -- the routine garbage
+#      collector, and the path that takes containers from FINISHED sweeps;
+#   3. `cleanup-container <name>`, on request.
+#
+# NOT `cleanup-issue`: it only builds `cfg-agent-<num>` / `cfg-agent-item-<id>`,
+# neither of which can match an investigator container's name.
+#
+# Step results survive independently in
+# `lanes/<lane>/step-*.findings.json`; what is lost is the event stream —
+# `step_written`, `step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and
+# with it the sequencing and timing needed to analyse harness behaviour after a
+# run. A sweep's first-finishing lane was the reliable casualty: by the time
+# anyone looked, only the still-running lanes could be read.
+#
+# `docker logs -f` follows until the container exits and then ends by itself,
+# so there is nothing to clean up and no lifetime to track. `--timestamps`
+# is what makes the result useful for timing analysis rather than just a
+# transcript.
+#
+# Detached via setsid+nohup so it never blocks or is killed with the dispatch
+# shell, and every failure path returns 0: an unpersisted log is a diagnostic
+# loss, never a reason to fail a launch that is otherwise fine.
+start_investigator_log_capture() {
+  local sweep_dir="$1" mode_safe="$2" container_id="$3"
+  local log_dir="${sweep_dir}/container-logs"
+
+  if [[ -z "$sweep_dir" || -z "$mode_safe" || -z "$container_id" ]]; then
+    echo "WARNING: log capture skipped (missing sweep dir, mode or container id)" >&2
+    return 0
+  fi
+
+  if ! mkdir -p "$log_dir" 2>/dev/null; then
+    echo "WARNING: could not create ${log_dir}; container log will not be persisted" >&2
+    return 0
+  fi
+
+  # setsid does not exist on Windows/Git Bash at all: the whole command
+  # failed to resolve ("setsid: command not found") before nohup or docker
+  # ever ran, and since the command's own stderr redirect swallowed that
+  # message into the log file, it looked like a real (if useless) capture
+  # rather than a silent no-op (Issue #4158). nohup alone still gives the
+  # property this actually needs -- outliving the dispatch shell's exit --
+  # even without setsid's full session detachment.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup docker logs -f --timestamps "$container_id" \
+      > "${log_dir}/${mode_safe}.log" 2>&1 < /dev/null &
+  else
+    nohup docker logs -f --timestamps "$container_id" \
+      > "${log_dir}/${mode_safe}.log" 2>&1 < /dev/null &
+  fi
+  disown 2>/dev/null || true
+  return 0
 }
 
 usage() {
@@ -172,6 +1699,76 @@ Commands:
                                             Exit 3 on validation failure.
   cleanup-stale-reviews                     Remove exited review containers that did not clean up
                                             their clone directory on exit.
+  launch-investigator --sweep-dir <DIR> [--snapshot-dir <DIR>] [--bundle-dir <DIR>] --mode <plan|LANE_ID>
+                      [--lane-entrypoint <SCRIPT>] [--harness <ID>] [--model <ID>] [--ollama-key-dir <DIR>]
+                                            Launch a read-only investigator container (Issue #3903)
+                                            against an existing security-review sweep directory.
+                                            Which directory --mode requires, and mounts at
+                                            /workspace, is mode-dependent (Issue #3979):
+                                            mode=plan requires --bundle-dir (the auditable bundle,
+                                            #3978) and NEVER mounts the snapshot; every other mode
+                                            (a lane) requires --snapshot-dir exactly as before
+                                            (Issue #3952) and never mounts the bundle. Whichever one
+                                            is required must already exist and resolve to exactly
+                                            <sweep-dir>/bundle or <sweep-dir>/snapshot respectively
+                                            (the sweep's own verified snapshot, snapshot.py/Issue
+                                            #3951, for the snapshot side), checked before any mount
+                                            is built. A missing required directory, or one that does
+                                            not resolve there, is a hard failure before any docker
+                                            call -- plan mode never falls back to mounting the
+                                            snapshot.
+                                            No GH_TOKEN, no git identity. This call also hashes
+                                            investigator-entrypoint.sh and --lane-entrypoint's script
+                                            (the only two files individually mounted from the live
+                                            repo) into a trusted-harness identity, written to
+                                            <sweep-dir>/harness_identity.json and injected as
+                                            CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY -- recorded, not
+                                            frozen: it is not verified against a prior value.
+                                            mode=plan mounts <sweep>/plan rw as /workspace-out and
+                                            execs `claude -p` with --disallowedTools. Any other mode
+                                            is a lane id: mounts <sweep>/plan ro, <sweep>/lanes/<id>
+                                            rw as /workspace-out, and execs --lane-entrypoint's script.
+                                            --harness/--model (Issue #3932) select a subscription
+                                            agent harness: --harness claude mounts
+                                            ~/.claude/.credentials.json read-only, --harness codex
+                                            mounts ~/.codex/auth.json read-only (Issue #3935),
+                                            --harness opencode mounts
+                                            ~/.local/share/opencode/auth.json read-only (Issue #3936;
+                                            codex/opencode both fail closed with
+                                            LAUNCH_FAILED:...:credential_unavailable if the file is
+                                            missing), and all flags set
+                                            CFGMS_SECURITY_REVIEW_HARNESS/_MODEL/_LANE_ID in the
+                                            container. `claude`/`codex`/`opencode` are wired; any
+                                            other harness id gets NO credential mount. Credential
+                                            delivery is
+                                            harness-gated in both modes — plan mode mounts a wired
+                                            harness's credential (read-only) only when --harness
+                                            selects that harness (or, for claude, is omitted), so a
+                                            planner never receives another harness's credential and
+                                            each wired --harness value yields exactly one mount. This
+                                            is the only credential-delivery mechanism for lane mode
+                                            (Issue #3933 retired the OS-keychain per-lane
+                                            credential-name flag in full, with the three REST lanes
+                                            that were its only callers).
+                                            --harness ollama mounts the `ollama signin` session
+                                            keypair, id_ed25519{,.pub}, read-only (Issue #3976). Its
+                                            directory is auto-detected (Issue #4005): when
+                                            ollama.service is a loaded systemd unit, the keypair the
+                                            daemon actually signs Cloud requests with lives under
+                                            THAT SERVICE ACCOUNT's home directory (resolved via
+                                            `getent passwd`), not the invoking user's $HOME -- `ollama
+                                            signin` run by hand writes to the human account's
+                                            ~/.ollama, which the daemon never reads. A loaded unit
+                                            with no explicit User= runs as root; `systemctl show -p
+                                            User --value` prints an EMPTY string for that case, not
+                                            "root", so empty is resolved to root, never treated as
+                                            "not service-managed". Falls back to
+                                            $HOME/.ollama when no systemd unit is found, or when
+                                            --ollama-key-dir names a directory explicitly (bypassing
+                                            detection for hosts it cannot cover -- a non-systemd
+                                            init, a renamed unit). Fails closed with
+                                            LAUNCH_FAILED:...:credential_unavailable naming the exact
+                                            directory it looked in when the keypair is not there.
   launch          <NUM>                     Launch agent container (issue mode)
   launch-generic  <NAME> <DIR> [ARGS...]    Launch agent container with custom name and args
   live            <BRANCH|NUM>               Drop into live Claude session (branch name or issue number)
@@ -184,14 +1781,268 @@ Commands:
   cleanup-container <NAME>                  Remove container and associated clone by name
   cleanup-stale                             Remove containers/clones for closed, blocked, or failed stories
   list-running                              List running agent containers
+  capacity [--json]                         Resource admission gate: CAPACITY_OK:slots=<n> (rc0) / CAPACITY_FULL:<binding>:slots=0 (rc1)
   list-exited                               List exited agent containers
   inspect-exit    <NUM>                     Print exit code of container
   inspect-detail  <NUM>                     Print stats + last 30 log lines
   inspect-container <NAME>                  Print stats + last 30 log lines for named container
-  health-check                              Check image age, Claude version, creds staleness
+  smoke-test      <N>                       Run cfg config list against Tier 1 as agent-test/<N>
+                                            Emits SMOKE_OK:<N> (exit 0) or SMOKE_FAILED:<N>:<error> (non-zero)
+                                            Requires CFGMS_TIER1_URL and a credential (CFGMS_API_KEY_FILE,
+                                            CFGMS_API_KEY, or the per-agent cred at AGENT_CRED_BASE/<N>/api.key)
+  health-check                              Check image age, Claude version, creds staleness, Tier 1 reachability
 EOF
   exit 1
 }
+
+# cleanup_reap_reason <state> <num> <failed_nums> <blocked_nums> <running>
+# Decides whether a story container should be reaped, and why. Prints the reason
+# and returns 0 when it should be reaped; prints nothing and returns 1 otherwise.
+#
+# The first three conditions reap even a running container: the story is
+# finished or parked for a human, so whatever is still executing is unwanted.
+#
+# The fourth (Issue #3656) covers a container that has already EXITED while its
+# story is still open -- Ready or In Progress. Nothing else reaps that case. The
+# stale name then collides with the next `docker run --name cfg-agent-<N>`, so
+# the story cannot be re-dispatched without a manual `docker rm`. Observed on
+# story #3417, whose agent died on an expired OAuth session: the entrypoint
+# correctly reset the story to Ready, but two re-dispatch attempts failed on
+# `Conflict. The container name "/cfg-agent-3417" is already in use`.
+#
+# Deliberately gated on running == "false", the exact string `docker inspect`
+# emits for `{{.State.Running}}`. An exited container has no work left to lose;
+# a live agent on an open story is precisely what must survive. Anything else,
+# including the empty string `_ledger_docker_inspect` returns when inspect
+# fails, is treated as "still running" and left alone -- unknown must not reap.
+cleanup_reap_reason() {
+  local state="$1" num="$2" failed_nums="$3" blocked_nums="$4" running="$5"
+  local reason=""
+
+  if [[ "$state" == "CLOSED" ]]; then
+    reason="story closed"
+  fi
+  if printf '%s' "$failed_nums" | grep -qxF "$num" 2>/dev/null; then
+    reason="project status: Failed"
+  fi
+  if printf '%s' "$blocked_nums" | grep -qxF "$num" 2>/dev/null; then
+    reason="project status: Blocked"
+  fi
+  if [[ -z "$reason" && "$running" == "false" ]]; then
+    reason="container exited, story still open"
+  fi
+
+  if [[ -z "$reason" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$reason"
+}
+
+# cleanup_container_class <container_name>
+# Maps an agent container name to its reap class, clone-directory prefix and
+# number, printed tab-separated. Returns 1 for a name no reaper owns.
+#
+# Issue #3657: the cleanup-stale loop matched only `^cfg-agent-([0-9]+)$` and
+# `continue`d past everything else, while cleanup-stale-reviews covered only
+# `cfg-agent-review-pr-<N>`. That left `cfg-agent-pr-fix-*` and
+# `cfg-agent-resolve-conflict-*` reaped by nothing at all. 18 had accumulated
+# when this was written, the oldest 2 days, spanning both exit 0 and exit 1 and
+# every PR terminal state -- so it was never a TTL set too long, it was the
+# absence of any TTL path. `docker system df` had 59GB reclaimable and disk was
+# the binding capacity resource holding the host at 3 free dispatch slots.
+#
+# Adding a class here is how a new container kind gets coverage. A bare regex
+# with an else-continue is how it silently loses it -- which is the whole bug.
+#
+# The classes live in one table, CLEANUP_CLASSES, so that both directions of the
+# mapping -- container name -> clone (here) and clone -> container name
+# (cleanup_clone_owner, Issue #4358) -- come from the same rows. Each row is
+# "<class>|<clone prefix>|<container name prefix>"; the number follows both.
+CLEANUP_CLASSES=(
+  "story|story|cfg-agent-"
+  "fix-pr|pr-fix|cfg-agent-pr-fix-"
+  "resolve-conflict|resolve-conflict|cfg-agent-resolve-conflict-"
+  "review|review-pr|cfg-agent-review-pr-"
+)
+
+cleanup_container_class() {
+  local name="$1" row class clone_prefix cname_prefix
+  for row in "${CLEANUP_CLASSES[@]}"; do
+    IFS='|' read -r class clone_prefix cname_prefix <<< "$row"
+    if [[ "$name" =~ ^${cname_prefix}([0-9]+)$ ]]; then
+      printf '%s\t%s\t%s\n' "$class" "$clone_prefix" "${BASH_REMATCH[1]}"; return 0
+    fi
+  done
+  return 1
+}
+
+# cleanup_clone_owner <clone dir basename>
+# Inverse of cleanup_container_class: prints "<class>\t<container name>\t<num>"
+# for a clone directory a reaper owns, or returns 1 for any other name (po-live,
+# anything hand-made). Driven by the same CLEANUP_CLASSES rows, so a class added
+# there gets orphan-clone coverage without a second list to keep in step.
+cleanup_clone_owner() {
+  local dir="$1" row class clone_prefix cname_prefix
+  for row in "${CLEANUP_CLASSES[@]}"; do
+    IFS='|' read -r class clone_prefix cname_prefix <<< "$row"
+    if [[ "$dir" =~ ^${clone_prefix}-([0-9]+)$ ]]; then
+      printf '%s\t%s%s\t%s\n' "$class" "$cname_prefix" "${BASH_REMATCH[1]}" "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# cleanup_pr_container_should_reap <running> <finished_ts> <now_ts> <max_age_s>
+# True only for a container that has genuinely exited and has been exited for at
+# least max_age_s.
+#
+# Fail-safe in both directions, deliberately. Only the literal "false" from
+# `{{.State.Running}}` counts as exited -- the empty string the inspect wrapper
+# yields on failure means "unknown", and unknown must never reap. An
+# unparseable or zero FinishedAt is likewise treated as unknown rather than as
+# "epoch, therefore ancient", which would reap a live container instantly.
+#
+# The 30-minute grace mirrors cleanup-stale-reviews and exists for the same
+# reason: an agent that has just exited may still be finishing final API calls,
+# and its clone is the only place its work survives until then.
+cleanup_pr_container_should_reap() {
+  local running="$1" finished_ts="$2" now_ts="$3" max_age="$4"
+  [[ "$running" == "false" ]] || return 1
+  [[ "$finished_ts" =~ ^[0-9]+$ ]] || return 1
+  [[ "$finished_ts" -gt 0 ]] || return 1
+  (( now_ts - finished_ts >= max_age )) || return 1
+  return 0
+}
+
+# clone_safe_to_discard <clone dir>
+# True only when the clone provably holds nothing that exists nowhere else: it is
+# its own git work tree, has no uncommitted or untracked files, no stash, and a
+# HEAD that some remote-tracking ref already contains. Every "could not tell"
+# (not a repo, git error, no HEAD) is false -- unknown is kept, never deleted.
+#
+# Files the dispatcher itself writes into a clone are not the agent's work, so
+# an untracked entry for exactly one of them, at the clone's top level, does
+# not count (Issue #4362). Without that, every review clone -- which always
+# carries REVIEW_PROMPT_FILE -- was kept as dirty forever.
+REVIEW_PROMPT_FILE=".acceptance-review-prompt.md"
+DISPATCH_CLONE_ARTIFACTS=("$REVIEW_PROMPT_FILE")
+
+clone_safe_to_discard() {
+  local dir="$1" top status line artifact own
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [[ "$(cd "$top" && pwd -P)" == "$(cd "$dir" && pwd -P)" ]] || return 1
+  git -C "$dir" rev-parse --verify --quiet HEAD >/dev/null 2>&1 || return 1
+  status=$(git -C "$dir" status --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    own=false
+    for artifact in "${DISPATCH_CLONE_ARTIFACTS[@]}"; do
+      [[ "$line" == "?? ${artifact}" ]] && own=true
+    done
+    $own || return 1
+  done <<< "$status"
+  [[ -z "$(git -C "$dir" stash list 2>/dev/null || echo unknown)" ]] || return 1
+  [[ -n "$(git -C "$dir" for-each-ref --contains HEAD refs/remotes 2>/dev/null)" ]] || return 1
+  return 0
+}
+
+# orphan_clone_decision <clone dir> <container names, newline-separated> <now_ts> <grace_s>
+# Decides what the orphan-clone reap does with one directory under WORKTREE_BASE
+# (Issue #4358). Prints exactly one tab-separated line:
+#   ignore                    -- not an agent clone, or its container exists
+#   keep  <reason>            -- an orphan, but not provably safe to delete yet
+#   reap  <class>  <num>      -- an orphan past the grace window with nothing unsaved
+#
+# Why this exists: every other reaper starts from a container and deletes the
+# clone that matches it. Once the container is gone first (removed by hand, by a
+# re-dispatch, by a reap that died between its two rm calls) the clone was owned
+# by nothing, so POs improvised a raw `rm -rf` on WORKTREE_BASE and sat on the
+# permission prompt it needs. Measured 2026-09-28: eight such clones, the oldest
+# twelve days, across the review, fix and resolve-conflict classes.
+#
+# A container in ANY state keeps its clone: its own reaper owns that pair. The
+# grace window is measured from the clone's mtime, the only clock a clone
+# without a container still has.
+orphan_clone_decision() {
+  local dir="$1" names="$2" now_ts="$3" grace="$4" owner class cname num mtime
+  owner=$(cleanup_clone_owner "$(basename "$dir")") || { printf 'ignore\n'; return 0; }
+  IFS=$'\t' read -r class cname num <<< "$owner"
+  if grep -qxF -- "$cname" <<< "$names"; then
+    printf 'ignore\n'; return 0
+  fi
+  mtime=$(stat -c %Y "$dir" 2>/dev/null) || mtime=""
+  if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+    printf 'keep\tmtime_unknown\n'; return 0
+  fi
+  if (( now_ts - mtime < grace )); then
+    printf 'keep\twithin_grace\n'; return 0
+  fi
+  if ! clone_safe_to_discard "$dir"; then
+    printf 'keep\tdirty\n'; return 0
+  fi
+  printf 'reap\t%s\t%s\n' "$class" "$num"
+}
+
+# reap_orphan_clones <worktree base> <container names, newline-separated> <now_ts> <grace_s>
+# Applies orphan_clone_decision to every directory directly under the base.
+# The caller supplies the container names and must NOT call this when it could
+# not list them: an empty list means "no containers exist", so a failed listing
+# passed in as empty would make every clone look orphaned.
+reap_orphan_clones() {
+  local base="$1" names="$2" now_ts="$3" grace="$4"
+  local dir decision action reason class num reaped=0 kept=0
+  for dir in "$base"/*/; do
+    dir="${dir%/}"
+    [[ -d "$dir" && ! -L "$dir" ]] || continue
+    decision=$(orphan_clone_decision "$dir" "$names" "$now_ts" "$grace")
+    IFS=$'\t' read -r action reason num <<< "$decision"
+    case "$action" in
+      keep)
+        echo "ORPHAN_KEPT:${dir}:${reason}"
+        kept=$((kept + 1))
+        ;;
+      reap)
+        class="$reason"
+        # Same credential handling the container-driven reapers apply to
+        # these classes; fix and resolve-conflict agents never get one.
+        case "$class" in
+          story)  revoke_agent_creds "$num" || true
+                  rm -rf "${AGENT_CRED_BASE:?}/${num}" 2>/dev/null || true ;;
+          review) revoke_agent_creds "review-pr-${num}" || true
+                  rm -rf "${AGENT_CRED_BASE:?}/review-pr-${num}" 2>/dev/null || true ;;
+        esac
+        if rm -rf "$dir"; then
+          echo "CLEANED:orphan-clone:${dir}"
+          reaped=$((reaped + 1))
+        fi
+        ;;
+    esac
+  done
+  echo "ORPHAN_CLONES_DONE:cleaned=${reaped}:kept=${kept}"
+}
+
+# orphan_clone_pass <worktree base> <now_ts> <grace_s>
+# The cleanup-stale entry point. Lists EVERY container, not only labelled ones:
+# any container holding the name keeps the clone. If the listing fails -- daemon
+# down, docker missing -- nothing is reaped and the skip is reported, because a
+# failed listing is not the same as "no containers exist".
+orphan_clone_pass() {
+  local base="$1" now_ts="$2" grace="$3" names
+  [[ -d "$base" ]] || return 0
+  if ! names=$(docker ps -a --format '{{.Names}}' 2>/dev/null); then
+    echo "ORPHAN_CLONES_SKIPPED:docker_ps_failed"
+    return 0
+  fi
+  reap_orphan_clones "$base" "$names" "$now_ts" "$grace"
+}
+
+# Guard so po-act.sh can `source` this file to reuse prepare_session_dir and
+# the AGENT_SESSIONS_* config (Issue #3051) without also executing this
+# script's own command dispatch against po-act.sh's positional args.
+# BASH_SOURCE[0] is this file whenever it's sourced; $0 stays the top-level
+# script (po-act.sh) — they match only when agent-dispatch.sh is run directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
 [[ $# -ge 1 ]] || usage
 
@@ -284,8 +2135,11 @@ case "$cmd" in
       if $keep_remote; then
         echo "INFO: Stale remote branch exists: ${branch_name} (keeping due to --keep-remote)"
       else
-        echo "Cleaning stale remote branch: ${branch_name}"
-        if ! git -C "$REPO_ROOT" push origin --delete "$branch_name" 2>&1; then
+        rc=0
+        delete_stale_remote_branch "$branch_name" || rc=$?
+        if [[ $rc -eq 4 ]]; then
+          exit 4
+        elif [[ $rc -ne 0 ]]; then
           echo "ERROR: Failed to delete stale remote branch '${branch_name}'. Refusing to dispatch to prevent history corruption."
           exit 1
         fi
@@ -305,20 +2159,28 @@ case "$cmd" in
   create-clone-item)
     [[ $# -eq 1 ]] || { echo "create-clone-item requires exactly one item_id"; exit 1; }
     item_id="$1"
-    # Derive LAST12: last 12 alphanumeric chars of item_id (strip non-[a-zA-Z0-9])
-    LAST12=$(echo "$item_id" | tr -cd 'a-zA-Z0-9' | rev | cut -c1-12 | rev)
+    # Derive LAST12: last 12 alphanumeric chars of item_id (strip non-[a-zA-Z0-9]),
+    # or the whole string when it has fewer than 12. Pure-bash suffix slice, not
+    # `rev` (not installed in this host's Git-Bash/MSYS usr/bin — Issue #3686).
+    # A plain negative-offset slice (`${_alnum: -12}`) returns EMPTY rather than
+    # the whole string once length < 12 -- verified: bash clamps a negative
+    # resulting offset to nothing, not to 0 -- so the offset is computed
+    # explicitly instead.
+    _alnum=$(echo "$item_id" | tr -cd 'a-zA-Z0-9')
+    LAST12="${_alnum:$(( ${#_alnum} > 12 ? ${#_alnum} - 12 : 0 )):12}"
     [[ -n "$LAST12" ]] || { echo "ERROR: item_id '${item_id}' has no alphanumeric chars — cannot derive LAST12"; exit 1; }
     branch_name="feature/item-${LAST12}-agent"
     dest="${WORKTREE_BASE}/item-${LAST12}"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
 
     # Check for stale remote branch before cloning — same logic as create-clone.
-    if git -C "$REPO_ROOT" ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q .; then
-      echo "Cleaning stale remote branch: ${branch_name}"
-      if ! git -C "$REPO_ROOT" push origin --delete "$branch_name" 2>&1; then
-        echo "ERROR: Failed to delete stale remote branch '${branch_name}'. Refusing to dispatch to prevent history corruption."
-        exit 1
-      fi
+    rc=0
+    delete_stale_remote_branch "$branch_name" || rc=$?
+    if [[ $rc -eq 4 ]]; then
+      exit 4
+    elif [[ $rc -ne 0 ]]; then
+      echo "ERROR: Failed to delete stale remote branch '${branch_name}'. Refusing to dispatch to prevent history corruption."
+      exit 1
     fi
 
     trap "rm -rf '$dest'" ERR
@@ -338,6 +2200,16 @@ case "$cmd" in
     sanitized=$(sanitize_branch "$branch")
     dest="${WORKTREE_BASE}/${sanitized}"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
+
+    # External-author gate (Issue #4343) -- see _branch_author_gate for why
+    # this path needs one create-clone-pr and review-pr already have.
+    branch_gate_result=$(_branch_author_gate "$branch")
+    if [[ "$branch_gate_result" == external:* ]]; then
+      IFS=: read -r _ branch_pr_num branch_pr_author branch_author_trust <<<"$branch_gate_result"
+      _post_quarantine_comment "$branch_pr_num" "$branch_pr_author"
+      echo "BRANCH_REFUSED:${branch}:external_author_${branch_pr_author}:${branch_author_trust}"
+      exit 3
+    fi
 
     # Check if branch exists on remote
     trap "rm -rf '$dest'" ERR
@@ -364,19 +2236,46 @@ case "$cmd" in
     ;;
 
   create-clone-pr)
+    # Optional --dest-prefix <PREFIX> flag (default: "pr-fix-") lets callers
+    # land the clone in a distinct namespace (e.g. "resolve-conflict-" for the
+    # resolve-conflict agent so it never collides with a simultaneous fix-pr
+    # container on the same PR).
+    dest_prefix="pr-fix-"
+    while [[ $# -gt 0 && "$1" == --* ]]; do
+      case "$1" in
+        --dest-prefix) dest_prefix="${2:?--dest-prefix requires a value}"; shift 2 ;;
+        *) echo "Unknown flag for create-clone-pr: $1"; exit 1 ;;
+      esac
+    done
     [[ $# -eq 1 ]] || { echo "create-clone-pr requires exactly one PR number"; exit 1; }
     pr_num="$1"
-    dest="${WORKTREE_BASE}/pr-fix-${pr_num}"
+    dest="${WORKTREE_BASE}/${dest_prefix}${pr_num}"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
 
-    # Get branch from PR
-    pr_branch=$(gh pr view "$pr_num" --json headRefName -q '.headRefName' 2>/dev/null) || {
-      echo "ERROR: Failed to get branch for PR #${pr_num}"
+    # Fetch all PR metadata in one call (author gate + branch + body).
+    pr_meta_fix=$(gh pr view "$pr_num" --json headRefName,body,labels,author 2>/dev/null) || {
+      echo "ERROR: Failed to get metadata for PR #${pr_num}"
       exit 1
     }
+    pr_branch=$(echo "$pr_meta_fix" | jq -r '.headRefName // empty')
+    pr_body=$(echo "$pr_meta_fix" | jq -r '.body // ""')
+    pr_labels_fix=$(echo "$pr_meta_fix" | jq -r '.labels[].name')
+    pr_author_login=$(echo "$pr_meta_fix" | jq -r '.author.login // empty')
 
-    # Extract issue number from PR body
-    pr_body=$(gh pr view "$pr_num" --json body -q '.body' 2>/dev/null || echo "")
+    if [[ -z "$pr_branch" ]]; then
+      echo "ERROR: Failed to get branch for PR #${pr_num}"
+      exit 1
+    fi
+
+    # External-author gate (Issue #1786): check trust BEFORE git clone/fetch of PR content.
+    author_trust=$(_check_author_permission "$pr_author_login" "$pr_num" "$pr_labels_fix")
+    if [[ "$author_trust" != "internal" ]]; then
+      _post_quarantine_comment "$pr_num" "$pr_author_login"
+      echo "FIX_REFUSED:${pr_num}:external_author_${pr_author_login}:${author_trust}"
+      exit 3
+    fi
+
+    # Extract issue number from body or branch name.
     issue_num=$(echo "$pr_body" | grep -oP 'Fixes #\K[0-9]+' | head -1 || true)
     if [[ -z "$issue_num" ]] && [[ "$pr_branch" =~ story-([0-9]+) ]]; then
       issue_num="${BASH_REMATCH[1]}"
@@ -392,16 +2291,45 @@ case "$cmd" in
     git checkout "$pr_branch"
     trap - ERR
 
-    echo "CLONE_OK:pr-fix-${pr_num}:${pr_branch}:issue=${issue_num:-none}"
+    echo "CLONE_OK:${dest_prefix}${pr_num}:${pr_branch}:issue=${issue_num:-none}"
     ;;
 
   launch)
     [[ $# -eq 1 ]] || { echo "launch requires exactly one issue number"; exit 1; }
     num="$1"
+    [[ "$num" =~ ^[0-9]+$ ]] || { echo "launch requires a numeric issue number"; exit 1; }
     gate_credentials_for_launch
     clone_path="${WORKTREE_BASE}/story-${num}"
+    [[ -d "$clone_path" ]] || { echo "ERROR: clone not found: ${clone_path}"; exit 1; }
+    gate_image_staleness_for_launch
     real_path=$(realpath "$clone_path")
     gh_token=$(gh auth token)
+
+    # Mint sub-tenant + scoped API key; write to per-agent tmpfs dir (Issue #2124).
+    # On mint failure: emit CRED_MINT_FAILED, clean up, exit non-zero — never start the container.
+    cred_dir="${AGENT_CRED_BASE}/${num}"
+    if ! mint_out=$(mint_agent_creds "$num" 2>&1); then
+      echo "$mint_out"
+      rm -rf "$clone_path"
+      echo "CLEANED:clone:${clone_path}"
+      exit 1
+    fi
+    echo "$mint_out"
+
+    tier1_url="${CFGMS_TIER1_URL:-}"
+
+    # Persist this run's transcript to the host so its token spend survives the
+    # container's --rm (Issue #3028; extended to this launch path in #3051 —
+    # `launch` was the one dev-agent path prepare_session_dir never reached).
+    # Degrades to no mount if the dir can't be created; telemetry never blocks
+    # dispatch.
+    session_mount=()
+    if sessions_dir=$(prepare_session_dir "cfg-agent-${num}" "issue" "${num}" "" ""); then
+      session_mount=(-v "${sessions_dir}:${AGENT_SESSIONS_MOUNT}")
+    fi
+
+    ledger_append_launch "cfg-agent-${num}" "issue" "${num}" "" "" "dev-agent" ""
+
     if container_id=$(docker run -d \
       --name "cfg-agent-${num}" \
       --label "cfg-agent=true" \
@@ -411,17 +2339,31 @@ case "$cmd" in
       --cpus=4 \
       --stop-timeout=3600 \
       -v "${real_path}:/workspace" \
-      -v "claude-creds:/persist" \
+      -v "${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json" \
+      -v "$(agent_trust_file "cfg-agent-${num}"):/home/agent/.claude.json" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
+      -v "${cred_dir}:/run/cfgms/agent-cred:ro" \
+      "${AGENT_METRICS_MOUNT_ARGS[@]}" \
+      "${AGENT_MODEL_ROUTING_MOUNT_ARGS[@]}" \
+      "${session_mount[@]}" \
       -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AUTONOMOUS=true" \
+      -e "CFGMS_API_KEY_FILE=/run/cfgms/agent-cred/api.key" \
+      -e "CFGMS_TENANT=agent-test/${num}" \
+      -e "CFGMS_TIER1_URL=${tier1_url}" \
+      -e "CFGMS_ADMIN_BUNDLE=" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${num}" 2>&1); then
       echo "LAUNCHED:${num}:${container_id}"
     else
-      # Launch failed — clean up orphaned clone to prevent blocking future dispatches
+      # Launch failed — revoke creds and clean up to prevent orphaned resources.
       echo "LAUNCH_FAILED:${num}:${container_id}"
+      ledger_append_launch_failed "cfg-agent-${num}" "issue"
+      revoke_agent_creds "$num" || true
+      rm -rf "${cred_dir}" 2>/dev/null || true
       rm -rf "$clone_path"
       echo "CLEANED:clone:${clone_path}"
       exit 1
@@ -435,20 +2377,49 @@ case "$cmd" in
     entrypoint_args=("$@")
 
     gate_credentials_for_launch
+    [[ -d "$clone_dir" ]] || { echo "ERROR: clone not found: ${clone_dir}"; exit 1; }
+    gate_image_staleness_for_launch
     real_path=$(realpath "$clone_dir")
     gh_token=$(gh auth token)
+
+    # Forward the distributed lease key (set by po-act dispatch-fix/resolve-conflict)
+    # so the container's entrypoint releases the pr-<N> lease on exit. Empty when
+    # launch-generic is used outside the cron (e.g. branch mode) — then no lease.
+    lease_env=()
+    if [[ -n "${CFGMS_LEASE_KEY:-}" ]]; then
+      lease_env=(-e "CFGMS_LEASE_KEY=${CFGMS_LEASE_KEY}")
+    fi
 
     # Derive mode and metadata labels from entrypoint args
     mode_label="branch"
     fix_pr_num=""
+    issue_arg=""
+    branch_arg=""
     extra_labels=()
     for i in "${!entrypoint_args[@]}"; do
       case "${entrypoint_args[$i]}" in
-        --fix-pr) mode_label="fix-pr"; fix_pr_num="${entrypoint_args[$((i+1))]}"; extra_labels+=(--label "pr=${entrypoint_args[$((i+1))]}") ;;
-        --branch) extra_labels+=(--label "branch=${entrypoint_args[$((i+1))]}") ;;
-        --issue)  extra_labels+=(--label "issue=${entrypoint_args[$((i+1))]}") ;;
+        --fix-pr)          mode_label="fix-pr";          fix_pr_num="${entrypoint_args[$((i+1))]}"; extra_labels+=(--label "pr=${entrypoint_args[$((i+1))]}") ;;
+        --resolve-conflict) mode_label="resolve-conflict"; fix_pr_num="${entrypoint_args[$((i+1))]}"; extra_labels+=(--label "pr=${entrypoint_args[$((i+1))]}") ;;
+        --branch)          branch_arg="${entrypoint_args[$((i+1))]}"; extra_labels+=(--label "branch=${entrypoint_args[$((i+1))]}") ;;
+        --issue)           issue_arg="${entrypoint_args[$((i+1))]}";  extra_labels+=(--label "issue=${entrypoint_args[$((i+1))]}") ;;
       esac
     done
+
+    # Persist this run's transcript to the host so its token spend survives the
+    # container's --rm (Issue #3028). Degrades to no mount if the dir can't be
+    # created; telemetry never blocks dispatch.
+    session_mount=()
+    if sessions_dir=$(prepare_session_dir \
+        "$container_name" "$mode_label" "$issue_arg" "$fix_pr_num" "$branch_arg"); then
+      session_mount=(-v "${sessions_dir}:${AGENT_SESSIONS_MOUNT}")
+    fi
+
+    ledger_segment="dev-agent"
+    if [[ "$mode_label" == "fix-pr" || "$mode_label" == "resolve-conflict" ]]; then
+      ledger_segment="fix-agent"
+    fi
+    ledger_append_launch "$container_name" "$mode_label" "${issue_arg:-}" "${fix_pr_num:-}" \
+      "${branch_arg:-}" "$ledger_segment" "${CFGMS_LEASE_KEY:-}"
 
     if container_id=$(docker run -d \
       --name "$container_name" \
@@ -459,10 +2430,17 @@ case "$cmd" in
       --cpus=4 \
       --stop-timeout=3600 \
       -v "${real_path}:/workspace" \
-      -v "claude-creds:/persist" \
+      -v "${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json" \
+      -v "$(agent_trust_file "${container_name}"):/home/agent/.claude.json" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
+      "${AGENT_METRICS_MOUNT_ARGS[@]}" \
+      "${AGENT_MODEL_ROUTING_MOUNT_ARGS[@]}" \
+      "${session_mount[@]}" \
       -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AUTONOMOUS=true" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
+      "${lease_env[@]}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${entrypoint_args[@]}" 2>&1); then
@@ -479,6 +2457,7 @@ case "$cmd" in
       fi
     else
       echo "LAUNCH_FAILED:${container_name}:${container_id}"
+      ledger_append_launch_failed "$container_name" "$mode_label"
       rm -rf "$clone_dir"
       echo "CLEANED:clone:${clone_dir}"
       exit 1
@@ -537,8 +2516,8 @@ case "$cmd" in
     fi
 
     real_path=$(realpath "$clone_dir")
-    refresh_creds_from_host
     gh_token=$(gh auth token)
+    gate_image_staleness_for_launch
 
     # Remove stale container with the same name if it exists
     docker rm -f "$container_name" 2>/dev/null || true
@@ -574,7 +2553,7 @@ case "$cmd" in
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c "setup-env.sh && exec claude --dangerously-skip-permissions"
+      -c "setup-env.sh && exec runuser -u agent -- claude --dangerously-skip-permissions"
     ;;
 
   po-live)
@@ -597,7 +2576,22 @@ case "$cmd" in
       for a in "$@"; do
         escaped+=" $(printf '%q' "$a")"
       done
-      exec tmux split-window -h "POLIVE_INNER=1 $0 po-live${escaped}"
+      # `tmux split-window` exits 0 for *creating the pane*, not for the command
+      # inside it surviving. A pane whose command dies immediately is closed by
+      # tmux, so a failed launch used to report success with nothing running.
+      # Capture the pane id, keep a dead pane visible so its error survives, and
+      # verify the pane still exists before claiming the session started.
+      pane=$(tmux split-window -h -P -F '#{pane_id}' \
+        "POLIVE_INNER=1 $0 po-live${escaped}") || exit 1
+      tmux set-option -p -t "$pane" remain-on-exit on 2>/dev/null || true
+      sleep 2
+      if ! tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane"; then
+        echo "ERROR: po-live pane exited immediately — the container never started." >&2
+        echo "       Re-run the inner path to see the failure:" >&2
+        echo "         POLIVE_INNER=1 $0 po-live${escaped}" >&2
+        exit 1
+      fi
+      exit 0
     fi
 
     if [[ -z "$TMUX" && -z "${POLIVE_INNER:-}" ]]; then
@@ -625,34 +2619,92 @@ case "$cmd" in
     fi
 
     real_path=$(realpath "$clone_dir")
-    refresh_creds_from_host
     gh_token=$(gh auth token)
 
     # Remove stale container with the same name (only one PO live at a time)
     docker rm -f "$container_name" 2>/dev/null || true
 
+    # Fresh /po sessions (i.e. NOT --resume/--continue) always start on a clean,
+    # up-to-date develop so a stale branch left by a prior session can't leak in.
+    # Any uncommitted work is stashed, not discarded (committed work is already
+    # safe on its own branch). This runs only after the old container is gone,
+    # so we never mutate the shared clone underneath a live session.
+    if [[ "${1:-}" != "--resume" && "${1:-}" != "--continue" ]]; then
+      echo "Refreshing po-live workspace to a clean, up-to-date develop..."
+      git -C "$clone_dir" fetch --quiet origin develop \
+        || echo "  ! warning: fetch of origin/develop failed; refreshing against last-known origin/develop" >&2
+      # Clear skip-worktree / assume-unchanged before inspecting the tree.
+      # `.devcontainer/scripts/setup-env.sh` marks `.mcp.json` skip-worktree so
+      # its per-container rewrite doesn't dirty every agent's clone. That hides
+      # the file from `status --porcelain`, so the stash below never fired and
+      # the checkout then refused with "local changes would be overwritten" —
+      # a silent, permanent break of every fresh po-live session. Clearing the
+      # bits first lets the existing stash-then-checkout path see the truth and
+      # preserve the content instead of discarding it.
+      # In `ls-files -v`, `S` marks skip-worktree and a LOWERCASE tag marks
+      # assume-unchanged; `H` is an ordinary cached file, so it must not match.
+      # The two --no-* flags MUST be separate invocations: passing both in one
+      # `update-index` call exits 0 and silently applies neither (verified —
+      # the S bit survives), which is exactly how this stayed broken.
+      git -C "$clone_dir" ls-files -v 2>/dev/null | awk '/^S / {print $2}' \
+        | xargs -r git -C "$clone_dir" update-index --no-skip-worktree || true
+      git -C "$clone_dir" ls-files -v 2>/dev/null | awk '/^[[:lower:]] / {print $2}' \
+        | xargs -r git -C "$clone_dir" update-index --no-assume-unchanged || true
+      if [[ -n "$(git -C "$clone_dir" status --porcelain 2>/dev/null)" ]]; then
+        stash_label="po-live-autobackup-$(date -u +%Y%m%dT%H%M%SZ)"
+        if git -C "$clone_dir" stash push -u -m "$stash_label" >/dev/null 2>&1; then
+          echo "  ! Stashed uncommitted changes as '${stash_label}'"
+          echo "    (recover with: git -C '${clone_dir}' stash list)"
+        else
+          echo "ERROR: could not stash uncommitted changes in ${clone_dir}; refusing to refresh to develop." >&2
+          echo "       Resolve manually (commit/stash/clean the clone), then relaunch." >&2
+          exit 1
+        fi
+      fi
+      git -C "$clone_dir" checkout -q -B develop origin/develop
+    fi
+
     # Build the initial prompt without trailing space when args are empty.
     # Trailing space leaves Claude's input box mid-word and shows the slash-
     # command autocomplete dropdown instead of submitting on Enter.
-    if [[ -n "$args" ]]; then
-      po_prompt="/po ${args}"
-      po_name="PO: ${args}"
+    # Resume mode: reattach to an existing Claude session in the same /workspace
+    # clone instead of seeding a fresh /po. These forward Claude's own flags:
+    #   --continue          -> claude --continue  (most recent session)
+    #   --resume            -> claude --continue  (bare: convenience alias)
+    #   --resume <session-id> -> claude --resume <session-id>  (that exact one)
+    # The session transcript persists on the host-mounted ~/.claude.
+    if [[ "${1:-}" == "--continue" ]]; then
+      claude_args=( --continue )
+      session_desc="continue last session"
+    elif [[ "${1:-}" == "--resume" ]]; then
+      if [[ -n "${2:-}" ]]; then
+        claude_args=( --resume "$2" )
+        session_desc="resume session ${2}"
+      else
+        claude_args=( --continue )
+        session_desc="resume last session"
+      fi
+    elif [[ -n "$args" ]]; then
+      claude_args=( --name "PO: ${args}" "/po ${args}" )
+      session_desc="/po ${args}"
     else
-      po_prompt="/po"
-      po_name="PO"
+      claude_args=( --name "PO" "/po" )
+      session_desc="/po"
     fi
+
+    gate_image_staleness_for_launch
 
     echo "================================================"
     echo " CFGMS PO Live Session"
-    echo " Initial prompt: ${po_prompt}"
+    echo " Session:        ${session_desc}"
     echo " Clone:          ${real_path}"
     echo "================================================"
 
     host_claude_dir="$HOME/.claude"
     host_claude_json="$HOME/.claude.json"
 
-    # Pass $1 (display name) and $2 (initial prompt) via bash -c positional
-    # args to avoid shell-quote escaping pain when args contain special chars.
+    # Pass the resolved claude args via bash -c positional args ("$@") to avoid
+    # shell-quote escaping pain when args contain special characters.
     exec docker run -it --rm \
       --name "$container_name" \
       --label "cfg-agent=true" \
@@ -671,10 +2723,9 @@ case "$cmd" in
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c 'setup-env.sh && exec claude --dangerously-skip-permissions --name "$1" "$2"' \
-      cfg-agent-live-po \
-      "$po_name" \
-      "$po_prompt"
+      -c 'setup-env.sh && exec runuser -u agent -- claude --dangerously-skip-permissions "$@"' \
+      _ \
+      "${claude_args[@]}"
     ;;
 
   launch-interactive)
@@ -684,9 +2735,9 @@ case "$cmd" in
     sanitized=$(sanitize_branch "$branch")
     clone_dir="${2:-${WORKTREE_BASE}/${sanitized}}"
     real_path=$(realpath "$clone_dir")
-    refresh_creds_from_host
     gh_token=$(gh auth token)
     container_name="cfg-agent-interactive-${sanitized}"
+    gate_image_staleness_for_launch
 
     # Use setup-env.sh for shared setup (firewall, credential symlinks, git config).
     # setup-env.sh is baked into the image at /usr/local/bin/ so it works even when
@@ -699,9 +2750,9 @@ case "$cmd" in
     setup_cmds+=" && echo ' Connect at: https://claude.ai/code'"
     setup_cmds+=" && echo '================================================'"
     setup_cmds+=" && echo 'Warming up workspace trust...'"
-    setup_cmds+=" && claude -p 'ready' --dangerously-skip-permissions 2>&1 || echo 'WARN: trust warmup failed (non-fatal)'"
+    setup_cmds+=" && runuser -u agent -- claude -p 'ready' --dangerously-skip-permissions 2>&1 || echo 'WARN: trust warmup failed (non-fatal)'"
     setup_cmds+=" && echo 'Starting remote-control...'"
-    setup_cmds+=" && exec claude remote-control --permission-mode bypassPermissions --name '${branch}' 2>&1"
+    setup_cmds+=" && exec runuser -u agent -- claude remote-control --permission-mode bypassPermissions --name '${branch}' 2>&1"
 
     # Launch container in detached mode with remote-control server
     if container_id=$(docker run -d \
@@ -713,11 +2764,13 @@ case "$cmd" in
       --cpus=4 \
       --stop-timeout=3600 \
       -v "${real_path}:/workspace" \
-      -v "claude-creds:/persist" \
+      -v "${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json" \
+      -v "$(agent_trust_file "${container_name}"):/home/agent/.claude.json" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
@@ -742,29 +2795,26 @@ case "$cmd" in
     ;;
 
   wait-for-auth)
-    # Deprecated: credentials are now pre-validated via check-creds and copied
-    # from the host via refresh_creds_from_host before launch. This no-op
-    # preserves backward compatibility for any callers that still invoke it.
+    # Deprecated no-op. Credentials are no longer copied per-agent — containers
+    # bind-mount the host credentials file directly. Kept for backward compat.
     echo "WAIT_DONE"
     ;;
 
   check-creds)
-    # Refresh from host session first so we check what agents will actually use
-    refresh_creds_from_host >/dev/null 2>&1
-    # Then check OAuth credential validity in the shared volume
-    if ! docker volume inspect claude-creds >/dev/null 2>&1; then
-      echo "CREDS_MISSING:no claude-creds volume"
-    elif ! docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null; then
-      echo "CREDS_MISSING:no credentials file"
+    # Report OAuth token validity by reading the host credentials file directly
+    # — agent containers bind-mount this exact file, so it is what they use.
+    # CREDS_LOW / CREDS_EXPIRED are advisory only: agents refresh the live file
+    # in place (see gate_credentials_for_launch). Only MISSING / ERROR block.
+    host_creds="$HOME/.claude/.credentials.json"
+    if [[ ! -f "$host_creds" ]]; then
+      echo "CREDS_MISSING:no host credentials file at ${host_creds}"
     else
-      result=$(docker run --rm -v claude-creds:/persist --entrypoint python3 cfg-agent:latest -c "
-import json, time
-d = json.load(open('/persist/.credentials.json'))
+      result=$(CFGMS_HOST_CREDS="$host_creds" python3 -c "
+import json, os, time
+d = json.load(open(os.environ['CFGMS_HOST_CREDS']))
 oauth = d.get('claudeAiOauth', {})
 exp_ms = oauth.get('expiresAt', 0)
-exp_s = exp_ms / 1000
-now = time.time()
-remaining_min = int((exp_s - now) / 60)
+remaining_min = int((exp_ms / 1000 - time.time()) / 60)
 if remaining_min < 0:
     print(f'CREDS_EXPIRED:{remaining_min}')
 elif remaining_min < 30:
@@ -780,8 +2830,11 @@ else:
     [[ $# -eq 1 ]] || { echo "cleanup-issue requires exactly one issue number or item_id"; exit 1; }
     num="$1"
     if [[ "$num" =~ ^[0-9]+$ ]]; then
-      # Issue mode (numeric): existing behavior
+      # Issue mode (numeric): revoke API key + suspend tenant, then remove container + clone.
+      revoke_agent_creds "$num" || true
+      rm -rf "${AGENT_CRED_BASE}/${num}" 2>/dev/null || true
       docker cp "cfg-agent-${num}:/tmp/agent-result.json" "/tmp/agent-result-${num}.json" 2>/dev/null || true
+      ledger_reconcile_exit "cfg-agent-${num}" "/tmp/agent-result-${num}.json"
       if docker rm -f "cfg-agent-${num}" >/dev/null 2>&1; then
         echo "CLEANED:container:cfg-agent-${num}"
       else
@@ -795,9 +2848,13 @@ else:
         echo "SKIP:clone:${clone_dir} not found"
       fi
     else
-      # Item mode (non-numeric item_id): derive LAST12 and clean item resources
-      item_last12=$(echo "$num" | tr -cd 'a-zA-Z0-9' | rev | cut -c1-12 | rev)
+      # Item mode (non-numeric item_id): derive LAST12 and clean item resources.
+      # See create-clone-item above for why this isn't `${_alnum: -12}`.
+      _alnum=$(echo "$num" | tr -cd 'a-zA-Z0-9')
+      item_last12="${_alnum:$(( ${#_alnum} > 12 ? ${#_alnum} - 12 : 0 )):12}"
       item_container="cfg-agent-item-${item_last12}"
+      docker cp "${item_container}:/tmp/agent-result.json" "/tmp/agent-result-${item_container}.json" 2>/dev/null || true
+      ledger_reconcile_exit "$item_container" "/tmp/agent-result-${item_container}.json"
       if docker rm -f "$item_container" >/dev/null 2>&1; then
         echo "CLEANED:container:${item_container}"
       else
@@ -819,6 +2876,7 @@ else:
     container_name="$1"
     # Copy result file (best-effort)
     docker cp "${container_name}:/tmp/agent-result.json" "/tmp/agent-result-${container_name}.json" 2>/dev/null || true
+    ledger_reconcile_exit "$container_name" "/tmp/agent-result-${container_name}.json"
     # Remove container
     if docker rm -f "$container_name" >/dev/null 2>&1; then
       echo "CLEANED:container:${container_name}"
@@ -829,6 +2887,8 @@ else:
     clone_dir=""
     if [[ "$container_name" =~ ^cfg-agent-pr-fix-(.+)$ ]]; then
       clone_dir="${WORKTREE_BASE}/pr-fix-${BASH_REMATCH[1]}"
+    elif [[ "$container_name" =~ ^cfg-agent-resolve-conflict-(.+)$ ]]; then
+      clone_dir="${WORKTREE_BASE}/resolve-conflict-${BASH_REMATCH[1]}"
     elif [[ "$container_name" =~ ^cfg-agent-branch-(.+)$ ]]; then
       clone_dir="${WORKTREE_BASE}/${BASH_REMATCH[1]}"
     elif [[ "$container_name" =~ ^cfg-agent-interactive-(.+)$ ]]; then
@@ -848,6 +2908,18 @@ else:
       --format "{{.Names}}\t{{.Status}}\t{{.Label \"issue\"}}\t{{.Label \"mode\"}}\t{{.Label \"branch\"}}\t{{.Label \"pr\"}}" 2>/dev/null || true
     ;;
 
+  capacity)
+    # Resource admission gate. `capacity` → CAPACITY_OK:slots=<n> (rc0) or
+    # CAPACITY_FULL:<binding>:slots=0 (rc1). `capacity --json` → full detail for
+    # the preflight. Used by every launch path to bound host resource use without
+    # a hand-tuned container count (RAM/disk 90%, CPU 90%, 2×ncpu backstop).
+    if [[ "${1:-}" == "--json" ]]; then
+      _capacity_compute json
+    else
+      _capacity_compute line
+    fi
+    ;;
+
   list-exited)
     docker ps -a --filter "label=cfg-agent=true" --filter "status=exited" \
       --format "{{.Names}}\t{{.Label \"issue\"}}\t{{.Label \"mode\"}}\t{{.Label \"branch\"}}\t{{.Label \"pr\"}}" 2>/dev/null || true
@@ -856,6 +2928,67 @@ else:
   inspect-exit)
     [[ $# -eq 1 ]] || { echo "inspect-exit requires exactly one issue number"; exit 1; }
     docker inspect --format "{{.State.ExitCode}}" "cfg-agent-$1"
+    ;;
+
+  ledger-report)
+    # Answers "how many agents of each mode ran in the last N days, and what
+    # did they cost" from the durable ledger (Issue #3052) — no docker/GitHub
+    # history cross-referencing required.
+    #   ./.claude/scripts/agent-dispatch.sh ledger-report [DAYS]
+    days="${1:-7}"
+    if [[ ! -f "$AGENT_LEDGER_FILE" ]]; then
+      echo "No ledger yet at ${AGENT_LEDGER_FILE}"
+      exit 0
+    fi
+    python3 - "$AGENT_LEDGER_FILE" "$days" <<'PYEOF'
+import json, sys
+from datetime import datetime, timedelta, timezone
+
+path, days = sys.argv[1], int(sys.argv[2])
+cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+def parse_ts(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+launch_modes = {}
+by_mode = {}
+with open(path) as f:
+    for line in f:
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        ts = parse_ts(rec.get("ts"))
+        if ts is None or ts < cutoff:
+            continue
+        if rec.get("event") == "launch":
+            launch_modes[rec.get("container")] = rec.get("mode")
+        elif rec.get("event") == "exit":
+            mode = rec.get("mode") or launch_modes.get(rec.get("container")) or "unknown"
+            bucket = by_mode.setdefault(mode, {"runs": 0, "failed": 0, "cost_usd": 0.0, "no_usage": 0})
+            bucket["runs"] += 1
+            if rec.get("source") == "launch-failed" or rec.get("exit_code") not in (0, None):
+                bucket["failed"] += 1
+            usage = rec.get("usage")
+            if usage and usage.get("cost_usd") is not None:
+                bucket["cost_usd"] += usage["cost_usd"]
+            else:
+                bucket["no_usage"] += 1
+
+print(f"Ledger report -- last {days}d ({path})")
+print(f"{'mode':<18} {'runs':>5} {'failed':>7} {'cost_usd':>10} {'no_usage':>9}")
+for mode, b in sorted(by_mode.items()):
+    print(f"{mode:<18} {b['runs']:>5} {b['failed']:>7} {b['cost_usd']:>10.2f} {b['no_usage']:>9}")
+total_runs = sum(b["runs"] for b in by_mode.values())
+total_failed = sum(b["failed"] for b in by_mode.values())
+total_cost = sum(b["cost_usd"] for b in by_mode.values())
+print(f"{'TOTAL':<18} {total_runs:>5} {total_failed:>7} {total_cost:>10.2f}")
+PYEOF
     ;;
 
   inspect-detail)
@@ -872,6 +3005,73 @@ else:
     docker stats --no-stream "$1" 2>/dev/null || echo "(container not running)"
     echo "=== Last 30 log lines ==="
     docker logs --tail 30 "$1" 2>/dev/null || echo "(no logs available)"
+    ;;
+
+  smoke-test)
+    [[ $# -eq 1 ]] || { echo "smoke-test requires exactly one issue number"; exit 1; }
+    num="$1"
+    [[ "$num" =~ ^[0-9]+$ ]] || { echo "SMOKE_FAILED:${num}:invalid_issue_num"; exit 1; }
+
+    tier1_url="${CFGMS_TIER1_URL:-}"
+    if [[ -z "$tier1_url" ]]; then
+      echo "SMOKE_FAILED:${num}:no_tier1_url"
+      exit 1
+    fi
+
+    # Determine credential source before launching — missing cred exits without starting a container.
+    # Priority: CFGMS_API_KEY_FILE env → per-agent tmpfs cred → CFGMS_API_KEY env.
+    api_key_file="${CFGMS_API_KEY_FILE:-}"
+    api_key_env="${CFGMS_API_KEY:-}"
+    agent_cred_file="${AGENT_CRED_BASE}/${num}/api.key"
+
+    use_cred_file=""
+    use_cred_env=""
+
+    if [[ -n "$api_key_file" && -f "$api_key_file" ]]; then
+      use_cred_file="$api_key_file"
+    elif [[ -f "$agent_cred_file" ]]; then
+      use_cred_file="$agent_cred_file"
+    elif [[ -n "$api_key_env" ]]; then
+      use_cred_env="$api_key_env"
+    else
+      echo "SMOKE_FAILED:${num}:no_cred"
+      exit 1
+    fi
+
+    # Build docker env args for credential injection.
+    smoke_docker_env=("-e" "CFGMS_TIER1_URL=${tier1_url}")
+    if [[ -n "$use_cred_file" ]]; then
+      smoke_docker_env+=("-v" "${use_cred_file}:/run/cfgms/smoke.key:ro"
+                         "-e" "CFGMS_API_KEY_FILE=/run/cfgms/smoke.key")
+    else
+      smoke_docker_env+=("-e" "CFGMS_API_KEY=${use_cred_env}")
+    fi
+
+    # Run smoke test. --rm ensures the container is always removed on exit.
+    # Test hook: CFGMS_TEST_SMOKE_RUN_CMD replaces docker run for hermetic tests.
+    smoke_exit=0
+    if [[ -n "${CFGMS_TEST_SMOKE_RUN_CMD:-}" ]]; then
+      smoke_out=$(bash -c "${CFGMS_TEST_SMOKE_RUN_CMD}" 2>&1) || smoke_exit=$?
+    else
+      # --cap-add NET_ADMIN: this container runs through the baked
+      # entrypoint.sh (ENTRYPOINT + a CMD override), whose first action is now
+      # always the root-then-drop firewall init (Issue #4343) regardless of
+      # what CMD is -- without the capability, init-firewall.sh's iptables
+      # calls fail and the smoke test never reaches `cfg config list` at all.
+      smoke_out=$(docker run --rm \
+        --cap-add NET_ADMIN \
+        "${smoke_docker_env[@]}" \
+        cfg-agent:latest \
+        cfg config list --tenant="agent-test/${num}" --no-bundle 2>&1) || smoke_exit=$?
+    fi
+
+    if [[ $smoke_exit -eq 0 ]]; then
+      echo "SMOKE_OK:${num}"
+    else
+      err_msg=$(echo "$smoke_out" | head -1)
+      echo "SMOKE_FAILED:${num}:${err_msg}"
+      exit 1
+    fi
     ;;
 
   health-check)
@@ -891,6 +3091,16 @@ else:
         echo "WARN:image_age:Image is ${age_days} days old — Trivy DB and Go modules may be stale. Run /agent-setup rebuild"
         warnings=$((warnings + 1))
       fi
+
+      # Build-inputs staleness check (Issue #4388) — independent of image_age
+      # above: a same-day merge under .devcontainer/ is stale immediately, not
+      # after a week.
+      checkout_inputs_hash=$(_image_build_inputs_hash)
+      image_inputs_label=$(_image_build_inputs_label)
+      if [[ -n "$checkout_inputs_hash" && "$checkout_inputs_hash" != "$image_inputs_label" ]]; then
+        echo "WARN:image_inputs_stale:Image build-inputs label (${image_inputs_label:-none}) does not match checkout .devcontainer (${checkout_inputs_hash}). Run /agent-setup rebuild"
+        warnings=$((warnings + 1))
+      fi
     fi
 
     # Claude version comparison
@@ -902,12 +3112,69 @@ else:
       warnings=$((warnings + 1))
     fi
 
-    # Credentials check
-    if docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null; then
-      echo "INFO:creds:Credentials present in claude-creds volume"
+    # Claude Code image label (Issue #4473) — Claude Code is exempt from the
+    # pin-and-cooldown policy every other tool in this image follows; it
+    # installs npm's current `stable` release at build time instead of a
+    # pinned version, so this label (not a Dockerfile ARG) is where the
+    # exact installed version is recorded and traceable.
+    claude_code_label=$(docker inspect cfg-agent:latest \
+      --format '{{index .Config.Labels "cfgms.claude_code_version"}}' 2>/dev/null || true)
+    echo "INFO:claude_code_version:${claude_code_label:-unknown}"
+
+    # cfg CLI version check
+    cfg_version=$(docker run --rm --entrypoint cfg cfg-agent:latest version 2>/dev/null \
+      | grep -oP '(?<=Version: )\S+(?=,)' || echo "unknown")
+    echo "INFO:cfg_version:${cfg_version}"
+    if [[ "$cfg_version" == "unknown" ]]; then
+      echo "WARN:cfg_version:cfg binary missing or version check failed — run /agent-setup rebuild"
+      warnings=$((warnings + 1))
+    fi
+
+    # Codex CLI version check (Issue #3935) — the second subscription agent
+    # harness the security review harness dispatches. Mirrors the cfg-version
+    # check above (a single binary-presence probe) rather than the Claude
+    # host-vs-container diff above it: there is no host-side `codex` install
+    # to compare against in every dev environment the way Claude Code is
+    # installed for interactive use.
+    codex_version=$(docker run --rm --entrypoint codex cfg-agent:latest --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "unknown")
+    echo "INFO:codex_version:${codex_version}"
+    if [[ "$codex_version" == "unknown" ]]; then
+      echo "WARN:codex_version:codex binary missing or version check failed — run /agent-setup rebuild"
+      warnings=$((warnings + 1))
+    fi
+
+    # OpenCode CLI version check (Issue #3936) — the third subscription agent
+    # harness the security review harness dispatches. Same single
+    # binary-presence probe pattern as the codex check above.
+    opencode_version=$(docker run --rm --entrypoint opencode cfg-agent:latest --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "unknown")
+    echo "INFO:opencode_version:${opencode_version}"
+    if [[ "$opencode_version" == "unknown" ]]; then
+      echo "WARN:opencode_version:opencode binary missing or version check failed — run /agent-setup rebuild"
+      warnings=$((warnings + 1))
+    fi
+
+    # Credentials check — agents bind-mount the host credentials file directly.
+    if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+      echo "INFO:creds:Host credentials file present (bind-mounted into agents)"
     else
       echo "WARN:creds:No credentials found — run /agent-setup creds"
       warnings=$((warnings + 1))
+    fi
+
+    # Tier 1 reachability probe
+    tier1_url="${CFGMS_TIER1_URL:-}"
+    if [[ -z "$tier1_url" ]]; then
+      echo "WARN:tier1_url_not_set"
+      warnings=$((warnings + 1))
+    else
+      http_code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
+        "${tier1_url}/api/v1/health" 2>/dev/null || echo "000")
+      if [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
+        echo "INFO:tier1_reachable:true"
+      else
+        echo "WARN:tier1_unreachable:${http_code}"
+        warnings=$((warnings + 1))
+      fi
     fi
 
     echo "HEALTH_DONE:warnings=${warnings}"
@@ -918,6 +3185,18 @@ else:
     # returns immediately after `docker run -d`; the container does the review
     # and exits when done. Replaces the inline subagent spawn that was hanging
     # on per-tool approval prompts in the host /po cron session.
+    # --force re-reviews a PR whose head has not moved since the last review.
+    # Legitimate when the *criteria* changed rather than the code (e.g. a story's
+    # AC was amended), which the staleness guard below cannot detect.
+    review_force=false
+    review_args=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --force) review_force=true; shift ;;
+        *)       review_args+=("$1"); shift ;;
+      esac
+    done
+    set -- "${review_args[@]}"
     [[ $# -eq 1 ]] || { echo "review-pr requires exactly one PR number"; exit 1; }
     pr_num="$1"
     if [[ ! "$pr_num" =~ ^[0-9]+$ ]]; then
@@ -925,29 +3204,63 @@ else:
       exit 1
     fi
 
-    gate_credentials_for_launch
-
     # Validate PR + auto-detect story number.
     pr_meta=$(gh pr view "$pr_num" --repo cfg-is/cfgms \
-      --json state,headRefName,body,labels,headRepositoryOwner 2>/dev/null) || {
-      echo "REVIEW_REFUSED:${pr_num}:pr_not_found"
-      exit 3
+      --json state,headRefName,body,labels,headRepositoryOwner,author,mergeStateStatus 2>/dev/null) || {
+      _emit_review_refused "$pr_num" "pr_not_found"
     }
+    gate_credentials_for_launch
+    gate_image_staleness_for_launch
     state=$(echo "$pr_meta" | jq -r '.state')
+    merge_state=$(echo "$pr_meta" | jq -r '.mergeStateStatus // empty' | tr '[:lower:]' '[:upper:]')
     pr_branch=$(echo "$pr_meta" | jq -r '.headRefName')
     fork_owner=$(echo "$pr_meta" | jq -r '.headRepositoryOwner.login // empty')
     pr_body=$(echo "$pr_meta" | jq -r '.body // ""')
     pr_labels=$(echo "$pr_meta" | jq -r '.labels[].name')
+    pr_author_login=$(echo "$pr_meta" | jq -r '.author.login // empty')
 
     if [[ "$state" != "OPEN" ]]; then
-      echo "REVIEW_REFUSED:${pr_num}:pr_state_${state}"
-      exit 3
+      _emit_review_refused "$pr_num" "pr_state_${state}"
     fi
     if [[ -n "$fork_owner" && "$fork_owner" != "cfg-is" ]]; then
-      echo "REVIEW_REFUSED:${pr_num}:fork_branch_${fork_owner}"
-      exit 3
+      _emit_review_refused "$pr_num" "fork_branch_${fork_owner}"
     fi
+
+    # External-author gate (Issue #1786): check trust BEFORE any git fetch/checkout.
+    # Fail-closed: null/empty author or any API error → external.
+    author_trust=$(_check_author_permission "$pr_author_login" "$pr_num" "$pr_labels")
+    if [[ "$author_trust" != "internal" ]]; then
+      _post_quarantine_comment "$pr_num" "$pr_author_login"
+      _emit_review_refused "$pr_num" "external_author_${pr_author_login}:${author_trust}"
+    fi
+
     validate_branch "$pr_branch"
+
+    # Conflict guard: a DIRTY PR has no merge ref, so GitHub runs NO pull_request
+    # workflow for it and every required check is simply absent. A reviewer handed
+    # that PR has no CI evidence to judge against and reaches for the story's ACs
+    # alone — one such review FAILed a PR partly for checks that could never have
+    # run, then a fix agent was dispatched against a branch whose real problem was
+    # a conflict. Rebase is strictly cheaper than that round trip.
+    #
+    # Lives here for the same reason as _review_is_stale below: the preflight
+    # already recommends `rebase` ahead of review for DIRTY, but that is advisory
+    # and a direct `review-pr <N>` call bypasses it. The dispatcher is the
+    # enforcement point.
+    #
+    # Only exact DIRTY refuses. GitHub reports UNKNOWN while it is still computing
+    # mergeability, and BEHIND/BLOCKED are the merge queue's business, not the
+    # reviewer's — refusing on those would strand reviewable PRs.
+    if [[ "$merge_state" == "DIRTY" ]]; then
+      _emit_review_refused "$pr_num" "merge_conflicts"
+    fi
+
+    # Stale-head guard: refuse a re-review when no commit has landed since the
+    # last acceptance review. Runs before story resolution / capacity / lease so
+    # a no-op review costs one API call instead of a container.
+    if [[ "$review_force" != "true" ]] && _review_is_stale "$pr_num"; then
+      _emit_review_refused "$pr_num" "no_new_commit_since_review"
+    fi
 
     # Resolve story/item from the branch (authoritative) or, for legacy
     # branches, the body. See resolve_pr_story_or_item() comment header for
@@ -965,18 +3278,30 @@ else:
         story_num="${resolution#STORY:}"
         ;;
       REFUSED:*)
-        echo "REVIEW_REFUSED:${pr_num}:${resolution#REFUSED:}"
-        exit 3
+        _emit_review_refused "$pr_num" "${resolution#REFUSED:}"
         ;;
     esac
 
     container_name="cfg-agent-review-pr-${pr_num}"
     clone_dir="${WORKTREE_BASE}/review-pr-${pr_num}"
 
-    # Container conflict gate: refuse if the review container already exists.
-    if docker ps -a --filter "name=^/${container_name}$" --format "{{.Names}}" 2>/dev/null | grep -qx "$container_name"; then
-      echo "REVIEW_REFUSED:${pr_num}:container_exists"
-      exit 3
+    # Container conflict gate. A live container means wait; a crashed one is
+    # preserved for diagnosis and refuses; a cleanly-exited one is reaped here
+    # and we proceed (see _classify_review_container_state for why).
+    # (Same-host fast path; the cross-host interlock is the pr-<N> lease below.)
+    existing_state=$(docker ps -a --filter "name=^/${container_name}$" --format "{{.State}}" 2>/dev/null | head -1)
+    if [[ -n "$existing_state" ]]; then
+      existing_exit=$(docker inspect "$container_name" --format '{{.State.ExitCode}}' 2>/dev/null || echo "")
+      case "$(_classify_review_container_state "$existing_state" "$existing_exit")" in
+        reap_clean)
+          echo "REAPED_CLEAN_REVIEW_CONTAINER:${pr_num}:${container_name}"
+          docker rm -f "$container_name" >/dev/null 2>&1 || true
+          rm -rf "$clone_dir" 2>/dev/null || true
+          ;;
+        *)
+          _emit_review_refused "$pr_num" "$(_classify_review_container_state "$existing_state" "$existing_exit")"
+          ;;
+      esac
     fi
 
     PROJECT_QUEUE="${REPO_ROOT}/scripts/project-queue.sh"
@@ -1025,8 +3350,7 @@ for i in items:
         done
       fi
       if [[ -z "$item_id" ]]; then
-        echo "REVIEW_REFUSED:${pr_num}:no_story_link"
-        exit 3
+        _emit_review_refused "$pr_num" "no_story_link"
       fi
     else
       # Story PR: look up project item_id via add-issue.
@@ -1037,10 +3361,35 @@ for i in items:
       # item_id leaves the reviewer reading some other item's body and
       # potentially mutating the wrong status (see issue #1806).
       if [[ -z "$item_id" ]]; then
-        echo "REVIEW_REFUSED:${pr_num}:no_project_item_for_story_${story_num}"
-        exit 3
+        _emit_review_refused "$pr_num" "no_project_item_for_story_${story_num}"
       fi
     fi
+
+    # Resource admission gate before claiming the lease / cloning.
+    if ! _capacity_gate "${pr_num}" "REVIEW_REFUSED"; then
+      exit 3
+    fi
+
+    # Cross-host PR lease — pr-<N> is shared by review/fix/resolve (mutually
+    # exclusive ops on one PR). Acquired only now that this is a confirmed,
+    # story-linked, reviewable PR (after the no_story_link / no_project_item
+    # refusals above, before any clone/launch). Another host already
+    # reviewing/fixing this PR holds it, and its local docker check above is
+    # invisible to us. The review container's review-entrypoint.sh releases the
+    # lease on exit; until then a pre-launch failure must release it, so we arm an
+    # EXIT trap and disarm it only after a successful detached launch (then the
+    # container owns release).
+    PIPELINE_HELPER="${CFGMS_TEST_PIPELINE_HELPER:-${REPO_ROOT}/scripts/pipeline-helper.sh}"
+    # Default must match po-act.sh's LEASE_TTL_PR — a shorter value here would
+    # expire a review lease under a live container (see lease-gc liveness guard).
+    review_lease_out=$(bash "$PIPELINE_HELPER" lease-acquire "pr-${pr_num}" "${CFGMS_LEASE_TTL_PR:-21600}" 2>/dev/null || true)
+    case "$review_lease_out" in
+      ACQUIRED:*|RECLAIMED:*) ;;
+      HELD:*) _emit_review_refused "$pr_num" "lease_held" ;;
+      *)      _emit_review_refused "$pr_num" "lease_error" ;;
+    esac
+    REVIEW_LEASE_RELEASE_ON_EXIT="pr-${pr_num}"
+    trap '[ -n "${REVIEW_LEASE_RELEASE_ON_EXIT:-}" ] && bash "$PIPELINE_HELPER" lease-release "$REVIEW_LEASE_RELEASE_ON_EXIT" >/dev/null 2>&1; true' EXIT
 
     # Stale clone cleanup (previous run crashed before docker rm got the dir).
     rm -rf "$clone_dir" 2>/dev/null || true
@@ -1061,7 +3410,7 @@ for i in items:
     # review-entrypoint.sh reads it and hands off to claude -p.
     if $is_item_branch; then
       # Item-branch prompt: story:0, cleanup via item_id (no linked issue to close).
-      cat > "${clone_dir}/.acceptance-review-prompt.md" <<PROMPT_EOF
+      cat > "${clone_dir}/${REVIEW_PROMPT_FILE}" <<PROMPT_EOF
 You are operating as the Acceptance Reviewer agent for CFGMS.
 
 Your assignment: pr:${pr_num} story:0 --project-item ${item_id}
@@ -1087,7 +3436,7 @@ agent definition. Then take exactly ONE of these closing actions:
 PROMPT_EOF
     else
       # Story-branch prompt: includes issue closing and story cleanup.
-      cat > "${clone_dir}/.acceptance-review-prompt.md" <<PROMPT_EOF
+      cat > "${clone_dir}/${REVIEW_PROMPT_FILE}" <<PROMPT_EOF
 You are operating as the Acceptance Reviewer agent for CFGMS.
 
 Your assignment: pr:${pr_num} story:${story_num} --project-item ${item_id}
@@ -1123,6 +3472,17 @@ PROMPT_EOF
       review_story_label="0"
     fi
 
+    # Persist the reviewer's transcript to the host (Issue #3028) — review
+    # containers are --rm too, so this is the only record of their spend.
+    review_session_mount=()
+    if review_sessions_dir=$(prepare_session_dir \
+        "$container_name" "review" "${story_num:-}" "$pr_num" "${pr_branch:-}"); then
+      review_session_mount=(-v "${review_sessions_dir}:${AGENT_SESSIONS_MOUNT}")
+    fi
+
+    ledger_append_launch "$container_name" "review" "${story_num:-}" "$pr_num" \
+      "${pr_branch:-}" "acceptance-review" "pr-${pr_num}"
+
     # Launch headless. Mount the review entrypoint at runtime — no image rebuild
     # required when this script changes.
     if container_id=$(docker run -d \
@@ -1135,24 +3495,768 @@ PROMPT_EOF
       --cpus=4 \
       --stop-timeout=1800 \
       -v "${real_path}:/workspace" \
-      -v "claude-creds:/persist" \
+      -v "${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json" \
+      -v "$(agent_trust_file "${container_name}"):/home/agent/.claude.json" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -v "${REPO_ROOT}/.devcontainer/scripts/setup-env.sh:/usr/local/bin/setup-env.sh:ro" \
       -v "${REPO_ROOT}/.devcontainer/scripts/review-entrypoint.sh:/usr/local/bin/review-entrypoint.sh:ro" \
+      -v "${REPO_ROOT}/.devcontainer/agent-context.sh:/usr/local/bin/agent-context.sh:ro" \
+      "${AGENT_METRICS_MOUNT_ARGS[@]}" \
+      "${AGENT_MODEL_ROUTING_MOUNT_ARGS[@]}" \
+      "${review_session_mount[@]}" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_LEASE_KEY=pr-${pr_num}" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
       --cap-add NET_ADMIN \
       --entrypoint /usr/local/bin/review-entrypoint.sh \
       cfg-agent:latest 2>&1); then
+      # Launch succeeded — the container now owns the pr-<N> lease and releases it
+      # on exit. Disarm the host-side release trap.
+      unset REVIEW_LEASE_RELEASE_ON_EXIT
       echo "REVIEW_DISPATCHED:${pr_num}:${review_story_label}:${container_id}"
       # Best-effort PR dashboard label via REST API (see launch-generic note above).
       gh api --method POST "repos/cfg-is/cfgms/issues/${pr_num}/labels" \
         -f "labels[]=review-agent" >/dev/null 2>&1 || true
     else
+      # Launch failed — the EXIT trap releases the lease.
       echo "LAUNCH_FAILED:${container_name}:${container_id}"
+      ledger_append_launch_failed "$container_name" "review"
       rm -rf "$clone_dir"
       echo "CLEANED:clone:${clone_dir}"
+      exit 1
+    fi
+    ;;
+
+  launch-investigator)
+    # Launch a read-only investigator container (Issue #3903) against an
+    # ALREADY-EXISTING security-review sweep directory (story #3902 owns
+    # creating that tree — this command fails if it is missing, it never
+    # creates one). Non-blocking, same `docker run -d` shape as review-pr.
+    #
+    # Every technical control below is deliberate and diverges from every
+    # other launch path in this file on purpose — see Issue #3903:
+    #   - no GH_TOKEN, no git identity/remote — this agent never talks to
+    #     GitHub or writes a commit
+    #   - /workspace mounted :ro — the repo checkout, not writable at all
+    #   - the writable mount is scoped to ONE lane directory (or, in plan
+    #     mode, only plan/) — never the whole sweep tree, so a container can
+    #     never read or write another lane's findings or manifest.json
+    inv_sweep_dir=""
+    inv_snapshot_dir=""
+    inv_bundle_dir=""
+    inv_mode=""
+    inv_lane_entrypoint=""
+    inv_harness=""
+    inv_model=""
+    inv_ollama_key_dir_flag=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --sweep-dir)       inv_sweep_dir="${2:?--sweep-dir requires a value}"; shift 2 ;;
+        --snapshot-dir)    inv_snapshot_dir="${2:?--snapshot-dir requires a value}"; shift 2 ;;
+        --bundle-dir)      inv_bundle_dir="${2:?--bundle-dir requires a value}"; shift 2 ;;
+        --mode)            inv_mode="${2:?--mode requires a value}"; shift 2 ;;
+        --lane-entrypoint) inv_lane_entrypoint="${2:?--lane-entrypoint requires a value}"; shift 2 ;;
+        --harness)         inv_harness="${2:?--harness requires a value}"; shift 2 ;;
+        --model)           inv_model="${2:?--model requires a value}"; shift 2 ;;
+        --ollama-key-dir)  inv_ollama_key_dir_flag="${2:?--ollama-key-dir requires a value}"; shift 2 ;;
+        *) echo "Unknown flag for launch-investigator: $1"; exit 1 ;;
+      esac
+    done
+
+    [[ -n "$inv_sweep_dir" ]] || { echo "ERROR: launch-investigator requires --sweep-dir"; exit 1; }
+    [[ -n "$inv_mode" ]] || { echo "ERROR: launch-investigator requires --mode (plan|<lane-id>)"; exit 1; }
+
+    # Checked here, before any mkdir, docker call, or mount construction
+    # (Issue #3979): which directory is required, and later mounted at
+    # /workspace, is mode-dependent. Plan mode mounts the bundle (#3978) and
+    # must never fall back to the snapshot if --bundle-dir is missing; every
+    # other mode (a lane) keeps requiring --snapshot-dir exactly as before
+    # (Issue #3952) and never touches --bundle-dir. A missing value for the
+    # mode's own required directory must never fall through to the other
+    # mode's directory for /workspace.
+    if [[ "$inv_mode" == "plan" ]]; then
+      [[ -n "$inv_bundle_dir" ]] || { echo "ERROR: launch-investigator --mode plan requires --bundle-dir"; exit 1; }
+    else
+      [[ -n "$inv_snapshot_dir" ]] || { echo "ERROR: launch-investigator requires --snapshot-dir"; exit 1; }
+    fi
+
+    # SECURITY: --mode is concatenated into the WRITABLE bind-mount path below
+    # (${inv_sweep_dir}/lanes/${inv_mode}), so it is validated as a strict lane
+    # id here, before any mkdir, any docker call, and any mount. The
+    # $inv_mode_safe value computed further down is `tr`-sanitized for the
+    # container name and ledger only and must never be mistaken for path
+    # validation: `tr -c 'a-zA-Z0-9._-' '-'` leaves `..` untouched, so a
+    # traversing mode would keep its traversal in the path while still yielding
+    # a plausible, collision-free container name. A lane id is a directory name
+    # under lanes/ and nothing else: alphanumeric-leading, no `/`, no `..`.
+    if [[ "$inv_mode" != "plan" ]]; then
+      inv_mode_valid=1
+      [[ "$inv_mode" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || inv_mode_valid=0
+      [[ "$inv_mode" == *".."* ]] && inv_mode_valid=0
+      if [[ "$inv_mode_valid" -ne 1 ]]; then
+        # The rejected value is deliberately not echoed back — it is attacker
+        # controlled and this line goes to a terminal and the dispatch log.
+        echo "INVESTIGATOR_REFUSED:invalid_mode:mode must be 'plan' or a lane id matching ^[A-Za-z0-9][A-Za-z0-9._-]*\$"
+        exit 2
+      fi
+    fi
+
+    # This story assumes the sweep tree already exists — see Out of Scope in
+    # Issue #3903. A missing sweep dir is a hard failure, never a mkdir -p
+    # opportunity (that would silently start a sweep this command isn't
+    # responsible for tracking).
+    [[ -d "$inv_sweep_dir" ]] || { echo "ERROR: sweep directory not found: ${inv_sweep_dir}"; exit 1; }
+    inv_sweep_dir="$(realpath "$inv_sweep_dir")"
+
+    # Issue #3979: which directory is resolved, verified, and ultimately
+    # mounted at /workspace is mode-dependent. Plan mode resolves ONLY
+    # --bundle-dir and never touches --snapshot-dir (even if a caller passed
+    # one); every other mode (a lane) resolves ONLY --snapshot-dir, exactly
+    # as before Issue #3952. inv_workspace_dir is the one value the docker
+    # run invocation below ever mounts at /workspace -- there is no path on
+    # which plan mode falls back to the snapshot.
+    if [[ "$inv_mode" == "plan" ]]; then
+      # --bundle-dir (Issue #3979): mount the auditable bundle (#3978)
+      # instead of any repository tree at all -- the planner never gets a
+      # checkout, snapshot or otherwise, to read from. Validated exactly like
+      # --snapshot-dir below: it must already exist (security-review.sh's
+      # dispatch_planner() creates it via planner.py's prepare(), which calls
+      # metadata.write_bundle(), before ever calling this command -- never
+      # mkdir -p'd here) and its realpath must land EXACTLY on
+      # <sweep-dir>/bundle. docker resolves the host side of a bind mount at
+      # mount time, so a symlink at the passed path would redirect /workspace
+      # to an arbitrary host directory -- including back to a live checkout,
+      # which is exactly what this story exists to stop being reachable from
+      # plan mode.
+      [[ -d "$inv_bundle_dir" ]] || { echo "ERROR: bundle directory not found: ${inv_bundle_dir}"; exit 1; }
+      inv_bundle_dir_real="$(realpath "$inv_bundle_dir" 2>/dev/null || true)"
+      if [[ "$inv_bundle_dir_real" != "${inv_sweep_dir}/bundle" ]]; then
+        echo "INVESTIGATOR_REFUSED:bundle_dir_escape:bundle dir does not resolve inside the sweep directory"
+        exit 2
+      fi
+      inv_bundle_dir="$inv_bundle_dir_real"
+      inv_workspace_dir="$inv_bundle_dir"
+    else
+      # --snapshot-dir (Issue #3952, epic #3950's D1): mount the tree from a
+      # verified, immutable snapshot instead of the live, mutable repo checkout.
+      # Validated exactly like inv_plan_dir_real/inv_lane_dir_real below: it
+      # must already exist (security-review.sh's create_sweep_tree() creates it
+      # via snapshot.create_snapshot() before ever calling this command --
+      # never mkdir -p'd here) and its realpath must land EXACTLY on
+      # <sweep-dir>/snapshot. The same reasoning as the plan/lane checks
+      # applies: docker resolves the host side of a bind mount at mount time,
+      # so a symlink at the passed path would redirect /workspace to an
+      # arbitrary host directory -- including back to the live checkout this
+      # story exists to stop mounting.
+      [[ -d "$inv_snapshot_dir" ]] || { echo "ERROR: snapshot directory not found: ${inv_snapshot_dir}"; exit 1; }
+      inv_snapshot_dir_real="$(realpath "$inv_snapshot_dir" 2>/dev/null || true)"
+      if [[ "$inv_snapshot_dir_real" != "${inv_sweep_dir}/snapshot" ]]; then
+        echo "INVESTIGATOR_REFUSED:snapshot_dir_escape:snapshot dir does not resolve inside the sweep directory"
+        exit 2
+      fi
+      inv_snapshot_dir="$inv_snapshot_dir_real"
+      inv_workspace_dir="$inv_snapshot_dir"
+    fi
+
+    inv_sweep_id="$(basename "$inv_sweep_dir")"
+    inv_mode_safe=$(printf '%s' "$inv_mode" | tr -c 'a-zA-Z0-9._-' '-')
+    inv_sweep_id_safe=$(printf '%s' "$inv_sweep_id" | tr -c 'a-zA-Z0-9._-' '-')
+    container_name="cfg-agent-investigator-${inv_sweep_id_safe}-${inv_mode_safe}"
+
+    # Container conflict gate (Issue #3930). launch-investigator's `docker
+    # run -d` carries no `--rm`, so a finished container's name stays taken
+    # until something removes it — without this state check, ANY container
+    # by this name, exited or not, refused every future launch for the same
+    # sweep/mode forever, which made `security-review.sh resume` a permanent
+    # no-op for a lane whose container had already exited. An exited
+    # container is reaped here and the launch proceeds; a genuinely still-
+    # running one is refused exactly as before.
+    existing_state=$(docker ps -a --filter "name=^/${container_name}$" --format "{{.State}}" 2>/dev/null | head -1)
+    if [[ -n "$existing_state" ]]; then
+      if _container_safe_to_reap "$existing_state"; then
+        docker rm -f "$container_name" >/dev/null 2>&1 || true
+      else
+        echo "INVESTIGATOR_REFUSED:${inv_mode}:container_exists:${container_name}"
+        exit 3
+      fi
+    fi
+
+    # Mount plan/lane subpaths only — never the sweep root — per the lane
+    # independence requirement above.
+    inv_out_mount=()
+    inv_plan_mount=()
+    claude_creds_mount=()
+    inv_agent_profile_mount=()
+    inv_agent_profile_host_path=""
+    # The disallowed-tools value below BLOCKS the "gh issue create" invocation
+    # (via --disallowedTools); it never runs it. It is built from a variable so
+    # the literal phrase never appears contiguously in this file's source and
+    # trips the "No raw 'gh issue create' in pipeline scripts" CI gate
+    # (label-decommission-gate.yml), which does a plain substring grep with no
+    # allowlist for legitimate blocklist references.
+    inv_gh_issue_verb="issue"
+    # Bash(curl:*)/Bash(wget:*) are defense-in-depth on top of the egress
+    # firewall (--cap-add NET_ADMIN below + init-firewall.sh in the
+    # entrypoint), not a boundary of their own: enumerating HTTP clients by
+    # binary name can never be complete, and the default-DROP OUTPUT policy
+    # plus the dnsmasq allowlist is what actually bounds where this container
+    # can send the credentials it holds. They are listed because the two
+    # obvious hand-reachable exfiltration verbs are free to refuse, and a
+    # refusal is visible in the transcript where a dropped packet is not.
+    # Read/Grep are defense-in-depth on top of investigator-entrypoint.sh's
+    # `--agent investigator` (Issue #3938): that flag loads
+    # .claude/agents/investigator.md's `tools: Bash, Glob` as the session's
+    # actual tool surface, so Read/Grep are already absent from the model's
+    # tool list before this flag is ever evaluated. Listing them here too
+    # means a future edit that widens the investigator profile's `tools:`
+    # line, or drops --agent from the entrypoint invocation, still leaves
+    # this CLI-level denial in place rather than depending on one control
+    # alone for the metadata-only boundary AC2 requires.
+    # MultiEdit is not a tool name the claude CLI (2.1.258 at the time this
+    # was observed; the image now installs npm's current `stable` release at
+    # build time rather than a pinned version -- Issue #4473, see the
+    # cfgms.claude_code_version label on the agent image for what's actually
+    # installed) recognizes -- it prints
+    # investigator start (Issue #4013). Edit is the CLI's actual file-edit
+    # tool name and already appears below, so removing the stale entry does
+    # not change what capability is denied.
+    inv_disallowed="Edit,Write,NotebookEdit,Read,Grep,Bash(curl:*),Bash(wget:*),Bash(git commit:*),Bash(git push:*),Bash(git branch:*),Bash(gh pr create:*),Bash(gh ${inv_gh_issue_verb} create:*)"
+    # <sweep>/plan is bind-mounted in BOTH modes — rw as /workspace-out in plan
+    # mode, ro as /workspace-plan into every lane — so it is resolved and
+    # verified once, here, for both. This is the same check the lanes/ guard
+    # below applies, and for the same reason: mkdir -p succeeds silently on an
+    # already-existing symlink-to-directory and docker resolves the host side
+    # of a bind mount at mount time, so a symlink planted at <sweep>/plan
+    # redirects the mount to an arbitrary host path. In plan mode that path is
+    # WRITABLE and the container runs `claude --dangerously-skip-permissions`,
+    # so `ln -s /workspace <sweep>/plan` would hand it a writable checkout of
+    # the repo that .claude/agents/investigator.md documents as EROFS-enforced;
+    # in lane mode it leaks an arbitrary host directory read-only. inv_sweep_dir
+    # is already realpath'd above, so the literal comparison is sound.
+    inv_plan_dir="${inv_sweep_dir}/plan"
+    mkdir -p "$inv_plan_dir"
+    inv_plan_dir_real="$(realpath "$inv_plan_dir" 2>/dev/null || true)"
+    if [[ "$inv_plan_dir_real" != "${inv_sweep_dir}/plan" ]]; then
+      echo "INVESTIGATOR_REFUSED:plan_dir_escape:plan/ does not resolve inside the sweep directory"
+      exit 2
+    fi
+
+    if [[ "$inv_mode" == "plan" ]]; then
+      inv_out_mount=(-v "${inv_plan_dir}:/workspace-out:rw")
+      # Credential delivery is gated on the HARNESS ID in plan mode exactly as
+      # it already is in lane mode (`inv_harness_creds_mount` below), and the
+      # mount is read-only in both. Multi-planner dispatch (Issue #3937) made
+      # `--mode plan` reachable with `--harness`/`--model`, which this branch
+      # predates: before that, plan mode was only ever launched without
+      # `--harness`, so the unconditional Claude mount always matched the
+      # harness that ran. Combining the two would have (a) handed the host's
+      # live Claude OAuth session to a container running a THIRD-PARTY harness
+      # that deliberately ingests untrusted repository source and third-party
+      # model output, and (b) for `--harness claude`, emitted two `-v` flags
+      # with the same container destination and conflicting rw/ro modes.
+      #
+      # So: mount the Claude credential here ONLY on the no-`--harness` legacy
+      # invocation, and let the harness block below be the single owner of the
+      # mount whenever `--harness` is supplied. An unwired harness gets no
+      # credential at all; investigator-entrypoint.sh's plan branch then fails
+      # closed on its own `~/.claude/.credentials.json` check rather than
+      # running with someone else's session.
+      #
+      # :ro, not rw. The container refreshes an OAuth token in memory for the
+      # life of the process; it never needs to write back to the host file, and
+      # rw let a container that ingests untrusted input overwrite the host's
+      # live credential. Lane mode has always mounted this :ro and drives the
+      # same `claude` CLI (lanes/claude_lane.py), so read-only is proven for
+      # this exact binary.
+      if [[ -z "$inv_harness" || "$inv_harness" == "claude" ]]; then
+        gate_credentials_for_launch
+      fi
+      if [[ -z "$inv_harness" ]]; then
+        claude_creds_mount=(-v "${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json:ro")
+      fi
+
+      # Issue #4003: since #3979 moved /workspace from a repo checkout to the
+      # read-only bundle, .claude/agents/ is no longer reachable from inside
+      # the container at all, so entrypoint's `claude --agent investigator`
+      # (Issue #3938) fails closed with "not found" and the container exits 1
+      # before the planner ever runs. Mounted individually at the user-level
+      # agents directory `claude` reads regardless of cwd, never by mounting a
+      # whole .claude/agents/ directory (which would also need to exist and
+      # would pull in every OTHER agent definition this profile has no reason
+      # to see). Read-only: the profile is a trust boundary (AC2 of #3938),
+      # not planner output. Lane mode never passes --agent (claude_lane.py)
+      # and its /workspace is the snapshot, which already contains this file,
+      # so this mount is plan-mode-only.
+      inv_agent_profile_host_path="${REPO_ROOT}/.claude/agents/investigator.md"
+      if [[ ! -f "$inv_agent_profile_host_path" ]]; then
+        echo "ERROR: investigator agent profile not found: ${inv_agent_profile_host_path}"
+        exit 1
+      fi
+      inv_agent_profile_mount=(-v "${inv_agent_profile_host_path}:/home/agent/.claude/agents/investigator.md:ro")
+    else
+      # Second, independent check on the same property the lane-id pattern
+      # above enforces syntactically: the thing about to be mounted rw must
+      # RESOLVE to a strict descendant of <sweep>/lanes/. This catches what a
+      # pattern cannot — a symlink already planted at lanes/ or at the lane
+      # path itself. lanes/ is resolved and verified before the mkdir so a
+      # symlinked lanes/ cannot be used to create the directory off-tree.
+      inv_lanes_root="${inv_sweep_dir}/lanes"
+      mkdir -p "$inv_lanes_root"
+      inv_lanes_root_real="$(realpath "$inv_lanes_root" 2>/dev/null || true)"
+      if [[ "$inv_lanes_root_real" != "${inv_sweep_dir}/lanes" ]]; then
+        echo "INVESTIGATOR_REFUSED:lane_dir_escape:lanes/ does not resolve inside the sweep directory"
+        exit 2
+      fi
+      inv_lane_dir="${inv_sweep_dir}/lanes/${inv_mode}"
+      mkdir -p "$inv_lane_dir"
+      inv_lane_dir_real="$(realpath "$inv_lane_dir" 2>/dev/null || true)"
+      if [[ "$inv_lane_dir_real" != "${inv_lanes_root_real}/"?* ]]; then
+        echo "INVESTIGATOR_REFUSED:lane_dir_escape:lane directory does not resolve under lanes/"
+        exit 2
+      fi
+      inv_plan_mount=(-v "${inv_plan_dir}:/workspace-plan:ro")
+      inv_out_mount=(-v "${inv_lane_dir}:/workspace-out:rw")
+    fi
+
+    # Harness session credential (Issue #3932, epic #3927's contract C2) --
+    # the ONLY credential-delivery mechanism for lane mode (Issue #3933
+    # retired the OS-keychain per-lane credential-name flag in full, along
+    # with the three REST lanes that were its only callers).
+    # Supersedes the mount two blocks up (`claude_creds_mount`) whenever
+    # `--harness` is supplied, in EITHER mode, so a container can authenticate
+    # as a subscription agent harness's own session instead of an OS-keychain
+    # API key — and so exactly one `-v` ever targets
+    # /home/agent/.claude/.credentials.json. Since Issue #3937 multi-planner
+    # dispatch, `--mode plan --harness <id>` is a real call shape; the plan
+    # branch above therefore mounts nothing of its own when `--harness` is
+    # present. `claude`, `codex`, and `opencode` are wired (Issue #3935;
+    # Issue #3936 adds opencode); an unrecognized harness id gets the env
+    # vars below but no credential mount, which is a deliberate no-op rather
+    # than a hard failure — the roster mechanism (C5) is proven in this
+    # story against a stub harness that legitimately has no credential file
+    # of its own.
+    inv_harness_creds_mount=()
+    inv_harness_env=()
+    inv_harness_extra_run_args=()
+    if [[ -n "$inv_harness" ]]; then
+      case "$inv_harness" in
+        claude)
+          inv_harness_creds_mount=(-v "${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json:ro")
+          ;;
+        codex)
+          # Codex's own session credential (Issue #3935): $CODEX_HOME/auth.json,
+          # default ~/.codex/auth.json — confirmed against the installed CLI
+          # (`codex login`, `codex doctor`), the ChatGPT-subscription analogue
+          # of Claude's ~/.claude/.credentials.json above. Unlike `claude`
+          # (gated on host token freshness only via `gate_credentials_for_launch`
+          # in plan mode, never on file existence in lane mode), codex is the
+          # first wired lane-mode harness whose credential can be genuinely
+          # absent on a host that has never run `codex login` — mounting a
+          # nonexistent host path leaves the mount's effective contents
+          # undefined rather than failing loudly. Checked here, before any
+          # docker call: a missing file fails closed with
+          # "credential_unavailable" in the message, which
+          # `security-review.sh`'s `_is_intentional_dispatch_skip` already
+          # matches (same substring `gate_credentials_for_launch`'s own
+          # DISPATCH_DEFERRED path documents), so a codex lane missing its
+          # credential is recorded and skipped without ever blocking another
+          # roster lane's dispatch or the consolidator run.
+          if [[ ! -f "${HOME}/.codex/auth.json" ]]; then
+            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:no codex session found at ${HOME}/.codex/auth.json -- run 'codex login' on the host"
+            exit 1
+          fi
+          inv_harness_creds_mount=(-v "${HOME}/.codex/auth.json:/home/agent/.codex/auth.json:ro")
+          ;;
+        opencode)
+          # OpenCode's own session credential (Issue #3936): confirmed
+          # against the installed CLI (`opencode providers list
+          # --print-logs --log-level DEBUG`, which prints "Credentials
+          # ~/.local/share/opencode/auth.json" directly) --
+          # $XDG_DATA_HOME/opencode/auth.json, default
+          # ~/.local/share/opencode/auth.json, the OpenCode Zen account
+          # analogue of Codex's ~/.codex/auth.json above. Same
+          # existence-gated fail-closed shape as codex: a host that has
+          # never run `opencode auth login` fails the launch closed with
+          # credential_unavailable, which security-review.sh's
+          # _is_intentional_dispatch_skip already recognizes, rather than
+          # mounting a nonexistent host path with undefined effective
+          # contents.
+          if [[ ! -f "${HOME}/.local/share/opencode/auth.json" ]]; then
+            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:no opencode session found at ${HOME}/.local/share/opencode/auth.json -- run 'opencode auth login' on the host"
+            exit 1
+          fi
+          inv_harness_creds_mount=(-v "${HOME}/.local/share/opencode/auth.json:/home/agent/.local/share/opencode/auth.json:ro")
+          ;;
+        ollama|opencode_agent)
+          # opencode_agent (Issue #4293) drives OpenCode against the in-container
+          # ollama daemon, so it needs exactly this lane's sign-in keypair.
+          #
+          # Ollama's own session credential (Issue #3976): the `ollama
+          # signin` keypair, `id_ed25519{,.pub}` -- confirmed against the
+          # installed CLI (`ollama signin`, host verification while writing
+          # that story: `~/.ollama/config.json` holds no token; the local
+          # daemon signs Cloud requests with this keypair instead). Same
+          # existence-gated fail-closed shape as codex and opencode above: a
+          # host with no signed-in keypair fails the launch closed with
+          # credential_unavailable, which security-review.sh's
+          # _is_intentional_dispatch_skip already recognizes.
+          #
+          # WHICH DIRECTORY (Issue #4005): on a host where Ollama runs as a
+          # systemd service (`User=ollama`, the shape the upstream install
+          # script sets up), `ollama signin` and `ollama run <model>:cloud`
+          # invoked BY THE DAEMON go through that service account, whose
+          # keypair lives under ITS home directory -- never the invoking
+          # (human) admin's $HOME, a different account entirely. Mounting
+          # the human's ~/.ollama/id_ed25519 in that case presents a key
+          # that was never signed in: ollama.com answers 401 on
+          # /api/generate and the lane records `failed`, even though the
+          # host CLI works fine (confirmed end to end while writing #4005:
+          # the public key the container presented, read off the `ollama
+          # signin` connect URL, matched the human's ~/.ollama/id_ed25519.pub
+          # exactly -- not the daemon's).
+          #
+          # Detection: a loaded ollama.service systemd unit means
+          # service-managed; `getent passwd` resolves that unit's User= to
+          # an actual home directory rather than assuming any single path
+          # (`/usr/share/ollama` is the common installer default, not a
+          # guarantee). `systemctl show -p User --value` prints an EMPTY
+          # STRING, not "root", for a loaded unit with no explicit User= --
+          # systemd still runs that unit as root, so empty is resolved to
+          # "root" here, never read as "not service-managed" (the gap a
+          # closed prior attempt at this story, PR #4024, left open: it fell
+          # through to $HOME/.ollama for exactly this shape and silently
+          # reproduced the wrong-key bug this story exists to fix).
+          # `LoadState` is checked first so "no such unit at all" (a
+          # non-systemd host, or Ollama not installed as a service) falls
+          # back to $HOME/.ollama rather than being misread the same way.
+          #
+          # --ollama-key-dir bypasses detection entirely for a host shape it
+          # cannot cover (a non-systemd init, a renamed unit, a containerized
+          # daemon) -- an operator names the correct directory directly.
+          inv_ollama_key_dir="${HOME}/.ollama"
+          inv_ollama_key_source="the invoking user's home directory"
+          if [[ -n "$inv_ollama_key_dir_flag" ]]; then
+            inv_ollama_key_dir="$inv_ollama_key_dir_flag"
+            inv_ollama_key_source="--ollama-key-dir"
+          elif command -v systemctl >/dev/null 2>&1 && command -v getent >/dev/null 2>&1; then
+            inv_ollama_unit_load_state=$(systemctl show -p LoadState --value ollama.service 2>/dev/null || true)
+            if [[ "$inv_ollama_unit_load_state" == "loaded" ]]; then
+              inv_ollama_unit_user=$(systemctl show -p User --value ollama.service 2>/dev/null || true)
+              [[ -z "$inv_ollama_unit_user" ]] && inv_ollama_unit_user="root"
+              inv_ollama_unit_home=$(getent passwd "$inv_ollama_unit_user" 2>/dev/null | cut -d: -f6 || true)
+              if [[ -n "$inv_ollama_unit_home" ]]; then
+                inv_ollama_key_dir="${inv_ollama_unit_home}/.ollama"
+                inv_ollama_key_source="the ollama.service systemd unit's account (${inv_ollama_unit_user})"
+              fi
+            fi
+          fi
+
+          # The two key files are mounted individually, never the key
+          # directory itself: `ollama serve` (started by
+          # investigator-entrypoint.sh once inside the container) writes
+          # other daemon state (models dir, config.json, history) into that
+          # same directory, and a directory bind mount from the host would
+          # either leak that host-side state into the container or make the
+          # daemon try to write through a read-only host mount.
+          # Both files are gated here, not just the private key: `docker run
+          # -v` creates a missing host path as an empty directory rather than
+          # failing, so an absent id_ed25519.pub alone would silently mount a
+          # directory at the path the daemon expects a file, rather than
+          # failing closed the same way a missing private key does.
+          if [[ ! -f "${inv_ollama_key_dir}/id_ed25519" || ! -f "${inv_ollama_key_dir}/id_ed25519.pub" ]]; then
+            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:ollama key not signed in -- no session keypair at ${inv_ollama_key_dir}/id_ed25519{,.pub} (looked in ${inv_ollama_key_source}); run 'ollama signin' as that account, or pass --ollama-key-dir to point at the correct directory"
+            exit 1
+          fi
+          # A bind mount keeps the HOST's ownership and mode, and the signin
+          # keypair is mode 600 owned by the ollama service account (uid 999
+          # here). The container runs as `agent` (uid 1000), so without this
+          # the private key is present and unreadable: `ollama serve` starts,
+          # finds no usable key, and every step fails with "You need to be
+          # signed in to Ollama to run Cloud models" -- indistinguishable from
+          # a genuinely signed-out host, and measured as exactly that before
+          # this was found. The public half is 644 and reads fine, which is
+          # why the failure is silent rather than obvious.
+          #
+          # Joining the key file's own group is the narrowest fix: no copy of
+          # a private key anywhere, no world-readable mode, and the group is
+          # read off the file rather than hardcoded, so a host that installed
+          # ollama under a different account still works. The key must be
+          # group-readable (640) for this to help; the launch fails closed
+          # below with that instruction if it is not.
+          inv_ollama_key_mode="$(stat -c '%a' "${inv_ollama_key_dir}/id_ed25519" 2>/dev/null || true)"
+          # The GROUP digit is the middle one, and read is bit 4. Testing the
+          # last digit instead (as this first did) rejects 640 -- the very mode
+          # the error message tells the operator to set.
+          inv_ollama_key_group_digit="${inv_ollama_key_mode: -2:1}"
+          if [[ -z "$inv_ollama_key_group_digit" || $(( inv_ollama_key_group_digit & 4 )) -eq 0 ]]; then
+            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:ollama key ${inv_ollama_key_dir}/id_ed25519 is mode ${inv_ollama_key_mode} -- not group-readable, so the container's agent user cannot read it and the daemon reports itself signed out. Run: sudo chmod 640 ${inv_ollama_key_dir}/id_ed25519"
+            exit 1
+          fi
+          inv_ollama_key_gid="$(stat -c '%g' "${inv_ollama_key_dir}/id_ed25519" 2>/dev/null || true)"
+          if [[ -n "$inv_ollama_key_gid" ]]; then
+            inv_harness_extra_run_args+=(--group-add "$inv_ollama_key_gid")
+          fi
+          inv_harness_creds_mount=(
+            -v "${inv_ollama_key_dir}/id_ed25519:/home/agent/.ollama/id_ed25519:ro"
+            -v "${inv_ollama_key_dir}/id_ed25519.pub:/home/agent/.ollama/id_ed25519.pub:ro"
+          )
+          ;;
+      esac
+      # Reasoning effort for the codex PLANNER, when set, must be one of the
+      # values codex accepts. Finder lanes are deliberately not covered yet:
+      # the measured finder roster runs gpt-5.6-luna, which already defaults to
+      # `medium`, and the lane-side change belongs with the lane work in
+      # Issue #4069 rather than ahead of it.
+      # Validated HERE, before any container starts, because the failure it
+      # prevents is silent: a value codex does not recognise makes the run
+      # exit non-zero inside the container after the prompt was already spent,
+      # and an unvalidated typo in a variable name would leave the planner on
+      # its default while the operator believed otherwise. Both variables are
+      # optional; unset means the harness keeps its own default and no flag is
+      # passed at all.
+      for _inv_reasoning_var in CFGMS_SECURITY_REVIEW_PLANNER_REASONING; do
+        _inv_reasoning_value="${!_inv_reasoning_var:-}"
+        if [[ -n "$_inv_reasoning_value" ]]; then
+          case "$_inv_reasoning_value" in
+            low|medium|high|xhigh|max|ultra) ;;
+            *)
+              echo "ERROR: ${_inv_reasoning_var}='${_inv_reasoning_value}' is not a codex reasoning effort" >&2
+              echo "       valid: low, medium, high, xhigh, max, ultra" >&2
+              exit 3
+              ;;
+          esac
+        fi
+      done
+
+      inv_harness_env=(
+        -e "CFGMS_SECURITY_REVIEW_HARNESS=${inv_harness}"
+        -e "CFGMS_SECURITY_REVIEW_MODEL=${inv_model}"
+        -e "CFGMS_SECURITY_REVIEW_LANE_ID=${inv_mode}"
+        # Rate-limit backoff is opt-in inside the lane (Issue #4059): a lane
+        # test's stub reports rate limited on purpose, and waiting that out for
+        # real would make every such suite sit for the whole budget. A REAL
+        # lane always wants to wait, so the variable is set here, at the one
+        # place that launches a real one. The operator's own value wins.
+        -e "CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS=${CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS:-900}"
+        -e "CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS=${CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS:-3600}"
+        -e "CFGMS_SECURITY_REVIEW_PLANNER_REASONING=${CFGMS_SECURITY_REVIEW_PLANNER_REASONING:-}"
+      )
+
+      # The agentic verifier's operator knobs: worker count, and turning the
+      # critical/high-or-multi-lane scope off. They are documented as
+      # operator-settable but were never passed into the container, so a real
+      # sweep always ran the defaults. Forwarded only when set: an empty
+      # value would reach the lane as "" and fail int() at import. The worker
+      # count is validated here, before any container starts.
+      if [[ -n "${CFGMS_AGENTIC_VERIFIER_WORKERS:-}" ]]; then
+        if ! [[ "$CFGMS_AGENTIC_VERIFIER_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+          echo "ERROR: CFGMS_AGENTIC_VERIFIER_WORKERS='${CFGMS_AGENTIC_VERIFIER_WORKERS}' is not a positive integer" >&2
+          exit 3
+        fi
+        inv_harness_env+=(-e "CFGMS_AGENTIC_VERIFIER_WORKERS=${CFGMS_AGENTIC_VERIFIER_WORKERS}")
+      fi
+      if [[ -n "${CFGMS_AGENTIC_VERIFIER_ALL:-}" ]]; then
+        inv_harness_env+=(-e "CFGMS_AGENTIC_VERIFIER_ALL=${CFGMS_AGENTIC_VERIFIER_ALL}")
+      fi
+      # The finder lane's concurrent-step count (Issue #4261). Same rules:
+      # forwarded only when set, validated before any container starts. A
+      # lane that declares itself serial ignores it inside the container.
+      if [[ -n "${CFGMS_SECURITY_REVIEW_LANE_WORKERS:-}" ]]; then
+        if ! [[ "$CFGMS_SECURITY_REVIEW_LANE_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+          echo "ERROR: CFGMS_SECURITY_REVIEW_LANE_WORKERS='${CFGMS_SECURITY_REVIEW_LANE_WORKERS}' is not a positive integer" >&2
+          exit 3
+        fi
+        inv_harness_env+=(-e "CFGMS_SECURITY_REVIEW_LANE_WORKERS=${CFGMS_SECURITY_REVIEW_LANE_WORKERS}")
+      fi
+    fi
+
+    inv_lane_entrypoint_mount=()
+    if [[ -n "$inv_lane_entrypoint" ]]; then
+      if [[ ! -f "$inv_lane_entrypoint" ]]; then
+        echo "ERROR: --lane-entrypoint not found: ${inv_lane_entrypoint}"
+        exit 1
+      fi
+      inv_lane_entrypoint_mount=(-v "${inv_lane_entrypoint}:/usr/local/bin/investigator-lane-entrypoint.py:ro")
+      # Issue #3982: the lane entrypoint imports the shared harness modules
+      # (harness_runner, scan_profiles -- the scanner allowlist -- schema,
+      # resume, terminal_state). They must come from the HOST's harness tree,
+      # the same trusted code that is running this launcher, never from the
+      # audited snapshot at /workspace. Mounted read-only at a fixed trusted
+      # path; the lane bootstraps consult CFGMS_SECURITY_REVIEW_HARNESS_DIR
+      # ahead of any /workspace fallback.
+      inv_harness_dir_host="${REPO_ROOT}/.claude/skills/security-review"
+      if [[ ! -d "$inv_harness_dir_host" ]]; then
+        echo "ERROR: trusted harness directory not found: ${inv_harness_dir_host}"
+        exit 1
+      fi
+      inv_lane_entrypoint_mount+=(-v "${inv_harness_dir_host}:/opt/cfgms-harness/security-review:ro")
+      inv_lane_entrypoint_mount+=(-e "CFGMS_SECURITY_REVIEW_HARNESS_DIR=/opt/cfgms-harness/security-review")
+      # The review methodology (.claude/skills/security-review/docs/methodology.md)
+      # is review POLICY and is loaded by harness_runner at import; it comes from
+      # the same trusted host tree, beside the harness, never from /workspace.
+      inv_methodology_dir_host="${REPO_ROOT}/.claude/skills/security-review/docs"
+      if [[ ! -f "${inv_methodology_dir_host}/methodology.md" ]]; then
+        echo "ERROR: trusted methodology not found: ${inv_methodology_dir_host}/methodology.md"
+        exit 1
+      fi
+      inv_lane_entrypoint_mount+=(-v "${inv_methodology_dir_host}:/opt/cfgms-harness/docs/security-review:ro")
+    fi
+
+    # Trusted-harness identity (Issue #3952, epic #3950's D1 correction on
+    # revision 3; extended by Issue #4003): hash exactly the files this
+    # command individually mounts from the live repo checkout --
+    # investigator-entrypoint.sh always, the --lane-entrypoint script when one
+    # is passed (plan mode passes none), and .claude/agents/investigator.md
+    # when plan mode mounts it (lane mode passes none -- its /workspace is the
+    # snapshot, which already contains the file, so no mount of this script's
+    # own exists for it there). Every OTHER file a lane runner imports
+    # (schema.py, harness_runner.py, atomic_write.py, roster.py,
+    # terminal_state.py, resume.py, the other lane files) has no mount of its
+    # own: in production the import bootstrap resolves those from /workspace,
+    # which after this story's own snapshot cutover above is the frozen
+    # snapshot, not the live tree -- their identity is already implied by
+    # commit_sha, so hashing them here would be redundant at best and describe
+    # code that never actually ran at worst (a sweep whose pinned commit
+    # differs from the live checkout). Each file's REPO_ROOT-relative path is
+    # fed into the digest ahead of its bytes, in a fixed order (entrypoint,
+    # lane entrypoint, agent profile), so a rename with unchanged content
+    # still changes the recorded identity -- the path is part of what
+    # actually got mounted where. Runs on the host, before the docker run
+    # call, using the same $REPO_ROOT the mount flags above are already built
+    # from. This is recording, not freezing: the value is written fresh on
+    # every call and never compared against a prior one. STORY-12 (D6) landed
+    # the envelope side -- every step envelope now carries this value -- but
+    # Issue #4136 removed the quarantine-on-mismatch half deliberately: the
+    # harness is the instrument, not the specimen, so its drift is REPORTED
+    # (`resume.provenance_by_step`, the report's `## Provenance` section) and
+    # never gated on. Nothing anywhere compares this value against a prior
+    # dispatch.
+    inv_entrypoint_host_path="${REPO_ROOT}/.devcontainer/scripts/investigator-entrypoint.sh"
+    inv_harness_identity_hash=$(python3 - "$REPO_ROOT" "$inv_entrypoint_host_path" "$inv_lane_entrypoint" "$inv_agent_profile_host_path" "${inv_sweep_dir}/harness_identity.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+repo_root, entrypoint_path, lane_entrypoint_path, agent_profile_path, dest_path = sys.argv[1:6]
+
+digest = hashlib.sha256()
+files = []
+paths = [entrypoint_path, lane_entrypoint_path, agent_profile_path]
+# Issue #3982: a lane runs the whole trusted harness tree (mounted at
+# /opt/cfgms-harness/security-review), not just its entrypoint file, so
+# every Python module in it is part of the harness identity RECORDED on each
+# envelope. Since Issue #4136 a resume does not check that identity -- the
+# harness is the instrument, not the specimen -- but the identity still has to
+# cover the whole tree, because its job is to say WHICH harness produced a
+# step, and a digest over the entrypoint alone could not answer that.
+if lane_entrypoint_path:
+    paths.append(os.path.join(repo_root, ".claude", "skills", "security-review", "docs", "methodology.md"))
+    harness_dir = os.path.join(repo_root, ".claude", "skills", "security-review")
+    for dirpath, dirnames, filenames in os.walk(harness_dir):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if name.endswith(".py") and not name.endswith("_test.py"):
+                paths.append(os.path.join(dirpath, name))
+for path in paths:
+    if not path:
+        continue
+    # Forward slashes always, even on Windows: this path is both hashed
+    # (native-separator paths would make the identity gratuitously
+    # platform-dependent) and recorded verbatim in "files" for callers to
+    # match against (Issue #4158).
+    rel = os.path.relpath(path, repo_root).replace(os.sep, "/")
+    with open(path, "rb") as f:
+        content = f.read()
+    digest.update(rel.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(content)
+    digest.update(b"\0")
+    files.append(rel)
+
+hash_hex = digest.hexdigest()
+data = {
+    "algorithm": "sha256",
+    "hash": hash_hex,
+    "files": files,
+    "computed_at": datetime.now(timezone.utc).isoformat(),
+}
+with open(dest_path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print(hash_hex)
+PY
+)
+
+    inv_session_mount=()
+    if inv_sessions_dir=$(prepare_session_dir "$container_name" "investigator-${inv_mode_safe}" "" "" ""); then
+      inv_session_mount=(-v "${inv_sessions_dir}:${AGENT_SESSIONS_MOUNT}")
+    fi
+
+    # Applies to every harness (claude/codex/opencode/ollama) -- they all
+    # converge on the one `docker run -d` below, unlike gate_credentials_for_launch
+    # above which only the claude harness needs.
+    gate_image_staleness_for_launch
+
+    ledger_append_launch "$container_name" "investigator-${inv_mode_safe}" "" "" "" "investigator" ""
+
+    # NO GH_TOKEN (SEC3900 B1) — an investigator never authenticates to
+    # GitHub. NO git identity/remote configuration — the checkout is :ro
+    # regardless, but this removes an easy local-commit path so a future
+    # change to the mount strategy does not quietly reopen one.
+    #
+    # --cap-add NET_ADMIN IS required, exactly as on every other launch path
+    # here: investigator-entrypoint.sh calls init-firewall.sh directly (it
+    # skips setup-env.sh only to avoid that script's git-identity setup), and
+    # that init needs CAP_NET_ADMIN to install the default-DROP OUTPUT policy,
+    # start dnsmasq with the domain allowlist, and pin resolv.conf to
+    # 127.0.0.1. Without the capability the entrypoint fails closed and the
+    # container exits rather than running with open egress — which for this
+    # profile would mean unfiltered outbound internet in the one container
+    # that holds the host's live Claude OAuth credentials (plan mode) and a
+    # provider API key (lane mode) while deliberately ingesting untrusted
+    # repository source and third-party model output.
+    if container_id=$(docker run -d \
+      --cap-add NET_ADMIN \
+      --name "$container_name" \
+      --label "cfg-agent=true" \
+      --label "mode=investigator" \
+      --label "investigator-mode=${inv_mode}" \
+      --label "sweep=${inv_sweep_id}" \
+      --memory=2g \
+      --cpus=2 \
+      --stop-timeout=900 \
+      -v "${inv_workspace_dir}:/workspace:ro" \
+      "${claude_creds_mount[@]}" \
+      "${inv_agent_profile_mount[@]}" \
+      "${inv_plan_mount[@]}" \
+      "${inv_out_mount[@]}" \
+      "${inv_harness_creds_mount[@]}" \
+      "${inv_harness_extra_run_args[@]}" \
+      "${inv_lane_entrypoint_mount[@]}" \
+      -v "${REPO_ROOT}/.devcontainer/scripts/investigator-entrypoint.sh:/usr/local/bin/investigator-entrypoint.sh:ro" \
+      "${AGENT_METRICS_MOUNT_ARGS[@]}" \
+      "${AGENT_MODEL_ROUTING_MOUNT_ARGS[@]}" \
+      "${inv_session_mount[@]}" \
+      -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_INVESTIGATOR_MODE=${inv_mode}" \
+      -e "CFGMS_INVESTIGATOR_DISALLOWED_TOOLS=${inv_disallowed}" \
+      -e "CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY=${inv_harness_identity_hash}" \
+      "${inv_harness_env[@]}" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
+      --entrypoint /usr/local/bin/investigator-entrypoint.sh \
+      cfg-agent:latest \
+      "${inv_mode}" 2>&1); then
+      # Before announcing the launch: the log exists only while the container
+      # does, and a later same-name launch reaps this one to reuse its name.
+      start_investigator_log_capture "$inv_sweep_dir" "$inv_mode_safe" "$container_id"
+      echo "LAUNCHED_INVESTIGATOR:${inv_mode}:${container_id}"
+    else
+      echo "LAUNCH_FAILED:${container_name}:${container_id}"
+      ledger_append_launch_failed "$container_name" "investigator-${inv_mode_safe}"
       exit 1
     fi
     ;;
@@ -1188,8 +4292,16 @@ PROMPT_EOF
 
       echo "STALE:${container_name}:finished=${finished_iso}:pr=${pr_num:-unknown}"
 
+      # Revoke any agent.dev API key associated with this review agent (Issue #2124).
+      # Review agents use the same cred dir layout as issue agents when pr_num is known.
+      if [[ -n "$pr_num" ]]; then
+        revoke_agent_creds "review-pr-${pr_num}" || true
+        rm -rf "${AGENT_CRED_BASE}/review-pr-${pr_num}" 2>/dev/null || true
+      fi
+
       # Archive the result JSON for forensics.
       docker cp "${container_name}:/tmp/agent-result.json" "/tmp/agent-result-review-${pr_num:-${container_name}}.json" 2>/dev/null || true
+      ledger_reconcile_exit "$container_name" "/tmp/agent-result-review-${pr_num:-${container_name}}.json"
 
       # Remove the container and clone.
       if docker rm -f "$container_name" >/dev/null 2>&1; then
@@ -1221,6 +4333,23 @@ PROMPT_EOF
     ;;
 
   cleanup-stale)
+    # Prune persisted agent transcripts past the retention window (Issue #3028).
+    # Deliberately independent of container cleanup below: a transcript outlives
+    # its container on purpose, so that spend stays attributable after the
+    # container is gone. Retention is what bounds the directory, not the
+    # container lifecycle.
+    if [[ -d "$AGENT_SESSIONS_BASE" ]]; then
+      pruned_sessions=0
+      while IFS= read -r stale_dir; do
+        [[ -z "$stale_dir" ]] && continue
+        rm -rf "$stale_dir" 2>/dev/null && pruned_sessions=$((pruned_sessions + 1))
+      done < <(find "$AGENT_SESSIONS_BASE" -mindepth 1 -maxdepth 1 -type d \
+                 -mtime "+${AGENT_SESSIONS_RETENTION_DAYS}" 2>/dev/null || true)
+      if [[ "$pruned_sessions" -gt 0 ]]; then
+        echo "PRUNED_SESSION_DIRS:${pruned_sessions}:older_than_${AGENT_SESSIONS_RETENTION_DAYS}d"
+      fi
+    fi
+
     # Find agent containers (running or exited) whose stories no longer need them.
     # A container is stale if its story issue is CLOSED or has project status Failed or Blocked.
     cleaned=0
@@ -1242,7 +4371,11 @@ PROMPT_EOF
       if [[ "$container_name" =~ ^cfg-agent-([0-9]+)$ ]]; then
         num="${BASH_REMATCH[1]}"
       else
-        # Skip non-issue containers (pr-fix, branch, interactive)
+        # Not a story container. pr-fix and resolve-conflict are handled by
+        # their own reap pass further down (Issue #3657); review containers by
+        # cleanup-stale-reviews; live/interactive sessions are founder-owned and
+        # deliberately never reaped. Do not turn this back into a blanket skip —
+        # that is what left two whole classes uncovered.
         continue
       fi
 
@@ -1250,39 +4383,95 @@ PROMPT_EOF
       issue_json=$(gh issue view "$num" --repo cfg-is/cfgms --json state 2>/dev/null || echo '{"state":"UNKNOWN"}')
       state=$(echo "$issue_json" | grep -oP '"state"\s*:\s*"\K[^"]+' || echo "UNKNOWN")
 
+      # `docker inspect` reports "true"/"false"; the wrapper yields "" if the
+      # container vanished between the ps listing and here. Only the literal
+      # "false" is treated as exited -- see cleanup_reap_reason.
+      running=$(_ledger_docker_inspect '{{.State.Running}}' "$container_name")
+
       should_clean=false
-
-      # Clean if story is closed (merged or manually closed)
-      if [[ "$state" == "CLOSED" ]]; then
+      reason=""
+      if reason=$(cleanup_reap_reason "$state" "$num" "$failed_nums" "$blocked_nums" "$running"); then
         should_clean=true
-        reason="story closed"
-      fi
-
-      # Clean if story is failed or blocked (agent is done, needs human intervention)
-      if echo "$failed_nums" | grep -qxF "$num" 2>/dev/null; then
-        should_clean=true
-        reason="project status: Failed"
-      fi
-      if echo "$blocked_nums" | grep -qxF "$num" 2>/dev/null; then
-        should_clean=true
-        reason="project status: Blocked"
       fi
 
       if $should_clean; then
         echo "STALE:${num}:${reason}"
-        # Reuse cleanup-issue logic
+        # Revoke API key + suspend tenant before removing container/clone (Issue #2124).
+        revoke_agent_creds "$num" || true
+        rm -rf "${AGENT_CRED_BASE}/${num}" 2>/dev/null || true
         docker cp "cfg-agent-${num}:/tmp/agent-result.json" "/tmp/agent-result-${num}.json" 2>/dev/null || true
+        ledger_reconcile_exit "cfg-agent-${num}" "/tmp/agent-result-${num}.json"
         if docker rm -f "cfg-agent-${num}" >/dev/null 2>&1; then
           echo "CLEANED:container:cfg-agent-${num}"
         fi
         clone_dir="${WORKTREE_BASE}/story-${num}"
         if [[ -d "$clone_dir" ]]; then
-          rm -rf "$clone_dir"
-          echo "CLEANED:clone:${clone_dir}"
+          if clone_safe_to_discard "$clone_dir"; then
+            rm -rf "$clone_dir"
+            echo "CLEANED:clone:${clone_dir}"
+          else
+            echo "KEPT:clone:${clone_dir}:unpushed_work"
+          fi
         fi
         cleaned=$((cleaned + 1))
       fi
     done
+
+    # --- Exited fix / resolve-conflict container reap (Issue #3657) ---
+    # The story loop above owns cfg-agent-<N>; cleanup-stale-reviews owns
+    # cfg-agent-review-pr-<N>. Nothing owned these two classes, so they grew
+    # without bound. Reaped on age alone, not on the PR's state: survival was
+    # measured to be independent of whether the PR merged, closed or was
+    # blocked, so keying off PR state would leave the same hole.
+    #
+    # No credential revoke here, unlike the story loop: mint_agent_creds is only
+    # ever called from the story launch path, so a fix or resolve-conflict
+    # container has no per-agent credential to revoke.
+    pr_reap_now=$(date -u +%s)
+    pr_reap_max_age=1800  # 30 minutes, matching cleanup-stale-reviews
+    while IFS= read -r container_name; do
+      [[ -z "$container_name" ]] && continue
+      class_line=$(cleanup_container_class "$container_name") || continue
+      IFS=$'\t' read -r reap_class clone_prefix reap_num <<< "$class_line"
+      case "$reap_class" in
+        fix-pr|resolve-conflict) ;;
+        *) continue ;;
+      esac
+
+      running=$(_ledger_docker_inspect '{{.State.Running}}' "$container_name")
+      finished_iso=$(_ledger_docker_inspect '{{.State.FinishedAt}}' "$container_name")
+      finished_ts=$(date -u -d "$finished_iso" +%s 2>/dev/null || echo 0)
+
+      cleanup_pr_container_should_reap \
+        "$running" "$finished_ts" "$pr_reap_now" "$pr_reap_max_age" || continue
+
+      echo "STALE:${container_name}:${reap_class} exited over $((pr_reap_max_age / 60))m ago"
+      docker cp "${container_name}:/tmp/agent-result.json" \
+        "/tmp/agent-result-${container_name}.json" 2>/dev/null || true
+      ledger_reconcile_exit "$container_name" "/tmp/agent-result-${container_name}.json"
+      if docker rm -f "$container_name" >/dev/null 2>&1; then
+        echo "CLEANED:container:${container_name}"
+      fi
+      clone_dir="${WORKTREE_BASE}/${clone_prefix}-${reap_num}"
+      if [[ -d "$clone_dir" ]]; then
+        if clone_safe_to_discard "$clone_dir"; then
+          rm -rf "$clone_dir"
+          echo "CLEANED:clone:${clone_dir}"
+        else
+          echo "KEPT:clone:${clone_dir}:unpushed_work"
+        fi
+      fi
+      cleaned=$((cleaned + 1))
+    done < <(docker ps -a --filter "label=cfg-agent=true" \
+               --filter "status=exited" --format '{{.Names}}' 2>/dev/null || true)
+
+    # --- Orphaned agent clone reap (Issue #4358) ---
+    # Runs after the container reaps above, so a pair they just removed is
+    # already gone and what is left has no container at all.
+    orphan_out=$(orphan_clone_pass "$WORKTREE_BASE" "$(date -u +%s)" 1800)
+    printf '%s\n' "$orphan_out"
+    orphan_cleaned=$(sed -n 's/^ORPHAN_CLONES_DONE:cleaned=\([0-9]*\):.*/\1/p' <<< "$orphan_out")
+    cleaned=$((cleaned + ${orphan_cleaned:-0}))
 
     # --- PR agent-status label reconcile ---
     # fix-agent / review-agent are display-only PR labels the dispatcher adds
@@ -1302,7 +4491,122 @@ PROMPT_EOF
       done
     done
 
+    # --- Investigator container reap (Issue #4055) ---
+    # security-review investigator containers were covered by no reap pass at
+    # all: not the story loop above (their names carry no issue number), not
+    # cleanup-stale-reviews (that matches cfg-agent-review-pr-*). Measured
+    # 2026-09-11: ten exited investigators had accumulated over 40 hours,
+    # holding ~179MB. Their findings are written to the host sweep directory,
+    # never kept inside the container, so an exited one holds nothing of value.
+    # Since Issue #4132 that is true BECAUSE its log is streamed to a
+    # container-logs/ directory under whichever --sweep-dir that launch was
+    # given -- see start_investigator_log_capture. Without that capture this
+    # reap is the main path by which a finished sweep's lane log is lost.
+    #
+    # Grace window rather than immediate: a just-exited investigator may still
+    # be being read by the sweep that launched it.
+    inv_grace_min="${CFGMS_INVESTIGATOR_REAP_MINUTES:-30}"
+    while IFS=$'\t' read -r inv_name inv_finished; do
+      [[ -z "${inv_name:-}" ]] && continue
+      [[ -z "${inv_finished:-}" ]] && continue
+      inv_epoch="$(date -d "$inv_finished" +%s 2>/dev/null)" || continue
+      inv_age_min=$(( ( $(date +%s) - inv_epoch ) / 60 ))
+      if (( inv_age_min < inv_grace_min )); then
+        continue
+      fi
+      docker rm "$inv_name" >/dev/null 2>&1 || continue
+      echo "CLEANED:investigator:${inv_name}:age_min=${inv_age_min}"
+      cleaned=$((cleaned + 1))
+    done < <(docker ps -a --filter "name=cfg-agent-investigator-" --filter "status=exited" \
+               --format '{{.Names}}' 2>/dev/null \
+             | while read -r _n; do
+                 [[ -z "$_n" ]] && continue
+                 printf '%s\t%s\n' "$_n" "$(docker inspect -f '{{.State.FinishedAt}}' "$_n" 2>/dev/null)"
+               done || true)
+
+    # --- Orphaned git worktree reap (Issue #4055) ---
+    # Two distinct leaks, and `git worktree prune` only covers the first.
+    #
+    # (a) Registrations whose directory is gone. `prune` clears exactly these.
+    #
+    # (b) Registrations whose directory still EXISTS but belongs to a dead
+    #     session. Measured 2026-09-11: five worktrees under
+    #     /tmp/claude-*/<session-id>/scratchpad/ from sessions that ended weeks
+    #     earlier, aged 8 and 27 days. `prune` is a no-op on all five because
+    #     the directories are still there, so they accumulate forever.
+    #
+    # A scratchpad worktree is session-scoped by construction: when the session
+    # ends nothing will ever use it again. But "abandoned" is inferred, not
+    # known, so this reaps only when all three hold — path under a scratchpad,
+    # older than the threshold, and NO uncommitted changes. A dirty worktree is
+    # somebody's unsaved work and is never removed, however old.
+    if git -C "$REPO_ROOT" worktree list --porcelain >/dev/null 2>&1; then
+      wt_reap_days="${CFGMS_WORKTREE_REAP_DAYS:-7}"
+      while read -r wt_path _; do
+        [[ -z "${wt_path:-}" ]] && continue
+        [[ "$wt_path" == *"/scratchpad/"* ]] || continue
+        [[ -d "$wt_path" ]] || continue
+        if [[ -n "$(find "$wt_path" -maxdepth 0 -mtime "-${wt_reap_days}" 2>/dev/null)" ]]; then
+          continue  # still recent
+        fi
+        if [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]]; then
+          echo "KEPT:worktree:${wt_path}:uncommitted_changes"
+          continue
+        fi
+        if git -C "$REPO_ROOT" worktree remove --force "$wt_path" 2>/dev/null; then
+          echo "CLEANED:worktree:${wt_path}"
+          cleaned=$((cleaned + 1))
+        fi
+      done < <(git -C "$REPO_ROOT" worktree list 2>/dev/null | awk '{print $1}' || true)
+
+      # (a): registrations whose directory is already gone.
+      pruned_wt="$(git -C "$REPO_ROOT" worktree prune --verbose --dry-run 2>/dev/null | grep -c '^Removing' || true)"
+      if [[ "${pruned_wt:-0}" -gt 0 ]]; then
+        git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
+        echo "PRUNED_WORKTREE_REGISTRATIONS:${pruned_wt}"
+      fi
+    fi
+
+    # --- Expired distributed-lease GC (multi-host cron coordination) ---
+    # Reap lease refs whose holder died past TTL. acquire-time reclaim already
+    # frees a key when it is re-acquired directly; this collects the rest (e.g. a
+    # crashed dev whose story was picked up by stalled-dispatch recovery under a
+    # different code path). Idempotent; best-effort.
+    bash "${REPO_ROOT}/scripts/pipeline-helper.sh" lease-gc 2>/dev/null || true
+
     echo "CLEANUP_STALE_DONE:cleaned=${cleaned}"
+    ;;
+
+  check-pr-author)
+    # Public API used by po-act.sh (Issue #1786).
+    # check-pr-author <PR_NUM>
+    # Exits 0 (internal) or 3 (external/quarantined).
+    [[ $# -eq 1 ]] || { echo "check-pr-author requires exactly one PR number"; exit 1; }
+    _cpa_pr="$1"
+    _cpa_meta=$(gh pr view "$_cpa_pr" --json author,labels 2>/dev/null) || {
+      echo "AUTHOR_CHECK_ERROR:${_cpa_pr}:api_error"
+      exit 3
+    }
+    _cpa_login=$(echo "$_cpa_meta" | jq -r '.author.login // empty')
+    _cpa_labels=$(echo "$_cpa_meta" | jq -r '.labels[].name')
+    _cpa_trust=$(_check_author_permission "$_cpa_login" "$_cpa_pr" "$_cpa_labels")
+    if [[ "$_cpa_trust" == "internal" ]]; then
+      echo "AUTHOR_TRUSTED:${_cpa_pr}:${_cpa_login}"
+      exit 0
+    else
+      _post_quarantine_comment "$_cpa_pr" "$_cpa_login"
+      echo "AUTHOR_EXTERNAL:${_cpa_pr}:${_cpa_login}:${_cpa_trust}"
+      exit 3
+    fi
+    ;;
+
+  _test-check-author)
+    # Hidden test hook for review_pr_detection.test.sh (Issue #1786).
+    # _test-check-author <login> [<pr_num>] [<pr_labels_newline_separated>]
+    # Calls _check_author_permission with the supplied args and prints result.
+    # Test hooks: CFGMS_TEST_COLLAB_PERM, CFGMS_TEST_ACTOR_LOGIN, CFGMS_TEST_ACTOR_PERM.
+    [[ $# -ge 1 ]] || { echo "_test-check-author requires <login> [<pr_num>] [<pr_labels>]"; exit 1; }
+    _check_author_permission "${1}" "${2:-}" "${3:-}"
     ;;
 
   _test-resolve-pr)
@@ -1313,8 +4617,44 @@ PROMPT_EOF
     resolve_pr_story_or_item "$1" "$2"
     ;;
 
+  _test-classify-container-state)
+    # Hidden test hook for review_pr_detection.test.sh. Calls
+    # _classify_review_container_state() with the supplied docker `.State`
+    # value and optional exit code, and prints its result.
+    # Safe (no docker, no gh, no writes).
+    [[ $# -ge 1 ]] || { echo "_test-classify-container-state requires <state> [exit_code]"; exit 1; }
+    _classify_review_container_state "$1" "${2-}"
+    ;;
+
+  _test-review-refusal-hint)
+    # Hidden test hook for review_pr_detection.test.sh. Calls
+    # _review_refusal_hint() with the supplied reason token and prints its
+    # result (empty string for reasons with no fixed hint). Safe (no docker,
+    # no gh, no writes).
+    [[ $# -eq 1 ]] || { echo "_test-review-refusal-hint requires <reason>"; exit 1; }
+    _review_refusal_hint "$1"
+    ;;
+
+  _test-mint-creds)
+    # Hidden test hook for agent-apikey-injection.test.sh (Issue #2124).
+    # Calls mint_agent_creds with the supplied issue number.
+    # Env overrides: CFGMS_TEST_CRED_BASE, CFGMS_TEST_MOCK_TIER1_DIR, CFGMS_TIER1_URL.
+    [[ $# -eq 1 ]] || { echo "_test-mint-creds requires exactly one issue number"; exit 1; }
+    mint_agent_creds "$1"
+    ;;
+
+  _test-revoke-creds)
+    # Hidden test hook for agent-apikey-injection.test.sh (Issue #2124).
+    # Calls revoke_agent_creds with the supplied issue number.
+    # Env overrides: CFGMS_TEST_CRED_BASE, CFGMS_TEST_MOCK_TIER1_DIR, CFGMS_TIER1_URL.
+    [[ $# -eq 1 ]] || { echo "_test-revoke-creds requires exactly one issue number"; exit 1; }
+    revoke_agent_creds "$1"
+    ;;
+
   *)
     echo "Unknown command: $cmd"
     usage
     ;;
 esac
+
+fi  # BASH_SOURCE[0] == $0

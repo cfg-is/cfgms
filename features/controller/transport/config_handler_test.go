@@ -24,6 +24,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/service"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -47,7 +48,7 @@ func (s *testConfigStream) Send(c *transportpb.ConfigChunk) error {
 func (s *testConfigStream) SetHeader(metadata.MD) error  { return nil }
 func (s *testConfigStream) SendHeader(metadata.MD) error { return nil }
 func (s *testConfigStream) SetTrailer(metadata.MD)       {}
-func (s *testConfigStream) Context() context.Context     { return context.Background() }
+func (s *testConfigStream) Context() context.Context     { return ctxkeys.WithSystem(context.Background()) }
 func (s *testConfigStream) SendMsg(interface{}) error    { return nil }
 func (s *testConfigStream) RecvMsg(interface{}) error    { return nil }
 
@@ -84,11 +85,13 @@ func peerContextWithCA(t *testing.T, ca *cfgcert.CA, cn string) context.Context 
 	p := &peer.Peer{
 		AuthInfo: credentials.TLSInfo{
 			State: tls.ConnectionState{
-				PeerCertificates: []*x509.Certificate{x509Cert},
+				PeerCertificates:  []*x509.Certificate{x509Cert},
+				VerifiedChains:    [][]*x509.Certificate{{x509Cert}},
+				HandshakeComplete: true,
 			},
 		},
 	}
-	return peer.NewContext(context.Background(), p)
+	return peer.NewContext(ctxkeys.WithSystem(context.Background()), p)
 }
 
 // createTestService returns a ConfigurationServiceV2 backed by real flatfile+SQLite
@@ -100,7 +103,7 @@ func createTestService(t *testing.T) *service.ConfigurationServiceV2 {
 	storageManager := pkgtesting.SetupTestStorage(t)
 	svc := service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
 	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
-		context.Background(),
+		ctxkeys.WithSystem(context.Background()),
 		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
 	))
 	return svc
@@ -110,11 +113,9 @@ func createTestService(t *testing.T) *service.ConfigurationServiceV2 {
 func minimalStewardConfig(stewardID string) *stewardtypes.StewardConfig {
 	return &stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   stewardID,
-			Mode: stewardtypes.ModeController,
+			ID: stewardID,
 			Logging: stewardtypes.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 			ErrorHandling: stewardtypes.ErrorHandlingConfig{
 				ModuleLoadFailure:  stewardtypes.ActionContinue,
@@ -151,8 +152,8 @@ func TestHandleGRPC_MissingPeerCert(t *testing.T) {
 	req := &transportpb.ConfigSyncRequest{StewardId: "steward-xyz"}
 	stream := &testConfigStream{}
 
-	// context.Background() carries no peer info.
-	err := h.HandleGRPC(context.Background(), req, stream)
+	// ctxkeys.WithSystem(context.Background()) carries no peer info.
+	err := h.HandleGRPC(ctxkeys.WithSystem(context.Background()), req, stream)
 
 	require.Error(t, err)
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
@@ -165,7 +166,7 @@ func TestHandleGRPC_MissingPeerCert(t *testing.T) {
 func TestHandleGRPC_StewardIDMismatch(t *testing.T) {
 	ca := newTestCA(t)
 	svc := createTestService(t)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil)
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca))
 
 	// Peer authenticates as "steward-alice".
 	ctx := peerContextWithCA(t, ca, "steward-alice")
@@ -195,10 +196,10 @@ func TestHandleGRPC_MatchingStewardIDProceedsNormally(t *testing.T) {
 
 	ca := newTestCA(t)
 	svc := createTestService(t)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil)
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca))
 
 	// Store a real configuration so GetConfiguration returns OK.
-	err := svc.SetConfiguration(context.Background(), "default", stewardID, minimalStewardConfig(stewardID))
+	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "default", stewardID, minimalStewardConfig(stewardID))
 	require.NoError(t, err)
 
 	ctx := peerContextWithCA(t, ca, stewardID)
@@ -268,7 +269,7 @@ func TestHandleGRPC_PopulatesSignatureWhenSignerSet(t *testing.T) {
 	signer := newTestSignerFromCA(t, ca)
 	h := NewConfigHandler(svc, logging.NewNoopLogger(), signer)
 
-	err := svc.SetConfiguration(context.Background(), "default", stewardID, minimalStewardConfig(stewardID))
+	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "default", stewardID, minimalStewardConfig(stewardID))
 	require.NoError(t, err)
 
 	ctx := peerContextWithCA(t, ca, stewardID)
@@ -293,16 +294,16 @@ func TestHandleGRPC_PopulatesSignatureWhenSignerSet(t *testing.T) {
 	assert.NotEmpty(t, sig.Signature, "signature bytes must be non-empty")
 }
 
-// TestHandleGRPC_NoSignatureWhenSignerNil verifies that HandleGRPC leaves
-// ConfigTransfer.Signature empty when no signer is configured.
-func TestHandleGRPC_NoSignatureWhenSignerNil(t *testing.T) {
+// TestHandleGRPC_RejectsWhenSignerNil verifies configuration cannot be
+// dispatched unsigned when the signing service is unavailable.
+func TestHandleGRPC_RejectsWhenSignerNil(t *testing.T) {
 	const stewardID = "steward-unsigned"
 
 	ca := newTestCA(t)
 	svc := createTestService(t)
 	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil) // nil signer
 
-	err := svc.SetConfiguration(context.Background(), "default", stewardID, minimalStewardConfig(stewardID))
+	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "default", stewardID, minimalStewardConfig(stewardID))
 	require.NoError(t, err)
 
 	ctx := peerContextWithCA(t, ca, stewardID)
@@ -310,11 +311,9 @@ func TestHandleGRPC_NoSignatureWhenSignerNil(t *testing.T) {
 	stream := &testConfigStream{}
 
 	err = h.HandleGRPC(ctx, req, stream)
-	require.NoError(t, err)
-
-	transfer := assembleConfigTransfer(t, stream)
-	assert.Empty(t, transfer.Signature,
-		"ConfigTransfer.Signature must be empty when no signer is configured")
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	assert.Empty(t, stream.chunks)
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +330,7 @@ func createTestServiceWithControllerSvc(t *testing.T, controllerSvc *service.Con
 	svc := service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, controllerSvc)
 	for _, tid := range []string{"default", "tenant-a"} {
 		require.NoError(t, storageManager.GetTenantStore().CreateTenant(
-			context.Background(),
+			ctxkeys.WithSystem(context.Background()),
 			&business.TenantData{ID: tid, Name: tid, Status: business.TenantStatusActive},
 		))
 	}
@@ -358,7 +357,7 @@ func TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig(t *testing.T)
 	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "tenant-a", "localhost:4433", "connected"))
 
 	svc := createTestServiceWithControllerSvc(t, nil) // nil: service does not see controllerSvc
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil).
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca)).
 		WithControllerService(controllerSvc)
 
 	// Store config under tenant-a only; no config under default.
@@ -366,7 +365,7 @@ func TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig(t *testing.T)
 	// If it incorrectly falls back to "default", GetConfiguration returns NOT_FOUND.
 	tenantACfg := minimalStewardConfig(stewardID)
 	tenantACfg.Steward.ID = "tenant-a-config-marker"
-	require.NoError(t, svc.SetConfiguration(context.Background(), "tenant-a", stewardID, tenantACfg))
+	require.NoError(t, svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "tenant-a", stewardID, tenantACfg))
 
 	ctx := peerContextWithCA(t, ca, stewardID)
 	req := &transportpb.ConfigSyncRequest{StewardId: stewardID}
@@ -393,7 +392,7 @@ func TestHandleGRPC_TenantIsolation_NoInjection_FallsBackToDefault(t *testing.T)
 	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil)
 
 	// Store config only under tenant-b. "default" has no config for this steward.
-	require.NoError(t, svc.SetConfiguration(context.Background(), "tenant-a", stewardID, minimalStewardConfig(stewardID)))
+	require.NoError(t, svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "tenant-a", stewardID, minimalStewardConfig(stewardID)))
 
 	ctx := peerContextWithCA(t, ca, stewardID)
 	req := &transportpb.ConfigSyncRequest{StewardId: stewardID}

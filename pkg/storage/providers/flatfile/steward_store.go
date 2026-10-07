@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,23 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *busine
 		return business.ErrStewardAlreadyExists
 	}
 
+	// Tenant-scoped device_id uniqueness: a non-empty device_id must not already
+	// be held by a different steward in the same tenant. Empty device_id is exempt
+	// (optional field on stewards registered before ADR-010 was implemented).
+	if record.DeviceID != "" {
+		all, err := s.readAllStewards()
+		if err != nil {
+			return fmt.Errorf("flatfile: failed to scan for device_id conflict: %w", err)
+		}
+		for _, r := range all {
+			// A deregistered record no longer reserves its device_id (Issue #4534).
+			if r.TenantID == record.TenantID && r.DeviceID == record.DeviceID && r.ID != record.ID &&
+				r.Status != business.StewardStatusDeregistered {
+				return business.ErrStewardDeviceIDConflict
+			}
+		}
+	}
+
 	now := time.Now().UTC()
 	r := *record
 	r.RegisteredAt = now
@@ -135,6 +153,75 @@ func (s *FlatFileStewardStore) GetSteward(_ context.Context, stewardID string) (
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.readSteward(stewardID)
+}
+
+// GetStewardByDeviceID returns the record whose DeviceID matches the given
+// 64-character hex fingerprint, with NO tenant predicate. Scans all steward
+// files via readAllStewards. When more than one record shares deviceID (allowed
+// across tenants by design), the match with the lexicographically smallest ID
+// is returned — deterministic, not incidental file-listing order. Returns
+// ErrStewardNotFound when no matching record exists. See the interface doc
+// comment (business.StewardStore) for who may call this unscoped form.
+func (s *FlatFileStewardStore) GetStewardByDeviceID(_ context.Context, deviceID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("flatfile: device ID cannot be empty")
+	}
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	all, err := s.readAllStewards()
+	if err != nil {
+		return nil, err
+	}
+	var matches []*business.StewardRecord
+	for _, r := range all {
+		if r.DeviceID == deviceID {
+			matches = append(matches, r)
+		}
+	}
+	return deterministicStewardMatch(matches)
+}
+
+// GetStewardByDeviceIDForTenant returns the record whose DeviceID matches the
+// given fingerprint AND whose TenantID matches tenantID. Returns
+// ErrStewardNotFound when no matching record exists in the given tenant, even
+// if deviceID matches a record belonging to a different tenant.
+func (s *FlatFileStewardStore) GetStewardByDeviceIDForTenant(_ context.Context, deviceID, tenantID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("flatfile: device ID cannot be empty")
+	}
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	all, err := s.readAllStewards()
+	if err != nil {
+		return nil, err
+	}
+	var matches []*business.StewardRecord
+	for _, r := range all {
+		if r.DeviceID == deviceID && r.TenantID == tenantID {
+			matches = append(matches, r)
+		}
+	}
+	return deterministicStewardMatch(matches)
+}
+
+// deterministicStewardMatch picks the match with the lexicographically
+// smallest ID so repeated lookups over the same data are deterministic,
+// instead of depending on incidental file-listing order.
+func deterministicStewardMatch(matches []*business.StewardRecord) (*business.StewardRecord, error) {
+	if len(matches) == 0 {
+		return nil, business.ErrStewardNotFound
+	}
+	// A non-deregistered record wins over deregistered ones, so a device that
+	// re-enrolled after decommission resolves to its live record (Issue #4534).
+	sort.Slice(matches, func(i, j int) bool {
+		di := matches[i].Status == business.StewardStatusDeregistered
+		dj := matches[j].Status == business.StewardStatusDeregistered
+		if di != dj {
+			return !di
+		}
+		return matches[i].ID < matches[j].ID
+	})
+	return matches[0], nil
 }
 
 // ListStewards returns all steward records. Reads every file in the stewards directory.
@@ -206,6 +293,40 @@ func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID 
 	}
 	record.Status = status
 	record.LastSeen = time.Now().UTC()
+	return s.writeSteward(record)
+}
+
+// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
+func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID string, hidden bool) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	record.Hidden = hidden
+	return s.writeSteward(record)
+}
+
+// UpdateStewardTenant moves a steward to a different tenant by updating its
+// TenantID field, guarded by a compare-and-swap on the steward's current
+// tenant (Issue #3895): the write only applies if the on-disk record's
+// TenantID still equals expectedTenantID at the instant this call re-reads it
+// under the held mutex — the mutex alone only prevents intra-process races, not
+// a caller's earlier GetSteward read going stale before this call runs.
+func (s *FlatFileStewardStore) UpdateStewardTenant(_ context.Context, stewardID, expectedTenantID, newTenantID string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	if record.TenantID != expectedTenantID {
+		return business.ErrStewardNotFound
+	}
+	record.TenantID = newTenantID
 	return s.writeSteward(record)
 }
 

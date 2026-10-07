@@ -75,7 +75,7 @@ func (s *AuditLoadTestSuite) TestAuditCompletenessUnderLoad() {
 			testDurationMinutes = 5   // Test duration
 		)
 
-		totalExpectedEvents := concurrentUsers * operationsPerUser
+		totalExpectedEvents := concurrentUsers * operationsPerUser * 2
 		s.framework.logger.Info("Load test configuration",
 			"concurrent_users", concurrentUsers,
 			"operations_per_user", operationsPerUser,
@@ -107,7 +107,28 @@ func (s *AuditLoadTestSuite) TestAuditCompletenessUnderLoad() {
 		wg.Wait()
 		loadTestDuration := time.Since(loadTestStart)
 
-		// Validate audit completeness
+		// A successful RecordEvent enqueue is not sufficient evidence of audit
+		// completeness. Flush, then count the durable entries across all five
+		// tenants so queue shedding or drain loss cannot masquerade as a pass.
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer flushCancel()
+		if err := rbacManager.FlushAudit(flushCtx); err != nil {
+			return fmt.Errorf("failed to flush audit events: %w", err)
+		}
+		persistedEvents := 0
+		for tenant := 0; tenant < 5; tenant++ {
+			entries, err := rbacManager.QueryAuditEntries(ctx, &business.AuditFilter{
+				TenantID:   fmt.Sprintf("load-test-tenant-%d", tenant),
+				EventTypes: []business.AuditEventType{business.AuditEventAuthorization},
+				Limit:      totalExpectedEvents,
+			})
+			if err != nil {
+				return fmt.Errorf("query durable audit entries for tenant %d: %w", tenant, err)
+			}
+			persistedEvents += len(entries)
+		}
+
+		// Validate audit completeness.
 		finalEventsGenerated := atomic.LoadInt64(&eventsGenerated)
 		finalEventsAudited := atomic.LoadInt64(&eventsAudited)
 		finalErrorCount := atomic.LoadInt64(&errorCount)
@@ -116,6 +137,7 @@ func (s *AuditLoadTestSuite) TestAuditCompletenessUnderLoad() {
 			"duration", loadTestDuration,
 			"events_generated", finalEventsGenerated,
 			"events_audited", finalEventsAudited,
+			"events_persisted", persistedEvents,
 			"errors", finalErrorCount,
 			"completion_rate", float64(finalEventsAudited)/float64(finalEventsGenerated)*100)
 
@@ -127,6 +149,10 @@ func (s *AuditLoadTestSuite) TestAuditCompletenessUnderLoad() {
 
 		if finalErrorCount > 0 {
 			return fmt.Errorf("audit errors detected during load test: %d errors", finalErrorCount)
+		}
+		if int64(persistedEvents) != finalEventsGenerated {
+			return fmt.Errorf("durable audit completeness failure: %d events generated, %d persisted (loss: %d)",
+				finalEventsGenerated, persistedEvents, finalEventsGenerated-int64(persistedEvents))
 		}
 
 		// Performance validation
@@ -261,20 +287,18 @@ func (s *AuditLoadTestSuite) TestComplianceReportAccuracyUnderLoad() {
 		var reportErrors int64
 
 		// Start compliance report generation in background
+		reportCtx, stopReports := context.WithCancel(ctx)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.runContinuousComplianceReporting(ctx, rbacManager, &reportErrors)
+			s.runContinuousComplianceReporting(reportCtx, rbacManager, &reportErrors)
 		}()
 
-		// Execute test operations
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.executeComplianceTestOperations(ctx, rbacManager, testData)
-		}()
-
-		// Wait for completion
+		// Execute operations while the reporter is live, then stop the reporter
+		// immediately. Waiting for the parent timeout here made this load test
+		// idle for twelve minutes after the workload had already completed.
+		s.executeComplianceTestOperations(ctx, rbacManager, testData)
+		stopReports()
 		wg.Wait()
 
 		// Flush pending audit writes before querying the durable store
@@ -478,24 +502,30 @@ func (s *AuditLoadTestSuite) generateComplianceTestData() *ComplianceTestData {
 func (s *AuditLoadTestSuite) runContinuousComplianceReporting(ctx context.Context,
 	rbacManager *rbac.Manager, reportErrors *int64) {
 
-	ticker := time.NewTicker(30 * time.Second)
+	// This is a test-local reporter. A short interval ensures it actually
+	// overlaps the finite synthetic workload instead of firing only after it.
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
+	runReport := func() {
+		startTime := time.Now().Add(-30 * time.Second)
+		_, err := rbacManager.QueryAuditEntries(ctx, &business.AuditFilter{
+			EventTypes: []business.AuditEventType{business.AuditEventAuthorization},
+			TimeRange:  &business.TimeRange{Start: &startTime},
+			Limit:      1000,
+		})
+		if err != nil && ctx.Err() == nil {
+			atomic.AddInt64(reportErrors, 1)
+			s.framework.logger.Warn("Compliance report generation failed", "error", err)
+		}
+	}
+	runReport()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			startTime := time.Now().Add(-30 * time.Second)
-			_, err := rbacManager.QueryAuditEntries(ctx, &business.AuditFilter{
-				EventTypes: []business.AuditEventType{business.AuditEventAuthorization},
-				TimeRange:  &business.TimeRange{Start: &startTime},
-				Limit:      1000,
-			})
-			if err != nil {
-				atomic.AddInt64(reportErrors, 1)
-				s.framework.logger.Warn("Compliance report generation failed", "error", err)
-			}
+			runReport()
 		}
 	}
 }

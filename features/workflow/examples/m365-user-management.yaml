@@ -1,6 +1,6 @@
 name: "m365-user-lifecycle-management"
 description: "Complete Microsoft 365 user lifecycle management workflow"
-version: "1.0"
+version: "1.0.0"
 
 variables:
   tenant_id: "your-tenant-id"

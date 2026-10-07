@@ -1,0 +1,632 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright 2026 Jordan Ritz -->
+
+# CFGMS Web UI
+
+React + TypeScript + Vite application for the controller-served web UI
+(Epic #2344): toolchain scaffold (#2488), login screen (#2495), app shell
+(#2496), and the fleet overview (#2497).
+
+The JS/TS toolchain is fully contained in `web/` and does not participate in
+any Go build or test gate. CI runs the same scripts (`lint`, `typecheck`,
+`test`, `build`, and `npm audit --audit-level=high`) via the dedicated
+[`frontend-ci.yml`](../.github/workflows/frontend-ci.yml) lane, which gates
+merges to `develop` for PRs that touch `web/**`.
+
+## How the SPA is embedded in the controller binary
+
+The `web/embed.go` file uses `//go:embed all:dist` to embed the entire `dist/`
+directory into the controller binary at build time. Go reads `dist/` from the
+filesystem at `go build` time — it does not care about git status.
+
+Two files matter, and they never occupy the same path:
+
+| Path | Tracked? | Written by |
+|---|---|---|
+| `dist/index.html` | yes — the placeholder | nothing; it is edited by hand |
+| `dist/app/**` | no — git-ignored | `npm run build` (`build.outDir` in `vite.config.ts`) |
+
+- **Go-only build (no Node):** only the placeholder is embedded. It carries the
+  `CFGMS_DIST_PLACEHOLDER` sentinel, and the controller refuses to route `/`
+  when that is all it finds, logging why. This is intentional: `go build ./...`
+  must always succeed on a clean checkout without Node, and a binary with no SPA
+  must fail loudly rather than serve a shell that never loads the application.
+- **Release build:** run `npm run build` inside `web/` first, then `go build`.
+  Vite writes the full SPA into `dist/app/`, which `go:embed` picks up and the
+  controller prefers over the placeholder — same binary format, no extra tooling
+  at runtime.
+
+Because the build writes to `dist/app/` and never to the tracked placeholder,
+`npm run build` leaves the working tree clean, and two branches that both build
+no longer conflict on a content-hashed entry point (Issue #3043).
+
+`dist/*` is git-ignored except for the placeholder (`dist/index.html`). Real Vite
+output is never committed — committed compiled JS bypasses source review
+(security A6.3) and risks stale-SPA patch-lag bugs. That rule is enforced, not
+just documented: [`scripts/check-web-dist.sh`](../scripts/check-web-dist.sh) runs
+both in the pre-commit hook (on staged content) and in `frontend-ci.yml` (on
+committed content, so it survives `--no-verify`).
+
+A stale — as opposed to absent — `dist/app/` is still a deployment error rather
+than a build error: `go build` embeds whatever is on disk. Releases should
+validate the `dist/app/` mtime as part of their packaging pipeline.
+
+## Prerequisites
+
+- Node 26 — pinned in [`.nvmrc`](.nvmrc) and enforced via `package.json`
+  `engines`. With nvm: `nvm use` in this directory.
+- npm (bundled with Node). Dependencies are pinned by `package-lock.json`;
+  always install with `npm ci` for reproducible trees.
+
+### Held major upgrades
+
+Two dev dependencies are deliberately held below their latest major because the
+lint gate cannot run on them (measured on 2026-08-14, Issue #3344). Re-check
+when the upstream blocker clears; do not force the bump past the peer conflict.
+
+| Package | Held at | Latest | Blocker |
+|---|---|---|---|
+| `typescript` | 6.x | 7.0.2 | `typescript-eslint` refuses to load against TS 7.0 — it aborts with "typescript-eslint does not support TS 7.0" ([typescript-eslint#10940](https://github.com/typescript-eslint/typescript-eslint/issues/10940), support targeted at TS >= 7.1). TS 7 also ships the native compiler with no in-process JS compiler API. |
+| `eslint` / `@eslint/js` | 9.x | 10.8.1 | `eslint-plugin-react@7.37.5` declares `eslint` peer `<= ^9.7` and crashes on ESLint 10 (`contextOrFilename.getFilename is not a function`). No published release supports ESLint 10, and the plugin cannot simply be dropped — see below. |
+
+Dropping `eslint-plugin-react` to reach ESLint 10 would lose **`react/jsx-no-target-blank`**
+(reverse-tabnabbing: `target="_blank"` without `rel="noopener noreferrer"`), which the
+plugin's recommended set enables at error severity and which has no equivalent elsewhere
+in `eslint.config.js`. Note that `react/no-danger` and `react/no-danger-with-children`
+are *not* the load-bearing rules here: the same `dangerouslySetInnerHTML` sink is caught
+independently by this repo's own `no-restricted-syntax` and `no-restricted-properties`
+bans, verified by turning both react rules off and confirming the violation still errors.
+
+## Commands
+
+All commands run from `web/`:
+
+| Command             | What it does                                                        |
+|---------------------|---------------------------------------------------------------------|
+| `npm ci`            | Clean, reproducible install from `package-lock.json`                |
+| `npm run dev`       | Vite dev server with `/api` proxy to a local controller             |
+| `npm run build`     | Typecheck (`tsc -b`) + production build to `web/dist/app/`          |
+| `npm run lint`      | ESLint (flat config) — security rules at error severity             |
+| `npm run typecheck` | TypeScript strict-mode check, no emit                               |
+| `npm run test`      | Vitest run (jsdom + Testing Library)                                |
+| `npm run audit`     | `npm audit --audit-level=high` — fails on high/critical advisories  |
+| `npm run preview`   | Serve the production build locally                                  |
+
+## Design tokens — single source, never fork
+
+All design tokens come from
+[`docs/design/web-ui-design-tokens.css`](../docs/design/web-ui-design-tokens.css)
+(founder-owned, consumed **read-only**). The binding is a Vite filesystem
+alias, `@design-tokens`, defined in [`vite.config.ts`](vite.config.ts) and
+imported exactly once, in
+[`src/styles/global.css`](src/styles/global.css):
+
+```css
+@import '@design-tokens';
+```
+
+Rules:
+
+- **Never copy token values into `web/`.** No hex colours, font stacks, type
+  scales, spacing, radii, or shadows that duplicate the token file — they
+  would silently drift from the source of truth. Reference tokens with
+  `var(--token-name)` only.
+- **Never edit the token file from this app.** `docs/design/` is
+  founder-owned.
+- The token file owns the theme model: light is the default,
+  `@media (prefers-color-scheme: dark)` supplies dark, and
+  `:root[data-theme="light"|"dark"]` overrides the media query in both
+  directions (the app's future theme control stamps `data-theme` on `:root`).
+  Nothing in `web/` may redeclare these tokens or interfere with that
+  cascade.
+- Fonts use the progressive fallback stacks from the token file. Do **not**
+  add external font CDN references — the app's CSP (#2494) is self-only.
+
+The dev server explicitly allows serving the token file from outside the app
+root (`server.fs.allow` in `vite.config.ts`).
+
+## Security lint gate
+
+`npm run lint` is a frontend SAST gate. The flat config
+([`eslint.config.js`](eslint.config.js)) enforces **at error severity**:
+
+- `react/no-danger` and `react/no-danger-with-children`
+- A ban on HTML-injection sinks: `dangerouslySetInnerHTML`, `innerHTML`,
+  `outerHTML`, `insertAdjacentHTML`, `document.write`/`writeln`
+  (`no-restricted-properties` / `no-restricted-syntax`)
+- `no-eval`, `no-implied-eval`, `no-new-func` (no runtime code composition)
+- The full `eslint-plugin-security` recommended ruleset, elevated from warn
+  to error
+
+Lint failures block; do not downgrade these rules or suppress them inline
+without review.
+
+## Dev proxy (dev-only)
+
+`npm run dev` proxies `/api` to a locally running controller REST API at
+`https://localhost:9080` (the controller's default HTTP API listen address).
+The proxy sets `secure: false` because a dev controller boots with an
+auto-generated, self-signed CA. **This is a dev-only setting**: it exists
+solely inside the Vite dev server and is not part of any production artifact.
+In production the controller serves the built app itself, same-origin — no
+proxy and no TLS-verification bypass exist there.
+
+## Auth and session architecture (Story #2495, ADR-018)
+
+The app authenticates against the controller's web session endpoints
+(#2493) using **cookie transport** — no token ever passes through JS.
+
+- **Session cookie (HttpOnly).** Set by `POST /api/v1/web/login`, attached
+  automatically by the browser on every same-origin request
+  (`credentials: 'same-origin'`). App code never reads, names, or stores
+  it; a source-scan test fails if any non-test source references it.
+- **CSRF (double-submit).** [`src/api/client.ts`](src/api/client.ts) is the
+  single fetch wrapper for cookie-authenticated calls. On every unsafe
+  method (POST/PUT/PATCH/DELETE) it echoes the JS-readable `cfgms_csrf`
+  cookie as the `X-CSRF-Token` header. GET/HEAD carry no CSRF header.
+- **Login pre-flight.** The login POST itself is gated by a **pre-session**
+  token: the client first calls `GET /api/v1/web/csrf` (which sets the
+  single-use `cfgms_csrf_pre` cookie) and echoes that value as
+  `X-CSRF-Token` on `POST /api/v1/web/login`. Credentials travel only in
+  the JSON body.
+- **401 handling (ADR-018 §4).** Any 401 on a normal API call means the
+  session is gone (idle/absolute expiry or revocation): a central listener
+  in [`src/auth/AuthContext.tsx`](src/auth/AuthContext.tsx) drops the app
+  to the login screen in its **"session expired"** state. Login and logout
+  requests are exempt — a 401 there is invalid credentials / an
+  already-dead session, not expiry.
+- **Logout.** `POST /api/v1/web/logout` (CSRF-checked) revokes the session
+  server-side; the client returns to the fresh signin state.
+- **In-memory state only (security A7.2).** The signed-in principal lives
+  in React context. Nothing auth-related is ever written to web storage —
+  enforced by both a runtime test and a source-scan test. A page reload
+  starts signed out; the first authenticated data call re-establishes or
+  expires the session naturally.
+- **Route guard.** `RequireAuth` renders the login screen
+  ([`src/pages/Login.tsx`](src/pages/Login.tsx), canonical design:
+  [`docs/design/mockups/login.html`](../docs/design/mockups/login.html))
+  for any unauthenticated visit; the authenticated screen it protects is
+  the app shell (#2496).
+
+## App shell architecture (Story #2496)
+
+Every authenticated screen mounts inside [`src/shell/AppShell.tsx`](src/shell/AppShell.tsx)
+— the persistent chrome fixed by
+[`docs/design/mockups/fleet-overview.html`](../docs/design/mockups/fleet-overview.html)
+(lines ~102-266): sidebar navigation, a top app bar (tenant-scope switcher,
+global search, alert center, user menu), and the responsive drawer/scrim
+behavior below 1024px. `App.tsx` renders `AppShell` as the sole child of
+`RequireAuth`; later epics mount their views into `AppShell`'s `.content`
+area (fleet overview, #2497, is the first occupant; the shell's global
+search box doubles as its live filter).
+
+- **Tenant-scope context — a display convenience, not a security boundary
+  (security A8.1).** [`src/shell/TenantScopeContext.tsx`](src/shell/TenantScopeContext.tsx)
+  holds the currently selected scope and the set of paths observed so far
+  (seeded with the principal's own root path; later views call
+  `registerObservedPath` as they see more of the tenant tree — there is no
+  list-tenants API). `isScopeMatch` mirrors the server's path-separator-aware
+  ancestor check in `handlers_stewards.go` (`tenant-a` must never match
+  `tenant-abc`). **Server-side tenant scoping on every API call is the only
+  real enforcement** — this context only decides what a technician sees in
+  the switcher and gives views a shared scope to filter by.
+- **Global search / alert center are chrome only.** No search or alerting
+  backend exists yet; `GlobalSearch` is a controlled input a later view can
+  wire up, and `AlertCenter` renders its designed empty state rather than
+  fabricated sample data.
+- **User menu.** Shows the signed-in principal from `AuthContext` and hosts
+  logout via the #2495 auth actions, plus the design-system theme toggle
+  (auto/light/dark via `:root[data-theme]`). Theme choice persists in
+  `localStorage` under `cfgms.theme` — a display preference, not auth data,
+  so it's explicitly allowlisted in the A7.2 source scan
+  ([`src/pages/Login.test.tsx`](src/pages/Login.test.tsx)
+  `STORAGE_ALLOWLIST`) rather than exempt from it: any new storage key
+  anywhere in `web/` must be added to that allowlist by exact `(file, key)`
+  match or the scan fails, and a non-literal key always fails closed.
+- **Responsive drawer.** Below 1024px the sidebar becomes an off-canvas
+  drawer opened by the hamburger button; a scrim covers the content and
+  Escape or a scrim click closes it, matching the mockup harness.
+
+## Registration console (Stories #2934, #2935)
+
+[`src/registration/RegistrationConsolePage.tsx`](src/registration/RegistrationConsolePage.tsx)
+renders the steward enrollment console at `/registration`. The page opens on the
+**Pending** tab by default. The tab strip follows the same roving-tabindex +
+ArrowLeft/Right pattern as `StewardAssetPage.tsx`.
+
+Canonical design:
+[`docs/design/mockups/registration-console.html`](../docs/design/mockups/registration-console.html).
+
+No approve, approve-all, approve-by-CIDR, mint, rotate, revoke, or delete control
+is present — those are Section 2's follow-on epic.
+
+### Pending tab (Story #2934)
+
+[`src/registration/PendingQueueTab.tsx`](src/registration/PendingQueueTab.tsx)
+lists every pending registration in the caller's tenant scope and provides a
+functional **Deny** button per row.
+
+- **List endpoint:** `GET /api/v1/registration/pending` — bare-array response (no
+  `{data:...}` envelope). Shape-validated by `parsePendingRegistrations` before
+  any value reaches the DOM.
+- **Deny endpoint:** `POST /api/v1/registration/{id}/deny` — removes the row from
+  the list on success; surfaces a row-level error without crashing on failure.
+- All steward-supplied values (`pending_id`, `steward_id`, `source_ip`,
+  `registered_at`) render as JSX text nodes only (security A9.1).
+
+### Tokens tab (Story #2935)
+
+[`src/registration/TokensTab.tsx`](src/registration/TokensTab.tsx)
+is a read-only view of registration tokens for the caller's tenant scope.
+`token_prefix` (never the full secret) is the only token identifier rendered.
+The list endpoint contract (`handlers_registration_tokens.go`) omits the `token`
+field from list responses; `parseToken` enforces this client-side by not reading
+that field.
+
+- **List endpoint:** `GET /api/v1/registration/tokens` — `{tokens:[...], total:N}`
+  shape (no `{data:...}` envelope). Shape-validated by `parseTokenList`.
+- **Fields rendered:** `token_prefix`, `tenant_id`, `group`, `created_at`,
+  `expires_at`, computed status (Active / Expired / Revoked).
+- `expires_at` / `revoked_at` are optional (`omitempty` in Go) — renders `—`
+  when absent, matching the `columns.ts` em-dash convention.
+- No mint, rotate, revoke, or delete affordance of any kind.
+
+### IP Trust tab (Story #2936)
+
+Renders a "soon" placeholder — the IP-trust list tab is added by Story #2936.
+
+## Fleet overview (Story #2497)
+
+[`src/fleet/FleetOverview.tsx`](src/fleet/FleetOverview.tsx) renders the
+steward table inside the app shell. Canonical design:
+[`docs/design/mockups/fleet-overview.html`](../docs/design/mockups/fleet-overview.html).
+Story #2498 adds saved views and the row drill-in asset-DNA drawer (both
+below).
+
+### Checkbox selection + bulk actions (Story #2939)
+
+Canonical design:
+[`docs/design/mockups/fleet-bulk.html`](../docs/design/mockups/fleet-bulk.html)
+(founder-approved 2026-07-24).
+
+[`src/fleet/FleetTable.tsx`](src/fleet/FleetTable.tsx) renders a checkbox
+column (leftmost) when `selectedIds` is provided. The header checkbox
+implements select-all-on-page; it is indeterminate when some but not all
+rows on the current page are selected.
+
+[`src/fleet/BulkActionBar.tsx`](src/fleet/BulkActionBar.tsx) is mounted by
+`FleetOverview` above the table panel when ≥1 row is selected; it disappears
+at zero selection. The bar shows the selected count and an **Edit tags**
+action.
+
+**Bulk tag edit** opens an inline tag editor in the bar. Clicking **Add to
+selected** or **Remove from selected** issues one `POST` or `DELETE
+/api/v1/stewards/{id}/tags` call per selected steward — no server-side batch
+endpoint is used, so the per-steward tenant authorization check in
+`resolveStewardForTags` runs for every steward individually. Results are
+surfaced per-item (e.g. "8 of 10 succeeded, 2 failed: id1, id2"); partial
+success is never swallowed into a single pass/fail toast.
+
+**Selection reset**: selection clears when the page, filter, or sort
+changes. Stale selections across a different displayed row set would allow
+bulk operations on rows the operator is no longer looking at, which is a
+correctness hazard. No selection state is preserved across page navigation.
+
+No decommission affordance of any kind exists in these components — that is
+Section 2's follow-on epic.
+
+### Data flow
+
+- **Endpoint:** `GET /api/v1/stewards?limit=<n>&offset=<n>` through the
+  #2495 client (`apiFetch` — cookie session, central 401 handling). The
+  response is the `{ data: { stewards, total, limit, offset } }` envelope
+  from Issue #2489: `total` is the post-filter, pre-slice fleet count and
+  page order is deterministic (steward-ID sort).
+- **Scale posture (48k+ stewards):** only the current server page is ever
+  held in memory; the full fleet is never fetched. The pager and the
+  toolbar count render the server `total`.
+- **Client-side semantics (fixed by the epic):** the live filter (the
+  shell's global search box) and column sort operate on the **displayed
+  page's rows** — the filter is not a fleet-wide query bar, and the server
+  provides only pagination + count (no sort/filter params). The pager's
+  "Showing X–Y of Z" always describes the server page window; the toolbar
+  count switches to "N of Z match" while a filter or narrowed scope is
+  active. The filter haystack covers every mapped DNA value (visible or
+  hidden columns) plus the derived health and check-in text.
+- **Tenant scope:** rows are narrowed by the #2496 scope context via
+  `isScopeMatch` when a scope below the principal's root is selected, and
+  tenant paths observed in page data are reported back through
+  `registerObservedPath`. Display convenience only — server-side tenant
+  scoping on the API call is the only enforcement (security A8.1).
+- **Untrusted data:** the response body is shape-validated
+  (`parseStewardPage`) before rendering, and every steward-supplied value
+  reaches the DOM as a text node only — never markup (security A9.1;
+  regression-tested with hostile DNA values).
+
+### DNA-attribute → column mapping
+
+Defined in [`src/fleet/columns.ts`](src/fleet/columns.ts). Default columns:
+Name, Company, Last user, IP, Health, Last check-in; opt-in: OS, Agent,
+Ring, Model, Serial, MAC. Missing values render an em-dash placeholder.
+
+| Column        | Source (payload field / `dna.attributes` key)                                           |
+|---------------|-----------------------------------------------------------------------------------------|
+| Name          | `dna.hostname`, fallback `id`                                                           |
+| Company       | `tenant` (tenant path; **not emitted by the controller yet** — renders `—` until it is) |
+| Last user     | `current_user`                                                                          |
+| IP            | `primary_ip`                                                                            |
+| Health        | derived from `status` + `last_seen` (see below)                                         |
+| Last check-in | `last_seen`, relative (`12s ago` … `3d ago`; `—` = never)                               |
+| OS            | `dna.os`, fallback `os_pretty_name`                                                     |
+| Agent         | `version`, fallback `steward.version`                                                   |
+| Ring          | `deployment_ring`                                                                       |
+| Model         | `system_model`, fallback `hardware_model`                                               |
+| Serial        | `system_serial_number`, fallback `motherboard_serial`                                   |
+| MAC           | `primary_mac`                                                                           |
+
+Column selection persists in `localStorage` under `cfgms.fleet.columns`
+(allowlisted in the A7.2 source scan; values read back are validated as
+untrusted input).
+
+### Saved views (Story #2498)
+
+[`src/fleet/SavedViews.tsx`](src/fleet/SavedViews.tsx) — the toolbar's
+"View:" panel (mockup `pop-views`). A saved view captures the current
+**filter text, sort (column + direction), visible column set, and page
+size** under a technician-chosen name; applying one restores exactly those
+four fields. Tenant scope is session chrome (per the mockup) and is never
+captured or restored. Save, apply, rename, and delete all happen in the
+panel; the built-in **All stewards** entry restores the defaults.
+
+**Storage format.** Views persist in `localStorage` under the literal key
+`cfgms.fleet.views` (allowlisted in the A7.2 source scan), keyed per
+principal *inside* the stored record so the storage key itself stays
+literal:
+
+```json
+{
+  "<username>": [
+    {
+      "name": "acme servers",
+      "config": {
+        "filter": "acme",
+        "sort": { "key": "name", "direction": -1 },
+        "columns": ["name", "company", "os", "health", "seen"],
+        "pageSize": 100
+      }
+    }
+  ]
+}
+```
+
+Everything read back is **untrusted input** (security A10.2): the record,
+each view, and every config field are shape- and type-validated
+(`sort.key` and `columns` against the column registry, `pageSize` against
+the fixed page-size set, length caps on names and filter text). A view
+that fails validation is dropped; valid siblings survive. At most 50 views
+per principal. There is no server-side persistence endpoint in this epic —
+sharing/roaming views across browsers is future work.
+
+### Asset-DNA drawer (Story #2498)
+
+[`src/fleet/DnaDrawer.tsx`](src/fleet/DnaDrawer.tsx) — clicking (or
+Enter/Space on) a fleet row opens the right-hand drawer (mockup `.det`)
+for that steward. Escape or a scrim click closes it, matching the shell
+overlay conventions.
+
+**Data flow.** The drawer fetches `GET /api/v1/stewards/{id}/dna` through
+the #2495 client and validates the `{ data: DNAInfo }` envelope
+(`parseDNAInfo`) as untrusted wire data. A **fixed client-side allowlist**
+maps known attribute keys into the mockup's designed groups (Identity,
+Network, System, Session & agent); every attribute the steward reports
+beyond the allowlist renders under **Other attributes**, so new steward
+DNA appears without UI changes. Group headings and row labels come only
+from that allowlist, never from data, and steward-supplied keys and values
+reach the DOM as text nodes only (security A10.1). A raw-JSON `<details>`
+view shows the full parsed payload.
+
+**Redaction tolerance.** The endpoint may 404 (cross-tenant requests 404
+rather than 403, no DNA reported yet) and the controller denylists
+sensitive attribute keys — the drawer renders its error state with a retry
+affordance for failed fetches and simply renders whatever attribute set
+comes back, never a blank panel.
+
+Deep-linking the drawer (steward ID in the route) is deferred until the
+app has a router; the seam is marked in `FleetOverview.tsx`.
+
+### Health mapping
+
+[`src/fleet/health.ts`](src/fleet/health.ts) folds lifecycle `status` and
+`last_seen` staleness into one cell, colored only by semantic state tokens:
+active/online + heartbeat ≤ 5 min → **Healthy** (ok); active/online but
+older (or never) → **Unreachable** (crit); `degraded` → **Degraded**
+(warn); `lost`/`offline` → **Unreachable** (crit); `revoked` → **Revoked**
+(crit); `registered`/`dormant`/`archived` → neutral; unknown statuses
+render neutral with the raw label as inert text. The 5-minute threshold is
+a display heuristic (the payload pins no heartbeat contract), anchored at
+fetch time; Go's zero time (`0001-01-01T00:00:00Z`) is treated as "never
+seen".
+
+## Registration console (Story #2934)
+
+[`src/registration/RegistrationConsolePage.tsx`](src/registration/RegistrationConsolePage.tsx)
+— the `/registration` route, accessible from the app shell nav. A three-tab
+console (Pending / Tokens / IP-Trust) using the same roving-tabindex tab-strip
+pattern as `StewardAssetPage.tsx`. Canonical design:
+[`docs/design/mockups/registration-console.html`](../docs/design/mockups/registration-console.html).
+
+Tabs and scope:
+
+| Tab | Story | Scope |
+|-----|-------|-------|
+| Pending | #2934 | Lists pending enrollments; Deny is functional |
+| Tokens | #2935 | Lists registration tokens (read-only) |
+| IP-Trust | #2936 | Lists trusted CIDR ranges (read-only) |
+
+### IP-Trust tab (Story #2936)
+
+[`src/registration/IPTrustTab.tsx`](src/registration/IPTrustTab.tsx) — read-only
+list of trusted CIDR ranges for the caller's tenant scope.
+
+**Endpoint:** `GET /api/v1/registration/ip-trust` (Story #2932). Uses the newer
+`{data: [...]}` array-envelope shape — the one endpoint in this cluster that does
+not use the bare-array shape the Pending tab uses.
+
+**Fields rendered:**
+
+| Field | Wire key | Notes |
+|-------|----------|-------|
+| CIDR | `cidr` | Monospace; key for deduplication |
+| Source | `pre_seeded` | `true` → "Pre-seeded" badge; `false` → "Manual" badge |
+| Trusted since | `trusted_since` | ISO-8601 string |
+| Last activity | `last_activity` | ISO-8601 string |
+| Revoked | `revoked` | `true` → "Revoked" badge in status column |
+
+**Out of scope:** no add or revoke button, disabled state, or any write affordance
+exists in this component — those belong to Section 2's follow-on epic.
+
+All API-supplied values render as JSX text nodes only (security A9.1); the
+`parseIPTrustList` function shape-validates the wire payload before any field
+reaches the DOM.
+
+## Refresh-request queue (Story #2941)
+
+[`src/refresh/RefreshQueuePage.tsx`](src/refresh/RefreshQueuePage.tsx) — the
+`/refresh` route, accessible from the app shell nav as "Refresh Requests". A
+distinct page from the Registration console: refresh requests are a separate
+resource (`/stewards/refresh/*`, device-credential rotation) from steward
+enrollment (`/registration/*`).
+
+**Endpoint:** `GET /api/v1/stewards/refresh/pending` — bare JSON array (no
+`{data:...}` envelope), tenant-scoped from `ctxkeys.TenantID` in the handler.
+
+**Reject endpoint:** `POST /api/v1/stewards/refresh/{pending_id}/reject` —
+removes the row from the list on success; surfaces a row-level error without
+crashing on failure.
+
+**Fields rendered:**
+
+| Field | Wire key | Notes |
+|-------|----------|-------|
+| Pending ID | `pending_id` | Monospace; list key |
+| Device ID | `device_id` | Monospace |
+| Tenant | `tenant_id` | Monospace path |
+| Source IP | `source_ip` | Monospace |
+| Provenance | `provenance_matched_fields` / `provenance_total_fields` | Badge: green when matched == total (full match), amber when matched < total (partial) |
+| Requested | `created_at` | ISO-8601 string |
+
+**Out of scope:** Approve is entirely out of scope for this story — no button,
+no disabled state, no deferred control of any kind. Approve belongs to Section
+2's follow-on epic.
+
+All API-supplied values render as JSX text nodes only (security A9.1); the
+`parsePendingRefreshList` / `parsePendingRefreshEntry` functions shape-validate
+the wire payload before any field reaches the DOM.
+
+## Installer & deploy hand-off (Story #2937)
+
+[`src/installer/InstallerPage.tsx`](src/installer/InstallerPage.tsx) — the
+`/installer` route, accessible from the app shell nav as "Installer".
+
+**Artifact table:** lists installer artifacts for the caller's tenant from
+`GET /api/v1/installer/artifacts` (`{data:[...]}` envelope, served by
+`handleListInstallerArtifacts`). Fixed columns in this order: **Platform,
+Arch, Size, Checksum, Download.** Size renders human-readable (e.g. `48.2 MB`,
+not raw bytes). Checksum renders in the monospace token, truncated to 16 chars
+with the full value available on hover (title attribute). Each Download cell
+links to `GET /api/v1/installer/download/{platform}/{arch}` — the public
+endpoint that returns a tar.gz package including the binary and an install
+README.
+
+**Download scope disclosure.** The table rows are tenant-scoped
+(`handleListInstallerArtifacts` reads `ctxkeys.TenantID`) but the download
+endpoint is unauthenticated and always reads the fixed root tenant
+(`downloadTenantID = "root"` in `handlers_installer.go`, Issue #1704). It also
+returns a tar.gz — binary plus CA material — rather than the raw blob whose
+checksum the row shows. Both mismatches are disclosed in the page rather than
+hidden: a note beneath the table (`installer-download-note`) states that
+Download serves the root-published package and that the Checksum column is the
+inner binary's SHA-256, and each Download link and checksum cell carries a
+matching `aria-label`/`title`. The column is not gated on the principal because
+`AuthContext` holds the principal in memory only — a page reload leaves it
+`null` while the session is still valid, which would blank the column for the
+root operator after every refresh.
+
+**Empty state:** follows the `WorkflowEmpty` shape (icon, heading, one line of
+body copy). Copy reads as "no artifacts published yet", not as a loading stall
+or error.
+
+**Command-assembler form** (below the table): platform/arch pickers, a
+password-type registration-token input, and a read-only assembled-command
+output with a copy button. The operator pastes in a registration token they
+already hold (minted via `cfg` CLI) and the page assembles a copy-paste
+one-liner. The binary name matches `installerFilename` and the `sudo` prefix
+matches `readmeText` (both in `handlers_installer.go`); the subcommand and
+flags come from `buildInstallCommand` in `cmd/steward/main.go`, which the
+packaged `README.txt` does not spell out:
+
+| Platform | Assembled command |
+|---|---|
+| `linux` / `darwin` | `sudo ./cfgms-steward-{arch} install --regtoken '{token}' --controller-url {origin}` |
+| `windows` | `.\cfgms-steward-{arch}.exe install --regtoken {token} --controller-url {origin}` |
+
+The `install` subcommand and the `--regtoken` / `--controller-url` flag names
+are those of the real steward CLI (`buildInstallCommand` in
+`cmd/steward/main.go`) — not `--token` / `--controller`. The POSIX token is
+single-quoted; the Windows one is not, because single quotes are literal in
+`cmd.exe` and would be passed through as part of the value.
+
+`{origin}` is `window.location.origin` (the controller's own URL). The copy
+button is disabled until platform, arch, and token are all supplied; it shows a
+transient "Copied" confirmation on click.
+
+**Security:** the operator-pasted token value is client-side only:
+- never sent in any network request from this page
+- never written to `localStorage` or `sessionStorage`
+- cleared when the component unmounts (navigation away), since it lives in
+  React component state
+
+The token input is `type="password"` with `autocomplete="off"` so the value
+is not shoulder-readable and browsers do not autofill it.
+
+All server-supplied values (platform, arch, checksum) render as JSX text nodes
+only (security A9.1); `parseArtifact` / `parseArtifactList` shape-validate the
+wire payload before any field reaches the DOM.
+
+**Tests:** [`src/installer/InstallerPage.test.tsx`](src/installer/InstallerPage.test.tsx)
+covers data states (loading, empty, error, populated table), column rendering,
+size formatting, checksum truncation, download hrefs, the download-scope
+disclosure note and per-cell labels, token charset rejection, assembler
+disabled state, assembled command content, and three required AC security
+tests:
+- Typing a token triggers zero `fetch` calls beyond the initial artifact list.
+- An empty artifact list renders the empty state (not loading, not error).
+- The token value is absent from `localStorage`, `sessionStorage`, and any
+  outgoing request payload after being entered.
+
+## Testing
+
+Vitest with jsdom and Testing Library. Suites:
+[`src/App.test.tsx`](src/App.test.tsx) (guard + full login/logout flow),
+[`src/api/client.test.ts`](src/api/client.test.ts) (CSRF injection,
+pre-session flow, 401 interception),
+[`src/auth/AuthContext.test.tsx`](src/auth/AuthContext.test.tsx) (state
+transitions, web-storage assertions), and
+[`src/pages/Login.test.tsx`](src/pages/Login.test.tsx) (mockup states,
+source scans), `src/shell/*.test.tsx` (tenant-scope prefix matching,
+drawer/scrim/Escape behavior, user-menu logout dispatch), and
+`src/fleet/*.test.*` (pagination contract, live filter, sort, column
+picker + persistence, health/staleness mapping, loading/error/empty
+states, hostile-DNA text-node rendering, saved-view round-trip +
+untrusted-config validation, DNA drawer fetch/grouping/error states +
+hostile attribute keys/values). Setup (jest-dom
+matchers, RTL cleanup, in-memory Storage for the A7.2 assertions):
+[`src/test/setup.ts`](src/test/setup.ts).
+
+## License
+
+All CFGMS code, including everything under `web/`, is licensed under
+**AGPL-3.0-only**. Every source file carries an
+`SPDX-License-Identifier: AGPL-3.0-only` header. A commercial embedding
+license is available via private agreement — see the repository root
+[`LICENSE`](../LICENSE).

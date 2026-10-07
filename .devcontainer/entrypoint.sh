@@ -1,7 +1,24 @@
 #!/usr/bin/env bash
 # Agent container entrypoint: restore creds, fetch issue, run Claude, update labels.
-# Supports three modes: issue (default), branch, and pr-fix.
+# Supports four modes: issue (default), branch, pr-fix, and resolve-conflict.
 set -euo pipefail
+
+# Root-then-drop (Issue #4343): the image now starts this entrypoint as root
+# (see Dockerfile) specifically so the egress firewall can be set up from
+# outside the agent's reach -- `agent` carries no sudoers entry and no other
+# escalation path, so once this process re-execs as `agent` below there is no
+# way back to root for the rest of the container's life, regardless of what a
+# prompt-injected agent session is told to run. This must be the very first
+# thing the script does, before sourcing anything or touching any
+# dispatch-supplied content (issue/PR body, prompt).
+# CFGMS_ENTRYPOINT_SOURCE_ONLY short-circuits this too: entrypoint_test.sh
+# sources this file to reach the helper-function definitions below without
+# running any agent flow, and must never trigger a real firewall init or a
+# re-exec even if the test happens to run as root.
+if [[ "${CFGMS_ENTRYPOINT_SOURCE_ONLY:-}" != "1" ]] && [[ "$(id -u)" -eq 0 ]]; then
+    init-firewall.sh
+    exec runuser -u agent -- "$0" "$@"
+fi
 
 # Helper library for prompt context assembly (fetch_* / render_* / no-op detection).
 # shellcheck source=./agent-context.sh
@@ -14,6 +31,150 @@ source "$(dirname "${BASH_SOURCE[0]}")/agent-context.sh"
 # at /usr/local/bin/ with no sibling scripts/ dir. Test harness overrides via
 # CFGMS_TEST_PROJECT_QUEUE to point at the host repo.
 PROJECT_QUEUE="${CFGMS_TEST_PROJECT_QUEUE:-/workspace/scripts/project-queue.sh}"
+PIPELINE_HELPER="${CFGMS_TEST_PIPELINE_HELPER:-/workspace/scripts/pipeline-helper.sh}"
+
+# Distributed-lease release (multi-host cron coordination). The launching host
+# passed CFGMS_LEASE_KEY (story-<item> for dev, pr-<N> for fix/resolve) and is
+# counting on THIS container to release it on exit — that "unlock when the agent
+# returns" is what lets whichever cron host comes back first pick up the next
+# phase (review/fix). Released unconditionally (success OR failure): a failed dev
+# run that resets the story to Ready must also free the lease so a later cycle
+# can re-dispatch. TTL reclaim is the backstop if the container dies first.
+release_cfgms_lease() {
+  [ -n "${CFGMS_LEASE_KEY:-}" ] || return 0
+  [ -f "$PIPELINE_HELPER" ] || return 0
+  bash "$PIPELINE_HELPER" lease-release "$CFGMS_LEASE_KEY" >/dev/null 2>&1 || true
+}
+trap release_cfgms_lease EXIT
+
+# _zero_work_retry — handle a zero-work failure retry/escalation.
+# Reads the retry count from the ZeroWorkRetries project field rather than from
+# issue comments, so comment content (or count) cannot influence dispatch state.
+# A read failure is treated conservatively: Blocked, not re-dispatch.
+# Globals used: PROJECT_QUEUE, CFGMS_PROJECT_ITEM_ID, ISSUE_NUM, EXIT_CODE
+_zero_work_retry() {
+    local zw_marker="<!-- cfgms-zero-work-retry -->"
+
+    # Read retry count from the project field. On get-item failure zw_read_ok
+    # stays false — a read failure must never be treated as "count is zero".
+    local zw_item_json zw_read_ok=false
+    if zw_item_json=$(bash "$PROJECT_QUEUE" get-item "$CFGMS_PROJECT_ITEM_ID" 2>/dev/null); then
+        zw_read_ok=true
+    fi
+
+    if [[ "$zw_read_ok" != "true" ]]; then
+        bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Blocked" \
+            2>/dev/null || echo "WARN: failed to set status Blocked"
+        [[ -n "${ISSUE_NUM:-}" ]] && gh issue comment "$ISSUE_NUM" --body \
+            "${zw_marker} Zero-work agent failure (exit ${EXIT_CODE}) — retry counter unavailable (project field read failed). Status set to Blocked for operator review." \
+            2>/dev/null || true
+        echo "Zero-work failure: retry counter unavailable — set to Blocked (conservative)"
+        return
+    fi
+
+    # Parse ZeroWorkRetries; a missing or empty value means first failure (treat as 0).
+    local zw_count
+    zw_count=$(printf '%s' "$zw_item_json" | python3 -c \
+        'import json,sys; d=json.load(sys.stdin); v=d.get("fields",{}).get("ZeroWorkRetries",""); print(v if v and v.strip() else "0")' \
+        2>/dev/null || echo "PARSE_ERROR")
+
+    if [[ "$zw_count" == "PARSE_ERROR" ]] || ! [[ "$zw_count" =~ ^[0-9]+$ ]]; then
+        bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Blocked" \
+            2>/dev/null || echo "WARN: failed to set status Blocked"
+        echo "Zero-work failure: retry counter parse error — set to Blocked (conservative)"
+        return
+    fi
+
+    if [ "$zw_count" -lt 3 ]; then
+        local new_count=$((zw_count + 1))
+        bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" "ZeroWorkRetries" "$new_count" \
+            2>/dev/null || echo "WARN: failed to increment ZeroWorkRetries field"
+        bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Ready" \
+            2>/dev/null || echo "WARN: failed to reset status Ready"
+        [[ -n "${ISSUE_NUM:-}" ]] && gh issue comment "$ISSUE_NUM" --body \
+            "${zw_marker} Zero-work agent failure (exit ${EXIT_CODE}) — no changes produced (likely usage limit / token reauth / early crash). Status reset to Ready for re-dispatch (retry ${new_count}/3)." \
+            2>/dev/null || true
+        echo "Zero-work failure: reset to Ready for re-dispatch (retry ${new_count}/3)"
+    else
+        bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Blocked" \
+            2>/dev/null || echo "WARN: failed to set status Blocked"
+        [[ -n "${ISSUE_NUM:-}" ]] && gh issue comment "$ISSUE_NUM" --body \
+            "${zw_marker} Zero-work agent failure (exit ${EXIT_CODE}) — 3 re-dispatch retries exhausted with no progress. Status set to Blocked for operator review." \
+            2>/dev/null || true
+        echo "Zero-work failure: retry cap reached — set to Blocked for operator review"
+    fi
+}
+
+# _salvage_no_pr — the run produced no PR. Capture whatever work exists so the
+# item is resumable, or route it for re-dispatch when there is nothing to keep.
+#
+# Called from BOTH exit paths. A zero exit code is not evidence that a PR was
+# opened: an agent that ends its turn waiting on a background task exits 0 with
+# no PR and no pushed branch, and without this the run produced no artifact and
+# no re-dispatch signal, stranding the item at In Progress forever (Issue #3158).
+#
+# $1 — human-readable reason, used in the WIP commit and draft-PR body.
+# Globals used: CURRENT_BRANCH, ISSUE_NUM, EXIT_CODE, PROJECT_QUEUE,
+#               CFGMS_PROJECT_ITEM_ID
+_salvage_no_pr() {
+    local reason="$1"
+
+    # Work is uncommitted changes OR commits the agent already made on this
+    # branch. Checking only the tree read an agent that committed (and even
+    # pushed) its fix, then died before `gh pr create`, as zero work: the item
+    # went back to Ready and the re-dispatch deleted the branch (Issue #4272).
+    # If the count vs origin/develop cannot be established, assume work -- a
+    # needless draft PR is recoverable, a discarded branch is not.
+    local dirty="" ahead
+    [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty=1
+    ahead=$(git rev-list --count origin/develop..HEAD 2>/dev/null) || ahead="unknown"
+
+    if [[ -n "$dirty" || "$ahead" != "0" ]]; then
+        # The agent produced work but opened no PR — capture it as a draft PR so
+        # the cron's resume_failed_session path can pick it up.
+        if [[ -n "$dirty" ]]; then
+            git add --update
+            local local_issue_ref=""
+            if [[ -n "${ISSUE_NUM:-}" ]]; then
+                local_issue_ref=" for issue #${ISSUE_NUM}"
+            fi
+            git commit -m "WIP: agent attempt${local_issue_ref} (${reason})" \
+                2>/dev/null || true
+        fi
+        git push -u origin "$CURRENT_BRANCH" 2>/dev/null || true
+        gh pr create --base develop --draft \
+            --title "WIP: ${CURRENT_BRANCH} (agent produced no PR)" \
+            --body "Agent session ended with exit code ${EXIT_CODE} and no pull request: ${reason}. Review container logs for details." \
+            2>/dev/null || true
+        return
+    fi
+
+    # Zero-work run: the agent produced no changes — it never got going (usage
+    # limit, token reauth, early crash) or it stalled before doing anything.
+    # There is nothing to capture as a draft PR, and leaving the item at In
+    # Progress strands it forever (the cron won't re-dispatch In Progress work).
+    # Reset it to Ready so the next cron cycle re-dispatches it, capped so a
+    # persistent failure escalates instead of looping. The retry count is read
+    # from the ZeroWorkRetries project field — not from issue comments — so
+    # comment content cannot influence dispatch state.
+    if [[ -z "${CFGMS_PROJECT_ITEM_ID:-}" ]]; then
+        echo "Zero-work run: no project item id — cannot route for re-dispatch"
+    elif [[ -z "${ISSUE_NUM:-}" ]]; then
+        # No issue linked — escalate rather than risk dispatch loops without
+        # operator-visible comment history.
+        bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Blocked" \
+            2>/dev/null || echo "WARN: failed to set status Blocked"
+        echo "Zero-work run (no issue linked) — set to Blocked"
+    else
+        _zero_work_retry
+    fi
+}
+
+# Testability hook: sourcing this file with CFGMS_ENTRYPOINT_SOURCE_ONLY=1
+# yields the helper definitions above without running any agent flow.
+if [[ "${CFGMS_ENTRYPOINT_SOURCE_ONLY:-}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # --- Argument parsing ---
 MODE="issue"
@@ -26,10 +187,11 @@ DRY_RUN=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --branch)  [[ $# -ge 2 ]] || { echo "ERROR: --branch requires a value"; exit 1; }; MODE="branch"; BRANCH="$2"; shift 2 ;;
-        --issue)   [[ $# -ge 2 ]] || { echo "ERROR: --issue requires a value"; exit 1; }; ISSUE_NUM="$2"; shift 2 ;;
-        --fix-pr)  [[ $# -ge 2 ]] || { echo "ERROR: --fix-pr requires a value"; exit 1; }; MODE="fix-pr"; PR_NUM="$2"; shift 2 ;;
-        --dry-run) DRY_RUN="true"; shift ;;
+        --branch)           [[ $# -ge 2 ]] || { echo "ERROR: --branch requires a value"; exit 1; }; MODE="branch"; BRANCH="$2"; shift 2 ;;
+        --issue)            [[ $# -ge 2 ]] || { echo "ERROR: --issue requires a value"; exit 1; }; ISSUE_NUM="$2"; shift 2 ;;
+        --fix-pr)           [[ $# -ge 2 ]] || { echo "ERROR: --fix-pr requires a value"; exit 1; }; MODE="fix-pr"; PR_NUM="$2"; shift 2 ;;
+        --resolve-conflict) [[ $# -ge 2 ]] || { echo "ERROR: --resolve-conflict requires a value"; exit 1; }; MODE="resolve-conflict"; PR_NUM="$2"; shift 2 ;;
+        --dry-run)          DRY_RUN="true"; shift ;;
         *)
             if [[ "$1" =~ ^[0-9]+$ ]]; then
                 ISSUE_NUM="$1"; shift
@@ -74,6 +236,13 @@ case "$MODE" in
             exit 1
         fi
         ;;
+    resolve-conflict)
+        if [[ -z "$PR_NUM" ]]; then
+            echo "ERROR: Resolve-conflict mode requires --resolve-conflict <PR_NUM>"
+            exit 1
+        fi
+        [[ "$PR_NUM" =~ ^[0-9]+$ ]] || { echo "ERROR: PR number must be numeric, got: ${PR_NUM}"; exit 1; }
+        ;;
 esac
 
 # --- Phase 0: Environment setup ---
@@ -99,7 +268,15 @@ print(int((exp_ms / 1000) - time.time()))" 2>/dev/null || echo "0")
 
 if [ "$TOKEN_REMAINING" -lt 300 ] 2>/dev/null; then
     echo "OAuth token expired or expiring in <5min (${TOKEN_REMAINING}s remaining), refreshing..."
-    if claude -p 'ping' --dangerously-skip-permissions --model haiku >/dev/null 2>&1; then
+    # Run from outside /workspace: for branch/fix-pr/resolve-conflict modes,
+    # /workspace is already a checkout of the branch/PR under dispatch by this
+    # point, and this call has nothing to do with reviewing or fixing its
+    # content -- it exists purely to refresh the OAuth token. Starting `claude`
+    # there anyway would let it pick up that branch's own CLAUDE.md/hooks for
+    # no reason connected to the actual review/fix work (Issue #4343); running
+    # from a neutral directory keeps this incidental call from being an
+    # execution surface for whatever the checked-out branch contains.
+    if (cd /tmp && claude -p 'ping' --dangerously-skip-permissions --model haiku >/dev/null 2>&1); then
         echo "OAuth token refreshed (persisted via symlink)"
     else
         echo "ERROR: OAuth token refresh failed — credentials may be expired"
@@ -151,41 +328,50 @@ Review your own changes for quality issues before proceeding:
 - Verify tests exercise error paths, not just happy paths
 - Fix any issues found'
 
-# Adversarial review phase — the 3-specialist review that catches issues the
-# implementing agent is blind to. Uses the same agents as /story-complete.
+# Adversarial review phase — runs the shared story-review workflow (the same
+# review-fix-verify gate /story-complete uses) so both review paths share ONE
+# implementation. The workflow orchestrates the review lenses + bounded fix loop.
 ADVERSARIAL_REVIEW_SECTION='## Phase 4: Adversarial Team Review (MANDATORY)
 
-Before committing, you MUST spawn three specialist review agents in parallel using
-the Agent tool. These agents review your work with fresh context. Read each agent
-definition file and include its full instructions in the agent prompt.
+Before committing, you MUST run the shared **story-review** workflow — the same
+review-fix-verify gate the interactive /story-complete path uses. Do NOT hand-spawn
+review agents. Do NOT skip this phase. Do NOT commit or create a PR before the
+workflow returns a passing verdict.
 
-**IMPORTANT**: Do NOT skip this phase. Do NOT commit or create a PR before all
-three specialists have reported PASS.
+### Run the workflow
 
-### Spawn these three agents in parallel:
+Call the Workflow tool with the shared gate, parameterized for the container
+(no Docker, so 3 lenses — code review / test quality / security; acceptance is
+verified post-PR by the cron acceptance-reviewer, so it is disabled here):
 
-1. **qa-test-runner** (subagent_type: qa-test-runner)
-   - Read `.claude/agents/qa-test-runner.md` for instructions
-   - OVERRIDE: Run `make test-agent-complete` instead of `make test-quality` (no Docker in container)
-   - Reports pass/fail with specific test names and error details
-   - After it passes, write the marker file: `touch /tmp/agent-validation-passed`
+```
+Workflow({
+  name: "story-review",
+  args: {
+    testTarget: "test-agent-complete",
+    includeAcceptanceChecker: false,
+    storyRef: "<the issue #, item id, or PR you are working>",
+    changedFiles: [<the output of: git diff --name-only origin/develop...HEAD>]
+  }
+})
+```
 
-2. **qa-code-reviewer** (subagent_type: qa-code-reviewer)
-   - Read `.claude/agents/qa-code-reviewer.md` for instructions
-   - Reviews all changed files for test quality, missing tests, mocks, hacky workarounds
-   - MUST verify: every new .go file has corresponding _test.go with functional tests
-   - MUST reject: new production code without tests, tests without error path coverage
+It runs the lenses in parallel, then a bounded fix loop that re-runs only the
+failed lenses (max 3 rounds), and returns
+`{ passed, reviewRounds, fixRounds, perRound, remainingFindings }`.
 
-3. **security-engineer** (subagent_type: security-engineer)
-   - Read `.claude/agents/security-engineer.md` for instructions
-   - Runs security scans and reviews for vulnerabilities, central provider violations
-   - Reports blocking issues with file:line references
+### Gate on the aggregate workflow verdict (NOT any single lens)
 
-### After all three report back:
+- If the workflow returns **passed: true**: write the validation marker with
+  `touch /tmp/agent-validation-passed`, then proceed to the commit/PR phase.
+- If it returns **passed: false** (the fix loop was exhausted without converging):
+  do NOT write the marker and do NOT open a normal PR. Open a **draft** PR whose
+  body lists the unresolved `remainingFindings` for a human to finish, then stop.
 
-- If ALL three report PASS: proceed to commit phase
-- If ANY report BLOCKING issues: fix the issues, then re-run ONLY the failing specialists
-- Maximum 3 fix iterations. If issues persist after 3 rounds, commit as draft PR with failure details.'
+The marker is the signal the entrypoint uses to decide success, so it MUST reflect
+the aggregate workflow verdict. Never write it because one lens (e.g. tests) passed
+while another (code review or security) reported a blocking finding — that is the
+exact failure mode this gate exists to prevent.'
 
 # Scope constraints — identical across all modes
 SCOPE_CONSTRAINTS_SECTION='## Scope Constraints
@@ -201,47 +387,26 @@ SCOPE_CONSTRAINTS_SECTION='## Scope Constraints
 # with no project item, no status, and no sub-issue link — the dispatcher
 # cannot see it. Caught 2026-05-18 on epic #1500: 13 audit stories were filed
 # this way and sat orphaned from the pipeline until manual cleanup.
-FOLLOW_UP_ISSUES_SECTION='## Filing follow-up issues (when the story tells you to)
+FOLLOW_UP_ISSUES_SECTION='## Filing follow-up work (when the story tells you to)
 
-If your story asks you to file a follow-up issue (e.g., a docs audit asks you
-to file a code-fix issue for each gap found, or a Deferred annotation needs a
-tracking issue), DO NOT just call `gh issue create`. A bare `gh issue create`
-produces an issue that is invisible to the pipeline — no project item, no
-status, no sub-issue link to the parent epic — and the work sits orphaned
-until a human cleans it up.
-
-For each follow-up issue, run all FOUR calls in this order. Omit step 2 only
-if there is genuinely no parent epic (rare — usually the epic your current
-story belongs to is the right parent).
+If your story asks you to file follow-up work (e.g., a docs audit asks you to
+file a code-fix item for each gap found, or a Deferred annotation needs a
+tracking item), file it as a PRIVATE PROJECT DRAFT — never create a public issue
+directly. You are autonomous: raw issue creation is hard-blocked, and a bare issue
+is injection/leak surface that is also invisible to the pipeline. A dev work-item
+becomes a locked `internal` issue only when it is dispatched.
 
 ```bash
-# 1. Create the public GH issue
-issue_num=$(gh issue create --repo cfg-is/cfgms \
-  --title "<scope>: <title>" \
-  --label story \
-  --body-file /path/to/body.md \
-  | grep -oE "[0-9]+$")
-
-# 2. Link as sub-issue of the parent epic (so the epic tracks completion)
-./scripts/pipeline-helper.sh link-child <PARENT_EPIC_NUM> "$issue_num"
-
-# 3. Add the issue to the project queue (so the dispatcher can see it)
-item_id=$(./scripts/project-queue.sh add-issue "$issue_num" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)[\"item_id\"])")
-
-# 4. Set initial status. Use `Draft` if the body needs Tech Lead validation
-#    before dispatch (the safe default for new gap-fix work, since you wrote
-#    the body without the BA+Tech Lead planning loop). Only use `Ready` if
-#    you are certain the body is parser-compliant (`## Dependencies` section
-#    is bare `None` or lists only `#NNN` refs to CLOSED issues, and
-#    `## Files In Scope` lists concrete file paths).
-./scripts/project-queue.sh update-field "$item_id" status "Draft"
+# Write the follow-up body to a file, then create a private draft under the epic.
+# Returns CREATED_DRAFT:<item_id>. Usually the epic your current story belongs to
+# is the right parent. The draft starts in Draft status (Tech Lead validates it
+# before it becomes Ready/dispatchable).
+./scripts/pipeline-helper.sh create-story <PARENT_EPIC_NUM> "<scope>: <title>" /path/to/body.md
 ```
 
-If any step fails, fix it before moving on — a half-filed issue is worse than
-no issue at all because it hides the problem. Story-body conventions the
-follow-up issue body must satisfy live in `.claude/agents/po.md` under
-"Reference: Story Body Conventions".'
+If create-story fails, fix it before moving on — a half-filed item is worse than
+none because it hides the problem. The follow-up body must satisfy the story-body
+conventions in `.claude/agents/po.md` under "Reference: Story Body Conventions".'
 
 # --- Phase 1: Compose prompt based on mode ---
 
@@ -610,18 +775,127 @@ PROMPT_EOF
     printf '%s\n' "$FOLLOW_UP_ISSUES_SECTION" >> "$PROMPT_FILE"
 }
 
+compose_resolve_conflict_prompt() {
+    echo "Fetching PR #${PR_NUM} metadata for conflict resolution..."
+    local pr_json
+    pr_json=$(gh_api_with_retry "fetch PR #${PR_NUM}" gh pr view "$PR_NUM" \
+        --repo cfg-is/cfgms \
+        --json number,title,headRefName,body,headRepositoryOwner 2>/dev/null) || {
+        echo "ERROR: Cannot fetch PR #${PR_NUM} for conflict resolution"
+        exit 1
+    }
+
+    local pr_title pr_branch
+    pr_title=$(echo "$pr_json" | jq -r '.title // ""')
+    pr_branch=$(echo "$pr_json" | jq -r '.headRefName // ""')
+
+    if [[ -z "$pr_branch" ]]; then
+        echo "ERROR: Could not determine PR branch from PR #${PR_NUM}"
+        exit 1
+    fi
+    BRANCH="$pr_branch"
+
+    PROMPT_FILE=$(mktemp)
+    printf 'You are resolving a rebase conflict on PR #%s: %s\n\n' "$PR_NUM" "$pr_title" > "$PROMPT_FILE"
+    cat >> "$PROMPT_FILE" <<PROMPT_EOF
+## PR Branch
+
+Branch: \`${pr_branch}\`
+
+## Context
+
+This PR's branch has merge conflicts with \`origin/develop\`. A plain
+\`rebase-pr.sh\` run returned \`REBASE_CONFLICT:${PR_NUM}\`. Your job is to
+resolve the conflict markers intelligently, validate the result, and push.
+
+## Instructions
+
+You are running inside an isolated container with --dangerously-skip-permissions.
+Branch \`${pr_branch}\` is already checked out. Follow CLAUDE.md conventions.
+CFGMS_AGENT_MODE=true is set.
+
+## Phase 1: Rebase and Resolve
+
+1. Run: \`git fetch origin develop\`
+2. Run: \`git rebase origin/develop\`
+3. For each conflict:
+   - Read BOTH sides carefully using \`git diff\` or the conflict markers
+   - Preserve ALL functionality from BOTH sides — do NOT silently drop any
+     test functions, validation checks, auth filters, or tenant guards
+   - Deduplicate helper functions that both sides added (keep one copy)
+   - Understand the intent of each side before merging
+4. After each file resolved: \`git add <resolved-file>\`
+5. Continue the rebase: \`git rebase --continue\`
+6. Repeat steps 3-5 until \`git rebase --continue\` completes without conflict
+
+## Phase 2: Validation (REQUIRED — do NOT skip)
+
+After rebase completes, run ALL of the following:
+
+\`\`\`bash
+go build ./...           # must exit 0
+go vet ./...             # must exit 0
+make test-commit         # runs tests + security + lint
+\`\`\`
+
+If ANY command fails:
+1. Abort the rebase: \`git rebase --abort\` (if still in progress)
+2. Post a comment on PR #${PR_NUM} with:
+   - The conflicting files
+   - The failure output (truncated to the first 50 lines)
+   - Why manual resolution is needed
+3. Exit WITHOUT pushing anything
+
+Example comment:
+\`\`\`bash
+gh pr comment ${PR_NUM} --repo cfg-is/cfgms --body "..."
+\`\`\`
+
+## Phase 3: Push (only after Phase 2 fully passes)
+
+\`\`\`bash
+git fetch origin ${pr_branch}   # refresh the lease reference
+git push --force-with-lease origin ${pr_branch}
+\`\`\`
+
+**Security constraints (enforced):**
+- ONLY push to \`${pr_branch}\` — never to \`develop\` or any other shared branch
+- Use \`--force-with-lease\`, never bare \`--force\`
+- \`git fetch origin ${pr_branch}\` immediately before the push (refreshes the lease)
+- One attempt only — do NOT loop on failure
+
+## Phase 4: Report
+
+Post a comment on PR #${PR_NUM} summarizing:
+- Which files had conflicts and how they were resolved
+- What validation was run and that it passed
+- That the branch has been force-pushed and is ready for re-review
+
+## Failure Handling
+
+If rebase fails (e.g., the conflict is too complex to resolve safely):
+- Abort: \`git rebase --abort\`
+- Post the failure summary on PR #${PR_NUM} explaining what failed
+- Exit non-zero (the PO cycle will surface this for human triage)
+- Do NOT push partial or unvalidated changes
+
+PROMPT_EOF
+    printf '%s\n\n' "$SCOPE_CONSTRAINTS_SECTION" >> "$PROMPT_FILE"
+}
+
 # Hard refusal: issue and branch modes must source content from Projects V2.
-# fix-pr reads PR review comments gated by repo write access — a separate surface.
-if [[ "$MODE" != "fix-pr" ]] && [[ -z "${CFGMS_PROJECT_ITEM_ID:-}" ]]; then
+# fix-pr and resolve-conflict read PR content gated by repo write access — separate surfaces.
+if [[ "$MODE" != "fix-pr" ]] && [[ "$MODE" != "resolve-conflict" ]] && [[ -z "${CFGMS_PROJECT_ITEM_ID:-}" ]]; then
     echo "ERROR: CFGMS_PROJECT_ITEM_ID must be set — no fallback to gh issue view" >&2
     exit 1
 fi
 
 # Compose prompt based on mode
 case "$MODE" in
-    issue)    compose_issue_prompt ;;
-    branch)   compose_branch_prompt ;;
-    fix-pr)   compose_pr_fix_prompt ;;
+    issue)             compose_issue_prompt ;;
+    branch)            compose_branch_prompt ;;
+    fix-pr)            compose_pr_fix_prompt ;;
+    resolve-conflict)  compose_resolve_conflict_prompt ;;
 esac
 
 if [ "$DRY_RUN" = "true" ]; then
@@ -642,19 +916,37 @@ rm -f /tmp/agent-validation-passed
 # Capture pre-run HEAD SHA so fix-pr mode can detect silent no-ops.
 PRE_FIX_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
 
-# All agent modes run on Sonnet 4.6. fix-pr briefly ran on Opus 4.7 (#1580) on
-# the hypothesis that stronger reasoning would compress multi-attempt fix loops,
-# but multi-round fix loops were already rare (~8% of fix-loop PRs) and the Opus
-# token cost was not justified once the pipeline was kept full ahead of the
-# cron. agent-result.json now records model + duration so this trade can be
-# revisited with real data rather than a hypothesis.
-AGENT_MODEL="claude-sonnet-4-6"
+# Model/effort is resolved per-segment from .claude/model-routing.yaml
+# (Issue #3030) rather than hardcoded, so a benchmarked change is a config
+# edit. fix-pr briefly ran on Opus 4.7 (#1580) on the hypothesis that stronger
+# reasoning would compress multi-attempt fix loops, but multi-round fix loops
+# were already rare (~8% of fix-loop PRs) and the Opus token cost was not
+# justified once the pipeline was kept full ahead of the cron. agent-result.json
+# records model + effort + duration so this trade can be revisited with real
+# data rather than a hypothesis.
+case "$MODE" in
+    fix-pr|resolve-conflict) MODEL_SEGMENT="fix-agent" ;;
+    *)                       MODEL_SEGMENT="dev-agent" ;;
+esac
+mapfile -t RESOLVED_MODEL < <(ac_resolve_agent_model "$MODEL_SEGMENT")
+AGENT_MODEL="${RESOLVED_MODEL[0]}"
+AGENT_EFFORT="${RESOLVED_MODEL[1]}"
 
-echo "Starting Claude agent (mode=${MODE}, model=${AGENT_MODEL})..."
+echo "Starting Claude agent (mode=${MODE}, segment=${MODEL_SEGMENT}, model=${AGENT_MODEL}, effort=${AGENT_EFFORT})..."
 EXIT_CODE=0
+# Wait indefinitely for background tasks (the story-complete / fix-pr review team
+# runs qa-test-runner etc. as background Task tool invocations). The CLI default
+# ceiling is 600s, which terminated agents mid-validation on slow-validation
+# stories (security + fleet-e2e suites) BEFORE PR creation/commit, silently
+# dropping completed work (#2173, #2176, #2177 — dev and fix-pr agents alike).
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 # Read prompt from file to avoid shell metacharacter corruption.
 # Issue/PR bodies contain backticks and $ in code blocks which break heredoc expansion.
 PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+# The ceiling above does NOT cover background Bash (Issue #4178), so every mode
+# gets the rule explicitly. Appended here, at the single launch point, rather
+# than in each mode's prompt builder, so no mode can be missed.
+PROMPT_CONTENT+=$'\n\n'"${AC_HEADLESS_NO_BG_WAIT_RULE}"
 AGENT_RUN_START=$(date +%s)
 claude --dangerously-skip-permissions --model "$AGENT_MODEL" -p "$PROMPT_CONTENT" || EXIT_CODE=$?
 AGENT_DURATION_SECONDS=$(( $(date +%s) - AGENT_RUN_START ))
@@ -673,8 +965,8 @@ fi
 # In fix-pr mode, a run that exits 0 but never advanced HEAD is a silent no-op.
 # The make test-agent-complete fallback would pass trivially on unchanged code,
 # masking the failure. Detect the no-op first and skip the fallback entirely.
-if [[ "$MODE" == "fix-pr" ]] && [ "$EXIT_CODE" -eq 0 ] && [ "$HEAD_ADVANCED" != "true" ]; then
-    echo "ERROR: fix-pr agent ran but made no commits (HEAD unchanged at ${PRE_FIX_HEAD})"
+if [[ "$MODE" == "fix-pr" || "$MODE" == "resolve-conflict" ]] && [ "$EXIT_CODE" -eq 0 ] && [ "$HEAD_ADVANCED" != "true" ]; then
+    echo "ERROR: ${MODE} agent ran but made no commits (HEAD unchanged at ${PRE_FIX_HEAD})"
     echo "Skipping make test-agent-complete fallback (would pass trivially on unchanged code)."
     EXIT_CODE=1
     # Best-effort idempotent breadcrumb on the PR.
@@ -686,9 +978,10 @@ if [[ "$MODE" == "fix-pr" ]] && [ "$EXIT_CODE" -eq 0 ] && [ "$HEAD_ADVANCED" != 
             echo "WARN: failed to post no-op comment on PR #${PR_NUM}"
     fi
 elif [ "$EXIT_CODE" -eq 0 ] && [ ! -f /tmp/agent-validation-passed ]; then
-    # The agent is instructed to have qa-test-runner write /tmp/agent-validation-passed
-    # after make test-agent-complete passes. If the marker is missing, tests either
-    # failed or were never run — both are failures.
+    # The agent is instructed to write /tmp/agent-validation-passed only when the
+    # story-review workflow returns passed:true. If the marker is missing, the
+    # workflow either did not pass or was never run — both are failures, so fall
+    # back to enforcing make test-agent-complete directly.
     echo "ERROR: Agent exited 0 but validation marker not found"
     echo "The qa-test-runner specialist either failed or was not run."
     echo "Running make test-agent-complete as fallback enforcement..."
@@ -717,6 +1010,17 @@ if [[ -n "${CFGMS_PROJECT_ITEM_ID:-}" ]] && [[ -n "$PR_URL" ]] && [[ "$MODE" != 
     fi
 fi
 
+# Classify a lost run (Issue #4178). "ended_turn_waiting" = the agent's last
+# message says it is waiting on background work AND nothing landed (see
+# ac_classify_outcome for what "landed" means per mode). This lets the
+# orchestrator tell this apart from a validation failure without reading the
+# transcript. Best-effort: an unreadable transcript leaves the outcome "normal".
+_session_jsonl=$(ls -t "${HOME}/.claude/projects/-workspace/"*.jsonl 2>/dev/null | head -1 || true)
+AGENT_OUTCOME=$(ac_classify_outcome "$MODE" "$PR_URL" "$HEAD_ADVANCED" "$_session_jsonl")
+if [[ "$AGENT_OUTCOME" == "ended_turn_waiting" ]]; then
+    echo "WARN: agent ended its turn waiting on background work; its background task was killed (Issue #4178)"
+fi
+
 # Write result summary
 cat > /tmp/agent-result.json <<RESULT_EOF
 {
@@ -725,6 +1029,7 @@ cat > /tmp/agent-result.json <<RESULT_EOF
   "pr_num": ${PR_NUM:-null},
   "exit_code": ${EXIT_CODE},
   "model": "${AGENT_MODEL}",
+  "effort": "${AGENT_EFFORT}",
   "agent_duration_seconds": ${AGENT_DURATION_SECONDS:-null},
   "pr_url": "${PR_URL}",
   "branch": "${CURRENT_BRANCH}",
@@ -732,9 +1037,75 @@ cat > /tmp/agent-result.json <<RESULT_EOF
   "pre_head_sha": "${PRE_FIX_HEAD}",
   "post_head_sha": "${POST_FIX_HEAD}",
   "head_advanced": ${HEAD_ADVANCED},
+  "outcome": "${AGENT_OUTCOME}",
   "timestamp": "$(date -Iseconds)"
 }
 RESULT_EOF
+
+# --- Token accounting (Issue #3028, harness-sourced per #3041) ---
+# Stamp this run's own spend into the result manifest and drop a copy next to
+# the transcript on the host, so the run stays attributable even after the
+# transcript is pruned. Reuses the reporter's cost model rather than
+# duplicating the cache-TTL pricing rules.
+#
+# The reporter is baked into the image at /usr/local/share/cfgms-metrics (see
+# Dockerfile) rather than read from /workspace — the PR branch under dispatch
+# must never be able to disable its own accounting by lacking, editing, or
+# deleting the reporter. Entirely best-effort: no telemetry failure may ever
+# change the agent's exit code, but a failure to record usage must be loud
+# (stdout WARN + an explicit usage_error marker in the manifest), never a
+# silently-absent "usage" key.
+CLAUDE_PROJECTS_DIR="${HOME}/.claude/projects"
+TOKEN_REPORT="/usr/local/share/cfgms-metrics/token_report.py"
+
+usage_status="ok"
+if [ ! -f "$TOKEN_REPORT" ]; then
+    usage_status="reporter_missing"
+    echo "WARN: token reporter not found at ${TOKEN_REPORT} — result manifest carries no usage"
+elif [ ! -d "$CLAUDE_PROJECTS_DIR" ]; then
+    usage_status="no_projects_dir"
+    echo "WARN: no persisted session directory at ${CLAUDE_PROJECTS_DIR} — result manifest carries no usage"
+elif ! python3 "$TOKEN_REPORT" --projects-dir "$CLAUDE_PROJECTS_DIR" \
+        --format totals --quiet > /tmp/agent-usage.json 2>/dev/null; then
+    usage_status="reporter_failed"
+    echo "WARN: token report failed — result manifest carries no usage"
+fi
+
+if [ "$usage_status" = "ok" ]; then
+    if ! python3 - <<'USAGE_MERGE'
+import json
+
+with open("/tmp/agent-result.json") as handle:
+    result = json.load(handle)
+with open("/tmp/agent-usage.json") as handle:
+    result["usage"] = json.load(handle)
+with open("/tmp/agent-result.json", "w") as handle:
+    json.dump(result, handle, indent=2)
+USAGE_MERGE
+    then
+        usage_status="merge_failed"
+        echo "WARN: could not merge token usage into result"
+    fi
+fi
+
+if [ "$usage_status" != "ok" ]; then
+    python3 - "$usage_status" <<'USAGE_MARK' || echo "WARN: could not write usage_error marker into result"
+import json, sys
+
+with open("/tmp/agent-result.json") as handle:
+    result = json.load(handle)
+result["usage"] = None
+result["usage_error"] = sys.argv[1]
+with open("/tmp/agent-result.json", "w") as handle:
+    json.dump(result, handle, indent=2)
+USAGE_MARK
+fi
+
+# Copy the manifest beside the transcript. When the host bind-mounts a session
+# directory this lands outside the container; without the mount it is a no-op
+# write into the container's own filesystem.
+cp /tmp/agent-result.json "${CLAUDE_PROJECTS_DIR}/agent-result.json" 2>/dev/null \
+    || echo "INFO: no persisted session directory — result manifest stays in-container"
 
 # Project queue status (In Progress → Done/Failed) is managed by acceptance-reviewer
 # and po-act.sh — decommissioned with pipeline label substrate (Story #1482).
@@ -763,64 +1134,20 @@ if [ "$EXIT_CODE" -eq 0 ]; then
             gh pr ready "$PR_URL" 2>/dev/null || true
         fi
     fi
+
+    # A zero exit code is NOT evidence that a PR exists. An agent that ends its
+    # turn waiting on a background task exits 0 having pushed nothing (Issue
+    # #3158). Salvage it on the same path a failed run takes, so the work
+    # becomes a resumable draft PR instead of vanishing.
+    if [[ "$MODE" != "fix-pr" ]] && [[ "$MODE" != "resolve-conflict" ]] && [ -z "$PR_URL" ]; then
+        echo "WARN: agent exited 0 but opened no pull request — salvaging"
+        _salvage_no_pr "exited 0 without opening a pull request"
+    fi
 else
     echo "Agent failed with exit code ${EXIT_CODE}"
 
-    if [[ "$MODE" != "fix-pr" ]] && [ -z "$PR_URL" ]; then
-        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-            # Agent produced work but failed — capture it as a draft PR so the
-            # cron's resume_failed_session path can pick it up.
-            git add --update
-            local_issue_ref=""
-            if [[ -n "$ISSUE_NUM" ]]; then
-                local_issue_ref=" for issue #${ISSUE_NUM}"
-            fi
-            git commit -m "WIP: agent attempt${local_issue_ref} (failed validation)" \
-                2>/dev/null || true
-            git push -u origin "$CURRENT_BRANCH" 2>/dev/null || true
-            gh pr create --base develop --draft \
-                --title "WIP: ${CURRENT_BRANCH} (agent failed)" \
-                --body "Agent session failed with exit code ${EXIT_CODE}. Review container logs for details." \
-                2>/dev/null || true
-        else
-            # Zero-work failure: the agent produced no changes — it never got
-            # going (usage limit, token reauth, early crash). There is nothing
-            # to capture as a draft PR, and leaving the item at In Progress
-            # strands it forever (the cron won't re-dispatch In Progress work).
-            # Reset it to Ready so the next cron cycle re-dispatches it, capped
-            # so a persistent failure escalates instead of looping. The retry
-            # count is the number of marker comments on the story issue.
-            if [[ -z "${CFGMS_PROJECT_ITEM_ID:-}" ]]; then
-                echo "Zero-work failure: no project item id — cannot route for re-dispatch"
-            elif [[ -z "$ISSUE_NUM" ]]; then
-                # No issue to track retries on — escalate rather than risk an
-                # unbounded re-dispatch loop.
-                bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Blocked" \
-                    2>/dev/null || echo "WARN: failed to set status Blocked"
-                echo "Zero-work failure (no issue for retry tracking) — set to Blocked"
-            else
-                zw_marker="<!-- cfgms-zero-work-retry -->"
-                zw_count=$(gh issue view "$ISSUE_NUM" --json comments \
-                    --jq "[.comments[] | select(.body | contains(\"$zw_marker\"))] | length" \
-                    2>/dev/null || echo 0)
-                zw_count=${zw_count:-0}
-                if [ "$zw_count" -lt 3 ]; then
-                    bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Ready" \
-                        2>/dev/null || echo "WARN: failed to reset status Ready"
-                    gh issue comment "$ISSUE_NUM" --body \
-                        "${zw_marker} Zero-work agent failure (exit ${EXIT_CODE}) — no changes produced (likely usage limit / token reauth / early crash). Status reset to Ready for re-dispatch (retry $((zw_count + 1))/3)." \
-                        2>/dev/null || true
-                    echo "Zero-work failure: reset to Ready for re-dispatch (retry $((zw_count + 1))/3)"
-                else
-                    bash "$PROJECT_QUEUE" update-field "$CFGMS_PROJECT_ITEM_ID" status "Blocked" \
-                        2>/dev/null || echo "WARN: failed to set status Blocked"
-                    gh issue comment "$ISSUE_NUM" --body \
-                        "${zw_marker} Zero-work agent failure (exit ${EXIT_CODE}) — 3 re-dispatch retries exhausted with no progress. Status set to Blocked for operator review." \
-                        2>/dev/null || true
-                    echo "Zero-work failure: retry cap reached — set to Blocked for operator review"
-                fi
-            fi
-        fi
+    if [[ "$MODE" != "fix-pr" ]] && [[ "$MODE" != "resolve-conflict" ]] && [ -z "$PR_URL" ]; then
+        _salvage_no_pr "failed validation"
     fi
 fi
 

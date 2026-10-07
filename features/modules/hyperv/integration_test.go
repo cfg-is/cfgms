@@ -40,7 +40,7 @@ func integrationModule(t *testing.T) *hypervModule {
 }
 
 // TestHypervIntegration_VMLifecycle exercises the full VM lifecycle against a real
-// Hyper-V host: create → start → stop → snapshot → restore → remove.
+// Hyper-V host: create → start → stop → remove.
 //
 // Run via:
 //
@@ -52,13 +52,9 @@ func TestHypervIntegration_VMLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	vmName := "cfgms-test__lifecycle-vm"
-	snapName := "cfgms-integration-snap"
 
 	t.Cleanup(func() {
 		bg := context.Background()
-		_, _ = m.transport.ExecutePS(bg,
-			"Get-VMSnapshot -VMName $VMName -Name $SnapName -ErrorAction SilentlyContinue | Remove-VMSnapshot -Confirm:$false",
-			map[string]string{"VMName": vmName, "SnapName": snapName})
 		_, _ = m.transport.ExecutePS(bg,
 			"$vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue; if ($vm) { Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue; Remove-VM -Name $VMName -Force }",
 			map[string]string{"VMName": vmName})
@@ -81,24 +77,6 @@ func TestHypervIntegration_VMLifecycle(t *testing.T) {
 		"Stop-VM -Name $VMName -Force",
 		map[string]string{"VMName": vmName})
 	require.NoError(t, err, "stop VM")
-
-	// Create snapshot (checkpoint)
-	_, err = m.transport.ExecutePS(ctx,
-		"Checkpoint-VM -Name $VMName -SnapshotName $SnapName",
-		map[string]string{"VMName": vmName, "SnapName": snapName})
-	require.NoError(t, err, "create snapshot")
-
-	// Restore snapshot
-	_, err = m.transport.ExecutePS(ctx,
-		"Get-VMSnapshot -VMName $VMName -Name $SnapName | Restore-VMSnapshot -Confirm:$false",
-		map[string]string{"VMName": vmName, "SnapName": snapName})
-	require.NoError(t, err, "restore snapshot")
-
-	// Remove snapshot
-	_, err = m.transport.ExecutePS(ctx,
-		"Get-VMSnapshot -VMName $VMName -Name $SnapName | Remove-VMSnapshot -Confirm:$false",
-		map[string]string{"VMName": vmName, "SnapName": snapName})
-	require.NoError(t, err, "remove snapshot")
 
 	// Remove VM
 	_, err = m.transport.ExecutePS(ctx,

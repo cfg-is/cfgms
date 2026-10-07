@@ -73,12 +73,12 @@ The git-sync component lives in `pkg/gitsync/` and is wired into the controller 
 | `OriginURL` | External git repository URL |
 | `Branch` | Branch to track (default: `main`) |
 | `CredentialsRef` | Credential reference: `""` = anonymous, `"env:<VAR>"` = env var, path = file |
-| `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef) |
+| `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef); required for the binding to be webhook-triggerable |
 | `PollingInterval` | Polling frequency; minimum 60 s; zero disables polling |
 
-**Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept an environment-variable name (prefix `env:`) or a filesystem path to a file containing the credential. TODO: migrate to `pkg/secrets` `SecretStore` once sub-story H lands.
+**Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept a `pkg/secrets` `SecretStore` key (prefix `secret:`, resolved through `gitsync.WithSecretStore`), an environment-variable name (prefix `env:`), or a filesystem path to a file containing the credential.
 
-**Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. Validates `X-Hub-Signature-256` when `WebhookSecretRef` is configured. Requests with an invalid or missing signature are rejected with HTTP 401.
+**Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. The HMAC-SHA256 signature is the endpoint's only credential, so validation is mandatory and fails closed: every binding matched by a push event must carry a `WebhookSecretRef`, and `X-Hub-Signature-256` must validate against it. Requests with an invalid or missing signature — and requests matching a binding that has no `WebhookSecretRef` — are rejected with HTTP 401. A binding without a webhook secret is not webhook-triggerable; it still syncs on its `PollingInterval`.
 
 **Polling:** Minimum interval is 60 seconds. Polling goroutines are per-scope; a failure in one scope does not block others.
 
@@ -119,7 +119,7 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 ```
 
 **Admin responsibilities**:
-- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent. A `cfg backup` CLI helper is planned (sub-story B).
+- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent.
 - Filesystem durability. SSD + regular snapshots is sufficient for single-controller OSS.
 - Access control. Directory is readable/writable only by the controller process.
 
@@ -145,13 +145,18 @@ The git storage provider was removed in Issue #664. Existing deployments running
 
 **One-shot migration command:**
 
+Use the general-purpose migration path (`cfg migrate --provider storage`) or the legacy alias
+`cfg storage migrate`; both delegate through the same provider-agnostic migration seam (Issue #2258):
+
 ```bash
-cfg storage migrate \
+cfg migrate --provider storage \
   --from git \
   --to flatfile \
   --git-root  /var/lib/cfgms/git-storage \
   --flatfile-root /var/lib/cfgms/flatfile
 ```
+
+`cfg storage migrate` also works and delegates to the same seam when a `storage` migrator is registered.
 
 What this does:
 
@@ -161,6 +166,70 @@ What this does:
 - Leaves the source repository untouched — safe to re-run for verification
 
 **Idempotent**: running the command twice against the same target produces the same record count with no duplicates. Safe to rehearse against a copy of production data before cutting over.
+
+**Dry-run preview**: pass `--dry-run` to read all source records and report per-store counts without writing anything to the target. Use this to confirm expected counts before scheduling downtime:
+
+```bash
+cfg storage migrate --from git --to flatfile \
+  --git-root /var/lib/cfgms/git-storage \
+  --flatfile-root /var/lib/cfgms/flatfile \
+  --dry-run
+```
+
+See [docs/operations/backend-migration.md](../operations/backend-migration.md) for the full offline-cutover procedure and downtime envelope.
+
+### Stores covered by the storage migrator
+
+The `cfg migrate --provider storage` pathway covers the following store kinds. Each row shows whether the OSS (flatfile+SQLite) and database (PostgreSQL) backends support export and import for that kind.
+
+| Store kind | OSS | PostgreSQL | Notes |
+|---|---|---|---|
+| `tenant` | ✓ | ✓ | Tenant tree |
+| `config` | ✓ | ✓ | Config entries |
+| `audit` | ✓ | ✓ | Audit log entries |
+| `registration_token` | ✓ | ✓ | Steward registration tokens |
+| `session` | ✓ | ✓ | Admin sessions |
+| `steward` | ✓ | ✓ | Steward fleet records |
+| `command` | ✓ | ✓ | Command records |
+| `trigger` | ✓ | ✓ | Workflow trigger records; PostgreSQL store added in Issue #3402 |
+| `push` | ✓ | ✓ | Push-state records for failover replay; PostgreSQL store added in Issue #3402 — enables `resumePendingPushes` in cluster mode |
+| `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
+| `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
+| `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
+| `pending_registration` | ✓ | ✓ | In-flight steward registration requests (Issue #3224); the PostgreSQL store is reachable through `DatabaseProvider.CreatePendingRegistrationStore` as of Issue #3401 |
+
+**Running the PostgreSQL store tests.** The `pkg/storage/providers/database` tests, and the
+Postgres-backed tests in `pkg/storage/interfaces` and `features/controller/api`, skip
+themselves when no test database is reachable. `make test-integration-setup && make
+test-integration-db` is their run path; no CI workflow provisions PostgreSQL, so a green
+CI run is not evidence that any of them executed.
+
+**Fail-loud on unmigratable kinds (Issue #3404).** Kinds marked `—` in the table above would
+cause the migration to **fail** when the source has records of that kind and the destination
+backend does not support the store — the migration does not silently drop records and report
+success. This applies to both `Plan` (dry-run) and `Run` — the dry run surfaces unmigratable
+kinds before any writes are attempted, so an operator learns about a destination gap before
+committing to a maintenance window. As of Issue #3402, `trigger` and `push` are fully
+supported on both OSS and PostgreSQL, so no kind currently triggers this path — but the
+mechanism remains in place for any future kind that is backend-specific.
+
+To acknowledge data loss for a kind the destination genuinely does not support, pass
+`WithSkippedKinds` explicitly:
+
+```go
+m := storage.NewStorageMigrator(src, dst,
+    storage.WithSkippedKinds("some_kind"))
+```
+
+The acknowledged kinds and their source counts appear in
+`MigrationReport.SkippedKinds`. The default path (without the option) fails; there is
+no silent drop.
+
+The per-kind integrity check at the end of `Run` compares counts for all kinds the
+destination supports (and that are not explicitly skipped). An idempotent re-run after a
+partial migration converges: already-imported records are upserted without duplicates.
+
+**Not yet covered:** `AlertStore` (tenant-scoped alert acknowledgement and silence records, Issue #3266) has no entry in this table because `pkg/migrate/storage/migrate.go` does not define a kind constant or export/import case for it yet — a `cfg migrate --provider storage` run does not transfer alert acknowledge/silence state in either direction. Wire it into the migrator (kind constant, export/import case, kind-availability map entry) before relying on migration to carry this state.
 
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
@@ -202,6 +271,25 @@ Interfaces are organized into five sub-packages under `pkg/storage/interfaces/`:
 
 ## Configuration Example
 
+**Connection pooling (database provider, ADR-031 Decision 6).** A controller
+process holds exactly one `database`-provider instance, and that instance opens
+one shared `*sql.DB` connection pool per distinct connection string — not one
+pool per store. Every business store (audit, RBAC, tenant, session, case, alert,
+and the rest) configured with the same connection string reuses the same pool,
+so `max_open_connections` below sizes the node's connection budget for that
+database, not a single store's. A pool is opened once per connection string,
+from whichever store using it is created first; set the sizing keys on the
+`business` config block, which is where the provider is first exercised in
+practice. There is no longer a per-store `max_open_connections` or
+`max_idle_connections` key — those were removed, not deprecated.
+
+Pools are keyed by connection string rather than one-per-process because the
+provider registry hands the same instance to every consumer, and a deployment
+may point different storage blocks (for example `business` and `config`, or
+`storage.cluster.postgres_dsn` and `storage.config.dsn`) at different databases.
+A caller configured for one database is never served a pool opened for another:
+that would silently discard its target database, credentials, and `sslmode`.
+
 ```yaml
 # cfgms.yaml — five-type storage composition (commercial/SaaS example)
 controller:
@@ -211,7 +299,7 @@ controller:
       config:
         host: cfgms-postgres.internal
         database: cfgms
-        max_open_connections: 100
+        max_open_connections: 100 # sizes the shared pool for this connection string, not a per-store pool
 
     config:
       provider: postgres
@@ -368,22 +456,132 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 `SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
 
-### CommandStore (Issue #665)
+### CommandStore (Issue #665; delivery lifecycle: Issue #3757, ADR-031 Decision 2)
 
-`CommandStore` is the durable command dispatch state backend. It persists the full lifecycle of commands dispatched to stewards so that dispatch state (executing, completed, failed) survives a process restart and forms a crash-survivable audit trail.
+`CommandStore` is the durable command dispatch state backend. It persists two
+independent lifecycles on the same `CommandRecord`:
+
+- **Execution status** (`Status`, Issue #665) — whether the *receiving steward*
+  has executed the command: `pending` → `executing` → `completed` / `failed` /
+  `cancelled`. Owned and transitioned by `features/steward/commands.Handler` on
+  the steward side.
+- **Delivery status** (`DeliveryStatus`, Issue #3757) — whether the *dispatching
+  controller* has gotten the command onto the wire to that steward at all:
+  `pending` → `delivered` → `acknowledged`, with terminal failures recorded
+  distinctly as `failed`. Owned and transitioned by the controller (e.g.
+  `handleConfigPush` in `features/controller/api`).
+
+The two are orthogonal: a record can be execution-`pending` and
+delivery-`delivered` (the steward has it but hasn't started on it yet), or
+execution-`completed` with delivery history irrelevant on the steward's own
+copy of the record (a steward only ever writes its own execution status).
 
 **Key design decisions**:
-- Two tables: `commands` (current state) and `command_transitions` (immutable audit log of every status change, including initial creation as `pending`).
-- `GetCommandAuditTrail(commandID)` returns all transitions in chronological order — this record is immutable; only `PurgeExpiredRecords` can delete it (by age).
-- `PurgeExpiredRecords(ctx, olderThan)` removes `completed`, `failed`, and `cancelled` records older than the threshold. `executing` and `pending` records are never purged.
-- **Startup sweep**: when `features/steward/commands.Handler` is initialised with a `CommandStore`, it queries all `executing` records and flips them to `failed` with error `"controller_restart"`. This converts crash-time in-progress state into a queryable audit entry.
-- The in-memory `executing` map in `Handler` retains only `context.CancelFunc` for in-flight cancellation — durable state is entirely in the store.
+- Two tables: `commands`/`command_records` (current state) and
+  `command_transitions` (immutable audit log of every *execution* status
+  change, including initial creation as `pending`). `DeliveryStatus` changes are
+  **not** written to `command_transitions` — that trail is scoped to
+  `CommandStatus` only; `UpdateDeliveryStatus` updates `delivery_status` /
+  `delivery_detail` in place.
+- `GetCommandAuditTrail(commandID)` returns all execution-status transitions in
+  chronological order — this record is immutable; only `PurgeExpiredRecords`
+  can delete it (by age).
+- `PurgeExpiredRecords(ctx, olderThan)` removes `completed`, `failed`, and
+  `cancelled` records older than the threshold. `executing` and `pending`
+  records are never purged.
+- `CreateCommandRecords(ctx, records)` creates a batch of records in a single
+  database transaction — every record commits, or none do. `handleConfigPush`
+  uses this so a fan-out to N stewards produces one durable fact (all N
+  delivery rows), never a partial set silently missing some stewards.
+- `CreatePushAndCommandRecords(ctx, push, records)` extends that batch
+  transaction to also write `push` (the `PushRecord` — the "config write") in
+  the same commit: ADR-031 Decision 2's "a command/notification row commits in
+  the same transaction as the state change that requires it." This is possible
+  because `PushRecord` and `CommandRecord` are both persisted by the same SQL
+  storage tier (the `database`/`sqlite` providers each open their own
+  connection pool, but both point at the same physical database, so a
+  transaction opened by either can write either table). Writes that live in a
+  genuinely different pluggable provider — e.g. the entity-graph desired-state
+  observation `handleConfigPush` also records — remain outside this seam and
+  stay best-effort by design; central-provider pluggability means a SQL
+  transaction cannot in general span an arbitrary second backend (the entity
+  graph, or a git-backed `ConfigStore`), so the outbox's joint-commit guarantee
+  is scoped to writes that share its own SQL tier. `handleConfigPush` passes
+  `push` (nil when no `PushStore` is configured) and the per-steward delivery
+  `records` (empty when no steward matched) to this single call instead of two
+  independently-committing writes.
+- `ListPendingDeliveries(ctx, stewardID, stewardTenant)` returns every record
+  targeting a steward whose `DeliveryStatus` is still `pending` — the set a
+  steward drains on reconnect. Delivery to an offline endpoint is deferred,
+  never lost. `stewardTenant` is mandatory and implementations must apply it in
+  the query: results are limited to records stamped with the steward's current
+  tenant or one of its ancestors (`business.TenantPathChain`), the only tenants
+  a subtree push targeting that steward can have been issued under. `steward_id`
+  alone is not a tenant boundary — the binding is mutable (steward move), so
+  rows written under a previous tenant stay attached to the same `steward_id`,
+  and neither backend compensates (the Postgres read path does not set
+  `app.current_tenant`, whose absence makes the `command_records` SELECT policy
+  permissive; SQLite has no RLS). An empty `stewardTenant` is refused with
+  `ErrCommandTenantIDRequired` rather than widening the query.
+- **Startup sweep — inverted under ADR-031 Decision 2.** Previously, restarting
+  `features/steward/commands.Handler` with a configured `CommandStore` flipped
+  *every* `executing` record to `failed` with error `"controller_restart"`,
+  unconditionally. This inverted the "a restart never fails a queued delivery"
+  requirement in spirit even though it operated on execution status, not
+  delivery status, so the behavior is now bounded: only `executing` records
+  whose `StartedAt` is older than `ExecutingRestartTimeout` (default 5 minutes)
+  are failed; a record that started executing more recently than the timeout is
+  left alone, since a fast restart may not have genuinely interrupted it.
+  `pending` records are **never** queried or touched by the sweep at all — they
+  were never mid-attempt, so a restart cannot have interrupted anything to fail.
+  This is the steward-side half of "a controller restart never fails a queued
+  delivery"; the controller-side half is structural: neither the `database` nor
+  `sqlite` `CommandStore` implementation runs any sweep on its own — a `pending`
+  `DeliveryStatus` row survives a controller restart unmodified because nothing
+  ever touches it until a real delivery attempt or an explicit
+  `UpdateDeliveryStatus` call changes it.
+- The in-memory `executing` map in `Handler` retains only `context.CancelFunc`
+  for in-flight cancellation — durable state is entirely in the store.
 
-**Status values**: `pending` → `executing` → `completed` / `failed` / `cancelled`.
+**Status values**: execution `pending` → `executing` → `completed` / `failed` /
+`cancelled`. Delivery `pending` → `delivered` → `acknowledged`, or `pending` →
+`failed` (terminal).
 
 **Implementations**:
-- `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables added to the shared SQLite schema. This is the OSS default.
-- `pkg/storage/providers/flatfile`, `database`, `git`: return `ErrNotSupported` — command state is business data, not config data.
+- `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables in
+  the shared SQLite schema, including `delivery_status`/`delivery_detail`
+  columns. Used both by the OSS controller composite and by each steward's own
+  local command-execution store.
+- `pkg/storage/providers/database`: `command_records` and `command_transitions`
+  tables with tenant-scoped RLS, including `delivery_status`/`delivery_detail`
+  columns. The controller-side outbox for deployments on the PostgreSQL
+  business-data tier.
+- `pkg/storage/providers/flatfile`, `git`: return `ErrNotSupported` — command
+  dispatch/delivery state is business data, not config data, and flatfile is
+  git-backed config storage only (`pkg/README.md` decision tree).
+
+## Cluster Mode Provider Compatibility
+
+Controllers in cluster mode require a storage backend that supports shared state across multiple concurrent controller nodes. Each storage provider and secrets provider declares this via `ClusterCapable() bool` on its respective interface (`StorageProvider`, `SecretProvider`).
+
+### Storage providers
+
+| Provider | `ClusterCapable()` | Reason |
+|----------|--------------------|--------|
+| `pkg/storage/providers/database` (PostgreSQL) | `true` | Postgres handles concurrent writers from multiple controller nodes via its transaction and locking model; the same DSN is accessible from all nodes. Also backs `pkg/session.Store` (`DatabaseSessionTokenStore`) for cluster-wide `cfg`/web session token validation (Issue #2775). |
+| `pkg/storage/providers/flatfile` | `false` | Local filesystem — concurrent writes across nodes are not coordinated; last-writer-wins semantics are unsafe for multi-active cluster mode |
+| `pkg/storage/providers/sqlite` | `false` | Single-file SQLite is node-local; no cross-node access or coordination |
+
+### Secrets providers
+
+| Provider | `ClusterCapable()` | Reason |
+|----------|--------------------|--------|
+| `pkg/secrets/providers/openbao` | `true` | OpenBao cluster exposes a shared KV service reachable by all controller nodes |
+| `pkg/secrets/providers/sops` | `false` | Git-backed file store is node-local at runtime; no shared-state coordination |
+| `pkg/secrets/providers/oskeychain` | `false` | Host OS keychain — per-host only, inaccessible from other nodes |
+| `pkg/secrets/providers/steward` | `false` | Steward-local encrypted store on the endpoint host, not a controller backend |
+
+The startup gate (sibling Story B) uses `ClusterCapable()` to reject misconfigured cluster deployments early, before any state is written.
 
 ## References
 

@@ -25,29 +25,13 @@ type DatabasePendingRegistrationStore struct {
 }
 
 // NewDatabasePendingRegistrationStore opens a PostgreSQL-backed PendingRegistrationStore at dsn.
-func NewDatabasePendingRegistrationStore(dsn string, config map[string]interface{}) (*DatabasePendingRegistrationStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+func NewDatabasePendingRegistrationStore(db *sql.DB, config map[string]interface{}) (*DatabasePendingRegistrationStore, error) {
 	store := &DatabasePendingRegistrationStore{db: db, schemas: NewDatabaseSchemas()}
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialise pending registration schema: %w", err)
 	}
 	return store, nil
+
 }
 
 func (s *DatabasePendingRegistrationStore) initSchema() error {
@@ -79,13 +63,20 @@ func (s *DatabasePendingRegistrationStore) AddPending(ctx context.Context, entry
 	if status == "" {
 		status = business.PendingRegistrationStatusPending
 	}
+	tokenLookupKey := business.RegistrationTokenLookupKey(entry.TokenStr)
+	keyPub := entry.IdentityKeyPub
+	if keyPub == nil {
+		keyPub = []byte{}
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cfgms_pending_registrations
-			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		entry.PendingID, entry.StewardID, entry.TenantID, entry.TokenStr, entry.SourceIP,
+			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			 device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		entry.PendingID, entry.StewardID, entry.TenantID, tokenLookupKey, entry.SourceIP,
 		registeredAt, entry.ExpiresAt, entry.ClaimedAt, status,
+		entry.DeviceID, keyPub, entry.KeyProtectionLevel, entry.CSRPEM, entry.Hostname, entry.Platform,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique_violation") {
@@ -99,26 +90,34 @@ func (s *DatabasePendingRegistrationStore) AddPending(ctx context.Context, entry
 // GetPendingByID retrieves the entry for the given pending_id.
 func (s *DatabasePendingRegistrationStore) GetPendingByID(ctx context.Context, pendingID string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+		       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 		FROM cfgms_pending_registrations WHERE pending_id = $1`, pendingID)
 	return scanDBPendingEntry(row)
 }
 
-// GetPendingByToken retrieves the entry whose token_str matches.
+// GetPendingByToken retrieves the entry whose token lookup key matches the raw
+// token. The plaintext branch is read-only migration compatibility.
 func (s *DatabasePendingRegistrationStore) GetPendingByToken(ctx context.Context, tokenStr string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-		FROM cfgms_pending_registrations WHERE token_str = $1 LIMIT 1`, tokenStr)
+		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+		       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+		FROM cfgms_pending_registrations WHERE token_str IN ($1, $2) LIMIT 1`,
+		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	return scanDBPendingEntry(row)
 }
 
 // UpdateStatus updates the status of the entry.
-// When status is "claimed", claimed_at is also set to now.
+// When status is "claimed", claimed_at is also set to now. Returns
+// ErrPendingRegistrationNotFound if no record exists, or (Issue #3895) if a
+// guarded transition's precondition on the entry's current status no longer
+// holds.
 func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pendingID, status string) error {
 	var res sql.Result
 	var err error
 
-	if status == business.PendingRegistrationStatusClaimed {
+	switch status {
+	case business.PendingRegistrationStatusClaimed:
 		// Guard with AND status = 'approved' so concurrent polls of the same entry
 		// result in exactly one winner: RowsAffected = 0 means already claimed.
 		res, err = s.db.ExecContext(ctx, `
@@ -127,7 +126,38 @@ func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pen
 			WHERE pending_id = $3 AND status = 'approved'`,
 			status, time.Now().UTC(), pendingID,
 		)
-	} else {
+	case business.PendingRegistrationStatusApproved:
+		// Issue #3895: guard with AND status = 'pending', mirroring the claimed
+		// transition's guard above. Without this, an approve landing on an
+		// any-node request after the entry was already claimed (or already
+		// approved/denied by a concurrent request) would flip it back to
+		// approved — reopening the claim window handleRegistrationStatus's own
+		// "AND status = 'approved'" guard exists to close, and enabling a second
+		// certificate issuance for one registration.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = $1
+			WHERE pending_id = $2 AND status = 'pending'`,
+			status, pendingID,
+		)
+	case business.PendingRegistrationStatusDenied:
+		// Deny is guarded on 'pending' OR 'approved', not on 'pending' alone.
+		// approved → denied is the only mechanism that stops certificate
+		// issuance for a registration an operator approved by mistake or later
+		// judged hostile: an approved-but-unclaimed entry stays claimable until
+		// ExpiresAt, so refusing this transition would leave the operator with
+		// no way to revoke the approval before the steward claims its cert.
+		// 'claimed', 'denied' and 'expired' remain excluded — those are terminal
+		// (see pendingRegistrationTerminalStatuses in pkg/migrate/storage), and
+		// denying a claimed entry would falsely suggest an issued cert had been
+		// withdrawn.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = $1
+			WHERE pending_id = $2 AND status IN ('pending', 'approved')`,
+			status, pendingID,
+		)
+	default:
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE cfgms_pending_registrations SET status = $1 WHERE pending_id = $2`,
 			status, pendingID,
@@ -143,7 +173,9 @@ func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pen
 	return nil
 }
 
-// ListPending returns all entries for the given tenantID, or all tenants if empty.
+// ListPending returns entries whose status is "pending" for the given tenantID,
+// or all tenants if empty, ordered by registered_at ascending.
+// Approved, denied, claimed, and expired entries are never included.
 func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
 	var (
 		rows *sql.Rows
@@ -151,12 +183,16 @@ func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tena
 	)
 	if tenantID == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-			FROM cfgms_pending_registrations ORDER BY registered_at ASC`)
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+			FROM cfgms_pending_registrations WHERE status = $1 ORDER BY registered_at ASC`,
+			business.PendingRegistrationStatusPending)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-			FROM cfgms_pending_registrations WHERE tenant_id = $1 ORDER BY registered_at ASC`, tenantID)
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+			FROM cfgms_pending_registrations WHERE tenant_id = $1 AND status = $2 ORDER BY registered_at ASC`,
+			tenantID, business.PendingRegistrationStatusPending)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list pending registrations: %w", err)
@@ -165,17 +201,44 @@ func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tena
 
 	var entries []*business.PendingRegistrationEntry
 	for rows.Next() {
-		e := &business.PendingRegistrationEntry{}
-		var claimedAt sql.NullTime
-		if err := rows.Scan(
-			&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
-			&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
-		); err != nil {
+		e, err := scanDBPendingRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("database: failed to scan pending registration: %w", err)
 		}
-		if claimedAt.Valid {
-			t := claimedAt.Time.UTC()
-			e.ClaimedAt = &t
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// ListAll returns entries in every status for the given tenantID, or all
+// tenants if empty, ordered by registered_at ascending.
+func (s *DatabasePendingRegistrationStore) ListAll(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+			FROM cfgms_pending_registrations ORDER BY registered_at ASC`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+			FROM cfgms_pending_registrations WHERE tenant_id = $1 ORDER BY registered_at ASC`,
+			tenantID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("database: failed to list all pending registrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*business.PendingRegistrationEntry
+	for rows.Next() {
+		e, err := scanDBPendingRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("database: failed to scan pending registration: %w", err)
 		}
 		entries = append(entries, e)
 	}
@@ -200,19 +263,20 @@ func (s *DatabasePendingRegistrationStore) ExpireStale(ctx context.Context, cuto
 }
 
 // Close closes the database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabasePendingRegistrationStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 
 func scanDBPendingEntry(row *sql.Row) (*business.PendingRegistrationEntry, error) {
 	e := &business.PendingRegistrationEntry{}
 	var claimedAt sql.NullTime
+	var keyPub []byte
 	err := row.Scan(
 		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
 		&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.CSRPEM, &e.Hostname, &e.Platform,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrPendingRegistrationNotFound
@@ -223,6 +287,32 @@ func scanDBPendingEntry(row *sql.Row) (*business.PendingRegistrationEntry, error
 	if claimedAt.Valid {
 		t := claimedAt.Time.UTC()
 		e.ClaimedAt = &t
+	}
+	if len(keyPub) > 0 {
+		e.IdentityKeyPub = keyPub
+	}
+	e.RegisteredAt = e.RegisteredAt.UTC()
+	e.ExpiresAt = e.ExpiresAt.UTC()
+	return e, nil
+}
+
+func scanDBPendingRow(rows *sql.Rows) (*business.PendingRegistrationEntry, error) {
+	e := &business.PendingRegistrationEntry{}
+	var claimedAt sql.NullTime
+	var keyPub []byte
+	if err := rows.Scan(
+		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
+		&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.CSRPEM, &e.Hostname, &e.Platform,
+	); err != nil {
+		return nil, err
+	}
+	if claimedAt.Valid {
+		t := claimedAt.Time.UTC()
+		e.ClaimedAt = &t
+	}
+	if len(keyPub) > 0 {
+		e.IdentityKeyPub = keyPub
 	}
 	e.RegisteredAt = e.RegisteredAt.UTC()
 	e.ExpiresAt = e.ExpiresAt.UTC()

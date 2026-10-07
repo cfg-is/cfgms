@@ -48,7 +48,6 @@ The zero-trust implementation follows secure coding practices and implements app
 
 - All high-privilege operations require MFA verification
 - MFA status tracked in security context: `SecurityContext.MFAVerified`
-- Implementation location: `features/rbac/zerotrust/types.go:330`
 
 **Certificate-based Authentication**
 
@@ -62,11 +61,15 @@ The zero-trust implementation follows secure coding practices and implements app
 - Permission inheritance follows principle of least privilege
 - RBAC decisions integrate with zero-trust policies
 
-**Just-in-Time (JIT) Access**
+**Bounded Elevation (Tenant-Crossing Grants)**
 
 - Time-bounded access with automatic expiration
-- Approval workflow enforced for sensitive operations
-- Implementation: `features/rbac/jit/access_manager.go`
+- Break-glass path with a durable audit record
+- Implementation: `features/controller/api/handlers_tenant_crossing.go`,
+  `pkg/storage/interfaces/business/tenant_crossing_store.go`. (A separate,
+  unwired `features/rbac/jit` package existed alongside this path with zero
+  production callers; it was deleted by Issue #4328 after recording a
+  capability map on Issue #4330 for any follow-on work.)
 
 #### ✅ Security Validations
 
@@ -178,7 +181,7 @@ func sanitizeContext(ctx map[string]string) map[string]string {
 
 - No passwords, tokens, or keys logged
 - PII scrubbing in audit logs
-- Implementation: `pkg/logging/secure_logger.go`
+- Implementation: `pkg/logging/sanitize.go`
 
 **Error Message Security**
 
@@ -292,7 +295,6 @@ After comprehensive analysis, no critical security vulnerabilities were identifi
 **Processing Time Limits**
 
 - Maximum evaluation time enforced (15ms for DoS protection)
-- Industry-leading performance (faster than AWS IAM, Google Cloud IAM, Auth0)
 - Timeout handling with fail-secure behavior
 - Background processing for non-blocking operations
 

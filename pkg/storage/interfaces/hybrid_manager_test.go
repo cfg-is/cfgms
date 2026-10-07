@@ -5,6 +5,7 @@ package interfaces
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -128,6 +129,10 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	// GetPendingRegistrationStore must be wired in the constructor when the operational
 	// provider supports pending registration storage (Issue #1696).
 	assert.NotNil(t, manager.GetPendingRegistrationStore())
+	// The operational provider reports ErrNotSupported for alert storage: construction
+	// must succeed and leave the accessor nil rather than failing (Issue #3266).
+	assert.Nil(t, manager.GetAlertStore(),
+		"GetAlertStore must be nil when the operational provider does not support alert storage")
 
 	// Round-trip: store a client tenant and verify retrieval returns the same value.
 	wantTenant := &business.ClientTenant{ID: "hybrid-rt-1", TenantName: "Hybrid Round Trip"}
@@ -355,8 +360,15 @@ func (p *mockProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACS
 	return &mockRBACStore{}, nil
 }
 
+// CreateTenantStore reports that this provider has no tenant backend.
+// HybridStorageManager never wires a TenantStore (it consumes ClientTenantStore
+// only), and this package cannot import a real provider without the import cycle
+// described on mockProvider. Reporting ErrNotSupported keeps the provider honest
+// instead of handing callers a tenant store that silently succeeds. Real
+// TenantStore behaviour — including the pending-deletion pipeline — is covered
+// against the SQLite and PostgreSQL providers in their own packages.
 func (p *mockProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
-	return &mockTenantStore{}, nil
+	return nil, business.ErrNotSupported
 }
 
 func (p *mockProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
@@ -391,6 +403,15 @@ func (p *mockProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IP
 	return &mockIPTrustStore{}, nil
 }
 
+// CreateAlertStore reports that this provider has no alert-state backend, exercising
+// the ErrNotSupported tolerance branch in NewHybridStorageManager. Real AlertStore
+// wiring is covered against the flat-file and PostgreSQL providers in
+// hybrid_manager_alert_test.go (package interfaces_test), which can import the
+// provider packages without an import cycle.
+func (p *mockProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
@@ -409,6 +430,8 @@ func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 func (p *mockProvider) GetVersion() string {
 	return "1.0.0"
 }
+
+func (p *mockProvider) ClusterCapable() bool { return false }
 
 // Mock store implementations
 type mockClientTenantStore struct {
@@ -586,6 +609,14 @@ func (s *mockAuditStore) GetLastAuditEntry(_ context.Context, _ string) (*busine
 	return nil, nil
 }
 
+// AppendChainedEntry returns nil to satisfy the AuditStore interface, for the
+// same circular-dependency reason documented on GetLastAuditEntry above. Chain
+// assignment is tested end-to-end in pkg/audit/manager_test.go and against real
+// providers in pkg/storage/interfaces/business's contract tests.
+func (s *mockAuditStore) AppendChainedEntry(_ context.Context, _ string, _ *business.AuditEntry, _ func(entry *business.AuditEntry) string) error {
+	return nil
+}
+
 func (s *mockAuditStore) Close() error {
 	return nil
 }
@@ -654,33 +685,6 @@ func (s *mockRBACStore) GetSubjectAssignments(_ context.Context, _, _ string) ([
 func (s *mockRBACStore) Initialize(_ context.Context) error { return nil }
 func (s *mockRBACStore) Close() error                       { return nil }
 
-// mockTenantStore implements business.TenantStore for testing
-type mockTenantStore struct{}
-
-func (s *mockTenantStore) CreateTenant(_ context.Context, _ *business.TenantData) error { return nil }
-func (s *mockTenantStore) GetTenant(_ context.Context, tenantID string) (*business.TenantData, error) {
-	return &business.TenantData{ID: tenantID, Name: "Test Tenant"}, nil
-}
-func (s *mockTenantStore) UpdateTenant(_ context.Context, _ *business.TenantData) error { return nil }
-func (s *mockTenantStore) DeleteTenant(_ context.Context, _ string) error               { return nil }
-func (s *mockTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
-	return nil, nil
-}
-func (s *mockTenantStore) GetTenantHierarchy(_ context.Context, tenantID string) (*business.TenantHierarchy, error) {
-	return &business.TenantHierarchy{TenantID: tenantID}, nil
-}
-func (s *mockTenantStore) GetChildTenants(_ context.Context, _ string) ([]*business.TenantData, error) {
-	return nil, nil
-}
-func (s *mockTenantStore) GetTenantPath(_ context.Context, tenantID string) ([]string, error) {
-	return []string{tenantID}, nil
-}
-func (s *mockTenantStore) IsTenantAncestor(_ context.Context, _, _ string) (bool, error) {
-	return false, nil
-}
-func (s *mockTenantStore) Initialize(_ context.Context) error { return nil }
-func (s *mockTenantStore) Close() error                       { return nil }
-
 // mockRegistrationTokenStore implements business.RegistrationTokenStore for testing
 type mockRegistrationTokenStore struct{}
 
@@ -689,6 +693,9 @@ func (s *mockRegistrationTokenStore) SaveToken(_ context.Context, _ *business.Re
 }
 func (s *mockRegistrationTokenStore) GetToken(_ context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	return &business.RegistrationTokenData{Token: tokenStr, TenantID: "test-tenant"}, nil
+}
+func (s *mockRegistrationTokenStore) GetTokenByID(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
+	return nil, fmt.Errorf("registration token not found")
 }
 func (s *mockRegistrationTokenStore) UpdateToken(_ context.Context, _ *business.RegistrationTokenData) error {
 	return nil
@@ -753,6 +760,10 @@ func (s *mockPendingRegistrationStore) UpdateStatus(_ context.Context, _, _ stri
 }
 
 func (s *mockPendingRegistrationStore) ListPending(_ context.Context, _ string) ([]*business.PendingRegistrationEntry, error) {
+	return nil, nil
+}
+
+func (s *mockPendingRegistrationStore) ListAll(_ context.Context, _ string) ([]*business.PendingRegistrationEntry, error) {
 	return nil, nil
 }
 

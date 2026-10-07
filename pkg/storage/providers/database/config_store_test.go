@@ -23,7 +23,7 @@ func TestDatabaseConfigStore_CRUD(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -103,7 +103,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -223,7 +223,7 @@ func TestDatabaseConfigStore_VersionHistory(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -293,7 +293,7 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -364,7 +364,7 @@ func TestDatabaseConfigStore_Statistics(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -438,7 +438,7 @@ func TestDatabaseConfigStore_Validation(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -513,7 +513,7 @@ func TestDatabaseConfigStore_ConcurrentAccess(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 
@@ -603,7 +603,7 @@ func BenchmarkDatabaseConfigStore_StoreConfig(b *testing.B) {
 	db := setupTestDatabaseForBench(b)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(b, err)
 	defer func() { _ = store.Close() }()
 
@@ -637,7 +637,7 @@ func BenchmarkDatabaseConfigStore_GetConfig(b *testing.B) {
 	db := setupTestDatabaseForBench(b)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(b, err)
 	defer func() { _ = store.Close() }()
 
@@ -676,7 +676,7 @@ func BenchmarkDatabaseConfigStore_ListConfigs(b *testing.B) {
 	db := setupTestDatabaseForBench(b)
 	defer func() { _ = db.Close() }()
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(b, err)
 	defer func() { _ = store.Close() }()
 

@@ -1,0 +1,1017 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+/*
+ * Fleet overview suite (Story #2497, #2723): pagination param generation +
+ * total rendering, live-filter narrowing, sort ordering, column add/remove +
+ * persistence, health mapping (incl. staleness), the loading/error/empty
+ * states, tenant-scope narrowing, row-click navigation to /stewards/:id
+ * (Story #2723), and the hostile-DNA text-node guarantee (security A9.1).
+ *
+ * FleetOverview reads search/onSearchChange from useOutletContext; test
+ * wrapper uses MemoryRouter + Outlet context to supply these.
+ */
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
+import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router'
+import { AuthProvider } from '../auth/AuthContext.tsx'
+import {
+  TenantScopeProvider,
+  useTenantScope,
+} from '../shell/TenantScopeContext.tsx'
+import FleetOverview from './FleetOverview.tsx'
+import { STALE_AFTER_MS } from './health.ts'
+import type { Steward } from './columns.ts'
+
+const fetchMock = vi.fn<typeof fetch>()
+
+beforeEach(() => {
+  fetchMock.mockReset()
+  vi.stubGlobal('fetch', fetchMock)
+  localStorage.clear()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  cleanup()
+})
+
+interface StewardSpec {
+  id: string
+  hostname?: string
+  status?: string
+  lastSeenMsAgo?: number | null
+  attributes?: Record<string, string>
+  version?: string
+}
+
+function makeSteward(spec: StewardSpec): Steward {
+  const lastSeen =
+    spec.lastSeenMsAgo === null
+      ? '0001-01-01T00:00:00Z'
+      : new Date(Date.now() - (spec.lastSeenMsAgo ?? 10_000)).toISOString()
+  return {
+    id: spec.id,
+    status: spec.status ?? 'active',
+    last_seen: lastSeen,
+    version: spec.version ?? 'v0.42',
+    dna: {
+      hostname: spec.hostname ?? spec.id,
+      os: 'linux',
+      architecture: 'amd64',
+      attributes: spec.attributes ?? {},
+    },
+  }
+}
+
+/**
+ * Serve a fleet: each request slices [offset, offset+limit) of `stewards`.
+ * When ?q= is present, applies server-side selector filtering (Issue #2919):
+ *  - Extracts a leading <tenant-path>/ prefix (same logic as pkg/fleet/selector).
+ *  - If rest is "all" (or empty after prefix), applies only the tenant filter.
+ *  - Otherwise applies a hostname/id substring filter to the tenant-filtered result.
+ *
+ * Health tiles are best-effort; the mock returns a 503 for /api/v1/fleet/health so
+ * tiles stay hidden in tests that don't specifically test tile rendering.
+ */
+function extractMockTenantPrefix(q: string): { tenant: string; rest: string } {
+  let splitAt = -1
+  for (let i = 0; i < q.length; i++) {
+    if (q.charAt(i) === '/') {
+      const left = q.slice(0, i)
+      if (left.length > 0 && !left.includes(':') && !left.includes(' ')) splitAt = i
+    }
+  }
+  if (splitAt < 0) return { tenant: '', rest: q }
+  return { tenant: q.slice(0, splitAt), rest: q.slice(splitAt + 1) }
+}
+
+function mockFleet(stewards: Steward[]) {
+  fetchMock.mockImplementation((input) => {
+    const url = new URL(String(input), 'https://controller.test')
+
+    if (url.pathname === '/api/v1/fleet/health') {
+      return Promise.resolve(new Response('{}', { status: 503 }))
+    }
+
+    const limit = Number(url.searchParams.get('limit'))
+    const offset = Number(url.searchParams.get('offset'))
+    const q = url.searchParams.get('q') ?? ''
+
+    const { tenant, rest } = extractMockTenantPrefix(q)
+    const tenantFiltered = tenant
+      ? stewards.filter((s) => {
+          const t = s.dna?.attributes?.['tenant']
+          return t !== undefined && (t === tenant || t.startsWith(tenant + '/'))
+        })
+      : stewards
+    const filtered =
+      rest && rest !== 'all'
+        ? tenantFiltered.filter(
+            (s) =>
+              s.dna?.hostname?.toLowerCase().includes(rest.toLowerCase()) ||
+              s.id.toLowerCase().includes(rest.toLowerCase()),
+          )
+        : tenantFiltered
+
+    const body = {
+      data: {
+        stewards: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+        limit,
+        offset,
+      },
+      timestamp: new Date().toISOString(),
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+}
+
+/** Mock both the steward list and the fleet health aggregate. */
+function mockFleetAndHealth(
+  stewards: Steward[],
+  health: { healthy: number; degraded: number; unreachable: number },
+) {
+  fetchMock.mockImplementation((input) => {
+    const url = new URL(String(input), 'https://controller.test')
+
+    if (url.pathname === '/api/v1/fleet/health') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: health }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+
+    const limit = Number(url.searchParams.get('limit'))
+    const offset = Number(url.searchParams.get('offset'))
+    const body = {
+      data: {
+        stewards: stewards.slice(offset, offset + limit),
+        total: stewards.length,
+        limit,
+        offset,
+      },
+      timestamp: new Date().toISOString(),
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+}
+
+/**
+ * Wrapper that provides FleetOverview with a MemoryRouter, outlet context
+ * (search/onSearchChange), AuthProvider, and TenantScopeProvider.
+ */
+function FleetWrapper({
+  search = '',
+  onSearchChange = () => {},
+  initialPath = '/',
+}: {
+  search?: string
+  onSearchChange?: (v: string) => void
+  initialPath?: string
+}) {
+  return (
+    <MemoryRouter initialEntries={[initialPath]}>
+      <AuthProvider>
+        <TenantScopeProvider rootPath="root">
+          <Routes>
+            <Route element={<Outlet context={{ search, onSearchChange }} />}>
+              <Route index element={<FleetOverview />} />
+              <Route
+                path="/stewards/:id"
+                element={<LocationDisplay />}
+              />
+            </Route>
+          </Routes>
+        </TenantScopeProvider>
+      </AuthProvider>
+    </MemoryRouter>
+  )
+}
+
+/** Displays current pathname for navigation assertions. */
+function LocationDisplay() {
+  const { pathname } = useLocation()
+  return <div data-testid="nav-location">{pathname}</div>
+}
+
+function renderFleet(search = '') {
+  return render(<FleetWrapper search={search} />)
+}
+
+function dataRows(): HTMLElement[] {
+  return within(screen.getByRole('table')).getAllByRole('row').slice(1)
+}
+
+function firstCellText(row: HTMLElement): string | null {
+  // Use the name-cell anchor text — robust to the checkbox column being first.
+  return within(row).queryByRole('link')?.textContent?.trim() ?? null
+}
+
+describe('pagination', () => {
+  const fleet = Array.from({ length: 120 }, (_, i) =>
+    makeSteward({ id: `s${String(i + 1).padStart(3, '0')}` }),
+  )
+
+  it('requests limit/offset pages and renders the server total, never the full fleet', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    // Find the stewards call — health tiles also fire a fetch, so calls[0] is not always stewards.
+    const stewardsArgs = fetchMock.mock.calls.find(
+      (args) => String(args[0]).includes('/api/v1/stewards'),
+    )
+    const stewardsUrl = String(stewardsArgs?.[0])
+    expect(stewardsUrl).toContain('/api/v1/stewards?')
+    expect(stewardsUrl).toContain('limit=50')
+    expect(stewardsUrl).toContain('offset=0')
+
+    expect(screen.getByTestId('fleet-count').textContent).toBe('120 stewards')
+    expect(screen.getByTestId('fleet-pager').textContent).toContain(
+      'Showing 1–50 of 120 stewards',
+    )
+    // Only the page is rendered, not the fleet.
+    expect(dataRows()).toHaveLength(50)
+  })
+
+  it('next page requests the next server window', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('fleet-pager').textContent).toContain(
+        'Showing 51–100 of 120 stewards',
+      ),
+    )
+    const lastUrl = String(fetchMock.mock.calls.at(-1)?.[0])
+    expect(lastUrl).toContain('limit=50')
+    expect(lastUrl).toContain('offset=50')
+  })
+
+  it('page-size change refetches from offset 0 with the new limit', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.change(screen.getByLabelText('Stewards per page'), {
+      target: { value: '25' },
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('fleet-pager').textContent).toContain(
+        'Showing 1–25 of 120 stewards',
+      ),
+    )
+    const lastUrl = String(fetchMock.mock.calls.at(-1)?.[0])
+    expect(lastUrl).toContain('limit=25')
+    expect(lastUrl).toContain('offset=0')
+  })
+})
+
+describe('server-driven search (selector)', () => {
+  const fleet = [
+    makeSteward({ id: 's1', hostname: 'web-ingest-04', attributes: { current_user: 'svc_deploy' } }),
+    makeSteward({ id: 's2', hostname: 'dc-01', attributes: { current_user: 'administrator' } }),
+    makeSteward({ id: 's3', hostname: 'kiosk-lobby', attributes: { current_user: 'kiosk' } }),
+  ]
+
+  it('passes the search value as q param and renders server-filtered results', async () => {
+    mockFleet(fleet)
+    const { rerender } = render(<FleetWrapper search="" />)
+    await screen.findByRole('table')
+    expect(dataRows()).toHaveLength(3)
+
+    rerender(<FleetWrapper search="web-ingest" />)
+    await waitFor(() => expect(dataRows()).toHaveLength(1))
+    expect(screen.getByText('web-ingest-04')).toBeInTheDocument()
+    // Server returned total=1; no scope → shows "1 stewards" (server-filtered count)
+    expect(screen.getByTestId('fleet-count').textContent).toBe('1 stewards')
+    const lastUrl = String(fetchMock.mock.calls.at(-1)?.[0])
+    expect(lastUrl).toContain('q=web-ingest')
+  })
+
+  it('does not send q param when search is empty', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+    expect(dataRows()).toHaveLength(3)
+
+    const url = String(fetchMock.mock.calls[0]?.[0])
+    expect(url).not.toContain('q=')
+  })
+
+  it('shows the no-match state when selector returns zero results', async () => {
+    mockFleet(fleet)
+    renderFleet('no-such-host')
+    await screen.findByText('No stewards match your filter')
+    expect(screen.queryByText('No stewards enrolled yet')).not.toBeInTheDocument()
+  })
+
+  it('resets to page 1 when search changes', async () => {
+    // Build a fleet large enough for multiple pages at default page size (50).
+    const bigFleet = Array.from({ length: 120 }, (_, i) =>
+      makeSteward({ id: `s${String(i + 1).padStart(3, '0')}`, hostname: `host-${i + 1}` }),
+    )
+    mockFleet(bigFleet)
+    const { rerender } = renderFleet()
+    await screen.findByRole('table')
+
+    // Advance to page 2.
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('fleet-pager').textContent).toContain('Showing 51'),
+    )
+
+    // Typing in the search box should reset to page 1.
+    rerender(<FleetWrapper search="host-" />)
+    await waitFor(() =>
+      expect(screen.getByTestId('fleet-pager').textContent).toContain('Showing 1'),
+    )
+  })
+})
+
+describe('sort', () => {
+  const fleet = [
+    makeSteward({ id: 's1', hostname: 'charlie' }),
+    makeSteward({ id: 's2', hostname: 'alpha' }),
+    makeSteward({ id: 's3', hostname: 'bravo' }),
+  ]
+
+  it('orders displayed rows by the clicked header and flips on re-click', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    const nameHeader = screen.getByRole('columnheader', { name: /name/i })
+    fireEvent.click(nameHeader)
+    let names = dataRows().map(firstCellText)
+    expect(names).toEqual(['alpha', 'bravo', 'charlie'])
+    expect(nameHeader).toHaveAttribute('aria-sort', 'ascending')
+
+    fireEvent.click(nameHeader)
+    names = dataRows().map(firstCellText)
+    expect(names).toEqual(['charlie', 'bravo', 'alpha'])
+    expect(nameHeader).toHaveAttribute('aria-sort', 'descending')
+  })
+
+  it('sorts Last check-in chronologically, not lexically', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'old', lastSeenMsAgo: 2 * 3_600_000 }),
+      makeSteward({ id: 's2', hostname: 'newest', lastSeenMsAgo: 5_000 }),
+      makeSteward({ id: 's3', hostname: 'never', lastSeenMsAgo: null, status: 'registered' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+    fireEvent.click(screen.getByRole('columnheader', { name: /last check-in/i }))
+    const names = dataRows().map(firstCellText)
+    // Ascending: never-seen first, then oldest, then newest.
+    expect(names).toEqual(['never', 'old', 'newest'])
+  })
+})
+
+describe('columns', () => {
+  const fleet = [
+    makeSteward({
+      id: 's1',
+      hostname: 'host-a',
+      attributes: {
+        deployment_ring: 'canary',
+        system_serial_number: 'SER-77',
+        primary_mac: 'aa:bb:cc:dd:ee:ff',
+      },
+    }),
+  ]
+
+  it('shows the default column set with opt-ins hidden', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+    for (const label of ['Name', 'Company', 'Last user', 'IP', 'Health', 'Last check-in']) {
+      expect(screen.getByRole('columnheader', { name: label })).toBeInTheDocument()
+    }
+    expect(screen.queryByRole('columnheader', { name: /ring/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /serial/i })).not.toBeInTheDocument()
+  })
+
+  it('adds and removes columns via the picker; Name is locked on', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('button', { name: /columns/i }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Ring' }))
+    expect(screen.getByRole('columnheader', { name: /ring/i })).toBeInTheDocument()
+    expect(screen.getByText('canary')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Company' }))
+    expect(screen.queryByRole('columnheader', { name: /company/i })).not.toBeInTheDocument()
+
+    expect(screen.getByRole('checkbox', { name: 'Name' })).toBeDisabled()
+  })
+
+  it('persists the selection across a reload under the allowlisted key', async () => {
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+    fireEvent.click(screen.getByRole('button', { name: /columns/i }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Ring' }))
+
+    const stored = localStorage.getItem('cfgms.fleet.columns')
+    expect(stored).not.toBeNull()
+    expect(JSON.parse(stored as string)).toContain('ring')
+
+    cleanup()
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+    expect(screen.getByRole('columnheader', { name: /ring/i })).toBeInTheDocument()
+  })
+
+  it('ignores a corrupted stored selection (untrusted input) and falls back to defaults', async () => {
+    localStorage.setItem('cfgms.fleet.columns', '{"not":"an-array"')
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+    expect(screen.getByRole('columnheader', { name: /company/i })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /ring/i })).not.toBeInTheDocument()
+  })
+
+  it('renders an em-dash placeholder for missing DNA attributes', async () => {
+    mockFleet([makeSteward({ id: 's-bare', attributes: {} })])
+    renderFleet()
+    await screen.findByRole('table')
+    const [row] = dataRows()
+    if (row === undefined) throw new Error('expected a data row')
+    // Company, Last user, and IP are unset on this steward.
+    expect(within(row).getAllByText('—').length).toBeGreaterThanOrEqual(3)
+  })
+})
+
+describe('health column', () => {
+  it('maps Status + LastSeen staleness onto semantic pills', async () => {
+    mockFleet([
+      // active + fresh  → Healthy/ok
+      makeSteward({ id: 's1', hostname: 'fresh',   status: 'active', lastSeenMsAgo: 10_000 }),
+      // active + stale  → Degraded/warn (matches server handleFleetHealth bucket; Issue #2920)
+      makeSteward({ id: 's2', hostname: 'stale',   status: 'active', lastSeenMsAgo: STALE_AFTER_MS + 60_000 }),
+      // lost            → Unreachable/crit
+      makeSteward({ id: 's3', hostname: 'lost',    status: 'lost' }),
+      // registered (no heartbeat) → Registered/neutral
+      makeSteward({ id: 's4', hostname: 'enrolled', status: 'registered', lastSeenMsAgo: null }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.getByText('Healthy')).toBeInTheDocument()
+    expect(screen.getByText('Degraded')).toBeInTheDocument()
+    expect(screen.getByText('Unreachable')).toBeInTheDocument()
+    expect(screen.getByText('Registered')).toBeInTheDocument()
+
+    expect(screen.getByText('Healthy').className).toContain('ok')
+    expect(screen.getByText('Degraded').className).toContain('warn')
+    expect(screen.getByText('Unreachable').className).toContain('crit')
+    expect(screen.getByText('Registered').className).toContain('neutral')
+  })
+})
+
+describe('data states', () => {
+  it('shows skeleton rows while the page is loading', () => {
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}))
+    renderFleet()
+    expect(screen.getByTestId('fleet-loading')).toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('surfaces a failed request as the error state with a retry affordance', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('{}', { status: 503, headers: { 'Content-Type': 'application/json' } }),
+    )
+    renderFleet()
+    await screen.findByRole('alert')
+    expect(screen.getByText(/couldn't reach the controller/i)).toBeInTheDocument()
+    expect(screen.getByText('GET /api/v1/stewards — 503')).toBeInTheDocument()
+
+    mockFleet([makeSteward({ id: 's1', hostname: 'back-online' })])
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+    await screen.findByRole('table')
+    expect(screen.getByText('back-online')).toBeInTheDocument()
+  })
+
+  it('treats an unexpected response shape as an error, never renders garbage', async () => {
+    // Use mockImplementation to create a fresh Response per call — the health
+    // tiles also fetch on mount and would consume a shared body created by
+    // mockResolvedValue, causing the stewards call to fail with a body-read error
+    // rather than the expected "unexpected response shape" message.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ data: { wrong: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+    renderFleet()
+    await screen.findByRole('alert')
+    expect(screen.getByText('unexpected response shape')).toBeInTheDocument()
+  })
+
+  it('shows the enrolled-empty state for a zero-steward fleet', async () => {
+    mockFleet([])
+    renderFleet()
+    await screen.findByText('No stewards enrolled yet')
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+})
+
+describe('row click → opens overlay drawer (Story #2917)', () => {
+  it('clicking a fleet row opens the overlay drawer over the list', async () => {
+    mockFleet([makeSteward({ id: 'stw-42', hostname: 'web-ingest-04' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    // The drawer is not mounted yet.
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
+
+    // Click the name-cell anchor (plain left click).
+    const anchor = screen.getByRole('link', { name: 'web-ingest-04' })
+    fireEvent.click(anchor)
+
+    // Drawer is now mounted and the fleet table is still visible.
+    expect(screen.getByTestId('steward-drawer')).toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
+  })
+
+  it('close button dismisses the drawer without losing the fleet table', async () => {
+    mockFleet([makeSteward({ id: 'stw-1', hostname: 'host-a' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('link', { name: 'host-a' }))
+    expect(screen.getByTestId('steward-drawer')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('drawer-close'))
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
+  })
+
+  it('ESC key closes the drawer', async () => {
+    mockFleet([makeSteward({ id: 'stw-2', hostname: 'host-b' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('link', { name: 'host-b' }))
+    expect(screen.getByTestId('steward-drawer')).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
+  })
+
+  it('the row anchor href encodes the steward ID for native new-tab support', async () => {
+    mockFleet([makeSteward({ id: 'stw/special id', hostname: 'host' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    const anchor = screen.getByRole('link', { name: 'host' })
+    expect(anchor).toHaveAttribute('href', '/stewards/stw%2Fspecial%20id')
+  })
+
+  it('does NOT navigate away — fleet list stays mounted after row click', async () => {
+    mockFleet([makeSteward({ id: 'stw-3', hostname: 'host-c' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('link', { name: 'host-c' }))
+
+    // nav-location sentinel would only appear if navigation happened.
+    expect(screen.queryByTestId('nav-location')).not.toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
+  })
+})
+
+describe('tenant scope', () => {
+  function ScopeHarness() {
+    const { setScope, observedPaths } = useTenantScope()
+    return (
+      <div>
+        <button type="button" onClick={() => setScope('root/msp-a')}>
+          narrow-scope
+        </button>
+        <span data-testid="observed">{observedPaths.join(',')}</span>
+        <Routes>
+          <Route element={<Outlet context={{ search: '', onSearchChange: () => {} }} />}>
+            <Route index element={<FleetOverview />} />
+          </Route>
+        </Routes>
+      </div>
+    )
+  }
+
+  const fleet = [
+    makeSteward({ id: 's1', hostname: 'in-scope', attributes: { tenant: 'root/msp-a' } }),
+    makeSteward({ id: 's2', hostname: 'descendant', attributes: { tenant: 'root/msp-a/client-1' } }),
+    makeSteward({ id: 's3', hostname: 'other-tenant', attributes: { tenant: 'root/msp-b' } }),
+    makeSteward({ id: 's4', hostname: 'no-tenant-data' }),
+  ]
+
+  it('registers observed tenant paths and narrows displayed rows to the scope', async () => {
+    // Issue #2919: narrowing the switcher sends ?q=root/msp-a/all (server-side
+    // TenantSubtree query) instead of client-side isScopeMatch filtering.
+    mockFleet(fleet)
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AuthProvider>
+          <TenantScopeProvider rootPath="root">
+            <ScopeHarness />
+          </TenantScopeProvider>
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByRole('table')
+
+    // Paths observed in the initial (unscoped) page are offered to the switcher.
+    expect(screen.getByTestId('observed').textContent).toContain('root/msp-a')
+    expect(screen.getByTestId('observed').textContent).toContain('root/msp-b')
+
+    // Narrowing triggers a new server fetch with a tenant-path prefix selector;
+    // the mock returns only the two msp-a stewards (server-side subtree filter).
+    fireEvent.click(screen.getByRole('button', { name: 'narrow-scope' }))
+    await screen.findByRole('table')
+    const names = dataRows().map(firstCellText)
+    expect(names).toEqual(['in-scope', 'descendant'])
+    expect(screen.getByTestId('fleet-count').textContent).toBe('2 stewards in root/msp-a')
+  })
+
+  it('shows the scope no-match state when the scope holds no rows on this page', async () => {
+    // Issue #2919: server returns empty for the ?q=root/msp-a/all query because
+    // only msp-b stewards exist. FleetOverview detects total===0 && scoped and
+    // renders NoMatch scopeOnly=true → "No stewards in this scope".
+    mockFleet([makeSteward({ id: 's3', hostname: 'other-tenant', attributes: { tenant: 'root/msp-b' } })])
+    function NarrowToEmpty() {
+      const { setScope } = useTenantScope()
+      return (
+        <div>
+          <button type="button" onClick={() => setScope('root/msp-a')}>
+            narrow-scope
+          </button>
+          <Routes>
+            <Route element={<Outlet context={{ search: '', onSearchChange: () => {} }} />}>
+              <Route index element={<FleetOverview />} />
+            </Route>
+          </Routes>
+        </div>
+      )
+    }
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AuthProvider>
+          <TenantScopeProvider rootPath="root">
+            <NarrowToEmpty />
+          </TenantScopeProvider>
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByRole('table')
+    fireEvent.click(screen.getByRole('button', { name: 'narrow-scope' }))
+    expect(await screen.findByText('No stewards in this scope')).toBeInTheDocument()
+    expect(screen.queryByText(/match your filter/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('hostile steward values (security A9.1)', () => {
+  it('renders a hostile hostname as inert text, never as markup', async () => {
+    const hostile = '<img src=x onerror="document.title=\'pwned\'">'
+    mockFleet([
+      makeSteward({
+        id: 's-evil',
+        hostname: hostile,
+        attributes: {
+          current_user: '<script>document.title="pwned"</script>',
+          primary_ip: '"><svg onload=alert(1)>',
+        },
+      }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    // The literal strings are visible as text…
+    expect(screen.getByText(hostile)).toBeInTheDocument()
+    // …and no element was ever created from them.
+    expect(document.querySelector('img')).toBeNull()
+    expect(document.querySelector('script')).toBeNull()
+    expect(document.title).not.toBe('pwned')
+  })
+})
+
+describe('fleet health tiles (Issue #2729)', () => {
+  it('renders three tiles with counts from GET /api/v1/fleet/health', async () => {
+    mockFleetAndHealth(
+      [makeSteward({ id: 's1', hostname: 'host-a', status: 'active' })],
+      { healthy: 12, degraded: 3, unreachable: 1 },
+    )
+    renderFleet()
+    await screen.findByTestId('fleet-health-tiles')
+
+    expect(screen.getByTestId('health-tile-healthy').textContent).toContain('12')
+    expect(screen.getByTestId('health-tile-degraded').textContent).toContain('3')
+    expect(screen.getByTestId('health-tile-unreachable').textContent).toContain('1')
+  })
+
+  it('hides the tiles when the health endpoint is unavailable', async () => {
+    // mockFleet returns 503 for the health endpoint by default.
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-a' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.queryByTestId('fleet-health-tiles')).not.toBeInTheDocument()
+  })
+})
+
+describe('bulk selection (Story #2939)', () => {
+  it('checking a row checkbox surfaces the bulk action bar with an accurate count', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'host-1' }),
+      makeSteward({ id: 's2', hostname: 'host-2' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select host-1' }))
+
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+    expect(screen.getByTestId('bulk-action-bar').textContent).toContain('1')
+    expect(screen.getByTestId('bulk-action-bar').textContent).toContain('selected')
+  })
+
+  it('unchecking all rows hides the bulk action bar', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    const checkbox = screen.getByRole('checkbox', { name: 'Select host-1' })
+    fireEvent.click(checkbox)
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    fireEvent.click(checkbox)
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED] changing page clears selection (bulk action bar disappears)', async () => {
+    const fleet = Array.from({ length: 60 }, (_, i) =>
+      makeSteward({ id: `s${String(i).padStart(3, '0')}`, hostname: `host-${i}` }),
+    )
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    // Select a row on the first page.
+    const checkboxes = screen.getAllByRole('checkbox', { name: /^Select host-/ })
+    fireEvent.click(checkboxes[0]!)
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    // Navigate to the next page — selection must be cleared.
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() =>
+      expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('[REQUIRED] changing sort clears selection (bulk action bar disappears)', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'alpha' }),
+      makeSteward({ id: 's2', hostname: 'bravo' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select alpha' }))
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('columnheader', { name: /name/i }))
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED] changing filter clears selection (bulk action bar disappears)', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'alpha' })])
+    const { rerender } = render(<FleetWrapper search="" />)
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select alpha' }))
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    rerender(<FleetWrapper search="alpha" />)
+    await waitFor(() =>
+      expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('selecting all rows via header checkbox selects every row on the page', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'host-1' }),
+      makeSteward({ id: 's2', hostname: 'host-2' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all on page' }))
+
+    expect(screen.getByRole('checkbox', { name: 'Select host-1' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select host-2' })).toBeChecked()
+    expect(screen.getByTestId('bulk-action-bar').textContent).toContain('2')
+  })
+
+  it('"Clear" in the bulk action bar deselects all rows and hides the bar', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select host-1' }))
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Select host-1' })).not.toBeChecked()
+  })
+})
+
+/**
+ * Mock fleet list + fleet health with a hidden count.
+ * The visibility PATCH endpoint is handled separately by the caller.
+ */
+function mockFleetWithHiddenHealth(
+  stewards: Steward[],
+  health: { healthy: number; degraded: number; unreachable: number; hidden: number },
+) {
+  fetchMock.mockImplementation((input) => {
+    const url = new URL(String(input), 'https://controller.test')
+
+    if (url.pathname === '/api/v1/fleet/health') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: health }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+
+    if (url.pathname.endsWith('/visibility') && url.pathname.startsWith('/api/v1/stewards/')) {
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+    }
+
+    const limit = Number(url.searchParams.get('limit'))
+    const offset = Number(url.searchParams.get('offset'))
+    const body = {
+      data: {
+        stewards: stewards.slice(offset, offset + limit),
+        total: stewards.length,
+        limit,
+        offset,
+      },
+      timestamp: new Date().toISOString(),
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+}
+
+describe('hidden steward toggle and count (Story #2918 AC)', () => {
+  it('renders a "Show hidden / quarantined" checkbox toggle', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.getByTestId('hidden-toggle')).toBeInTheDocument()
+    expect(screen.getByTestId('hidden-toggle-label').textContent).toContain(
+      'Show hidden / quarantined',
+    )
+  })
+
+  it('default (toggle off) — does not append include_hidden to the stewards request', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    const stewardsCall = fetchMock.mock.calls.find((args) =>
+      String(args[0]).includes('/api/v1/stewards'),
+    )
+    expect(String(stewardsCall?.[0])).not.toContain('include_hidden')
+    expect(String(stewardsCall?.[0])).not.toContain('include_quarantined')
+  })
+
+  it('toggle on — appends include_hidden=true and include_quarantined=true to stewards request', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fetchMock.mockReset()
+    // Re-supply mock so the refetch after toggle works.
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+
+    fireEvent.click(screen.getByTestId('hidden-toggle'))
+
+    await waitFor(() => {
+      const hiddenCall = fetchMock.mock.calls.find((args) =>
+        String(args[0]).includes('include_hidden=true'),
+      )
+      expect(hiddenCall).toBeDefined()
+    })
+
+    const hiddenCallUrl = fetchMock.mock.calls.find((args) =>
+      String(args[0]).includes('include_hidden=true'),
+    )
+    expect(String(hiddenCallUrl?.[0])).toContain('include_quarantined=true')
+  })
+
+  it('shows "(N hidden)" count when health reports hidden > 0 and toggle is off', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 's1', hostname: 'host-1' })],
+      { healthy: 1, degraded: 0, unreachable: 0, hidden: 3 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('hidden-count')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('hidden-count').textContent).toContain('3')
+    expect(screen.getByTestId('hidden-count').textContent).toContain('hidden')
+  })
+
+  it('hides the "(N hidden)" count when toggle is on (hidden entries are visible)', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 's1', hostname: 'host-1' })],
+      { healthy: 1, degraded: 0, unreachable: 0, hidden: 3 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    await waitFor(() => expect(screen.getByTestId('hidden-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('hidden-toggle'))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('hidden-count')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows hidden health tile when health reports hidden > 0', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 's1', hostname: 'host-1' })],
+      { healthy: 2, degraded: 0, unreachable: 0, hidden: 5 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('health-tile-hidden')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('health-tile-hidden').textContent).toContain('5')
+  })
+
+  it('clicking the hide button on a row calls PATCH /api/v1/stewards/{id}/visibility', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 'stw-abc', hostname: 'my-server' })],
+      { healthy: 1, degraded: 0, unreachable: 0, hidden: 0 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    const btn = await screen.findByTestId('visibility-btn-stw-abc')
+    fireEvent.click(btn)
+
+    await waitFor(() => {
+      const patchCall = fetchMock.mock.calls.find(
+        (args) => String(args[0]).includes('/api/v1/stewards/stw-abc/visibility'),
+      )
+      expect(patchCall).toBeDefined()
+      const opts = patchCall?.[1] as RequestInit | undefined
+      expect(opts?.method).toBe('PATCH')
+    })
+  })
+})

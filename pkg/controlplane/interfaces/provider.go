@@ -8,9 +8,25 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 )
+
+// ErrStewardNotConnected is wrapped into the error SendCommand returns when
+// the target steward has no live connection in the provider's local registry.
+// A caller checks this with errors.Is rather than matching the error string,
+// so that pkg/controlplane/internaldelivery (Issue #3764, ADR-031 Decision 3)
+// can distinguish "not connected to this node — consult the routing table and
+// try a peer" from a genuine transport failure worth surfacing as-is.
+var ErrStewardNotConnected = errors.New("steward not connected")
+
+// ErrIdentityRejected reports that the controller definitively refused the
+// steward's identity: the control channel was refused as unauthenticated or not
+// approved (unknown, deregistered or revoked steward). It is never returned for an
+// unreachable or timed-out controller, nor for a TLS handshake failure, which can
+// be transient (clock skew, an intercepting proxy) (Issue #4532).
+var ErrIdentityRejected = errors.New("controller rejected steward identity")
 
 // ControlPlaneProvider defines the interface for control plane implementations.
 //

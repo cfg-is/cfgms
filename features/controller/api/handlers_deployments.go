@@ -3,12 +3,12 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -27,10 +27,11 @@ func (s *Server) handleGetConfigDeployments(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Authenticated tenant is the scope for the query — prevents cross-tenant enumeration.
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
+	// Authenticated tenant (or an authorized ?tenant_id=) is the scope for the
+	// query — prevents cross-tenant enumeration.
+	tenantID, ok := s.selectListTenant(w, r, "GET /api/v1/configs/{id}/deployments")
+	if !ok {
+		return
 	}
 
 	if s.pushStore == nil {
@@ -42,7 +43,7 @@ func (s *Server) handleGetConfigDeployments(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		s.logger.Error("Failed to list push records",
 			"config_id", logging.SanitizeLogValue(configID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to retrieve deployment history", "INTERNAL_ERROR")
 		return
 	}
@@ -63,7 +64,7 @@ func (s *Server) handleGetConfigDeployments(w http.ResponseWriter, r *http.Reque
 	// Derive per-steward status from the most recent push and the live steward registry,
 	// scoped to the authenticated tenant. This is a best-effort view: per-steward
 	// delivery records are not stored individually.
-	stewards := s.deriveStewardDeploymentStatus(pushRecords, tenantID)
+	stewards := s.deriveStewardDeploymentStatus(r.Context(), pushRecords, tenantID)
 	summary := buildDeploymentSummary(stewards)
 
 	s.writeSuccessResponse(w, ConfigDeploymentsResponse{
@@ -77,12 +78,12 @@ func (s *Server) handleGetConfigDeployments(w http.ResponseWriter, r *http.Reque
 // deriveStewardDeploymentStatus computes a per-steward deployment status by
 // combining the most recent push record with the live steward registry scoped
 // to tenantID. When no push records exist all matching stewards show as "unknown".
-func (s *Server) deriveStewardDeploymentStatus(pushRecords []*business.PushRecord, tenantID string) []StewardDeploymentStatus {
+func (s *Server) deriveStewardDeploymentStatus(ctx context.Context, pushRecords []*business.PushRecord, tenantID string) []StewardDeploymentStatus {
 	if s.controllerService == nil {
 		return []StewardDeploymentStatus{}
 	}
 
-	allStewards := s.controllerService.GetAllStewards()
+	allStewards := s.controllerService.ListFleetStewards(ctx)
 	if len(allStewards) == 0 {
 		return []StewardDeploymentStatus{}
 	}

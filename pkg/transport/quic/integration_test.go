@@ -396,10 +396,22 @@ func TestGRPCOverQUIC_ClientDisconnect(t *testing.T) {
 	// Cancel before receiving the response.
 	cancel()
 
-	// The stream operations after cancel must return a context error (Canceled or EOF).
-	var msg echoMsg
-	err = stream.RecvMsg(&msg)
-	require.Error(t, err, "RecvMsg after context cancellation must return an error, not succeed")
+	// The bidi handler echoes every message straight back, so the echo of "bye"
+	// can already be buffered in the stream by the time cancel() lands. That first
+	// RecvMsg then legitimately succeeds and returns the payload — asserting on it
+	// makes the test a race between the echo and the cancellation. Only a read past
+	// the buffered message is guaranteed to observe the cancellation, so drain until
+	// an error surfaces. One message was sent, so at most one echo can be buffered.
+	var (
+		msg     echoMsg
+		recvErr error
+	)
+	for i := 0; i < 3; i++ {
+		if recvErr = stream.RecvMsg(&msg); recvErr != nil {
+			break
+		}
+	}
+	require.Error(t, recvErr, "RecvMsg after context cancellation must return an error, not succeed")
 }
 
 // TestGRPCOverQUIC_TLSRequired verifies that a connection attempt with a

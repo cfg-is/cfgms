@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Design tokens are single-sourced from docs/design/web-ui-design-tokens.css
+ * (founder-owned, consumed read-only) via the `@design-tokens` Vite alias.
+ * Never redeclare or fork token VALUES in web/ — reference tokens with
+ * var(--token-name) only. The token file owns the theme model: light default,
+ * dark via prefers-color-scheme, and :root[data-theme="light"|"dark"]
+ * overrides stamped by the app's (future) theme control.
+ */
+@import '@design-tokens';
+
+/* Minimal base styles — placeholder only, no design-system implementation
+ * yet (deliberate; framework stories are not gated on the design system).
+ * Every color/font/spacing reference below is a token var(), never a literal
+ * value. */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+}
+
+code {
+  font-family: var(--font-mono);
+}

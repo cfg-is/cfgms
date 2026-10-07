@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestHTTPClient_ExecuteRequest(t *testing.T) {
@@ -38,7 +38,8 @@ func TestHTTPClient_ExecuteRequest(t *testing.T) {
 	}()
 
 	client := NewHTTPClient(HTTPClientConfig{
-		Timeout: 10 * time.Second,
+		Timeout:              10 * time.Second,
+		AllowPrivateNetworks: true,
 	})
 
 	httpConfig := &HTTPConfig{
@@ -77,7 +78,7 @@ func TestHTTPClient_ExecuteRequest_WithRetry(t *testing.T) {
 		server.Close() // Test server close doesn't return error
 	}()
 
-	client := NewHTTPClient(HTTPClientConfig{})
+	client := NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	httpConfig := &HTTPConfig{
 		URL:    server.URL,
@@ -112,8 +113,9 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "http-test-workflow",
@@ -177,8 +179,9 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	// Mock the Microsoft Graph API URL by overriding the buildMicrosoftGraphRequest method
 	// For this test, we'll create a simpler API config that uses our test server
@@ -238,8 +241,9 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "webhook-test-workflow",
@@ -285,8 +289,9 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 func TestEngine_ExecuteDelayStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "delay-test-workflow",
@@ -357,8 +362,9 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "complex-api-workflow",
@@ -423,12 +429,12 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
-	// Verify all steps completed successfully
+	// Verify all steps completed successfully (keyed by structural ID: s0=authenticate, s1=create-user, s2=wait-propagation, s3=send-notification)
 	stepResults := finalExecution.GetStepResults()
-	assert.Equal(t, StatusCompleted, stepResults["authenticate"].Status)
-	assert.Equal(t, StatusCompleted, stepResults["create-user"].Status)
-	assert.Equal(t, StatusCompleted, stepResults["wait-propagation"].Status)
-	assert.Equal(t, StatusCompleted, stepResults["send-notification"].Status)
+	assert.Equal(t, StatusCompleted, stepResults["s0"].Status, "authenticate (s0)")
+	assert.Equal(t, StatusCompleted, stepResults["s1"].Status, "create-user (s1)")
+	assert.Equal(t, StatusCompleted, stepResults["s2"].Status, "wait-propagation (s2)")
+	assert.Equal(t, StatusCompleted, stepResults["s3"].Status, "send-notification (s3)")
 
 	// Verify variables were set correctly
 	assert.Equal(t, 200, finalExecution.Variables["authenticate_status_code"])

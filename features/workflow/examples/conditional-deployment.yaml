@@ -1,7 +1,7 @@
 workflow:
   name: "conditional-deployment"
   description: "Demonstrates enhanced conditional logic for deployment scenarios"
-  version: "1.0"
+  version: "1.0.0"
   variables:
     environment: "production"
     feature_enabled: true

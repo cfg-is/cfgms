@@ -158,6 +158,8 @@ func (h *ExecProcessHandle) Start(ctx context.Context, listenAPIAddr, listenTran
 	// just because its parent ctx fires; that should be Drain or Stop.
 	cctx, ccancel := context.WithCancel(ctx)
 	h.cancel = ccancel
+	// #nosec G118 -- after cctx fires, Stop needs an independent bounded context
+	// so cancellation cannot prevent child cleanup; Stop applies StopTimeout.
 	go func() {
 		<-cctx.Done()
 		// If ctx fired BEFORE the orchestrator called Stop, do an

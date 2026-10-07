@@ -68,9 +68,9 @@ Exit codes:
 
 var (
 	scriptLibURL         string
-	scriptLibAPIKey      string
 	scriptLibTLSCACert   string
 	scriptLibTLSInsecure bool
+	scriptLibServerName  string
 )
 
 // scriptPrivilegeScopes holds the --scope flag values for set-privilege.
@@ -86,7 +86,7 @@ var scriptListCmd = &cobra.Command{
 	Long: `Display scripts from the git-backed script library on the controller.
 
 Examples:
-  cfg script list --url=https://controller.example.com --api-key=mykey`,
+  cfg script list --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	RunE: runScriptList,
 }
 
@@ -97,7 +97,7 @@ var scriptShowCmd = &cobra.Command{
 	Long: `Display metadata and content for a specific script from the controller's library.
 
 Examples:
-  cfg script show backup-all --url=https://controller.example.com --api-key=mykey`,
+  cfg script show backup-all --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runScriptShow,
 }
@@ -115,7 +115,7 @@ Caller must hold every scope they grant and must have steward:read-dna to bind D
 
 Examples:
   cfg script set-privilege backup-all --scope steward:execute-scripts \
-    --url=https://controller.example.com --api-key=mykey`,
+    --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runScriptSetPrivilege,
 }
@@ -124,9 +124,9 @@ func init() {
 	// Library subcommand flags
 	for _, cmd := range []*cobra.Command{scriptListCmd, scriptShowCmd, scriptSetPrivilegeCmd} {
 		cmd.Flags().StringVar(&scriptLibURL, "url", "", "Controller API URL")
-		cmd.Flags().StringVar(&scriptLibAPIKey, "api-key", "", "API key for authentication")
 		cmd.Flags().StringVar(&scriptLibTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&scriptLibTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&scriptLibServerName, "server-name", "", "Override TLS server name for certificate verification")
 	}
 	scriptSetPrivilegeCmd.Flags().StringArrayVar(&scriptPrivilegeScopes, "scope", nil, "Required API scope (repeatable)")
 	scriptSetPrivilegeCmd.Flags().StringArrayVar(&scriptPrivilegeBindings, "param-binding", nil, "Parameter→DNA binding key=path (repeatable)")
@@ -146,30 +146,13 @@ func getScriptLibClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := scriptLibAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := scriptLibTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := scriptLibServerName
 
-	tlsCACertPath := scriptLibTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runScriptList(cmd *cobra.Command, _ []string) error {
@@ -406,6 +389,8 @@ func signScript(filePath, keyPath, algorithm string) error {
 	}
 
 	sigPath := filePath + ".sig"
+	// #nosec G703 -- this local signing command writes beside the exact artifact
+	// path selected by its operator; no remote principal controls filePath.
 	if err := os.WriteFile(sigPath, sigBytes, 0600); err != nil {
 		return fmt.Errorf("write signature file %q: %w", sigPath, err)
 	}

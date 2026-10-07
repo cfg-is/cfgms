@@ -24,8 +24,8 @@ The CFGMS security workflow integrates four complementary security scanning tool
 
 - **Purpose**: Scans filesystem for known vulnerabilities in dependencies and infrastructure
 - **Scope**: Critical/High CVEs, secrets, misconfigurations
-- **Blocking**: Yes (Critical/High vulnerabilities block deployment)
-- **SARIF Support**: Yes (GitHub Security tab integration)
+- **Blocking**: Yes — two enforcement points: (1) `trivy-scan` is a required PR/merge-queue context that exits 1 on findings; (2) `security-deployment-gate` in `production-gates.yml` also runs Trivy with `--exit-code 1`
+- **SARIF Support**: Yes (GitHub Security tab integration; uploaded with `if: always()` so findings land in the Security tab even when the job fails)
 
 ### 2. Nancy - Go Dependency Scanning
 
@@ -33,6 +33,89 @@ The CFGMS security workflow integrates four complementary security scanning tool
 - **Scope**: Go dependencies and transitive dependencies
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: No (custom integration)
+
+#### CVE suppression file (`.nancy-ignore`)
+
+When a CVE cannot be remediated because no patched upstream release exists, suppress it
+in `.nancy-ignore` at the repository root rather than silencing the entire scan.
+
+**Format** (nancy v2.1.0):
+
+```
+# Comment lines start with #
+CVE-YYYY-NNNNN until=YYYY-MM-DD
+```
+
+The `until=YYYY-MM-DD` field sets an expiry: once the date lapses nancy re-reports
+the CVE as a live finding, which forces a re-review. Every entry must have an expiry
+approximately one quarter out from the suppression date.
+
+**What justifies an entry:**
+
+- No patched upstream release exists at the time of suppression.
+- The affected package cannot be removed or replaced without significant rework.
+- The CVE has been triaged and the risk is accepted for the suppression period.
+
+**What does NOT justify an entry:**
+
+- "We haven't gotten around to it yet." Upgrade the dependency instead.
+- Blanket suppression of multiple unrelated CVEs — one entry per CVE, no wildcards.
+- Suppressing a CVE that a newer release fixes.
+
+**Adding a suppression:**
+
+1. Confirm no fixed release exists: `go list -m -versions <module>` to check upstream.
+2. Add an entry to `.nancy-ignore` with a comment block naming the package, the reason,
+   and the expiry.  Keep the comment immediately above the CVE line.
+3. Run `make security-deps` (requires `GUIDE_TOKEN`) to confirm the scan now passes.
+4. Open a PR — the `nancy-scan` CI job validates it.
+
+**Reviewing suppressions (weekly dependency scan):**
+
+When `dependency-pin-check.yml` fires or the `/refresh-pins` skill runs:
+
+1. Check each entry in `.nancy-ignore` for entries near or past their `until=` date.
+2. Run `go list -m -versions <module>` for each suppressed package to see if a fix landed.
+3. If a fix exists: upgrade via `go get <module>@<version>` and remove the entry.
+4. If no fix: renew the `until=` date and update the comment with today's re-check date.
+
+**Active suppressions:**
+
+| CVE | Package | Reason | Expiry |
+|-----|---------|--------|--------|
+| CVE-2026-56860 | golang.org/x/net v0.58.0 | No patched release upstream as of 2026-08-15; v0.58.0 is newest | 2026-11-15 |
+
+**Scoping verification — a second, unrelated CVE still fails the gate:**
+
+`make security-deps` runs `scripts/verify-nancy-ignore-scope.sh` against `.nancy-ignore`
+before invoking nancy, and fails closed on:
+
+- any entry containing a wildcard character (`*`, `?`, `[`) — nancy has no glob
+  matching, so a wildcard is either a no-op or a mistaken attempt at a blanket
+  ignore, and either way it is rejected;
+- a missing or malformed `until=YYYY-MM-DD` expiry — nancy v2.1.0 aborts parsing
+  the *rest of the file* on the first bad date (the error is swallowed by its
+  caller, `internal/cmd/root.go`), so a broken second entry would silently drop
+  every entry after it, including ones that were previously working;
+- duplicate entries for the same CVE.
+
+This was verified directly against nancy's source (tag `v2.1.0`, commit
+`410f73d14f5cf35300b2695dc1a74fb560b70a85`): `internal/ossindex/types.go`
+`maybeExclude` matches with `v.Cve == ex || v.ID == ex` — plain string equality,
+no prefix or pattern matching. `scripts/verify-nancy-ignore-scope.sh` replicates
+that exact check (and nancy's two parsing regexes, `unixComments` and
+`untilComment`) against a synthetic CVE id that is deliberately absent from the
+file, and fails if that synthetic id is ever reported as excluded — proving, on
+every `make security-deps` run and with no network or `GUIDE_TOKEN` required,
+that only the literal ids listed in `.nancy-ignore` are ever suppressed. See
+`scripts/verify-nancy-ignore-scope_test.sh` for the fixture coverage (run with
+`bash scripts/verify-nancy-ignore-scope_test.sh`).
+
+To additionally confirm end-to-end against a live Sonatype Guide scan: with a
+valid `GUIDE_TOKEN` exported, temporarily add an unrelated, genuinely vulnerable
+module (e.g. `go get github.com/dgrijalva/jwt-go@v3.2.0+incompatible`, which
+carries known, unfixed CVEs) to a scratch `go.mod`, run `make security-deps`, and
+confirm it still exits non-zero — then discard the scratch change.
 
 ### 3. gosec - Go Security Patterns
 
@@ -61,13 +144,255 @@ CodeQL cannot see our runtime validators, so it raises false positives where a v
 
 - **Pack source**: `.github/codeql/extensions/` — `qlpack.yml` (`cfg-is/cfgms-go-extensions`) plus `models/*.model.yml`.
 - **Publish requirement**: the pack is referenced *by name* from `.github/codeql/codeql-config.yml` (`packs:`) and **must be published to the ghcr.io CodeQL pack registry** by `.github/workflows/codeql-pack-publish.yml`. **Local-path pack references are not supported by the codeql-action** — a model file on disk does nothing until the pack is republished.
-- **Already modeled**: `safeJoin` (path-injection), `SanitizeLogValue` + `RedactedID` (log-injection / clear-text-logging).
+- **Bump the version (REQUIRED for every model change)**: editing a `models/*.yml` does nothing on its own. `codeql pack publish` refuses to overwrite an existing `<name>@<version>` and no-ops (`"already exists"`); the publish workflow treats that as a green no-op. You **must bump `version:` in `.github/codeql/extensions/qlpack.yml`** in the same change, or the registry keeps serving the old pack and your model stays inert (it will still *bundle* fine, masking the problem).
+- **Already modeled**: `safeJoin` (path-injection), `ValidateAndCleanPath` (path-injection), `SanitizeLogValue` + `RedactedID` (log-injection / clear-text-logging).
 
 Decision path for a CodeQL alert:
 
 1. **Genuine bug** → fix the code (e.g. wrap operator-supplied values in `logging.SanitizeLogValue`).
-2. **False positive with a real, value-returning sanitizer** (e.g. `safeJoin`) → add/extend a model. Prefer **`barrierModel`** (kind = the sink kind, e.g. `path-injection`; CodeQL ≥ 2.25.2) over the older **`summaryModel(kind=value)`**, which is unreliable on some flow paths. Verify the exact `barrierModel` tuple format against `github/codeql:go/ql/lib/ext/` — the format is finicky and CI is the only reliable verification (CodeQL can't be modeled-and-tested purely locally).
+2. **False positive with a real, value-returning sanitizer** (e.g. `safeJoin`, `ValidateAndCleanPath`) → add/extend a model. Use **both** `barrierModel` (kind = the sink kind, e.g. `path-injection`; CodeQL ≥ 2.25.2) **and** `summaryModel(kind=value)` together — neither is reliable alone across all taint-flow paths (json.Decode field-selection flows bypass barrierModel in some CodeQL versions; summaryModel can miss other paths). Also prefer refactoring the call site to *use the sanitizer's return value* (e.g. `cleanedBase := ValidateAndCleanPath(...)`) rather than discarding it — a code-level taint barrier is more robust than any model. Verify the exact `barrierModel` tuple format against `github/codeql:go/ql/lib/ext/` — the format is finicky and CI is the only reliable verification (CodeQL can't be modeled-and-tested purely locally).
 3. **False positive from a guard-style validator** (returns only `error`, e.g. blobstore `validateKey`/`validateKeyComponent`) or a **heuristic source** (CodeQL flagging a variable *named* `*SecretKey` that holds a SecretStore key *reference*, not a value) → data extensions can't cleanly model these; **dismiss the alert with justification** (or refactor to a value-returning sanitizer that *can* be modeled).
+4. **False positive from struct field-insensitivity** (CodeQL traces taint through a whole struct because one field is a secret — e.g. `APIKey.Key` — even though only non-secret fields are logged) → these **cannot** be fixed by extension-pack models (no field-access barrier primitive exists). Dismiss with justification; confirm via grep that no secret/credential field value is passed to the logger at the flagged site.
+5. **Heuristic source you control the name of** → **rename the identifier**. This is strictly better than dismissal: it clears the alert permanently and stops it re-firing at every new sink the value reaches. See the exact regexes below before choosing a replacement name.
+
+##### The sensitive-name heuristic, exactly
+
+`clear-text-logging` classifies a source by **identifier name alone**, regardless of type — a `bool` named `PasswordSet` is a "secret". The matcher lives in the CodeQL Go pack at `semmle/go/security/SensitiveActions.qll` (module `HeuristicNames`) and consults **no** data extension, so the pack cannot suppress it. There are exactly three source patterns:
+
+| Classification | Regex |
+|---|---|
+| secret | `(?is).*((?<!is)secret\|(?<!un\|is)trusted).*` |
+| account info | `(?is).*(puid\|username\|userid).*` |
+| password | `(?is).*pass(wd\|word\|code\|phrase)(?!.*question).*` and `(?is).*(auth(entication\|ori[sz]ation)?\|api\|secret)key.*` |
+
+A name matching any of them is a source **unless** it also matches the suppressor `(?is).*(test|redact|censor|obfuscate|hash|md5|(?<!un)mask|sha|((?<!un)(en))?(crypt|code)).*`. That suppressor is also what makes a *call* a barrier (`ObfuscatorCall`) — which is why `logging.RedactedID` blocks clear-text-logging flow but `logging.SanitizeLogValue` does not.
+
+Notably **`credential` is not a trigger word** — it appears in no regex in the Go pack. `HasCredential`, `credentialRef`, `userStoreRef` and `passStoreRef` are all clean; `userSecretKey`, `passSecretKey`, `passwdFile`, `PasswordSet` and `secretKey` were not. Test a candidate name against the table above before committing to it, and read the local pack copy (`~/.codeql/packages/codeql/go-all/<version>/semmle/go/security/SensitiveActions.qll`) rather than trusting this table if the two disagree.
+
+#### Model inventory and dismissal log (most recent first)
+
+| Pack version | Alert IDs | Kind | Resolution | Notes |
+|---|---|---|---|---|
+| 0.0.11 | #1298 | reflected-xss | Dismiss | `features/reports/api/handlers.go:166` — `w.Write(exportData)` after `html/template.Execute`. False positive: `X-Content-Type-Options: nosniff` is set (line 164); `setExportHeaders` sets a format-derived `Content-Type` (line 165); the only HTML-typed output path (`FormatHTML`) renders through Go's contextually-auto-escaping `html/template.Execute` with no `template.HTML()` or unsafe-cast bypass found. CodeQL does not model `html/template` auto-escaping as a sanitizer barrier. |
+| 0.0.11 | #668 | log-injection | Code fix | `features/controller/api/handlers_deployments.go:45` — `"error", err` in `s.logger.Error("Failed to list push records", ...)`. Wrapped raw `err` in `logging.SanitizeLogValue(err.Error())`. Data-extension pack cannot suppress log-injection alerts (sanitizer classes are hardcoded in the upstream query); code fix is the only valid disposition. |
+| 0.0.11 | #1304 | log-injection | Code fix | `features/rbac/manager.go:906-908` — `"subject_id", subjectID` and `"error", invErr` in `slog.Warn("rbac: failed to invalidate subject cache after RevokeRole", ...)`. Wrapped both raw values in `logging.SanitizeLogValue(...)`. Same hardcoded-sanitizer constraint as #668; code fix only. |
+| 0.0.11 | #1240, #1241 | zipslip | Model | `features/modules/extended/github_runner.safeJoin` added as `summaryModel` + `barrierModel(path-injection)`. A second, independent `safeJoin` from the flatfile one already modelled — it rejects any `..` segment and re-verifies containment with `filepath.Rel` before returning the extraction target. |
+| 0.0.11 | #1289, #1284, #1285, #1116–#1121, #1126–#1130, #1138, #1139 | clear-text-logging | Rename | Name-heuristic FPs, fixed at the source by renaming the five identifiers that were classified as secrets by name: `PasswordSet`→`HasCredential` (a bool; also renames the module yaml key `password_set`→`has_credential`), `userSecretKey`/`passSecretKey`→`userStoreRef`/`passStoreRef` (hyperv — SecretStore *lookup keys*, not values), `passwdFile`→`userDBPath` (the path `/etc/passwd`), `secretKey`→`credentialRef` (api — a store lookup path). See "The sensitive-name heuristic, exactly" above for why these names matched and why the replacements do not. |
+| 0.0.11 | #1232 | log-injection | Dismiss | `handlers_ip_trust.go:78` — the flagged argument is `req.PreSeeded`, a `bool`. CodeQL is field-insensitive over the JSON-decoded request struct and does not type-filter the `slog` variadic `...any`, so a boolean is reported as a log-injection sink argument. A bool cannot carry CR/LF; there is nothing to sanitize. |
+| 0.0.11 | #530 | path-injection | Dismiss | `pkg/security/fileaccess.go:189` — the `os.Stat(parent)` existence probe inside `ValidateAndCleanPath`'s deepest-existing-ancestor walk. The sink is *inside the sanitizer itself*, after the pre-resolution containment check at lines 160–164 has already proven the path is inside the base, so the pack's `barrierModel` on the function's return value cannot apply. Read-only probe; no path outside the base is ever touched. |
+| 0.0.10 | #1101 | clear-text-logging | Dismiss | Map field-insensitivity FP: `PasswordSet bool` in `stdlib/user/interface.go ToMap()` taints the generic `configMap` used by the hyperv executor; CodeQL propagates taint to `configMap["vhd_path"]` → `cfg.VHDPath` → `seedVHDPath()` → `mediaPath` in `vm_provision.go:876`. `mediaPath` is a filesystem path, not a credential; `PasswordSet` is a boolean flag. No secret value is logged at that site (grep-confirmed). Cannot be modeled (no map-key/field-access barrier primitive). |
+| 0.0.7 | #745, #746 | path-injection | Code fix + model | `git_store.go`: use `cleanedBase` (return value of `ValidateAndCleanPath`) instead of raw `tenantID` in `filepath.Join`. `ValidateAndCleanPath` added as `summaryModel` + `barrierModel` in `path-injection-sanitizers.model.yml`. |
+| 0.0.7 | #669, #713, #714, #715, #722 | log-injection | Model + dismiss | `SanitizeLogValue` `summaryModel(kind=value)` added as belt-and-suspenders over existing `barrierModel` (json.Decode field-selection flows bypass barrierModel alone). Alerts dismissed as FP: all sites already wrap input in `SanitizeLogValue`; the barrierModel is correct but insufficiently reliable. |
+| 0.0.7 | #774, #777 | clear-text-logging | Dismiss | Struct field-insensitivity FP: `keyInfo.ID`/`keyInfo.TenantID` (middleware.go) and `deviceID` (controller_service.go) are non-secret fields; the struct's `Key`/`Token` field is never logged. Cannot be modeled (no field-access barrier primitive). |
+| 0.0.6 | #747–#751 | log-injection | Dismiss | handlers_registration_refresh.go — json.Decode field-selection sources; all sites use `SanitizeLogValue`. Same heuristic-source class as #669–#722. |
+| 0.0.5 | safeJoin | path-injection | Model | `summaryModel` + `barrierModel` for `pkg/storage/providers/flatfile.safeJoin`. |
+
+### 6. Go Native Fuzzing
+
+- **Purpose**: Finds panics and unexpected crashes in parse/decode boundaries under adversarial input — the threat-model-relevant surfaces a compromised steward or malicious config push would hit
+- **Scope**: CFGMS-owned parse surfaces (does NOT fuzz `crypto/x509`, `google.golang.org/protobuf`, or any vendored library's own internals)
+- **Blocking**: **NOT a PR gate** — time-boxed fuzzing is flaky as a required check. Runs nightly via `.github/workflows/fuzz-nightly.yml`
+- **Discovery**: `scripts/fuzz-all.sh` auto-discovers all `Fuzz*` targets via `go test -list '^Fuzz'` for each listed package — any new `Fuzz*` target in a listed package is picked up automatically, no workflow edit needed
+
+**Fuzz targets:**
+
+| Target | File | Surface |
+|--------|------|---------|
+| `FuzzUnmarshalStewardConfig` | `pkg/config/manager_fuzz_test.go` | `yaml.Unmarshal` + `ValidateConfiguration` on steward config payloads (the config-parsing boundary a malformed `cfg push` would hit) |
+| `FuzzReassembleDNA` | `features/controller/transport/dna_handler_fuzz_test.go` | Both `json.Unmarshal` calls in `reassembleDNA` on concatenated steward-supplied `DNAChunk` payload bytes (the compromised-steward-to-controller wire boundary) |
+| `FuzzParseEID` | `pkg/entitygraph/types/eid_fuzz_test.go` | Hand-rolled `ParseEID` parser on steward/directory-supplied identifier strings |
+| `FuzzParseCertificateFromPEM` | `pkg/cert/utils_fuzz_test.go` | PEM decode + `x509.ParseCertificate` (mTLS-everywhere means cert parsing is the highest threat-model-relevant fuzz surface) |
+| `FuzzParseCertificateChainFromPEM` | `pkg/cert/utils_fuzz_test.go` | Multi-block `pem.Decode` loop |
+| `FuzzParsePrivateKeyFromPEM` | `pkg/cert/utils_fuzz_test.go` | PEM block type dispatch to `x509.ParsePKCS1PrivateKey` / `ParsePKCS8PrivateKey` / `ParseECPrivateKey` |
+| `FuzzGzipDecompress` | `features/controller/fleet/storage/compression_fuzz_test.go` | Storage read-back decompression boundary: gzip-decompress then `proto.Unmarshal` into `commonpb.DNA`. Decompression-bomb surface — an attacker writing to the config store's compressed blob could trigger unbounded memory growth. |
+| `FuzzOptimizedDNADecompress` | `features/controller/fleet/storage/compression_fuzz_test.go` | Distinct second decode boundary for the `dna-optimized` compressor: gzip-decompress then `json.Unmarshal` into `serializedOptimizedPayload`, then manual field-by-field reconstruction with index bounds checks. |
+| `FuzzSplitCSVLine` | `features/steward/dna/hardware_parse_fuzz_test.go` | RFC-4180 CSV parser (hardware_parse.go:27) on raw CIM/WMI command output — real untrusted-input boundary when the invoked binary is compromised or its output is truncated/malformed. |
+| `FuzzCimDataRows` | `features/steward/dna/hardware_parse_fuzz_test.go` | Multi-row CSV splitter (hardware_parse.go:55) — exercises header-skip and blank-line-skip logic. |
+| `FuzzParseCIMComputerSystem` | `features/steward/dna/hardware_parse_fuzz_test.go` | Full Win32_ComputerSystem CIM parse pipeline including `strconv.ParseInt` on the TotalPhysicalMemory field. |
+| `FuzzParseCIMMemoryModules` | `features/steward/dna/hardware_parse_fuzz_test.go` | Multi-row memory module parser — sums capacities across arbitrarily many rows; higher combinatorial complexity than single-row parsers. |
+
+> **Why no `FuzzZstdDecompress` or `FuzzLZ4Decompress`:** `ZstdCompressor.Decompress` and `LZ4Compressor.Decompress` are one-line delegates to `GzipCompressor.Decompress` (compression.go:225, :308 — design decision documented at line 219: "zstd/LZ4 compression requires build tags... GZIP is the universal fallback"). A separate fuzz target for either would exercise the exact same code path as `FuzzGzipDecompress` and add zero real coverage.
+
+**Corpus locations:** `<package>/testdata/fuzz/<FuzzName>/` — crash entries are committed as regression fixtures and uploaded as workflow artifacts by `fuzz-nightly.yml`.
+
+**Local run:**
+
+```bash
+# Run a single target for 30 seconds
+go test -run='^$' -fuzz='^FuzzParseEID$' -fuzztime=30s ./pkg/entitygraph/types/
+
+# Run all targets via the auto-discovery script (same as CI)
+./scripts/fuzz-all.sh 30s
+```
+
+### 7. OpenSSF Scorecard
+
+- **Purpose**: Measures supply-chain security posture across 18 checks (dependency pinning, token
+  permissions, code review, branch protection, SAST, fuzzing, and more)
+- **Scope**: `develop` branch state (Scorecard scores the default branch regardless of which branch
+  the workflow runs from)
+- **Blocking**: No — runs post-merge on push to `develop` and weekly; NOT a required PR check
+- **SARIF Support**: Yes (published to GitHub Security tab and to the OSSF public dashboard)
+- **Workflow**: `.github/workflows/scorecard.yml`
+
+#### Baseline (2026-07-24, commit fa292575, Scorecard v5.5.0)
+
+**Overall score: 6.3 / 10**
+
+Scored using Scorecard CLI v5.5.0 with the default `GITHUB_TOKEN` against `develop` commit
+`fa292575`. Two checks (`CII-Best-Practices`, `Vulnerabilities`) hit network errors in the
+container environment and are excluded from the average; they will resolve on the first GitHub
+Actions workflow run (the GHA runner has the required external API access). The score above is the
+real CLI-measured value — the first `workflow_dispatch` after the workflow lands on `develop` will
+produce the definitive GHA-run score.
+
+**Checks at full marks (10/10):** CI-Tests, Dangerous-Workflow, Dependency-Update-Tool, Fuzzing,
+License, Maintained, Packaging, SAST, Security-Policy.
+
+**Checks below full marks — gap list:**
+
+| Check | Score | Gap / Rationale | Owning Story or Status |
+|-------|-------|-----------------|------------------------|
+| Binary-Artifacts | 9/10 | Scorecard detected binaries in the repository | Follow-up investigation |
+| Pinned-Dependencies | 7/10 | ~~Dockerfiles use image tags without SHA digest~~ **Resolved (Issue #3202)**: all six `FROM` lines across `.devcontainer/Dockerfile`, `cmd/steward/Dockerfile{,.debian}` and `Dockerfile.test-runner` are now digest-pinned. Remaining findings are `goCommand` (`go install …@vX.Y.Z` in `security-scan.yml`), `downloadThenRun` (`curl … \| sh` in the devcontainer) and `npmCommand` — see "Accepted risks" below. | Docker image pinning done + digest-drift tracking added to `dependency-pin-check.yml` |
+| CII-Best-Practices | -1/10¹ | No OpenSSF Best Practices badge obtained; expected 0/10 on GHA run | Future improvement |
+| Vulnerabilities | -1/10¹ | OSV scanner failed due to container network restriction; Trivy + Nancy run as blocking gates in `security-scan.yml`; expected 10/10 on GHA run | Covered by existing blocking gates |
+| Token-Permissions | 0/10 | **Resolved (Issue #3202)**: `develop-sanity.yml` and `cla-check.yml` moved their write grants from workflow top level to job level; `test-suite.yml`, `fuzz-nightly.yml` and `dependency-pin-check.yml` gained a top-level `permissions: {}`. Every workflow except `frontend-ci.yml` (which grants only `contents: read`) now starts from default-deny. Three jobs still declare write scopes they genuinely need — see "Accepted risks" below. | Migration done; re-score on the next Scorecard run |
+| Signed-Releases | 0/10 | No releases cut yet; no cosign / sigstore provenance attached | Future — when release process is established |
+| Contributors | 0/10 | 0 contributing organizations; Scorecard rewards multi-org contribution | **Accepted gap — solo-dev model (CLAUDE.md)** |
+| Code-Review | 0/10 | 0 approved changesets found; branch protection deliberately omits required reviewers (CLAUDE.md: "squash-only, no-review, solo-friendly") | **Accepted gap — solo-dev model (CLAUDE.md)**. Will improve to 10/10 when team expansion adds required reviews. |
+| Branch-Protection | 0/10 | Two compounding factors: (1) default `GITHUB_TOKEN` lacks `administration:read` scope, so Scorecard cannot read the branch ruleset — a founder-provisioned fine-grained PAT added as `SCORECARD_READ_TOKEN` is required to unlock this; (2) even with a PAT, branch protection deliberately omits required PR reviewers (CLAUDE.md solo-dev model), which caps the score below 8/10 regardless. | **Accepted gap — solo-dev model (CLAUDE.md)**. PAT provisioning is a founder-owned decision. No `SCORECARD_READ_TOKEN` secret is provisioned by this story. |
+
+¹ `CII-Best-Practices` and `Vulnerabilities` hit network errors during the container CLI run.
+Expected GHA scores: `CII-Best-Practices` → 0/10 (no badge); `Vulnerabilities` → 10/10
+(no unfixed known CVEs in OSV data; Trivy/Nancy blocking gates confirm this).
+
+**Realistic ceiling given the solo-dev model: ~7.5–8.0, not 9.0+**
+
+The source issue's "toward 9.0+" framing is walked back here. Even with all fixable gaps
+resolved (Token-Permissions, Pinned-Dependencies, Binary-Artifacts, Signed-Releases,
+CII-Best-Practices), Code-Review (0/10) and Contributors (0/10) are structurally capped by the
+solo operating model, and Branch-Protection stays below 8/10 without required reviewers. This
+ceiling is structural — not a gap list to chase.
+
+**Fuzzing:** 10/10 (native Go fuzz targets; Scorecard recognises Go native fuzzing since v5). Score
+may improve further as additional fuzz surfaces land from related stories.
+
+#### Accepted risks (Issue #3202)
+
+These Scorecard alerts stay open deliberately. Each has a reason; none is un-triaged.
+
+| Alert | Reason |
+|---|---|
+| `TokenPermissionsID` — `release.yml:publish` (`contents`/`id-token`/`attestations`/`artifact-metadata: write`) | The job's purpose is to publish a signed release. It cannot do that without write. Scoped to one job in a `release` environment. |
+| `TokenPermissionsID` — `codeql-pack-publish.yml:publish` (`packages: write`) | Publishes the CodeQL extension pack to ghcr.io. Write to packages is the job. |
+| `TokenPermissionsID` — `dast-scan.yml:dast-scan` (`security-events: write`) | Uploads ZAP SARIF to the Security tab. Write to security-events is the job. |
+| `PinnedDependenciesID` — `goCommand` (`go install …@vX.Y.Z` in `security-scan.yml`) | Tool installs are version-pinned, and the module checksum database plus `go.sum` provide the integrity guarantee a hash pin would. `dependency-pin-check.yml` already tracks these versions weekly. |
+| `PinnedDependenciesID` — `downloadThenRun` / `npmCommand` (`.devcontainer/Dockerfile`) | Developer container only — never part of a released artifact or of any steward/controller image. Every other `npm install -g` in this Dockerfile (Codex, OpenCode) is version-pinned and tracked by `dependency-pin-check.yml`. Claude Code is the one deliberate exception (founder decision 2026-10-01, Issue #4473): it installs npm's `stable` dist-tag at build time instead of a pin, because its release cadence (several times a week) makes a hand-maintained pin lag constantly; the resolved version is recorded as the `cfgms.claude_code_version` image label instead. See `.claude/skills/refresh-pins/references/cooldown-policy.md`. |
+| `CodeReviewID` (0/10), `Contributors` (0/10), `BranchProtectionID` | Structural to the solo operating model documented in `CLAUDE.md` (squash-only, no required reviewers). Not a gap to chase — see "Realistic ceiling" above. |
+| `CIIBestPracticesID` | No OpenSSF Best Practices badge obtained. Applying for one is a founder-owned decision, not a code change. |
+| `VulnerabilitiesID` | OSV scanner network failure in the container run. Trivy and Nancy run as blocking gates and cover the same ground; expected 10/10 on a GHA run. |
+
+**Base-image digests are now tracked.** Digest pinning freezes the image, so a patched re-push of the
+same tag is no longer picked up automatically. `dependency-pin-check.yml` resolves each pinned
+`FROM … @sha256:…` against the tag's current digest on its weekly run and reports drift into the
+`dependency-pins` issue, so a stale base image surfaces the same way a stale tool version does.
+
+### 8. OWASP ZAP — Dynamic Application Security Testing
+
+- **Purpose**: Unauthenticated baseline DAST scan (spider + passive rules) against the controller's single HTTPS listener, covering both the REST API and the embedded SPA (`features/controller/api/spa.go`).
+- **Scope**: Public surface only — no authenticated crawl. Authenticated DAST is a follow-on story.
+- **Blocking**: Advisory — not a required merge-queue check. Findings are visible in the workflow artifacts; see below for the escalation path.
+- **Workflow file**: `.github/workflows/dast-scan.yml`
+- **Triggers**: `workflow_dispatch` (manual) + weekly schedule (Sunday 03:00 UTC).
+
+#### Controller bootstrap (no external DB needed)
+
+The scan uses a self-contained flatfile-storage controller:
+- `DefaultConfig().Storage.Provider` = `"flatfile"` — no `CFGMS_STORAGE_PROVIDER` override needed, no database service.
+- Certs auto-generated by `pkg/cert.Manager` on first boot into the mounted `/app/certs` volume.
+- `CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080` overrides the loopback-only default (`127.0.0.1:8080`, Story #1919) so ZAP can reach the container. ZAP's Docker container runs with `--network=host` (see zaproxy/action-baseline source), making `localhost:8080` reachable.
+- **`CFGMS_ENABLE_TEST_ENDPOINTS` and `CFGMS_SEED_TEST_TOKENS` are NOT set.** The DAST target runs with production auth posture.
+
+#### ZAP self-signed cert
+
+ZAP's baseline scan sends requests directly to the target and does not validate the server's certificate chain by design (it is a DAST tool, not a browser). The controller's auto-generated cert includes `localhost` as a SAN, so ZAP's hostname resolution is correct even if chain validation were enabled.
+
+#### Rules file (`.zap/rules.tsv`)
+
+Suppresses known-acceptable false positives for the CI scanning surface. Format:
+
+```
+# Comment
+plugin_id<TAB>threshold
+# threshold: IGNORE | INFO | LOW | MEDIUM | HIGH | FAIL
+```
+
+Populate this file after the first manual run reveals the alert baseline. Only suppress confirmed false positives that are specific to the CI context (localhost, self-signed cert, flatfile storage) — do not suppress production-relevant findings.
+
+#### Artifacts and findings
+
+- **Workflow artifacts**: ZAP HTML, JSON, and Markdown reports are uploaded as `zap-dast-report` (30-day retention).
+- **SARIF**: `zaproxy/action-baseline` does not generate SARIF natively. Use the JSON artifact to review findings. A follow-on story can add a SARIF converter step and upload to the Security tab.
+
+#### Escalation path for findings
+
+1. Run `workflow_dispatch` → download `zap-dast-report` artifact.
+2. Review the HTML report for findings at MEDIUM/HIGH severity.
+3. Genuine issues → fix the code and open a PR.
+4. Confirmed false positives specific to CI surface → add an IGNORE entry in `.zap/rules.tsv` with a comment explaining why.
+5. Suppress nothing blindly — every entry in `rules.tsv` must have a justification comment.
+
+### 9. Snyk & SonarCloud — Tool Evaluation
+
+This section records the explicit keep/drop decision for Snyk and SonarCloud, evaluated against
+the security tooling stack already running in CI (§§1–8 above). The evaluation answers the
+acceptance criterion originally scoped in Issue #2930 and landed via Issue #3083.
+
+#### Snyk — Decision: DROP
+
+- **Purpose**: Developer-first SCA (Software Composition Analysis) platform combining CVE scanning
+  of dependencies (`snyk test`), container image scanning (`snyk container test`), and SAST
+  (`snyk code test`).
+- **Unique coverage over the existing stack**: Minimal.
+  - CVE / dependency scanning: Trivy (§1) already scans the filesystem for CRITICAL/HIGH CVEs and
+    is a blocking PR gate; Nancy (§2) specifically targets Go module vulnerabilities using OSV
+    data. Snyk's SCA surface is a subset of what Trivy + Nancy already cover.
+  - Container image scanning: Trivy (`--scanners vuln`) covers Docker images; the
+    `security-deployment-gate` already runs Trivy with `--exit-code 1` in `production-gates.yml`.
+  - SAST (`snyk code`): pattern-based; CodeQL (§5) provides deeper whole-program data-flow /
+    taint-tracking analysis for the same vulnerability classes (path-injection, log-injection,
+    clear-text logging). gosec (§3) covers Go-specific security anti-patterns. Snyk Code would be
+    a weaker, overlapping signal with no gap to fill.
+- **Operational cost**: new `SNYK_TOKEN` organization secret required; new CI job to maintain;
+  SaaS dependency; paid tier required for private repositories beyond the OSS free quota.
+- **Decision: DROP.** The existing Trivy + Nancy + gosec + CodeQL stack covers Snyk's entire scope
+  with a blocking gate (Trivy) and deeper semantic analysis (CodeQL). Adding Snyk would increase
+  operational surface and introduce a SaaS dependency without adding unique detection capability.
+
+#### SonarCloud — Decision: DROP
+
+- **Purpose**: Cloud-based code quality and security analysis platform offering quality rules,
+  security hotspot detection, and taint-flow analysis across Go and TypeScript in a unified
+  dashboard.
+- **Unique coverage over the existing stack**: Marginal.
+  - Go quality and security rules: staticcheck (§4) covers 47 categories of code quality and
+    correctness; gosec (§3) covers Go security anti-patterns. SonarCloud's Go ruleset is largely a
+    subset of what these two tools already report.
+  - TypeScript security analysis: CodeQL (§5) was extended to TypeScript during Issue #2930
+    (`language: ['go', 'typescript']`), providing deep data-flow analysis for the SPA. The lint
+    gate also runs `eslint-plugin-security` for pattern-based TypeScript security checks.
+  - Multi-language unified dashboard: provides a single-pane view, but all gate results are already
+    visible in the GitHub Security tab via SARIF (Trivy, gosec, CodeQL all upload SARIF). The
+    incremental value of a separate SonarCloud dashboard is low in the solo-dev model.
+- **Operational cost**: new `SONAR_TOKEN` organization secret required; new CI job to maintain;
+  paid tier required for private repositories (the free SonarCloud tier is OSS/public-repo only;
+  CFGMS is AGPL-3.0 but the repository is private); multi-language scan setup adds maintenance
+  complexity.
+- **Decision: DROP.** The existing staticcheck + gosec + CodeQL (Go + TypeScript) + eslint-plugin-security
+  stack covers SonarCloud's scope. The unified-dashboard benefit is not material given SARIF already
+  surfaces all findings in the GitHub Security tab. Operational cost (new secret, new CI job, paid
+  subscription for private repo) is not justified by the marginal incremental coverage.
 
 ## Local Development Workflow
 
@@ -81,8 +406,8 @@ make install-nancy
 
 # Install individual tools (Ubuntu/Debian)
 sudo apt-get install trivy
-go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
-go install honnef.co/go/tools/cmd/staticcheck@2026.1
+go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
 ```
 
 ### Development Security Commands
@@ -101,7 +426,7 @@ make security-scan-nonblocking
 make security-remediation-report
 
 # Unified development validation
-make test-with-security
+make test-commit
 ```
 
 ### Integration with CLAUDE.md Workflow
@@ -113,7 +438,7 @@ The security workflow is integrated into the mandatory CLAUDE.md development pro
 make security-scan  # MUST pass before proceeding
 
 # Alternative: Unified validation (RECOMMENDED)
-make test-with-security  # Runs: test + security-scan + summary
+make test-commit  # Runs: test + lint + security-scan
 ```
 
 ## GitHub Actions Integration
@@ -150,17 +475,17 @@ make test-with-security  # Runs: test + security-scan + summary
 
 **Security Gate Features**:
 
-- Critical/High vulnerability blocking
+- Critical/High vulnerability blocking via Trivy (`--exit-code 1`)
 - Emergency override mechanism
 - Comprehensive audit trail
-- Automated notifications
 - Integration with existing release gates
+
+**Scope**: `security-deployment-gate` runs only the blocking Trivy scan. Advisory tools (nancy, gosec, staticcheck) run as non-required contexts in `security-scan.yml` and are not executed here.
 
 **Gate Flow**:
 
-1. `security-deployment-gate` - Primary security validation
+1. `security-deployment-gate` - Primary security validation (Trivy only)
 2. `production-risk-assessment` - Risk analysis (requires security approval)
-3. `deployment-notification` - Automated status notifications
 
 ## Production Deployment Gates
 
@@ -224,7 +549,6 @@ Every override creates comprehensive audit documentation:
 **Audit Artifacts**:
 
 - `security-deployment-audit` (90-day retention)
-- `deployment-notification` (30-day retention)
 
 ### Post-Override Requirements
 
@@ -393,13 +717,10 @@ The security workflow collects the following metrics:
 
 ```bash
 # Workflow effectiveness analysis
-make analyze-security-metrics
+make security-workflow-metrics
 
 # Performance benchmarking
 make benchmark-security-workflow
-
-# Developer experience survey
-make security-workflow-survey
 ```
 
 ### Metrics Dashboard

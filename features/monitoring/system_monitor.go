@@ -360,6 +360,12 @@ func (sm *SystemMonitor) Start(ctx context.Context) error {
 	go sm.metricsCollectionLoop(ctx)
 
 	if sm.config.EnableResourceMonitoring {
+		// Collect resource metrics synchronously before returning so that a
+		// snapshot read by GetResourceMetrics is populated as soon as Start
+		// returns. Deferring the first sample to the ticker (or to a goroutine)
+		// makes availability depend on scheduling and on ResourceInterval
+		// elapsing, which leaves consumers observing a zero-valued snapshot.
+		sm.collectResourceMetrics(ctx)
 		go sm.resourceMonitoringLoop(ctx)
 	}
 
@@ -457,8 +463,15 @@ func (sm *SystemMonitor) GetMetrics() *SystemMetrics {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	// Return a copy to prevent external modification
+	// Return a copy to prevent external modification. The shallow struct copy
+	// shares the ComponentMetrics map with the live systemMetrics, so deep-copy
+	// it under the lock to avoid a data race with concurrent writes in
+	// collectMetrics (which runs on the metrics collection goroutine).
 	metrics := *sm.systemMetrics
+	metrics.ComponentMetrics = make(map[string]interface{}, len(sm.systemMetrics.ComponentMetrics))
+	for name, value := range sm.systemMetrics.ComponentMetrics {
+		metrics.ComponentMetrics[name] = value
+	}
 	return &metrics
 }
 

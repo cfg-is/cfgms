@@ -7,6 +7,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	_ "github.com/lib/pq"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -89,11 +92,70 @@ func NewFileBackend(config *Config, logger logging.Logger) (*FileBackend, error)
 	return backend, nil
 }
 
+// validateHashPathComponent rejects any content hash that is not the exact shape
+// ContentHash produces (64 lowercase hex characters).
+//
+// The hash originates in DNA.aggregate_root, an arbitrary steward-supplied
+// string, and FileBackend interpolates it into a filesystem path. filepath.Join
+// cleans "../" segments rather than rejecting them, so an unvalidated hash such
+// as "../../../../etc/cron.d/x" escapes basePath and turns StoreRecord into an
+// arbitrary file write (and GetRecord into an arbitrary read). Validating the
+// component is the only thing standing between the two.
+func validateHashPathComponent(contentHash string) error {
+	if !sdna.IsValidAggregateRoot(contentHash) {
+		return fmt.Errorf("invalid content hash: must be %d lowercase hex characters", sdna.AggregateRootHexLen)
+	}
+	return nil
+}
+
+// safePathComponent returns a filesystem-safe representation of s for use as a
+// single path component.
+//
+// Values that are already safe (non-empty, no path separators, no "."/".."
+// traversal, no characters outside the conservative set below) are returned
+// unchanged so operators keep readable filenames. Anything else is replaced by
+// its SHA-256 digest, which is deterministic and injective — a lossy
+// character-substitution scheme would let two distinct device IDs collide onto
+// one reference file and silently drop a record.
+func safePathComponent(s string) string {
+	if isSafePathComponent(s) {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("id-%x", sum[:])
+}
+
+// maxSafePathComponentLen bounds a path component well below the 255-byte limit
+// common to ext4, APFS and NTFS, leaving room for the hash prefix and suffix
+// that FileBackend concatenates around it.
+const maxSafePathComponentLen = 128
+
+func isSafePathComponent(s string) bool {
+	if s == "" || len(s) > maxSafePathComponentLen || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // StoreRecord stores a DNA record with compressed data to the filesystem
 func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compressedData []byte) error {
 	// Create file path based on shard and content hash
+	if err := validateHashPathComponent(record.ContentHash); err != nil {
+		return fmt.Errorf("refusing to store DNA record: %w", err)
+	}
 	fileName := fmt.Sprintf("%s.dna", record.ContentHash)
-	filePath := filepath.Join(b.basePath, record.ShardID, fileName)
+	filePath := filepath.Join(b.basePath, safePathComponent(record.ShardID), fileName)
 
 	// Create record data structure for storage
 	recordData := struct {
@@ -115,14 +177,9 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 		return fmt.Errorf("failed to write record file: %w", err)
 	}
 
-	hashDisplay := record.ContentHash
-	if len(hashDisplay) > 16 {
-		hashDisplay = hashDisplay[:16]
-	}
-
 	b.logger.Debug("DNA record stored to file",
 		"device_id", record.DeviceID,
-		"content_hash", hashDisplay,
+		"content_hash", shortHash(record.ContentHash),
 		"file_path", filePath,
 		"file_size", len(data))
 
@@ -131,9 +188,14 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 
 // StoreReference stores a reference to existing content
 func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) error {
-	// For file backend, references are stored as separate files
-	fileName := fmt.Sprintf("%s_ref_%s.json", record.ContentHash, record.DeviceID)
-	filePath := filepath.Join(b.basePath, record.ShardID, "refs", fileName)
+	// For file backend, references are stored as separate files. Both
+	// interpolated components are attacker-influenced: the content hash comes
+	// from DNA.aggregate_root and the device ID from the registering steward.
+	if err := validateHashPathComponent(record.ContentHash); err != nil {
+		return fmt.Errorf("refusing to store DNA reference: %w", err)
+	}
+	fileName := fmt.Sprintf("%s_ref_%s.json", record.ContentHash, safePathComponent(record.DeviceID))
+	filePath := filepath.Join(b.basePath, safePathComponent(record.ShardID), "refs", fileName)
 
 	// Ensure refs directory exists
 	if err := os.MkdirAll(filepath.Dir(filePath), 0750); err != nil {
@@ -151,14 +213,9 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 		return fmt.Errorf("failed to write reference file: %w", err)
 	}
 
-	hashDisplay := record.ContentHash
-	if len(hashDisplay) > 16 {
-		hashDisplay = hashDisplay[:16]
-	}
-
 	b.logger.Debug("DNA reference stored to file",
 		"device_id", record.DeviceID,
-		"content_hash", hashDisplay,
+		"content_hash", shortHash(record.ContentHash),
 		"ref_file", filePath)
 
 	return nil
@@ -166,14 +223,18 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 
 // GetRecord retrieves a DNA record by content hash and shard
 func (b *FileBackend) GetRecord(ctx context.Context, contentHash, shardID string) (*DNARecord, error) {
+	if err := validateHashPathComponent(contentHash); err != nil {
+		return nil, fmt.Errorf("refusing to read DNA record: %w", err)
+	}
 	fileName := fmt.Sprintf("%s.dna", contentHash)
-	filePath := filepath.Join(b.basePath, shardID, fileName)
+	filePath := filepath.Join(b.basePath, safePathComponent(shardID), fileName)
 
 	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("DNA record not found: content_hash=%s, shard_id=%s", contentHash[:16], shardID)
+			return nil, fmt.Errorf("DNA record not found: content_hash=%s, shard_id=%s",
+				shortHash(contentHash), logging.SanitizeLogValue(shardID))
 		}
 		return nil, fmt.Errorf("failed to read record file: %w", err)
 	}
@@ -193,6 +254,12 @@ func (b *FileBackend) GetRecord(ctx context.Context, contentHash, shardID string
 
 // HasContent checks if content with the given hash already exists
 func (b *FileBackend) HasContent(ctx context.Context, contentHash string) (bool, error) {
+	// A malformed hash cannot name a stored record, and probing with it would
+	// turn the dedup lookup into a filesystem-existence oracle outside basePath.
+	if err := validateHashPathComponent(contentHash); err != nil {
+		return false, fmt.Errorf("refusing to look up DNA content: %w", err)
+	}
+
 	// Check all shards for the content
 	shardDirs := []string{"default"}
 	if b.config.EnableSharding {
@@ -298,8 +365,16 @@ type DatabaseBackend struct {
 
 // NewDatabaseBackend creates a new PostgreSQL-based DNA storage backend
 func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend, error) {
-	// Get connection string from environment or config
-	connString := os.Getenv("CFGMS_DNA_DATABASE_URL")
+	// Get connection string: config field > environment variable (or its
+	// _FILE-delivered companion, ADR-030) > individual env vars.
+	connString := config.DatabaseURL
+	if connString == "" {
+		var err error
+		connString, _, err = controllerconfig.ResolveEnvValue("CFGMS_DNA_DATABASE_URL")
+		if err != nil {
+			return nil, err
+		}
+	}
 	if connString == "" {
 		var err error
 		connString, err = buildDNAConnString()
@@ -383,6 +458,11 @@ func (b *DatabaseBackend) StoreRecord(ctx context.Context, record *DNARecord, co
 		record.CompressedSize,
 		record.CompressionRatio,
 		record.ShardID,
+		record.TenantID,
+		"", // os — flat attributes path retired (Issue #3329)
+		"", // architecture — flat attributes path retired
+		"", // hostname — flat attributes path retired
+		record.Status,
 	)
 
 	if err != nil {
@@ -589,7 +669,14 @@ func (b *DatabaseBackend) initializeSchema() error {
 			compression_ratio REAL NOT NULL,
 			shard_id TEXT NOT NULL DEFAULT 'default',
 			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-			
+
+			-- Fleet query fields extracted from DNA attributes for efficient filtering
+			tenant_id TEXT NOT NULL DEFAULT '',
+			os TEXT NOT NULL DEFAULT '',
+			architecture TEXT NOT NULL DEFAULT '',
+			hostname TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+
 			-- Ensure unique version per device
 			UNIQUE(device_id, version)
 		);
@@ -604,6 +691,12 @@ func (b *DatabaseBackend) initializeSchema() error {
 
 		-- GIN index for JSONB queries (PostgreSQL-specific)
 		CREATE INDEX IF NOT EXISTS idx_dna_json_gin ON dna_history USING GIN(dna_json);
+
+		-- Fleet query indexes for efficient filtered searches
+		CREATE INDEX IF NOT EXISTS idx_dna_tenant ON dna_history(tenant_id);
+		CREATE INDEX IF NOT EXISTS idx_dna_os ON dna_history(os);
+		CREATE INDEX IF NOT EXISTS idx_dna_architecture ON dna_history(architecture);
+		CREATE INDEX IF NOT EXISTS idx_dna_status ON dna_history(status);
 
 		-- Reference table for deduplication
 		CREATE TABLE IF NOT EXISTS dna_references (
@@ -631,9 +724,18 @@ func (b *DatabaseBackend) initializeSchema() error {
 		);
 
 		-- Insert initial statistics
-		INSERT INTO storage_stats (stat_name, stat_value) 
+		INSERT INTO storage_stats (stat_name, stat_value)
 		VALUES ('total_records', '0'), ('total_devices', '0'), ('schema_version', '1')
 		ON CONFLICT (stat_name) DO NOTHING;
+
+		-- Minimal device-to-tenant mapping written at registration time (Issue #3324).
+		-- Independent of dna_history so tenant resolution survives retiring the flat DNARecord store.
+		CREATE TABLE IF NOT EXISTS device_tenant (
+			device_id TEXT NOT NULL PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			registered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_device_tenant_tenant ON device_tenant(tenant_id);
 	`
 
 	if _, err := b.db.Exec(schema); err != nil {
@@ -649,21 +751,47 @@ func (b *DatabaseBackend) prepareStatements() error {
 	var err error
 
 	// Insert DNA record statement
+	// ON CONFLICT keeps the write idempotent when two DNA snapshots for the same
+	// device resolve to the same version (GetNextVersion runs outside this insert's
+	// transaction, so a duplicate/concurrent publish can collide on the
+	// UNIQUE(device_id, version) constraint). The latest snapshot wins.
 	b.stmts.insertRecord, err = b.db.Prepare(`
-		INSERT INTO dna_history 
-		(device_id, timestamp, version, dna_json, content_hash, 
-		 original_size, compressed_size, compression_ratio, shard_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO dna_history
+		(device_id, timestamp, version, dna_json, content_hash,
+		 original_size, compressed_size, compression_ratio, shard_id,
+		 tenant_id, os, architecture, hostname, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			timestamp=EXCLUDED.timestamp,
+			dna_json=EXCLUDED.dna_json,
+			content_hash=EXCLUDED.content_hash,
+			original_size=EXCLUDED.original_size,
+			compressed_size=EXCLUDED.compressed_size,
+			compression_ratio=EXCLUDED.compression_ratio,
+			shard_id=EXCLUDED.shard_id,
+			tenant_id=EXCLUDED.tenant_id,
+			os=EXCLUDED.os,
+			architecture=EXCLUDED.architecture,
+			hostname=EXCLUDED.hostname,
+			status=EXCLUDED.status
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			content_hash=EXCLUDED.content_hash,
+			timestamp=EXCLUDED.timestamp,
+			shard_id=EXCLUDED.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert reference statement: %w", err)
@@ -760,12 +888,18 @@ func (b *DatabaseBackend) calculateStats() error {
 }
 
 // buildDNAConnString constructs a PostgreSQL connection string from individual env vars.
-// CFGMS_DNA_DB_PASSWORD is required — no hardcoded defaults for credentials.
+// CFGMS_DNA_DB_PASSWORD is required — no hardcoded defaults for credentials. Like
+// CFGMS_DNA_DATABASE_URL above, it may be delivered directly or via its
+// CFGMS_DNA_DB_PASSWORD_FILE companion (ADR-030) — the same sealed-credential
+// delivery already used for CFGMS_STORAGE_DB_PASSWORD.
 func buildDNAConnString() (string, error) {
-	password := os.Getenv("CFGMS_DNA_DB_PASSWORD")
+	password, _, err := controllerconfig.ResolveEnvValue("CFGMS_DNA_DB_PASSWORD")
+	if err != nil {
+		return "", err
+	}
 	if password == "" {
 		return "", fmt.Errorf("CFGMS_DNA_DB_PASSWORD environment variable is required for DNA database backend. " +
-			"Set this variable or use CFGMS_DNA_DATABASE_URL for a full connection string. " +
+			"Set this variable (or CFGMS_DNA_DB_PASSWORD_FILE) or use CFGMS_DNA_DATABASE_URL for a full connection string. " +
 			"See docs/deployment/ for configuration examples")
 	}
 

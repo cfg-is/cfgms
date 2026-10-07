@@ -5,30 +5,82 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gorilla/mux"
 
+	_ "modernc.org/sqlite"
+
+	configsignature "github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	_ "modernc.org/sqlite"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// testBlastRadiusPolicyStore is a real in-memory BlastRadiusPolicyStore (Issue #3698),
+// mirroring testAssurancePolicyStore's shape (assurance_resolve_test.go) — a genuine
+// implementation of the interface, not a mock.
+type testBlastRadiusPolicyStore struct {
+	mu       sync.RWMutex
+	policies map[string]*business.BlastRadiusPolicy
+}
+
+func newTestBlastRadiusPolicyStore() *testBlastRadiusPolicyStore {
+	return &testBlastRadiusPolicyStore{policies: make(map[string]*business.BlastRadiusPolicy)}
+}
+
+func (s *testBlastRadiusPolicyStore) GetPolicy(_ context.Context, tenantID string) (*business.BlastRadiusPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.policies[tenantID]; ok {
+		cp := *p
+		return &cp, nil
+	}
+	return &business.BlastRadiusPolicy{TenantID: tenantID, MaxTargets: nil}, nil
+}
+
+func (s *testBlastRadiusPolicyStore) SetPolicy(_ context.Context, p *business.BlastRadiusPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *p
+	s.policies[p.TenantID] = &cp
+	return nil
+}
+
 // withPrincipal injects a principal + its tenant into the request context exactly
-// as authenticationMiddleware does for an mTLS admin cert (Issue #1990).
+// as authenticationMiddleware does for an mTLS admin cert (Issue #1990), including
+// the TenantScope authenticationMiddleware sets alongside it (Issue #4316/#4334,
+// #4335) — an empty TenantID is treated as root scope, mirroring
+// scopeForVerifiedAdminCert, tenant scope otherwise. Without this, a handler
+// that switched from the legacy TenantID string to isAuthorizedForTenant (or to
+// reading TenantScope directly) sees every test caller as unset-scope and fails
+// closed, even though p.TenantID says the caller is authorized.
 func withPrincipal(req *http.Request, p *Principal) *http.Request {
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, fixtureCallerTenant(p.TenantID))
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
 	return req.WithContext(ctx)
 }
 
@@ -43,7 +95,8 @@ func postRunWithPrincipal(t *testing.T, handler http.HandlerFunc, path string, p
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, fixtureCallerTenant(p.TenantID))
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -81,10 +134,14 @@ func newTestRunManager(t *testing.T) *controllerrun.Manager {
 }
 
 // newTestRunQueue creates a real ExecutionQueue backed by an in-memory store.
-func newTestRunQueue() *scriptmodule.ExecutionQueue {
+// Registers cleanup via t so the queue's EphemeralKeyManager goroutine is stopped.
+func newTestRunQueue(t *testing.T) *scriptmodule.ExecutionQueue {
+	t.Helper()
 	monitor := scriptmodule.NewExecutionMonitor()
 	keyManager := scriptmodule.NewEphemeralKeyManager()
-	return scriptmodule.NewExecutionQueue(monitor, keyManager, 0, "", nil, nil, 0)
+	queue := scriptmodule.NewExecutionQueue(monitor, keyManager, 0, "", nil, nil, 0)
+	t.Cleanup(queue.Stop)
+	return queue
 }
 
 // setupRunServer creates a test server wired with a run manager, execution queue,
@@ -94,41 +151,144 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	server := setupTestServer(t)
 
 	manager := newTestRunManager(t)
-	queue := newTestRunQueue()
+	queue := newTestRunQueue(t)
 
 	server.SetRunManager(manager, queue)
-	server.fleetQuery = &staticRunFleetQuery{results: stewards}
+	// ADR-031 Decision 3, Issue #3764: run synthesis and enforceExecTenantScope now
+	// share the single fleetQuery field (retires the Issue #3495 clusterFleetQuery
+	// split). Overridden here so the static steward fixtures reach both code paths.
+	static := &staticRunFleetQuery{results: stewards}
+	server.fleetQuery = static
+
+	// Issue #3694: operator-signature verification for POST /runs/command now runs
+	// unconditionally (no longer gated on SecurityProfilePublicBeta), so every test
+	// that dispatches an inline command needs a working cert manager to verify
+	// against — wire one here rather than per-test.
+	server.certManager = newTLSTestCertManager(t)
 
 	return server, manager, queue
 }
 
-// postRunScript sends POST /api/v1/runs/script with the given request body.
-func postRunScript(t *testing.T, server *Server, apiKey string, body interface{}) *httptest.ResponseRecorder {
+// signedOperatorEnvelopeFields signs content as an operator envelope bound to
+// targets and returns the request-body fields handlePostRunCommand now requires
+// unconditionally (Issue #3694): signature, targets, nonce, expires_at. The operator
+// cert is issued by server's own certManager so it chains to the CA the controller
+// verifies against, and carries the payload-signing marker.
+//
+// Payload-signing marker, not admin (Issue #3696): validatePublicBetaCommandSignature
+// requires the same credential type cfg now signs with and the steward now verifies on
+// delivery. Minting an admin-marked cert here would let a controller-side regression
+// pass CI while the real end-to-end path is inoperable. Test files are exempt from
+// SetPayloadSigningMarker's restricted-caller allow-list
+// (TestSetPayloadSigningMarker_Architecture).
+func signedOperatorEnvelopeFields(t *testing.T, server *Server, content []byte, shell string, targets []string) map[string]interface{} {
+	t.Helper()
+	return signedOperatorEnvelopeFieldsWithMarker(t, server, content, shell, targets, cert.SetPayloadSigningMarker)
+}
+
+// signedOperatorEnvelopeFieldsWithMarker is signedOperatorEnvelopeFields with the
+// issued operator cert's marker under test control, so the negative case (an
+// admin-bundle-shaped credential) can be driven through the real request path.
+func signedOperatorEnvelopeFieldsWithMarker(t *testing.T, server *Server, content []byte, shell string, targets []string, marker func(*x509.Certificate)) map[string]interface{} {
+	t.Helper()
+	require.NotNil(t, server.certManager, "test server must have a certManager to sign an operator envelope")
+
+	operator, err := server.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "test-operator",
+		ValidityDays:     1,
+		KeySize:          2048,
+		ClientID:         "test-operator",
+		TemplateModifier: marker,
+	})
+	require.NoError(t, err)
+
+	nonceBytes := make([]byte, 16)
+	_, err = rand.Read(nonceBytes)
+	require.NoError(t, err)
+
+	envelope := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     hex.EncodeToString(nonceBytes),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	canonical, err := operatorpayload.CanonicalBytes(envelope)
+	require.NoError(t, err)
+
+	signer, err := configsignature.NewSigner(&configsignature.SignerConfig{
+		PrivateKeyPEM:  operator.PrivateKeyPEM,
+		CertificatePEM: operator.CertificatePEM,
+	})
+	require.NoError(t, err)
+	signedContent, err := signer.Sign(canonical)
+	require.NoError(t, err)
+
+	return map[string]interface{}{
+		"signature": map[string]interface{}{
+			"algorithm":  string(signedContent.Algorithm),
+			"value":      signedContent.Signature,
+			"public_key": string(operator.CertificatePEM),
+		},
+		"targets":    envelope.Targets,
+		"nonce":      envelope.Nonce,
+		"expires_at": envelope.ExpiresAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// withEnvelopeFields merges signedOperatorEnvelopeFields' output into a request body
+// map, for tests that build their body inline.
+func withEnvelopeFields(body map[string]interface{}, envelopeFields map[string]interface{}) map[string]interface{} {
+	for k, v := range envelopeFields {
+		body[k] = v
+	}
+	return body
+}
+
+// runPrincipal returns a Strong-assurance principal holding exactly the given
+// permissions, for the given tenant. steward:execute-scripts requires
+// AssuranceStrong as of Issue #3687, so a Machine-assurance API-key principal can
+// no longer reach POST/DELETE /runs/* — postRunScript, postRunCommand and deleteRun
+// present this principal through requirePermission directly instead of X-API-Key.
+// Strong assurance is safe to use unconditionally here even for negative-permission
+// tests: hasPermission is checked before the assurance floor, so a principal missing
+// the relevant permission still gets 403 regardless of its assurance level.
+func runPrincipal(id string, perms []string, tenantID string) *Principal {
+	return &Principal{ID: id, Assurance: session.AssuranceStrong, Permissions: perms, TenantID: tenantID}
+}
+
+// postRunScript sends POST /api/v1/runs/script through the same
+// requirePermission("steward","execute-scripts") gate routes_runs.go registers.
+func postRunScript(t *testing.T, server *Server, principal *Principal, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/script", bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostRunScript))
+	handler.ServeHTTP(rec, req)
 	return rec
 }
 
-// postRunCommand sends POST /api/v1/runs/command with the given request body.
-func postRunCommand(t *testing.T, server *Server, apiKey string, body interface{}) *httptest.ResponseRecorder {
+// postRunCommand sends POST /api/v1/runs/command through the same
+// requirePermission("steward","execute-scripts") gate routes_runs.go registers.
+func postRunCommand(t *testing.T, server *Server, principal *Principal, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/command", bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostRunCommand))
+	handler.ServeHTTP(rec, req)
 	return rec
 }
 
-// getRun sends GET /api/v1/runs/{runID}.
+// getRun sends GET /api/v1/runs/{runID}. steward:read-scripts is unaffected by
+// Issue #3687, so this keeps going through the router with an X-API-Key credential.
 func getRun(t *testing.T, server *Server, apiKey, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil)
@@ -138,7 +298,9 @@ func getRun(t *testing.T, server *Server, apiKey, runID string) *httptest.Respon
 	return rec
 }
 
-// getRunJobs sends GET /api/v1/runs/{runID}/jobs.
+// getRunJobs sends GET /api/v1/runs/{runID}/jobs. steward:read-scripts is
+// unaffected by Issue #3687, so this keeps going through the router with an
+// X-API-Key credential.
 func getRunJobs(t *testing.T, server *Server, apiKey, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/jobs", nil)
@@ -148,13 +310,16 @@ func getRunJobs(t *testing.T, server *Server, apiKey, runID string) *httptest.Re
 	return rec
 }
 
-// deleteRun sends DELETE /api/v1/runs/{runID}.
-func deleteRun(t *testing.T, server *Server, apiKey, runID string) *httptest.ResponseRecorder {
+// deleteRun sends DELETE /api/v1/runs/{runID} through the same
+// requirePermission("steward","execute-scripts") gate routes_runs.go registers.
+func deleteRun(t *testing.T, server *Server, principal *Principal, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/runs/"+runID, nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"run_id": runID})
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handleDeleteRun))
+	handler.ServeHTTP(rec, req)
 	return rec
 }
 
@@ -169,9 +334,9 @@ func TestPostRunScript_TwoStewardFanout(t *testing.T) {
 		{ID: "steward-002", TenantID: "test-tenant"},
 	}
 	server, manager, queue := setupRunServer(t, stewards)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunScript(t, server, apiKey, map[string]interface{}{
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/deploy.sh",
 		"params":    map[string]string{"env": "prod"},
@@ -212,6 +377,24 @@ func TestPostRunScript_TwoStewardFanout(t *testing.T) {
 	}
 }
 
+// TestPostRunScript_CrossTenantExplicitID_Forbidden is the [REQUIRED TEST] for
+// Issue #4335: a tenant A caller cannot re-run a script against a tenant B
+// steward by naming it explicitly via an id: selector.
+func TestPostRunScript_CrossTenantExplicitID_Forbidden(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "steward-tenant-b", TenantID: "tenant-b"},
+	}
+	server, _, _ := setupRunServer(t, stewards)
+	execPrincipal := runPrincipal("exec-caller-a", []string{"steward:execute-scripts"}, "tenant-a")
+
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
+		"target":    "id:steward-tenant-b",
+		"script_id": "scripts/deploy.sh",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"tenant-a caller must not be able to run a script against tenant-b's steward: %s", rec.Body.String())
+}
+
 // ---- [REQUIRED TEST] admin mTLS (empty-tenant) run dispatch (Issue #1990) ---
 
 // TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized proves the Issue #1990 fix:
@@ -222,17 +405,64 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
 
-	body := map[string]interface{}{
+	body := withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	}
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"}))
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
 	assert.Equal(t, http.StatusOK, rec.Code, "admin exec should reach run synthesis; body: %s", rec.Body.String())
+}
+
+// TestRunCommandRequiresAndPreservesOperatorSignature verifies Issue #3694's
+// controller-side AC: operator-signature verification runs unconditionally for
+// POST /api/v1/runs/command — regardless of SecurityProfile, not just public-beta —
+// and the signed envelope's target/nonce/expiry fields are forwarded to the steward
+// unmodified alongside the existing signature metadata.
+func TestRunCommandRequiresAndPreservesOperatorSignature(t *testing.T) {
+	const content = "hostname"
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, queue := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true}
+
+	// Well-formed targets/nonce/expires_at but no signature — isolates the
+	// signature-required check from the expires_at parse check.
+	unsigned := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+		"target":     "id:steward-1",
+		"content":    base64.StdEncoding.EncodeToString([]byte(content)),
+		"shell":      "pwsh",
+		"targets":    []string{"steward-1"},
+		"nonce":      "unsigned-test-nonce",
+		"expires_at": time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	require.Equal(t, http.StatusBadRequest, unsigned.Code, "body: %s", unsigned.Body.String())
+	assert.Contains(t, unsigned.Body.String(), "INVALID_SIGNATURE")
+	assert.Empty(t, queue.PeekForDevice("steward-1"), "unsigned command must not reach the execution queue")
+
+	envelopeFields := signedOperatorEnvelopeFields(t, server, []byte(content), "pwsh", []string{"steward-1"})
+	signed := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, withEnvelopeFields(map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte(content)),
+		"shell":   "pwsh",
+	}, envelopeFields))
+	require.Equal(t, http.StatusOK, signed.Code, "body: %s", signed.Body.String())
+
+	queued := queue.PeekForDevice("steward-1")
+	require.Len(t, queued, 1)
+	sig := envelopeFields["signature"].(map[string]interface{})
+	assert.Equal(t, sig["algorithm"], queued[0].Metadata["signature_algorithm"])
+	assert.Equal(t, sig["value"], queued[0].Metadata["signature_value"])
+	assert.Equal(t, sig["public_key"], queued[0].Metadata["signature_public_key"])
+	assert.Equal(t, envelopeFields["targets"], queued[0].Metadata["targets"],
+		"targets must be forwarded to the steward unmodified")
+	assert.Equal(t, envelopeFields["nonce"], queued[0].Metadata["nonce"],
+		"nonce must be forwarded to the steward unmodified")
+	assert.Equal(t, envelopeFields["expires_at"], queued[0].Metadata["expires_at"],
+		"expires_at must be forwarded to the steward unmodified")
 }
 
 // TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized is the same guard for run-script.
@@ -242,7 +472,7 @@ func TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 
 	body := map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"}
 	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
-		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected; body: %s", rec.Body.String())
@@ -260,10 +490,64 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 		"shell":   "pwsh",
 	}
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "scoped-key", IsAdmin: false, TenantID: ""}, body)
+		&Principal{ID: "scoped-key", Assurance: session.AssuranceMachine, TenantID: ""}, body)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"a non-admin principal with no tenant must remain unauthorized")
+}
+
+// TestRunCommand_AdminMarkerOnlyCredential_Rejected locks the controller half of the
+// Issue #3696 cutover. The signed ad-hoc path has three enforcement points that must
+// agree on one credential type — cfg's signCommandContent, this endpoint, and the
+// steward's verifyOperatorCert. While this check still required HasAdminMarker, the
+// payload-signing credential cfg sends was rejected here and the admin bundle that
+// passed here was rejected at the steward: no certificate on the documented issuance
+// path satisfied both, and the whole path was inoperable.
+//
+// An IssueAdminBundle-shaped credential (AdminMarkerOID, no PayloadSigningMarkerOID)
+// is driven through the real POST /runs/command path — same body, same handler, same
+// signing as the positive tests — and must be rejected.
+func TestRunCommand_AdminMarkerOnlyCredential_Rejected(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+
+	envelope := signedOperatorEnvelopeFieldsWithMarker(t, server, []byte("hostname"), "pwsh",
+		[]string{"steward-1"}, cert.SetAdminMarker)
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin,
+		withEnvelopeFields(map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+			"shell":   "pwsh",
+		}, envelope))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"an admin-marked credential without the payload-signing marker must not authorize an operator payload; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "payload-signing",
+		"rejection must name the missing credential type")
+}
+
+// TestRunCommand_PayloadSigningCredential_Accepted is the positive half of the same
+// boundary: the credential type `cfg credential request-signing-cert` actually issues
+// (PayloadSigningMarkerOID, no AdminMarkerOID — handlers_signing_credential.go) is
+// accepted by POST /runs/command. Together with the negative case above, this pins the
+// endpoint to the one credential type both other enforcement points now require.
+func TestRunCommand_PayloadSigningCredential_Accepted(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+
+	envelope := signedOperatorEnvelopeFieldsWithMarker(t, server, []byte("hostname"), "pwsh",
+		[]string{"steward-1"}, cert.SetPayloadSigningMarker)
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin,
+		withEnvelopeFields(map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+			"shell":   "pwsh",
+		}, envelope))
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"the CSR-issued payload-signing credential must be accepted; body: %s", rec.Body.String())
 }
 
 // TestRunLifecycle_AdminMTLSEmptyTenant covers the FULL cfg steward exec lifecycle
@@ -274,14 +558,14 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 
 	// 1. Dispatch (POST) as admin.
-	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	})
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"})))
 	require.Equal(t, http.StatusOK, rec.Code, "dispatch body: %s", rec.Body.String())
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -316,18 +600,18 @@ func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
 
 	// Admin dispatches a run owned by the global/empty tenant.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, map[string]interface{}{
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, withEnvelopeFields(map[string]interface{}{
 			"target":  "id:steward-1",
 			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 			"shell":   "pwsh",
-		})
+		}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"})))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	runID := resp.Data.(map[string]interface{})["run_id"].(string)
 
 	// A tenant-scoped (non-admin) caller from a different tenant must get 404.
-	scoped := &Principal{ID: "tenant-b-key", IsAdmin: false, TenantID: "tenant-b"}
+	scoped := &Principal{ID: "tenant-b-key", Assurance: session.AssuranceMachine, TenantID: "tenant-b"}
 	getReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), scoped)
 	getRec := httptest.NewRecorder()
 	server.handleGetRun(getRec, getReq)
@@ -345,11 +629,11 @@ func TestGetRunJobs_ReturnsCorrectDeviceAndExecutionIDs(t *testing.T) {
 		{ID: "device-B", TenantID: "test-tenant"},
 	}
 	server, _, queue := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
 	// Create the run
-	rec := postRunScript(t, server, execKey, map[string]interface{}{
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/check.sh",
 	})
@@ -400,18 +684,19 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-perm", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
 
-	readOnlyKey := NewTestKey(t, server, []string{"steward:read-scripts"})
+	readOnlyPrincipal := runPrincipal("read-only-caller", []string{"steward:read-scripts"}, "test-tenant")
+	execOnlyPrincipal := runPrincipal("exec-only-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	execOnlyKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
 
 	// POST /runs/script requires execute-scripts
-	rec := postRunScript(t, server, readOnlyKey, map[string]interface{}{
+	rec := postRunScript(t, server, readOnlyPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/test.sh",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "POST /runs/script must require execute-scripts")
 
 	// POST /runs/command requires execute-scripts
-	rec = postRunCommand(t, server, readOnlyKey, map[string]interface{}{
+	rec = postRunCommand(t, server, readOnlyPrincipal, map[string]interface{}{
 		"target":  "all",
 		"content": base64.StdEncoding.EncodeToString([]byte("echo hi")),
 		"shell":   "bash",
@@ -420,7 +705,7 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 
 	// GET /runs/{run_id} requires read-scripts
 	// Create a run first with exec key
-	createRec := postRunScript(t, server, execOnlyKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execOnlyPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/test.sh",
 	})
@@ -436,7 +721,7 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "GET /runs/{id}/jobs must require read-scripts")
 
 	// DELETE requires execute-scripts
-	rec = deleteRun(t, server, readOnlyKey, runID)
+	rec = deleteRun(t, server, readOnlyPrincipal, runID)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "DELETE /runs/{id} must require execute-scripts")
 }
 
@@ -447,11 +732,11 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 func TestDeleteRun_Success(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-del", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
 	// Create a run
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/cleanup.sh",
 	})
@@ -461,7 +746,7 @@ func TestDeleteRun_Success(t *testing.T) {
 	runID := createResp.Data.(map[string]interface{})["run_id"].(string)
 
 	// Cancel it
-	delRec := deleteRun(t, server, execKey, runID)
+	delRec := deleteRun(t, server, execPrincipal, runID)
 	require.Equal(t, http.StatusOK, delRec.Code, "DELETE must return 200 for a non-terminal run; body: %s", delRec.Body.String())
 
 	var delResp APIResponse
@@ -483,9 +768,9 @@ func TestDeleteRun_Success(t *testing.T) {
 // TestDeleteRun_NotFound verifies that DELETE on an unknown run returns 404.
 func TestDeleteRun_NotFound(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := deleteRun(t, server, apiKey, "no-such-run-id")
+	rec := deleteRun(t, server, execPrincipal, "no-such-run-id")
 	assert.Equal(t, http.StatusNotFound, rec.Code, "DELETE on unknown run must return 404")
 
 	var resp ErrorResponse
@@ -498,10 +783,10 @@ func TestDeleteRun_NotFound(t *testing.T) {
 func TestDeleteRun_AlreadyTerminal(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-term", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
 	// Create and cancel a run (so it's in a terminal state)
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/test.sh",
 	})
@@ -511,10 +796,10 @@ func TestDeleteRun_AlreadyTerminal(t *testing.T) {
 	runID := createResp.Data.(map[string]interface{})["run_id"].(string)
 
 	// Cancel it once
-	require.Equal(t, http.StatusOK, deleteRun(t, server, execKey, runID).Code)
+	require.Equal(t, http.StatusOK, deleteRun(t, server, execPrincipal, runID).Code)
 
 	// Cancel it again — must return 409
-	rec := deleteRun(t, server, execKey, runID)
+	rec := deleteRun(t, server, execPrincipal, runID)
 	assert.Equal(t, http.StatusConflict, rec.Code, "DELETE on terminal run must return 409")
 
 	var resp ErrorResponse
@@ -528,10 +813,10 @@ func TestDeleteRun_AlreadyTerminal(t *testing.T) {
 func TestGetRun_Found(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-get", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/get-test.sh",
 	})
@@ -562,9 +847,9 @@ func TestGetRun_NotFound(t *testing.T) {
 
 func TestPostRunScript_MissingScriptID_ReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunScript(t, server, apiKey, map[string]interface{}{
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target": "all",
 		// script_id intentionally omitted
 	})
@@ -582,14 +867,15 @@ func TestPostRunCommand_TwoStewardFanout(t *testing.T) {
 		{ID: "cmd-dev-2", TenantID: "test-tenant"},
 	}
 	server, manager, queue := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	content := base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\necho hello"))
-	rec := postRunCommand(t, server, execKey, map[string]interface{}{
+	rawContent := []byte("#!/bin/bash\necho hello")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	})
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"cmd-dev-1", "cmd-dev-2"})))
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp APIResponse
@@ -613,9 +899,9 @@ func TestPostRunCommand_TwoStewardFanout(t *testing.T) {
 
 func TestPostRunCommand_InvalidBase64_ReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 		"target":  "all",
 		"content": "not-valid-base64!!!",
 		"shell":   "bash",
@@ -625,13 +911,160 @@ func TestPostRunCommand_InvalidBase64_ReturnsBadRequest(t *testing.T) {
 
 func TestPostRunCommand_MissingContent_ReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 		"target": "all",
 		"shell":  "bash",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ---- [REQUIRED TEST] Blast-radius bound (Issue #3698) -----------------------
+
+// TestPostRunCommand_ExceedsBlastRadius_Rejected is the primary [REQUIRED TEST]:
+// a validly signed payload — correct signature, correct payload-signing credential,
+// everything else legitimate — whose resolved Targets list exceeds the caller's
+// tenant bound is rejected at submission. The signature being good is the whole
+// point: a bound that only stops malformed or unsigned requests is not a bound.
+func TestPostRunCommand_ExceedsBlastRadius_Rejected(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "blast-steward-1", TenantID: "test-tenant"},
+		{ID: "blast-steward-2", TenantID: "test-tenant"},
+		{ID: "blast-steward-3", TenantID: "test-tenant"},
+	}
+	server, _, queue := setupRunServer(t, stewards)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "test-tenant", MaxTargets: ptrInt(2),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"test-tenant": {"test-tenant"},
+	}))
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	targets := []string{"blast-steward-1", "blast-steward-2", "blast-steward-3"}
+	rawContent := []byte("#!/bin/bash\necho hi")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a validly signed payload over the tenant's blast-radius bound must be hard rejected; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "BLAST_RADIUS_EXCEEDED")
+
+	for _, id := range targets {
+		assert.Empty(t, queue.PeekForDevice(id), "a rejected-for-blast-radius dispatch must never reach the execution queue for %s", id)
+	}
+}
+
+// TestPostRunCommand_ChildTenantNarrowerOverride_Enforced is the second [REQUIRED
+// TEST]: a child tenant's narrower override is enforced even when the parent
+// tenant's default would have allowed the request — direct proof of root-to-leaf
+// inheritance, not just the raw cap.
+func TestPostRunCommand_ChildTenantNarrowerOverride_Enforced(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "child-steward-1", TenantID: "root/child"},
+		{ID: "child-steward-2", TenantID: "root/child"},
+	}
+	server, _, queue := setupRunServer(t, stewards)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	// Parent ("root") allows up to 10 targets; child narrows it to 1.
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root", MaxTargets: ptrInt(10),
+	}))
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root/child", MaxTargets: ptrInt(1),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"root/child": {"root", "root/child"},
+	}))
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "root/child")
+	// Two targets: within the parent's default of 10, but over the child's own
+	// override of 1 — this must be rejected only if the child's narrower value
+	// (not the parent's) actually governs resolution.
+	targets := []string{"child-steward-1", "child-steward-2"}
+	rawContent := []byte("echo hi")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"the child tenant's narrower override must be enforced even though the parent's default would allow this request; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "BLAST_RADIUS_EXCEEDED")
+	assert.Empty(t, queue.PeekForDevice("child-steward-1"))
+}
+
+// TestPostRunCommand_RejectedBlastRadius_AuditedAsBoundViolation is the third
+// [REQUIRED TEST]: a rejected-for-blast-radius request still produces an audit
+// record naming it as a bound violation, not silently dropped from the trail.
+func TestPostRunCommand_RejectedBlastRadius_AuditedAsBoundViolation(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "audit-steward-1", TenantID: "test-tenant"},
+		{ID: "audit-steward-2", TenantID: "test-tenant"},
+	}
+	server, _, _ := setupRunServer(t, stewards)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "test-tenant", MaxTargets: ptrInt(1),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"test-tenant": {"test-tenant"},
+	}))
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	targets := []string{"audit-steward-1", "audit-steward-2"}
+	rawContent := []byte("echo audit-me")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+
+	var found *business.AuditEntry
+	for _, e := range entries {
+		if e.Action == "operator_payload.dispatch" {
+			found = e
+			break
+		}
+	}
+	require.NotNil(t, found, "a rejected-for-blast-radius dispatch must still produce an audit record")
+	assert.Equal(t, business.AuditResultDenied, found.Result, "the audit record must name this a denial, not a silent no-op")
+	require.NotNil(t, found.Details)
+	reason, _ := found.Details["rejection_reason"].(string)
+	assert.Contains(t, reason, "exceeds tenant bound", "the record must name the rejection as a blast-radius bound violation")
+	// The payload is identified by digest, never stored verbatim: an investigator
+	// holding a candidate payload can confirm it is the one dispatched, while an
+	// operator payload carrying an inline credential never reaches the audit store.
+	wantDigest := sha256.Sum256([]byte("echo audit-me"))
+	assert.Equal(t, hex.EncodeToString(wantDigest[:]), found.Details["payload_sha256"],
+		"the audit record must identify the payload by its SHA-256 digest")
+	assert.Equal(t, "13", found.Details["payload_bytes"],
+		"the audit record must carry the payload byte length")
+	assert.NotContains(t, found.Details, "payload",
+		"the audit record must never carry the literal payload text")
 }
 
 // ---- Tenant isolation (IDOR prevention) -------------------------------------
@@ -644,8 +1077,8 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	server, _, _ := setupRunServer(t, stewards)
 
 	// Create a run as the default test-tenant (tenantID = "test-tenant")
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/iso-test.sh",
 	})
@@ -665,9 +1098,175 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant GET jobs must return 404")
 
 	// Cross-tenant DELETE must return 404.
-	otherExecKey := NewEphemeralTestKey(t, server, []string{"steward:execute-scripts"}, "other-tenant", 5*60*1000000000)
-	rec = deleteRun(t, server, otherExecKey, runID)
+	otherExecPrincipal := runPrincipal("other-tenant-exec-caller", []string{"steward:execute-scripts"}, "other-tenant")
+	rec = deleteRun(t, server, otherExecPrincipal, runID)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant DELETE must return 404")
+}
+
+// TestRunVisibleTo_AssuranceBoundary is a table-driven regression test for the
+// runAccess helper (handlers_runs.go), migrated to ctxkeys.TenantScope
+// (Issue #4335) confirming that the Assurance-based isolation gate is
+// byte-for-byte equivalent to the deleted IsAdmin check:
+//   - AssuranceBasic (admin) principal always sees the run regardless of tenant.
+//   - AssuranceMachine (API key / relay-grant) principal sees only same-tenant runs.
+//   - Relay-grant principals (AssuranceMachine) cannot see another tenant's run.
+func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
+	server := setupTestServer(t)
+	run := &controllerrun.RunRecord{RunID: "r1", TenantID: "tenant-a"}
+
+	cases := []struct {
+		name    string
+		scope   ctxkeys.TenantScope
+		wantVis bool
+	}{
+		{
+			// Admin callers (mTLS, root scope) have unrestricted access. In real
+			// requests, scope comes from ctxkeys.TenantScopeKey — for admins that
+			// is ctxkeys.NewRootScope() (unrestricted).
+			name:    "AssuranceBasic_admin_any_tenant",
+			scope:   ctxkeys.NewRootScope(),
+			wantVis: true,
+		},
+		{
+			name:    "AssuranceMachine_same_tenant",
+			scope:   ctxkeys.NewTenantScope("tenant-a"),
+			wantVis: true,
+		},
+		{
+			name:    "AssuranceMachine_cross_tenant_hidden",
+			scope:   ctxkeys.NewTenantScope("tenant-b"),
+			wantVis: false,
+		},
+		{
+			// Defense-in-depth: relay-grant scope (tenant-b scoped) must not see a
+			// tenant-a run even if the grant's tenant were somehow wrong.
+			name:    "relay_grant_cross_tenant_hidden",
+			scope:   ctxkeys.NewTenantScope("tenant-b"),
+			wantVis: false, // run.TenantID=tenant-a ≠ scope.Path()=tenant-b
+		},
+		{
+			// Unset scope (plumbing bug — no explicit scope was ever established)
+			// must be refused, never treated as unrestricted (Issue #4316/#4335).
+			name:    "unset_scope_refused",
+			scope:   ctxkeys.TenantScope{},
+			wantVis: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := server.runAccess(context.Background(), tc.scope, run, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed
+			assert.Equal(t, tc.wantVis, got,
+				"runAccess(scope=%+v, run{TenantID=%q})", tc.scope, run.TenantID)
+		})
+	}
+}
+
+// TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked verifies the fix for Issue
+// #3143: a session-authenticated principal has GlobalScope=true (set by middleware)
+// even when scoped to a specific tenant. Before the fix, the GlobalScope flag caused
+// runAccess to return true for any run regardless of the caller's tenant. After
+// the fix, only the caller's ctxkeys.TenantScope (Issue #4335) governs access.
+func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	server := setupTestServer(t)
+
+	// A web-session principal's scope, as middleware.go builds it (tenant-a scoped) —
+	// GlobalScope is a permission-breadth flag, not a tenant-scope override.
+	scope := ctxkeys.NewTenantScope("tenant-a")
+
+	runOwnTenant := &controllerrun.RunRecord{RunID: "r-own", TenantID: "tenant-a"}
+	runOtherTenant := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
+
+	assert.True(t, server.runAccess(context.Background(), scope, runOwnTenant, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
+		"session principal must see runs belonging to their own tenant")
+	assert.False(t, server.runAccess(context.Background(), scope, runOtherTenant, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
+		"session principal must NOT see runs belonging to a different tenant (Issue #3143)")
+}
+
+// ── [REQUIRED TEST] GlobalScope ⊥ Assurance independence (Issue #2787) ───────
+
+// TestGlobalScope_IndependentOfAssurance proves that GlobalScope and Assurance
+// are genuinely independent signals — not just relabeled versions of each other.
+// A hypothetical future tenant-scoped-but-strongly-authenticated platform admin
+// (Assurance=AssuranceStrong, GlobalScope=false, ImplicitAdmin=true) must be:
+//   - Confined by the tenant-scope sites (runAccess returns false for cross-tenant)
+//   - Still admitted by auth-strength-gated actions (hasPermission returns true via
+//     ImplicitAdmin; requirePermission admits on AssuranceStrong-gated routes)
+//
+// This principal is not constructible by any current code path. The test proves
+// that if such an account type were ever added, the two signals would correctly
+// remain independent: the account would see only its own tenant's data but could
+// still perform strongly-authenticated operations.
+func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
+	// Hypothetical tenant-scoped implicit-admin principal with strong assurance —
+	// not producible today. ImplicitAdmin: true reflects that permission breadth is
+	// an explicit grant, not inferred from Assurance (ADR-025 Amendment 3).
+	strongScoped := &Principal{
+		ID:            "future-strong-scoped-account",
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   false,
+		TenantID:      "tenant-a",
+		ImplicitAdmin: true,
+	}
+
+	// Tenant-scope sites: GlobalScope=false confines the principal regardless of Assurance.
+	server := setupTestServer(t)
+	scope := ctxkeys.NewTenantScope("tenant-a")
+	run := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
+	assert.False(t, server.runAccess(context.Background(), scope, run, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
+		"AssuranceStrong+GlobalScope:false principal must be tenant-confined by runAccess (cross-tenant run must be invisible)")
+	assert.True(t, server.runAccess(context.Background(), scope, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
+		"AssuranceStrong+GlobalScope:false principal must see same-tenant runs")
+
+	// Permission breadth: ImplicitAdmin passes regardless of GlobalScope.
+	assert.True(t, server.hasPermission(strongScoped, "certificate:provision"),
+		"ImplicitAdmin principal must pass hasPermission for any permission regardless of GlobalScope")
+	assert.True(t, server.hasPermission(strongScoped, "rbac:create-role"),
+		"ImplicitAdmin principal must pass hasPermission for strong-gated permissions regardless of GlobalScope")
+
+	// requirePermission must admit the principal on an AssuranceStrong-gated route.
+	admitted := false
+	handler := server.requirePermission("certificate", "provision")(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			admitted = true
+			w.WriteHeader(http.StatusOK)
+		}))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, strongScoped))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.True(t, admitted,
+		"ImplicitAdmin+GlobalScope:false principal must be admitted by requirePermission on a Strong-gated route (body: %s)", rec.Body.String())
+}
+
+// TestAuthRunAccess_DoesNotConsultGlobalScope proves the empty-tenant admission gate in
+// authRunAccess (handlers_runs.go) keys off principal.Assurance, not principal.GlobalScope
+// (Issue #3143 acceptance follow-up). GlobalScope is hardcoded true on every session
+// principal by middleware.go, so gating admission on "!principal.GlobalScope" is a dead
+// check for session principals — it can never fire regardless of whether the caller is
+// genuinely entitled to operate with an empty tenant. Flip GlobalScope on both sides of
+// the table below: only Assurance should determine the outcome.
+func TestAuthRunAccess_DoesNotConsultGlobalScope(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	// GlobalScope=false (as a correctly-scoped session principal would be, absent the
+	// middleware bug) must still be ADMITTED when Assurance is not machine-level —
+	// admission for an empty-tenant caller depends on Assurance, not GlobalScope.
+	humanNoTenant := &Principal{ID: "session-acct", Assurance: session.AssuranceBasic, GlobalScope: false, TenantID: ""}
+	req := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/runs/whatever", nil), humanNoTenant)
+	rec := httptest.NewRecorder()
+	_, _, ok := server.authRunAccess(rec, req)
+	assert.True(t, ok, "Assurance-based admission must admit a non-machine empty-tenant principal even with GlobalScope=false; body: %s", rec.Body.String())
+
+	// GlobalScope=true (mirroring the middleware bug) must NOT rescue a machine
+	// (API-key-style) principal with no tenant — it must still be rejected.
+	machineNoTenant := &Principal{ID: "bugged-key", Assurance: session.AssuranceMachine, GlobalScope: true, TenantID: ""}
+	req2 := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/runs/whatever", nil), machineNoTenant)
+	rec2 := httptest.NewRecorder()
+	_, _, ok2 := server.authRunAccess(rec2, req2)
+	assert.False(t, ok2, "a machine-assurance empty-tenant principal must be rejected regardless of GlobalScope")
+	assert.Equal(t, http.StatusUnauthorized, rec2.Code)
 }
 
 // ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------
@@ -677,7 +1276,7 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 // prohibited command pattern (CLAUDE.md §Modules, execution path 3).
 func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
 	cases := []struct {
 		name    string
@@ -694,11 +1293,12 @@ func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+			rawContent := []byte(tc.command)
+			rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
 				"target":  "id:steward-abc",
-				"content": base64.StdEncoding.EncodeToString([]byte(tc.command)),
+				"content": base64.StdEncoding.EncodeToString(rawContent),
 				"shell":   "bash",
-			})
+			}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"steward-abc"})))
 			assert.Equal(t, http.StatusBadRequest, rec.Code,
 				"command with pattern %q must return 400, body: %s", tc.name, rec.Body.String())
 
@@ -724,13 +1324,14 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 	server, _, _ := setupRunServer(t, stewards)
 
 	// test-tenant principal: cannot access stewards in msp-a.
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+	rawContent := []byte("hostname")
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-cross",
-		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"content": base64.StdEncoding.EncodeToString(rawContent),
 		"shell":   "bash",
-	})
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"steward-cross"})))
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"cross-tenant exec must return 403; body: %s", rec.Body.String())
 
@@ -740,41 +1341,263 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
 }
 
+// ---- Issue #4091: exec tenant scoping must deny on error, not permit --------
+
+// errorRunFleetQuery is a real FleetQuery implementation whose Search always
+// fails, modeling a transient fleet-store outage. Not a mock — it satisfies the
+// fleet.FleetQuery interface exactly like staticRunFleetQuery.
+type errorRunFleetQuery struct{}
+
+func (errorRunFleetQuery) Search(_ context.Context, _ fleet.Filter) ([]fleet.StewardResult, error) {
+	return nil, errors.New("fleet store unavailable")
+}
+
+func (errorRunFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, error) {
+	return 0, errors.New("fleet store unavailable")
+}
+
+// TestEnforceExecTenantScope_FleetQueryError_DeniesDistinguishablyFromForbidden
+// is the [REQUIRED TEST] for AC1: when the fleet query dependency errors,
+// enforceExecTenantScope cannot establish whether the target steward is in
+// scope, so it must deny — and the HTTP surface (handlePostRunCommand) must
+// carry that denial as 503/SERVICE_UNAVAILABLE, not the 403/FORBIDDEN shape used
+// for a genuine out-of-scope steward. Collapsing the two into one response would
+// pass a fix that just swaps "allow" for "forbidden" on error, which is exactly
+// the failure this AC guards against: a transient store outage would then look
+// to real users like a permissions problem instead of a service outage.
+func TestEnforceExecTenantScope_FleetQueryError_DeniesDistinguishablyFromForbidden(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	server.fleetQuery = errorRunFleetQuery{}
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	rawContent := []byte("hostname")
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "id:some-steward",
+		"content": base64.StdEncoding.EncodeToString(rawContent),
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"some-steward"})))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a fleet-query error must deny, surfaced as 503 (could-not-verify), not silently permit; body: %s", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "SERVICE_UNAVAILABLE", resp.Error.Code,
+		"the error-path denial must be distinguishable from the out-of-scope FORBIDDEN denial "+
+			"asserted by TestRunCommandSingle_RejectsCrossTenantSteward — \"could not check\" and "+
+			"\"checked and denied\" are different facts")
+	assert.NotEqual(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// TestEnforceExecTenantScope_NilFleetQuery_Denies is the [REQUIRED TEST] for AC2:
+// enforceExecTenantScope must deny, not allow, when its fleetQuery dependency is
+// nil. This is called directly (not through the HTTP handler) because the only
+// two call sites are inside handlePostRunCommand, which already returns 503 on
+// s.fleetQuery == nil before either call is reached — the helper's nil branch is
+// unreachable in production today, but that must not make it unsafe: a future
+// caller that does not have the same guard would otherwise fail open.
+func TestEnforceExecTenantScope_NilFleetQuery_Denies(t *testing.T) {
+	server := &Server{} // fleetQuery is nil
+
+	decision := server.enforceExecTenantScope(context.Background(), "some-steward", "test-tenant")
+
+	assert.Equal(t, execScopeIndeterminate, decision,
+		"a nil fleetQuery must deny (indeterminate), not allow")
+	assert.NotEqual(t, execScopeAllowed, decision)
+}
+
+// ---- Issue #4091: blast-radius inheritance must take the minimum, not the last --
+
+// TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins is the [REQUIRED TEST]
+// for AC3, using the pinned three-level shape where the strictest bound is held
+// by the ROOT, not the leaf: root=100, middle=5000 (the widening attempt this
+// item exists to stop), leaf=2000 (wider than root, narrower than middle).
+// Last-wins (the pre-fix behavior) resolves to the leaf's 2000; min-across-path
+// (the fix) resolves to the root's 100. A test where the leaf holds the minimum
+// would pass both implementations and prove nothing — this shape is required
+// specifically because it only agrees with the fixed implementation.
+func TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins(t *testing.T) {
+	server := setupTestServer(t)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root", MaxTargets: ptrInt(100),
+	}))
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root/middle", MaxTargets: ptrInt(5000),
+	}))
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root/middle/leaf", MaxTargets: ptrInt(2000),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+	}))
+
+	got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+	assert.Equal(t, 100, got,
+		"inheritance must resolve to the root's strictest bound (100), not the leaf's "+
+			"wider one (2000) or the middle tenant's widening attempt (5000) — a leaf must "+
+			"never be able to raise a bound its ancestor set")
+}
+
+// ---- Issue #4099: a mid-walk policy-lookup error must not discard an already- --
+// ---- resolved narrower bound in favor of the default --------------------------
+
+// failingBlastRadiusPolicyStore wraps a real testBlastRadiusPolicyStore and returns
+// an error from GetPolicy for any tenantID in failOn, modeling a storage hiccup that
+// hits only some elements of a multi-tenant path walk — the shape #4099 exists to
+// fix. Distinct from errorAssurancePolicyStore (assurance_resolve_test.go), which
+// always errors and so cannot express "ancestor succeeded, descendant failed."
+type failingBlastRadiusPolicyStore struct {
+	*testBlastRadiusPolicyStore
+	failOn map[string]bool
+}
+
+func newFailingBlastRadiusPolicyStore(failOn ...string) *failingBlastRadiusPolicyStore {
+	fail := make(map[string]bool, len(failOn))
+	for _, id := range failOn {
+		fail[id] = true
+	}
+	return &failingBlastRadiusPolicyStore{
+		testBlastRadiusPolicyStore: newTestBlastRadiusPolicyStore(),
+		failOn:                     fail,
+	}
+}
+
+func (s *failingBlastRadiusPolicyStore) GetPolicy(ctx context.Context, tenantID string) (*business.BlastRadiusPolicy, error) {
+	if s.failOn[tenantID] {
+		return nil, errors.New("blast-radius policy store unavailable")
+	}
+	return s.testBlastRadiusPolicyStore.GetPolicy(ctx, tenantID)
+}
+
+// TestResolveMaxTargetsForTenant_MidWalkPolicyError_KeepsNarrowerKnownBound is the
+// [REQUIRED TEST] for AC1: when an ancestor earlier in the path has already
+// supplied a bound narrower than the default, and a later path element's
+// GetPolicy call fails, the resolved bound must be the narrower known value, not
+// the default. The pre-fix code abandons the walk on any GetPolicy error and
+// returns defaultMaxOperatorPayloadTargets (1000) unconditionally, discarding the
+// root's already-resolved 50 — this test fails on revert.
+func TestResolveMaxTargetsForTenant_MidWalkPolicyError_KeepsNarrowerKnownBound(t *testing.T) {
+	server := setupTestServer(t)
+
+	blastStore := newFailingBlastRadiusPolicyStore("root/middle")
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root", MaxTargets: ptrInt(50),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+	}))
+
+	got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+	assert.Equal(t, 50, got,
+		"a GetPolicy error at 'root/middle' must not discard the narrower bound (50) "+
+			"already resolved from 'root' in favor of the default (1000)")
+}
+
+// TestResolveMaxTargetsForTenant_FirstLookupFailure_ResolvesToDefault is the
+// [REQUIRED TEST] for AC2: when nothing about the tenant's policy is known yet —
+// GetTenantPath itself fails, or the first GetPolicy in the walk fails — there is
+// no narrower bound to fall back to, so the resolver returns the default.
+func TestResolveMaxTargetsForTenant_FirstLookupFailure_ResolvesToDefault(t *testing.T) {
+	t.Run("GetTenantPath error", func(t *testing.T) {
+		server := setupTestServer(t)
+		server.SetBlastRadiusPolicyStore(newTestBlastRadiusPolicyStore())
+		server.SetTenantStore(errorTenantStore{})
+
+		got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+		assert.Equal(t, defaultMaxOperatorPayloadTargets, got,
+			"a GetTenantPath error means nothing is known yet; must resolve to the default")
+	})
+
+	t.Run("first GetPolicy in the walk errors", func(t *testing.T) {
+		server := setupTestServer(t)
+		blastStore := newFailingBlastRadiusPolicyStore("root")
+		server.SetBlastRadiusPolicyStore(blastStore)
+		server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+			"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+		}))
+
+		got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+		assert.Equal(t, defaultMaxOperatorPayloadTargets, got,
+			"a GetPolicy error on the first path element leaves no narrower bound "+
+				"resolved yet; must resolve to the default")
+	})
+}
+
+// TestPostRunCommand_StorageErrorDuringBlastRadiusResolution_DoesNotFailClosed is
+// the [REQUIRED TEST] for AC3: a storage error while resolving the blast-radius
+// bound must still permit a dispatch within the resolved bound — treating any
+// resolution error as "reject everything" is not an acceptable fallback, per the
+// documented rationale resolveMaxTargetsForTenant restates (Issue #4099).
+func TestPostRunCommand_StorageErrorDuringBlastRadiusResolution_DoesNotFailClosed(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "err-steward-1", TenantID: "test-tenant"},
+		{ID: "err-steward-2", TenantID: "test-tenant"},
+	}
+	server, _, queue := setupRunServer(t, stewards)
+
+	server.SetBlastRadiusPolicyStore(newTestBlastRadiusPolicyStore())
+	server.SetTenantStore(errorTenantStore{}) // GetTenantPath always fails
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	targets := []string{"err-steward-1", "err-steward-2"}
+	rawContent := []byte("echo hi")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a blast-radius-resolution storage error must not fail the dispatch closed "+
+			"when the request is within the resolved (default) bound; body: %s", rec.Body.String())
+
+	for _, id := range targets {
+		assert.NotEmpty(t, queue.PeekForDevice(id),
+			"dispatch must reach the execution queue for %s despite the resolution error", id)
+	}
+}
+
 // ---- Service unavailable when manager not wired -----------------------------
 
 func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts", "steward:read-scripts"})
+	// steward:execute-scripts requires AssuranceStrong (Issue #3687); POST/DELETE
+	// routes present a Strong-assurance principal directly instead of an X-API-Key
+	// credential (Machine-assurance, which can no longer reach these gates).
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
-	for _, tc := range []struct {
-		method string
-		path   string
-		body   interface{}
-	}{
-		{"POST", "/api/v1/runs/script", map[string]interface{}{"script_id": "s.sh"}},
-		{"POST", "/api/v1/runs/command", map[string]interface{}{"content": "X", "shell": "bash"}},
-		{"GET", "/api/v1/runs/some-id", nil},
-		{"GET", "/api/v1/runs/some-id/jobs", nil},
-		{"DELETE", "/api/v1/runs/some-id", nil},
-	} {
-		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			var body *bytes.Reader
-			if tc.body != nil {
-				b, err := json.Marshal(tc.body)
-				require.NoError(t, err)
-				body = bytes.NewReader(b)
-			} else {
-				body = bytes.NewReader(nil)
-			}
-			req := httptest.NewRequest(tc.method, tc.path, body)
-			req.Header.Set("X-API-Key", apiKey)
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-			server.router.ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
-				"%s %s must return 503 when run manager is not wired", tc.method, tc.path)
-		})
-	}
+	t.Run("POST /api/v1/runs/script", func(t *testing.T) {
+		rec := postRunScript(t, server, execPrincipal, map[string]interface{}{"script_id": "s.sh"})
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("POST /api/v1/runs/command", func(t *testing.T) {
+		rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{"content": "X", "shell": "bash"})
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("GET /api/v1/runs/some-id", func(t *testing.T) {
+		rec := getRun(t, server, readKey, "some-id")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("GET /api/v1/runs/some-id/jobs", func(t *testing.T) {
+		rec := getRunJobs(t, server, readKey, "some-id")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("DELETE /api/v1/runs/some-id", func(t *testing.T) {
+		rec := deleteRun(t, server, execPrincipal, "some-id")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
 }
 
 // TestAllowedShellsMatchesExecutorTaxonomy pins the controller allow-list to the
@@ -796,4 +1619,364 @@ func TestAllowedShellsMatchesExecutorTaxonomy(t *testing.T) {
 	// Specifically guard the two shells regressed in Issue #1995.
 	assert.True(t, allowedShells["powershell"], "Windows PowerShell 5.1 must be dispatchable")
 	assert.True(t, allowedShells["pwsh"], "PowerShell Core must be dispatchable")
+}
+
+// ── handleListRuns tests ──────────────────────────────────────────────────────
+
+// listRunsAs sends GET /api/v1/runs with the given principal and optional query string.
+func listRunsAs(server *Server, principal *Principal, query string) *httptest.ResponseRecorder {
+	url := "/api/v1/runs"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handleListRuns(rec, req)
+	return rec
+}
+
+// TestHandleListRuns_NilManager_Returns503 verifies the service-unavailable guard.
+func TestHandleListRuns_NilManager_Returns503(t *testing.T) {
+	server := setupTestServer(t)
+	// runManager is nil by default in setupTestServer.
+	rec := listRunsAs(server, adminRunPrincipal(), "")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", resp.Error.Code)
+}
+
+// adminRunPrincipal returns a global-admin principal for run handler tests.
+func adminRunPrincipal() *Principal {
+	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+}
+
+// TestHandleListRuns_NoPrincipal_Returns401 verifies the auth guard.
+func TestHandleListRuns_NoPrincipal_Returns401(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
+	rec := httptest.NewRecorder()
+	server.handleListRuns(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleListRuns_EmptyList_NeverNull verifies that an empty store returns [] not null.
+func TestHandleListRuns_EmptyList_NeverNull(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	rec := listRunsAs(server, adminRunPrincipal(), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, json.RawMessage("[]"), raw["data"], "empty run list must serialize as [] not null")
+}
+
+// TestHandleListRuns_CrossTenantIsolation is the [REQUIRED TEST] verifying that a
+// principal in tenant A cannot see tenant B's runs.
+func TestHandleListRuns_CrossTenantIsolation(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "s-1", TenantID: "tenant-a"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	principalA := &Principal{ID: "user-a", TenantID: "tenant-a", Assurance: session.AssuranceMachine}
+	principalB := &Principal{ID: "user-b", TenantID: "tenant-b", Assurance: session.AssuranceMachine}
+
+	// Create a run under tenant-a.
+	recA := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script", principalA,
+		map[string]interface{}{"target": "all", "script_id": "scripts/a.sh"})
+	require.Equal(t, http.StatusOK, recA.Code, "create run for tenant-a: %s", recA.Body.String())
+
+	// Create a run under tenant-b.
+	recB := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script", principalB,
+		map[string]interface{}{"target": "all", "script_id": "scripts/b.sh"})
+	require.Equal(t, http.StatusOK, recB.Code, "create run for tenant-b: %s", recB.Body.String())
+
+	// List as tenant-a: must see exactly 1 run belonging to tenant-a.
+	recList := listRunsAs(server, principalA, "")
+	require.Equal(t, http.StatusOK, recList.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &resp))
+	runs, ok := resp.Data.([]interface{})
+	require.True(t, ok, "data must be an array")
+	require.Len(t, runs, 1, "tenant-a must see exactly 1 run, not tenant-b's")
+
+	runMap, ok := runs[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "tenant-a", runMap["tenant_id"], "the visible run must belong to tenant-a")
+
+	// List as tenant-b: must see exactly 1 run belonging to tenant-b.
+	recListB := listRunsAs(server, principalB, "")
+	require.Equal(t, http.StatusOK, recListB.Code)
+
+	var respB APIResponse
+	require.NoError(t, json.Unmarshal(recListB.Body.Bytes(), &respB))
+	runsB, ok := respB.Data.([]interface{})
+	require.True(t, ok, "data must be an array")
+	require.Len(t, runsB, 1, "tenant-b must see exactly 1 run, not tenant-a's")
+
+	runMapB, ok := runsB[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "tenant-b", runMapB["tenant_id"])
+}
+
+// [REQUIRED TEST] TestHandleListRuns_PaginationClamping verifies that limit/offset
+// clamping mirrors the convention in handlers_audit.go.
+func TestHandleListRuns_PaginationClamping(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	p := adminRunPrincipal()
+
+	// limit > 500 is silently clamped; request must succeed.
+	rec := listRunsAs(server, p, "limit=9999")
+	assert.Equal(t, http.StatusOK, rec.Code, "limit=9999 must be clamped to 500, not error")
+
+	// limit=0 is clamped to 1; request must succeed.
+	rec = listRunsAs(server, p, "limit=0")
+	assert.Equal(t, http.StatusOK, rec.Code, "limit=0 must be clamped to 1, not error")
+
+	// Non-numeric params are silently ignored; defaults apply.
+	rec = listRunsAs(server, p, "limit=notanumber&offset=bad")
+	assert.Equal(t, http.StatusOK, rec.Code, "invalid params must be silently ignored")
+
+	// Valid offset with no data returns empty list.
+	rec = listRunsAs(server, p, "offset=100&limit=10")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestHandleListRuns_PaginationOffsetLimit verifies that offset and limit correctly
+// slice the result set.
+func TestHandleListRuns_PaginationOffsetLimit(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "s-1", TenantID: "tenant-pg"}}
+	server, _, _ := setupRunServer(t, stewards)
+	p := &Principal{ID: "user-pg", TenantID: "tenant-pg", Assurance: session.AssuranceMachine}
+
+	// Create 3 runs.
+	for i := 0; i < 3; i++ {
+		rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script", p,
+			map[string]interface{}{"target": "all", "script_id": "scripts/pg.sh"})
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+
+	// Fetch all 3 with a generous limit.
+	rec := listRunsAs(server, p, "limit=10")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	all, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, all, 3, "limit=10 must return all 3 runs")
+
+	// Fetch with limit=2: should return exactly 2.
+	rec = listRunsAs(server, p, "limit=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	page1, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, page1, 2, "limit=2 must return exactly 2 runs")
+
+	// Fetch with offset=2 and limit=10: should return exactly 1.
+	rec = listRunsAs(server, p, "limit=10&offset=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	page2, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, page2, 1, "offset=2 must return the remaining 1 run")
+}
+
+// fixedStewardProvider feeds the real fleet.MemoryQuery a fixed steward list, so
+// run targets resolve through the production filter logic (IDs, selectors,
+// tenant scope).
+type fixedStewardProvider []fleet.StewardData
+
+func (p fixedStewardProvider) GetAllStewards() []fleet.StewardData { return p }
+
+// countingFleetQuery counts searches against a real FleetQuery, so a test can
+// prove the run's targets are resolved once — the authorized list is the
+// dispatched list (Issue #4554).
+type countingFleetQuery struct {
+	fleet.FleetQuery
+	searches atomic.Int32
+}
+
+func (q *countingFleetQuery) Search(ctx context.Context, f fleet.Filter) ([]fleet.StewardResult, error) {
+	q.searches.Add(1)
+	return q.FleetQuery.Search(ctx, f)
+}
+
+// setupCrossingRunServer is a run server over the real fleet.MemoryQuery with a
+// tenant-crossing store and a client tenant ("msp-run", beneath the seeded root)
+// for ADR-025 boundary tests.
+func setupCrossingRunServer(t *testing.T, stewards []fleet.StewardData) (*Server, *controllerrun.Manager, *countingFleetQuery) {
+	t.Helper()
+	server, manager, _ := setupRunServer(t, nil)
+	counting := &countingFleetQuery{FleetQuery: fleet.NewMemoryQuery(fixedStewardProvider(stewards))}
+	server.fleetQuery = counting
+	wireCrossingStore(t, server)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "msp-run", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	return server, manager, counting
+}
+
+// assertNoRunCreated proves a refused run left nothing behind.
+func assertNoRunCreated(t *testing.T, manager *controllerrun.Manager) {
+	t.Helper()
+	runs, err := manager.ListRuns(context.Background(), "", 100, 0)
+	require.NoError(t, err)
+	assert.Empty(t, runs, "a refused run must create no run record or jobs")
+}
+
+func grantRunCrossing(t *testing.T, server *Server, principalID, tenantID string) {
+	t.Helper()
+	now := time.Now()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+		ID: "grant-" + principalID, TenantID: tenantID, PrincipalID: principalID,
+		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-admin",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+}
+
+func signedCommandBody(t *testing.T, server *Server, target string, targets []string) map[string]interface{} {
+	t.Helper()
+	return withEnvelopeFields(map[string]interface{}{
+		"target":  target,
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", targets))
+}
+
+func runScriptBody(target string) map[string]interface{} {
+	return map[string]interface{}{"target": target, "script_id": "scripts/check.sh"}
+}
+
+var (
+	runStewardRoot = fleet.StewardData{ID: "steward-root", TenantID: testRootTenantID}
+	runStewardMSP  = fleet.StewardData{ID: "steward-msp", TenantID: "msp-run"}
+)
+
+// TestRunCommand_RootScopedWithoutCrossing_Challenged guards the ADR-025 boundary on
+// ad-hoc runs: a root-scoped principal dispatching to a steward in a client tenant
+// without an active crossing gets the crossing challenge, exactly as config push
+// does, and no run is created.
+func TestRunCommand_RootScopedWithoutCrossing_Challenged(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		rootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "id:steward-msp", []string{"steward-msp"}))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunCommand_RootScopedSelector_Challenged: a fleet selector for /runs/command
+// reaching an uncrossed client tenant is refused whole.
+func TestRunCommand_RootScopedSelector_Challenged(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		rootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "all", []string{"steward-root", "steward-msp"}))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunCommand_RootScopedWithCrossing_Allowed: with an active crossing on the
+// steward's tenant the run is dispatched to exactly the authorized steward, and the
+// targets are resolved once.
+func TestRunCommand_RootScopedWithCrossing_Allowed(t *testing.T) {
+	server, manager, counting := setupCrossingRunServer(t, []fleet.StewardData{runStewardMSP})
+	caller := rootScopedPrincipal("root-operator-run")
+	grantRunCrossing(t, server, caller.ID, "msp-run")
+
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		caller, signedCommandBody(t, server, "id:steward-msp", []string{"steward-msp"}))
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, int32(1), counting.searches.Load(), "the authorized target list is the dispatched list: one fleet search")
+	runs, err := manager.ListRuns(context.Background(), "", 100, 0)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	jobs, err := manager.ListRunJobs(context.Background(), runs[0].RunID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "steward-msp", jobs[0].DeviceID)
+}
+
+// TestRunScript_RootScopedExplicitID_Challenged: an explicit id: target for
+// /runs/script in an uncrossed client tenant is challenged; nothing is created.
+func TestRunScript_RootScopedExplicitID_Challenged(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("id:steward-msp"))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_RootScopedSelectorSpanningTenants_RefusedWhole: a fleet selector
+// reaching the root tenant and an uncrossed client tenant is refused as a whole,
+// never silently narrowed to the tenants the caller may reach.
+func TestRunScript_RootScopedSelectorSpanningTenants_RefusedWhole(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_RootScopedRootTenantOnly_Allowed: a root-scoped principal acting
+// on stewards in the root tenant itself needs no crossing.
+func TestRunScript_RootScopedRootTenantOnly_Allowed(t *testing.T) {
+	server, _, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestRunScript_RootScopedZeroMatches_Allowed: a selector matching no stewards
+// reaches no tenant, so there is nothing to refuse.
+func TestRunScript_RootScopedZeroMatches_Allowed(t *testing.T) {
+	server, _, _ := setupCrossingRunServer(t, nil)
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestRunScript_RootScopedEmptyTenantSteward_Denied: a matched steward with no
+// tenant is denied rather than treated as the root tenant.
+func TestRunScript_RootScopedEmptyTenantSteward_Denied(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{{ID: "steward-orphan"}})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_RootScopedAmbiguousRoot_Denied: with two top-level tenants the
+// root is ambiguous, so root-scoped dispatch to either is denied.
+func TestRunScript_RootScopedAmbiguousRoot_Denied(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{{ID: "steward-legacy", TenantID: "legacy-top"}})
+	seedLegacyTopLevelTenant(t, server, "legacy-top")
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_FleetSearchError_ServiceUnavailable: a failed target resolution
+// refuses the run with 503 and creates nothing.
+func TestRunScript_FleetSearchError_ServiceUnavailable(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, nil)
+	server.fleetQuery = &failingFleetQuery{}
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
 }

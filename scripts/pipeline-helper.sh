@@ -15,8 +15,22 @@ usage() {
 Pipeline Helper — wraps gh CLI for subagent permission compatibility
 
 Story lifecycle:
-  create-story <epic_num> <title> <body_file>   Create story as a project draft item (not a GitHub issue)
-  edit-body <issue_num> <body_file>              Replace issue body from file
+  create-story <epic_num> <title> <body_file> [--defer] [--cap <c1,c2>] [--dep-draft <PVTI_id>] [--skip-validation]
+                                                 Create story and materialize it immediately as a locked
+                                                 `internal` issue linked under its epic (ADR-015). With
+                                                 --defer, stay a private project draft until dispatch —
+                                                 for security-sensitive or business-adjacent bodies.
+                                                 --cap applies descriptive cap:* capability tags (the
+                                                 consuming product capability; multi-valued, e.g.
+                                                 cms,twin). Deferred: intent rides a body marker until
+                                                 materialize. Vocabulary: docs/product/roadmap.md.
+  edit-body <issue_num> <body_file> <expected_updated_at>
+                                                 Replace issue body from file. Fails closed
+                                                 (non-zero, no write) when the issue's live
+                                                 updatedAt no longer matches expected_updated_at —
+                                                 fetch it from `view <issue_num>` immediately before
+                                                 writing. On refusal, the live body is written to a
+                                                 predictable conflict file for merging (Issue #4433).
   append-section <issue_num> <section> <file>    Append content after ## <section> heading
 
 Sub-issue linking:
@@ -28,11 +42,39 @@ Comments:
   comment-inline <issue_num> <text>              Post short comment (single line, no special chars)
 
 Issue queries:
-  view <issue_num>                               View issue JSON (title, body, labels, state)
+  view <issue_num>                               View issue JSON (title, body, labels, state, updatedAt)
   list-prs <search>                              List open PRs matching search (JSON)
 
 Epic operations:
-  create-epic <title> <body_file>                Create epic issue with epic label
+  create-epic <title> <body_file> [--cap <c1,c2>]
+                                                 Create epic issue (epic+internal label, locked). --cap
+                                                 applies descriptive cap:* tags stories inherit at decomposition.
+
+Materialization (privileged — called by create-story at decomposition; by
+po-act.sh dispatch for --defer drafts):
+  materialize-issue <item_id> [epic_num] [--cap <c1,c2>]
+                                                 Convert a draft to a locked internal issue; link under epic.
+                                                 Applies cap:* from --cap, or from the body marker on defer.
+
+Standalone fix issues (no parent epic):
+  create-fix-issue <title> <body_file> [--cap <c1,c2>] [--defer] [--skip-validation]
+                                                 Create a locked `internal` + `bug` issue with NO epic
+                                                 parent. Use for a defect found after an epic's scope was
+                                                 defined: attaching it to that epic would grow the epic's
+                                                 denominator and stop it ever closing on delivery.
+
+Community issues (human-directed, interactive sessions only):
+  create-community-issue <title> <body_file>     Create a PUBLIC, UNLOCKED community issue
+
+Lock maintenance (run from the PO cron):
+  lock-sweep                                     Lock+internal pipeline PRs; re-lock any unlocked internal issue
+
+Distributed leases (multi-host cron coordination — atomic git-ref lock):
+  lease-acquire <key> [ttl_seconds]              Try to claim <key>; ACQUIRED/RECLAIMED (rc0), HELD (rc1), ACQUIRE_ERROR (rc2)
+  lease-release <key>                            Release <key> (idempotent)
+  lease-status <key>                             HELD:<holder>:exp:expired | FREE
+  lease-list                                     TSV of all live leases: key, holder, exp, expired
+  lease-gc                                       Delete all expired lease refs (run from cleanup-stale)
 USAGE
   exit 1
 }
@@ -44,10 +86,84 @@ case "$cmd" in
 
   # ── Story lifecycle ──────────────────────────────────────────────
 
+  validate-story-body)
+    # Run the REAL dispatch parser over a story body and fail on any condition
+    # that would make a gate silently stop working (Issue #3634). Creates
+    # nothing and touches no network — safe to run on a draft at any time, and
+    # the entry point create-story delegates to.
+    vbody="${1:?Usage: validate-story-body <body_file> [epic_num]}"
+    vepic="${2:-}"
+    VPREFLIGHT="$(cd "$(dirname "$0")/.." && pwd)/.claude/scripts/po-cycle-preflight.py"
+    if [ ! -f "$vbody" ]; then
+      echo "ERROR: Body file not found: $vbody" >&2
+      exit 1
+    fi
+    if [ ! -f "$VPREFLIGHT" ]; then
+      echo "  WARN: preflight parser not found at $VPREFLIGHT — validation skipped" >&2
+      exit 0
+    fi
+    PF_PATH="$VPREFLIGHT" EPIC_NUM="$vepic" python3 - "$vbody" <<'VALIDATE_EOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("preflight", os.environ["PF_PATH"])
+pf = importlib.util.module_from_spec(spec); spec.loader.exec_module(pf)
+body = open(sys.argv[1]).read()
+r = pf.parse_story({"body": body, "number": None, "title": "", "labels": []})
+fatal, warn = [], []
+for w in r["parse_warnings"]:
+    if "Dependencies" in w and "no #NNN" in w:
+        fatal.append(f"{w}\n    -> the dependency gate would be DROPPED: this story would "
+                     "dispatch as if it declared None. Use real #NNN refs, a PVTI_ draft id "
+                     "(--dep-draft), or a bare 'None'.")
+    elif "Files In Scope" in w and "no file paths" in w:
+        fatal.append(f"{w}\n    -> file-overlap conflict detection would be DISABLED: two "
+                     "agents could edit the same files concurrently. Note bare DIRECTORY "
+                     "entries match nothing; list representative files.")
+    else:
+        warn.append(w)
+epic = (os.environ.get("EPIC_NUM") or "").strip()
+if epic.isdigit() and int(epic) in r["deps_parsed"]:
+    fatal.append(f"'## Dependencies' names the parent epic #{epic} as a dependency\n"
+                 "    -> parent epics do not close until all children merge, so this story "
+                 "would be held forever.")
+for w in warn:
+    print(f"  WARN: {w}", file=sys.stderr)
+if fatal:
+    print("ERROR: story body failed dispatch-parser validation:", file=sys.stderr)
+    for f in fatal:
+        print(f"  - {f}", file=sys.stderr)
+    print("  (re-run with --skip-validation to override)", file=sys.stderr)
+    sys.exit(1)
+print(f"  validation ok: deps={r['deps_parsed']} draft_deps={r['draft_deps_parsed']} "
+      f"files={len(r['files_parsed'])}", file=sys.stderr)
+VALIDATE_EOF
+    exit $?
+    ;;
+
   create-story)
-    epic_num="${1:?Usage: create-story <epic_num> <title> <body_file>}"
-    title="${2:?Usage: create-story <epic_num> <title> <body_file>}"
-    body_file="${3:?Usage: create-story <epic_num> <title> <body_file>}"
+    epic_num="${1:?Usage: create-story <epic_num> <title> <body_file> [--defer] [--cap <c1,c2>] [--dep-draft <PVTI_id>] [--skip-validation]}"
+    title="${2:?Usage: create-story <epic_num> <title> <body_file> [--defer] [--cap <c1,c2>] [--dep-draft <PVTI_id>] [--skip-validation]}"
+    body_file="${3:?Usage: create-story <epic_num> <title> <body_file> [--defer] [--cap <c1,c2>] [--dep-draft <PVTI_id>] [--skip-validation]}"
+    shift 3
+    # Flags may appear in any order after the three positionals.
+    defer=""
+    cap=""
+    dep_drafts=""
+    skip_validation=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --defer) defer="--defer"; shift ;;
+        --cap)   cap="${2:?--cap requires a comma-separated value (e.g. cms,twin)}"; shift 2 ;;
+        --dep-draft)
+          # Depend on a --defer'd sibling that has no issue number yet (Issue
+          # #3634). Repeatable. The id is appended to the story's
+          # `## Dependencies` section, where the dispatch gate reads it and
+          # holds until the draft materializes and its issue closes.
+          dep_drafts="${dep_drafts}${dep_drafts:+ }${2:?--dep-draft requires a PVTI_ draft item id}"
+          shift 2 ;;
+        --skip-validation) skip_validation="1"; shift ;;
+        *) echo "ERROR: unknown create-story arg: $1"; exit 1 ;;
+      esac
+    done
 
     if [ ! -f "$body_file" ]; then
       echo "ERROR: Body file not found: $body_file"
@@ -55,24 +171,174 @@ case "$cmd" in
     fi
 
     PROJECT_QUEUE="$(cd "$(dirname "$0")/.." && pwd)/scripts/project-queue.sh"
+    PREFLIGHT="$(cd "$(dirname "$0")/.." && pwd)/.claude/scripts/po-cycle-preflight.py"
 
-    # Create a project draft item (private; not a public GitHub issue).
-    # epic_num is passed as story_num — a traceability hint; 0 is acceptable too.
-    draft_json=$(bash "$PROJECT_QUEUE" create-draft "$epic_num" "$title" "$body_file")
+    # cap:* capability tags (descriptive, multi-valued) name the product capability
+    # that CONSUMES this story — see docs/product/roadmap.md. For a --defer draft
+    # (no labels until dispatch) the intent must ride in the body as a
+    # machine-readable marker so materialize-issue can apply it later.
+    effective_body="$body_file"
+    if [ "$defer" = "--defer" ] && [ -n "$cap" ]; then
+      effective_body="$(mktemp)"
+      cat "$body_file" > "$effective_body"
+      printf '\n\n<!-- cap: %s -->\n' "$cap" >> "$effective_body"
+    fi
+
+    # --dep-draft: splice draft-item dependencies into `## Dependencies` so the
+    # author does not hand-edit the section (Issue #3634). A section reading
+    # exactly `None` is replaced; otherwise the ids are appended as list items.
+    if [ -n "$dep_drafts" ]; then
+      spliced="$(mktemp)"
+      # `if !` rather than a trailing `$?` check: `set -e` would abort the script
+      # on a non-zero python exit before any post-hoc test could run.
+      if ! DEP_DRAFTS="$dep_drafts" python3 - "$effective_body" > "$spliced" <<'SPLICE_EOF'
+import os, re, sys
+body = open(sys.argv[1]).read()
+ids = os.environ["DEP_DRAFTS"].split()
+bad = [i for i in ids if not re.fullmatch(r"PVTI_[A-Za-z0-9_-]{8,}", i)]
+if bad:
+    sys.exit(f"ERROR: --dep-draft value(s) are not project draft item ids: {', '.join(bad)}")
+lines = "\n".join(f"- {i}" for i in ids)
+m = re.search(r'(?ms)^## Dependencies\n(.*?)(?=^## |\Z)', body)
+if not m:
+    sys.exit("ERROR: --dep-draft given but the body has no '## Dependencies' section")
+cur = m.group(1).strip()
+new = lines if cur.lower().rstrip(".") in ("", "none", "n/a") else cur + "\n" + lines
+sys.stdout.write(body[:m.start(1)] + new + "\n\n" + body[m.end(1):])
+SPLICE_EOF
+      then
+        rm -f "$spliced"
+        echo "ERROR: create-story aborted — could not apply --dep-draft."
+        exit 1
+      fi
+      effective_body="$spliced"
+    fi
+
+    # Author-time validation (Issue #3634) — delegated to the `validate-story-body`
+    # subcommand so it is reachable, and testable, WITHOUT creating anything. The
+    # test suite for this gate targets that subcommand directly; an earlier
+    # revision tested it through create-story and created five real issues.
+    if [ -z "$skip_validation" ]; then
+      if ! bash "$0" validate-story-body "$effective_body" "$epic_num"; then
+        echo "ERROR: create-story aborted — body would dispatch with a broken gate."
+        exit 1
+      fi
+    fi
+
+    # Create a project draft item first. epic_num doubles as the traceability
+    # hint (story_num) on the board; 0 = no epic.
+    draft_json=$(bash "$PROJECT_QUEUE" create-draft "$epic_num" "$title" "$effective_body")
     item_id=$(echo "$draft_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
-    echo "CREATED_DRAFT:${item_id}"
+
+    # --defer keeps the story a private draft until dispatch. Reserved for
+    # bodies that must not be world-readable while queued: security fixes
+    # describing live vulnerabilities, business/customer specifics.
+    if [ "$defer" = "--defer" ]; then
+      echo "CREATED_DRAFT:${item_id}"
+      exit 0
+    fi
+
+    # Default (ADR-015): materialize at decomposition. The issue is created by
+    # CONVERT (never `gh issue create`), born locked + `internal`, and linked
+    # under its epic so subIssuesSummary tracks decomposition machine-visibly.
+    # Injection stays closed by the lock; deferral never added protection.
+    link_epic=""
+    if [ "$epic_num" != "0" ]; then link_epic="$epic_num"; fi
+    mat_args=("$item_id")
+    if [ -n "$link_epic" ]; then mat_args+=("$link_epic"); fi
+    if [ -n "$cap" ]; then mat_args+=(--cap "$cap"); fi
+    mat_out=$(bash "$0" materialize-issue "${mat_args[@]}") || {
+      echo "ERROR: create-story materialize failed for ${item_id}: ${mat_out}"
+      echo "CREATED_DRAFT:${item_id}"
+      exit 1
+    }
+    issue_num=$(echo "$mat_out" | grep -oE '#[0-9]+' | tr -d '#' | head -1)
+    echo "CREATED_ISSUE:${item_id}:#${issue_num}"
     ;;
 
   edit-body)
-    issue_num="${1:?Usage: edit-body <issue_num> <body_file>}"
-    body_file="${2:?Usage: edit-body <issue_num> <body_file>}"
+    issue_num="${1:?Usage: edit-body <issue_num> <body_file> <expected_updated_at>}"
+    body_file="${2:?Usage: edit-body <issue_num> <body_file> <expected_updated_at>}"
+    expected_updated_at="${3:?Usage: edit-body <issue_num> <body_file> <expected_updated_at> — fetch expected_updated_at from 'view <issue_num>' immediately before writing; there is no flag to skip this check}"
 
     if [ ! -f "$body_file" ]; then
       echo "ERROR: Body file not found: $body_file"
       exit 1
     fi
 
-    gh issue edit "$issue_num" --repo "$REPO" --body-file "$body_file"
+    # Scratch files hold complete issue bodies in cleartext, so they never live
+    # in a world-writable directory: a predictable name under /tmp is both a
+    # symlink-traversal write primitive (`mkdir -p` succeeds silently on a
+    # pre-existing symlink-to-directory and the later redirect writes through
+    # it) and a world-readable copy of the body. Use the caller's own runtime
+    # or cache directory, verify what we ended up with, and keep it 0700.
+    scratch_root="${XDG_RUNTIME_DIR:-}"
+    if [ -z "$scratch_root" ]; then
+      if [ -z "${HOME:-}" ]; then
+        echo "ERROR: edit-body needs XDG_RUNTIME_DIR or HOME set for its scratch directory"
+        exit 1
+      fi
+      scratch_root="${HOME}/.cache"
+    fi
+    scratch_dir="${scratch_root}/cfgms/edit-body"
+    umask 077
+    mkdir -p "$scratch_dir"
+    # -L catches the symlink swap on the components we create ourselves; -O
+    # catches a directory planted by another user before we ever ran.
+    for scratch_check in "${scratch_root}/cfgms" "$scratch_dir"; do
+      if [ -L "$scratch_check" ]; then
+        echo "ERROR: refusing edit-body — scratch path is a symlink: ${scratch_check}"
+        exit 1
+      fi
+    done
+    for scratch_check in "$scratch_root" "${scratch_root}/cfgms" "$scratch_dir"; do
+      if [ ! -d "$scratch_check" ]; then
+        echo "ERROR: refusing edit-body — scratch path is not a directory: ${scratch_check}"
+        exit 1
+      fi
+      if [ ! -O "$scratch_check" ]; then
+        echo "ERROR: refusing edit-body — scratch path is not owned by the current user: ${scratch_check}"
+        exit 1
+      fi
+    done
+    chmod 700 "$scratch_dir"
+    conflict_file="${scratch_dir}/${issue_num}-conflict.md"
+    applied_file="${scratch_dir}/${issue_num}-applied.md"
+
+    # Optimistic concurrency (Issue #4433): two sessions that both read a body,
+    # both revise it, and both write it used to silently last-writer-wins —
+    # both were told UPDATED. Refuse the write instead when the live issue has
+    # moved since the caller's read.
+    live_json=$(gh issue view "$issue_num" --repo "$REPO" --json updatedAt,body)
+    live_updated_at=$(printf '%s' "$live_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['updatedAt'])")
+
+    if [ "$live_updated_at" != "$expected_updated_at" ]; then
+      rm -f "$conflict_file"
+      printf '%s' "$live_json" | python3 -c "import json,sys; sys.stdout.write(json.load(sys.stdin)['body'])" > "$conflict_file"
+      chmod 600 "$conflict_file"
+      echo "ERROR: refusing edit-body for #${issue_num} — issue changed since it was read."
+      echo "  expected updatedAt: ${expected_updated_at}"
+      echo "  live updatedAt:     ${live_updated_at}"
+      echo "  live body written to: ${conflict_file}"
+      echo "Merge your intended changes into that file, re-read updatedAt, and retry."
+      exit 1
+    fi
+
+    # Stage the body at a predictable path (not a random mktemp name) so that
+    # if the edit below is lost, it is recoverable without the caller having
+    # kept its own copy.
+    rm -f "$applied_file"
+    cp "$body_file" "$applied_file"
+    chmod 600 "$applied_file"
+
+    if ! gh issue edit "$issue_num" --repo "$REPO" --body-file "$body_file"; then
+      echo "ERROR: gh issue edit failed for #${issue_num} — intended body retained at: ${applied_file}"
+      exit 1
+    fi
+    # The copy exists only to make a *lost* write recoverable. Once GitHub has
+    # the body, retaining a cleartext issue body on disk is exposure with no
+    # recovery value, so it is removed on success.
+    rm -f "$applied_file"
     echo "UPDATED:${issue_num}"
     ;;
 
@@ -155,7 +421,7 @@ case "$cmd" in
 
   view)
     issue_num="${1:?Usage: view <issue_num>}"
-    gh issue view "$issue_num" --repo "$REPO" --json number,title,body,labels,state,assignees
+    gh issue view "$issue_num" --repo "$REPO" --json number,title,body,labels,state,assignees,updatedAt
     ;;
 
   list-prs)
@@ -166,8 +432,16 @@ case "$cmd" in
   # ── Epic operations ──────────────────────────────────────────────
 
   create-epic)
-    title="${1:?Usage: create-epic <title> <body_file>}"
-    body_file="${2:?Usage: create-epic <title> <body_file>}"
+    title="${1:?Usage: create-epic <title> <body_file> [--cap <c1,c2>]}"
+    body_file="${2:?Usage: create-epic <title> <body_file> [--cap <c1,c2>]}"
+    shift 2
+    cap=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cap) cap="${2:?--cap requires a comma-separated value}"; shift 2 ;;
+        *) echo "ERROR: unknown create-epic arg: $1"; exit 1 ;;
+      esac
+    done
 
     if [ ! -f "$body_file" ]; then
       echo "ERROR: Body file not found: $body_file"
@@ -180,7 +454,384 @@ case "$cmd" in
       --body-file "$body_file")
 
     epic_num=$(echo "$epic_url" | grep -oP '\d+$')
+    # Epics are internal pipeline anchors: tag `internal` and lock to external comment.
+    # cap:* capability tags (descriptive) declare which product capability the epic
+    # serves; stories inherit them at decomposition. See docs/product/roadmap.md.
+    epic_labels="internal"
+    if [ -n "$cap" ]; then
+      cap_labels=$(printf '%s' "$cap" | tr ',' '\n' | sed -E 's/^[[:space:]]*(cap:)?/cap:/; s/[[:space:]]*$//' | grep -vx 'cap:' | paste -sd, - || true)
+      if [ -n "$cap_labels" ]; then epic_labels="${epic_labels},${cap_labels}"; fi
+    fi
+    gh issue edit "$epic_num" --repo "$REPO" --add-label "$epic_labels" >/dev/null
+    epic_node=$(gh issue view "$epic_num" --repo "$REPO" --json id -q .id)
+    gh api graphql \
+      -f query='mutation($l: ID!) { lockLockable(input: {lockableId: $l}) { clientMutationId } }' \
+      -f l="$epic_node" >/dev/null
     echo "CREATED:${epic_num}:${epic_url}"
+    ;;
+
+  # ── Dispatch-time issue materialization (privileged) ─────────────
+
+  materialize-issue)
+    # Convert a draft into a locked `internal` issue, then (optionally) link it
+    # under its epic. Uses convert — NOT `gh issue create` — so it never trips
+    # the autonomous gate. Called by create-story at decomposition (ADR-015
+    # default) and by po-act.sh dispatch for --defer drafts.
+    #   materialize-issue <item_id> [epic_num] [--cap <c1,c2>]
+    item_id="${1:?Usage: materialize-issue <item_id> [epic_num] [--cap <c1,c2>]}"
+    shift
+    epic_num=""
+    cap=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cap) cap="${2:?--cap requires a comma-separated value}"; shift 2 ;;
+        *) epic_num="$1"; shift ;;
+      esac
+    done
+
+    PROJECT_QUEUE="$(cd "$(dirname "$0")/.." && pwd)/scripts/project-queue.sh"
+    mat_json=$(bash "$PROJECT_QUEUE" materialize "$item_id")
+    issue_num=$(echo "$mat_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['issue_num'])")
+
+    # Base labels. cap:* capability tags are descriptive/multi-valued (see
+    # docs/product/roadmap.md) and orthogonal to Projects-V2 queue state.
+    labels="internal,story"
+    # For a --defer draft materialized later, --cap isn't passed; recover the
+    # intent from the body marker create-story embedded.
+    if [ -z "$cap" ]; then
+      body=$(gh issue view "$issue_num" --repo "$REPO" --json body -q .body 2>/dev/null || true)
+      cap=$(printf '%s' "$body" | grep -oE '<!-- cap:[^>]*-->' | sed -E 's/.*cap:[[:space:]]*//; s/[[:space:]]*-->.*//' | head -1 || true)
+    fi
+    if [ -n "$cap" ]; then
+      cap_labels=$(printf '%s' "$cap" | tr ',' '\n' | sed -E 's/^[[:space:]]*(cap:)?/cap:/; s/[[:space:]]*$//' | grep -vx 'cap:' | paste -sd, - || true)
+      if [ -n "$cap_labels" ]; then labels="${labels},${cap_labels}"; fi
+    fi
+    # Issue is already locked by project-queue materialize. Tag internal + story (+ cap:*).
+    gh issue edit "$issue_num" --repo "$REPO" --add-label "$labels" >/dev/null
+
+    # Link under the epic so subIssuesSummary tracks completion.
+    if [ -n "$epic_num" ]; then
+      parent_id=$(gh issue view "$epic_num" --repo "$REPO" --json id -q .id)
+      child_id=$(gh issue view "$issue_num" --repo "$REPO" --json id -q .id)
+      gh api graphql \
+        -f query='mutation($p: ID!, $c: ID!) { addSubIssue(input: {issueId: $p, subIssueId: $c}) { issue { number } } }' \
+        -f p="$parent_id" -f c="$child_id" >/dev/null 2>&1 || true
+    fi
+
+    echo "MATERIALIZED:${item_id}:#${issue_num}"
+    ;;
+
+  # ── Community issues (human-directed, interactive only) ──────────
+
+  create-fix-issue)
+    # A defect fix that belongs to NO epic (Issue #4055). Epics describe a
+    # planned scope; a bug found afterwards is not part of that scope, and
+    # attaching it re-opens the epic's denominator forever — an epic at N/N
+    # gains an N+1th child and can never be closed on delivery. Standalone fix
+    # issues keep epic completion meaningful: the epic closes when the scope it
+    # declared is delivered, and later defects are tracked on their own.
+    #
+    # Identical to `create-story 0 ...` (epic_num 0 = no parent) plus a `bug`
+    # label, exposed as its own verb because "pass zero" is not discoverable and
+    # was, in practice, never used.
+    title="${1:?Usage: create-fix-issue <title> <body_file> [--cap <c1,c2>] [--defer] [--skip-validation]}"
+    body_file="${2:?Usage: create-fix-issue <title> <body_file> [--cap <c1,c2>] [--defer] [--skip-validation]}"
+    shift 2
+
+    out=$(bash "$0" create-story 0 "$title" "$body_file" "$@") || {
+      echo "$out"
+      echo "ERROR: create-fix-issue aborted — create-story failed."
+      exit 1
+    }
+    echo "$out"
+
+    # A --defer draft has no issue yet; materialize-issue applies labels later.
+    issue_num=$(echo "$out" | grep -oE 'CREATED_ISSUE:[^:]+:#[0-9]+' | grep -oE '[0-9]+$' || true)
+    if [ -n "$issue_num" ]; then
+      # gh pr/issue edit --add-label hits the deprecated Projects-classic
+      # GraphQL path and fails; the REST route is the one that works.
+      gh api "repos/${REPO}/issues/${issue_num}/labels" \
+        -f "labels[]=bug" >/dev/null || {
+        echo "WARN: could not apply 'bug' label to #${issue_num}" >&2
+      }
+    fi
+    ;;
+
+  create-community-issue)
+    # Public, UNLOCKED, `community`-labelled. For a human in an interactive
+    # session to file an external-facing bug report / feature request.
+    title="${1:?Usage: create-community-issue <title> <body_file>}"
+    body_file="${2:?Usage: create-community-issue <title> <body_file>}"
+
+    if [ ! -f "$body_file" ]; then
+      echo "ERROR: Body file not found: $body_file"
+      exit 1
+    fi
+
+    issue_url=$(gh issue create --repo "$REPO" \
+      --title "$title" \
+      --label "community" \
+      --body-file "$body_file")
+    issue_num=$(echo "$issue_url" | grep -oP '\d+$')
+    # Community issues stay public + unlocked by design — no lock, no internal label.
+    echo "CREATED_COMMUNITY:${issue_num}:${issue_url}"
+    ;;
+
+  # ── Lock maintenance (run from the PO cron) ──────────────────────
+
+  lock-sweep)
+    # Idempotent backstop: lock + `internal`-tag pipeline PRs (which have no single
+    # creation chokepoint), and re-lock any unlocked `internal` issue (covers the
+    # create->lock race in materialize/create-epic). Locked items take no external
+    # comments — the injection surface stays closed.
+    python3 - "$REPO" <<'PYEOF'
+import json, re, subprocess, sys
+
+repo = sys.argv[1]
+owner, name = repo.split('/')
+
+
+def gh_json(args):
+    r = subprocess.run(['gh'] + args, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        return None
+    return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+def graphql(query, **vars):
+    args = ['api', 'graphql', '-f', f'query={query}']
+    for k, v in vars.items():
+        args += ['-F', f'{k}={v}']
+    return gh_json(args)
+
+
+def lock(node_id):
+    graphql('mutation($l:ID!){lockLockable(input:{lockableId:$l}){clientMutationId}}', l=node_id)
+
+
+locked_count = 0
+
+# 1. Open pipeline PRs (feature/story-* or feature/item-*): lock + internal label.
+prs = gh_json(['pr', 'list', '--repo', repo, '--state', 'open',
+               '--json', 'number,headRefName,id,labels', '--limit', '100']) or []
+for pr in prs:
+    if not pr['headRefName'].startswith(('feature/story-', 'feature/item-')):
+        continue
+    locked = graphql('query($o:String!,$n:String!,$num:Int!){repository(owner:$o,name:$n){'
+                     'pullRequest(number:$num){locked}}}', o=owner, n=name, num=pr['number'])
+    is_locked = (((locked or {}).get('data') or {}).get('repository') or {}).get('pullRequest', {}).get('locked')
+    labels = [l['name'] for l in pr.get('labels', [])]
+    if 'internal' not in labels:
+        subprocess.run(['gh', 'pr', 'edit', str(pr['number']), '--repo', repo,
+                        '--add-label', 'internal'], capture_output=True)
+    # Carry the linked story's cap:* capability tags onto the PR (issue -> PR).
+    # feature/story-<N> branches key on the story issue number; feature/item-*
+    # branches have no issue to read from, so cap carry only applies to story-*.
+    m = re.match(r'feature/story-(\d+)', pr['headRefName'])
+    if m:
+        iss = gh_json(['issue', 'view', m.group(1), '--repo', repo, '--json', 'labels'])
+        iss_caps = [l['name'] for l in (iss or {}).get('labels', []) if l['name'].startswith('cap:')]
+        missing = [c for c in iss_caps if c not in labels]
+        if missing:
+            subprocess.run(['gh', 'pr', 'edit', str(pr['number']), '--repo', repo,
+                            '--add-label', ','.join(missing)], capture_output=True)
+    if not is_locked:
+        lock(pr['id'])
+        locked_count += 1
+        print(f"LOCKED_PR:#{pr['number']}")
+
+# 2. Open `internal` issues that are unlocked: re-lock.
+issues = gh_json(['issue', 'list', '--repo', repo, '--state', 'open',
+                  '--label', 'internal', '--json', 'number,id', '--limit', '200']) or []
+for iss in issues:
+    locked = graphql('query($o:String!,$n:String!,$num:Int!){repository(owner:$o,name:$n){'
+                     'issue(number:$num){locked}}}', o=owner, n=name, num=iss['number'])
+    is_locked = (((locked or {}).get('data') or {}).get('repository') or {}).get('issue', {}).get('locked')
+    if not is_locked:
+        lock(iss['id'])
+        locked_count += 1
+        print(f"LOCKED_ISSUE:#{iss['number']}")
+
+print(f"LOCK_SWEEP_DONE:{locked_count}")
+PYEOF
+    ;;
+
+  # ── Distributed leases (multi-host cron coordination) ────────────────
+  #
+  # The pipeline can run `/po cron` on more than one host concurrently. To keep
+  # two hosts from dispatching the same work unit, every collision-prone action
+  # (dev dispatch, PR review/fix/resolve, epic decompose, pin refresh, sweep)
+  # acquires a lease keyed on the work unit BEFORE acting.
+  #
+  # The lease is a git ref under refs/cfgms-lease/<key>. Creating a ref is the
+  # ONE server-atomic operation GitHub exposes — POST git/refs returns 422 if the
+  # ref already exists — so exactly one racing host wins regardless of how many
+  # attempt it. No host-local state is involved: the lock lives in GitHub, so
+  # every host sees it. The ref points at an orphan commit whose message encodes
+  # holder + acquired + exp epochs; a held lease past its exp is reclaimable
+  # (covers a host that died holding it). Reclaim (PATCH ref --force) is the only
+  # non-atomic step, but it is bounded to crash recovery, not steady state.
+  #
+  # Lifetimes:
+  #  - Container ops (dev/review/fix/resolve): the launching host acquires, passes
+  #    CFGMS_LEASE_KEY into the container, and the container's entrypoint releases
+  #    on exit. Crash backstop = TTL reclaim.
+  #  - Inline ops (decompose/pin/sweep/rebase): the host acquires, runs in-session,
+  #    releases in a trap. Short TTL.
+
+  lease-acquire)
+    # lease-acquire <key> [ttl_seconds]
+    # ACQUIRED:<key>:<holder>:exp=<exp>   (rc 0) — you now hold it
+    # RECLAIMED:<key>:<holder> (was <prev>) (rc 0) — prior holder's lease expired
+    # HELD:<key>:<holder>:exp=<exp>       (rc 1) — someone else holds a live lease
+    # ACQUIRE_ERROR:<key>:<detail>        (rc 2) — API/transport failure
+    key=$(printf '%s' "${1:?Usage: lease-acquire <key> [ttl_seconds]}" | tr -c 'A-Za-z0-9._-' '-')
+    ttl="${2:-3600}"
+    owner="${REPO%%/*}"; name="${REPO##*/}"
+    holder="${CFGMS_HOST_ID:-$(hostname 2>/dev/null || echo unknown)}"
+    now=$(date +%s); exp=$(( now + ttl ))
+    empty_tree="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    msg="cfgms-lease key=${key} holder=${holder} acquired=${now} exp=${exp}"
+
+    commit_sha=$(gh api -X POST "repos/${owner}/${name}/git/commits" \
+      -f message="$msg" -f tree="$empty_tree" --jq '.sha' 2>/dev/null || true)
+    if [ -z "$commit_sha" ]; then
+      echo "ACQUIRE_ERROR:${key}:could not create lease commit object"
+      exit 2
+    fi
+
+    err_file=$(mktemp)
+    if gh api -X POST "repos/${owner}/${name}/git/refs" \
+        -f ref="refs/cfgms-lease/${key}" -f sha="$commit_sha" >/dev/null 2>"$err_file"; then
+      rm -f "$err_file"
+      echo "ACQUIRED:${key}:${holder}:exp=${exp}"
+      exit 0
+    fi
+
+    # createRef failed — distinguish "already exists" (contention) from real errors.
+    if ! grep -qi "already exists" "$err_file"; then
+      detail=$(tr -d '\n' < "$err_file" | cut -c1-200); rm -f "$err_file"
+      echo "ACQUIRE_ERROR:${key}:${detail}"
+      exit 2
+    fi
+    rm -f "$err_file"
+
+    # Held — inspect the incumbent for staleness.
+    cur_sha=$(gh api "repos/${owner}/${name}/git/ref/cfgms-lease/${key}" --jq '.object.sha' 2>/dev/null || true)
+    cur_msg=""
+    [ -n "$cur_sha" ] && cur_msg=$(gh api "repos/${owner}/${name}/git/commits/${cur_sha}" --jq '.message' 2>/dev/null || true)
+    cur_exp=$(printf '%s' "$cur_msg" | grep -oE 'exp=[0-9]+' | head -1 | cut -d= -f2)
+    cur_holder=$(printf '%s' "$cur_msg" | grep -oE 'holder=[^ ]+' | head -1 | cut -d= -f2)
+    cur_holder="${cur_holder:-unknown}"
+
+    if [ -n "$cur_exp" ] && [ "$now" -gt "$cur_exp" ]; then
+      # Stale — reclaim by force-pointing the ref at our fresh commit.
+      if gh api -X PATCH "repos/${owner}/${name}/git/refs/cfgms-lease/${key}" \
+          -f sha="$commit_sha" -F force=true >/dev/null 2>&1; then
+        echo "RECLAIMED:${key}:${holder} (was ${cur_holder}, expired)"
+        exit 0
+      fi
+      echo "ACQUIRE_ERROR:${key}:reclaim of expired lease (holder ${cur_holder}) failed"
+      exit 2
+    fi
+    echo "HELD:${key}:${cur_holder}:exp=${cur_exp:-unknown}"
+    exit 1
+    ;;
+
+  lease-release)
+    # lease-release <key>  →  RELEASED:<key> (idempotent; FREE if already gone)
+    key=$(printf '%s' "${1:?Usage: lease-release <key>}" | tr -c 'A-Za-z0-9._-' '-')
+    owner="${REPO%%/*}"; name="${REPO##*/}"
+    if gh api -X DELETE "repos/${owner}/${name}/git/refs/cfgms-lease/${key}" >/dev/null 2>&1; then
+      echo "RELEASED:${key}"
+    else
+      # 404/422 → ref already absent; any other error is non-fatal for a release.
+      echo "FREE:${key}"
+    fi
+    exit 0
+    ;;
+
+  lease-status)
+    # lease-status <key>  →  HELD:<key>:<holder>:exp=<exp>:expired=<bool> | FREE:<key>
+    key=$(printf '%s' "${1:?Usage: lease-status <key>}" | tr -c 'A-Za-z0-9._-' '-')
+    owner="${REPO%%/*}"; name="${REPO##*/}"
+    # Key off exit status, not stdout: gh api writes the 404 body to stdout and
+    # ignores --jq on error, so an empty-stdout test would misread a free key.
+    if ! cur_sha=$(gh api "repos/${owner}/${name}/git/ref/cfgms-lease/${key}" --jq '.object.sha' 2>/dev/null); then
+      cur_sha=""
+    fi
+    if [ -z "$cur_sha" ]; then echo "FREE:${key}"; exit 0; fi
+    cur_msg=$(gh api "repos/${owner}/${name}/git/commits/${cur_sha}" --jq '.message' 2>/dev/null || true)
+    cur_exp=$(printf '%s' "$cur_msg" | grep -oE 'exp=[0-9]+' | head -1 | cut -d= -f2)
+    cur_holder=$(printf '%s' "$cur_msg" | grep -oE 'holder=[^ ]+' | head -1 | cut -d= -f2)
+    now=$(date +%s); expired=false
+    [ -n "$cur_exp" ] && [ "$now" -gt "$cur_exp" ] && expired=true
+    echo "HELD:${key}:${cur_holder:-unknown}:exp=${cur_exp:-unknown}:expired=${expired}"
+    exit 0
+    ;;
+
+  lease-list)
+    # lease-list  →  one TSV line per live lease ref: <key>\t<holder>\t<exp>\t<expired>
+    owner="${REPO%%/*}"; name="${REPO##*/}"
+    now=$(date +%s)
+    # Pure bash + local jq (Issue #3686), mirroring lease-status above: native
+    # Windows Python's subprocess module can't exec the test harness's fake
+    # `gh` (an extensionless shebang script) — it silently falls through PATH
+    # to a real installed gh.exe instead of erroring, defeating
+    # PATH-interception test mocks. Piping through the system `jq` binary
+    # directly (not `gh api --jq`) avoids spawning a second process per ref,
+    # so there is nothing here for that failure mode to attach to.
+    refs_json=$(gh api "repos/${owner}/${name}/git/matching-refs/cfgms-lease/" 2>/dev/null || echo '[]')
+    while IFS=$'\t' read -r ref sha; do
+      [ -n "$ref" ] || continue
+      key="${ref#refs/cfgms-lease/}"
+      msg=""
+      if [ -n "$sha" ]; then
+        msg=$(gh api "repos/${owner}/${name}/git/commits/${sha}" --jq '.message' 2>/dev/null || true)
+      fi
+      exp=$(printf '%s' "$msg" | grep -oE 'exp=[0-9]+' | head -1 | cut -d= -f2)
+      holder=$(printf '%s' "$msg" | grep -oE 'holder=[^ ]+' | head -1 | cut -d= -f2)
+      expired=false
+      [ -n "$exp" ] && [ "$now" -gt "$exp" ] && expired=true
+      printf '%s\t%s\t%s\t%s\n' "$key" "$holder" "$exp" "$expired"
+    done < <(printf '%s' "$refs_json" | jq -r '.[] | "\(.ref)\t\(.object.sha // "")"' 2>/dev/null | tr -d '\r' || true)
+    exit 0
+    ;;
+
+  lease-gc)
+    # lease-gc  →  delete every expired lease ref. Safe to run every cycle.
+    # Belt-and-suspenders alongside acquire-time reclaim: keeps refs/cfgms-lease/
+    # tidy when a crashed holder's work is picked up by status/stalled recovery
+    # rather than by a direct re-acquire of the same key.
+    # LIVENESS GUARD: a lease may expire while its holder is still working —
+    # observed repeatedly with fix containers running 2h35m against a 1h PR TTL
+    # and dev containers past 3h. Deleting the ref then leaves live work with no
+    # interlock, so a second host can claim a PR that is actively being worked.
+    # Agent containers carry a `pr=<N>` label, so a `pr-<N>` lease maps directly
+    # to its holder; skip GC while that container is alive. Falls through to
+    # plain TTL behaviour where docker is absent (GC may run off-host).
+    owner="${REPO%%/*}"; name="${REPO##*/}"
+    have_docker=false
+    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && have_docker=true
+    gced=0; skipped=0
+    while IFS=$'\t' read -r key holder exp expired; do
+      [ "$expired" = "True" ] || [ "$expired" = "true" ] || continue
+      if [ "$have_docker" = true ] && [[ "$key" =~ ^pr-([0-9]+)$ ]]; then
+        pr_num="${BASH_REMATCH[1]}"
+        if [ -n "$(docker ps -q --filter "label=cfg-agent=true" --filter "label=pr=${pr_num}" 2>/dev/null)" ]; then
+          echo "GC_SKIPPED:${key} (expired but holder container still running)"
+          skipped=$(( skipped + 1 ))
+          continue
+        fi
+      fi
+      if gh api -X DELETE "repos/${owner}/${name}/git/refs/cfgms-lease/${key}" >/dev/null 2>&1; then
+        echo "GC_RELEASED:${key} (was ${holder:-unknown}, expired)"
+        gced=$(( gced + 1 ))
+      fi
+    done < <(bash "$0" lease-list)
+    echo "LEASE_GC_DONE:${gced} LEASE_GC_SKIPPED:${skipped}"
+    exit 0
     ;;
 
   *)

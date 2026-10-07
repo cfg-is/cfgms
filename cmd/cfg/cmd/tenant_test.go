@@ -196,7 +196,7 @@ func TestGetTenantViaAPI_Exists(t *testing.T) {
 	server := newTenantServer(t)
 	defer server.Close()
 
-	client, err := newClientFromFlags(server.URL, "", "", true)
+	client, err := newClientFromFlags(server.URL, "", true)
 	require.NoError(t, err)
 
 	td, err := client.GetTenantViaAPI(t.Context(), "team-root")
@@ -211,10 +211,44 @@ func TestGetTenantViaAPI_NotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newClientFromFlags(server.URL, "", "", true)
+	client, err := newClientFromFlags(server.URL, "", true)
 	require.NoError(t, err)
 
 	_, err = client.GetTenantViaAPI(t.Context(), "missing-tenant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tenant not found")
+}
+
+// TestCreateTenantCommand_TopLevelRefusalFails guards Issue #4542: a 409 refusing
+// a second top-level tenant must fail the command, not be reported as "tenant
+// already exists" with exit 0 — the tenant was not created.
+func TestCreateTenantCommand_TopLevelRefusalFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"TOP_LEVEL_TENANT_EXISTS","message":"a top-level tenant already exists; specify parent_id"}}`))
+	}))
+	defer server.Close()
+
+	origAPIURL := tenantAPIURL
+	origTLSInsecure := tenantTLSInsecure
+	origID := tenantCreateID
+	origParent := tenantCreateParent
+	t.Cleanup(func() {
+		tenantAPIURL = origAPIURL
+		tenantTLSInsecure = origTLSInsecure
+		tenantCreateID = origID
+		tenantCreateParent = origParent
+	})
+
+	tenantAPIURL = server.URL
+	tenantTLSInsecure = true
+	tenantCreateID = "root"
+	tenantCreateParent = ""
+
+	output := captureStdout(t, func() {
+		err := runTenantCreate(tenantCreateCmd, nil)
+		require.ErrorIs(t, err, ErrTopLevelTenantExists)
+	})
+	assert.NotContains(t, output, "already exists: root")
 }

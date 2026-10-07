@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package dna provides system DNA (system attributes) collection for stewards.
+// Package dna provides system DNA (host-fact fragment) collection for stewards.
 //
-// DNA represents the digital fingerprint of a system, containing hardware,
-// software, and configuration attributes that uniquely identify and describe
-// the system. This information is used by the controller for configuration
-// targeting and system management.
+// DNA represents the digital fingerprint of a system, expressed as a set of
+// ADR-017 fragments. Each fragment covers one host-fact domain (host:cpu,
+// host:os, host:network, etc.) and carries a canonical-bytes payload and hash
+// for partial-sync validation.
 //
 // Basic usage:
 //
@@ -16,7 +16,7 @@
 //	}
 //
 //	fmt.Printf("System ID: %s\n", dna.Id)
-//	fmt.Printf("OS: %s\n", dna.Attributes["os"])
+//	fmt.Printf("Fragments: %d\n", len(dna.Fragments))
 package dna
 
 import (
@@ -33,8 +33,54 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
+	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// CollectorOption configures optional Collector behaviour.
+type CollectorOption func(*Collector)
+
+// WithOsquerySource returns an option that wires an OsquerySource for
+// host:* fragment collection. When the source is active and healthy on a cycle,
+// PartitionHostFactsFromOsquery is called instead of PartitionHostFacts (ADR-017
+// Amendment 3, Issue #3565). When nil or inactive, the gatherer path is used.
+func WithOsquerySource(src OsquerySource) CollectorOption {
+	return func(c *Collector) { c.osquery = src }
+}
+
+// WithHardwareCollector returns an option that selects the HardwareCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformHardwareCollector would build. The intended use is test
+// injection: a snapshot-backed HardwareCollector (pkg/testing/dnasnapshot)
+// that replays data captured once from a real collector run, so tests that
+// assert on Collect's assembly, caching and partitioning logic don't pay the
+// cost of probing real hardware on every run (the Windows platform collector
+// issues nine WMI queries per run, Issue #4222).
+func WithHardwareCollector(h HardwareCollector) CollectorOption {
+	return func(c *Collector) { c.hardware = h }
+}
+
+// WithSoftwareCollector returns an option that selects the SoftwareCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformSoftwareCollector would build. See WithHardwareCollector.
+func WithSoftwareCollector(s SoftwareCollector) CollectorOption {
+	return func(c *Collector) { c.software = s }
+}
+
+// WithNetworkCollector returns an option that selects the NetworkCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformNetworkCollector would build. See WithHardwareCollector.
+func WithNetworkCollector(n NetworkCollector) CollectorOption {
+	return func(c *Collector) { c.network = n }
+}
+
+// WithSecurityCollector returns an option that selects the SecurityCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformSecurityCollector would build. See WithHardwareCollector.
+func WithSecurityCollector(s SecurityCollector) CollectorOption {
+	return func(c *Collector) { c.security = s }
+}
 
 // Collector collects system DNA (attributes) for identification and targeting.
 //
@@ -48,6 +94,22 @@ import (
 // goroutine after the first Collect() call, so startup is never blocked.
 type Collector struct {
 	logger logging.Logger
+
+	// osquery is the optional osquery source for host:* fact collection.
+	// When non-nil and IsActiveAndHealthy() returns true, PartitionHostFactsFromOsquery
+	// is used instead of PartitionHostFacts (ADR-017 Amendment 3, Issue #3565).
+	// Gatherers (collectHardwareInfo, collectNetworkInfo, etc.) and RawAttributes
+	// run unconditionally regardless of which source wins the fragment decision.
+	osquery OsquerySource
+
+	// Sub-collector overrides — nil unless set via WithHardwareCollector,
+	// WithSoftwareCollector, WithNetworkCollector, or WithSecurityCollector.
+	// When nil, collectHardwareInfo/collectSoftwareInfo/collectNetworkInfo/
+	// collectSecurityInfo build the platform-specific collector as before.
+	hardware HardwareCollector
+	software SoftwareCollector
+	network  NetworkCollector
+	security SecurityCollector
 
 	// Hardware cache — static hardware data collected once and reused.
 	hwCacheOnce sync.Once
@@ -64,12 +126,18 @@ type Collector struct {
 // NewCollector creates a new DNA collector.
 //
 // The collector will gather system information using platform-specific methods
-// and create a comprehensive DNA profile for the system.
-func NewCollector(logger logging.Logger) *Collector {
-	return &Collector{
+// and create a comprehensive DNA profile for the system. Optional opts are
+// applied after construction (e.g. WithOsquerySource to enable osquery-sourced
+// host:* fragment collection per ADR-017 Amendment 3).
+func NewCollector(logger logging.Logger, opts ...CollectorOption) *Collector {
+	c := &Collector{
 		logger: logger,
 		bgDone: make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Collect gathers the current system DNA (attributes).
@@ -136,6 +204,53 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 		// Background not yet complete; return fast data only.
 	}
 
+	// Source-selection gate (ADR-017 Amendment 3, Issue #3565): a single
+	// deterministic per-cycle decision — osquery if active and healthy, gatherer
+	// otherwise. The source and its label are set together, never split:
+	// gatherer-sourced content is never labeled "osquery" and vice versa.
+	//
+	// Gatherers (collectHardwareInfo etc.) and RawAttributes run unconditionally
+	// above regardless of which source wins here.
+	var (
+		hostFragments []*commonpb.Fragment
+		hostEnvelopes map[string]*commonpb.FragmentEnvelope
+		fragErr       error
+	)
+	if c.osquery != nil && c.osquery.IsActiveAndHealthy() {
+		hostFragments, hostEnvelopes, fragErr = PartitionHostFactsFromOsquery(
+			ctx, c.osquery, entitygraphtypes.DefaultTaxonomy(), stdlibModuleOwnership())
+		if fragErr != nil {
+			c.logger.Error("Failed to partition host facts via osquery",
+				"error", logging.SanitizeLogValue(fragErr.Error()))
+			// Non-fatal: continue with nil fragment fields.
+		}
+	} else {
+		hostFragments, hostEnvelopes, fragErr = PartitionHostFacts(
+			attributes, entitygraphtypes.DefaultTaxonomy(), stdlibModuleOwnership())
+		if fragErr != nil {
+			c.logger.Error("Failed to partition host facts into fragments",
+				"error", logging.SanitizeLogValue(fragErr.Error()))
+			// Non-fatal: continue with nil fragment fields.
+		}
+	}
+
+	// Build the sorted manifest and compute the aggregate root for partial-sync.
+	var manifest []*commonpb.ManifestEntry
+	for _, frag := range hostFragments {
+		manifest = append(manifest, &commonpb.ManifestEntry{
+			FragmentId:   frag.FragmentId,
+			FragmentHash: frag.FragmentHash,
+		})
+	}
+	aggregateRoot := ""
+	if len(manifest) > 0 {
+		var rootErr error
+		aggregateRoot, rootErr = AggregateRoot(manifest)
+		if rootErr != nil {
+			c.logger.Error("Failed to compute DNA aggregate root", "error", rootErr)
+		}
+	}
+
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
 
@@ -144,7 +259,6 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 
 	dna := &commonpb.DNA{
 		Id:          systemID,
-		Attributes:  attributes,
 		LastUpdated: timestamppb.New(now),
 
 		// Sync metadata (will be updated by steward with config info)
@@ -152,14 +266,92 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 		LastSyncTime:    timestamppb.New(now),
 		AttributeCount:  c.safeInt32(len(attributes)), // Safe conversion with bounds validation
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
+
+		// ADR-017 fragment fields (Amendment 3: gatherers as interim host-fact authority).
+		Fragments:     hostFragments,
+		Envelopes:     hostEnvelopes,
+		AggregateRoot: aggregateRoot,
+		Manifest:      manifest,
 	}
 
 	c.logger.Info("System DNA collected",
 		"id", systemID,
 		"attributes", len(attributes),
+		"fragments", len(hostFragments),
 		"total_duration", totalDuration)
 
 	return dna, nil
+}
+
+// stdlibModuleOwnership returns the ownership declarations for the standard
+// library modules, hardcoded from features/modules/stdlib/*/module.yaml.
+// These kinds are module-owned and must never be promoted to host:* fragments
+// by the gatherer partition step (ADR-017 §2, Amendment 3).
+func stdlibModuleOwnership() map[string][]modules.OwnershipDeclaration {
+	return map[string][]modules.OwnershipDeclaration{
+		"cert_trust": {{Kind: "cert_trust"}},
+		"file":       {{Kind: "file"}},
+		"firewall":   {{Kind: "firewall"}},
+		"hostname":   {{Kind: "hostname"}},
+		"package":    {{Kind: "package"}},
+		"patch":      {{Kind: "patch"}},
+		"script":     {{Kind: "script"}},
+		"service":    {{Kind: "service"}},
+		"time":       {{Kind: "time"}},
+		"user":       {{Kind: "user"}},
+	}
+}
+
+// WaitForBackground blocks until the asynchronous background collection started
+// by the first Collect call has completed, or until ctx is cancelled. Background
+// collection is kicked off by Collect (via bgOnce), so callers must call Collect
+// at least once before WaitForBackground for it to make progress; a second
+// Collect after this returns yields the merged full snapshot. It exists so that
+// external packages (e.g. integration tests) can wait for the full snapshot
+// without reaching into the unexported bgDone channel.
+func (c *Collector) WaitForBackground(ctx context.Context) {
+	select {
+	case <-c.bgDone:
+	case <-ctx.Done():
+	}
+}
+
+// RawAttributes rebuilds and returns the full flat attributes map — the same
+// intermediate map that Collect() assembles before partitioning it into
+// host:* fragments. Unlike Collect(), it does not create or return a DNA proto,
+// and does not trigger background collection (call Collect + WaitForBackground
+// first to include slow software/security attributes).
+//
+// After Issue #3332 the DNA proto no longer carries the flat Attributes field,
+// so this is the access path for the consumers that are not fragment-aware yet:
+//
+//   - the steward's DNA attribute payload (cmd/steward's dnaCollectorAdapter),
+//     which the controller's required-field integrity check reads for the
+//     device-identity fields (hostname, os) before it will persist a snapshot;
+//   - unmanaged-drift detection (features/steward.detectUnmanagedDNADrift), whose
+//     detector compares flat attribute maps and would report "no drift"
+//     unconditionally — a detection control failing open — if fed empty ones;
+//   - the must-collect integration test, which verifies every must-collect
+//     attribute is gathered even where no fragment spec covers its domain.
+//
+// Re-homing the first two onto fragments retires this method.
+func (c *Collector) RawAttributes(ctx context.Context) map[string]string {
+	attributes := make(map[string]string)
+	c.collectBasicInfo(attributes)
+	c.collectHardwareInfo(ctx, attributes)
+	c.collectNetworkInfo(ctx, attributes)
+	c.collectEnvironmentInfo(attributes)
+	// Merge slow background data if already completed.
+	select {
+	case <-c.bgDone:
+		c.slowMu.RLock()
+		for k, v := range c.slowAttrs {
+			attributes[k] = v
+		}
+		c.slowMu.RUnlock()
+	default:
+	}
+	return attributes
 }
 
 // runBackgroundCollection collects slow software and security data asynchronously.
@@ -230,7 +422,10 @@ func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[stri
 		defer cancel()
 
 		cache := make(map[string]string)
-		hwCollector := NewHardwareCollector(cacheCtx)
+		hwCollector := c.hardware
+		if hwCollector == nil {
+			hwCollector = NewHardwareCollector(cacheCtx)
+		}
 
 		if err := hwCollector.CollectCPU(cacheCtx, cache); err != nil {
 			c.logger.Error("Failed to collect CPU information", "error", err)
@@ -267,7 +462,10 @@ func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[stri
 
 // collectSoftwareInfo collects software and OS information using platform-specific collectors.
 func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[string]string) {
-	swCollector := NewSoftwareCollector(ctx)
+	swCollector := c.software
+	if swCollector == nil {
+		swCollector = NewSoftwareCollector(ctx)
+	}
 
 	// Collect OS information
 	if err := swCollector.CollectOS(ctx, attributes); err != nil {
@@ -281,7 +479,7 @@ func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[stri
 
 	// Collect service information
 	if err := swCollector.CollectServices(ctx, attributes); err != nil {
-		c.logger.Error("Failed to collect service information", "error", err)
+		c.logger.Error("Failed to collect service information", "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Collect process information
@@ -297,7 +495,10 @@ func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[stri
 
 // collectNetworkInfo collects network configuration information using platform-specific collectors.
 func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[string]string) {
-	netCollector := NewNetworkCollector()
+	netCollector := c.network
+	if netCollector == nil {
+		netCollector = NewNetworkCollector()
+	}
 
 	// Collect network interface information
 	if err := netCollector.CollectInterfaces(ctx, attributes); err != nil {
@@ -322,7 +523,10 @@ func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[strin
 
 // collectSecurityInfo collects security attributes using platform-specific collectors.
 func (c *Collector) collectSecurityInfo(ctx context.Context, attributes map[string]string) {
-	secCollector := NewSecurityCollector()
+	secCollector := c.security
+	if secCollector == nil {
+		secCollector = NewSecurityCollector()
+	}
 
 	// Collect user information
 	if err := secCollector.CollectUsers(ctx, attributes); err != nil {

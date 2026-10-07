@@ -28,17 +28,15 @@ func TestServer_New_WiresSharedConnectionRegistry(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
 	tempDir := t.TempDir()
-	certDir := tempDir + "/ca"
-
-	// Create the CA up front so EnableCertManagement startup succeeds without
-	// the init guard rejecting the boot.
+	// cert.NewManager with StoragePath=tempDir stores the CA at tempDir/ca/;
+	// CAPath is tempDir+"/ca" so loadExistingCertificateManager derives StoragePath=tempDir.
+	caDir := tempDir + "/ca"
 	_, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: certDir,
+		StoragePath: tempDir,
 		CAConfig: &cert.CAConfig{
 			Organization: "Registry Wiring Test",
 			Country:      "US",
 			ValidityDays: 3650,
-			StoragePath:  certDir,
 		},
 		LoadExistingCA: false,
 	})
@@ -46,10 +44,9 @@ func TestServer_New_WiresSharedConnectionRegistry(t *testing.T) {
 
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		CertPath:   certDir,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               certDir,
+			CAPath:               caDir,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "registry-wiring-controller",
 				Organization: "Registry Wiring Test",

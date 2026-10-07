@@ -1,17 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package sops implements SOPS-based secret store
-// M-AUTH-1: SecretStore implementation using git ConfigStore with SOPS encryption
+// Package sops implements authenticated envelope-encrypted secret storage.
 package sops
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cache"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -24,21 +34,61 @@ type SOPSSecretStoreConfig struct {
 	CacheEnabled    bool                   // Enable secret caching
 	CacheTTL        int                    // Cache TTL in seconds
 	CacheMaxSize    int                    // Maximum cache size
-	KMSKeyID        string                 // KMS key ID for encryption (optional)
+	KeyFile         string                 // External 32-byte or base64-encoded AES key file
 }
 
-// SOPSSecretStore implements SecretStore using git ConfigStore with SOPS encryption
-// M-AUTH-1: Secrets are stored as ConfigEntry objects in git, automatically encrypted by SOPS
+// SOPSSecretStore stores encrypted ConfigEntry objects in a configured
+// ConfigStore. The historical provider name is retained for compatibility.
 type SOPSSecretStore struct {
-	configStore  cfgconfig.ConfigStore // Underlying config store (git with SOPS)
+	configStore  cfgconfig.ConfigStore // Underlying config store (backend-agnostic, SOPS-encrypted)
 	cache        *cache.Cache          // Secret cache
 	config       *SOPSSecretStoreConfig
 	providerName string
+	aead         cipher.AEAD
+
+	// conditionalStore is the backing ConfigStore when it can perform an atomic
+	// conditional write itself (PostgreSQL: "UPDATE ... WHERE version = $expected").
+	// Non-nil is what makes CompareAndSwapSecret atomic across controller nodes;
+	// nil means the file-lock fallback below is in use and the guarantee stops at
+	// the boundary of a shared filesystem. Resolved once at construction so the
+	// property a caller relies on cannot change per call (Issue #3775).
+	conditionalStore cfgconfig.ConditionalConfigStore
+
+	// casLockRoot is the directory CompareAndSwapSecret places lock files in when
+	// conditionalStore is nil. Empty means no private lock root could be derived
+	// and CompareAndSwapSecret refuses rather than degrading to a shared location;
+	// casUnavailableErr carries the reason.
+	casLockRoot       string
+	casUnavailableErr error
+}
+
+type encryptedEnvelope struct {
+	Version    int    `json:"version"`
+	Algorithm  string `json:"algorithm"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
 }
 
 // NewSOPSSecretStore creates a new SOPS-based secret store
-// M-AUTH-1: Create secret store that leverages existing git+SOPS infrastructure
+// M-AUTH-1: Create an envelope-encrypted store backed by the configured
+// ConfigStore. The encryption key must be provisioned separately from data.
 func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error) {
+	if config == nil {
+		return nil, fmt.Errorf("secret store config is required")
+	}
+	key, err := loadExternalKey(config)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("initialize AES cipher: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("initialize AES-GCM: %w", err)
+	}
+
 	// Create ConfigStore using storage provider
 	configStore, err := storageif.CreateConfigStoreFromConfig(config.StorageProvider, config.StorageConfig)
 	if err != nil {
@@ -49,6 +99,21 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 		configStore:  configStore,
 		config:       config,
 		providerName: config.StorageProvider,
+		aead:         aead,
+	}
+
+	// Resolve the compare-and-swap strategy once, here, so that
+	// CompareAndSwapIsClusterAtomic reports a stable property of this store rather
+	// than something re-derived per call. Preference order is not arbitrary: a
+	// backend that can decide the comparison and the write in one storage-layer
+	// operation is the only shape whose atomicity survives a second controller node,
+	// so it wins whenever it is available (Issue #3775).
+	if conditional, ok := configStore.(cfgconfig.ConditionalConfigStore); ok {
+		store.conditionalStore = conditional
+	} else if lockRoot, lockErr := casLockDir(config); lockErr == nil {
+		store.casLockRoot = lockRoot
+	} else {
+		store.casUnavailableErr = lockErr
 	}
 
 	// Initialize cache if enabled
@@ -65,24 +130,155 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 	return store, nil
 }
 
+// isSystemdCredentialPath reports whether keyPath is a file systemd's
+// LoadCredential= exposed. Such files are always mode 0440 (owner+group read)
+// when the unit runs as a non-root User= — access is actually scoped to this
+// single unit invocation via a POSIX ACL, not by the raw group-owner bits the
+// mode alone implies. Without this exception, the strict permission check
+// below would reject every systemd-credential-backed key file, which is the
+// documented, intended way to deliver CFGMS_SECRETS_KEY_FILE without ever
+// writing the key to a process-accessible path on real disk (see
+// tier1-bootstrap.sh / ha-cluster-node-bootstrap.sh's LoadCredential +
+// InaccessiblePaths pairing).
+func isSystemdCredentialPath(keyPath string) bool {
+	return strings.HasPrefix(keyPath, "/run/credentials/")
+}
+
+func loadExternalKey(config *SOPSSecretStoreConfig) ([]byte, error) {
+	if strings.TrimSpace(config.KeyFile) == "" {
+		return nil, fmt.Errorf("external encryption key file is required")
+	}
+
+	keyPath, err := filepath.Abs(config.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("resolve encryption key file: %w", err)
+	}
+	if root, ok := config.StorageConfig["root"].(string); ok && strings.TrimSpace(root) != "" {
+		rootPath, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			return nil, fmt.Errorf("resolve secret storage root: %w", rootErr)
+		}
+		rel, relErr := filepath.Rel(rootPath, keyPath)
+		if relErr != nil {
+			return nil, fmt.Errorf("compare key and storage paths: %w", relErr)
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+			return nil, fmt.Errorf("encryption key file must be stored separately from secret data")
+		}
+	}
+
+	info, err := os.Lstat(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat encryption key file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("encryption key file must not be a symbolic link")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("encryption key file must be a regular file")
+	}
+	if runtime.GOOS != "windows" && !isSystemdCredentialPath(keyPath) && info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("encryption key file permissions must not grant group or other access")
+	}
+
+	// #nosec G304 -- keyPath is explicit administrator configuration and has
+	// just been lstat-validated as a private regular, non-symlink file.
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read encryption key file: %w", err)
+	}
+	if len(keyData) != 32 {
+		encoded := bytes.TrimSpace(keyData)
+		decoded, decodeErr := base64.StdEncoding.DecodeString(string(encoded))
+		if decodeErr != nil || len(decoded) != 32 {
+			return nil, fmt.Errorf("encryption key file must contain exactly 32 raw bytes or a base64-encoded 32-byte key")
+		}
+		keyData = decoded
+	}
+	return keyData, nil
+}
+
+func (s *SOPSSecretStore) encrypt(plaintext []byte, tenantID, key string) ([]byte, error) {
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate encryption nonce: %w", err)
+	}
+	aad := []byte(tenantID + "\x00" + key)
+	ciphertext := s.aead.Seal(nil, nonce, plaintext, aad)
+	return json.Marshal(&encryptedEnvelope{
+		Version:    1,
+		Algorithm:  "AES-256-GCM",
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	})
+}
+
+func (s *SOPSSecretStore) decrypt(encrypted []byte, tenantID, key string) ([]byte, error) {
+	var envelope encryptedEnvelope
+	if err := json.Unmarshal(encrypted, &envelope); err != nil {
+		return nil, fmt.Errorf("secret ciphertext is not a valid encrypted envelope")
+	}
+	if envelope.Version != 1 || envelope.Algorithm != "AES-256-GCM" {
+		return nil, fmt.Errorf("unsupported secret encryption envelope")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(envelope.Nonce)
+	if err != nil || len(nonce) != s.aead.NonceSize() {
+		return nil, fmt.Errorf("invalid secret encryption nonce")
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("invalid secret ciphertext encoding")
+	}
+	aad := []byte(tenantID + "\x00" + key)
+	plaintext, err := s.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("secret ciphertext authentication failed")
+	}
+	return plaintext, nil
+}
+
 // StoreSecret stores a secret
-// M-AUTH-1: Stores secret as ConfigEntry, automatically encrypted by SOPS
+// M-AUTH-1: Stores an authenticated encrypted envelope as ConfigEntry data.
 func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.SecretRequest) error {
-	// Validate request
+	if err := validateSecretRequest(req); err != nil {
+		return err
+	}
+	_, err := s.writeSecretEntry(ctx, req)
+	return err
+}
+
+// validateSecretRequest applies the validation shared by every write path
+// (StoreSecret and CompareAndSwapSecret).
+func validateSecretRequest(req *secretsif.SecretRequest) error {
+	if req == nil {
+		return fmt.Errorf("secret request cannot be nil")
+	}
 	if req.Key == "" {
 		return fmt.Errorf("secret key cannot be empty")
+	}
+	if len(req.Key) > 256 {
+		return fmt.Errorf("secret key exceeds 256 character limit")
 	}
 	if req.TenantID == "" {
 		return fmt.Errorf("tenant ID cannot be empty")
 	}
+	if len(req.Value) > 1<<20 {
+		return fmt.Errorf("secret value exceeds 1048576 byte limit")
+	}
+	return nil
+}
 
-	// Create secret metadata
+// buildSecretEntry encrypts req into the authenticated envelope that goes on the
+// wire to the ConfigStore, without writing anything. Split out from
+// writeSecretEntry so CompareAndSwapSecret can hand the same envelope to a
+// conditional write instead of an unconditional StoreConfig (Issue #3775).
+func (s *SOPSSecretStore) buildSecretEntry(req *secretsif.SecretRequest) (*secretsif.Secret, *cfgconfig.ConfigEntry, error) {
 	secret := &secretsif.Secret{
 		Key:         req.Key,
 		Value:       req.Value,
 		Metadata:    req.Metadata,
 		Tags:        req.Tags,
-		Version:     1, // Version will be set by ConfigStore
+		Version:     1, // placeholder only — never read back; the ConfigStore's own Version is authoritative (see getSecretWithTenant)
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 		CreatedBy:   req.CreatedBy,
@@ -100,10 +296,14 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 	// Convert secret to JSON for storage
 	secretData, err := json.Marshal(secret)
 	if err != nil {
-		return fmt.Errorf("failed to marshal secret: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal secret: %w", err)
+	}
+	encryptedData, err := s.encrypt(secretData, req.TenantID, req.Key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encrypt secret: %w", err)
 	}
 
-	// Store as ConfigEntry (will be automatically encrypted by SOPS)
+	// Store the encrypted envelope as a ConfigEntry.
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  req.TenantID,
 		Namespace: "secrets", // Use "secrets" namespace for all secrets
@@ -113,7 +313,7 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 
 	configEntry := &cfgconfig.ConfigEntry{
 		Key:       configKey,
-		Data:      secretData,
+		Data:      encryptedData,
 		Format:    cfgconfig.ConfigFormatJSON, // Secrets are stored as JSON
 		CreatedBy: req.CreatedBy,
 		UpdatedBy: req.CreatedBy,
@@ -125,28 +325,349 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 		configEntry.Tags = append(configEntry.Tags, fmt.Sprintf("type:%s", secretType))
 	}
 
-	// Store in ConfigStore (SOPS encryption happens here)
+	return secret, configEntry, nil
+}
+
+// cacheSecret refreshes the cache entry for a just-written secret.
+func (s *SOPSSecretStore) cacheSecret(req *secretsif.SecretRequest, secret *secretsif.Secret) {
+	if s.cache == nil {
+		return
+	}
+	cacheKey := s.getCacheKey(req.TenantID, req.Key)
+	cacheTTL := time.Duration(s.config.CacheTTL) * time.Second
+	if req.TTL > 0 && req.TTL < cacheTTL {
+		cacheTTL = req.TTL // Use shorter TTL if secret expires sooner
+	}
+	_ = s.cache.Set(cacheKey, secret, cacheTTL)
+}
+
+// writeSecretEntry encrypts req and writes it through the configured ConfigStore,
+// updating the cache on success. This is an unconditional overwrite: it is the
+// StoreSecret path, never the compare-and-swap path.
+func (s *SOPSSecretStore) writeSecretEntry(ctx context.Context, req *secretsif.SecretRequest) (*secretsif.Secret, error) {
+	secret, configEntry, err := s.buildSecretEntry(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store only the authenticated encrypted envelope in the ConfigStore.
 	if err := s.configStore.StoreConfig(ctx, configEntry); err != nil {
-		return fmt.Errorf("failed to store secret: %w", err)
+		return nil, fmt.Errorf("failed to store secret: %w", err)
 	}
 
-	// Update cache if enabled
-	if s.cache != nil {
-		cacheKey := s.getCacheKey(req.TenantID, req.Key)
-		cacheTTL := time.Duration(s.config.CacheTTL) * time.Second
-		if req.TTL > 0 && req.TTL < cacheTTL {
-			cacheTTL = req.TTL // Use shorter TTL if secret expires sooner
+	s.cacheSecret(req, secret)
+
+	return secret, nil
+}
+
+// CompareAndSwapIsClusterAtomic implements
+// secretsif.ClusterAtomicCompareAndSwapper. It reports true only when the backing
+// ConfigStore performs the version comparison and the write as one atomic
+// storage-layer operation — the only arrangement under which two controller nodes
+// racing the same state transition cannot both win.
+//
+// It is false for a file-lock-coordinated backend. That lock is a genuine
+// cross-process lock and is correct for two processes on one host sharing a
+// directory, but O_CREAT|O_EXCL is not dependably atomic over a network
+// filesystem, so it must not be presented to a caller as a cluster guarantee.
+// Callers that need the cluster property gate on this rather than assuming it
+// (Issue #3775).
+func (s *SOPSSecretStore) CompareAndSwapIsClusterAtomic() bool {
+	return s.conditionalStore != nil
+}
+
+// casCurrentVersion reads the version CompareAndSwapSecret must compare
+// expectedVersion against, alongside the version physically stored.
+//
+// The two differ for an expired secret, and that difference is the whole point.
+// A secret past its expiry is invisible to every read path (getSecretWithTenant
+// refuses it, ListSecrets skips it), so for comparison purposes it does not
+// exist: logical is 0, and a create-if-absent may take it over. stored keeps the
+// real version so the takeover can still be written conditionally — the steal
+// itself is a compare-and-set against the expired record's actual version, so
+// exactly one of several nodes trying to take over the same expired record wins.
+//
+// Without this, a TTL-bearing claim record whose creator crashed before releasing
+// it would block its transition permanently: nothing in this provider ever
+// removes an expired record, so the claim's TTL would be a documented fail-safe
+// that does not exist (Issue #3775).
+func (s *SOPSSecretStore) casCurrentVersion(ctx context.Context, tenantID, key string) (logical int, stored int64, err error) {
+	configKey := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "secrets",
+		Name:      key,
+	}
+
+	existing, err := s.configStore.GetConfig(ctx, configKey)
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return 0, 0, nil
 		}
-		_ = s.cache.Set(cacheKey, secret, cacheTTL)
+		return 0, 0, fmt.Errorf("failed to read current secret version: %w", err)
 	}
 
-	return nil
+	plaintext, err := s.decrypt(existing.Data, tenantID, key)
+	if err != nil {
+		// The record exists but cannot be authenticated. Surface it rather than
+		// treating an unreadable record as absent, which would let a caller
+		// overwrite something it could not verify.
+		return 0, 0, fmt.Errorf("failed to decrypt current secret for compare-and-swap: %w", err)
+	}
+	var secret secretsif.Secret
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
+		return 0, 0, fmt.Errorf("failed to unmarshal current secret for compare-and-swap: %w", err)
+	}
+
+	if s.isExpired(&secret) {
+		return 0, existing.Version, nil
+	}
+	return int(existing.Version), existing.Version, nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret.
+//
+// ConfigStore.StoreConfig is an unconditional overwrite that derives its new
+// version from a preceding read, so building a compare-and-set on it requires
+// atomicity from somewhere else. This takes it from one of two places, chosen
+// once at construction (NewSOPSSecretStore) and reported by
+// CompareAndSwapIsClusterAtomic:
+//
+//   - The backing ConfigStore's own conditional write
+//     (cfgconfig.ConditionalConfigStore — PostgreSQL's "UPDATE ... WHERE version =
+//     $expected"). The database decides the comparison and the write together, so
+//     two controller nodes racing the same transition cannot both win. This is the
+//     cluster-mode shape, where the storage provider is "database".
+//   - Otherwise, an OS-visible file lock on the store's own private data root
+//     (acquireCASLock), which serializes callers on this host and across processes
+//     sharing that root. This is the single-node flatfile shape.
+//
+// When neither is available — a backend with no conditional-write primitive and no
+// private filesystem root — this refuses with an error instead of performing an
+// unprotected read-check-write. There is no third, weaker mode: a compare-and-set
+// that silently stops being atomic is worse than one that says so, because every
+// call site (enrolment-token spend, approved->collected, account revoke, renewal
+// claim) mints certificates on the strength of winning it.
+func (s *SOPSSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	if err := validateSecretRequest(req); err != nil {
+		return 0, false, err
+	}
+	if key == "" {
+		return 0, false, fmt.Errorf("secret key cannot be empty")
+	}
+	if expectedVersion < 0 {
+		return 0, false, fmt.Errorf("expected version cannot be negative")
+	}
+
+	switch {
+	case s.conditionalStore != nil:
+		return s.compareAndSwapConditional(ctx, expectedVersion, req)
+	case s.casLockRoot != "":
+		release, err := acquireCASLock(ctx, s.casLockRoot, req.TenantID, req.Key)
+		if err != nil {
+			return 0, false, fmt.Errorf("failed to acquire compare-and-swap lock: %w", err)
+		}
+		defer release()
+		return s.compareAndSwapUnderLock(ctx, expectedVersion, req)
+	default:
+		return 0, false, fmt.Errorf(
+			"compare-and-swap is unavailable for storage provider %q: %w; "+
+				"configure a backend with a conditional-write primitive (database) or a private storage root (flatfile)",
+			s.providerName, s.casUnavailableErr)
+	}
+}
+
+// compareAndSwapConditional performs the swap using the backing store's own
+// conditional write, which is atomic across controller nodes.
+//
+// The read is advisory: it translates the caller's expectedVersion (in which an
+// expired record counts as absent) into the version physically stored, which is
+// what the conditional write must be keyed on so that taking an expired record
+// over replaces it rather than colliding with it. The write remains the single
+// atomic decision — if another node changes the key between the read and the
+// write, the write matches nothing and this reports a lost race, exactly as if the
+// read had never happened.
+func (s *SOPSSecretStore) compareAndSwapConditional(ctx context.Context, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	logical, stored, err := s.casCurrentVersion(ctx, req.TenantID, req.Key)
+	if err != nil {
+		return 0, false, err
+	}
+	if logical != expectedVersion {
+		return 0, false, nil
+	}
+
+	secret, configEntry, err := s.buildSecretEntry(req)
+	if err != nil {
+		return 0, false, err
+	}
+
+	newVersion, ok, err := s.conditionalStore.CompareAndSwapConfig(ctx, configEntry, stored)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to compare-and-swap secret: %w", err)
+	}
+	if !ok {
+		return 0, false, nil
+	}
+
+	secret.Version = int(newVersion)
+	s.cacheSecret(req, secret)
+	return int(newVersion), true, nil
+}
+
+// compareAndSwapUnderLock performs the read-check-write sequence for backends with
+// no conditional-write primitive. The caller must already hold the
+// tenant+key-scoped file lock.
+func (s *SOPSSecretStore) compareAndSwapUnderLock(ctx context.Context, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	logical, _, err := s.casCurrentVersion(ctx, req.TenantID, req.Key)
+	if err != nil {
+		return 0, false, err
+	}
+	if logical != expectedVersion {
+		return 0, false, nil
+	}
+
+	secret, configEntry, err := s.buildSecretEntry(req)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := s.configStore.StoreConfig(ctx, configEntry); err != nil {
+		return 0, false, fmt.Errorf("failed to store secret: %w", err)
+	}
+
+	// Not every ConfigStore stamps the version it assigned back onto the entry it
+	// was handed (flatfile writes a copy), so read it back. Still inside the lock,
+	// so no other writer can have moved it.
+	written, err := s.configStore.GetConfig(ctx, configEntry.Key)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to read version after compare-and-swap write: %w", err)
+	}
+
+	secret.Version = int(written.Version)
+	s.cacheSecret(req, secret)
+	return int(written.Version), true, nil
+}
+
+// errBadSecretRef is returned for a reference with no "<tenant_id>/<key>" split.
+var errBadSecretRef = errors.New("secret key must be in format 'tenant_id/key' or tenant ID must be provided")
+
+// secretRefSplits returns every (tenant, key) reading of a combined "<tenant_id>/<key>"
+// reference, leftmost separator first. The string alone is ambiguous: tenant IDs are
+// hierarchical paths ("msp-a/client-1") and secret keys may contain "/" too
+// ("m365/<id>/token"), so the reference is resolved against the store rather than
+// split at a fixed position (Issue #4574).
+func secretRefSplits(ref string) [][2]string {
+	var out [][2]string
+	for i := 0; i < len(ref); i++ {
+		if ref[i] != '/' {
+			continue
+		}
+		if i == 0 || i == len(ref)-1 {
+			continue
+		}
+		out = append(out, [2]string{ref[:i], ref[i+1:]})
+	}
+	return out
+}
+
+// Shadowing assumption: leftmost-first means a record under tenant "a" named "b/<k>"
+// would shadow tenant "a/b" key "<k>". That cannot arise on the flatfile backend, the
+// one SOPS stores on by default, because flatfile rejects "/" in a config name (pinned
+// by TestFlatfileBackend_RejectsSlashInSecretName). On a backend that accepts "/" in
+// names, a caller that knows the tenant should use TenantSecretAccessor, which never
+// resolves a combined reference — the API-key paths do.
+//
+// resolveSecretRef finds the (tenant, key) reading of ref whose record exists,
+// trying split points left to right — so every reference that resolved under the
+// former first-separator split resolves identically, and "tenant-a/child/<key>"
+// resolves to tenant "tenant-a/child" once "tenant-a" + "child/<key>" is found
+// absent. Lookups are bounded by the number of separators in ref.
+//
+// A candidate the backend rejects as malformed (a flatfile name containing "/") or
+// reports missing is passed over. If no candidate exists the result wraps
+// ErrSecretNotFound when any candidate was a clean miss; otherwise the first error is
+// returned, so a storage fault is never reported as not-found.
+func (s *SOPSSecretStore) resolveSecretRef(ctx context.Context, ref string) (string, string, *cfgconfig.ConfigEntry, error) {
+	splits := secretRefSplits(ref)
+	if len(splits) == 0 {
+		return "", "", nil, errBadSecretRef
+	}
+	var firstErr error
+	sawMiss := false
+	for _, sp := range splits {
+		entry, err := s.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+			TenantID:  sp[0],
+			Namespace: "secrets",
+			Name:      sp[1],
+		})
+		if err == nil {
+			return sp[0], sp[1], entry, nil
+		}
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			sawMiss = true
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if sawMiss {
+		// The reference is deliberately omitted: it may embed a credential hash.
+		return "", "", nil, secretsif.ErrSecretNotFound
+	}
+	return "", "", nil, fmt.Errorf("failed to retrieve secret: %w", firstErr)
+}
+
+// resolveSecretRefOrLeftmost is resolveSecretRef for operations that must still
+// address a record whose current entry is gone (version history): when no reading
+// exists it falls back to the leftmost split, the historical behaviour.
+func (s *SOPSSecretStore) resolveSecretRefOrLeftmost(ctx context.Context, ref string) (string, string, error) {
+	tenantID, key, _, err := s.resolveSecretRef(ctx, ref)
+	if err == nil {
+		return tenantID, key, nil
+	}
+	splits := secretRefSplits(ref)
+	if len(splits) == 0 {
+		return "", "", errBadSecretRef
+	}
+	return splits[0][0], splits[0][1], nil
 }
 
 // GetSecret retrieves a secret
 // M-AUTH-1: Retrieves secret from ConfigStore, automatically decrypted by SOPS
 func (s *SOPSSecretStore) GetSecret(ctx context.Context, key string) (*secretsif.Secret, error) {
 	return s.getSecretWithTenant(ctx, "", key)
+}
+
+var _ secretsif.TenantSecretAccessor = (*SOPSSecretStore)(nil)
+
+// GetTenantSecret reads the secret key in tenantID, addressed explicitly so no
+// reference resolution is involved (secretsif.TenantSecretAccessor, Issue #4574). It
+// always reads the backing store, never this instance's cache, so a change made
+// through another store instance (another controller node) is observed at once.
+func (s *SOPSSecretStore) GetTenantSecret(ctx context.Context, tenantID, key string) (*secretsif.Secret, error) {
+	if tenantID == "" || key == "" {
+		return nil, secretsif.ErrTenantRequired
+	}
+	configEntry, err := s.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "secrets",
+		Name:      key,
+	})
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, secretsif.ErrSecretNotFound
+		}
+		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
+	}
+	return s.decodeSecretEntry(configEntry, tenantID, key)
+}
+
+// DeleteTenantSecret deletes the secret key in tenantID, addressed explicitly
+// (secretsif.TenantSecretAccessor, Issue #4574).
+func (s *SOPSSecretStore) DeleteTenantSecret(ctx context.Context, tenantID, key string) error {
+	if tenantID == "" || key == "" {
+		return secretsif.ErrTenantRequired
+	}
+	return s.deleteSecretIn(ctx, tenantID, key)
 }
 
 // getSecretWithTenant retrieves a secret with explicit tenant ID
@@ -166,41 +687,35 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 		}
 	}
 
-	// Extract tenant ID from key if not provided (format: tenant_id/secret_key)
+	var configEntry *cfgconfig.ConfigEntry
 	if tenantID == "" {
-		parts := strings.SplitN(key, "/", 2)
-		if len(parts) == 2 {
-			tenantID = parts[0]
-			key = parts[1]
-		} else {
-			return nil, fmt.Errorf("secret key must be in format 'tenant_id/key' or tenant ID must be provided")
+		// Resolve the combined "<tenant_id>/<key>" reference against the store.
+		t, k, entry, err := s.resolveSecretRef(ctx, key)
+		if err != nil {
+			if errors.Is(err, secretsif.ErrSecretNotFound) {
+				return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
+			}
+			return nil, err
 		}
+		tenantID, key, configEntry = t, k, entry
+	} else {
+		entry, err := s.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+			TenantID:  tenantID,
+			Namespace: "secrets",
+			Name:      key,
+		})
+		if err != nil {
+			if err == cfgconfig.ErrConfigNotFound {
+				return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
+			}
+			return nil, fmt.Errorf("failed to retrieve secret: %w", err)
+		}
+		configEntry = entry
 	}
 
-	// Retrieve from ConfigStore
-	configKey := &cfgconfig.ConfigKey{
-		TenantID:  tenantID,
-		Namespace: "secrets",
-		Name:      key,
-	}
-
-	configEntry, err := s.configStore.GetConfig(ctx, configKey)
+	secret, err := s.decodeSecretEntry(configEntry, tenantID, key)
 	if err != nil {
-		if err == cfgconfig.ErrConfigNotFound {
-			return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
-		}
-		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
-	}
-
-	// Parse secret from JSON (SOPS decryption happens in ConfigStore.GetConfig)
-	var secret secretsif.Secret
-	if err := json.Unmarshal(configEntry.Data, &secret); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
-	}
-
-	// Check expiration
-	if s.isExpired(&secret) {
-		return nil, fmt.Errorf("secret expired: %s", key)
+		return nil, err
 	}
 
 	// Update cache if enabled
@@ -213,7 +728,35 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 				cacheTTL = remainingTTL
 			}
 		}
-		_ = s.cache.Set(cacheKey, &secret, cacheTTL)
+		_ = s.cache.Set(cacheKey, secret, cacheTTL)
+	}
+
+	return secret, nil
+}
+
+// decodeSecretEntry decrypts and parses a stored secret entry, refusing an expired one.
+func (s *SOPSSecretStore) decodeSecretEntry(configEntry *cfgconfig.ConfigEntry, tenantID, key string) (*secretsif.Secret, error) {
+	plaintext, err := s.decrypt(configEntry.Data, tenantID, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt secret: %w: %w", secretsif.ErrSecretUndecryptable, err)
+	}
+
+	// Parse the authenticated plaintext only after decryption succeeds.
+	var secret secretsif.Secret
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal secret: %w: %w", secretsif.ErrSecretUndecryptable, err)
+	}
+	// The encrypted payload's own Version field is stamped once at write time and
+	// never updated on subsequent writes (writeSecretEntry always marshals
+	// Version: 1) — it is not a reliable version number. The ConfigStore's own
+	// auto-incrementing Version is authoritative and is what CompareAndSwapSecret
+	// keys on, so every read path must report it, not the stale payload value
+	// (Issue #3775).
+	secret.Version = int(configEntry.Version)
+
+	// Check expiration
+	if s.isExpired(&secret) {
+		return nil, fmt.Errorf("secret expired: %s: %w", key, secretsif.ErrSecretExpired)
 	}
 
 	return &secret, nil
@@ -222,14 +765,25 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 // DeleteSecret deletes a secret
 // M-AUTH-1: Deletes secret from ConfigStore
 func (s *SOPSSecretStore) DeleteSecret(ctx context.Context, key string) error {
-	// Extract tenant ID from key (format: tenant_id/secret_key)
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("secret key must be in format 'tenant_id/key'")
+	// Resolve the combined "<tenant_id>/<key>" reference against the store.
+	tenantID, secretKey, _, err := s.resolveSecretRef(ctx, key)
+	if err != nil {
+		switch {
+		case errors.Is(err, errBadSecretRef):
+			return fmt.Errorf("secret key must be in format 'tenant_id/key'")
+		case errors.Is(err, secretsif.ErrSecretNotFound):
+			// The key is deliberately omitted: it may be a credential hash.
+			return secretsif.ErrSecretNotFound
+		}
+		// Not %w-wrapped: storage errors embed the filesystem path, which
+		// contains the secret key.
+		return errors.New("failed to delete secret: storage error")
 	}
-	tenantID := parts[0]
-	secretKey := parts[1]
+	return s.deleteSecretIn(ctx, tenantID, secretKey)
+}
 
+// deleteSecretIn deletes the secret secretKey in tenantID.
+func (s *SOPSSecretStore) deleteSecretIn(ctx context.Context, tenantID, secretKey string) error {
 	// Delete from ConfigStore
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
@@ -239,9 +793,13 @@ func (s *SOPSSecretStore) DeleteSecret(ctx context.Context, key string) error {
 
 	if err := s.configStore.DeleteConfig(ctx, configKey); err != nil {
 		if err == cfgconfig.ErrConfigNotFound {
-			return fmt.Errorf("secret not found: %s", key)
+			// The key (and any storage path derived from it) is deliberately
+			// omitted: callers log this error and the key may be a credential hash.
+			return secretsif.ErrSecretNotFound
 		}
-		return fmt.Errorf("failed to delete secret: %w", err)
+		// Not %w-wrapped: storage errors embed the filesystem path, which
+		// contains the secret key.
+		return errors.New("failed to delete secret: storage error")
 	}
 
 	// Remove from cache if enabled
@@ -277,10 +835,31 @@ func (s *SOPSSecretStore) ListSecrets(ctx context.Context, filter *secretsif.Sec
 	// Convert to secret metadata
 	var metadata []*secretsif.SecretMetadata
 	for _, config := range configs {
+		if config.Key == nil {
+			continue
+		}
+		// The secret key is the config name (buildSecretEntry), so a KeyPrefix
+		// filter is applied before paying for a decrypt (Issue #4574).
+		if filter.KeyPrefix != "" && !strings.HasPrefix(config.Key.Name, filter.KeyPrefix) {
+			continue
+		}
+		plaintext, decryptErr := s.decrypt(config.Data, config.Key.TenantID, config.Key.Name)
+		if decryptErr != nil {
+			// A listing skips a record it cannot open rather than failing outright:
+			// one corrupt or foreign-keyed record must not hide every other secret
+			// (e.g. take down all API-key authentication). Direct reads
+			// (getSecretWithTenant) still fail closed on the same condition. The
+			// record name is not logged: it may be a credential hash.
+			logging.ForComponent("secrets").Warn("Skipping secret that failed to decrypt while listing",
+				"tenant_id", logging.SanitizeLogValue(config.Key.TenantID))
+			continue
+		}
 		// Parse secret to get metadata
 		var secret secretsif.Secret
-		if err := json.Unmarshal(config.Data, &secret); err != nil {
-			continue // Skip invalid secrets
+		if err := json.Unmarshal(plaintext, &secret); err != nil {
+			logging.ForComponent("secrets").Warn("Skipping secret that failed to parse while listing",
+				"tenant_id", logging.SanitizeLogValue(config.Key.TenantID))
+			continue
 		}
 
 		// Apply additional filters
@@ -312,10 +891,14 @@ func (s *SOPSSecretStore) ListSecrets(ctx context.Context, filter *secretsif.Sec
 		}
 
 		metadata = append(metadata, &secretsif.SecretMetadata{
-			Key:         secret.Key,
-			Metadata:    secret.Metadata,
-			Tags:        secret.Tags,
-			Version:     secret.Version,
+			Key:      secret.Key,
+			Metadata: secret.Metadata,
+			Tags:     secret.Tags,
+			// config.Version (the ConfigStore's own auto-incrementing version) is
+			// authoritative — secret.Version is stamped once at write time and never
+			// updated on subsequent writes; see getSecretWithTenant's identical fix
+			// (Issue #3775).
+			Version:     int(config.Version),
 			CreatedAt:   secret.CreatedAt,
 			UpdatedAt:   secret.UpdatedAt,
 			ExpiresAt:   secret.ExpiresAt,
@@ -337,8 +920,7 @@ func (s *SOPSSecretStore) GetSecrets(ctx context.Context, keys []string) (map[st
 	for _, key := range keys {
 		secret, err := s.GetSecret(ctx, key)
 		if err != nil {
-			// Skip secrets that don't exist or have errors
-			continue
+			return nil, fmt.Errorf("failed to retrieve secret %s: %w", key, err)
 		}
 		result[key] = secret
 	}
@@ -360,13 +942,11 @@ func (s *SOPSSecretStore) StoreSecrets(ctx context.Context, secrets map[string]*
 // GetSecretVersion retrieves a specific version of a secret
 // M-AUTH-1: Version retrieval using git history
 func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, version int) (*secretsif.Secret, error) {
-	// Extract tenant ID from key
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("secret key must be in format 'tenant_id/key'")
+	// Resolve the combined "<tenant_id>/<key>" reference against the store.
+	tenantID, secretKey, err := s.resolveSecretRefOrLeftmost(ctx, key)
+	if err != nil {
+		return nil, err
 	}
-	tenantID := parts[0]
-	secretKey := parts[1]
 
 	// Get version from ConfigStore
 	configKey := &cfgconfig.ConfigKey{
@@ -380,9 +960,14 @@ func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, vers
 		return nil, fmt.Errorf("failed to retrieve secret version: %w", err)
 	}
 
+	plaintext, err := s.decrypt(configEntry.Data, tenantID, secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt secret version: %w", err)
+	}
+
 	// Parse secret from JSON
 	var secret secretsif.Secret
-	if err := json.Unmarshal(configEntry.Data, &secret); err != nil {
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
 	}
 
@@ -392,13 +977,11 @@ func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, vers
 // ListSecretVersions lists all versions of a secret
 // M-AUTH-1: Version history using git log
 func (s *SOPSSecretStore) ListSecretVersions(ctx context.Context, key string) ([]*secretsif.SecretVersion, error) {
-	// Extract tenant ID from key
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("secret key must be in format 'tenant_id/key'")
+	// Resolve the combined "<tenant_id>/<key>" reference against the store.
+	tenantID, secretKey, err := s.resolveSecretRefOrLeftmost(ctx, key)
+	if err != nil {
+		return nil, err
 	}
-	tenantID := parts[0]
-	secretKey := parts[1]
 
 	// Get version history from ConfigStore
 	configKey := &cfgconfig.ConfigKey{
@@ -415,10 +998,14 @@ func (s *SOPSSecretStore) ListSecretVersions(ctx context.Context, key string) ([
 	// Convert to secret versions
 	var versions []*secretsif.SecretVersion
 	for _, config := range history {
+		plaintext, decryptErr := s.decrypt(config.Data, tenantID, secretKey)
+		if decryptErr != nil {
+			return nil, fmt.Errorf("failed to decrypt secret version history: %w", decryptErr)
+		}
 		// Parse secret to get created info
 		var secret secretsif.Secret
-		if err := json.Unmarshal(config.Data, &secret); err != nil {
-			continue
+		if err := json.Unmarshal(plaintext, &secret); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal secret version history: %w", err)
 		}
 
 		versions = append(versions, &secretsif.SecretVersion{
@@ -546,9 +1133,15 @@ func (s *SOPSSecretStore) Close() error {
 
 // Helper methods
 
-// getCacheKey generates a cache key for a secret
+// getCacheKey generates a cache key for a secret. Length-prefixing each
+// component (rather than joining with a plain separator) is what makes the
+// mapping collision-free: tenantID="a/b", key="c" and tenantID="a",
+// key="b/c" both join to "a/b/c" under a bare "%s/%s" format, which would let
+// one tenant's cache entry be served for another tenant/key scope entirely.
+// Neither component's length can be forged from within the string itself, so
+// two distinct (tenantID, key) pairs can never encode to the same key.
 func (s *SOPSSecretStore) getCacheKey(tenantID, key string) string {
-	return fmt.Sprintf("%s/%s", tenantID, key)
+	return fmt.Sprintf("%d:%s/%d:%s", len(tenantID), tenantID, len(key), key)
 }
 
 // isExpired checks if a secret is expired

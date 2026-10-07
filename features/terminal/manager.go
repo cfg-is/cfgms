@@ -20,6 +20,19 @@ type DefaultSessionManager struct {
 	recorder  Recorder
 	cleanupCh chan string
 	stopCh    chan struct{}
+	// cleanupDone is closed by cleanupRoutine when it returns, letting callers
+	// (Stop, quiesceBackgroundCleanup) wait for the background ticker to have
+	// fully stopped rather than merely signaled.
+	cleanupDone chan struct{}
+	// stopped records that Stop has already run its teardown (closing sessions
+	// and the recorder). A second call must be a no-op rather than repeating
+	// that teardown.
+	stopped bool
+	// cleanupStopSignaled records that stopCh has already been closed, whether
+	// by Stop or by the test-only quiesceBackgroundCleanup. stopCh must only
+	// ever be closed once — a second close panics — so every close goes through
+	// signalCleanupStopLocked.
+	cleanupStopSignaled bool
 	// afterCollectHook, if non-nil, is called after the timed-out ID slice is
 	// collected and m.mu is released, but before the termination loop begins.
 	// Used in tests to inject deterministic race conditions.
@@ -40,23 +53,35 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 		return nil, fmt.Errorf("max sessions must be positive")
 	}
 
-	manager := &DefaultSessionManager{
-		config:    config,
-		logger:    logger,
-		sessions:  make(map[string]*Session),
-		cleanupCh: make(chan string, 100),
-		stopCh:    make(chan struct{}),
+	// Recording writes cleartext session content to disk, so the destination must
+	// be an explicit, deployment-owned directory. Reject the misconfiguration at
+	// construction instead of silently falling back to a shared location.
+	if config.RecordSessions && config.RecordingStoragePath == "" {
+		return nil, fmt.Errorf("recording_storage_path is required when record_sessions is enabled")
 	}
 
-	// Initialize recorder if recording is enabled
+	manager := &DefaultSessionManager{
+		config:      config,
+		logger:      logger,
+		sessions:    make(map[string]*Session),
+		cleanupCh:   make(chan string, 100),
+		stopCh:      make(chan struct{}),
+		cleanupDone: make(chan struct{}),
+	}
+
+	// Initialize recorder if recording is enabled. RecordSessions is a security
+	// control (session I/O is the audit trail for privileged interactive shells),
+	// so a recorder that fails to initialize — including the symlink/permission
+	// hijack cases ensureSecureRecordingDir rejects — must fail construction
+	// rather than silently fall back to running unrecorded.
 	if config.RecordSessions {
 		recorderConfig := DefaultRecorderConfig()
+		recorderConfig.StoragePath = config.RecordingStoragePath
 		recorder, err := NewSessionRecorder(recorderConfig, logger)
 		if err != nil {
-			logger.Warn("Failed to initialize session recorder, continuing without recording", "error", err)
-		} else {
-			manager.recorder = recorder
+			return nil, fmt.Errorf("failed to initialize session recorder: %w", err)
 		}
+		manager.recorder = recorder
 	}
 
 	// Start background cleanup routine
@@ -90,15 +115,17 @@ func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionR
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Set recorder if available
+	// Set recorder if available. When RecordSessions is enabled, a session must
+	// not be created — let alone served — without a working recording: that
+	// would leave a privileged interactive shell with no captured keystroke/output
+	// audit trail, silently defeating the reason recording is enabled.
 	if m.recorder != nil {
 		session.SetRecorder(m.recorder)
 
-		// Start recording session
 		metadata := session.GetMetadata()
 		if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
 			if err := recorder.StartRecording(session.ID, metadata); err != nil {
-				m.logger.Warn("Failed to start session recording", "session_id", logging.RedactedID(session.ID), "error", err)
+				return nil, fmt.Errorf("failed to start session recording: %w", err)
 			}
 		}
 	}
@@ -108,8 +135,8 @@ func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionR
 
 	m.logger.Info("Session created",
 		"session_id", logging.RedactedID(session.ID),
-		"steward_id", session.StewardID,
-		"user_id", session.UserID,
+		"steward_id", logging.SanitizeLogValue(session.StewardID),
+		"user_id", logging.SanitizeLogValue(session.UserID),
 		"active_sessions", len(m.sessions))
 
 	return session, nil
@@ -138,18 +165,12 @@ func (m *DefaultSessionManager) TerminateSession(ctx context.Context, sessionID 
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Close the session
+	// Close the session. Session.Close finalizes this session's recording (and only
+	// this session's) via Recorder.EndRecording, so no manager-level end/close of the
+	// shared recorder happens here — that would take down the recordings of every
+	// other live session.
 	if err := session.Close(ctx); err != nil {
 		m.logger.Warn("Error closing session", "session_id", logging.RedactedID(sessionID), "error", err)
-	}
-
-	// End recording if recorder is available
-	if m.recorder != nil {
-		if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
-			if err := recorder.EndRecording(sessionID); err != nil {
-				m.logger.Warn("Failed to end session recording", "session_id", logging.RedactedID(sessionID), "error", err)
-			}
-		}
 	}
 
 	// Remove from active sessions
@@ -193,8 +214,12 @@ func (m *DefaultSessionManager) GetSessionRecording(sessionID string) (*SessionR
 	return m.recorder.GetRecording(sessionID)
 }
 
-// cleanupRoutine runs in the background to clean up timed-out sessions
+// cleanupRoutine runs in the background to clean up timed-out sessions.
+// cleanupDone is closed on return so callers can wait for the ticker to have
+// actually stopped, not merely been signaled to stop.
 func (m *DefaultSessionManager) cleanupRoutine() {
+	defer close(m.cleanupDone)
+
 	ticker := time.NewTicker(1 * time.Minute) // Check every minute
 	defer ticker.Stop()
 
@@ -221,10 +246,13 @@ func (m *DefaultSessionManager) CleanupTimedOutSessions() {
 			timedOut = append(timedOut, id)
 		}
 	}
+	// Captured under the same lock tests use to install it, so a hook write
+	// racing this read is never observed as a torn or stale value.
+	hook := m.afterCollectHook
 	m.mu.Unlock()
 
-	if m.afterCollectHook != nil {
-		m.afterCollectHook(timedOut)
+	if hook != nil {
+		hook(timedOut)
 	}
 
 	for _, id := range timedOut {
@@ -259,13 +287,42 @@ func (m *DefaultSessionManager) RequestCleanup(sessionID string) {
 	}
 }
 
-// Stop stops the session manager and cleans up resources
+// signalCleanupStopLocked closes stopCh at most once, whether the caller is
+// Stop or quiesceBackgroundCleanup. Callers must hold m.mu.
+func (m *DefaultSessionManager) signalCleanupStopLocked() {
+	if m.cleanupStopSignaled {
+		return
+	}
+	m.cleanupStopSignaled = true
+	close(m.stopCh)
+}
+
+// quiesceBackgroundCleanup halts the background cleanup ticker and waits for
+// cleanupRoutine to actually exit, without closing live sessions or the
+// recorder. Test-only: lets a test install afterCollectHook and drive
+// CleanupTimedOutSessions itself without the ticker racing that call. Safe to
+// call more than once, and safe to call before a later Stop().
+func (m *DefaultSessionManager) quiesceBackgroundCleanup() {
+	m.mu.Lock()
+	m.signalCleanupStopLocked()
+	m.mu.Unlock()
+
+	<-m.cleanupDone
+}
+
+// Stop stops the session manager and cleans up resources. It is idempotent:
+// repeated calls return nil without re-closing stopCh or re-closing sessions.
 func (m *DefaultSessionManager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.stopped {
+		return nil
+	}
+	m.stopped = true
+
 	// Signal cleanup routine to stop
-	close(m.stopCh)
+	m.signalCleanupStopLocked()
 
 	// Close all active sessions
 	for sessionID, session := range m.sessions {

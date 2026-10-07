@@ -4,6 +4,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -14,8 +15,15 @@ func (e *Engine) executeHTTPStep(ctx context.Context, step Step, execution *Work
 		return fmt.Errorf("HTTP configuration is required for HTTP steps")
 	}
 
+	// Render {{ }} template fields against current execution variables.
+	vars := execution.GetVariables()
+	renderedHTTP, err := renderHTTPConfig(step.HTTP, vars)
+	if err != nil {
+		return fmt.Errorf("template rendering failed for step %q: %w", step.Name, err)
+	}
+
 	// Execute HTTP request
-	response, err := e.httpClient.ExecuteRequest(ctx, step.HTTP)
+	response, err := e.httpClient.ExecuteRequest(ctx, renderedHTTP)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
@@ -26,6 +34,15 @@ func (e *Engine) executeHTTPStep(ctx context.Context, step Step, execution *Work
 	execution.SetVariable(step.Name+"_headers", response.Headers)
 	execution.SetVariable(step.Name+"_body", string(response.Body))
 	execution.SetVariable(step.Name+"_duration", response.Duration.String())
+
+	// Attempt to decode response body as JSON for addressable downstream access.
+	// Non-JSON bodies are silently ignored; raw body is always available via _body.
+	if len(response.Body) > 0 {
+		var jsonData interface{}
+		if jsonErr := json.Unmarshal(response.Body, &jsonData); jsonErr == nil {
+			execution.SetVariable(step.Name+"_response_json", jsonData)
+		}
+	}
 	e.mutex.Unlock()
 
 	e.logger.Info("HTTP step completed",
@@ -42,8 +59,15 @@ func (e *Engine) executeAPIStep(ctx context.Context, step Step, execution *Workf
 		return fmt.Errorf("API configuration is required for API steps")
 	}
 
+	// Render {{ }} template fields against current execution variables.
+	vars := execution.GetVariables()
+	renderedAPI, err := renderAPIConfig(step.API, vars)
+	if err != nil {
+		return fmt.Errorf("template rendering failed for step %q: %w", step.Name, err)
+	}
+
 	// Use provider registry for API operations
-	response, err := e.providerRegistry.ExecuteOperation(ctx, step.API)
+	response, err := e.providerRegistry.ExecuteOperation(ctx, renderedAPI)
 	if err != nil {
 		return fmt.Errorf("API operation failed: %w", err)
 	}
@@ -59,9 +83,9 @@ func (e *Engine) executeAPIStep(ctx context.Context, step Step, execution *Workf
 
 	e.logger.Info("API step completed",
 		"step", step.Name,
-		"provider", step.API.Provider,
-		"service", step.API.Service,
-		"operation", step.API.Operation,
+		"provider", renderedAPI.Provider,
+		"service", renderedAPI.Service,
+		"operation", renderedAPI.Operation,
 		"success", response.Success)
 
 	return nil
@@ -73,16 +97,23 @@ func (e *Engine) executeWebhookStep(ctx context.Context, step Step, execution *W
 		return fmt.Errorf("webhook configuration is required for webhook steps")
 	}
 
+	// Render {{ }} template fields against current execution variables.
+	vars := execution.GetVariables()
+	renderedWebhook, err := renderWebhookConfig(step.Webhook, vars)
+	if err != nil {
+		return fmt.Errorf("template rendering failed for step %q: %w", step.Name, err)
+	}
+
 	// Convert webhook config to HTTP config
 	httpConfig := &HTTPConfig{
-		URL:            step.Webhook.URL,
-		Method:         step.Webhook.Method,
-		Headers:        step.Webhook.Headers,
-		Body:           step.Webhook.Payload,
-		Auth:           step.Webhook.Auth,
-		Timeout:        step.Webhook.Timeout,
-		Retry:          step.Webhook.Retry,
-		ExpectedStatus: []int{200, 201, 202, 204}, // Common webhook success codes
+		URL:            renderedWebhook.URL,
+		Method:         renderedWebhook.Method,
+		Headers:        renderedWebhook.Headers,
+		Body:           renderedWebhook.Payload,
+		Auth:           renderedWebhook.Auth,
+		Timeout:        renderedWebhook.Timeout,
+		Retry:          renderedWebhook.Retry,
+		ExpectedStatus: []int{200, 201, 202, 204},
 	}
 
 	// Set default method if not specified
@@ -104,7 +135,7 @@ func (e *Engine) executeWebhookStep(ctx context.Context, step Step, execution *W
 
 	e.logger.Info("Webhook step completed",
 		"step", step.Name,
-		"url", step.Webhook.URL,
+		"url", renderedWebhook.URL,
 		"status_code", response.StatusCode)
 
 	return nil
@@ -130,11 +161,21 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 		"duration", step.Delay.Duration,
 		"message", message)
 
-	// Wait for the specified duration or context cancellation
+	// Wait for the specified duration or context cancellation.
+	//
+	// Use an explicit timer (stopped on return) rather than time.After: time.After
+	// leaks its underlying timer and goroutine until the full duration elapses even
+	// when the context is cancelled first. For long delays cancelled early (e.g. a
+	// cancelled or abandoned execution) that leak keeps a goroutine parked in this
+	// select for the whole duration, which surfaces as "stuck in executeDelayStep"
+	// goroutines in dumps. Stopping the timer releases it immediately on cancellation.
+	timer := time.NewTimer(step.Delay.Duration)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(step.Delay.Duration):
+	case <-timer.C:
 		// Delay completed successfully
 	}
 
@@ -143,13 +184,14 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 		"duration", step.Delay.Duration)
 
 	// Set the output for the step result
-	result, exists := execution.GetStepResult(step.Name)
+	delayKey := StepResultKey(step)
+	result, exists := execution.GetStepResult(delayKey)
 	if exists {
 		if result.Output == nil {
 			result.Output = make(map[string]interface{})
 		}
 		result.Output["message"] = message
-		execution.SetStepResult(step.Name, result)
+		execution.SetStepResult(delayKey, result)
 	}
 
 	return nil

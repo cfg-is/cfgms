@@ -66,7 +66,7 @@ func (h *ConfigHandler) WithControllerService(cs *service.ControllerService) *Co
 // This is the gRPC path used by the composite handler (Story #515).
 //
 // It extracts the steward ID from the request, looks up the configuration,
-// signs it if a signer is available, and streams the result as ConfigChunks.
+// requires a configured signer, and streams signed ConfigChunks.
 func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigSyncRequest, stream grpc.ServerStreamingServer[transportpb.ConfigChunk]) error {
 	stewardID := req.GetStewardId()
 	h.logger.Info("Handling gRPC config sync request",
@@ -94,6 +94,12 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	// request context before calling GetConfiguration. The mTLS data-plane sync path
 	// carries no tenant context value, so without this injection extractTenantID(ctx)
 	// returns "default" and the config lookup scopes to the wrong tenant. (Issue #1720)
+	//
+	// The caller here is a steward proven by its certificate to be stewardID, not a
+	// tenant principal, so the context is marked system-internal (Issue #4665); the
+	// steward's own tenant, injected below whenever the registry knows it, confines
+	// every tenant-guarded read to that tenant.
+	ctx = ctxkeys.WithSystem(ctx)
 	if h.controllerSvc != nil {
 		if info, ok := h.controllerSvc.GetStewardInfo(stewardID); ok && info.TenantID != "" {
 			ctx = context.WithValue(ctx, ctxkeys.TenantID, info.TenantID)
@@ -122,22 +128,18 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 		return fmt.Errorf("configuration request failed: %s", configResp.Status.Message)
 	}
 
-	// Sign the protobuf configuration if signer is available
-	var finalConfig *controller.SignedConfig
-	if h.signer != nil {
-		signed, err := signature.SignProtoConfig(h.signer, configResp.Config.Config)
-		if err != nil {
-			h.logger.Error("Failed to sign configuration", "steward_id", stewardID, "error", err)
-			return fmt.Errorf("failed to sign configuration: %w", err)
-		}
-		finalConfig = signed
-		h.logger.Info("Configuration signed successfully",
-			"steward_id", stewardID,
-			"algorithm", h.signer.Algorithm(),
-			"key_fingerprint", h.signer.KeyFingerprint())
-	} else {
-		finalConfig = configResp.Config
+	if h.signer == nil {
+		return status.Error(codes.FailedPrecondition, "configuration signing service unavailable")
 	}
+	finalConfig, err := signature.SignProtoConfig(h.signer, configResp.Config.Config)
+	if err != nil {
+		h.logger.Error("Failed to sign configuration", "steward_id", stewardID, "error", err)
+		return fmt.Errorf("failed to sign configuration: %w", err)
+	}
+	h.logger.Info("Configuration signed successfully",
+		"steward_id", stewardID,
+		"algorithm", h.signer.Algorithm(),
+		"key_fingerprint", h.signer.KeyFingerprint())
 
 	// Marshal to bytes
 	configBytes, err := proto.Marshal(finalConfig)
@@ -155,18 +157,16 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	}
 
 	// Sign the proto payload and store the JSON-serialised signature in the transfer.
-	if h.signer != nil {
-		sig, err := h.signer.Sign(configBytes)
-		if err != nil {
-			h.logger.Error("Failed to sign config transfer", "steward_id", stewardID, "error", err)
-			return fmt.Errorf("failed to sign config transfer: %w", err)
-		}
-		sigJSON, err := json.Marshal(sig)
-		if err != nil {
-			return fmt.Errorf("failed to marshal config signature: %w", err)
-		}
-		transfer.Signature = sigJSON
+	sig, err := h.signer.Sign(configBytes)
+	if err != nil {
+		h.logger.Error("Failed to sign config transfer", "steward_id", stewardID, "error", err)
+		return fmt.Errorf("failed to sign config transfer: %w", err)
 	}
+	sigJSON, err := json.Marshal(sig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config signature: %w", err)
+	}
+	transfer.Signature = sigJSON
 
 	// JSON-encode the ConfigTransfer so chunksToConfigTransfer can reassemble it.
 	transferBytes, err := json.Marshal(transfer)
@@ -190,10 +190,12 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 			end = len(transferBytes)
 		}
 
+		// #nosec G115 -- i and totalChunks are non-negative and explicitly
+		// bounded by MaxInt32 above before constructing the protobuf chunk.
 		chunk := &transportpb.ConfigChunk{
 			Data:        transferBytes[start:end],
-			ChunkIndex:  int32(i),           //nolint:gosec // G115: bounded by totalChunks > math.MaxInt32 check above
-			TotalChunks: int32(totalChunks), //nolint:gosec // G115: bounded by totalChunks > math.MaxInt32 check above
+			ChunkIndex:  int32(i),
+			TotalChunks: int32(totalChunks),
 			Version:     configResp.Version,
 			ConfigId:    transfer.ID,
 		}

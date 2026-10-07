@@ -44,6 +44,10 @@ type SecretProvider interface {
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
 	GetVersion() string
+
+	// ClusterCapable returns true if this provider can serve as shared state
+	// across multiple CFGMS controller nodes in cluster mode.
+	ClusterCapable() bool
 }
 
 // Global provider registry (Salt-style auto-registration)

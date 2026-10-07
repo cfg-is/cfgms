@@ -28,9 +28,6 @@ type MemoryIndexer struct {
 	// Time-based index: time bucket -> list of record references
 	timeIndex map[string][]*RecordRef
 
-	// Attribute index: attribute key -> value -> list of record references
-	attributeIndex map[string]map[string][]*RecordRef
-
 	// Version tracking: deviceID -> current version
 	versionIndex map[string]int64
 
@@ -51,12 +48,11 @@ func NewIndexer(config *Config, logger logging.Logger) (Indexer, error) {
 // NewMemoryIndexer creates a new in-memory indexer
 func NewMemoryIndexer(config *Config, logger logging.Logger) (*MemoryIndexer, error) {
 	indexer := &MemoryIndexer{
-		logger:         logger,
-		config:         config,
-		deviceIndex:    make(map[string][]*RecordRef),
-		timeIndex:      make(map[string][]*RecordRef),
-		attributeIndex: make(map[string]map[string][]*RecordRef),
-		versionIndex:   make(map[string]int64),
+		logger:       logger,
+		config:       config,
+		deviceIndex:  make(map[string][]*RecordRef),
+		timeIndex:    make(map[string][]*RecordRef),
+		versionIndex: make(map[string]int64),
 		stats: &IndexStats{
 			TotalEntries:     0,
 			UniqueDevices:    0,
@@ -87,6 +83,7 @@ func (i *MemoryIndexer) IndexRecord(ctx context.Context, record *DNARecord) erro
 	}
 
 	// Update device index
+	_, deviceAlreadyIndexed := i.deviceIndex[record.DeviceID]
 	i.deviceIndex[record.DeviceID] = append(i.deviceIndex[record.DeviceID], ref)
 
 	// Sort device records by version (newest first)
@@ -98,16 +95,17 @@ func (i *MemoryIndexer) IndexRecord(ctx context.Context, record *DNARecord) erro
 	timeBucket := record.StoredAt.Format("2006-01-02")
 	i.timeIndex[timeBucket] = append(i.timeIndex[timeBucket], ref)
 
-	// Update attribute index (sample a few key attributes)
-	if record.DNA != nil {
-		i.indexSampleAttributes(ref, record.DNA.Attributes)
-	}
-
 	// Update version tracking
 	i.versionIndex[record.DeviceID] = record.Version
 
-	// Update statistics
-	i.updateIndexStats()
+	// Update statistics incrementally. This used to call updateIndexStats(),
+	// which recomputed TotalEntries/UniqueDevices by iterating every device's
+	// full ref slice on every single write — O(index size) per write, so total
+	// cost across a run was O(n^2) in the number of records indexed. That is
+	// the per-write growth TestScalabilityScenario/large_organization_simulation
+	// caught on windows-latest (Issue #4239): a two-vCPU runner made the growth
+	// visible where a many-core dev box's noise floor buried it.
+	i.recordIndexed(!deviceAlreadyIndexed)
 
 	hashDisplay := record.ContentHash
 	if len(hashDisplay) > 16 {
@@ -272,7 +270,6 @@ func (i *MemoryIndexer) Close() error {
 	// Clear all indices
 	i.deviceIndex = nil
 	i.timeIndex = nil
-	i.attributeIndex = nil
 	i.versionIndex = nil
 
 	i.logger.Info("Memory indexer closed")
@@ -280,20 +277,6 @@ func (i *MemoryIndexer) Close() error {
 }
 
 // Helper methods
-
-func (i *MemoryIndexer) indexSampleAttributes(ref *RecordRef, attributes map[string]string) {
-	// Index key attributes for fast lookup
-	keyAttributes := []string{"os", "arch", "hostname", "cpu_model", "memory_total"}
-
-	for _, key := range keyAttributes {
-		if value, exists := attributes[key]; exists {
-			if i.attributeIndex[key] == nil {
-				i.attributeIndex[key] = make(map[string][]*RecordRef)
-			}
-			i.attributeIndex[key][value] = append(i.attributeIndex[key][value], ref)
-		}
-	}
-}
 
 func (i *MemoryIndexer) matchesFilters(ref *RecordRef, options *QueryOptions) bool {
 	// Time range filter
@@ -307,21 +290,24 @@ func (i *MemoryIndexer) matchesFilters(ref *RecordRef, options *QueryOptions) bo
 	return true
 }
 
-func (i *MemoryIndexer) updateIndexStats() {
+// recordIndexed applies the effect of one IndexRecord call to the running
+// statistics in O(1). isNewDevice is whether this write's device ID had no
+// prior entry in deviceIndex, i.e. whether UniqueDevices grew.
+//
+// This replaces a former updateIndexStats() that recomputed TotalEntries and
+// UniqueDevices from scratch by iterating the entire deviceIndex map on every
+// call — see the comment at the IndexRecord call site for why that mattered.
+func (i *MemoryIndexer) recordIndexed(isNewDevice bool) {
 	i.statsMutex.Lock()
 	defer i.statsMutex.Unlock()
 
-	// Count total entries across all indices
-	totalEntries := int64(0)
-	for _, refs := range i.deviceIndex {
-		totalEntries += int64(len(refs))
+	i.stats.TotalEntries++
+	if isNewDevice {
+		i.stats.UniqueDevices++
 	}
 
-	i.stats.TotalEntries = totalEntries
-	i.stats.UniqueDevices = int64(len(i.deviceIndex))
-
 	// Estimate index size (rough calculation)
-	i.stats.IndexSize = totalEntries * 100 // Approximate 100 bytes per entry
+	i.stats.IndexSize = i.stats.TotalEntries * 100 // Approximate 100 bytes per entry
 }
 
 func (i *MemoryIndexer) calculateGlobalStats() {
@@ -365,18 +351,6 @@ func (i *MemoryIndexer) OptimizeIndex() error {
 		}
 	}
 
-	// Clean up attribute index
-	for attr, valueMap := range i.attributeIndex {
-		for value, refs := range valueMap {
-			if len(refs) == 0 {
-				delete(valueMap, value)
-			}
-		}
-		if len(valueMap) == 0 {
-			delete(i.attributeIndex, attr)
-		}
-	}
-
 	// Update optimization timestamp
 	i.statsMutex.Lock()
 	i.stats.LastOptimization = time.Now()
@@ -386,69 +360,6 @@ func (i *MemoryIndexer) OptimizeIndex() error {
 	i.logger.Info("Index optimization completed", "duration", optimizationTime)
 
 	return nil
-}
-
-// GetAttributeValues returns all unique values for a specific attribute
-func (i *MemoryIndexer) GetAttributeValues(ctx context.Context, attribute string) ([]string, error) {
-	i.mutex.RLock()
-	defer i.mutex.RUnlock()
-
-	valueMap, exists := i.attributeIndex[attribute]
-	if !exists {
-		return []string{}, nil
-	}
-
-	values := make([]string, 0, len(valueMap))
-	for value := range valueMap {
-		values = append(values, value)
-	}
-
-	sort.Strings(values)
-	return values, nil
-}
-
-// QueryByAttribute queries records by attribute value
-func (i *MemoryIndexer) QueryByAttribute(ctx context.Context, attribute, value string, options *QueryOptions) ([]*RecordRef, error) {
-	i.mutex.RLock()
-	defer i.mutex.RUnlock()
-
-	valueMap, exists := i.attributeIndex[attribute]
-	if !exists {
-		return []*RecordRef{}, nil
-	}
-
-	refs, exists := valueMap[value]
-	if !exists {
-		return []*RecordRef{}, nil
-	}
-
-	// Apply additional filters
-	var filteredRefs []*RecordRef
-	for _, ref := range refs {
-		if i.matchesFilters(ref, options) {
-			filteredRefs = append(filteredRefs, ref)
-		}
-	}
-
-	// Apply pagination
-	startIdx := 0
-	endIdx := len(filteredRefs)
-
-	if options.Offset > 0 {
-		startIdx = options.Offset
-		if startIdx >= len(filteredRefs) {
-			return []*RecordRef{}, nil
-		}
-	}
-
-	if options.Limit > 0 {
-		endIdx = startIdx + options.Limit
-		if endIdx > len(filteredRefs) {
-			endIdx = len(filteredRefs)
-		}
-	}
-
-	return filteredRefs[startIdx:endIdx], nil
 }
 
 // GetDeviceTimeline returns a timeline of changes for a device

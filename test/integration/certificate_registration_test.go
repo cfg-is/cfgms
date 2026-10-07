@@ -259,7 +259,7 @@ func (s *CertificateRegistrationTestSuite) TestCertificateProvisioning() {
 		ValidityDays: 365,
 	}
 
-	resp, err := s.certProvisioningService.ProvisionCertificate(req)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), req)
 	require.NoError(s.T(), err)
 	require.True(s.T(), resp.Success, "Provisioning should succeed: %s", resp.Message)
 
@@ -285,7 +285,7 @@ func (s *CertificateRegistrationTestSuite) TestCertificateContentsValidation() {
 		ValidityDays: 365,
 	}
 
-	resp, err := s.certProvisioningService.ProvisionCertificate(req)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), req)
 	require.NoError(s.T(), err)
 	require.True(s.T(), resp.Success)
 
@@ -337,7 +337,7 @@ func (s *CertificateRegistrationTestSuite) TestCAChainValidation() {
 		ValidityDays: 365,
 	}
 
-	resp, err := s.certProvisioningService.ProvisionCertificate(req)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), req)
 	require.NoError(s.T(), err)
 	require.True(s.T(), resp.Success)
 
@@ -377,7 +377,7 @@ func (s *CertificateRegistrationTestSuite) TestPrivateKeyMatchesCertificate() {
 		ValidityDays: 365,
 	}
 
-	resp, err := s.certProvisioningService.ProvisionCertificate(req)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), req)
 	require.NoError(s.T(), err)
 	require.True(s.T(), resp.Success)
 
@@ -395,7 +395,7 @@ func (s *CertificateRegistrationTestSuite) TestCertificateProvisioningWithDefaul
 		StewardID: "defaults-steward",
 	}
 
-	resp, err := s.certProvisioningService.ProvisionCertificate(req)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), req)
 	require.NoError(s.T(), err)
 	require.True(s.T(), resp.Success, "Provisioning with defaults should succeed")
 
@@ -418,7 +418,7 @@ func (s *CertificateRegistrationTestSuite) TestCertificateProvisioningMissingSte
 		StewardID: "",
 	}
 
-	resp, err := s.certProvisioningService.ProvisionCertificate(req)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), req)
 	assert.Error(s.T(), err, "Should fail without steward ID")
 	assert.False(s.T(), resp.Success, "Response should indicate failure")
 
@@ -427,7 +427,7 @@ func (s *CertificateRegistrationTestSuite) TestCertificateProvisioningMissingSte
 
 // TestCertificateProvisioningNilRequest validates nil request handling
 func (s *CertificateRegistrationTestSuite) TestCertificateProvisioningNilRequest() {
-	resp, err := s.certProvisioningService.ProvisionCertificate(nil)
+	resp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), nil)
 	assert.Error(s.T(), err, "Should fail with nil request")
 	assert.False(s.T(), resp.Success, "Response should indicate failure")
 
@@ -525,7 +525,7 @@ func (s *CertificateRegistrationTestSuite) TestRegistrationFlowIntegration() {
 	stewardID := "steward-integration-test-001"
 
 	// Step 4: Provision certificate (as controller does during registration)
-	certResp, err := s.certProvisioningService.ProvisionCertificate(&service.CertificateProvisioningRequest{
+	certResp, err := s.certProvisioningService.ProvisionCertificate(context.Background(), &service.CertificateProvisioningRequest{
 		StewardID:    stewardID,
 		Organization: "CFGMS Integration Test",
 		ValidityDays: 365,

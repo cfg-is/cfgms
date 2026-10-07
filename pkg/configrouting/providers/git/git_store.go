@@ -61,12 +61,15 @@ func NewGitConfigStore(
 ) (*GitConfigStore, error) {
 	// Validate tenantID against workDir before constructing any paths.
 	// ValidateAndCleanPath requires workDir to exist; callers must ensure this.
-	if _, err := security.ValidateAndCleanPath(workDir, tenantID); err != nil {
+	// The cleaned return value (not the raw tenantID) is used in filepath.Join so that
+	// the sanitizer's return value acts as a natural path-injection barrier for CodeQL.
+	cleanedBase, err := security.ValidateAndCleanPath(workDir, tenantID)
+	if err != nil {
 		return nil, fmt.Errorf("invalid tenantID %q: %w", tenantID, err)
 	}
 
 	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(source.URL)))
-	repoDir := filepath.Join(workDir, tenantID, urlHash)
+	repoDir := filepath.Join(cleanedBase, urlHash)
 
 	if err := os.MkdirAll(repoDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create repo directory: %w", err)
@@ -189,6 +192,9 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 }
 
 // ListConfigs enumerates config files under <repoDir>/<subPath>/<filter.Namespace>/.
+// When filter.TenantID is non-empty it is validated and the walk is skipped entirely
+// if the filter names a different tenant than this store holds — matching the scoping
+// behaviour of the flatfile and database providers.
 func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	base := s.repoDir
 	if s.source.SubPath != "" {
@@ -196,6 +202,18 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		base, err = security.ValidateAndCleanPath(s.repoDir, s.source.SubPath)
 		if err != nil {
 			return nil, fmt.Errorf("invalid subPath: %w", err)
+		}
+	}
+
+	// Scope by TenantID: validate to catch traversal attempts, then skip the walk
+	// entirely when the filter names a tenant other than the one this store holds.
+	// Empty TenantID preserves today's unscoped-walk behaviour.
+	if filter != nil && filter.TenantID != "" {
+		if _, err := security.ValidateAndCleanPath(s.repoDir, filter.TenantID); err != nil {
+			return nil, fmt.Errorf("invalid tenant ID in filter: %w", err)
+		}
+		if filter.TenantID != s.tenantID {
+			return nil, nil
 		}
 	}
 
@@ -213,8 +231,14 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		}
 	}
 
+	configRoot, err := os.OpenRoot(searchDir)
+	if err != nil {
+		return nil, fmt.Errorf("open config search root: %w", err)
+	}
+	defer func() { _ = configRoot.Close() }()
+
 	var entries []*cfgconfig.ConfigEntry
-	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, walkErr error) error {
+	err = filepath.Walk(searchDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil || info.IsDir() {
 			return walkErr
 		}
@@ -222,7 +246,11 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 			return nil
 		}
 
-		data, readErr := os.ReadFile(path) // #nosec G304 — Walk restricts to searchDir subtree
+		relativePath, relErr := filepath.Rel(searchDir, path)
+		if relErr != nil {
+			return nil
+		}
+		data, readErr := configRoot.ReadFile(relativePath)
 		if readErr != nil {
 			return nil // skip unreadable files
 		}
@@ -238,13 +266,9 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		ns := parts[0]
 		name := strings.TrimSuffix(parts[len(parts)-1], ".yaml")
 
-		tenantID := ""
-		if filter != nil {
-			tenantID = filter.TenantID
-		}
 		entries = append(entries, &cfgconfig.ConfigEntry{
 			Key: &cfgconfig.ConfigKey{
-				TenantID:  tenantID,
+				TenantID:  s.tenantID,
 				Namespace: ns,
 				Name:      name,
 			},

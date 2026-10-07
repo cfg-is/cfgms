@@ -14,6 +14,128 @@ import (
 
 // identityFileName is the name of the on-disk steward identity file,
 // stored alongside the cert store in defaultCertStoreDir().
+// pendingStateFileName is the name of the on-disk pending registration state file.
+// Stored alongside the identity file in defaultCertStoreDir() so restarts resume
+// the same pending record rather than creating a new one on each restart (Issue #1899).
+const pendingStateFileName = "steward-pending.json"
+
+// PendingState holds the pending registration ID issued by the controller when
+// registration.workflow is set to "manual". Persisted between restarts so the
+// steward resumes polling the same record instead of creating duplicate entries.
+//
+// ClientKeyPEM is the PKCS8 PEM-encoded private key the steward generated
+// locally for this pending registration's CSR (Issue #3780 follow-up). Without
+// it, a restart during the quarantine poll window resumes polling with a fresh
+// HTTPClient that never generated a keypair — when the controller later reports
+// the registration claimed, the returned certificate has no key to pair with,
+// and the steward is orphaned (no way to recover: the pending record is single-
+// claim and a fresh Register with the same device_id is rejected as a
+// duplicate). Persisting it here lets registerAndConnect call
+// registration.HTTPClient.ResumePendingClientKey before resuming the poll, so
+// the eventual claim completes exactly as it would have in the original
+// process. Stored in cleartext at 0600 like the identity file above and the
+// client key cert.Manager persists once registration completes
+// (pkg/cert/storage.go) — this is the same file-permission-protected pattern
+// already used for the steward's ongoing mTLS identity, not a new class of
+// on-disk secret. May be empty when read from a pending-state file written
+// before this field existed; callers must treat that as "cannot resume,
+// re-register" rather than silently connecting without mTLS.
+type PendingState struct {
+	PendingID    string `json:"pending_id"`
+	ClientKeyPEM string `json:"client_key_pem,omitempty"`
+}
+
+// refreshPendingStateFileName holds a re-admission request the controller queued
+// for approval: its pending ID and the private key of the CSR it submitted, so a
+// later claim can pair the approved certificate with that key (Issue #4532).
+// Same 0600 file-permission protection as the registration pending state.
+const refreshPendingStateFileName = "steward-refresh-pending.json"
+
+func saveRefreshPendingState(dir string, state PendingState) error {
+	return writePendingStateFile(dir, refreshPendingStateFileName, state)
+}
+
+func loadRefreshPendingState(dir string) (*PendingState, error) {
+	return readPendingStateFile(dir, refreshPendingStateFileName)
+}
+
+func clearRefreshPendingState(dir string) error {
+	path := filepath.Join(dir, refreshPendingStateFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear refresh pending state file: %w", err)
+	}
+	return nil
+}
+
+// savePendingState writes state to dir/steward-pending.json with permissions 0600.
+// The write is atomic: content goes to a temp file then renamed into place.
+func savePendingState(dir string, state PendingState) error {
+	return writePendingStateFile(dir, pendingStateFileName, state)
+}
+
+// writePendingStateFile writes state to dir/name with permissions 0600. The write
+// is atomic: content goes to a temp file then renamed into place.
+func writePendingStateFile(dir, name string, state PendingState) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create pending state dir: %w", err)
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal pending state: %w", err)
+	}
+	path := filepath.Join(dir, name)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write pending state file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit pending state file: %w", err)
+	}
+	return nil
+}
+
+// loadPendingState reads dir/steward-pending.json.
+// Returns (nil, nil) when the file does not exist — caller performs fresh registration.
+// Returns (nil, err) on read/parse failure.
+func loadPendingState(dir string) (*PendingState, error) {
+	return readPendingStateFile(dir, pendingStateFileName)
+}
+
+// readPendingStateFile reads dir/name; (nil, nil) when it does not exist.
+func readPendingStateFile(dir, name string) (*PendingState, error) {
+	path := filepath.Join(dir, name)
+	// #nosec G304 -- dir is the steward's private identity directory and the
+	// pending-state filename is a fixed internal constant.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read pending state file: %w", err)
+	}
+	var state PendingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("pending state file corrupt (JSON parse failed): %w", err)
+	}
+	if state.PendingID == "" {
+		return nil, fmt.Errorf("pending state file missing pending_id")
+	}
+	return &state, nil
+}
+
+// clearPendingState removes dir/steward-pending.json if it exists.
+// Returns nil when the file does not exist (no-op).
+func clearPendingState(dir string) error {
+	path := filepath.Join(dir, pendingStateFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear pending state file: %w", err)
+	}
+	return nil
+}
+
+// identityFileName is the name of the on-disk steward identity file,
+// stored alongside the cert store in defaultCertStoreDir().
 const identityFileName = "steward-identity.json"
 
 // StewardIdentity is the persisted record written after first HTTP registration
@@ -31,6 +153,10 @@ const identityFileName = "steward-identity.json"
 // SigningCertPEM (singular) is kept for backward-compatible reading of identity
 // files written before multi-cert support. loadIdentity migrates it into
 // SigningCertPEMs automatically on read.
+//
+// TrustMode and CAPinFingerprint record the trust anchor established at enrollment
+// (ADR-013 §3). The downgrade guard uses these to ensure trust is never silently
+// weakened across restarts or re-enrollments.
 type StewardIdentity struct {
 	StewardID        string     `json:"steward_id"`
 	TenantID         string     `json:"tenant_id"`
@@ -40,6 +166,12 @@ type StewardIdentity struct {
 	SigningCertPEM   string     `json:"signing_cert_pem,omitempty"`   // backward compat: single cert (legacy)
 	SigningCertPEMs  []string   `json:"signing_cert_pems,omitempty"`  // Issue #1816: mutable rotation set
 	OverlapExpiresAt *time.Time `json:"overlap_expires_at,omitempty"` // Issue #1816: rotation overlap deadline
+	// Device identity fields (Issue #2094): stable across mTLS cert rotations.
+	DeviceID       string `json:"device_id,omitempty"`        // 64-char lowercase hex SHA-256 of Ed25519 public key
+	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (32 bytes)
+	// Trust anchor fields (ADR-013 §3, Issue #1517).
+	TrustMode        string `json:"trust_mode,omitempty"`         // "compile-baked", "install-pinned", "tofu"
+	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"` // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600
@@ -76,6 +208,8 @@ func saveIdentity(dir string, id StewardIdentity) error {
 // the legacy field.
 func loadIdentity(dir string) (*StewardIdentity, error) {
 	path := filepath.Join(dir, identityFileName)
+	// #nosec G304 -- dir is the steward's private identity directory and the
+	// identity filename is a fixed internal constant.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

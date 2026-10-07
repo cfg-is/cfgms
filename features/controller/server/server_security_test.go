@@ -4,8 +4,10 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -39,15 +41,23 @@ func createDockerTestStorageConfig(t *testing.T, provider string) *config.Storag
 	t.Helper()
 	switch provider {
 	case "database":
+		// session_hmac_key is required by DatabaseSessionStore; the constructor fails
+		// closed with no silent insecure fallback when it is absent. Use the env-override
+		// so CI can inject a real key; fall back to a fixed test-only key for local dev.
+		hmacKey := os.Getenv("CFGMS_TEST_SESSION_HMAC_KEY")
+		if hmacKey == "" {
+			hmacKey = "test-hmac-key-for-server-security-tests-only"
+		}
 		return &config.StorageConfig{
 			Provider: "database",
 			Config: map[string]interface{}{
-				"host":     os.Getenv("CFGMS_TEST_DB_HOST"),
-				"port":     5433,
-				"database": "cfgms_test",
-				"username": "cfgms_test",
-				"password": os.Getenv("CFGMS_TEST_DB_PASSWORD"),
-				"sslmode":  "disable",
+				"host":             os.Getenv("CFGMS_TEST_DB_HOST"),
+				"port":             5433,
+				"database":         "cfgms_test",
+				"username":         "cfgms_test",
+				"password":         os.Getenv("CFGMS_TEST_DB_PASSWORD"),
+				"sslmode":          "disable",
+				"session_hmac_key": hmacKey,
 			},
 		}
 	default:
@@ -131,14 +141,13 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/cert-mgmt"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 30,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						ServerCertValidityDays: 90,
 						RenewalThresholdDays:   7,
 						Server: &config.ServerCertificateConfig{
@@ -237,12 +246,18 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 							t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
 							return
 						}
-						// Fail if in CI/integration mode without Docker, skip in development
-						if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
+						// CI is the one place the infrastructure is guaranteed to be
+						// provisioned, so a missing database there is a hard failure.
+						if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
 							t.Fatalf("REQUIRED INFRASTRUCTURE MISSING: Database provider requires Docker environment in CI/integration mode - run 'make test-integration-setup'")
-						} else {
-							t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
 						}
+						// Locally, isDockerTestEnvironment has already probed the port, so
+						// reaching here means nothing is listening — whether or not stale
+						// credentials are still exported. Skip with an actionable message
+						// rather than failing on a "connection refused" further down.
+						t.Skipf("Database provider requires a running Docker environment (nothing listening on %s) - "+
+							"run 'make test-integration-setup', or 'make test-integration-cleanup' to clear a stale .env.test",
+							dockerTestDBAddr())
 						return
 					default:
 						// Use git or other local providers
@@ -256,6 +271,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 						EnableCertManagement: false,
 					},
 					Storage: storageConfig,
+				}
+				// Database provider has no FlatfileRoot or SQLitePath to derive a blob
+				// root from; supply a DataDir so the filesystem blob store can initialize.
+				if providerInfo.Name == "database" {
+					config.DataDir = t.TempDir()
 				}
 
 				server, err := New(config, logger)
@@ -366,10 +386,9 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/prod-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Storage: &config.StorageConfig{
 						Provider:     "flatfile",
 						FlatfileRoot: tempDir + "/flatfile",
@@ -379,7 +398,7 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 30,
 						ServerCertValidityDays: 90,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						RenewalThresholdDays:   7,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "prod-controller",
@@ -491,10 +510,9 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/excessive-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Storage: &config.StorageConfig{
 						Provider:     "flatfile",
 						FlatfileRoot: tempDir + "/flatfile",
@@ -504,7 +522,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 36500,
 						ServerCertValidityDays: 36500,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "test-controller",
 							Organization: "Test Org",
@@ -558,10 +576,9 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/wildcard-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "0.0.0.0:0",
-					CertPath:   certDir,
 					Storage: &config.StorageConfig{
 						Provider:     "flatfile",
 						FlatfileRoot: tempDir + "/flatfile",
@@ -569,7 +586,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
-						CAPath:               certDir,
+						CAPath:               filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "wildcard-controller",
 							Organization: "Test Org",
@@ -610,6 +627,38 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 	}
 }
 
+// TestConcurrentStorageConfigs_GetDistinctEntityGraphDirectories guards the isolation
+// TestServer_ConcurrentSecurity_And_RaceConditions depends on.
+//
+// The entity graph provider takes no configured path. It derives one as
+// filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
+// (server.go:3432), so two configs that differ only in SQLite *filename* still share a
+// single entitygraph.db. Concurrent opens of one SQLite file fail with SQLITE_BUSY.
+//
+// This asserts on the derived directory rather than on live concurrency, so it fails
+// against the old same-directory layout on every platform. The SQLITE_BUSY itself only
+// surfaced on Windows, which is why the defect survived on Linux and macOS.
+func TestConcurrentStorageConfigs_GetDistinctEntityGraphDirectories(t *testing.T) {
+	tempDir := t.TempDir()
+	const numConcurrent = 10
+
+	seen := make(map[string]int, numConcurrent)
+	for i := 0; i < numConcurrent; i++ {
+		dir := filepath.Join(tempDir, fmt.Sprintf("concurrent-%d", i))
+		cfg := createTestStorageConfig(dir, "server")
+
+		// Mirrors server.go:3432 exactly.
+		egDir := filepath.Dir(cfg.SQLitePath)
+		if prev, dup := seen[egDir]; dup {
+			t.Fatalf("goroutines %d and %d would share entity graph directory %s — "+
+				"concurrent opens of one entitygraph.db fail with SQLITE_BUSY", prev, i, egDir)
+		}
+		seen[egDir] = i
+	}
+	require.Len(t, seen, numConcurrent,
+		"every concurrent server must derive its own entity graph directory")
+}
+
 func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
@@ -620,11 +669,38 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	const numConcurrent = 10
 
-	// Race detector adds 5-10x overhead, and full suite load adds further contention
-	// Each concurrent server creation involves: Git init, RBAC setup, storage init
+	// Race detector adds 5-10x overhead, and full suite load adds further contention.
+	// Windows NTFS + concurrent Git init is significantly slower than Linux tmpfs.
+	// Each concurrent server creation involves: RBAC setup, flatfile+SQLite storage init.
 	timeout := 5 * time.Second
-	if raceDetectorEnabled() {
-		timeout = 45 * time.Second // Race + full suite resource contention
+	if raceDetectorEnabled() || runtime.GOOS == "windows" {
+		timeout = 45 * time.Second // Race detector overhead or Windows FS contention
+	}
+	if runtime.GOOS == "windows" {
+		// Windows filesystem ops (SQLite WAL, directory creation) are 5-10x slower
+		// than Linux for concurrent workloads on CI runners.
+		timeout = 60 * time.Second
+	}
+
+	// Each goroutine needs its own storage DIRECTORY, not merely its own filenames.
+	// The entity graph provider does not read a configured path: it derives one as
+	// filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
+	// (server.go:3432). Configs that differ only in filename therefore still resolve
+	// to a single shared entitygraph.db, and N concurrent opens of one SQLite file
+	// fail with "database is locked (5) (SQLITE_BUSY)" — measured on the Windows leg
+	// of queue commit e8ee121d, where this test reported
+	// "failed to initialize entity graph provider ... ping
+	// C:\...\concurrent_test*\entitygraph.db: database is locked".
+	//
+	// The directories are created here, on the test goroutine, for two reasons: the
+	// SQLite providers do not create parent directories, and require/t.Fatalf must
+	// never be called from a spawned goroutine.
+	goroutineDirs := make([]string, numConcurrent)
+	for i := range goroutineDirs {
+		dir := filepath.Join(tempDir, fmt.Sprintf("concurrent-%d", i))
+		require.NoError(t, os.MkdirAll(dir, 0o750),
+			"per-goroutine storage directory must be created before the race starts")
+		goroutineDirs[i] = dir
 	}
 
 	// Test concurrent server creation (should be thread-safe)
@@ -633,15 +709,16 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	for i := 0; i < numConcurrent; i++ {
 		go func(index int) {
-			// Each goroutine gets its own unique storage configuration to avoid Git conflicts
+			// Each goroutine gets its own unique storage configuration to avoid Git
+			// conflicts, and its own directory so the derived entity graph database
+			// is unique too.
 			uniqueConfig := &config.Config{
 				ListenAddr: "127.0.0.1:0",
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false,
 				},
 				// Epic 6: Storage configuration required for all server creation
-				// Use unique storage path per goroutine to prevent Git repository conflicts
-				Storage: createTestStorageConfig(tempDir, fmt.Sprintf("concurrent-%d", index)),
+				Storage: createTestStorageConfig(goroutineDirs[index], "server"),
 			}
 			server, err := New(uniqueConfig, logger)
 			if err != nil {
@@ -810,16 +887,15 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/short-validity-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 7,
 						ServerCertValidityDays: 30,
 						RenewalThresholdDays:   3,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "secure-controller",
 							DNSNames:     []string{"localhost"},
@@ -846,13 +922,12 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/auto-renewal-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
-						CAPath:               certDir,
+						CAPath:               filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "auto-controller",
 							Organization: "Auto Org",
@@ -910,17 +985,16 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir2) }()
 
 	// Pre-initialize both CA directories before server creation
-	testutil.PreInitControllerForTest(t, tempDir1, tempDir1)
-	testutil.PreInitControllerForTest(t, tempDir2, tempDir2)
+	testutil.PreInitControllerForTest(t, tempDir1, filepath.Join(tempDir1, "ca"))
+	testutil.PreInitControllerForTest(t, tempDir2, filepath.Join(tempDir2, "ca"))
 
 	// Test that servers created with different configurations are properly isolated
 	config1 := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		DataDir:    tempDir1 + "/data1",
-		CertPath:   tempDir1,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               tempDir1,
+			CAPath:               filepath.Join(tempDir1, "ca"),
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "server1-controller",
 				Organization: "Server1 Org",
@@ -932,10 +1006,9 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	config2 := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		DataDir:    tempDir2 + "/data2",
-		CertPath:   tempDir2,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               tempDir2,
+			CAPath:               filepath.Join(tempDir2, "ca"),
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "server2-controller",
 				Organization: "Server2 Org",
@@ -1046,28 +1119,28 @@ func TestServer_New_LegacyCompatibility(t *testing.T) {
 
 	certDir := tempDir + "/legacy-ca"
 
-	// Create CA files without marker (simulates pre-init deployment)
+	// cert.NewManager with StoragePath=certDir creates CA files at certDir/ca/.
 	_, err = cert.NewManager(&cert.ManagerConfig{
 		StoragePath: certDir,
 		CAConfig: &cert.CAConfig{
 			Organization: "Legacy Org",
 			Country:      "US",
 			ValidityDays: 3650,
-			StoragePath:  certDir,
 		},
 		LoadExistingCA: false,
 	})
 	require.NoError(t, err, "Failed to create legacy CA")
 
-	// Verify no marker exists yet
-	assert.False(t, initialization.IsInitialized(certDir), "Should not have marker before server start")
+	caDir := filepath.Join(certDir, "ca")
+
+	// Verify no marker exists yet at the CA directory.
+	assert.False(t, initialization.IsInitialized(caDir), "Should not have marker before server start")
 
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		CertPath:   certDir,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               certDir,
+			CAPath:               caDir,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "legacy-controller",
 				Organization: "Legacy Org",
@@ -1087,8 +1160,8 @@ func TestServer_New_LegacyCompatibility(t *testing.T) {
 		})
 	}
 
-	// Verify marker was created
-	assert.True(t, initialization.IsInitialized(certDir), "Marker should be auto-created for legacy CA")
+	// Verify marker was auto-created at the CA directory.
+	assert.True(t, initialization.IsInitialized(caDir), "Marker should be auto-created for legacy CA")
 }
 
 // TestServer_New_MarkerButNoCA verifies that if the marker exists but CA files
@@ -1100,19 +1173,19 @@ func TestServer_New_MarkerButNoCA(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	certDir := tempDir + "/orphan-marker"
-	require.NoError(t, os.MkdirAll(certDir, 0700))
+	certParent := tempDir + "/orphan-marker"
+	caDir := filepath.Join(certParent, "ca")
+	require.NoError(t, os.MkdirAll(caDir, 0700))
 
-	// Write marker without CA files (simulates deleted/missing CA)
-	err = initialization.CreateLegacyMarker(certDir)
+	// Write marker at caDir (== CAPath) without CA files — simulates deleted/missing CA.
+	err = initialization.CreateLegacyMarker(caDir)
 	require.NoError(t, err)
 
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		CertPath:   certDir,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               certDir,
+			CAPath:               caDir,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "orphan-controller",
 				Organization: "Test Org",
@@ -1177,7 +1250,35 @@ func TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk(t *testing.T
 		"buildGRPCControlPlaneTLSConfig must not write server key to disk")
 }
 
-// Check if we're running in Docker integration test environment
+// dockerTestDBAddr returns the host:port the Docker test Postgres is expected on.
+// It mirrors createDockerTestStorageConfig, which reads CFGMS_TEST_DB_HOST and uses
+// port 5433 (the docker-compose.test.yml published port for postgres-test).
+func dockerTestDBAddr() string {
+	host := os.Getenv("CFGMS_TEST_DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	return net.JoinHostPort(host, "5433")
+}
+
+// isDockerTestEnvironment reports whether the Docker-backed integration infrastructure
+// is actually available to this test run.
+//
+// Credentials in the environment are NOT evidence that the containers are running.
+// `make test-integration-docker` sources .env.test whenever the file exists, and that
+// file outlives the containers it was generated for: a previous session that was torn
+// down (or a machine with no Docker daemon at all) still leaves CFGMS_TEST_DB_PASSWORD
+// and CFGMS_TEST_GITEA_URL exported. Detecting on the credentials alone made the suite
+// claim a Docker environment that did not exist and then fail on "connection refused"
+// against port 5433. Both the credentials and a live listener are required.
 func isDockerTestEnvironment() bool {
-	return os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" && os.Getenv("CFGMS_TEST_GITEA_URL") != ""
+	if os.Getenv("CFGMS_TEST_DB_PASSWORD") == "" || os.Getenv("CFGMS_TEST_GITEA_URL") == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", dockerTestDBAddr(), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }

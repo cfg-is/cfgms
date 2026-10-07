@@ -6,31 +6,23 @@ The Firewall module manages host-based firewall rules on CFGMS-managed endpoints
 module instance represents a single named rule — `action`, `direction`, `protocol`/`service`,
 and address constraints — that the steward applies to the operating-system firewall.
 
-**Platform Support:** This module is **Linux only**. The implementation ships two
-executors: `executor_linux.go` (iptables, via `exec.Command("iptables", ...)`) and
-`executor_stub.go` for all other platforms. On Windows and macOS the stub executor
-returns `modules.ErrUnsupportedPlatform` — all calls fail immediately. Use platform
-targeting in your CFGMS configuration to restrict firewall modules to Linux steward
-endpoints.
-
-> **Note:** `module.yaml` lists `darwin` and `windows` under `platforms:`, but the
-> stub executor actively rejects all operations on those platforms at runtime.
-> nftables is **not** currently supported; the Linux executor uses iptables only.
+**Platform Support:** Linux (iptables). The implementation ships
+`executor_linux.go` (iptables, via `exec.Command("iptables", ...)`) and
+`executor_stub.go` for other platforms. Use platform targeting in your CFGMS
+configuration to restrict firewall modules to Linux steward endpoints.
 
 ## Implementation References
 
-- Schema: [`features/modules/firewall/module.yaml`](../../features/modules/firewall/module.yaml)
-- Implementation: [`features/modules/firewall/module.go`](../../features/modules/firewall/module.go)
-- Linux executor: [`features/modules/firewall/executor_linux.go`](../../features/modules/firewall/executor_linux.go)
-- Non-Linux stub: [`features/modules/firewall/executor_stub.go`](../../features/modules/firewall/executor_stub.go)
+- Schema: [`features/modules/stdlib/firewall/module.yaml`](../../features/modules/stdlib/firewall/module.yaml)
+- Implementation: [`features/modules/stdlib/firewall/module.go`](../../features/modules/stdlib/firewall/module.go)
+- Linux executor: [`features/modules/stdlib/firewall/executor_linux.go`](../../features/modules/stdlib/firewall/executor_linux.go)
+- Non-Linux stub: [`features/modules/stdlib/firewall/executor_stub.go`](../../features/modules/stdlib/firewall/executor_stub.go)
 
 ## Platform Support
 
 | Platform | `applyRule` | `deleteRule` | `ruleExists` | Backend |
 |----------|------------|--------------|--------------|---------|
 | Linux    | ✓ | ✓ | ✓ | iptables |
-| macOS    | ✗ (`ErrUnsupportedPlatform`) | ✗ | ✗ | — |
-| Windows  | ✗ (`ErrUnsupportedPlatform`) | ✗ | ✗ | — |
 
 ## Configuration
 

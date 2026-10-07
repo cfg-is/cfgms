@@ -70,12 +70,14 @@ func (m *Manager) QueryFleet(ctx context.Context, filter *FleetFilter) (*FleetQu
 		filter = &FleetFilter{}
 	}
 
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return nil, fmt.Errorf("fleet query requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.QueryFleet(ctx, filter)
+	case *DatabaseBackend:
+		return backend.QueryFleet(ctx, filter)
+	default:
+		return nil, fmt.Errorf("fleet query requires SQLite or database backend, got %T", m.storage)
 	}
-
-	return sqliteBackend.QueryFleet(ctx, filter)
 }
 
 // QueryFleet executes the fleet query against the SQLite backend.
@@ -202,11 +204,14 @@ func (b *SQLiteBackend) QueryFleet(ctx context.Context, filter *FleetFilter) (*F
 // ListAllDeviceIDs returns the device IDs of all stewards in storage.
 // Used during controller startup to warm the in-memory registry.
 func (m *Manager) ListAllDeviceIDs(ctx context.Context) ([]string, error) {
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return nil, fmt.Errorf("ListAllDeviceIDs requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.listAllDeviceIDs(ctx)
+	case *DatabaseBackend:
+		return backend.listAllDeviceIDs(ctx)
+	default:
+		return nil, fmt.Errorf("ListAllDeviceIDs requires SQLite or database backend, got %T", m.storage)
 	}
-	return sqliteBackend.listAllDeviceIDs(ctx)
 }
 
 // Ping performs a cheap O(1) round-trip to the durable store to confirm it is
@@ -215,15 +220,14 @@ func (m *Manager) ListAllDeviceIDs(ctx context.Context) ([]string, error) {
 // real-state signal a readiness probe needs (Issue #2012). Used by
 // ControllerService.StorageReady and the blue/green cutover smoketest.
 func (m *Manager) Ping(ctx context.Context) error {
-	// Mirrors the SQLite-only constraint of ListAllDeviceIDs/GetLatestByDeviceID:
-	// the OSS composite DNA backend is SQLite (DefaultConfig). A future
-	// PostgreSQL/file backend rollout must extend this to round-trip that
-	// backend, or readiness (and the cutover smoketest) will hard-fail there.
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return fmt.Errorf("Ping requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.ping(ctx)
+	case *DatabaseBackend:
+		return backend.ping(ctx)
+	default:
+		return fmt.Errorf("Ping requires SQLite or database backend, got %T", m.storage)
 	}
-	return sqliteBackend.ping(ctx)
 }
 
 // ping issues a trivial SELECT to confirm the SQLite connection is live and the
@@ -245,11 +249,30 @@ func (b *SQLiteBackend) ping(ctx context.Context) error {
 // in-memory index, which starts empty after a controller restart — so this is
 // the path LoadFromStorage must use to warm the steward registry on startup.
 func (m *Manager) GetLatestByDeviceID(ctx context.Context, deviceID string) (*DNARecord, error) {
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return nil, fmt.Errorf("GetLatestByDeviceID requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.GetLatestByDeviceID(ctx, deviceID)
+	case *DatabaseBackend:
+		return backend.GetLatestByDeviceID(ctx, deviceID)
+	default:
+		return nil, fmt.Errorf("GetLatestByDeviceID requires SQLite or database backend, got %T", m.storage)
 	}
-	return sqliteBackend.GetLatestByDeviceID(ctx, deviceID)
+}
+
+// GetHistoryByDeviceID returns all DNA records for a device in version-descending
+// order, read directly from the SQL store. Unlike GetHistory (which consults the
+// in-memory index), this path returns correct results after a controller restart
+// when the in-memory index starts empty.
+//
+// options may be nil; Limit, Offset, and TimeRange are applied when set.
+// The second return value is the total count of matching records before pagination.
+func (m *Manager) GetHistoryByDeviceID(ctx context.Context, deviceID string, options *QueryOptions) ([]*DNARecord, int64, error) {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.GetHistoryByDeviceID(ctx, deviceID, options)
+	default:
+		return nil, 0, fmt.Errorf("GetHistoryByDeviceID requires SQLite backend, got %T", m.storage)
+	}
 }
 
 // listAllDeviceIDs queries the distinct device IDs stored in dna_history.
@@ -275,6 +298,96 @@ func (b *SQLiteBackend) listAllDeviceIDs(ctx context.Context) ([]string, error) 
 	return ids, rows.Err()
 }
 
+// GetHistoryByDeviceID queries dna_history for all records belonging to a device,
+// applying optional time-range and pagination from options. Results are ordered
+// by version descending (newest first) to match MemoryIndexer.QueryRecords ordering.
+func (b *SQLiteBackend) GetHistoryByDeviceID(ctx context.Context, deviceID string, options *QueryOptions) ([]*DNARecord, int64, error) {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	conditions := []string{"device_id = ?"}
+	args := []interface{}{deviceID}
+
+	if options != nil && options.TimeRange != nil {
+		// Bounds are normalised through the same canonical UTC layout the rows
+		// were written with. The column compares as text, so a bound rendered in
+		// any other zone would be compared character-by-character against a
+		// differently-zoned row and select the wrong day. See sqliteTimestamp.
+		conditions = append(conditions, "timestamp >= ?", "timestamp <= ?")
+		args = append(args, sqliteTimestamp(options.TimeRange.Start), sqliteTimestamp(options.TimeRange.End))
+	}
+
+	where := " WHERE " + strings.Join(conditions, " AND ")
+
+	// Count query for TotalCount (pagination-independent).
+	countArgs := make([]interface{}, len(args))
+	copy(countArgs, args)
+	var totalCount int64
+	if err := b.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dna_history"+where, countArgs...).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count history for device %s: %w", deviceID, err)
+	}
+
+	// where is built exclusively from static literal strings; all caller-supplied
+	// values are bound through ? placeholders in args.
+	query := "SELECT device_id, tenant_id, os, architecture, hostname, status," +
+		" version, timestamp, dna_json, content_hash," +
+		" original_size, compressed_size, compression_ratio, shard_id" +
+		" FROM dna_history" + where + " ORDER BY version DESC" // #nosec G202 -- where uses only static string literals; user values bound via ? placeholders
+
+	// LIMIT and OFFSET are formatted as integers (%d) — type-safe, no string injection risk.
+	if options != nil && options.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", options.Limit)
+	}
+	if options != nil && options.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", options.Offset)
+	}
+
+	rows, err := b.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query history for device %s: %w", deviceID, err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Close() error is non-actionable after row iteration completes
+
+	var records []*DNARecord
+	for rows.Next() {
+		var rec DNARecord
+		var storedAt time.Time
+		var dnaJSON string
+		if err := rows.Scan(
+			&rec.DeviceID,
+			&rec.TenantID,
+			new(string), // os — available via DNA fragments
+			new(string), // architecture
+			new(string), // hostname
+			&rec.Status,
+			&rec.Version,
+			&storedAt,
+			&dnaJSON,
+			&rec.ContentHash,
+			&rec.OriginalSize,
+			&rec.CompressedSize,
+			&rec.CompressionRatio,
+			&rec.ShardID,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan history record for device %s: %w", deviceID, err)
+		}
+		rec.StoredAt = storedAt
+
+		var dna commonpb.DNA
+		if err := json.Unmarshal([]byte(dnaJSON), &dna); err != nil {
+			return nil, 0, fmt.Errorf("failed to unmarshal DNA JSON for device %s: %w", deviceID, err)
+		}
+		rec.DNA = &dna
+
+		records = append(records, &rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("history query row iteration error for device %s: %w", deviceID, err)
+	}
+
+	return records, totalCount, nil
+}
+
 // GetLatestByDeviceID retrieves the most recent DNA record for a device using
 // SQL rather than the indexer, suitable for startup warm-loading.
 func (b *SQLiteBackend) GetLatestByDeviceID(ctx context.Context, deviceID string) (*DNARecord, error) {
@@ -297,7 +410,7 @@ func (b *SQLiteBackend) GetLatestByDeviceID(ctx context.Context, deviceID string
 	if err := row.Scan(
 		&rec.DeviceID,
 		&rec.TenantID,
-		new(string), // os — available in DNA.Attributes
+		new(string), // os — available via DNA fragments
 		new(string), // architecture
 		new(string), // hostname
 		&rec.Status,
@@ -324,4 +437,97 @@ func (b *SQLiteBackend) GetLatestByDeviceID(ctx context.Context, deviceID string
 	rec.DNA = &dna
 
 	return &rec, nil
+}
+
+// SetDeviceTenant upserts the durable (stewardID → tenantID) mapping. Written
+// at registration time so tenant resolution is independent of dna_history
+// (Issue #3324).
+func (m *Manager) SetDeviceTenant(ctx context.Context, deviceID, tenantID string) error {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.setDeviceTenant(ctx, deviceID, tenantID)
+	case *DatabaseBackend:
+		return backend.setDeviceTenant(ctx, deviceID, tenantID)
+	default:
+		return fmt.Errorf("SetDeviceTenant requires SQLite or database backend, got %T", m.storage)
+	}
+}
+
+// GetDeviceTenant retrieves the authoritative tenant for a device from the
+// durable mapping. Returns found=false when no mapping exists for the device.
+func (m *Manager) GetDeviceTenant(ctx context.Context, deviceID string) (tenantID string, found bool, err error) {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.getDeviceTenant(ctx, deviceID)
+	case *DatabaseBackend:
+		return backend.getDeviceTenant(ctx, deviceID)
+	default:
+		return "", false, fmt.Errorf("GetDeviceTenant requires SQLite or database backend, got %T", m.storage)
+	}
+}
+
+// ListDeviceTenants returns all (deviceID → tenantID) pairs from the durable
+// mapping. Used by LoadFromStorage to warm the steward registry at startup.
+func (m *Manager) ListDeviceTenants(ctx context.Context) (map[string]string, error) {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.listDeviceTenants(ctx)
+	case *DatabaseBackend:
+		return backend.listDeviceTenants(ctx)
+	default:
+		return nil, fmt.Errorf("ListDeviceTenants requires SQLite or database backend, got %T", m.storage)
+	}
+}
+
+// setDeviceTenant upserts (device_id, tenant_id) into the device_tenant table.
+func (b *SQLiteBackend) setDeviceTenant(ctx context.Context, deviceID, tenantID string) error {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	_, err := b.db.ExecContext(ctx,
+		`INSERT INTO device_tenant (device_id, tenant_id) VALUES (?, ?)
+		 ON CONFLICT(device_id) DO UPDATE SET tenant_id = excluded.tenant_id`,
+		deviceID, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to set device tenant for %s: %w", deviceID, err)
+	}
+	return nil
+}
+
+// getDeviceTenant retrieves the tenant for a device from device_tenant.
+func (b *SQLiteBackend) getDeviceTenant(ctx context.Context, deviceID string) (tenantID string, found bool, err error) {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	err = b.db.QueryRowContext(ctx,
+		`SELECT tenant_id FROM device_tenant WHERE device_id = ?`, deviceID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get device tenant for %s: %w", deviceID, err)
+	}
+	return tenantID, true, nil
+}
+
+// listDeviceTenants returns all (device_id, tenant_id) pairs from device_tenant.
+func (b *SQLiteBackend) listDeviceTenants(ctx context.Context) (map[string]string, error) {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	rows, err := b.db.QueryContext(ctx, `SELECT device_id, tenant_id FROM device_tenant`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list device tenants: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Close() error is non-actionable after row iteration completes
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var did, tid string
+		if err := rows.Scan(&did, &tid); err != nil {
+			return nil, fmt.Errorf("failed to scan device tenant: %w", err)
+		}
+		result[did] = tid
+	}
+	return result, rows.Err()
 }

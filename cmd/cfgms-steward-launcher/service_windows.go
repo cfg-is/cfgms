@@ -110,12 +110,18 @@ func (h *windowsServiceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, 
 				return false, uint32(code)
 			}
 		case code := <-done:
-			// Supervise exited on its own (e.g. broken child, no
-			// rollback available). Report Stopped with the actual
-			// exit code so the SCM can log + apply recovery actions.
+			// Supervise exited on its own (terminal failure — broken child
+			// with no rollback available). A non-zero code is reported as a
+			// service-specific exit so Win32_Service.ExitCode is non-zero and
+			// the SCM applies its configured recovery actions (RESTART).
+			// A zero code (unexpected clean supervise exit) is reported as a
+			// clean stop — no recovery needed.
 			cancel()
 			status <- svc.Status{State: svc.Stopped}
-			return false, uint32(code)
+			if code != 0 {
+				return true, uint32(code)
+			}
+			return false, 0
 		}
 	}
 }

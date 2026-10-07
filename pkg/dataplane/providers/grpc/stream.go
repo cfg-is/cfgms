@@ -12,6 +12,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // isEOF reports whether err signals end-of-stream from a gRPC Recv call.
@@ -54,10 +55,12 @@ func configTransferToChunks(cfg *types.ConfigTransfer) ([]*transportpb.ConfigChu
 		if end > len(data) {
 			end = len(data)
 		}
+		// #nosec G115 -- i and total are non-negative and explicitly bounded
+		// by MaxInt32 above before constructing the protobuf chunk.
 		chunks = append(chunks, &transportpb.ConfigChunk{
 			Data:        data[start:end],
-			ChunkIndex:  int32(i),     //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
-			TotalChunks: int32(total), //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
+			ChunkIndex:  int32(i),
+			TotalChunks: int32(total),
 			Version:     cfg.Version,
 			ConfigId:    cfg.ID,
 		})
@@ -84,7 +87,9 @@ func chunksToConfigTransfer(chunks []*transportpb.ConfigChunk) (*types.ConfigTra
 	}
 
 	for i, c := range chunks {
-		if c.ChunkIndex != int32(i) { //nolint:gosec // G115: i bounded by TotalChunks check above (≤ math.MaxInt32)
+		// #nosec G115 -- len(chunks) was proven equal to the non-negative
+		// int32 TotalChunks above, so every index fits int32.
+		if c.ChunkIndex != int32(i) {
 			return nil, fmt.Errorf("position %d has index %d: %w", i, c.ChunkIndex, ErrChunkSequenceGap)
 		}
 	}
@@ -145,12 +150,14 @@ func dnaTransferToChunks(dna *types.DNATransfer) ([]*transportpb.DNAChunk, error
 		if end > len(data) {
 			end = len(data)
 		}
+		// #nosec G115 -- i and total are non-negative and explicitly bounded
+		// by MaxInt32 above before constructing the protobuf chunk.
 		chunks = append(chunks, &transportpb.DNAChunk{
 			StewardId:   dna.StewardID,
 			TenantId:    dna.TenantID,
 			Data:        data[start:end],
-			ChunkIndex:  int32(i),     //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
-			TotalChunks: int32(total), //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
+			ChunkIndex:  int32(i),
+			TotalChunks: int32(total),
 			IsDelta:     dna.Delta,
 		})
 	}
@@ -176,7 +183,9 @@ func chunksToDNATransfer(chunks []*transportpb.DNAChunk) (*types.DNATransfer, er
 	}
 
 	for i, c := range chunks {
-		if c.ChunkIndex != int32(i) { //nolint:gosec // G115: i bounded by TotalChunks check above (≤ math.MaxInt32)
+		// #nosec G115 -- len(chunks) was proven equal to the non-negative
+		// int32 TotalChunks above, so every index fits int32.
+		if c.ChunkIndex != int32(i) {
 			return nil, fmt.Errorf("position %d has index %d: %w", i, c.ChunkIndex, ErrChunkSequenceGap)
 		}
 	}
@@ -320,7 +329,11 @@ func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer,
 		sum := sha256.Sum256(data)
 		expected := fmt.Sprintf("sha256:%x", sum)
 		if checksum != expected {
-			return nil, fmt.Errorf("want %s, got %s: %w", expected, checksum, ErrChecksumMismatch)
+			// checksum comes from chunks[0].Metadata["checksum"], a peer-supplied
+			// wire field (BulkChunk.Metadata) — sanitize before it rides out in
+			// this error's message text, since %s does not escape control
+			// characters the way %q does for the TenantId mismatch error below.
+			return nil, fmt.Errorf("want %s, got %s: %w", expected, logging.SanitizeLogValue(checksum), ErrChecksumMismatch)
 		}
 	}
 

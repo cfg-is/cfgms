@@ -4,6 +4,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestNestedWorkflowByName(t *testing.T) {
@@ -41,8 +42,8 @@ func TestNestedWorkflowByName(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
@@ -63,7 +64,8 @@ func TestNestedWorkflowByName(t *testing.T) {
 }
 
 func TestNestedWorkflowByPath(t *testing.T) {
-	// Write a real YAML workflow file to a temp dir and load it by path.
+	// A nested workflow referenced by path is refused (Issue #4638): the file
+	// exists and is valid, and must still never be read.
 	const yamlContent = `
 name: path-loaded-workflow
 variables:
@@ -73,54 +75,28 @@ steps:
     type: delay
     delay:
       duration: 1ms
-      message: "loaded from path"
 `
-	dir := t.TempDir()
-	wfPath := filepath.Join(dir, "workflow.yaml")
+	wfPath := filepath.Join(t.TempDir(), "workflow.yaml")
 	require.NoError(t, os.WriteFile(wfPath, []byte(yamlContent), 0600))
 
 	workflow := Workflow{
 		Name: "parent-workflow-path",
-		Variables: map[string]interface{}{
-			"parent_var": "parent_value",
-		},
-		Steps: []Step{
-			{
-				Name: "call-nested-workflow",
-				Type: StepTypeWorkflow,
-				WorkflowCall: &WorkflowCallConfig{
-					WorkflowPath: wfPath,
-					Parameters: map[string]interface{}{
-						"input_param": "test_value",
-					},
-					OutputMappings: map[string]string{
-						"loaded_path": "path_result",
-					},
-				},
-			},
-		},
+		Steps: []Step{{
+			Name:         "call-nested-workflow",
+			Type:         StepTypeWorkflow,
+			WorkflowCall: &WorkflowCallConfig{WorkflowPath: wfPath, OutputMappings: map[string]string{"loaded_path": "path_result"}},
+		}},
 	}
 
-	// Create engine and execute workflow
-	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
-	ctx := context.Background()
-
-	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	execution, err := engine.ExecuteWorkflow(context.Background(), workflow, nil)
 	require.NoError(t, err)
-	require.NotNil(t, execution)
 
-	// Wait for completion
-	waitForWorkflowCompletion(t, execution, 2*time.Second)
-
-	// Verify execution completed successfully
-	assert.Equal(t, StatusCompleted, execution.GetStatus())
-
-	// Verify output mapping worked from the file-loaded variable
-	loadedPath, exists := execution.GetVariable("loaded_path")
-	assert.True(t, exists)
-	assert.Equal(t, "from_file", loadedPath)
+	final := waitForTerminal(t, engine, execution.ID)
+	assert.Equal(t, StatusFailed, final.Status)
+	assert.Contains(t, fmt.Sprint(final.Error), "workflow_path is not supported")
+	_, loaded := final.Variables["loaded_path"]
+	assert.False(t, loaded, "nothing from the file may reach the execution")
 }
 
 func TestNestedWorkflowParameterMapping(t *testing.T) {
@@ -151,8 +127,8 @@ func TestNestedWorkflowParameterMapping(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
@@ -186,8 +162,8 @@ func TestNestedWorkflowTimeout(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
@@ -231,8 +207,8 @@ func TestNestedWorkflowAsync(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 
@@ -262,8 +238,8 @@ func TestNestedWorkflowMissingConfiguration(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -297,8 +273,8 @@ func TestNestedWorkflowMissingWorkflowSpec(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -329,8 +305,8 @@ func TestNestedWorkflowNotFound(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
@@ -377,8 +353,8 @@ func TestNestedWorkflowComplexParameterMapping(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
 

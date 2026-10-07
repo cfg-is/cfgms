@@ -4,10 +4,8 @@
 
 steward:
   id: steward-test-docker
-  mode: standalone
   logging:
     level: debug
-    format: text
   error_handling:
     module_load_failure: continue
     resource_failure: warn

@@ -4,6 +4,11 @@ package transport
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,13 +39,14 @@ func (s *RegistrationTestSuite) TearDownSuite() {}
 
 // TestHTTPRegistrationEndpoint tests the HTTP registration endpoint returns transport_address.
 func (s *RegistrationTestSuite) TestHTTPRegistrationEndpoint() {
-	token := s.helper.CreateToken(s.T(), "", "")
+	token := s.helper.CreateToken("", "")
 	expectedTenantID := "test-tenant-integration"
 	expectedGroup := "production"
 
 	s.T().Logf("Using test token: %s", token)
 
-	regResp := s.helper.RegisterSteward(s.T(), token)
+	regResp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
 	s.Equal(expectedTenantID, regResp.TenantID, "Tenant ID should match")
@@ -95,12 +101,24 @@ func (s *RegistrationTestSuite) TestRevokedToken() {
 
 // TestPerennialToken tests that perennial tokens can be used multiple times (Issue #1690).
 func (s *RegistrationTestSuite) TestPerennialToken() {
-	reqBody := map[string]string{"token": "integration_reusable"}
-	reqJSON, err := json.Marshal(reqBody)
-	s.NoError(err)
-
 	registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
 	for i := 0; i < 3; i++ {
+		// Each registration needs a unique DeviceID to avoid 409 conflict within the tenant.
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		s.NoError(err)
+		h := sha256.Sum256(pub)
+		// Each registration submits a locally generated CSR (Issue #3780); the
+		// matching private key stays in this process.
+		_, csrPEM, csrErr := generateTestRegistrationKeypairAndCSR()
+		s.Require().NoError(csrErr)
+		reqBody := map[string]string{
+			"token":            "integration_reusable",
+			"device_id":        hex.EncodeToString(h[:]),
+			"identity_key_pub": base64.StdEncoding.EncodeToString(pub),
+			"csr_pem":          csrPEM,
+		}
+		reqJSON, err := json.Marshal(reqBody)
+		s.NoError(err)
 		resp, postErr := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 		s.NoError(postErr)
 		_ = resp.Body.Close()
@@ -114,8 +132,9 @@ func (s *RegistrationTestSuite) TestStewardIDUniqueness() {
 	stewardIDs := make([]string, 0, numStewards)
 
 	for i := 0; i < numStewards; i++ {
-		token := s.helper.CreateToken(s.T(), "test-tenant-integration", "production")
-		regResp := s.helper.RegisterSteward(s.T(), token)
+		token := s.helper.CreateToken("test-tenant-integration", "production")
+		regResp, err := s.helper.RegisterSteward(token)
+		s.Require().NoErrorf(err, "Registration #%d should succeed", i+1)
 
 		s.Equal("test-tenant-integration", regResp.TenantID, "Response should have correct tenant ID")
 		stewardIDs = append(stewardIDs, regResp.StewardID)
@@ -141,8 +160,31 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 
 	for i := 0; i < numConcurrent; i++ {
 		go func(idx int) {
-			reqBody := map[string]string{"token": token}
-			reqJSON, _ := json.Marshal(reqBody)
+			// Each concurrent registration needs a unique DeviceID to avoid 409 conflicts.
+			pub, _, genErr := ed25519.GenerateKey(rand.Reader)
+			if genErr != nil {
+				results <- genErr
+				return
+			}
+			h := sha256.Sum256(pub)
+			// Each concurrent registration submits its own locally generated CSR
+			// (Issue #3780); the matching private key never leaves this process.
+			_, csrPEM, csrErr := generateTestRegistrationKeypairAndCSR()
+			if csrErr != nil {
+				results <- csrErr
+				return
+			}
+			reqBody := map[string]string{
+				"token":            token,
+				"device_id":        hex.EncodeToString(h[:]),
+				"identity_key_pub": base64.StdEncoding.EncodeToString(pub),
+				"csr_pem":          csrPEM,
+			}
+			reqJSON, marshalErr := json.Marshal(reqBody)
+			if marshalErr != nil {
+				results <- marshalErr
+				return
+			}
 
 			registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
 			resp, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
@@ -157,11 +199,18 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 				return
 			}
 
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				results <- fmt.Errorf("registration %d: read body: %w", idx, readErr)
+				return
+			}
 			var regResp struct {
 				StewardID string `json:"steward_id"`
 			}
-			_ = json.Unmarshal(body, &regResp)
+			if unmarshalErr := json.Unmarshal(body, &regResp); unmarshalErr != nil {
+				results <- fmt.Errorf("registration %d: unmarshal response: %w", idx, unmarshalErr)
+				return
+			}
 
 			stewardIDs <- regResp.StewardID
 			results <- nil

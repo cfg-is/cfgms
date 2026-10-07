@@ -1467,3 +1467,20 @@ func TestConfigRollback_ListsPointsWhenNoVersion(t *testing.T) {
 		assert.Contains(t, output, "No rollback points available")
 	})
 }
+
+func TestConfigUploadHelpText(t *testing.T) {
+	t.Run("short description references cfg file not YAML config", func(t *testing.T) {
+		assert.Contains(t, configUploadCmd.Short, ".cfg")
+		assert.NotContains(t, configUploadCmd.Short, "YAML config")
+	})
+
+	t.Run("long description references cfg file not YAML configuration file", func(t *testing.T) {
+		assert.Contains(t, configUploadCmd.Long, ".cfg")
+		assert.NotContains(t, configUploadCmd.Long, "YAML configuration file")
+	})
+
+	t.Run("examples use positional file argument not --config flag", func(t *testing.T) {
+		assert.NotContains(t, configUploadCmd.Long, "--config")
+		assert.NotContains(t, configUploadCmd.Long, ".yaml")
+	})
+}

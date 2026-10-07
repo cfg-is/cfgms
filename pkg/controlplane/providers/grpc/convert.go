@@ -31,8 +31,11 @@ var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
 	types.CommandSyncDNA:           transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
 	types.CommandReconnect:         transportpb.CommandType_COMMAND_TYPE_RECONNECT,
 	types.CommandExecuteScript:     transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT,
+	types.CommandRelayResponse:     transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE, // Issue #1994
 	types.CommandPushSigningCert:   transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT,
 	types.CommandPushStewardBinary: transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY,
+	types.CommandOpenTerminal:      transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL,   // Issue #2760
+	types.CommandObserveModules:    transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES, // Issue #3104
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
@@ -41,8 +44,11 @@ var protoToCommandType = map[transportpb.CommandType]types.CommandType{
 	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:            types.CommandSyncDNA,
 	transportpb.CommandType_COMMAND_TYPE_RECONNECT:           types.CommandReconnect,
 	transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT:      types.CommandExecuteScript,
+	transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE:      types.CommandRelayResponse, // Issue #1994
 	transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT:   types.CommandPushSigningCert,
 	transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: types.CommandPushStewardBinary,
+	transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL:       types.CommandOpenTerminal,   // Issue #2760
+	transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES:     types.CommandObserveModules, // Issue #3104
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {
@@ -55,6 +61,7 @@ func commandToProto(cmd *types.Command) *transportpb.Command {
 		StewardId: cmd.StewardID,
 		TenantId:  cmd.TenantID,
 		Timestamp: timestamppb.New(cmd.Timestamp),
+		Term:      cmd.Term,
 	}
 	if len(cmd.Params) > 0 {
 		pb.Params = interfaceMapToStringMap(cmd.Params)
@@ -72,6 +79,7 @@ func commandFromProto(pb *transportpb.Command) *types.Command {
 		StewardID: pb.GetStewardId(),
 		TenantID:  pb.GetTenantId(),
 		Timestamp: protoTimestampToTime(pb.GetTimestamp()),
+		Term:      pb.GetTerm(),
 	}
 	if len(pb.GetParams()) > 0 {
 		cmd.Params = stringMapToInterfaceMap(pb.GetParams())
@@ -134,6 +142,7 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 		TenantId:  pb.GetTenantId(),
 		Timestamp: pb.GetTimestamp(),
 		Params:    filteredParams,
+		Term:      pb.GetTerm(),
 	}
 	cmd := commandFromProto(pbClean)
 	if cmd == nil {
@@ -176,6 +185,7 @@ var eventTypeToProto = map[types.EventType]transportpb.EventType{
 	types.EventStewardUpgradeSwapped:    transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED,
 	types.EventStewardUpgradeCommitted:  transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED,
 	types.EventStewardUpgradeRolledBack: transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK,
+	types.EventObserveSweepRequest:      transportpb.EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST, // Issue #3104
 }
 
 // protoToEventType maps proto enum to semantic EventType.
@@ -189,13 +199,14 @@ var protoToEventType = map[transportpb.EventType]types.EventType{
 	transportpb.EventType_EVENT_TYPE_COMMAND_COMPLETED: types.EventCommandCompleted,
 	transportpb.EventType_EVENT_TYPE_COMMAND_FAILED:    types.EventCommandFailed,
 	// Issue #1997: reverse mapping for the wire-crossing events added above.
-	transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:    types.EventScriptCompleted,
-	transportpb.EventType_EVENT_TYPE_DNA_CHANGED:         types.EventDNAChanged,
-	transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:       types.EventRelayRequest,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:  types.EventStewardUpgradeDownloaded,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:     types.EventStewardUpgradeSwapped,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:   types.EventStewardUpgradeCommitted,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK: types.EventStewardUpgradeRolledBack,
+	transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:      types.EventScriptCompleted,
+	transportpb.EventType_EVENT_TYPE_DNA_CHANGED:           types.EventDNAChanged,
+	transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:         types.EventRelayRequest,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:    types.EventStewardUpgradeDownloaded,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:       types.EventStewardUpgradeSwapped,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:     types.EventStewardUpgradeCommitted,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK:   types.EventStewardUpgradeRolledBack,
+	transportpb.EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST: types.EventObserveSweepRequest, // Issue #3104
 }
 
 // severityToProto maps semantic severity string to proto enum.
@@ -284,8 +295,23 @@ func heartbeatToProto(hb *types.Heartbeat) *transportpb.Heartbeat {
 		ActiveSessions:  hb.ActiveSessions,
 		ConnectionState: hb.ConnectionState,
 	}
+	// Merge Metrics and DNAAggregateRoot into pb.Metrics.
+	// DNAAggregateRoot is side-channelled through the Metrics map because the
+	// transportpb.Heartbeat message cannot be regenerated in this build environment
+	// (protoc is unavailable). This avoids manual rawDesc surgery while preserving
+	// the field through the existing Metrics wire path (ADR-017 §7).
+	var merged map[string]string
 	if len(hb.Metrics) > 0 {
-		pb.Metrics = interfaceMapToStringMap(hb.Metrics)
+		merged = interfaceMapToStringMap(hb.Metrics)
+	}
+	if hb.DNAAggregateRoot != "" {
+		if merged == nil {
+			merged = make(map[string]string)
+		}
+		merged["dna_aggregate_root"] = hb.DNAAggregateRoot
+	}
+	if len(merged) > 0 {
+		pb.Metrics = merged
 	}
 	return pb
 }
@@ -304,8 +330,23 @@ func heartbeatFromProto(pb *transportpb.Heartbeat) *types.Heartbeat {
 		ActiveSessions:  pb.GetActiveSessions(),
 		ConnectionState: pb.GetConnectionState(),
 	}
-	if len(pb.GetMetrics()) > 0 {
-		hb.Metrics = stringMapToInterfaceMap(pb.GetMetrics())
+	// Extract DNAAggregateRoot from Metrics (side-channelled in heartbeatToProto).
+	// Remaining Metrics (without the aggregate root key) are surfaced as hb.Metrics.
+	if rawMetrics := pb.GetMetrics(); len(rawMetrics) > 0 {
+		if root, ok := rawMetrics["dna_aggregate_root"]; ok {
+			hb.DNAAggregateRoot = root
+			filtered := make(map[string]string, len(rawMetrics)-1)
+			for k, v := range rawMetrics {
+				if k != "dna_aggregate_root" {
+					filtered[k] = v
+				}
+			}
+			if len(filtered) > 0 {
+				hb.Metrics = stringMapToInterfaceMap(filtered)
+			}
+		} else {
+			hb.Metrics = stringMapToInterfaceMap(rawMetrics)
+		}
 	}
 	return hb
 }
@@ -385,6 +426,21 @@ func stringMapToInterfaceMap(m map[string]string) map[string]interface{} {
 		result[k] = v
 	}
 	return result
+}
+
+// SignedCommandToProto exports signedCommandToProto's wire-format conversion
+// for pkg/controlplane/internaldelivery (Issue #3764), which needs to encode a
+// SignedCommand the same way before forwarding it to a peer controller node —
+// the peer's local SendCommand path decodes it with SignedCommandFromProto and
+// must see byte-identical framing to what a directly connected steward would.
+func SignedCommandToProto(sc *types.SignedCommand) *transportpb.Command {
+	return signedCommandToProto(sc)
+}
+
+// SignedCommandFromProto exports signedCommandFromProto for
+// pkg/controlplane/internaldelivery (Issue #3764); see SignedCommandToProto.
+func SignedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
+	return signedCommandFromProto(pb)
 }
 
 // --- Timestamp helpers ---

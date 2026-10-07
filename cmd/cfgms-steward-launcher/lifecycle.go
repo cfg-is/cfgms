@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/version"
@@ -58,7 +59,47 @@ type Supervisor struct {
 
 	// clock is injectable for tests; production uses time.Now / time.Since.
 	clock clock
+
+	// CertStoreDir is the directory where upgrade flag files (upgrade-committed,
+	// upgrade-rolled-back) are written so the steward process can emit the
+	// corresponding lifecycle events to the controller on reconnect.
+	// Set from --cert-store-dir in production; tests set it directly via t.TempDir().
+	// If empty, flag-file writes are skipped (no cert store configured).
+	CertStoreDir string
+
+	// RetentionPolicy controls pruning of old version directories under
+	// <Root>/versions/ after each successful (committed) startup.
+	// Zero value means no pruning occurs.
+	RetentionPolicy RetentionPolicy
+
+	// ServiceRepairInterval is the cadence of the dedicated SCM
+	// service-registration self-repair ticker (#2465), independent of the
+	// supervised child's exit/restart cadence. Zero uses
+	// defaultServiceRepairInterval. Tests set a short interval to drive the
+	// check quickly.
+	ServiceRepairInterval time.Duration
 }
+
+// defaultServiceRepairInterval is the production cadence of the SCM
+// service-registration self-repair check (#2465). It is set at or tighter than
+// the fastest install-time SCM recovery-action delay (10s — see
+// cmd/steward/service/manager_windows.go's SetRecoveryActions) so a repair can
+// plausibly land before or alongside the SCM's own first restart attempt. It is
+// deliberately NOT gated on supervise-loop iterations: execOnce blocks for the
+// full child lifetime (days/weeks for a stable steward), so a per-iteration
+// cadence would leave a deleted registration undetected for that entire span.
+const defaultServiceRepairInterval = 10 * time.Second
+
+// errChildNeverStarted marks an execOnce failure in which no child process was
+// ever created because ctx was already cancelled by the time exec reached
+// Start. exec.Cmd.Start returns ctx.Err() verbatim in that case, so without
+// this marker the supervise loop cannot tell "the steward crashed instantly"
+// (ranFor ≈ 0, non-nil error) from "we never launched the steward at all"
+// (ranFor ≈ 0, non-nil error). The two demand opposite responses: the first is
+// a failed upgrade that must roll back, the second is an ordinary shutdown that
+// must not — rolling a version back because the service manager stopped us is a
+// silent, unattended downgrade of a perfectly healthy install.
+var errChildNeverStarted = errors.New("launcher: child never started (context cancelled before exec)")
 
 type clock interface {
 	Now() time.Time
@@ -69,6 +110,30 @@ type realClock struct{}
 
 func (realClock) Now() time.Time                  { return time.Now() }
 func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
+
+// runServiceRegistrationRepair runs check on its own ticker until ctx is
+// cancelled. Supervise launches it in a goroutine so the SCM
+// service-registration self-repair (#2465) runs independent of the supervised
+// child's exit/restart cadence. check is maybeRepairServiceRegistration in
+// production (a no-op on non-Windows); tests inject a check bound to a unique
+// throwaway service so they never touch the host's real registration. Uses a
+// real time.Ticker, not s.clock, because the repair cadence is wall-clock
+// (SCM recovery timing), not the injectable child-lifecycle clock.
+func (s *Supervisor) runServiceRegistrationRepair(ctx context.Context, interval time.Duration, check func(io.Writer)) {
+	if check == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			check(s.Stderr)
+		}
+	}
+}
 
 // Supervise runs the supervision loop until ctx is cancelled, the child
 // exits normally without triggering rollback, or all rollback attempts are
@@ -93,8 +158,36 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 		s.MaxRollbackCycles = 0
 	}
 
+	// Start the SCM service-registration self-repair ticker (#2465) BEFORE the
+	// supervise loop. It runs in its own goroutine on its own ticker, fully
+	// decoupled from execOnce's blocking child lifecycle, so a registration
+	// deleted out from under a long-running healthy steward is detected and
+	// re-created within one interval rather than not until the next child exit.
+	// repairCtx is cancelled when Supervise returns (any path), stopping the
+	// goroutine. maybeRepairServiceRegistration is a no-op on non-Windows builds.
+	repairInterval := s.ServiceRepairInterval
+	if repairInterval <= 0 {
+		repairInterval = defaultServiceRepairInterval
+	}
+	repairCtx, cancelRepair := context.WithCancel(ctx)
+	defer cancelRepair()
+	go s.runServiceRegistrationRepair(repairCtx, repairInterval, maybeRepairServiceRegistration)
+
 	rollbacksRemaining := s.MaxRollbackCycles
 	for {
+		// Never begin (or re-begin) a child launch once shutdown has been
+		// requested. Every `continue` below re-enters this loop, and a cancel
+		// that lands between a child's exit and the next iteration would
+		// otherwise exec a doomed child: exec.Cmd.Start refuses to fork on a
+		// cancelled ctx, returning ctx.Err() after a few microseconds, which
+		// the classifier below reads as "the steward died inside its startup
+		// window" and answers with a rollback. Stopping here makes shutdown
+		// the only outcome of a cancel, which is what the service manager
+		// asked for.
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		current, err := s.Layout.ReadCurrent()
 		if err != nil {
 			return fmt.Errorf("launcher: read current version: %w", err)
@@ -115,6 +208,26 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 		exitErr := s.execOnce(ctx, exe)
 		ranFor := s.clock.Since(started)
 
+		// Compute the binary hash AFTER the child exits. Hashing before exec
+		// would delay the child launch on every restart — for a large binary
+		// the I/O adds hundreds of milliseconds, creating a window where a
+		// caller that checks connection state may observe stale "connected"
+		// from the previous process and dispatch a command to the dead
+		// connection. Hashing after exec still catches on-disk replacements:
+		// if the binary was swapped while the child ran, the new hash differs
+		// from the stored known-good hash and probation rules apply correctly.
+		exeHash, hashErr := computeBinaryHash(exe)
+		isKnownGood := false
+		if hashErr == nil {
+			if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
+				isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
+			}
+		}
+		// If the binary cannot be hashed (deleted, permission error), isKnownGood
+		// stays false — conservative treatment applies probation rules. This does
+		// not abort supervision; the stat check at the top of the next iteration
+		// will surface a missing-binary error if the file is truly gone.
+
 		// Context cancelled → service manager is shutting us down.
 		// Distinguish two sub-cases:
 		//   (a) The child was still running when ctx fired and got
@@ -133,14 +246,42 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 		//       that exited inside the window with a non-zero code
 		//       gets the failure surfaced even on cancel.
 		if ctx.Err() != nil {
+			// The guard at the top of the loop is a check-then-act, so a
+			// cancel can still land in the window between it and Start. When
+			// it does, no child process was created, so there is no child
+			// outcome to classify — this is purely a shutdown.
+			if errors.Is(exitErr, errChildNeverStarted) {
+				return nil
+			}
 			failedStartupOnCancel := ranFor < s.StartupWindow && exitErr != nil
 			if !failedStartupOnCancel {
+				return nil
+			}
+			// A known-good version that fast-exits coinciding with a
+			// context cancel is an environmental fault (e.g. WMI race on
+			// boot), not an upgrade failure. Return clean shutdown rather
+			// than rolling back or looping on a cancelled context. Log the
+			// suppression decision first: without it, an operator inspecting
+			// why the launcher exited on a proven binary sees nothing, and
+			// the rollback-suppression guarantee for known-good versions
+			// (Issue #2033) is indistinguishable from a silent crash.
+			if isKnownGood {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — fast exit (ran %s) coincided with shutdown; rollback suppressed, exiting cleanly\n", current, ranFor)
 				return nil
 			}
 			// Fall through to the rollback logic below — this looks
 			// like a real upgrade failure that happened to coincide
 			// with a cancel. The operator (or the next startup) will
 			// observe the rolled-back state.
+		} else if exitErr == nil {
+			// Detect an intentional upgrade self-exit: the steward called
+			// StageBinary (which advances state.json.current to the new version)
+			// then exited cleanly so the launcher re-execs the staged binary.
+			// This must NOT be treated as a startup failure — skip the rollback
+			// guard and loop to exec the new current version.
+			if after, readErr := s.Layout.ReadCurrent(); readErr == nil && after != current {
+				continue
+			}
 		}
 
 		failedStartup := ranFor < s.StartupWindow
@@ -148,13 +289,57 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 		if !failedStartup && !nonZeroExit {
 			// Child stayed up past the startup window then exited cleanly.
-			// Normal restart-on-clean-exit path.
+			// Reset the failure counter, persist the known-good marker, and
+			// prune old version directories. Write the committed flag file
+			// last so its presence is a reliable completion signal for tests
+			// and the steward process.
+			if ps, loadErr := s.Layout.loadState(); loadErr == nil {
+				ps.ConsecutiveFailures = 0
+				// Only update the known-good marker if the post-exec hash
+				// succeeded; if it failed (binary deleted/unreadable after
+				// run) leave any existing marker untouched.
+				if hashErr == nil {
+					ps.KnownGood = current
+					ps.KnownGoodHash = exeHash
+				}
+				if saveErr := s.Layout.saveState(ps); saveErr != nil {
+					_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
+				}
+			} else {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for counter reset: %v\n", loadErr)
+			}
+			if _, pruneErr := pruneVersions(s.Layout.VersionsDir(), current, s.RetentionPolicy, s.clock.Now()); pruneErr != nil {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: retention prune: %v\n", pruneErr)
+			}
+			if flagErr := s.writeFlagFile("upgrade-committed", current); flagErr != nil {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-committed flag: %v\n", flagErr)
+			}
 			continue
 		}
 
-		// Anything else (early exit OR non-zero exit) is a "broken
-		// child" signal. Attempt rollback if we have a previous version
-		// AND we haven't exhausted our budget.
+		// Anything else (early exit OR non-zero exit) is a "broken child"
+		// signal. Increment the consecutive-failure counter on any non-clean
+		// exit regardless of whether a rollback will fire.
+		if ps, loadErr := s.Layout.loadState(); loadErr == nil {
+			ps.ConsecutiveFailures++
+			if saveErr := s.Layout.saveState(ps); saveErr != nil {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: save state on failure: %v\n", saveErr)
+			}
+		} else {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
+		}
+
+		// Known-good fast-exit: a proven binary that exits inside the startup
+		// window is suffering a transient environmental fault (e.g. a boot-time
+		// dependency race), not an upgrade regression. Restart it in place so
+		// SCM recovery and the OS backoff handle persistence — never roll back
+		// a binary that has already proven healthy (Issue #2033).
+		if isKnownGood && failedStartup {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — restarting in place after fast exit (ran %s); rollback suppressed\n", current, ranFor)
+			continue
+		}
+
+		// Attempt rollback if we have a previous version AND budget.
 		previous, perr := s.Layout.ReadPrevious()
 		if perr != nil {
 			return fmt.Errorf("launcher: read previous version after child failure: %w", perr)
@@ -164,6 +349,13 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 				return fmt.Errorf("launcher: child failed (ran for %s) and no rollback available: %w", ranFor, exitErr)
 			}
 			return fmt.Errorf("launcher: child exited inside startup window (%s) and no rollback available", ranFor)
+		}
+
+		// Rollback is going to fire: write the flag file with the version we
+		// are rolling back TO (previous), which will be the version the steward
+		// process is running when it reconnects and reads the flag.
+		if flagErr := s.writeFlagFile("upgrade-rolled-back", previous); flagErr != nil {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-rolled-back flag: %v\n", flagErr)
 		}
 
 		newCurrent, rbErr := s.Layout.Rollback()
@@ -196,6 +388,14 @@ func (s *Supervisor) execOnce(ctx context.Context, exe string) error {
 	// self-exit. (Issue #2003)
 	cmd.Env = append(os.Environ(), version.EnvStewardLauncherManaged+"=1")
 	if err := cmd.Start(); err != nil {
+		// exec.Cmd.Start declines to fork when ctx is already done and returns
+		// ctx.Err() unchanged. Tag that case so the supervise loop can tell it
+		// apart from a genuine start failure (missing/corrupt binary, denied
+		// exec permission), which still means the current version is broken
+		// and must roll back.
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return fmt.Errorf("%w: %w", errChildNeverStarted, err)
+		}
 		return err
 	}
 	if err := attachChildToJobObject(cmd); err != nil {
@@ -215,4 +415,27 @@ func (s *Supervisor) execOnce(ctx context.Context, exe string) error {
 		return fmt.Errorf("attachChildToJobObject failed: %w", err)
 	}
 	return cmd.Wait()
+}
+
+// writeFlagFile atomically writes a version string to a named flag file in
+// CertStoreDir. The steward process reads these files on startup to emit the
+// corresponding upgrade lifecycle events to the controller.
+//
+// If CertStoreDir is empty the write is skipped silently — this allows tests
+// that do not care about flag files to omit the field.
+func (s *Supervisor) writeFlagFile(name, version string) error {
+	if s.CertStoreDir == "" {
+		return nil
+	}
+	// #nosec G301 -- this store contains only public CA certificates needed by
+	// the unprivileged steward service, so directory traversal is intentional.
+	if err := os.MkdirAll(s.CertStoreDir, 0o755); err != nil {
+		return err
+	}
+	dst := filepath.Join(s.CertStoreDir, name)
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, []byte(version+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }

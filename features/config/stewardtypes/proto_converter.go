@@ -19,11 +19,9 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 	}
 
 	stewardSettings := &controller.StewardSettings{
-		Id:   config.Steward.ID,
-		Mode: string(config.Steward.Mode),
+		Id: config.Steward.ID,
 		Logging: &controller.LoggingConfig{
-			Level:  config.Steward.Logging.Level,
-			Format: config.Steward.Logging.Format,
+			Level: config.Steward.Logging.Level,
 		},
 		ErrorHandling: &controller.ErrorHandlingConfig{
 			ModuleLoadFailure:  string(config.Steward.ErrorHandling.ModuleLoadFailure),
@@ -48,6 +46,8 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 		}
 		stewardSettings.ConvergeInterval = durationpb.New(d)
 	}
+
+	stewardSettings.DesiredVersion = config.Steward.Upgrade.DesiredVersion
 
 	ss := config.Steward.ScriptSigning
 	protoSS := &controller.ScriptSigningConfig{
@@ -93,16 +93,17 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 	config := &StewardConfig{
 		Steward: StewardSettings{
 			ID:          proto.Steward.Id,
-			Mode:        OperationMode(proto.Steward.Mode),
 			ModulePaths: proto.Steward.ModulePaths,
+			Upgrade: UpgradeConfig{
+				DesiredVersion: proto.Steward.DesiredVersion,
+			},
 		},
 		Modules: proto.Modules,
 	}
 
 	if proto.Steward.Logging != nil {
 		config.Steward.Logging = LoggingConfig{
-			Level:  proto.Steward.Logging.Level,
-			Format: proto.Steward.Logging.Format,
+			Level: proto.Steward.Logging.Level,
 		}
 	}
 

@@ -177,8 +177,8 @@
 
 **Internal Domains Searched**:
 
-- `ritzmob.com` (development domain)
-- `76vfrz.onmicrosoft.com` (Azure test tenant)
+- `<development-domain>` (development domain, redacted)
+- `<tenant>.onmicrosoft.com` (Azure test tenant, redacted)
 
 **Search Results**:
 
@@ -188,7 +188,7 @@
 
 **Email Addresses in Code**:
 
-- `jrdn@ritzmob.com` appears in:
+- `<author-email>` appears in:
   - Git commit author field (526 commits)
   - `.env.local` (gitignored, not in history)
 - **Risk**: LOW - Author attribution only, no customer data
@@ -226,7 +226,7 @@
 
 3. **Author Email in Git History**
    - **Severity**: Low
-   - **Data**: `jrdn@ritzmob.com` in commit metadata
+   - **Data**: `<author-email>` in commit metadata
    - **Status**: Standard git author attribution
    - **Action**: None required for OSS
 
@@ -281,7 +281,7 @@ All sensitive data has been confirmed to NOT be in git history.
 ### OPTIONAL Actions
 
 1. **Update Author Email** (Optional):
-   - Current: `jrdn@ritzmob.com` in 526 commits
+   - Current: `<author-email>` in 526 commits
    - Option: Use `noreply@cfg.is` or similar for future commits
    - **Note**: Rewriting history is NOT recommended
 

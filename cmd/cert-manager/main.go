@@ -435,7 +435,7 @@ func exportCmd() *cobra.Command {
 		Use:   "export",
 		Short: "Export certificate files",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			certPEM, keyPEM, err := manager.ExportCertificate(serialNumber, includePrivateKey)
+			certPEM, keyPEM, err := manager.ExportCertificate(serialNumber, includePrivateKey, false)
 			if err != nil {
 				return fmt.Errorf("failed to export certificate: %w", err)
 			}

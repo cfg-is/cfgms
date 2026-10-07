@@ -35,9 +35,21 @@ func (p *FileProvider) needsRotation() bool {
 	return false
 }
 
-// rotateLogFile rotates the current log file and creates a new one
-// Note: This function expects the caller to hold p.mutex
+// rotateLogFile rotates the current log file and creates a new one.
+// Note: This function expects the caller to hold p.mutex.
+//
+// It refuses to run on a closed provider. This is the enforcement point for
+// Issue #4145: opening a log file is the only way this provider acquires a
+// handle, so gating it on p.initialized — checked under the same lock that
+// Close() uses to clear that flag — makes "a closed provider holds no file
+// handle" a structural property rather than something every caller has to get
+// right. Initialize() sets p.initialized before its first call here, which is
+// the one legitimate open on a provider that is not yet serving writes.
 func (p *FileProvider) rotateLogFile() error {
+	if !p.initialized {
+		return fmt.Errorf("cannot rotate log file: provider is closed")
+	}
+
 	// Flush and close current file
 	if p.writer != nil {
 		_ = p.writer.Flush() // Ignore flush error during rotation
@@ -69,17 +81,52 @@ func (p *FileProvider) rotateLogFile() error {
 	p.currentFile = file
 	p.writer = bufio.NewWriterSize(file, p.config.BufferSize)
 
-	// Start compression of old files in background (pass needed config to avoid race)
-	go p.compressOldFiles(p.config.CompressRotated, p.config.Directory, p.config.FilePrefix)
+	// Start compression of old files in background (pass needed config to avoid race).
+	// Tracked in p.bgWg, the same way backgroundMaintenance is, so Close()'s
+	// p.bgWg.Wait() guarantees this goroutine has exited -- and released any file
+	// handle compressFile opened -- before Close() returns. That is required by
+	// AC2 (a closed provider has no in-flight file work) whenever compression is
+	// enabled; it is not the cause of the Issue #4145 failure, whose logging
+	// config sets compress_rotated: false, so this goroutine returns immediately
+	// without touching the filesystem. See WriteEntry and the p.initialized gate
+	// above for that root cause.
+	//
+	// Adding to the WaitGroup here is safe against Close()'s Wait(): the caller
+	// holds p.mutex and p.initialized is true (checked above), while Close()
+	// clears p.initialized under the same lock before it calls Wait(). So every
+	// Add happens-before the Wait that must observe it.
+	//
+	// The three config values are captured into locals here, under p.mutex,
+	// rather than read from p.config inside the goroutine: p.config is a
+	// pointer Initialize() can replace wholesale on a later re-Initialize, so
+	// reading through it from an unlocked goroutine would race that reassignment.
+	compressRotated, directory, filePrefix := p.config.CompressRotated, p.config.Directory, p.config.FilePrefix
+	p.bgWg.Add(1)
+	go func() {
+		defer p.bgWg.Done()
+		p.compressOldFiles(compressRotated, directory, filePrefix)
+	}()
 
 	return nil
 }
 
-// compressOldFiles compresses rotated log files to save space
+// compressOldFiles compresses rotated log files to save space.
+//
+// Serialized on p.compressMu: rotateLogFile spawns a new call to this function
+// on every rotation and backgroundMaintenance runs one on every tick, so two
+// passes can otherwise run concurrently. Both would glob the same directory,
+// pick the same eligible file, and race to os.Open/os.Create/os.Remove it --
+// on Windows the loser's os.Remove fails with "The process cannot access the
+// file because it is being used by another process", because the winner still
+// holds a read handle on that path. The mutex makes overlapping passes run one
+// after another instead of racing.
 func (p *FileProvider) compressOldFiles(compressRotated bool, directory, filePrefix string) {
 	if !compressRotated {
 		return
 	}
+
+	p.compressMu.Lock()
+	defer p.compressMu.Unlock()
 
 	pattern := filepath.Join(directory, filePrefix+"*.log")
 	files, err := filepath.Glob(pattern)
@@ -138,12 +185,21 @@ func (p *FileProvider) compressFile(filename string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer func() { _ = src.Close() }()
+	// No deferred close: src must be explicitly closed before os.Remove(filename)
+	// below, not merely by the time this function returns. Go opens files on
+	// Windows without FILE_SHARE_DELETE, so deleting a path that still has an
+	// open handle -- including a read-only one whose defer has not fired yet --
+	// fails with "The process cannot access the file because it is being used by
+	// another process", leaving the uncompressed original behind next to its .gz.
+	// This is a separate defect from Issue #4145's handle leak (it needs
+	// compression enabled, which that failure does not have), found while
+	// auditing this file's handle lifecycle for AC2.
 
 	// Create compressed file
 	compressedFilename := filename + ".gz"
 	dst, err := os.Create(compressedFilename)
 	if err != nil {
+		_ = src.Close()
 		return fmt.Errorf("failed to create compressed file: %w", err)
 	}
 	defer func() { _ = dst.Close() }()
@@ -151,13 +207,19 @@ func (p *FileProvider) compressFile(filename string) error {
 	// Create GZIP writer
 	gzWriter, err := gzip.NewWriterLevel(dst, compressionLevel)
 	if err != nil {
+		_ = src.Close()
 		return fmt.Errorf("failed to create gzip writer: %w", err)
 	}
 	defer func() { _ = gzWriter.Close() }()
 
 	// Copy data
-	if _, err := io.Copy(gzWriter, src); err != nil {
-		return fmt.Errorf("failed to compress data: %w", err)
+	_, copyErr := io.Copy(gzWriter, src)
+	closeErr := src.Close()
+	if copyErr != nil {
+		return fmt.Errorf("failed to compress data: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close source file: %w", closeErr)
 	}
 
 	if err := gzWriter.Close(); err != nil {
@@ -168,7 +230,8 @@ func (p *FileProvider) compressFile(filename string) error {
 		return fmt.Errorf("failed to close compressed file: %w", err)
 	}
 
-	// Remove original file after successful compression
+	// Remove original file after successful compression. src is guaranteed
+	// closed by this point (explicitly, above -- not via a still-pending defer).
 	if err := os.Remove(filename); err != nil {
 		fmt.Printf("Warning: failed to remove original file %s after compression: %v\n", filename, err)
 	} else {
@@ -499,12 +562,11 @@ func (p *FileProvider) calculateTotalStorageSize() (int64, error) {
 // - rotation_unix.go for Linux/macOS/BSD
 // - rotation_windows.go for Windows
 
-// updateStats updates provider statistics
-func (p *FileProvider) updateStats(entriesWritten int, latency time.Duration) {
-	// Lock to prevent concurrent access to stats
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
+// updateStatsLocked updates provider statistics. The caller must already hold
+// p.mutex for writing: the write paths check p.initialized, perform the write,
+// and record their stats under a single lock acquisition, because releasing the
+// lock between those steps is what let a write race Close() (Issue #4145).
+func (p *FileProvider) updateStatsLocked(entriesWritten int, latency time.Duration) {
 	p.stats.TotalEntries += int64(entriesWritten)
 	p.stats.LatestEntry = time.Now()
 

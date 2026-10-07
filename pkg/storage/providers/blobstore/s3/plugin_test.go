@@ -5,13 +5,18 @@ package s3provider
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,6 +29,11 @@ import (
 type inMemoryS3 struct {
 	mu      sync.RWMutex
 	objects map[string]*inMemoryObject
+
+	// objectLockOutput/objectLockErr drive GetObjectLockConfiguration's response
+	// for the ProbeObjectLock tests below. Exactly one should be set per test.
+	objectLockOutput *s3.GetObjectLockConfigurationOutput
+	objectLockErr    error
 }
 
 type inMemoryObject struct {
@@ -57,9 +67,25 @@ func (m *inMemoryS3) PutObject(ctx context.Context, params *s3.PutObjectInput, o
 	}
 
 	k := m.objectKey(*params.Bucket, *params.Key)
+
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Honor IfNoneMatch: "*" — the conditional-write precondition
+	// PutBlobIfAbsent relies on. Real S3 rejects the write with HTTP 412 when
+	// the key already exists; this fake mirrors that via a smithyhttp
+	// ResponseError so isS3PreconditionFailed's status-code check exercises
+	// the same path a real S3 response would take.
+	if params.IfNoneMatch != nil && *params.IfNoneMatch == "*" {
+		if _, exists := m.objects[k]; exists {
+			return nil, &smithyhttp.ResponseError{
+				Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusPreconditionFailed}},
+				Err:      errors.New("PreconditionFailed: At least one of the pre-conditions you specified did not hold"),
+			}
+		}
+	}
+
 	m.objects[k] = &inMemoryObject{body: body, contentType: contentType, metadata: meta}
-	m.mu.Unlock()
 
 	return &s3.PutObjectOutput{}, nil
 }
@@ -150,6 +176,18 @@ func (m *inMemoryS3) DeleteObject(ctx context.Context, params *s3.DeleteObjectIn
 	return &s3.DeleteObjectOutput{}, nil
 }
 
+// GetObjectLockConfiguration returns the configured fake response, letting
+// TestS3BlobStore_ProbeObjectLock drive all three ProbeObjectLock outcomes
+// without a real S3/MinIO endpoint.
+func (m *inMemoryS3) GetObjectLockConfiguration(ctx context.Context, params *s3.GetObjectLockConfigurationInput, optFns ...func(*s3.Options)) (*s3.GetObjectLockConfigurationOutput, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.objectLockErr != nil {
+		return nil, m.objectLockErr
+	}
+	return m.objectLockOutput, nil
+}
+
 // newTestStore creates an S3BlobStore backed by the in-memory S3 client.
 func newTestS3Store(t *testing.T) *S3BlobStore {
 	t.Helper()
@@ -166,6 +204,28 @@ func testS3Key(name string) blob.BlobKey {
 		Namespace: "installers",
 		Name:      name,
 	}
+}
+
+// TestS3BlobStore_PreservesSignatureLabels verifies the steward-binary signature/publisher
+// labels survive a GetBlob round-trip through the S3 sidecar, so the public GET handler can
+// serve them as headers in a production (non-filesystem) deployment (#2836).
+func TestS3BlobStore_PreservesSignatureLabels(t *testing.T) {
+	store := newTestS3Store(t)
+	ctx := context.Background()
+
+	labels := map[string]string{
+		"signature": "cVBzcy1zaWduYXR1cmUtYnl0ZXM",
+		"publisher": "cfgms",
+	}
+	key := testS3Key("steward.bin")
+	require.NoError(t, store.PutBlob(ctx, key, bytes.NewReader([]byte("bin")), blob.BlobMeta{Labels: labels}))
+
+	rc, gotMeta, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+
+	assert.Equal(t, "cVBzcy1zaWduYXR1cmUtYnl0ZXM", gotMeta.Labels["signature"])
+	assert.Equal(t, "cfgms", gotMeta.Labels["publisher"])
 }
 
 // TestS3BlobStore_PutGetBlob verifies a basic roundtrip.
@@ -543,4 +603,170 @@ func TestS3BlobStore_ListBlobs_SidecarError(t *testing.T) {
 	// ListBlobs should propagate the sidecar parse error (not silently skip).
 	_, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a"})
 	assert.Error(t, err, "ListBlobs should return error when sidecar cannot be parsed")
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_FirstCallWins verifies the happy path: an
+// absent key accepts the write and the blob is retrievable afterward.
+func TestS3BlobStore_PutBlobIfAbsent_FirstCallWins(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+	key := testS3Key("first.bin")
+
+	require.NoError(t, store.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("winner")), blob.BlobMeta{}))
+
+	rc, meta, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("winner"), got)
+	assert.NotEmpty(t, meta.Checksum)
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_RejectsExistingKey verifies a second call for
+// the same key is rejected with ErrBlobAlreadyExists and does not overwrite the
+// first caller's data.
+func TestS3BlobStore_PutBlobIfAbsent_RejectsExistingKey(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+	key := testS3Key("taken.bin")
+
+	require.NoError(t, store.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("first")), blob.BlobMeta{}))
+
+	err := store.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("second")), blob.BlobMeta{})
+	require.ErrorIs(t, err, blob.ErrBlobAlreadyExists)
+
+	rc, _, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("first"), got, "the losing call must not overwrite the winner's data")
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_ConcurrentPublishesExactlyOneWins is the
+// [REQUIRED TEST] regression coverage for Issue #3895's TOCTOU fix at the
+// storage layer: N concurrent PutBlobIfAbsent calls for the same key must
+// produce exactly one success and every other call must fail with
+// ErrBlobAlreadyExists — never two silent successes overwriting each other.
+// Run with -race.
+func TestS3BlobStore_PutBlobIfAbsent_ConcurrentPublishesExactlyOneWins(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+	key := testS3Key("race.bin")
+
+	const attempts = 8
+	results := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			content := []byte(fmt.Sprintf("attempt-%d", i))
+			results <- store.PutBlobIfAbsent(ctx, key, bytes.NewReader(content), blob.BlobMeta{})
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, blob.ErrBlobAlreadyExists):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	assert.Equal(t, 1, successes, "exactly one concurrent PutBlobIfAbsent must succeed")
+	assert.Equal(t, attempts-1, conflicts, "every other call must be rejected with ErrBlobAlreadyExists")
+
+	rc, _, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(got, []byte("attempt-")), "stored content must be exactly one full attempt's data, not a mix")
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_TenantRequired verifies the same validation
+// contract as PutBlob.
+func TestS3BlobStore_PutBlobIfAbsent_TenantRequired(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	err := store.PutBlobIfAbsent(context.Background(), blob.BlobKey{Namespace: "ns", Name: "n"}, bytes.NewReader([]byte("x")), blob.BlobMeta{})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
+}
+
+// TestS3BlobStore_ProbeObjectLock is a REQUIRED test (Issue #4037 AC):
+// S3BlobStore.ProbeObjectLock must classify all three GetObjectLockConfiguration
+// outcomes correctly — a successful response with ObjectLockEnabledEnum
+// "Enabled", the well-known ObjectLockConfigurationNotFoundError (the only
+// signal for "never had Object Lock"), and any other error (e.g. AccessDenied),
+// which must never be read as "disabled".
+func TestS3BlobStore_ProbeObjectLock(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     *s3.GetObjectLockConfigurationOutput
+		err        error
+		wantStatus blob.ObjectLockStatus
+	}{
+		{
+			name: "enabled",
+			output: &s3.GetObjectLockConfigurationOutput{
+				ObjectLockConfiguration: &s3types.ObjectLockConfiguration{
+					ObjectLockEnabled: s3types.ObjectLockEnabledEnabled,
+				},
+			},
+			wantStatus: blob.ObjectLockEnabled,
+		},
+		{
+			name: "never enabled on bucket (ObjectLockConfigurationNotFoundError)",
+			err: &smithy.GenericAPIError{
+				Code:    "ObjectLockConfigurationNotFoundError",
+				Message: "Object Lock configuration does not exist for this bucket",
+			},
+			wantStatus: blob.ObjectLockDisabled,
+		},
+		{
+			name: "arbitrary other error (AccessDenied) must not be read as disabled",
+			err: &smithy.GenericAPIError{
+				Code:    "AccessDenied",
+				Message: "Access Denied",
+			},
+			wantStatus: blob.ObjectLockUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newInMemoryS3()
+			client.objectLockOutput = tc.output
+			client.objectLockErr = tc.err
+			store := &S3BlobStore{client: client, bucket: "test-bucket"}
+
+			status, err := store.ProbeObjectLock(context.Background())
+			require.NoError(t, err, "ProbeObjectLock classifies every outcome into a status; it does not propagate a raw error")
+			assert.Equal(t, tc.wantStatus, status)
+		})
+	}
+}
+
+// TestS3BlobStore_ProbeObjectLock_NonAPIError verifies a transport-level error
+// that is not a smithy.APIError at all (e.g. a network failure) is classified
+// Unknown, never Disabled.
+func TestS3BlobStore_ProbeObjectLock_NonAPIError(t *testing.T) {
+	client := newInMemoryS3()
+	client.objectLockErr = errors.New("connection reset by peer")
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+
+	status, err := store.ProbeObjectLock(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, blob.ObjectLockUnknown, status)
 }

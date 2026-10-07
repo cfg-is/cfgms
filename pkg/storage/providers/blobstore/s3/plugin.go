@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -35,9 +36,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
+
+// objectLockConfigurationNotFoundErrorCode is the well-known S3 error code
+// returned by GetObjectLockConfiguration when Object Lock was never enabled on
+// the bucket. S3 does not model this as a typed Go error struct — it is
+// discriminated by ErrorCode() alone, same shape as isS3PreconditionFailed
+// below.
+const objectLockConfigurationNotFoundErrorCode = "ObjectLockConfigurationNotFoundError"
 
 const (
 	defaultContentType = "application/octet-stream"
@@ -56,6 +66,7 @@ type s3API interface {
 	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	GetObjectLockConfiguration(ctx context.Context, params *s3.GetObjectLockConfigurationInput, optFns ...func(*s3.Options)) (*s3.GetObjectLockConfigurationOutput, error)
 }
 
 // S3BlobProvider implements BlobProvider using an S3-compatible object store.
@@ -245,6 +256,85 @@ func (s *S3BlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r io.Reader
 	})
 	if err != nil {
 		return fmt.Errorf("blob s3 put: failed to upload metadata sidecar: %w", err)
+	}
+
+	return nil
+}
+
+// PutBlobIfAbsent stores a blob only if no blob currently exists for key,
+// atomic with respect to concurrent PutBlob/PutBlobIfAbsent calls for the same
+// key (Issue #3895). The metadata sidecar's PutObject with IfNoneMatch: "*" is
+// the atomicity point: S3 rejects that write with HTTP 412 if the key already
+// exists, so exactly one concurrent caller wins for a given key. The blob
+// object is only uploaded after this caller wins the sidecar write — a losing
+// caller never touches the blob object at all.
+//
+// A failure uploading the blob object after winning the sidecar write is
+// cleaned up best-effort (the sidecar is deleted) so a transient failure does
+// not permanently block future publishes; if that cleanup itself fails, the
+// sidecar is left in place and the key behaves like the filesystem provider's
+// documented crash window — recoverable via PutBlob (the handler's force=true
+// path).
+func (s *S3BlobStore) PutBlobIfAbsent(ctx context.Context, key blob.BlobKey, r io.Reader, meta blob.BlobMeta) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = defaultContentType
+	}
+
+	h := sha256.New()
+	tee := io.TeeReader(r, h)
+	blobData, err := io.ReadAll(tee)
+	if err != nil {
+		return fmt.Errorf("blob s3 put-if-absent: failed to read blob data: %w", err)
+	}
+
+	checksum := hex.EncodeToString(h.Sum(nil))
+	size := int64(len(blobData))
+
+	sidecar := s3BlobMetaSidecar{
+		ContentType: contentType,
+		Size:        size,
+		Checksum:    checksum,
+		CreatedAt:   time.Now().UTC(),
+		Labels:      meta.Labels,
+	}
+	metaJSON, err := json.Marshal(sidecar)
+	if err != nil {
+		return fmt.Errorf("blob s3 put-if-absent: failed to marshal metadata: %w", err)
+	}
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(s.metaObjectKey(key)),
+		Body:          bytes.NewReader(metaJSON),
+		ContentType:   aws.String("application/json"),
+		ContentLength: aws.Int64(int64(len(metaJSON))),
+		IfNoneMatch:   aws.String("*"),
+	})
+	if err != nil {
+		if isS3PreconditionFailed(err) {
+			return blob.ErrBlobAlreadyExists
+		}
+		return fmt.Errorf("blob s3 put-if-absent: failed to create metadata sidecar: %w", err)
+	}
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(s.objectKey(key)),
+		Body:          bytes.NewReader(blobData),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(size),
+	})
+	if err != nil {
+		_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(s.metaObjectKey(key)),
+		})
+		return fmt.Errorf("blob s3 put-if-absent: failed to upload blob: %w", err)
 	}
 
 	return nil
@@ -443,6 +533,35 @@ func (s *S3BlobStore) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// ProbeObjectLock implements blob.ObjectLockProber (Issue #4037). Object Lock
+// is a bucket-creation-time-only setting: GetObjectLockConfigurationOutput's
+// ObjectLockEnabled enum models only one success value, "Enabled" — there is no
+// "disabled" success response. A bucket that never had Object Lock enabled
+// instead fails the call with the well-known
+// ObjectLockConfigurationNotFoundError code, which is the only signal this
+// method treats as a definitive "disabled". Every other error (AccessDenied, a
+// network failure, or any non-smithy.APIError) cannot be distinguished from
+// "disabled" and is classified Unknown so a caller never treats an
+// unverifiable bucket as protected.
+func (s *S3BlobStore) ProbeObjectLock(ctx context.Context) (blob.ObjectLockStatus, error) {
+	output, err := s.client.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{
+		Bucket: aws.String(s.bucket),
+	})
+	if err == nil {
+		if output.ObjectLockConfiguration != nil &&
+			output.ObjectLockConfiguration.ObjectLockEnabled == s3types.ObjectLockEnabledEnabled {
+			return blob.ObjectLockEnabled, nil
+		}
+		return blob.ObjectLockUnknown, nil
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == objectLockConfigurationNotFoundErrorCode {
+		return blob.ObjectLockDisabled, nil
+	}
+	return blob.ObjectLockUnknown, nil
+}
+
 // fetchSidecar retrieves and parses the metadata sidecar for a blob.
 func (s *S3BlobStore) fetchSidecar(ctx context.Context, key blob.BlobKey) (*s3BlobMetaSidecar, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -497,6 +616,19 @@ func isS3NotFound(err error) bool {
 	}
 	var notFound *s3types.NotFound
 	return errors.As(err, &notFound)
+}
+
+// isS3PreconditionFailed reports whether an S3 error represents a failed
+// conditional-write precondition (HTTP 412) — the response an IfNoneMatch: "*"
+// PutObject receives when the key already exists. S3 does not model this as a
+// typed error struct the way NoSuchKey/NotFound are modeled; it surfaces as a
+// generic smithy HTTP response error, so the check is by status code.
+func isS3PreconditionFailed(err error) bool {
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.HTTPStatusCode() == http.StatusPreconditionFailed
+	}
+	return false
 }
 
 // s3ChecksumVerifyingReader computes SHA-256 during reads and returns

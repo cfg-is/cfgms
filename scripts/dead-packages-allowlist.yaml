@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026 Jordan Ritz
+#
+# dead-packages-allowlist.yaml — packages intentionally unreachable from
+# every `main` package in the module (Issue #4317), read by
+# scripts/check-dead-packages.sh.
+#
+# This is not a place to silence the gate. Every entry needs a written
+# reason: either a genuine contract that intentionally has no implementation
+# yet, a package that is unreachable from `main` by design (a test suite
+# entry point, never imported), or a tracked entry pending its own
+# removal-or-wiring-in follow-up story. It is not a home for abandoned code.
+#
+# Format: each entry is a list item with a `path` (import path relative to
+# the module root, i.e. without the `github.com/cfgis/cfgms/` prefix) and a
+# `reason`. check-dead-packages.sh parses only the `- path: <value>` line of
+# each entry with a line-oriented match — keep one entry's `path` on its own
+# list-item line, exactly as below.
+#
+# A package leaving this list because it was wired into a main package or
+# removed should have its entry deleted in the same change — a stale entry
+# (allowlisting a package the gate no longer finds unreachable) fails the
+# gate just like an unlisted unreachable package does.
+#
+# Issue #4345 classified every package that Issue #4317 had parked under a
+# generic "baseline" placeholder reason as CONTRACT, WIRE, or DELETE, with
+# specific evidence for each. The full classification, including the exact
+# follow-up issue titles/bodies drafted for the PO to file, is recorded as a
+# comment on Issue #4345 — this file carries only the one-line reason each
+# entry needs to justify its place in the allowlist. Three packages this
+# story classified (pkg/controlplane/providers/memory,
+# pkg/maintenance/providers/steward, features/controller/modules/sources/git)
+# do NOT have entries here: check-dead-packages.sh already buckets them as
+# "reachable only from _test.go files" (test-support, informational), which
+# is not the same set as `dead.txt` this file guards — adding them here would
+# fail the gate's own stale-entry check. Their classification is recorded on
+# Issue #4345 only.
+
+packages:
+  # --- Confirmed contracts with no implementation yet -----------------------
+  - path: pkg/storage/interfaces/secrets
+    reason: >
+      Confirmed contract with no implementation yet — no secrets storage
+      provider exists under pkg/storage/providers/ (CLAUDE.md Central
+      Provider System, pkg/storage).
+
+  - path: pkg/storage/interfaces/timeseries
+    reason: >
+      Confirmed contract with no implementation yet — no timeseries storage
+      provider exists under pkg/storage/providers/ (CLAUDE.md Central
+      Provider System, pkg/storage / pkg/logging timescale backing store).
+
+  # --- Confirmed contracts delivered through a non-Go-import mechanism -------
+  - path: features/workflow/templates
+    reason: >
+      Confirmed contract, Issue #4345: promote-hv-role.yaml here is the
+      documented "authoritative" copy, live in production via a manual
+      dual-copy pattern (Issue #2669/#2670) — cmd/cfg/cmd/workflow.go
+      `//go:embed`s a byte-identical copy at cmd/cfg/cmd/templates/, because
+      go:embed cannot reference paths outside its own package directory.
+      Both files' headers cross-reference each other and instruct keeping
+      them in sync; features/controller/api/handlers_workflows_promote_hv_role_test.go
+      also parses this copy directly by path, calling it authoritative. The
+      Go-import reachability model cannot see this YAML-level dependency, so
+      the package reads as dead when it is not.
+
+  # --- Test suite entry points: never imported by design ---------------------
+  # These packages ARE the integration/E2E/unit test suites (Test File
+  # Taxonomy, CLAUDE.md). They are executed directly via `go test`, not
+  # imported by any main package or by any other package's tests — that is
+  # the correct, permanent state for a test-suite root, not drift.
+  - path: test/e2e
+    reason: test suite entry point (test/e2e), run via `go test`, never imported.
+  - path: test/e2e/fleet
+    reason: test suite entry point (test/e2e/fleet), run via `go test`, never imported.
+  - path: test/integration
+    reason: test suite entry point (test/integration), run via `go test`, never imported.
+  - path: test/integration/cluster
+    reason: test suite entry point (test/integration/cluster), run via `go test`, never imported.
+  - path: test/integration/controller
+    reason: test suite entry point (test/integration/controller), run via `go test`, never imported.
+  - path: test/integration/ha
+    reason: test suite entry point (test/integration/ha), run via `go test`, never imported.
+  - path: test/integration/logging
+    reason: test suite entry point (test/integration/logging), run via `go test`, never imported.
+  - path: test/integration/standalone
+    reason: test suite entry point (test/integration/standalone), run via `go test`, never imported.
+  - path: test/integration/testutil
+    reason: >
+      Support helpers for test/integration (test_helper.go), never imported
+      outside the test/integration tree itself.
+  - path: test/integration/transport
+    reason: test suite entry point (test/integration/transport), run via `go test`, never imported.
+  - path: test/unit
+    reason: test suite entry point (test/unit), run via `go test`, never imported.
+  - path: test/unit/build
+    reason: test suite entry point (test/unit/build), run via `go test`, never imported.
+  - path: test/unit/steward
+    reason: test suite entry point (test/unit/steward), run via `go test`, never imported.
+
+  - path: features/modules/extended/activedirectory/tests
+    reason: >
+      Issue #4445: test-only package, zero non-test Go files
+      (`go list -f '{{len .GoFiles}}' ./features/modules/extended/activedirectory/tests`
+      returns 0), so it can never enter the `go list -deps` closure of any
+      main package — permanently, not pending wiring. It is also not reported
+      as test-support: nothing in a production-reachable package's _test.go
+      files imports it. features/modules/extended/activedirectory itself
+      (the module, not this tests package) is registered in the steward
+      factory by this same story and is no longer unreachable.
+
+  # --- Out of scope for Issue #4345: module-kind work with its own wiring ---
+  # --- story (M365 / Active Directory), excluded per #4345's Out of Scope ---
+  # --- section to avoid double-covering the same packages. Reasons below ----
+  # --- are unchanged from Issue #4317's original baseline entries. ----------
+  - path: features/workflow/modules/m365
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/conditional_access
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/entra_admin_unit
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/entra_application
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/gdap
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/gdap/types
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/intune_policy
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/directory/providers/network_activedirectory
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+
+  # --- WIRE (Issue #4345): real, tested implementations missing only a ------
+  # --- caller/registration point. Follow-up issues drafted in the #4345 -----
+  # --- classification comment, pending PO creation. Wiring or deleting any --
+  # --- of these is explicitly out of scope for #4345 — see its Out of Scope.
+  - path: features/controller/directory
+    reason: >
+      WIRE (Issue #4345): DirectoryService facade, real implementation
+      (service.go, interfaces.go). Its only non-excluded consumer,
+      features/controller (root), is itself DELETE-classified below — the
+      wiring gap is a caller one level up: features/controller/server or
+      cmd/controller/main.go needs to construct this service directly (the
+      way it already constructs other features/controller/* subpackages),
+      then register a pkg/directory/interfaces provider. Tightly coupled to
+      pkg/directory/dna below (its sole consumer). Wiring must coordinate
+      with the separate M365/AD module-wiring story and include a security
+      review — pkg/directory/providers/network_activedirectory/provider.go
+      (out of #4345's package list, owned by that story) carries a
+      confirmed finding that would go live the moment a provider is
+      registered here.
+
+  - path: pkg/directory/dna
+    reason: >
+      WIRE (Issue #4345): directory-object DNA drift/monitoring extension,
+      10k+ lines, under active maintenance (touched in the current develop
+      tip, Issue #4341, alongside a log-sanitization pass) — not abandoned.
+      Reachable only through features/controller/directory (WIRE, above),
+      whose own caller is missing. Same follow-up as
+      features/controller/directory; the fix is a caller two levels up in
+      features/controller/server / cmd/controller, not in this package.
+
+  - path: features/saas
+    reason: >
+      WIRE (Issue #4345): multi-tenant SaaS provider/JWT/OAuth2
+      infrastructure with real security-hardening history (mock OAuth2/JWT
+      replaced with real implementations, cross-tenant token-mismatch
+      rejection). Its only consumer, features/workflow/modules/m365/gdap,
+      is itself unreachable — out of scope for #4345 (M365 module-wiring is
+      its own story). docs/product/roadmap.md still lists "SaaS Steward
+      using workflow engine foundation" and "Advanced multi-tenant SaaS
+      management" as open (unchecked) items. Wiring this package is
+      sequenced after, and should be decided jointly with, the M365
+      module-wiring story — deleting it would strand that tree's only
+      tenant-auth layer.
+
+  # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
+  # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
+  # --- classification comment, pending PO creation. Deleting any of these ---
+  # --- is explicitly out of scope for #4345 — see its Out of Scope section.
+  #
+  # features/controller (root), features/controller/cirunner,
+  # internal/cli/commands and internal/controller were all deleted by Issue
+  # #4406 (the capability-map-then-delete follow-up referenced above): the
+  # seven test-only importers of features/controller now construct against
+  # features/controller/server.Server directly, matching
+  # cmd/controller/main.go's own wiring, and all four packages are gone from
+  # the tree. features/controller/directory (below) is unaffected — it is a
+  # subdirectory, not part of the deleted root package, and Issue #4406 was
+  # scoped to leave its WIRE entry untouched for the sibling wiring story.

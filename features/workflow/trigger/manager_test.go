@@ -4,348 +4,163 @@ package trigger
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// MockStorageProvider implements StorageProvider for testing
-type MockStorageProvider struct {
-	mock.Mock
+// triggerHarness wires a TriggerManagerImpl to the real trigger-system components:
+// TestStorageProvider (a real StorageProvider backed by an in-memory TriggerStore),
+// the production CronScheduler, HTTPWebhookHandler and SIEMProcessor, the real
+// TestWorkflowTrigger and the in-memory SecretStore. Tests assert on the observable
+// state of those components rather than on recorded interactions.
+type triggerHarness struct {
+	manager         *TriggerManagerImpl
+	storage         *TestStorageProvider
+	scheduler       *CronScheduler
+	webhookHandler  *HTTPWebhookHandler
+	siemProcessor   *SIEMProcessor
+	workflowTrigger *TestWorkflowTrigger
+	triggerStore    *inMemoryTriggerStore
+	secretStore     secretsif.SecretStore
 }
 
-func (m *MockStorageProvider) Initialize(ctx context.Context, config map[string]interface{}) error {
-	args := m.Called(ctx, config)
-	return args.Error(0)
-}
+// newTriggerHarness builds a fully wired trigger manager from real components.
+func newTriggerHarness(t *testing.T) *triggerHarness {
+	t.Helper()
 
-func (m *MockStorageProvider) Store(ctx context.Context, key string, data []byte) error {
-	args := m.Called(ctx, key, data)
-	return args.Error(0)
-}
+	storage := NewTestStorageProvider()
+	workflowTrigger := NewTestWorkflowTrigger()
+	secretStore := newTestSecretStore(t)
 
-func (m *MockStorageProvider) Retrieve(ctx context.Context, key string) ([]byte, error) {
-	args := m.Called(ctx, key)
-	return args.Get(0).([]byte), args.Error(1)
-}
+	// Components need the manager and the manager needs the components, so the
+	// manager is constructed first and the components are attached afterwards
+	// (same wiring order the controller factory uses).
+	manager := NewTriggerManager(storage, nil, nil, nil, workflowTrigger, secretStore)
 
-func (m *MockStorageProvider) Delete(ctx context.Context, key string) error {
-	args := m.Called(ctx, key)
-	return args.Error(0)
-}
+	scheduler := NewCronScheduler(manager, workflowTrigger)
+	// These tests assert scheduling state, not fired executions: a long tick keeps
+	// the scheduler loop from executing triggers concurrently with the assertions.
+	scheduler.SetTickerInterval(time.Hour)
+	webhookHandler := NewHTTPWebhookHandler(manager, workflowTrigger, "127.0.0.1", 0)
+	siemProcessor := NewSIEMProcessor(manager, workflowTrigger)
 
-func (m *MockStorageProvider) List(ctx context.Context, prefix string) ([]string, error) {
-	args := m.Called(ctx, prefix)
-	return args.Get(0).([]string), args.Error(1)
-}
+	manager.scheduler = scheduler
+	manager.webhookHandler = webhookHandler
+	manager.siemIntegration = siemProcessor
 
-func (m *MockStorageProvider) Exists(ctx context.Context, key string) (bool, error) {
-	args := m.Called(ctx, key)
-	return args.Bool(0), args.Error(1)
-}
+	triggerStore, ok := manager.triggerStore.(*inMemoryTriggerStore)
+	require.True(t, ok, "NewTriggerManager must build a TriggerStore from the storage provider")
 
-func (m *MockStorageProvider) Available() (bool, error) {
-	args := m.Called()
-	return args.Bool(0), args.Error(1)
-}
+	t.Cleanup(func() {
+		manager.mutex.RLock()
+		running := manager.running
+		manager.mutex.RUnlock()
+		if running {
+			require.NoError(t, manager.Stop(context.Background()))
+		}
+	})
 
-func (m *MockStorageProvider) Close() error {
-	args := m.Called()
-	return args.Error(0)
-}
-
-// Additional methods required by StorageProvider interface
-func (m *MockStorageProvider) Name() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockStorageProvider) Description() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(business.ClientTenantStore), args.Error(1)
-}
-
-func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(cfgconfig.ConfigStore), args.Error(1)
-}
-
-func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(business.AuditStore), args.Error(1)
-}
-
-func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(business.RBACStore), args.Error(1)
-}
-
-func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(business.TenantStore), args.Error(1)
-}
-
-func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
-	args := m.Called(config)
-	return args.Get(0).(business.RegistrationTokenStore), args.Error(1)
-}
-
-func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
-	args := m.Called()
-	return args.Get(0).(interfaces.ProviderCapabilities)
-}
-
-func (m *MockStorageProvider) GetVersion() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-// MockScheduler implements Scheduler for testing
-type MockScheduler struct {
-	mock.Mock
-}
-
-func (m *MockScheduler) ScheduleWorkflow(ctx context.Context, trigger *Trigger) error {
-	args := m.Called(ctx, trigger)
-	return args.Error(0)
-}
-
-func (m *MockScheduler) UnscheduleWorkflow(ctx context.Context, triggerID string) error {
-	args := m.Called(ctx, triggerID)
-	return args.Error(0)
-}
-
-func (m *MockScheduler) Start(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockScheduler) Stop(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// MockWebhookHandler implements WebhookHandler for testing
-type MockWebhookHandler struct {
-	mock.Mock
-}
-
-func (m *MockWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trigger) error {
-	args := m.Called(ctx, trigger)
-	return args.Error(0)
-}
-
-func (m *MockWebhookHandler) UnregisterWebhook(ctx context.Context, triggerID string) error {
-	args := m.Called(ctx, triggerID)
-	return args.Error(0)
-}
-
-func (m *MockWebhookHandler) HandleWebhook(ctx context.Context, triggerID string, payload []byte, headers map[string]string) (*TriggerExecution, error) {
-	args := m.Called(ctx, triggerID, payload, headers)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	return &triggerHarness{
+		manager:         manager,
+		storage:         storage,
+		scheduler:       scheduler,
+		webhookHandler:  webhookHandler,
+		siemProcessor:   siemProcessor,
+		workflowTrigger: workflowTrigger,
+		triggerStore:    triggerStore,
+		secretStore:     secretStore,
 	}
-	return args.Get(0).(*TriggerExecution), args.Error(1)
-}
-
-func (m *MockWebhookHandler) Start(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockWebhookHandler) Stop(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// MockSIEMIntegration implements SIEMIntegration for testing
-type MockSIEMIntegration struct {
-	mock.Mock
-}
-
-func (m *MockSIEMIntegration) RegisterSIEMTrigger(ctx context.Context, trigger *Trigger) error {
-	args := m.Called(ctx, trigger)
-	return args.Error(0)
-}
-
-func (m *MockSIEMIntegration) UnregisterSIEMTrigger(ctx context.Context, triggerID string) error {
-	args := m.Called(ctx, triggerID)
-	return args.Error(0)
-}
-
-func (m *MockSIEMIntegration) ProcessLogEntry(ctx context.Context, logEntry map[string]interface{}) error {
-	args := m.Called(ctx, logEntry)
-	return args.Error(0)
-}
-
-func (m *MockSIEMIntegration) Start(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockSIEMIntegration) Stop(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
 }
 
 func TestTriggerManagerImpl_NewTriggerManager(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
 
-	mockStorage.On("Available").Return(true, nil)
+	require.NotNil(t, h.manager)
+	assert.Same(t, h.storage, h.manager.storage)
+	assert.Same(t, h.scheduler, h.manager.scheduler)
+	assert.Same(t, h.webhookHandler, h.manager.webhookHandler)
+	assert.Same(t, h.siemProcessor, h.manager.siemIntegration)
+	assert.Same(t, h.workflowTrigger, h.manager.workflowTrigger)
+	assert.Same(t, h.secretStore, h.manager.secretStore)
+	assert.NotNil(t, h.manager.triggers)
+	assert.NotNil(t, h.manager.executions)
+	assert.False(t, h.manager.running)
 
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	assert.NotNil(t, manager)
-	assert.Equal(t, mockStorage, manager.storage)
-	assert.Equal(t, mockScheduler, manager.scheduler)
-	assert.Equal(t, mockWebhookHandler, manager.webhookHandler)
-	assert.Equal(t, mockSIEMIntegration, manager.siemIntegration)
-	assert.Equal(t, mockWorkflowTrigger, manager.workflowTrigger)
-	assert.NotNil(t, manager.triggers)
-	assert.NotNil(t, manager.executions)
-	assert.False(t, manager.running)
+	// The manager must derive its TriggerStore from the storage provider.
+	assert.NotNil(t, h.manager.triggerStore)
 }
 
 func TestTriggerManagerImpl_StartStop(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
-
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
+	h := newTriggerHarness(t)
 	ctx := context.Background()
 
-	// Mock successful starts
-	mockScheduler.On("Start", ctx).Return(nil)
-	mockWebhookHandler.On("Start", ctx).Return(nil)
-	mockSIEMIntegration.On("Start", ctx).Return(nil)
-	mockStorage.On("List", ctx, "triggers/").Return([]string{}, nil)
+	require.NoError(t, h.manager.Start(ctx))
+	assert.True(t, h.manager.running)
 
-	// Mock successful stops
-	mockScheduler.On("Stop", ctx).Return(nil)
-	mockWebhookHandler.On("Stop", ctx).Return(nil)
-	mockSIEMIntegration.On("Stop", ctx).Return(nil)
+	// Each real component must now be running: starting one directly reports it.
+	assert.Error(t, h.scheduler.Start(ctx), "scheduler must already be running")
+	assert.Error(t, h.webhookHandler.Start(ctx), "webhook handler must already be running")
+	assert.Error(t, h.siemProcessor.Start(ctx), "SIEM processor must already be running")
 
-	// Test start
-	err := manager.Start(ctx)
-	assert.NoError(t, err)
-	assert.True(t, manager.running)
+	// The running SIEM processor accepts log entries; a stopped one rejects them.
+	require.NoError(t, h.siemProcessor.ProcessLogEntry(ctx, map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"level":     "info",
+		"message":   "startup probe",
+		"source":    "manager-test",
+	}))
 
-	// Test double start (should fail)
-	err = manager.Start(ctx)
-	assert.Error(t, err)
+	// Double start (should fail)
+	err := h.manager.Start(ctx)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "trigger manager is already running")
 
-	// Test stop
-	err = manager.Stop(ctx)
-	assert.NoError(t, err)
-	assert.False(t, manager.running)
+	require.NoError(t, h.manager.Stop(ctx))
+	assert.False(t, h.manager.running)
 
-	// Test double stop (should fail)
-	err = manager.Stop(ctx)
-	assert.Error(t, err)
+	// Each real component must now be stopped.
+	assert.Error(t, h.scheduler.Stop(ctx), "scheduler must already be stopped")
+	assert.Error(t, h.webhookHandler.Stop(ctx), "webhook handler must already be stopped")
+	assert.Error(t, h.siemProcessor.Stop(ctx), "SIEM processor must already be stopped")
+	assert.Error(t, h.siemProcessor.ProcessLogEntry(ctx, map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"level":     "info",
+		"message":   "shutdown probe",
+		"source":    "manager-test",
+	}), "stopped SIEM processor must reject log entries")
+
+	// Double stop (should fail)
+	err = h.manager.Stop(ctx)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "trigger manager is not running")
-
-	// Verify all mocks were called
-	mockScheduler.AssertExpectations(t)
-	mockWebhookHandler.AssertExpectations(t)
-	mockSIEMIntegration.AssertExpectations(t)
 }
 
 func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
-
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	ctx := context.Background()
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-123")
 
 	tests := []struct {
 		name        string
 		trigger     *Trigger
-		setupMocks  func()
 		expectError bool
 		errorMsg    string
+		verify      func(t *testing.T)
 	}{
 		{
 			name: "create schedule trigger",
@@ -363,12 +178,16 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 				CreatedAt: time.Now(),
 				UpdatedAt: time.Now(),
 			},
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
-			},
 			expectError: false,
+			verify: func(t *testing.T) {
+				scheduled := h.scheduler.GetScheduledTriggers()
+				require.Contains(t, scheduled, "schedule-1", "schedule trigger must be registered with the scheduler")
+				assert.Equal(t, "backup-workflow", scheduled["schedule-1"].WorkflowName)
+
+				next, err := h.scheduler.GetNextExecutionTime("schedule-1")
+				require.NoError(t, err)
+				assert.False(t, next.IsZero(), "scheduler must compute a next execution time")
+			},
 		},
 		{
 			name: "create webhook trigger",
@@ -387,12 +206,12 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 				CreatedAt: time.Now(),
 				UpdatedAt: time.Now(),
 			},
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockWebhookHandler.On("RegisterWebhook", ctx, mock.Anything).Return(nil)
-			},
 			expectError: false,
+			verify: func(t *testing.T) {
+				registered := h.webhookHandler.GetRegisteredWebhooks()
+				require.Contains(t, registered, "webhook-1", "webhook trigger must be registered with the webhook handler")
+				assert.Equal(t, "/webhook/api", registered["webhook-1"].Webhook.Path)
+			},
 		},
 		{
 			name: "create SIEM trigger",
@@ -411,12 +230,12 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 				CreatedAt: time.Now(),
 				UpdatedAt: time.Now(),
 			},
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockSIEMIntegration.On("RegisterSIEMTrigger", ctx, mock.Anything).Return(nil)
-			},
 			expectError: false,
+			verify: func(t *testing.T) {
+				registered := h.siemProcessor.GetRegisteredSIEMTriggers()
+				require.Contains(t, registered, "siem-1", "SIEM trigger must be registered with the SIEM processor")
+				assert.Equal(t, []string{"auth_failure"}, registered["siem-1"].SIEM.EventTypes)
+			},
 		},
 		{
 			name: "trigger with empty ID",
@@ -426,7 +245,6 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 				Type:         TriggerTypeSchedule,
 				WorkflowName: "test-workflow",
 			},
-			setupMocks:  func() {},
 			expectError: true,
 			errorMsg:    "schedule configuration is required for schedule triggers",
 		},
@@ -438,7 +256,6 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 				Type:         TriggerTypeSchedule,
 				WorkflowName: "",
 			},
-			setupMocks:  func() {},
 			expectError: true,
 			errorMsg:    "workflow name is required",
 		},
@@ -450,12 +267,11 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 				Type:         TriggerType("invalid"),
 				WorkflowName: "test-workflow",
 			},
-			setupMocks:  func() {},
 			expectError: true,
 			errorMsg:    "unsupported trigger type",
 		},
 		{
-			name: "storage not implemented yet",
+			name: "trigger persisted to trigger store",
 			trigger: &Trigger{
 				ID:           "storage-test-1",
 				Name:         "Storage Test",
@@ -466,60 +282,82 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 					Enabled:        true,
 				},
 			},
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
-			},
 			expectError: false,
+			verify: func(t *testing.T) {
+				record, err := h.triggerStore.GetTrigger(ctx, "storage-test-1")
+				require.NoError(t, err, "trigger must be persisted to the trigger store")
+				assert.Equal(t, "Storage Test", record.Name)
+				assert.Equal(t, string(TriggerTypeSchedule), record.Type)
+				assert.Equal(t, "test-workflow", record.WorkflowName)
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockStorage.ExpectedCalls = nil
-			mockScheduler.ExpectedCalls = nil
-			mockWebhookHandler.ExpectedCalls = nil
-			mockSIEMIntegration.ExpectedCalls = nil
-			mockWorkflowTrigger.ExpectedCalls = nil
-
-			tt.setupMocks()
-
-			err := manager.CreateTrigger(ctx, tt.trigger)
+			err := h.manager.CreateTrigger(ctx, tt.trigger)
 
 			if tt.expectError {
-				if assert.Error(t, err) {
-					assert.Contains(t, err.Error(), tt.errorMsg)
-				}
-			} else {
-				assert.NoError(t, err)
-				assert.Contains(t, manager.triggers, tt.trigger.ID)
-				assert.Equal(t, tt.trigger, manager.triggers[tt.trigger.ID])
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errorMsg)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Contains(t, h.manager.triggers, tt.trigger.ID)
+			assert.Equal(t, tt.trigger, h.manager.triggers[tt.trigger.ID])
+			if tt.verify != nil {
+				tt.verify(t)
 			}
 		})
 	}
 }
 
+// TestTriggerManagerImpl_CreateTrigger_NoTenantContextRefused proves CreateTrigger
+// refuses a caller with no tenant on the context, rather than creating an
+// unowned trigger (Issue #4326 required test).
+func TestTriggerManagerImpl_CreateTrigger_NoTenantContextRefused(t *testing.T) {
+	h := newTriggerHarness(t)
+
+	trigger := &Trigger{
+		ID:           "no-tenant-1",
+		Name:         "No Tenant Trigger",
+		Type:         TriggerTypeManual,
+		WorkflowName: "test-workflow",
+	}
+
+	err := h.manager.CreateTrigger(context.Background(), trigger)
+	require.Error(t, err)
+	assert.NotContains(t, h.manager.triggers, "no-tenant-1")
+}
+
+// TestTriggerManagerImpl_CreateTrigger_IgnoresBodyTenant proves the trigger's tenant
+// always comes from the authenticated context, never from a caller-supplied body
+// field (Issue #4326 required test). Before the fix, CreateTrigger only defaulted
+// the tenant from context when the body left TenantID empty, so a request body
+// naming a different tenant was accepted as-is.
+func TestTriggerManagerImpl_CreateTrigger_IgnoresBodyTenant(t *testing.T) {
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-real")
+
+	trigger := &Trigger{
+		ID:           "spoofed-tenant-1",
+		Name:         "Spoofed Tenant Trigger",
+		Type:         TriggerTypeManual,
+		TenantID:     "tenant-attacker-supplied",
+		WorkflowName: "test-workflow",
+	}
+
+	require.NoError(t, h.manager.CreateTrigger(ctx, trigger))
+	assert.Equal(t, "tenant-real", trigger.TenantID,
+		"the stored trigger must carry the authenticated context's tenant, not the body-supplied one")
+	assert.Equal(t, "tenant-real", h.manager.triggers["spoofed-tenant-1"].TenantID)
+}
+
 func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
+	ctx := logging.WithTenant(context.Background(), "tenant-123")
 
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Create an existing trigger
 	existingTrigger := &Trigger{
 		ID:           "schedule-1",
 		Name:         "Daily Backup",
@@ -531,19 +369,15 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 			CronExpression: "0 2 * * *",
 			Enabled:        true,
 		},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
 	}
-	manager.triggers[existingTrigger.ID] = existingTrigger
-
-	ctx := logging.WithTenant(context.Background(), "tenant-123")
+	require.NoError(t, h.manager.CreateTrigger(ctx, existingTrigger))
 
 	tests := []struct {
 		name        string
 		trigger     *Trigger
-		setupMocks  func()
 		expectError bool
 		errorMsg    string
+		verify      func(t *testing.T)
 	}{
 		{
 			name: "update existing trigger",
@@ -558,16 +392,20 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 					CronExpression: "0 3 * * *", // Changed time
 					Enabled:        true,
 				},
-				CreatedAt: existingTrigger.CreatedAt,
-				UpdatedAt: time.Now(),
-			},
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockWorkflowTrigger.On("ValidateTrigger", ctx, mock.Anything).Return(nil)
-				mockScheduler.On("UnscheduleWorkflow", ctx, "schedule-1").Return(nil)
-				mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
 			},
 			expectError: false,
+			verify: func(t *testing.T) {
+				// The scheduler must hold the re-registered trigger with the new cron.
+				scheduled := h.scheduler.GetScheduledTriggers()
+				require.Contains(t, scheduled, "schedule-1")
+				assert.Equal(t, "0 3 * * *", scheduled["schedule-1"].Schedule.CronExpression)
+				assert.Equal(t, "backup-workflow-v2", scheduled["schedule-1"].WorkflowName)
+
+				record, err := h.triggerStore.GetTrigger(ctx, "schedule-1")
+				require.NoError(t, err)
+				assert.Equal(t, "Daily Backup Updated", record.Name)
+				assert.Equal(t, "backup-workflow-v2", record.WorkflowName)
+			},
 		},
 		{
 			name: "update non-existent trigger",
@@ -577,7 +415,6 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 				Type:         TriggerTypeSchedule,
 				WorkflowName: "test-workflow",
 			},
-			setupMocks:  func() {},
 			expectError: true,
 			errorMsg:    "trigger non-existent not found",
 		},
@@ -593,79 +430,71 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 					Enabled:        true,
 				},
 			},
-			setupMocks: func() {
-				// No mocks needed - validation should fail before any calls
-			},
 			expectError: true,
 			errorMsg:    "cron expression is required",
+			verify: func(t *testing.T) {
+				// Rejected update must leave the previously stored trigger intact.
+				assert.Equal(t, "Daily Backup Updated", h.manager.triggers["schedule-1"].Name)
+				scheduled := h.scheduler.GetScheduledTriggers()
+				require.Contains(t, scheduled, "schedule-1")
+				assert.Equal(t, "0 3 * * *", scheduled["schedule-1"].Schedule.CronExpression)
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockStorage.ExpectedCalls = nil
-			mockScheduler.ExpectedCalls = nil
-			mockWorkflowTrigger.ExpectedCalls = nil
-
-			tt.setupMocks()
-
-			err := manager.UpdateTrigger(ctx, tt.trigger)
+			err := h.manager.UpdateTrigger(ctx, tt.trigger)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errorMsg)
 			} else {
-				assert.NoError(t, err)
-				updatedTrigger := manager.triggers[tt.trigger.ID]
+				require.NoError(t, err)
+				updatedTrigger := h.manager.triggers[tt.trigger.ID]
 				assert.Equal(t, tt.trigger.Name, updatedTrigger.Name)
 				assert.Equal(t, tt.trigger.WorkflowName, updatedTrigger.WorkflowName)
+			}
+
+			if tt.verify != nil {
+				tt.verify(t)
 			}
 		})
 	}
 }
 
 func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
+	ctx := logging.WithTenant(context.Background(), "tenant-123")
 
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Create test triggers
 	scheduleTrigger := &Trigger{
-		ID:       "schedule-1",
-		Type:     TriggerTypeSchedule,
-		TenantID: "tenant-123",
+		ID:           "schedule-1",
+		Name:         "Schedule Delete",
+		Type:         TriggerTypeSchedule,
+		TenantID:     "tenant-123",
+		WorkflowName: "schedule-workflow",
 		Schedule: &ScheduleConfig{
 			CronExpression: "0 2 * * *",
 			Enabled:        true,
 		},
 	}
 	webhookTrigger := &Trigger{
-		ID:       "webhook-1",
-		Type:     TriggerTypeWebhook,
-		TenantID: "tenant-123",
+		ID:           "webhook-1",
+		Name:         "Webhook Delete",
+		Type:         TriggerTypeWebhook,
+		TenantID:     "tenant-123",
+		WorkflowName: "webhook-workflow",
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/test",
 			Enabled: true,
 		},
 	}
 	siemTrigger := &Trigger{
-		ID:       "siem-1",
-		Type:     TriggerTypeSIEM,
-		TenantID: "tenant-123",
+		ID:           "siem-1",
+		Name:         "SIEM Delete",
+		Type:         TriggerTypeSIEM,
+		TenantID:     "tenant-123",
+		WorkflowName: "siem-workflow",
 		SIEM: &SIEMConfig{
 			EventTypes: []string{"error"},
 			WindowSize: 5 * time.Minute,
@@ -673,50 +502,44 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 		},
 	}
 
-	manager.triggers["schedule-1"] = scheduleTrigger
-	manager.triggers["webhook-1"] = webhookTrigger
-	manager.triggers["siem-1"] = siemTrigger
-
-	ctx := logging.WithTenant(context.Background(), "tenant-123")
-
 	tests := []struct {
 		name        string
 		triggerID   string
-		setupMocks  func()
+		trigger     *Trigger
 		expectError bool
 		errorMsg    string
+		verify      func(t *testing.T)
 	}{
 		{
 			name:      "delete schedule trigger",
 			triggerID: "schedule-1",
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockScheduler.On("UnscheduleWorkflow", ctx, "schedule-1").Return(nil)
+			trigger:   scheduleTrigger,
+			verify: func(t *testing.T) {
+				assert.NotContains(t, h.scheduler.GetScheduledTriggers(), "schedule-1",
+					"deleted schedule trigger must be unscheduled")
 			},
-			expectError: false,
 		},
 		{
 			name:      "delete webhook trigger",
 			triggerID: "webhook-1",
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockWebhookHandler.On("UnregisterWebhook", ctx, "webhook-1").Return(nil)
+			trigger:   webhookTrigger,
+			verify: func(t *testing.T) {
+				assert.NotContains(t, h.webhookHandler.GetRegisteredWebhooks(), "webhook-1",
+					"deleted webhook trigger must be unregistered")
 			},
-			expectError: false,
 		},
 		{
 			name:      "delete SIEM trigger",
 			triggerID: "siem-1",
-			setupMocks: func() {
-				mockStorage.On("Available").Return(true, nil)
-				mockSIEMIntegration.On("UnregisterSIEMTrigger", ctx, "siem-1").Return(nil)
+			trigger:   siemTrigger,
+			verify: func(t *testing.T) {
+				assert.NotContains(t, h.siemProcessor.GetRegisteredSIEMTriggers(), "siem-1",
+					"deleted SIEM trigger must be unregistered")
 			},
-			expectError: false,
 		},
 		{
 			name:        "delete non-existent trigger",
 			triggerID:   "non-existent",
-			setupMocks:  func() {},
 			expectError: true,
 			errorMsg:    "trigger non-existent not found",
 		},
@@ -724,65 +547,43 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockStorage.ExpectedCalls = nil
-			mockScheduler.ExpectedCalls = nil
-			mockWebhookHandler.ExpectedCalls = nil
-			mockSIEMIntegration.ExpectedCalls = nil
-
-			tt.setupMocks()
-
-			// Ensure trigger exists before deletion (for valid test cases)
-			switch tt.triggerID {
-			case "schedule-1":
-				manager.triggers["schedule-1"] = scheduleTrigger
-			case "webhook-1":
-				manager.triggers["webhook-1"] = webhookTrigger
-			case "siem-1":
-				manager.triggers["siem-1"] = siemTrigger
+			if tt.trigger != nil {
+				require.NoError(t, h.manager.CreateTrigger(ctx, tt.trigger))
 			}
 
-			err := manager.DeleteTrigger(ctx, tt.triggerID)
+			err := h.manager.DeleteTrigger(ctx, tt.triggerID)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errorMsg)
-			} else {
-				assert.NoError(t, err)
-				assert.NotContains(t, manager.triggers, tt.triggerID)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.NotContains(t, h.manager.triggers, tt.triggerID)
+
+			_, storeErr := h.triggerStore.GetTrigger(ctx, tt.triggerID)
+			assert.ErrorIs(t, storeErr, business.ErrTriggerNotFound,
+				"deleted trigger must be removed from the trigger store")
+
+			if tt.verify != nil {
+				tt.verify(t)
 			}
 		})
 	}
 }
 
 func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-test")
 
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Create test trigger
 	trigger := &Trigger{
 		ID:           "test-1",
 		Name:         "Test Trigger",
-		Type:         TriggerTypeSchedule,
+		Type:         TriggerTypeManual,
 		WorkflowName: "test-workflow",
 	}
-	manager.triggers["test-1"] = trigger
-
-	ctx := context.Background()
+	require.NoError(t, h.manager.CreateTrigger(ctx, trigger))
 
 	tests := []struct {
 		name        string
@@ -808,14 +609,14 @@ func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := manager.GetTrigger(ctx, tt.triggerID)
+			result, err := h.manager.GetTrigger(ctx, tt.triggerID)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Nil(t, result)
 				assert.Contains(t, err.Error(), tt.errorMsg)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.Equal(t, tt.expected, result)
 			}
 		})
@@ -823,81 +624,84 @@ func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
 }
 
 func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
 
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Create test triggers
+	// Triggers are created through the manager for each tenant so the filter runs
+	// against state produced by the real create path.
 	triggers := []*Trigger{
 		{
-			ID:       "schedule-1",
-			Name:     "Schedule Trigger",
-			Type:     TriggerTypeSchedule,
-			Status:   TriggerStatusActive,
-			TenantID: "tenant-123",
-			Tags:     []string{"backup", "daily"},
+			ID:           "schedule-1",
+			Name:         "Schedule Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			TenantID:     "tenant-123",
+			WorkflowName: "schedule-workflow",
+			Tags:         []string{"backup", "daily"},
 		},
 		{
-			ID:       "webhook-1",
-			Name:     "Webhook Trigger",
-			Type:     TriggerTypeWebhook,
-			Status:   TriggerStatusActive,
-			TenantID: "tenant-123",
-			Tags:     []string{"api", "integration"},
+			ID:           "webhook-1",
+			Name:         "Webhook Trigger",
+			Type:         TriggerTypeWebhook,
+			Status:       TriggerStatusActive,
+			TenantID:     "tenant-123",
+			WorkflowName: "webhook-workflow",
+			Tags:         []string{"api", "integration"},
+			Webhook: &WebhookConfig{
+				Path:    "/webhook/list",
+				Enabled: true,
+			},
 		},
 		{
-			ID:       "siem-1",
-			Name:     "SIEM Trigger",
-			Type:     TriggerTypeSIEM,
-			Status:   TriggerStatusInactive,
-			TenantID: "tenant-456",
-			Tags:     []string{"security", "monitoring"},
+			ID:           "siem-1",
+			Name:         "SIEM Trigger",
+			Type:         TriggerTypeSIEM,
+			Status:       TriggerStatusInactive,
+			TenantID:     "tenant-456",
+			WorkflowName: "siem-workflow",
+			Tags:         []string{"security", "monitoring"},
+			SIEM: &SIEMConfig{
+				EventTypes: []string{"error"},
+				WindowSize: time.Minute,
+				Enabled:    true,
+			},
 		},
 	}
 
 	for _, trigger := range triggers {
-		manager.triggers[trigger.ID] = trigger
+		tenantCtx := contextWithTenant(trigger.TenantID)
+		require.NoError(t, h.manager.CreateTrigger(tenantCtx, trigger))
 	}
 
-	// Use background context (no tenant = admin access to see all triggers)
-	ctx := context.Background()
+	ctx123 := contextWithTenant("tenant-123")
+	ctx456 := contextWithTenant("tenant-456")
 
 	tests := []struct {
 		name        string
+		ctx         context.Context
 		filter      *TriggerFilter
 		expectedLen int
 		expectedIDs []string
 		expectError bool
 	}{
 		{
-			name:        "list all triggers",
+			// Issue #4326 required test: a caller authenticated to tenant-123 lists
+			// triggers and sees only tenant-123's, never tenant-456's siem-1.
+			name:        "caller sees only their own tenant's triggers",
+			ctx:         ctx123,
 			filter:      &TriggerFilter{},
-			expectedLen: 3,
-			expectedIDs: []string{"schedule-1", "webhook-1", "siem-1"},
-		},
-		{
-			name: "filter by tenant",
-			filter: &TriggerFilter{
-				TenantID: "tenant-123",
-			},
 			expectedLen: 2,
 			expectedIDs: []string{"schedule-1", "webhook-1"},
 		},
 		{
-			name: "filter by type",
+			name:        "a different tenant sees only their own trigger",
+			ctx:         ctx456,
+			filter:      &TriggerFilter{},
+			expectedLen: 1,
+			expectedIDs: []string{"siem-1"},
+		},
+		{
+			name: "filter by type within own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
 				Type: TriggerTypeWebhook,
 			},
@@ -905,7 +709,8 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 			expectedIDs: []string{"webhook-1"},
 		},
 		{
-			name: "filter by status",
+			name: "filter by status within own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
 				Status: TriggerStatusActive,
 			},
@@ -913,7 +718,8 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 			expectedIDs: []string{"schedule-1", "webhook-1"},
 		},
 		{
-			name: "filter by tags",
+			name: "filter by tags within own tenant",
+			ctx:  ctx456,
 			filter: &TriggerFilter{
 				Tags: []string{"security"},
 			},
@@ -921,165 +727,166 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 			expectedIDs: []string{"siem-1"},
 		},
 		{
-			name: "filter with limit",
+			name: "filter with limit within own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
-				Limit: 2,
+				Limit: 1,
 			},
-			expectedLen: 2,
+			expectedLen: 1,
 		},
 		{
-			name: "filter with no matches",
+			// filter.TenantID cannot be used to escalate beyond the authenticated
+			// caller's own tenant: the ctx-based restriction and the query filter
+			// AND together, so naming another tenant in the filter narrows to nothing
+			// rather than reaching across tenants.
+			name: "filter.TenantID cannot escalate beyond the caller's own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
-				TenantID: "non-existent-tenant",
+				TenantID: "tenant-456",
 			},
 			expectedLen: 0,
 			expectedIDs: []string{},
+		},
+		{
+			// Issue #4326 required test: an absent tenant is refused, not treated as
+			// admin access to every tenant's triggers.
+			name:        "no tenant context is refused",
+			ctx:         context.Background(),
+			filter:      &TriggerFilter{},
+			expectError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := manager.ListTriggers(ctx, tt.filter)
+			result, err := h.manager.ListTriggers(tt.ctx, tt.filter)
 
 			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Len(t, result, tt.expectedLen)
+				require.Error(t, err)
+				return
+			}
 
-				if tt.expectedIDs != nil {
-					actualIDs := make([]string, len(result))
-					for i, trigger := range result {
-						actualIDs[i] = trigger.ID
-					}
-					assert.ElementsMatch(t, tt.expectedIDs, actualIDs)
+			require.NoError(t, err)
+			assert.Len(t, result, tt.expectedLen)
+
+			if tt.expectedIDs != nil {
+				actualIDs := make([]string, len(result))
+				for i, trigger := range result {
+					actualIDs[i] = trigger.ID
 				}
+				assert.ElementsMatch(t, tt.expectedIDs, actualIDs)
 			}
 		})
 	}
 }
 
 func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-test")
 
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Create test trigger
 	trigger := &Trigger{
-		ID:     "test-1",
-		Type:   TriggerTypeSchedule,
-		Status: TriggerStatusInactive,
+		ID:           "test-1",
+		Name:         "Enable Disable Trigger",
+		Type:         TriggerTypeSchedule,
+		Status:       TriggerStatusActive,
+		WorkflowName: "test-workflow",
 		Schedule: &ScheduleConfig{
 			CronExpression: "0 2 * * *",
-			Enabled:        false,
+			Enabled:        true,
 		},
 	}
-	manager.triggers["test-1"] = trigger
-
-	ctx := context.Background()
-
-	t.Run("enable trigger", func(t *testing.T) {
-		mockScheduler.On("ScheduleWorkflow", ctx, mock.Anything).Return(nil)
-
-		err := manager.EnableTrigger(ctx, "test-1")
-		assert.NoError(t, err)
-		assert.Equal(t, TriggerStatusActive, trigger.Status)
-
-		mockScheduler.AssertExpectations(t)
-	})
+	require.NoError(t, h.manager.CreateTrigger(ctx, trigger))
+	require.Contains(t, h.scheduler.GetScheduledTriggers(), "test-1")
 
 	t.Run("disable trigger", func(t *testing.T) {
-		// Reset mocks
-		mockStorage.ExpectedCalls = nil
-		mockScheduler.ExpectedCalls = nil
-
-		trigger.Status = TriggerStatusActive
-		trigger.Schedule.Enabled = true
-
-		mockScheduler.On("UnscheduleWorkflow", ctx, "test-1").Return(nil)
-
-		err := manager.DisableTrigger(ctx, "test-1")
-		assert.NoError(t, err)
+		require.NoError(t, h.manager.DisableTrigger(ctx, "test-1"))
 		assert.Equal(t, TriggerStatusInactive, trigger.Status)
+		assert.NotContains(t, h.scheduler.GetScheduledTriggers(), "test-1",
+			"disabled trigger must be removed from the scheduler")
 
-		mockScheduler.AssertExpectations(t)
+		record, err := h.triggerStore.GetTrigger(ctx, "test-1")
+		require.NoError(t, err)
+		assert.Equal(t, string(TriggerStatusInactive), record.Status)
+	})
+
+	t.Run("enable trigger", func(t *testing.T) {
+		require.NoError(t, h.manager.EnableTrigger(ctx, "test-1"))
+		assert.Equal(t, TriggerStatusActive, trigger.Status)
+		assert.Contains(t, h.scheduler.GetScheduledTriggers(), "test-1",
+			"enabled trigger must be re-registered with the scheduler")
+
+		record, err := h.triggerStore.GetTrigger(ctx, "test-1")
+		require.NoError(t, err)
+		assert.Equal(t, string(TriggerStatusActive), record.Status)
 	})
 
 	t.Run("enable non-existent trigger", func(t *testing.T) {
-		err := manager.EnableTrigger(ctx, "non-existent")
-		assert.Error(t, err)
+		err := h.manager.EnableTrigger(ctx, "non-existent")
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "trigger non-existent not found")
 	})
 }
 
 func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-test")
 
-	mockStorage.On("Available").Return(true, nil)
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Create test trigger
 	trigger := &Trigger{
 		ID:           "test-1",
+		Name:         "Manual Trigger",
 		Type:         TriggerTypeManual,
 		Status:       TriggerStatusActive,
 		WorkflowName: "test-workflow",
 	}
-	manager.triggers["test-1"] = trigger
+	require.NoError(t, h.manager.CreateTrigger(ctx, trigger))
 
-	ctx := context.Background()
 	triggerData := map[string]interface{}{
 		"manual_execution": true,
 		"user_id":          "user-123",
 	}
 
-	mockWorkflowTrigger.On("TriggerWorkflow", ctx, trigger, mock.Anything).Return(
-		&workflow.WorkflowExecution{
-			ID:           "exec-123",
-			WorkflowName: "test-workflow",
-			Status:       workflow.StatusRunning,
-			StartTime:    time.Now(),
-		}, nil)
+	execution, err := h.manager.ExecuteTrigger(ctx, "test-1", triggerData)
 
-	execution, err := manager.ExecuteTrigger(ctx, "test-1", triggerData)
-
-	assert.NoError(t, err)
-	assert.NotNil(t, execution)
+	require.NoError(t, err)
+	require.NotNil(t, execution)
 	assert.Equal(t, "test-1", execution.TriggerID)
 	assert.Equal(t, TriggerExecutionStatusSuccess, execution.Status)
-	assert.Equal(t, "exec-123", execution.WorkflowExecutionID)
+
+	// The real workflow trigger recorded exactly one execution, and the manager
+	// linked the trigger execution to that workflow execution ID.
+	workflowExecutions := h.workflowTrigger.GetExecutions()
+	require.Len(t, workflowExecutions, 1)
+	assert.Equal(t, "test-workflow", workflowExecutions[0].WorkflowName)
+	assert.Equal(t, workflowExecutions[0].ID, execution.WorkflowExecutionID)
 
 	// Verify execution is stored
-	assert.Contains(t, manager.executions, execution.ID)
-
-	mockWorkflowTrigger.AssertExpectations(t)
+	assert.Contains(t, h.manager.executions, execution.ID)
 }
 
+func TestTriggerManagerImpl_ExecuteTriggerFailure(t *testing.T) {
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-test")
+
+	trigger := &Trigger{
+		ID:           "test-fail",
+		Name:         "Failing Manual Trigger",
+		Type:         TriggerTypeManual,
+		Status:       TriggerStatusActive,
+		WorkflowName: "failing-workflow",
+	}
+	require.NoError(t, h.manager.CreateTrigger(ctx, trigger))
+
+	// The real workflow trigger fails the next execution.
+	h.workflowTrigger.SetFailNext(true)
+
+	execution, err := h.manager.ExecuteTrigger(ctx, "test-fail", nil)
+
+	require.NoError(t, err, "a failing workflow must not fail the trigger execution call")
+	require.NotNil(t, execution)
+	assert.Equal(t, TriggerExecutionStatusFailed, execution.Status)
+	assert.NotEmpty(t, execution.Error)
+	assert.Empty(t, execution.WorkflowExecutionID)
+}
 func TestTriggerManagerImpl_NilStoragePersistence(t *testing.T) {
 	// When storage is nil (e.g. composite OSS manager where GetProvider returns nil),
 	// save and delete should be no-ops, not panics.
@@ -1090,7 +897,7 @@ func TestTriggerManagerImpl_NilStoragePersistence(t *testing.T) {
 		logger:     logging.ForModule("workflow.trigger.manager.test"),
 	}
 
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-test")
 	trigger := &Trigger{ID: "t-nil-storage", Name: "nil-storage-trigger"}
 
 	t.Run("saveTriggerToStorage returns nil when storage is nil", func(t *testing.T) {
@@ -1227,87 +1034,35 @@ func (s *inMemoryTriggerStore) ListTriggers(_ context.Context, filter business.T
 
 func (s *inMemoryTriggerStore) Close() error { return nil }
 
-// inMemorySecretStore is a thread-safe in-memory SecretStore for testing.
-type inMemorySecretStore struct {
-	mu      sync.RWMutex
-	secrets map[string]string // key → plaintext value
+// newTestSecretStore returns a real SOPS secret store in a temp directory with a
+// generated key. Trigger credentials are read and deleted by "<tenant>/<ref>"
+// exactly as production stores address them (Issue #4641); an in-memory stand-in
+// that accepted bare refs hid that the manager never addressed them that way.
+func newTestSecretStore(t *testing.T) secretsif.SecretStore {
+	t.Helper()
+	base := t.TempDir()
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	keyPath := filepath.Join(base, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600))
+	store, err := secretsif.CreateSecretStoreFromConfig("sops", map[string]interface{}{
+		"storage_provider": "flatfile",
+		"storage_config":   map[string]interface{}{"root": filepath.Join(base, "data")},
+		"cache_enabled":    false,
+		"key_file":         keyPath,
+	})
+	require.NoError(t, err, "create SOPS test store")
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
-
-func newInMemorySecretStore() *inMemorySecretStore {
-	return &inMemorySecretStore{secrets: make(map[string]string)}
-}
-
-func (s *inMemorySecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.secrets[req.Key] = req.Value
-	return nil
-}
-
-func (s *inMemorySecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	v, ok := s.secrets[key]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", secretsif.ErrSecretNotFound, key)
-	}
-	return &secretsif.Secret{Key: key, Value: v}, nil
-}
-
-func (s *inMemorySecretStore) DeleteSecret(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.secrets[key]; !ok {
-		return fmt.Errorf("%w: %s", secretsif.ErrSecretNotFound, key)
-	}
-	delete(s.secrets, key)
-	return nil
-}
-
-func (s *inMemorySecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) GetSecrets(_ context.Context, keys []string) (map[string]*secretsif.Secret, error) {
-	result := make(map[string]*secretsif.Secret)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, k := range keys {
-		if v, ok := s.secrets[k]; ok {
-			result[k] = &secretsif.Secret{Key: k, Value: v}
-		}
-	}
-	return result, nil
-}
-func (s *inMemorySecretStore) StoreSecrets(ctx context.Context, secrets map[string]*secretsif.SecretRequest) error {
-	for _, req := range secrets {
-		if err := s.StoreSecret(ctx, req); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-func (s *inMemorySecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
-	return nil, errors.New("versioning not supported")
-}
-func (s *inMemorySecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
-	return nil
-}
-func (s *inMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
-func (s *inMemorySecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
-func (s *inMemorySecretStore) HealthCheck(_ context.Context) error                      { return nil }
-func (s *inMemorySecretStore) Close() error                                             { return nil }
 
 // newManagerWithPersistence creates a TriggerManagerImpl wired to real in-memory
 // TriggerStore and SecretStore. Used by persistence-focused tests.
-func newManagerWithPersistence(tenantID string) (*TriggerManagerImpl, *inMemoryTriggerStore, *inMemorySecretStore) {
+func newManagerWithPersistence(t *testing.T, tenantID string) (*TriggerManagerImpl, *inMemoryTriggerStore, secretsif.SecretStore) {
+	t.Helper()
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	mgr := &TriggerManagerImpl{
 		logger:       logging.ForModule("workflow.trigger.manager.test"),
 		triggerStore: ts,
@@ -1318,9 +1073,11 @@ func newManagerWithPersistence(tenantID string) (*TriggerManagerImpl, *inMemoryT
 	return mgr, ts, ss
 }
 
-// contextWithTenant returns a context carrying the given tenant ID via the trigger package key.
+// contextWithTenant returns a context carrying the given tenant ID under
+// ctxkeys.TenantID, the same key the authentication middleware sets in production
+// (Issue #4326).
 func contextWithTenant(tenantID string) context.Context {
-	return context.WithValue(context.Background(), TenantIDContextKey, tenantID)
+	return context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,7 +1085,7 @@ func contextWithTenant(tenantID string) context.Context {
 // ---------------------------------------------------------------------------
 
 func TestTriggerManagerSaveRedactsAllCredentials(t *testing.T) {
-	mgr, ts, _ := newManagerWithPersistence("tenant-save")
+	mgr, ts, _ := newManagerWithPersistence(t, "tenant-save")
 	ctx := contextWithTenant("tenant-save")
 
 	trigger := &Trigger{
@@ -1386,7 +1143,7 @@ func TestTriggerManagerPersistenceRoundTrip(t *testing.T) {
 	// Save a trigger with full credentials, then simulate manager restart
 	// by creating a fresh manager pointing at the same stores.
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 
 	ctx := contextWithTenant("tenant-rt")
 
@@ -1450,7 +1207,7 @@ func TestTriggerManagerPersistenceRoundTrip(t *testing.T) {
 func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 	// Two managers sharing one secret store but different tenants.
 	// A secret written by tenant A must not be readable via tenant B's key namespace.
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	tsA := newInMemoryTriggerStore()
 	tsB := newInMemoryTriggerStore()
 
@@ -1488,14 +1245,14 @@ func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 
 	// The secret is stored under the tenant-A key; tenant-B's key for the same
 	// trigger ID and field must not exist.
-	keyA := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-A", "t-iso")
-	keyB := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-B", "t-iso")
+	keyA := triggerCredentialRef("t-iso", "bearer")
+	keyB := triggerCredentialRef("t-iso", "bearer")
 
-	secretA, err := ss.GetSecret(ctxA, keyA)
+	secretA, err := ss.GetSecret(ctxA, "tenant-A/"+keyA)
 	require.NoError(t, err, "tenant-A secret must be retrievable")
 	assert.Equal(t, "secret-A", secretA.Value)
 
-	_, err = ss.GetSecret(ctxB, keyB)
+	_, err = ss.GetSecret(ctxB, "tenant-B/"+keyB)
 	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound,
 		"tenant-B must not be able to retrieve tenant-A's secret via its own key namespace")
 
@@ -1507,7 +1264,7 @@ func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 
 func TestTriggerManagerDegradedLoad(t *testing.T) {
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	ctx := contextWithTenant("tenant-dg")
 
 	// Populate store directly: two valid triggers + one with a deleted bearer ref.
@@ -1548,7 +1305,7 @@ func TestTriggerManagerDegradedLoad(t *testing.T) {
 
 func TestTriggerDeleteCleansSecrets(t *testing.T) {
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	ctx := contextWithTenant("tenant-del")
 
 	mgr := &TriggerManagerImpl{
@@ -1581,14 +1338,14 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 
 	// Verify secrets were stored.
 	refKeys := []string{
-		"trigger-tenant-del-t-del-bearer",
-		"trigger-tenant-del-t-del-hmac-secret",
-		"trigger-tenant-del-t-del-api-key",
-		"trigger-tenant-del-t-del-basic-user",
-		"trigger-tenant-del-t-del-basic-pass",
+		"trigger-t-del-bearer",
+		"trigger-t-del-hmac-secret",
+		"trigger-t-del-api-key",
+		"trigger-t-del-basic-user",
+		"trigger-t-del-basic-pass",
 	}
 	for _, k := range refKeys {
-		_, err := ss.GetSecret(ctx, k)
+		_, err := ss.GetSecret(ctx, "tenant-del/"+k)
 		require.NoError(t, err, "secret %q must exist before delete", k)
 	}
 
@@ -1596,7 +1353,7 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 
 	// After deletion, all five secret refs must be gone.
 	for _, k := range refKeys {
-		_, err := ss.GetSecret(ctx, k)
+		_, err := ss.GetSecret(ctx, "tenant-del/"+k)
 		assert.ErrorIs(t, err, secretsif.ErrSecretNotFound,
 			"secret %q must be removed after trigger deletion", k)
 	}
@@ -1622,4 +1379,133 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 	// deleteTriggerFromStorage must succeed even with missing secret refs (WARN + continue).
 	err := mgr.deleteTriggerFromStorage(ctx, "t-del-partial")
 	assert.NoError(t, err, "deleteTriggerFromStorage must not fail on missing secret refs")
+}
+
+// ---------------------------------------------------------------------------
+// Store requirement declaration tests (Issue #3493)
+// ---------------------------------------------------------------------------
+
+// decliningTriggerProvider is a purpose-built StorageProvider that returns
+// ErrNotSupported for CreateTriggerStore while delegating every other method
+// to TestStorageProvider. It is a real provider that cannot supply workflow
+// trigger persistence — the condition StoreRequirements exists to catch at startup.
+type decliningTriggerProvider struct {
+	*TestStorageProvider
+}
+
+func (p *decliningTriggerProvider) Name() string { return "test-declining-trigger" }
+
+func (p *decliningTriggerProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+// clusterTriggerStoreConfig returns the database-provider configuration used by the
+// cluster-shape subtest, built from the same CFGMS_TEST_DB_* environment variables the
+// database provider's own tests use so it targets the CI Postgres service when one is
+// present and fails to connect (rather than failing to parse) when one is not.
+func clusterTriggerStoreConfig() map[string]interface{} {
+	port := "5432"
+	if v := os.Getenv("CFGMS_TEST_DB_PORT"); v != "" {
+		port = v
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	dsn := fmt.Sprintf("host=localhost port=%s dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, os.Getenv("CFGMS_TEST_DB_PASSWORD"))
+	return map[string]interface{}{"dsn": dsn}
+}
+
+// TestStoreRequirements_TriggerStoreAvailable_PassesValidation verifies that a
+// controller composed with workflow-trigger enabled and TriggerStore available
+// starts cleanly — in both the OSS (flatfile+SQLite) and database-provider shapes.
+// Both shapes supply TriggerStore (#3402 shipped it on the database provider),
+// so both must pass ValidateStorageRequirements with StoreRequirements.
+//
+// Each subtest builds its own StorageManager from the real provider registry for
+// the shape it names: two distinct compositions, not one object validated twice.
+func TestStoreRequirements_TriggerStoreAvailable_PassesValidation(t *testing.T) {
+	t.Run("OSS shape", func(t *testing.T) {
+		// The production OSS composition entry point: real flatfile provider for
+		// config/audit/steward, real SQLite provider for business stores.
+		sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "triggers.db"))
+		require.NoError(t, err, "OSS composition (flatfile + SQLite) must succeed")
+		t.Cleanup(func() { _ = sm.Close() })
+
+		require.True(t, sm.HasStore(interfaces.StoreNameTrigger),
+			"the OSS shape must supply TriggerStore — without it the assertion below is vacuous")
+		require.NoError(t, interfaces.ValidateStorageRequirements(sm, StoreRequirements),
+			"OSS controller with TriggerStore available must start cleanly")
+	})
+
+	t.Run("database shape", func(t *testing.T) {
+		provider, err := interfaces.GetStorageProvider("database")
+		require.NoError(t, err, "the database provider backing the cluster shape must be registered")
+
+		ts, createErr := provider.CreateTriggerStore(clusterTriggerStoreConfig())
+		// ErrNotSupported is the one outcome that reaches this gate: CreateClusterStorageManager
+		// translates it into a nil triggerStore field, and a nil field is the only input that
+		// makes ValidateStorageRequirements fail. Any other error aborts composition earlier.
+		// This assertion holds with or without a reachable Postgres, so the cluster shape's
+		// capability (#3402) is checked on every run, not only in the integration lane.
+		require.False(t, errors.Is(createErr, business.ErrNotSupported),
+			"the database provider must not decline TriggerStore — a declined store makes every cluster-mode controller fail this startup gate")
+		if createErr != nil {
+			// No Postgres reachable: a deployment condition, not a capability gap. The
+			// live composition below runs wherever the Postgres service exists.
+			t.Logf("no reachable Postgres for the live cluster composition (%v); capability assertion above still applied", createErr)
+			return
+		}
+		if c, ok := ts.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+
+		// Postgres is present: compose the real cluster StorageManager — a second,
+		// database-provider-backed manager distinct from the OSS one above.
+		sm, err := interfaces.CreateClusterStorageManager(
+			clusterTriggerStoreConfig()["dsn"].(string),
+			"test-hmac-key-for-workflow-trigger-requirement-tests-only",
+			nil,
+		)
+		require.NoError(t, err, "cluster composition against the database provider must succeed")
+		t.Cleanup(func() { _ = sm.Close() })
+
+		require.Equal(t, "database", sm.GetProviderName(),
+			"the cluster shape must be backed by the database provider, not flatfile or SQLite")
+		require.True(t, sm.HasStore(interfaces.StoreNameTrigger),
+			"the database shape must supply TriggerStore — without it the assertion below is vacuous")
+		require.NoError(t, interfaces.ValidateStorageRequirements(sm, StoreRequirements),
+			"database-provider controller with TriggerStore available must start cleanly")
+	})
+}
+
+// TestStoreRequirements_TriggerStoreDeclined_FailsStartup verifies that a controller
+// composed with workflow-trigger enabled but a provider that declines TriggerStore
+// fails startup with an error naming the workflow-trigger subsystem. The declining
+// condition is produced by a purpose-built test provider (not a mock) so the
+// test exercises the same code path as a real composition failure.
+func TestStoreRequirements_TriggerStoreDeclined_FailsStartup(t *testing.T) {
+	p := &decliningTriggerProvider{TestStorageProvider: NewTestStorageProvider()}
+	ts, declineErr := p.CreateTriggerStore(nil)
+	require.True(t, errors.Is(declineErr, business.ErrNotSupported),
+		"declining provider must return ErrNotSupported for CreateTriggerStore")
+	require.Nil(t, ts)
+
+	// Compose a StorageManager as production code does: ErrNotSupported → nil TriggerStore field.
+	sm := interfaces.NewStorageManagerFromStores(
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, ts, nil,
+	)
+
+	err := interfaces.ValidateStorageRequirements(sm, StoreRequirements)
+	require.Error(t, err,
+		"workflow-trigger's required TriggerStore must block startup when the provider declines it")
+	assert.Contains(t, err.Error(), "workflow-trigger",
+		"error must name the declaring subsystem")
+	assert.Contains(t, err.Error(), string(interfaces.StoreNameTrigger),
+		"error must name the missing store")
 }

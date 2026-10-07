@@ -338,8 +338,9 @@ func RecordRetryAttempt(result *StepResult, attemptNumber int, err *WorkflowErro
 }
 
 // AddExecutionTrace adds a step to the execution trace
-func AddExecutionTrace(execution *WorkflowExecution, stepName string, stepType StepType, status ExecutionStatus, duration time.Duration, variables map[string]interface{}, parentStep string, loopIteration int) {
+func AddExecutionTrace(execution *WorkflowExecution, stepID string, stepName string, stepType StepType, status ExecutionStatus, duration time.Duration, variables map[string]interface{}, parentStep string, loopIteration int) {
 	step := ExecutionStep{
+		StepID:        stepID,
 		StepName:      stepName,
 		StepType:      stepType,
 		Timestamp:     time.Now(),

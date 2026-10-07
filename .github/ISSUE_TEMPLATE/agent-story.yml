@@ -1,7 +1,10 @@
 name: Agent Story
 description: A well-scoped implementation task for automated agent dispatch
 title: ""
-labels: ["story", "agent:ready"]
+labels: ["story"]
+# Queue state lives in GitHub Projects V2, not labels (agent:ready was decommissioned,
+# Story #1482). Capability is captured in the "Capability" field below; a maintainer
+# applies the matching cap:* label(s) — see docs/product/roadmap.md → Capability Tags.
 body:
   - type: markdown
     attributes:
@@ -43,6 +46,25 @@ body:
         - docs/
     validations:
       required: true
+
+  - type: checkboxes
+    id: capability
+    attributes:
+      label: Capability
+      description: >
+        Which product capability CONSUMES this work? (the end-in-mind, not the topic;
+        select all that apply). A maintainer applies the matching cap:* label(s).
+        See docs/product/roadmap.md → Capability Tags.
+      options:
+        - label: "cap:cms — core config management (convergence, drift, modules)"
+        - label: "cap:twin — digital twin (entity model, topology graph, temporal state)"
+        - label: "cap:dex — digital employee experience (endpoint signals, baselines)"
+        - label: "cap:workflow — automation / workflow engine"
+        - label: "cap:directory — identity & directory services (M365, AD/Entra)"
+        - label: "cap:web — web UI and visualization surfaces"
+        - label: "cap:msp — MSP tool integrations (PSA / RMM / documentation)"
+    validations:
+      required: false
 
   - type: textarea
     id: reference-implementation

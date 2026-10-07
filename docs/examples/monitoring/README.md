@@ -94,7 +94,7 @@ CFGMS_EXPORT_ELASTICSEARCH_ENABLED=true
 
 The Prometheus configuration scrapes metrics from:
 
-- CFGMS Controller API (`/api/v1/monitoring/metrics`)
+- CFGMS private metrics listener (`/api/v1/monitoring/metrics`)
 - CFGMS Health endpoint (`/api/v1/monitoring/health`)
 
 ### Alert Rules
@@ -187,7 +187,8 @@ docker logs cfgms-controller
 curl http://localhost:9090/api/v1/targets
 
 # Test CFGMS metrics endpoint
-curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/monitoring/metrics
+curl --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: your-key" https://localhost:9090/api/v1/monitoring/metrics
 ```
 
 #### Export Failures
@@ -254,6 +255,6 @@ done
 
 ## Related Documentation
 
-- [CFGMS Monitoring Guide](../monitoring.md) - Complete monitoring documentation
-- [REST API Reference](../api/rest-api.md) - API documentation including monitoring endpoints
-- [Architecture Overview](../architecture.md) - System architecture details
+- [CFGMS Monitoring Guide](../../monitoring.md) - Complete monitoring documentation
+- [REST API Reference](../../api/rest-api.md) - API documentation including monitoring endpoints
+- [Architecture Overview](../../../ARCHITECTURE.md) - System architecture details

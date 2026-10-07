@@ -4,9 +4,18 @@ package transport
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,45 +80,157 @@ func (h *TestHelper) BaseURL() string {
 // use the same shared token with pre-configured metadata. Multi-tenant isolation
 // tests verify unique steward IDs but do NOT validate per-tenant token boundaries.
 // Per-tenant tokens require seeding distinct tokens in the controller test setup.
-func (h *TestHelper) CreateToken(_ *testing.T, _, _ string) string {
+//
+// It takes no *testing.T: suites call it from worker goroutines, where the
+// testing package forbids Fatal-family calls, so no test handle is handed out.
+func (h *TestHelper) CreateToken(_, _ string) string {
 	return "integration_reusable" //nolint:gosec // test-only token, requires CFGMS_SEED_TEST_TOKENS=1 on the controller
 }
 
-// RegisterSteward registers a steward via HTTP API and returns the response.
-func (h *TestHelper) RegisterSteward(t *testing.T, token string) *RegistrationResponse {
-	t.Helper()
+// generateTestDeviceIdentity generates a fresh Ed25519 key pair for integration test device identity.
+// Each call produces unique credentials to prevent DeviceID conflicts within the same tenant.
+// It returns an error instead of failing the test so that callers running on a
+// goroutine other than the test goroutine can propagate the failure back.
+func generateTestDeviceIdentity() (deviceID, identityKeyPub string, err error) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("generate Ed25519 key for device identity: %w", err)
+	}
+	h := sha256.Sum256(pub)
+	return hex.EncodeToString(h[:]), base64.StdEncoding.EncodeToString(pub), nil
+}
 
-	reqBody := map[string]string{"token": token}
+// generateTestRegistrationKeypairAndCSR generates a fresh ECDSA P-256 keypair and a
+// self-signed PEM CERTIFICATE REQUEST over its public key, mirroring
+// features/steward/registration/client_http.go's generateStewardKeypair /
+// buildRegistrationCSR (Issue #3780). Returns the PKCS8 PEM-encoded private key
+// (held only by the caller, never transmitted) and the CSR PEM to submit.
+func generateTestRegistrationKeypairAndCSR() (keyPEM, csrPEM string, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("generate registration keypair: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal registration private key: %w", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: "integration-test-steward"},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, priv)
+	if err != nil {
+		return "", "", fmt.Errorf("create registration CSR: %w", err)
+	}
+	csrPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
+	return keyPEM, csrPEM, nil
+}
+
+// RegisterSteward registers a steward via HTTP API and returns the response.
+//
+// It reports failures as an error rather than calling t.Fatalf. The testing
+// package requires FailNow/Fatal/Fatalf to be called only from the goroutine
+// running the test function; several suites register stewards concurrently from
+// their own goroutines, so this helper must be safe to call from any goroutine.
+// Callers assert on the returned error from the test goroutine.
+func (h *TestHelper) RegisterSteward(token string) (*RegistrationResponse, error) {
+	deviceID, identityKeyPub, err := generateTestDeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate the steward's mTLS keypair locally and submit only the public half
+	// as a CSR (Issue #3780); clientKeyPEM never leaves this process.
+	clientKeyPEM, csrPEM, err := generateTestRegistrationKeypairAndCSR()
+	if err != nil {
+		return nil, err
+	}
+
+	reqBody := map[string]string{
+		"token":            token,
+		"device_id":        deviceID,
+		"identity_key_pub": identityKeyPub,
+		"csr_pem":          csrPEM,
+	}
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {
-		t.Fatalf("Failed to marshal registration request: %v", err)
+		return nil, fmt.Errorf("marshal registration request: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/register", h.baseURL)
 	resp, err := h.httpClient.Post(url, "application/json", bytes.NewBuffer(reqJSON))
 	if err != nil {
-		t.Fatalf("HTTP registration request failed: %v", err)
+		return nil, fmt.Errorf("HTTP registration request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("Failed to read response body: %v", err)
+		return nil, fmt.Errorf("read registration response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Registration failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var regResp RegistrationResponse
 	if err := json.Unmarshal(body, &regResp); err != nil {
-		t.Fatalf("Failed to parse registration response: %v", err)
+		return nil, fmt.Errorf("parse registration response: %w", err)
 	}
+	// No client_key field exists on the wire response (Issue #3780): the
+	// controller never generates or sees a private key for this credential.
+	// ClientKey is populated here from the keypair generated locally above,
+	// combined with the controller-issued certificate.
+	regResp.ClientKey = clientKeyPEM
 
-	return &regResp
+	return &regResp, nil
 }
 
-// RegistrationResponse represents the registration API response.
+// RegisterStewardRawBody performs the same registration request as RegisterSteward
+// but returns the raw, unparsed HTTP response body — used by wire-contract tests
+// that must inspect the literal JSON rather than the typed response, e.g. to prove
+// no client_key field is ever present on the wire (Issue #3780).
+func (h *TestHelper) RegisterStewardRawBody(token string) ([]byte, error) {
+	deviceID, identityKeyPub, err := generateTestDeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
+	_, csrPEM, err := generateTestRegistrationKeypairAndCSR()
+	if err != nil {
+		return nil, err
+	}
+
+	reqBody := map[string]string{
+		"token":            token,
+		"device_id":        deviceID,
+		"identity_key_pub": identityKeyPub,
+		"csr_pem":          csrPEM,
+	}
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal registration request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/register", h.baseURL)
+	resp, err := h.httpClient.Post(url, "application/json", bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return nil, fmt.Errorf("HTTP registration request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read registration response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+// RegistrationResponse represents the registration API response. ClientKey is
+// never read off the wire (Issue #3780) — see RegisterSteward.
 type RegistrationResponse struct {
 	StewardID        string `json:"steward_id"`
 	TenantID         string `json:"tenant_id"`
@@ -117,7 +238,7 @@ type RegistrationResponse struct {
 	ControllerURL    string `json:"controller_url"`
 	TransportAddress string `json:"transport_address"`
 	ClientCert       string `json:"client_cert,omitempty"`
-	ClientKey        string `json:"client_key,omitempty"`
+	ClientKey        string `json:"-"`
 	CACert           string `json:"ca_cert,omitempty"`
 }
 
@@ -125,8 +246,11 @@ type RegistrationResponse struct {
 func (h *TestHelper) GetTLSConfigFromRegistration(t *testing.T, tenantID, group string) (*tls.Config, string) {
 	t.Helper()
 
-	token := h.CreateToken(t, tenantID, group)
-	resp := h.RegisterSteward(t, token)
+	token := h.CreateToken(tenantID, group)
+	resp, err := h.RegisterSteward(token)
+	if err != nil {
+		t.Fatalf("Failed to register steward: %v", err)
+	}
 
 	if resp.ClientCert == "" || resp.ClientKey == "" || resp.CACert == "" {
 		t.Fatalf("Registration did not return certificates (ClientCert=%v, ClientKey=%v, CACert=%v)",

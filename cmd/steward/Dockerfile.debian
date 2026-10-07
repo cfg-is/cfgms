@@ -1,5 +1,9 @@
+# No `# syntax=` pragma: the BuildKit frontend bundled with the Docker Engine
+# that runs this already supports RUN --mount cache mounts, and resolving
+# `docker/dockerfile:1` from Docker Hub was an anonymous-token network
+# dependency this build doesn't need (Issue #4212).
 # Build stage
-FROM golang:1.26.4-alpine3.23 AS builder
+FROM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -11,29 +15,32 @@ WORKDIR /src
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source code
 COPY . .
 
-# Build steward with compile-time controller URL
+# Build steward with compile-time controller URL (GOCACHE + module cache mounts warm
+# across builds; CGO_ENABLED=0 already yields a static binary, so -a/-installsuffix
+# are unneeded and only force cold recompiles)
 ARG STEWARD_CONTROLLER_URL=https://localhost:9080
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X main.ControllerURL=${STEWARD_CONTROLLER_URL}" \
     -o steward ./cmd/steward
 
 # Build the steward launcher (Issue #1948: required for upgrade swap in fleet E2E tests)
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w" \
     -o cfgms-launcher ./cmd/cfgms-steward-launcher
 
-# Final stage - Debian bookworm-slim for fleet testing
-FROM debian:bookworm-slim
+# Final stage - Debian 13 (trixie) for fleet testing
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     procps \
     && rm -rf /var/lib/apt/lists/*
 

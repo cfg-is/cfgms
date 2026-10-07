@@ -24,6 +24,10 @@ When you contribute to CFGMS, you agree to:
 **How to sign:**
 Add your name to [CONTRIBUTORS.md](../../CONTRIBUTORS.md) in your first Pull Request.
 
+### [CLA Enforcement Guide (CLA-ENFORCEMENT.md)](CLA-ENFORCEMENT.md)
+
+For maintainers: how to verify and enforce the CLA when reviewing Pull Requests.
+
 ---
 
 ## Why a CLA?

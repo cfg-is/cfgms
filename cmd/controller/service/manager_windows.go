@@ -15,6 +15,14 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// Windows SCM and service handles are released throughout this file with an
+// explicit `_ =` (or a deferred closure). Every such release runs after the
+// operation's outcome is already decided, and the Windows API offers no remedy
+// for a failed release beyond leaking the handle until process exit — so the
+// error is deliberately dropped rather than handled or logged. This mirrors the
+// `_ = exec.Command(...).Run()` cleanup convention in the Linux and darwin
+// siblings of this package.
+
 const (
 	windowsInstallDir  = `C:\Program Files\CFGMS`
 	windowsInstallPath = `C:\Program Files\CFGMS\cfgms-controller.exe`
@@ -41,7 +49,7 @@ func (m *windowsManager) IsElevated() bool {
 	if err != nil {
 		return false
 	}
-	scm.Disconnect()
+	_ = scm.Disconnect()
 	return true
 }
 
@@ -64,7 +72,7 @@ func (m *windowsManager) Install(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	// Stop and delete existing service to allow binary replacement (idempotent).
 	if existing, err := scm.OpenService(windowsServiceName); err == nil {
@@ -75,10 +83,10 @@ func (m *windowsManager) Install(configPath string) error {
 		}
 		fmt.Println("Removing existing service definition...")
 		if err := existing.Delete(); err != nil {
-			existing.Close()
+			_ = existing.Close()
 			return fmt.Errorf("failed to delete existing service: %w", err)
 		}
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	// Create install directory.
@@ -106,7 +114,7 @@ func (m *windowsManager) Install(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Windows service: %w", err)
 	}
-	defer newSvc.Close()
+	defer func() { _ = newSvc.Close() }()
 
 	// Configure automatic restart on failure (3 escalating delays, 1-day reset).
 	recoveryActions := []mgr.RecoveryAction{
@@ -143,7 +151,7 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	existing, err := scm.OpenService(windowsServiceName)
 	if err != nil {
@@ -157,10 +165,10 @@ func (m *windowsManager) Uninstall(purge bool) error {
 
 		fmt.Println("Removing service definition...")
 		if err := existing.Delete(); err != nil {
-			existing.Close()
+			_ = existing.Close()
 			return fmt.Errorf("failed to delete service: %w", err)
 		}
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	if purge {
@@ -176,6 +184,35 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// StageBinaryAndRestart copies newBinaryPath to the service install path,
+// then stops and starts the Windows service for an in-place binary swap.
+// The service definition is unchanged; only the binary on disk is replaced.
+func (m *windowsManager) StageBinaryAndRestart(newBinaryPath, configPath string) error {
+	if err := copyBinary(newBinaryPath, windowsInstallPath); err != nil {
+		return fmt.Errorf("stage binary: %w", err)
+	}
+	scm, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect to SCM: %w", err)
+	}
+	defer func() { _ = scm.Disconnect() }()
+
+	existing, err := scm.OpenService(windowsServiceName)
+	if err != nil {
+		return fmt.Errorf("open service %s: %w", windowsServiceName, err)
+	}
+	defer func() { _ = existing.Close() }()
+
+	_, _ = existing.Control(svc.Stop)
+	if stopErr := waitForStop(existing, 30*time.Second); stopErr != nil {
+		return fmt.Errorf("stop service for restart: %w", stopErr)
+	}
+	if startErr := existing.Start(); startErr != nil {
+		return fmt.Errorf("start service after binary swap: %w", startErr)
+	}
+	return nil
+}
+
 // Status returns the current service state without requiring elevated privileges.
 func (m *windowsManager) Status() (*ServiceStatus, error) {
 	status := &ServiceStatus{
@@ -188,14 +225,14 @@ func (m *windowsManager) Status() (*ServiceStatus, error) {
 		// Cannot connect to SCM — report not installed.
 		return status, nil
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	existing, err := scm.OpenService(windowsServiceName)
 	if err != nil {
 		// Service not registered.
 		return status, nil
 	}
-	defer existing.Close()
+	defer func() { _ = existing.Close() }()
 
 	status.Installed = true
 

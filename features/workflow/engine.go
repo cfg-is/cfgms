@@ -13,7 +13,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // executionIDCounter ensures unique IDs even when time.Now().UnixNano() returns
@@ -29,25 +31,58 @@ type TransformStepExecutor interface {
 	ExecuteTransformStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
+// RingHealthStepExecutor executes a workflow step of type query_ring_health.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers pass *nodes.RingHealthNodeExecutor.
+type RingHealthStepExecutor interface {
+	ExecuteRingHealthStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
+// SetHARoleStepExecutor executes a workflow step of type set_ha_role.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers (S2) pass *nodes.SetHARoleNodeExecutor.
+type SetHARoleStepExecutor interface {
+	ExecuteSetHARoleStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
+// MoveResourceToClusterStepExecutor executes a workflow step of type move_resource_to_cluster.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers (S3) pass *nodes.MoveResourceToClusterNodeExecutor.
+type MoveResourceToClusterStepExecutor interface {
+	ExecuteMoveResourceToClusterStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory     ModuleLoader
-	logger            *logging.ModuleLogger
-	executions        map[string]*WorkflowExecution
-	workflows         map[string]Workflow
-	mutex             sync.RWMutex
-	httpClient        *HTTPClient
-	providerRegistry  *ProviderRegistry
-	errorHandler      ErrorHandler
-	syncManager       *SyncManager
-	debugEngine       *DebugEngineImpl
-	transformExecutor TransformStepExecutor
+	moduleFactory                 ModuleLoader
+	logger                        *logging.ModuleLogger
+	executions                    map[string]*WorkflowExecution
+	workflows                     map[string]Workflow
+	workflowResolver              WorkflowResolver
+	mutex                         sync.RWMutex
+	httpClient                    *HTTPClient
+	providerRegistry              *ProviderRegistry
+	errorHandler                  ErrorHandler
+	syncManager                   *SyncManager
+	debugEngine                   *DebugEngineImpl
+	transformExecutor             TransformStepExecutor
+	ringHealthExecutor            RingHealthStepExecutor
+	setHARoleExecutor             SetHARoleStepExecutor
+	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
 }
 
 // NewEngine creates a new workflow engine instance.
-// transformExecutor handles StepTypeTransform steps; pass nil if transform steps
-// are not used (executeStep will return an error for any transform step encountered).
-func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecutor TransformStepExecutor) *Engine {
+// secrets is the controller's central secret store; pass nil when no store is available
+// (e.g. steward-side) — providers that require secrets will surface a clear error.
+// transformExecutor handles StepTypeTransform steps; pass nil if transform steps are not used.
+// ringHealthExecutor handles StepTypeQueryRingHealth steps; pass nil if ring-health steps are not used.
+// setHARoleExecutor handles StepTypeSetHARole steps; pass nil until S2 wires the real executor.
+// moveResourceToClusterExecutor handles StepTypeMoveResourceToCluster steps; pass nil until S3 wires the real executor.
+// executeStep returns a clear error for any step type whose executor is nil.
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor, setHARoleExecutor SetHARoleStepExecutor, moveResourceToClusterExecutor MoveResourceToClusterStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -64,18 +99,21 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecu
 
 	// Design decision: ProviderRegistry is retained for backwards compatibility with workflows
 	// registered before the pluggable provider system; new workflows use the provider interface directly.
-	providerRegistry := NewProviderRegistry(logger)
+	providerRegistry := NewProviderRegistry(logger, secrets)
 
 	engine := &Engine{
-		moduleFactory:     moduleFactory,
-		logger:            workflowLogger,
-		executions:        make(map[string]*WorkflowExecution),
-		workflows:         make(map[string]Workflow),
-		httpClient:        httpClient,
-		providerRegistry:  providerRegistry,
-		errorHandler:      NewDefaultErrorHandler(),
-		syncManager:       NewSyncManager(),
-		transformExecutor: transformExecutor,
+		moduleFactory:                 moduleFactory,
+		logger:                        workflowLogger,
+		executions:                    make(map[string]*WorkflowExecution),
+		workflows:                     make(map[string]Workflow),
+		httpClient:                    httpClient,
+		providerRegistry:              providerRegistry,
+		errorHandler:                  NewDefaultErrorHandler(),
+		syncManager:                   NewSyncManager(),
+		transformExecutor:             transformExecutor,
+		ringHealthExecutor:            ringHealthExecutor,
+		setHARoleExecutor:             setHARoleExecutor,
+		moveResourceToClusterExecutor: moveResourceToClusterExecutor,
 	}
 
 	// Initialize debug engine
@@ -86,6 +124,13 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecu
 
 // ExecuteWorkflow starts execution of a workflow
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
+	// Clone steps before assigning IDs so each execution has its own private
+	// copy of the Step structs. Without this, concurrent calls share the same
+	// underlying array and the ID assignment races with goroutines launched for
+	// earlier executions of the same workflow.
+	workflow.Steps = CloneSteps(workflow.Steps)
+	AssignStepIDs(workflow.Steps)
+
 	executionID := generateExecutionID()
 
 	// Create execution context with timeout if specified
@@ -96,6 +141,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	} else {
 		execCtx, cancel = context.WithCancel(ctx)
 	}
+	execCtx = withComposedWorkflowBudget(execCtx)
 
 	// Merge workflow variables with provided variables
 	mergedVars := make(map[string]interface{})
@@ -106,9 +152,18 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 		mergedVars[k] = v
 	}
 
+	// Resolve the caller's authenticated tenant from the canonical context key —
+	// never from logging.ExtractTenantFromContext, a logging-only accessor never
+	// meant to gate authorization decisions (Issue #4326) — and inject it into
+	// the execution so step executors can authorize tenant-scoped actions
+	// against it instead of trusting workflow-author-controlled data
+	// (execution.Variables / step.Config) (Issue #4338).
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+
 	execution := &WorkflowExecution{
 		ID:           executionID,
 		WorkflowName: workflow.Name,
+		TenantID:     tenantID,
 		Status:       StatusPending,
 		StartTime:    time.Now(),
 		StepResults:  make(map[string]StepResult),
@@ -123,8 +178,6 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	e.executions[executionID] = execution
 	e.mutex.Unlock()
 
-	// Extract tenant context for structured logging
-	tenantID := logging.ExtractTenantFromContext(ctx)
 	logger := e.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Starting workflow execution",
@@ -177,27 +230,40 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 	e.mutex.Lock()
 
 	if err != nil {
-		// Handle workflow-level error
-		var workflowErr *WorkflowError
-		if wfErr, ok := err.(*WorkflowError); ok {
-			workflowErr = wfErr
+		// If the execution context was explicitly cancelled (via CancelExecution),
+		// treat this as a cancellation rather than a failure. This prevents the
+		// async goroutine from overriding StatusCancelled with StatusFailed.
+		// Context timeout (DeadlineExceeded) is still treated as a failure.
+		if execution.Context.Err() == context.Canceled {
+			e.mutex.Unlock()
+			if execution.GetStatus() != StatusCancelled {
+				execution.SetStatus(StatusCancelled)
+			}
+			e.logger.Info("Workflow execution cancelled",
+				"execution_id", execution.ID)
 		} else {
-			workflowErr = NewWorkflowError(
-				ErrorCodeStepExecution,
-				err.Error(),
-				execution.GetCurrentStep(),
-				"",
-				err,
-			).WithVariableState(execution.Variables)
-		}
+			// Handle workflow-level error
+			var workflowErr *WorkflowError
+			if wfErr, ok := err.(*WorkflowError); ok {
+				workflowErr = wfErr
+			} else {
+				workflowErr = NewWorkflowError(
+					ErrorCodeStepExecution,
+					err.Error(),
+					execution.GetCurrentStep(),
+					"",
+					err,
+				).WithVariableState(execution.Variables)
+			}
 
-		execution.SetError(workflowErr.Error())
-		execution.SetErrorDetails(workflowErr)
-		e.mutex.Unlock()
-		execution.SetStatus(StatusFailed)
-		e.logger.Error("Workflow execution failed",
-			"execution_id", execution.ID,
-			"error", workflowErr.FullError())
+			execution.SetError(workflowErr.Error())
+			execution.SetErrorDetails(workflowErr)
+			e.mutex.Unlock()
+			execution.SetStatus(StatusFailed)
+			e.logger.Error("Workflow execution failed",
+				"execution_id", execution.ID,
+				"error", workflowErr.FullError())
+		}
 	} else {
 		e.mutex.Unlock()
 		execution.SetStatus(StatusCompleted)
@@ -281,9 +347,10 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 								"step", step.Name,
 								"attempt", attempt)
 							lastRetryErr = e.executeStep(ctx, step, execution)
-							if result, exists := execution.GetStepResult(step.Name); exists {
+							retryKey := StepResultKey(step)
+							if result, exists := execution.GetStepResult(retryKey); exists {
 								result.RetryCount = attempt
-								execution.SetStepResult(step.Name, result)
+								execution.SetStepResult(retryKey, result)
 							}
 							if lastRetryErr == nil {
 								break
@@ -337,7 +404,9 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 							"step", step.Name,
 							"fallback", step.ErrorHandling.FallbackStep.Name,
 							"decision", decision.Message)
-						if fallbackErr := e.executeStep(ctx, *step.ErrorHandling.FallbackStep, execution); fallbackErr != nil {
+						fallback := *step.ErrorHandling.FallbackStep
+						fallback.ID = step.ID + ".fallback"
+						if fallbackErr := e.executeStep(ctx, fallback, execution); fallbackErr != nil {
 							e.logger.Error("Fallback step also failed",
 								"step", step.Name,
 								"fallback", step.ErrorHandling.FallbackStep.Name,
@@ -359,7 +428,8 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 
 // executeStep executes a single step based on its type
 func (e *Engine) executeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
-	execution.SetCurrentStep(step.Name)
+	key := StepResultKey(step)
+	execution.SetCurrentStep(key)
 
 	e.logger.Info("Executing step",
 		"execution_id", execution.ID,
@@ -389,7 +459,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	}
 
 	// Store initial result safely
-	execution.SetStepResult(step.Name, result)
+	execution.SetStepResult(key, result)
 
 	var err error
 	switch step.Type {
@@ -447,14 +517,38 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var transformResult StepResult
 			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
-			execution.SetStepResult(step.Name, transformResult)
+			execution.SetStepResult(key, transformResult)
+		}
+	case StepTypeQueryRingHealth:
+		if e.ringHealthExecutor == nil {
+			err = fmt.Errorf("ring health executor not configured")
+		} else {
+			var rhResult StepResult
+			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
+			execution.SetStepResult(key, rhResult)
+		}
+	case StepTypeSetHARole:
+		if e.setHARoleExecutor == nil {
+			err = fmt.Errorf("set_ha_role executor not configured")
+		} else {
+			var haResult StepResult
+			haResult, err = e.setHARoleExecutor.ExecuteSetHARoleStep(ctx, step, execution)
+			execution.SetStepResult(key, haResult)
+		}
+	case StepTypeMoveResourceToCluster:
+		if e.moveResourceToClusterExecutor == nil {
+			err = fmt.Errorf("move_resource_to_cluster executor not configured")
+		} else {
+			var moveResult StepResult
+			moveResult, err = e.moveResourceToClusterExecutor.ExecuteMoveResourceToClusterStep(ctx, step, execution)
+			execution.SetStepResult(key, moveResult)
 		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
 	}
 
 	// Get the current result (which may have been updated by the step execution)
-	currentResult, exists := execution.GetStepResult(step.Name)
+	currentResult, exists := execution.GetStepResult(key)
 	if exists {
 		result = currentResult
 	}
@@ -487,9 +581,9 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	}
 
 	// Add execution trace entry
-	AddExecutionTrace(execution, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
+	AddExecutionTrace(execution, key, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
 
-	execution.SetStepResult(step.Name, result)
+	execution.SetStepResult(key, result)
 	return err
 }
 
@@ -640,6 +734,7 @@ func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
 	executionCopy := WorkflowExecution{
 		ID:             execution.ID,
 		WorkflowName:   execution.WorkflowName,
+		TenantID:       execution.TenantID,
 		Status:         execution.GetStatus(),
 		StartTime:      execution.StartTime,
 		EndTime:        execution.GetEndTime(),
@@ -752,8 +847,24 @@ func (e *Engine) GetDebugEngine() DebugEngine {
 	return e.debugEngine
 }
 
+// WorkflowResolver resolves a workflow that a running execution references by
+// name (a nested workflow step, an error workflow, a composite component). It is
+// given the execution's authenticated tenant and must resolve only within it
+// (Issue #4638).
+type WorkflowResolver func(ctx context.Context, tenantID, name string) (Workflow, error)
+
+// SetWorkflowResolver wires how executions resolve workflows by name. The
+// controller resolves through the execution tenant's workflow store; once a
+// resolver is set the in-memory registry is never consulted, so a name can never
+// resolve to another tenant's workflow.
+func (e *Engine) SetWorkflowResolver(resolver WorkflowResolver) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.workflowResolver = resolver
+}
+
 // RegisterWorkflow adds a workflow to the engine's in-memory registry so it can
-// be resolved by name via loadWorkflowByName.
+// be resolved by name via loadWorkflowByName when no WorkflowResolver is set.
 func (e *Engine) RegisterWorkflow(workflow Workflow) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
@@ -1139,11 +1250,13 @@ func (e *Engine) executeFanOutStep(ctx context.Context, step Step, execution *Wo
 			// Create a copy of the worker template
 			workerStep := config.WorkerTemplate
 			workerStep.Name = fmt.Sprintf("%s_worker_%d", step.Name, index)
+			workerStep.ID = fmt.Sprintf("%s.w%d", step.ID, index)
 
 			// Create new execution context for the worker
 			workerExecution := &WorkflowExecution{
 				ID:           fmt.Sprintf("%s_worker_%d", execution.ID, index),
 				WorkflowName: fmt.Sprintf("%s_worker_%d", execution.WorkflowName, index),
+				TenantID:     execution.TenantID,
 				Status:       StatusPending,
 				StartTime:    time.Now(),
 				StepResults:  make(map[string]StepResult),
@@ -1178,7 +1291,7 @@ func (e *Engine) executeFanOutStep(ctx context.Context, step Step, execution *Wo
 					}
 				}
 				// Also capture step result
-				if stepResult, exists := workerExecution.GetStepResult(workerStep.Name); exists {
+				if stepResult, exists := workerExecution.GetStepResult(workerStep.ID); exists {
 					result.StepResult = stepResult
 				}
 			}

@@ -761,7 +761,6 @@ func (x *StewardConfig) GetModules() map[string]string {
 type StewardSettings struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Mode          string                 `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`
 	ModulePaths   []string               `protobuf:"bytes,3,rep,name=module_paths,json=modulePaths,proto3" json:"module_paths,omitempty"`
 	Logging       *LoggingConfig         `protobuf:"bytes,4,opt,name=logging,proto3" json:"logging,omitempty"`
 	ErrorHandling *ErrorHandlingConfig   `protobuf:"bytes,5,opt,name=error_handling,json=errorHandling,proto3" json:"error_handling,omitempty"`
@@ -772,8 +771,11 @@ type StewardSettings struct {
 	ConvergeInterval *durationpb.Duration `protobuf:"bytes,7,opt,name=converge_interval,json=convergeInterval,proto3" json:"converge_interval,omitempty"`
 	// script_signing configures script signing policy and trust configuration.
 	ScriptSigning *ScriptSigningConfig `protobuf:"bytes,8,opt,name=script_signing,json=scriptSigning,proto3" json:"script_signing,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// desired_version is the ring-resolved target steward binary version (Issue #2271).
+	// When set, the steward convergence loop upgrades or downgrades to this version.
+	DesiredVersion string `protobuf:"bytes,9,opt,name=desired_version,json=desiredVersion,proto3" json:"desired_version,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *StewardSettings) Reset() {
@@ -809,13 +811,6 @@ func (*StewardSettings) Descriptor() ([]byte, []int) {
 func (x *StewardSettings) GetId() string {
 	if x != nil {
 		return x.Id
-	}
-	return ""
-}
-
-func (x *StewardSettings) GetMode() string {
-	if x != nil {
-		return x.Mode
 	}
 	return ""
 }
@@ -862,6 +857,13 @@ func (x *StewardSettings) GetScriptSigning() *ScriptSigningConfig {
 	return nil
 }
 
+func (x *StewardSettings) GetDesiredVersion() string {
+	if x != nil {
+		return x.DesiredVersion
+	}
+	return ""
+}
+
 // ScriptSigningConfig defines the steward-level script signing policy and trust configuration.
 type ScriptSigningConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -873,8 +875,6 @@ type ScriptSigningConfig struct {
 	TrustedKeys []*TrustedKeyRef `protobuf:"bytes,3,rep,name=trusted_keys,json=trustedKeys,proto3" json:"trusted_keys,omitempty"`
 	// allow_public_ca, when true alongside trusted_keys_and_public mode, also accepts public CAs.
 	AllowPublicCa bool `protobuf:"varint,4,opt,name=allow_public_ca,json=allowPublicCa,proto3" json:"allow_public_ca,omitempty"`
-	// Deprecated: reserved in proto (field 5). Keep for binary-descriptor compatibility until protoc regeneration.
-	ScriptRepoUrl string `protobuf:"bytes,5,opt,name=script_repo_url,json=scriptRepoUrl,proto3" json:"script_repo_url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -935,14 +935,6 @@ func (x *ScriptSigningConfig) GetAllowPublicCa() bool {
 		return x.AllowPublicCa
 	}
 	return false
-}
-
-// Deprecated: GetScriptRepoUrl is reserved; use ScriptPrivilegeMetadata in the controller API instead.
-func (x *ScriptSigningConfig) GetScriptRepoUrl() string {
-	if x != nil {
-		return x.ScriptRepoUrl
-	}
-	return ""
 }
 
 // TrustedKeyRef identifies a trusted signing key or certificate.
@@ -1013,7 +1005,6 @@ func (x *TrustedKeyRef) GetPublicKeyRef() string {
 type LoggingConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Level         string                 `protobuf:"bytes,1,opt,name=level,proto3" json:"level,omitempty"`
-	Format        string                 `protobuf:"bytes,2,opt,name=format,proto3" json:"format,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1051,13 +1042,6 @@ func (*LoggingConfig) Descriptor() ([]byte, []int) {
 func (x *LoggingConfig) GetLevel() string {
 	if x != nil {
 		return x.Level
-	}
-	return ""
-}
-
-func (x *LoggingConfig) GetFormat() string {
-	if x != nil {
-		return x.Format
 	}
 	return ""
 }
@@ -1379,35 +1363,33 @@ const file_controller_config_proto_rawDesc = "" +
 	"\amodules\x18\x03 \x03(\v20.cfgms.api.controller.StewardConfig.ModulesEntryR\amodules\x1a:\n" +
 	"\fModulesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xae\x04\n" +
 	"\x0fStewardSettings\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04mode\x18\x02 \x01(\tR\x04mode\x12!\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fmodule_paths\x18\x03 \x03(\tR\vmodulePaths\x12=\n" +
 	"\alogging\x18\x04 \x01(\v2#.cfgms.api.controller.LoggingConfigR\alogging\x12P\n" +
 	"\x0eerror_handling\x18\x05 \x01(\v2).cfgms.api.controller.ErrorHandlingConfigR\rerrorHandling\x12L\n" +
 	"\asecrets\x18\x06 \x03(\v22.cfgms.api.controller.StewardSettings.SecretsEntryR\asecrets\x12F\n" +
 	"\x11converge_interval\x18\a \x01(\v2\x19.google.protobuf.DurationR\x10convergeInterval\x12P\n" +
-	"\x0escript_signing\x18\b \x01(\v2).cfgms.api.controller.ScriptSigningConfigR\rscriptSigning\x1a:\n" +
+	"\x0escript_signing\x18\b \x01(\v2).cfgms.api.controller.ScriptSigningConfigR\rscriptSigning\x12'\n" +
+	"\x0fdesired_version\x18\t \x01(\tR\x0edesiredVersion\x1a:\n" +
 	"\fSecretsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe4\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x02\x10\x03R\x04mode\"\xd3\x01\n" +
 	"\x13ScriptSigningConfig\x12\x16\n" +
 	"\x06policy\x18\x01 \x01(\tR\x06policy\x12\x1d\n" +
 	"\n" +
 	"trust_mode\x18\x02 \x01(\tR\ttrustMode\x12F\n" +
 	"\ftrusted_keys\x18\x03 \x03(\v2#.cfgms.api.controller.TrustedKeyRefR\vtrustedKeys\x12&\n" +
-	"\x0fallow_public_ca\x18\x04 \x01(\bR\rallowPublicCa\x12&\n" +
-	"\x0fscript_repo_url\x18\x05 \x01(\tR\rscriptRepoUrl\"i\n" +
+	"\x0fallow_public_ca\x18\x04 \x01(\bR\rallowPublicCaJ\x04\b\x05\x10\x06R\x0fscript_repo_url\"i\n" +
 	"\rTrustedKeyRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
 	"\n" +
 	"thumbprint\x18\x02 \x01(\tR\n" +
 	"thumbprint\x12$\n" +
-	"\x0epublic_key_ref\x18\x03 \x01(\tR\fpublicKeyRef\"=\n" +
+	"\x0epublic_key_ref\x18\x03 \x01(\tR\fpublicKeyRef\"3\n" +
 	"\rLoggingConfig\x12\x14\n" +
-	"\x05level\x18\x01 \x01(\tR\x05level\x12\x16\n" +
-	"\x06format\x18\x02 \x01(\tR\x06format\"\xa1\x01\n" +
+	"\x05level\x18\x01 \x01(\tR\x05levelJ\x04\b\x02\x10\x03R\x06format\"\xa1\x01\n" +
 	"\x13ErrorHandlingConfig\x12.\n" +
 	"\x13module_load_failure\x18\x01 \x01(\tR\x11moduleLoadFailure\x12)\n" +
 	"\x10resource_failure\x18\x02 \x01(\tR\x0fresourceFailure\x12/\n" +

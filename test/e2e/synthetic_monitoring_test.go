@@ -88,6 +88,8 @@ func (s *SyntheticMonitoringSuite) SetupSuite() {
 	terminalConfig := terminal.DefaultConfig()
 	terminalConfig.MaxSessions = 50 // Reasonable limit for monitoring
 	terminalConfig.SessionTimeout = 2 * time.Minute
+	// Recording storage is explicit (no shared/world-writable fallback exists).
+	terminalConfig.RecordingStoragePath = s.T().TempDir()
 
 	terminalMgr, err := terminal.NewSessionManager(terminalConfig, framework.logger)
 	s.Require().NoError(err)

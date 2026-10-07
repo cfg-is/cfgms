@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestExperimentalBuildProvidersReturnSimulatedSuccess verifies that in the experimental build
@@ -30,8 +30,8 @@ func TestExperimentalBuildProvidersReturnSimulatedSuccess(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.provider, func(t *testing.T) {
-			logger := pkgtesting.NewMockLogger(true)
-			registry := NewProviderRegistry(logger)
+			logger := logging.NewNoopLogger()
+			registry := NewProviderRegistry(logger, nil)
 
 			config := &APIConfig{
 				Provider:  tc.provider,

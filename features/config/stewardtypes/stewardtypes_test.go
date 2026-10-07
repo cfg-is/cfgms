@@ -14,11 +14,9 @@ import (
 func TestValidateConfiguration_ValidConfig(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 			Logging: LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 		},
 		Resources: []ResourceConfig{
@@ -35,7 +33,6 @@ func TestValidateConfiguration_ValidConfig(t *testing.T) {
 func TestValidateConfiguration_MissingID(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			Mode:    ModeStandalone,
 			Logging: LoggingConfig{Level: "info"},
 		},
 	}
@@ -48,7 +45,6 @@ func TestValidateConfiguration_InvalidLogLevel(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:      "test-steward",
-			Mode:    ModeStandalone,
 			Logging: LoggingConfig{Level: "verbose"},
 		},
 	}
@@ -57,25 +53,11 @@ func TestValidateConfiguration_InvalidLogLevel(t *testing.T) {
 	assert.Contains(t, err.Error(), "log level")
 }
 
-func TestValidateConfiguration_InvalidOperationMode(t *testing.T) {
-	cfg := StewardConfig{
-		Steward: StewardSettings{
-			ID:      "test-steward",
-			Mode:    "distributed",
-			Logging: LoggingConfig{Level: "info"},
-		},
-	}
-	err := ValidateConfiguration(cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "operation mode")
-}
-
 func TestValidateConfiguration_EmptyLogLevelValid(t *testing.T) {
 	// Empty log level is valid — applyDefaults fills in "info"
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeController,
+			ID: "test-steward",
 		},
 	}
 	assert.NoError(t, ValidateConfiguration(cfg))
@@ -84,8 +66,7 @@ func TestValidateConfiguration_EmptyLogLevelValid(t *testing.T) {
 func TestValidateConfiguration_ResourceMissingName(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 		},
 		Resources: []ResourceConfig{
 			{Module: "mod", Config: map[string]interface{}{"k": "v"}},
@@ -99,8 +80,7 @@ func TestValidateConfiguration_ResourceMissingName(t *testing.T) {
 func TestValidateConfiguration_ResourceMissingModule(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 		},
 		Resources: []ResourceConfig{
 			{Name: "r1", Config: map[string]interface{}{"k": "v"}},
@@ -114,8 +94,7 @@ func TestValidateConfiguration_ResourceMissingModule(t *testing.T) {
 func TestValidateConfiguration_DuplicateResourceNames(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 		},
 		Resources: []ResourceConfig{
 			{Name: "dup", Module: "m1", Config: map[string]interface{}{"k": "v"}},
@@ -131,7 +110,6 @@ func TestValidateConfiguration_ConvergeIntervalInvalid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:               "test-steward",
-			Mode:             ModeStandalone,
 			ConvergeInterval: "not-a-duration",
 		},
 	}
@@ -144,7 +122,6 @@ func TestValidateConfiguration_ConvergeIntervalZero(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:               "test-steward",
-			Mode:             ModeStandalone,
 			ConvergeInterval: "0s",
 		},
 	}
@@ -233,6 +210,81 @@ func TestGetConvergeInterval_EmptyFallback(t *testing.T) {
 	assert.Equal(t, 30*time.Minute, GetConvergeInterval(cfg))
 }
 
+// --- GetDNARefreshInterval ---
+
+func TestGetDNARefreshInterval_ValidInterval(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{DNARefreshInterval: "15m"}}
+	assert.Equal(t, 15*time.Minute, GetDNARefreshInterval(cfg))
+}
+
+func TestGetDNARefreshInterval_EmptyFallback(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{}}
+	assert.Equal(t, 30*time.Minute, GetDNARefreshInterval(cfg))
+}
+
+func TestGetDNARefreshInterval_InvalidStringFallback(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{DNARefreshInterval: "notaduration"}}
+	assert.Equal(t, 30*time.Minute, GetDNARefreshInterval(cfg),
+		"unparseable duration must fall back to 30m default")
+}
+
+func TestGetDNARefreshInterval_ZeroFallback(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{DNARefreshInterval: "0s"}}
+	assert.Equal(t, 30*time.Minute, GetDNARefreshInterval(cfg),
+		"zero duration must fall back to 30m default")
+}
+
+// --- GetObserveSweepN (Issue #3104, ADR-024 Amendment 1 §3) ---
+
+// intPtr returns a pointer to n. StewardSettings.ObserveSweepN is a *int so an
+// explicitly configured 0 (sweep disabled) is distinguishable from an absent key.
+func intPtr(n int) *int { return &n }
+
+func TestGetObserveSweepN_UnsetUsesDefault(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{}}
+	assert.Equal(t, DefaultObserveSweepN, GetObserveSweepN(cfg),
+		"an absent observe_sweep_n must yield the shipped default cadence")
+}
+
+func TestGetObserveSweepN_ExplicitZeroDisables(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ObserveSweepN: intPtr(0)}}
+	assert.Equal(t, 0, GetObserveSweepN(cfg),
+		"an explicit observe_sweep_n: 0 must disable the sweep, not fall back to the default")
+}
+
+func TestGetObserveSweepN_ExplicitValue(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ObserveSweepN: intPtr(3)}}
+	assert.Equal(t, 3, GetObserveSweepN(cfg))
+}
+
+func TestGetObserveSweepN_NegativeTreatedAsDisabled(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ObserveSweepN: intPtr(-1)}}
+	assert.Equal(t, 0, GetObserveSweepN(cfg),
+		"a negative cadence must never reach the client as a live cadence")
+}
+
+func TestValidateConfiguration_RejectsNegativeObserveSweepN(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:            "steward-1",
+			ObserveSweepN: intPtr(-1),
+		},
+	}
+	err := ValidateConfiguration(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "observe_sweep_n")
+}
+
+func TestValidateConfiguration_AcceptsZeroObserveSweepN(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:            "steward-1",
+			ObserveSweepN: intPtr(0),
+		},
+	}
+	require.NoError(t, ValidateConfiguration(cfg))
+}
+
 // --- GetConfiguredModules ---
 
 func TestGetConfiguredModules_DeduplicatesModules(t *testing.T) {
@@ -269,7 +321,7 @@ func TestStewardConfig_RequiredModules_ParsesCorrectly(t *testing.T) {
 }
 
 func TestStewardConfig_RequiredModules_Empty(t *testing.T) {
-	cfg := StewardConfig{Steward: StewardSettings{ID: "s1", Mode: ModeStandalone}}
+	cfg := StewardConfig{Steward: StewardSettings{ID: "s1"}}
 	assert.Empty(t, cfg.RequiredModules)
 	assert.NoError(t, ValidateConfiguration(cfg))
 }
@@ -280,8 +332,7 @@ func TestStewardConfig_RequiredModules_Empty(t *testing.T) {
 func TestStewardSettings_ModuleTrust_StrictMode_ParsesCorrectly(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "s1",
-			Mode: ModeStandalone,
+			ID: "s1",
 			ModuleTrust: ModuleTrustConfig{
 				Mode:                 ModuleTrustModeStrict,
 				AdditionalPublishers: []string{"vendor-a"},
@@ -297,29 +348,32 @@ func TestStewardSettings_ModuleTrust_ControllerMode_Valid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:          "s1",
-			Mode:        ModeStandalone,
 			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeController},
 		},
 	}
 	assert.NoError(t, ValidateConfiguration(cfg))
 }
 
-func TestStewardSettings_ModuleTrust_BypassMode_Valid(t *testing.T) {
+// [REQUIRED TEST] module_trust mode "bypass" is unavailable in a release build
+// (Issue #4324 item 1): a binary built without the cfgms_dev_bypass tag must
+// reject bypass from pushed configuration, not merely warn about it.
+func TestStewardSettings_ModuleTrust_BypassMode_RejectedInReleaseBuild(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:          "s1",
-			Mode:        ModeStandalone,
 			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeBypass},
 		},
 	}
-	assert.NoError(t, ValidateConfiguration(cfg))
+	err := ValidateConfiguration(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bypass")
+	assert.Contains(t, err.Error(), "release build")
 }
 
 func TestStewardSettings_ModuleTrust_EmptyMode_Valid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "s1",
-			Mode: ModeStandalone,
+			ID: "s1",
 		},
 	}
 	assert.NoError(t, ValidateConfiguration(cfg))
@@ -329,8 +383,7 @@ func TestStewardSettings_ModuleTrust_EmptyMode_Valid(t *testing.T) {
 func TestStewardSettings_ModuleTrust_InvalidMode_ReturnsError(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "s1",
-			Mode: ModeStandalone,
+			ID: "s1",
 			ModuleTrust: ModuleTrustConfig{
 				Mode: ModuleTrustMode("invalid_value"),
 			},
@@ -348,7 +401,6 @@ func TestValidateModuleTrustConfig_ValidModes(t *testing.T) {
 	for _, mode := range []ModuleTrustMode{
 		ModuleTrustModeStrict,
 		ModuleTrustModeController,
-		ModuleTrustModeBypass,
 		"",
 	} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -357,8 +409,28 @@ func TestValidateModuleTrustConfig_ValidModes(t *testing.T) {
 	}
 }
 
+// [REQUIRED TEST] bypass is rejected by ValidateModuleTrustConfig in a release
+// build (Issue #4324 item 1). See bypass_allowed_test.go for the mirror
+// assertion under the cfgms_dev_bypass build tag.
+func TestValidateModuleTrustConfig_Bypass_RejectedInReleaseBuild(t *testing.T) {
+	err := ValidateModuleTrustConfig(ModuleTrustConfig{Mode: ModuleTrustModeBypass})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bypass")
+	assert.Contains(t, err.Error(), "release build")
+}
+
 func TestValidateModuleTrustConfig_InvalidMode(t *testing.T) {
 	err := ValidateModuleTrustConfig(ModuleTrustConfig{Mode: "bogus"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bogus")
+}
+
+// TestModuleTrustModeLevel_Ordering verifies the strictness ordering used by
+// the cascade downgrade guard (Issue #4324): bypass < controller == "" < strict.
+func TestModuleTrustModeLevel_Ordering(t *testing.T) {
+	assert.Less(t, ModuleTrustModeLevel(ModuleTrustModeBypass), ModuleTrustModeLevel(ModuleTrustModeController))
+	assert.Less(t, ModuleTrustModeLevel(ModuleTrustModeController), ModuleTrustModeLevel(ModuleTrustModeStrict))
+	assert.Equal(t, ModuleTrustModeLevel(ModuleTrustModeController), ModuleTrustModeLevel(ModuleTrustMode("")),
+		`an empty mode must compare equal to "controller", its runtime default`)
+	assert.Equal(t, -1, ModuleTrustModeLevel(ModuleTrustMode("bogus")))
 }

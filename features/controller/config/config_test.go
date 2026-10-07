@@ -25,6 +25,76 @@ func TestDefaultConfig_TransportPopulated(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, cfg.Transport.IdleTimeout.AsDuration())
 }
 
+func TestDefaultConfig_RequiresExplicitPrivateMetricsListener(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.Empty(t, cfg.MetricsListenAddr,
+		"metrics listener must not be silently defaulted by production configuration")
+}
+
+// TestDefaultConfig_ExternalURLEmpty verifies that DefaultConfig does not set a
+// plausible-looking default for external_url. That field's entire purpose is
+// external reachability — silently shipping https://localhost:8080 produces wrong
+// admin bundles on any non-dev controller without a clear error.
+func TestDefaultConfig_ExternalURLEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.Empty(t, cfg.ExternalURL,
+		"external_url must not be silently defaulted; operators must set it explicitly")
+}
+
+func TestValidatePrivateListenerAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, address := range []string{
+		"127.0.0.1:9090",
+		"10.20.30.40:9090",
+		"172.30.0.10:9090",
+		"192.168.1.5:9090",
+		"[::1]:9090",
+		"[fd00::1]:9090",
+	} {
+		if err := ValidatePrivateListenerAddress(address); err != nil {
+			t.Errorf("private address %q rejected: %v", address, err)
+		}
+	}
+
+	for _, address := range []string{
+		"",
+		"0.0.0.0:9090",
+		"[::]:9090",
+		"8.8.8.8:9090",
+		"metrics.example.com:9090",
+		"127.0.0.1:0",
+		"127.0.0.1:http",
+		"127.0.0.1:65536",
+	} {
+		if err := ValidatePrivateListenerAddress(address); err == nil {
+			t.Errorf("unsafe address %q accepted", address)
+		}
+	}
+}
+
+func TestLoadWithPath_PrivateMetricsListener(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("metrics_listen_addr: \"127.0.0.1:9090\"\n"), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:9090", cfg.MetricsListenAddr)
+	require.NoError(t, ValidatePrivateListenerAddress(cfg.MetricsListenAddr))
+}
+
+func TestLoadWithPath_PrivateMetricsListenerEnvOverride(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("metrics_listen_addr: \"127.0.0.1:9090\"\n"), 0600))
+	t.Setenv("CFGMS_METRICS_LISTEN_ADDR", "10.20.30.40:9191")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "10.20.30.40:9191", cfg.MetricsListenAddr)
+}
+
 // TestTransportConfig_Validate_Valid verifies that a valid TransportConfig passes validation.
 func TestTransportConfig_Validate_Valid(t *testing.T) {
 	tc := &TransportConfig{
@@ -440,4 +510,868 @@ func TestRegistrationConfig_DarkWindowAndTimeout_YAML(t *testing.T) {
 		"336h must parse to 14 days")
 	assert.Equal(t, 3*24*time.Hour, cfg.Registration.GetPendingReviewTimeout(),
 		"72h must parse to 3 days")
+}
+
+// TestRegistrationConfig_GetEnrollmentLinkTTL verifies the enrollment-link TTL
+// getter covers nil receiver, zero value, and configured value (Issue #2966).
+func TestRegistrationConfig_GetEnrollmentLinkTTL(t *testing.T) {
+	var rc *RegistrationConfig
+	assert.Equal(t, 72*time.Hour, rc.GetEnrollmentLinkTTL(),
+		"nil RegistrationConfig must default to 72 hours")
+
+	zero := &RegistrationConfig{}
+	assert.Equal(t, 72*time.Hour, zero.GetEnrollmentLinkTTL(),
+		"zero EnrollmentLinkTTL must default to 72 hours")
+
+	configured := &RegistrationConfig{EnrollmentLinkTTL: Duration(24 * time.Hour)}
+	assert.Equal(t, 24*time.Hour, configured.GetEnrollmentLinkTTL(),
+		"configured TTL must be returned unchanged")
+}
+
+// TestRegistrationConfig_EnrollmentLinkTTL_YAML verifies that enrollment_link_ttl
+// is parsed from YAML (Issue #2966). Uses a non-default value (24h) so the
+// assertion only passes when YAML unmarshaling actually populated the field.
+func TestRegistrationConfig_EnrollmentLinkTTL_YAML(t *testing.T) {
+	yamlInput := "registration:\n  enrollment_link_ttl: 24h\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+	require.NotNil(t, cfg.Registration)
+
+	assert.Equal(t, 24*time.Hour, cfg.Registration.GetEnrollmentLinkTTL(),
+		"enrollment_link_ttl: 24h must parse to 24 hours")
+}
+
+// TestHAMode_YAML verifies that ha.mode: cluster is parsed correctly (Issue #2119).
+func TestHAMode_YAML(t *testing.T) {
+	yamlInput := "ha:\n  mode: cluster\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.HA, "HA config must be populated when ha block is present")
+	assert.Equal(t, "cluster", cfg.HA.Mode,
+		"ha.mode: cluster must parse to the string \"cluster\"")
+	assert.True(t, cfg.HA.IsClusterMode(), "IsClusterMode() must return true for mode=cluster")
+}
+
+// TestHAMode_YAML_Single verifies that ha.mode: single is parsed correctly.
+func TestHAMode_YAML_Single(t *testing.T) {
+	yamlInput := "ha:\n  mode: single\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.HA)
+	assert.Equal(t, "single", cfg.HA.Mode)
+	assert.False(t, cfg.HA.IsClusterMode())
+}
+
+// TestHAMode_YAML_Absent verifies that omitting ha block leaves HA nil.
+func TestHAMode_YAML_Absent(t *testing.T) {
+	yamlInput := "listen_addr: \"127.0.0.1:8080\"\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	assert.Nil(t, cfg.HA, "HA config must be nil when the ha block is absent")
+}
+
+// TestHAModeEnvVar verifies that CFGMS_HA_MODE overrides ha.mode from YAML (Issue #2119).
+func TestHAModeEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_HA_MODE", "cluster")
+	// Clear CFGMS_STORAGE_CLUSTER_POSTGRES_DSN so it doesn't interfere.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.HA, "CFGMS_HA_MODE must materialise the HA config section")
+	assert.Equal(t, "cluster", cfg.HA.Mode,
+		"CFGMS_HA_MODE=cluster must set ha.Mode to \"cluster\"")
+	assert.True(t, cfg.HA.IsClusterMode())
+}
+
+// TestClusterStorageConfig_YAML verifies that storage.cluster.postgres_dsn and
+// storage.cluster.session_hmac_key are parsed (Issues #2119, #3127).
+func TestClusterStorageConfig_YAML(t *testing.T) {
+	yamlInput := `
+storage:
+  cluster:
+    postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require"
+    session_hmac_key: "yaml-session-hmac-key"
+    s3:
+      bucket: "cfgms-installers"
+      region: "us-east-1"
+`
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.Storage.Cluster, "storage.cluster must be populated")
+	assert.Equal(t,
+		"host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require",
+		cfg.Storage.Cluster.PostgresDSN)
+	assert.Equal(t, "yaml-session-hmac-key", cfg.Storage.Cluster.SessionHMACKey,
+		"storage.cluster.session_hmac_key must be parsed from YAML")
+	require.NotNil(t, cfg.Storage.Cluster.S3)
+	assert.Equal(t, "cfgms-installers", cfg.Storage.Cluster.S3["bucket"])
+	assert.Equal(t, "us-east-1", cfg.Storage.Cluster.S3["region"])
+}
+
+// TestClusterStorageDSNEnvVar verifies that CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides
+// storage.cluster.postgres_dsn (Issue #2119).
+func TestClusterStorageDSNEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable")
+	t.Setenv("CFGMS_HA_MODE", "") // clear so HA mode is not set by env
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Storage.Cluster,
+		"CFGMS_STORAGE_CLUSTER_POSTGRES_DSN must materialise storage.cluster")
+	assert.Equal(t,
+		"host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable",
+		cfg.Storage.Cluster.PostgresDSN)
+}
+
+// TestClusterStorageSessionHMACKeyEnvVar verifies that
+// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY materialises storage.cluster and populates
+// storage.cluster.session_hmac_key when no config file supplies it (Issue #3127).
+func TestClusterStorageSessionHMACKeyEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "env-session-hmac-key")
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "") // clear so only the HMAC key is set by env
+	t.Setenv("CFGMS_HA_MODE", "")                      // clear so HA mode is not set by env
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Storage.Cluster,
+		"CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY must materialise storage.cluster")
+	assert.Equal(t, "env-session-hmac-key", cfg.Storage.Cluster.SessionHMACKey)
+}
+
+// TestClusterStorageSessionHMACKeyEnvVarOverridesYAML verifies that
+// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY takes precedence over a session_hmac_key
+// supplied by the config file, and that an unset env var leaves the YAML value intact
+// (Issue #3127). The key backs bearer-token hashing, so operators must be able to keep
+// it out of the on-disk config.
+func TestClusterStorageSessionHMACKeyEnvVarOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+
+	content := `
+storage:
+  cluster:
+    postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms sslmode=require"
+    session_hmac_key: "from-yaml"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "") // clear so the YAML DSN is not overridden
+	t.Setenv("CFGMS_HA_MODE", "")                      // clear so HA mode is not set by env
+
+	// Env var unset: the YAML value survives.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "")
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Storage.Cluster)
+	assert.Equal(t, "from-yaml", cfg.Storage.Cluster.SessionHMACKey,
+		"an empty env var must not clobber the config-file session_hmac_key")
+
+	// Env var set: it wins over the YAML value.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "from-env")
+	cfg, err = LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Storage.Cluster)
+	assert.Equal(t, "from-env", cfg.Storage.Cluster.SessionHMACKey,
+		"CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY must override storage.cluster.session_hmac_key")
+	assert.Equal(t, "host=pg.example.com port=5432 dbname=cfgms user=cfgms sslmode=require",
+		cfg.Storage.Cluster.PostgresDSN,
+		"overriding the HMAC key must not disturb the sibling postgres_dsn")
+}
+
+// --- Deployment Ring Config tests (Issue #2271) ---
+
+// TestDeploymentRings_YAML_ParsesCorrectly verifies the deployment_rings section
+// is parsed from YAML with all fields populated.
+func TestDeploymentRings_YAML_ParsesCorrectly(t *testing.T) {
+	yamlInput := `
+deployment_rings:
+  fallback_ring: early
+  rings:
+    - name: pre-release
+      desired_version: "v0.6.0-rc1"
+    - name: early
+      desired_version: "v0.5.21"
+      soak: 24h
+      halt_threshold: 0.05
+      concurrency_limit: 10
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+`
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.DeploymentRings, "deployment_rings must be populated")
+	assert.Equal(t, "early", cfg.DeploymentRings.FallbackRing)
+	require.Len(t, cfg.DeploymentRings.Rings, 4)
+	assert.Equal(t, "pre-release", cfg.DeploymentRings.Rings[0].Name)
+	assert.Equal(t, "v0.6.0-rc1", cfg.DeploymentRings.Rings[0].DesiredVersion)
+	assert.Equal(t, "early", cfg.DeploymentRings.Rings[1].Name)
+	assert.Equal(t, "v0.5.21", cfg.DeploymentRings.Rings[1].DesiredVersion)
+	assert.Equal(t, 24*time.Hour, cfg.DeploymentRings.Rings[1].Soak.AsDuration())
+	assert.InDelta(t, 0.05, cfg.DeploymentRings.Rings[1].HaltThreshold, 1e-9)
+	assert.Equal(t, 10, cfg.DeploymentRings.Rings[1].ConcurrencyLimit)
+}
+
+// TestDeploymentRings_Absent_LeavesNil verifies that omitting deployment_rings leaves the
+// field nil, signalling use of the default ring set.
+func TestDeploymentRings_Absent_LeavesNil(t *testing.T) {
+	yamlInput := `listen_addr: "127.0.0.1:8080"` + "\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	assert.Nil(t, cfg.DeploymentRings, "deployment_rings must be nil when absent")
+}
+
+// TestValidateDeploymentRingConfig_Valid verifies that a well-formed ring config passes.
+func TestValidateDeploymentRingConfig_Valid(t *testing.T) {
+	rc := DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []RingSpec{
+			{Name: "pre-release"},
+			{Name: "early"},
+			{Name: "default", DesiredVersion: "v0.5.21"},
+			{Name: "stable"},
+		},
+	}
+	assert.NoError(t, ValidateDeploymentRingConfig(rc))
+}
+
+// TestValidateDeploymentRingConfig_RejectsDuplicateNames verifies that duplicate ring
+// names are rejected at startup.
+func TestValidateDeploymentRingConfig_RejectsDuplicateNames(t *testing.T) {
+	rc := DeploymentRingConfig{
+		FallbackRing: "early",
+		Rings: []RingSpec{
+			{Name: "early"},
+			{Name: "default"},
+			{Name: "early"}, // duplicate
+		},
+	}
+	err := ValidateDeploymentRingConfig(rc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate ring name")
+	assert.Contains(t, err.Error(), "early")
+}
+
+// TestValidateDeploymentRingConfig_RejectsUnknownFallbackRing verifies that a
+// fallback_ring not in the declared set is rejected at startup.
+func TestValidateDeploymentRingConfig_RejectsUnknownFallbackRing(t *testing.T) {
+	rc := DeploymentRingConfig{
+		FallbackRing: "canary",
+		Rings: []RingSpec{
+			{Name: "pre-release"},
+			{Name: "default"},
+		},
+	}
+	err := ValidateDeploymentRingConfig(rc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fallback_ring")
+	assert.Contains(t, err.Error(), "canary")
+}
+
+// TestValidateDeploymentRingConfig_RejectsInvalidName verifies that ring names not
+// matching ^[a-z][a-z0-9-]{0,31}$ are rejected.
+func TestValidateDeploymentRingConfig_RejectsInvalidName(t *testing.T) {
+	tests := []struct {
+		name    string
+		invalid string
+	}{
+		{"uppercase", "Early"},
+		{"starts-with-digit", "1early"},
+		{"has-underscore", "early_ring"},
+		{"too-long", "a" + "b0123456789012345678901234567890"}, // 33 chars
+		{"empty", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := DeploymentRingConfig{
+				Rings: []RingSpec{{Name: tt.invalid}},
+			}
+			err := ValidateDeploymentRingConfig(rc)
+			require.Error(t, err, "ring name %q must be rejected", tt.invalid)
+		})
+	}
+}
+
+// TestConfig_ValidateDeploymentRings_AbsentIsNil verifies nil DeploymentRings is always valid.
+func TestConfig_ValidateDeploymentRings_AbsentIsNil(t *testing.T) {
+	cfg := &Config{}
+	assert.NoError(t, cfg.ValidateDeploymentRings(),
+		"nil DeploymentRings must be valid (defaults apply)")
+}
+
+// TestConfig_EffectiveRings_DefaultsApplied verifies EffectiveRings returns the four
+// default rings when DeploymentRings is nil.
+func TestConfig_EffectiveRings_DefaultsApplied(t *testing.T) {
+	cfg := &Config{}
+	rings := cfg.EffectiveRings()
+
+	require.Len(t, rings.Rings, 4, "must return the four default rings")
+	assert.Equal(t, "pre-release", rings.Rings[0].Name)
+	assert.Equal(t, "early", rings.Rings[1].Name)
+	assert.Equal(t, "default", rings.Rings[2].Name)
+	assert.Equal(t, "stable", rings.Rings[3].Name)
+	assert.Equal(t, "default", rings.FallbackRing)
+}
+
+// TestConfig_EffectiveRings_ConfigOverride verifies EffectiveRings returns the
+// operator-configured rings when present, with fallback_ring defaulted to "default".
+func TestConfig_EffectiveRings_ConfigOverride(t *testing.T) {
+	cfg := &Config{
+		DeploymentRings: &DeploymentRingConfig{
+			Rings: []RingSpec{
+				{Name: "beta", DesiredVersion: "v0.6.0"},
+				{Name: "stable", DesiredVersion: "v0.5.21"},
+			},
+		},
+		// FallbackRing deliberately left empty — should default to "default"
+	}
+	rings := cfg.EffectiveRings()
+
+	require.Len(t, rings.Rings, 2)
+	assert.Equal(t, "beta", rings.Rings[0].Name)
+	assert.Equal(t, DefaultFallbackRing, rings.FallbackRing,
+		"empty fallback_ring must default to the constant DefaultFallbackRing")
+}
+
+// TestDeploymentRings_LoadWithPath verifies deployment_rings is loaded from a config file.
+func TestDeploymentRings_LoadWithPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+
+	content := `
+deployment_rings:
+  fallback_ring: default
+  rings:
+    - name: pre-release
+      desired_version: "v0.6.0"
+    - name: early
+      desired_version: "v0.5.21"
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.DeploymentRings)
+	assert.Len(t, cfg.DeploymentRings.Rings, 4)
+	assert.Equal(t, "v0.6.0", cfg.DeploymentRings.Rings[0].DesiredVersion)
+	assert.Equal(t, "default", cfg.DeploymentRings.FallbackRing)
+}
+
+// TestLoadWithPath_Tier1BootstrapTemplate_SetsExternalAddress verifies that a config
+// mirroring the tier1-bootstrap.sh generated template populates Transport.ExternalAddress.
+// Regression test for Issue #3170: the bootstrap template omitted external_address from
+// the transport: block, causing controllers to crash on startup.
+func TestLoadWithPath_Tier1BootstrapTemplate_SetsExternalAddress(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	// Minimal fragment matching the fixed tier1-bootstrap.sh template output.
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+external_url: "https://ctrl.tier1.lab:9080"
+listen_addr: "0.0.0.0:9080"
+metrics_listen_addr: "127.0.0.1:9090"
+transport:
+  listen_addr: "0.0.0.0:4433"
+  external_address: "ctrl.tier1.lab"
+  use_cert_manager: true
+  max_connections: 50000
+  keepalive_period: "30s"
+  idle_timeout: "5m"
+`), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Transport, "Transport block must be parsed")
+	assert.NotEmpty(t, cfg.Transport.ExternalAddress,
+		"Transport.ExternalAddress must be populated from the bootstrap template")
+	assert.Equal(t, "ctrl.tier1.lab", cfg.Transport.ExternalAddress)
+	assert.Equal(t, "https://ctrl.tier1.lab:9080", cfg.ExternalURL)
+}
+
+// TestValidateCAPath_RejectsNonCAFinalComponent verifies that a ca_path not ending in
+// "ca" is rejected at load time with an actionable error naming both the configured
+// path and the wrongly-derived parent directory — so a misconfiguration that would
+// silently write CA files to the wrong location fails loudly instead.
+func TestValidateCAPath_RejectsNonCAFinalComponent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		caPath     string
+		wantParent string
+	}{
+		{caPath: "/etc/cfgms/my-ca", wantParent: "/etc/cfgms"},
+		{caPath: "/var/lib/cfgms/certs", wantParent: "/var/lib/cfgms"},
+		{caPath: "/tmp/certs/", wantParent: "/tmp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.caPath, func(t *testing.T) {
+			err := ValidateCAPath(tc.caPath)
+			require.Error(t, err, "ca_path %q should be rejected", tc.caPath)
+			assert.Contains(t, err.Error(), tc.caPath, "error must name the configured ca_path")
+			assert.Contains(t, err.Error(), tc.wantParent, "error must name the wrongly-derived parent")
+		})
+	}
+}
+
+// TestValidateCAPath_AcceptsCAFinalComponent verifies that paths ending in "ca"
+// (the only valid convention) pass validation.
+func TestValidateCAPath_AcceptsCAFinalComponent(t *testing.T) {
+	t.Parallel()
+
+	for _, caPath := range []string{
+		"/var/lib/cfgms/certs/ca",
+		"/etc/cfgms/ca",
+		"certs/ca",
+		"/var/lib/cfgms/certs/ca/",
+	} {
+		t.Run(caPath, func(t *testing.T) {
+			assert.NoError(t, ValidateCAPath(caPath), "ca_path %q should be accepted", caPath)
+		})
+	}
+}
+
+// TestLoadWithPath_RejectsCAPathNotEndingInCA verifies that LoadWithPath returns a
+// descriptive error when certificate.ca_path does not end in "ca", naming both the
+// configured value and the wrongly-derived parent — the repro path from Issue #3171
+// (misconfigured ca_path silently fell back to relative defaults).
+func TestLoadWithPath_RejectsCAPathNotEndingInCA(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+certificate:
+  enable_cert_management: true
+  ca_path: "/etc/cfgms/my-ca"
+`), 0600))
+
+	_, err := LoadWithPath(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/etc/cfgms/my-ca", "error must name the configured ca_path")
+	assert.Contains(t, err.Error(), "/etc/cfgms", "error must name the wrongly-derived parent")
+}
+
+// TestLoadWithPath_AcceptsCAPathEndingInCA verifies that LoadWithPath succeeds when
+// certificate.ca_path ends in "ca", the required convention.
+func TestLoadWithPath_AcceptsCAPathEndingInCA(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+certificate:
+  enable_cert_management: true
+  ca_path: "/var/lib/cfgms/certs/ca"
+`), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "/var/lib/cfgms/certs/ca", cfg.Certificate.CAPath)
+}
+
+// TestLoadWithPath_CertPath_RelativeResolvesToConfigFileDir verifies that a relative
+// cert_path in the config file is resolved to an absolute path rooted at the config
+// file's directory, removing CWD-dependence (Issue #3197).
+func TestLoadWithPath_CertPath_RelativeResolvesToConfigFileDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath, []byte("cert_path: certs/\n"), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+
+	want := filepath.Join(dir, "certs")
+	assert.Equal(t, want, cfg.CertPath,
+		"relative cert_path must resolve to <configDir>/certs, not CWD-relative")
+	assert.True(t, filepath.IsAbs(cfg.CertPath),
+		"cert_path must be absolute after loading from config file")
+}
+
+// TestLoadWithPath_CertPath_AbsoluteHonoured verifies that an absolute cert_path
+// in the config file is used unchanged (Issue #3197).
+func TestLoadWithPath_CertPath_AbsoluteHonoured(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	absoluteCertPath := filepath.Join(t.TempDir(), "mycerts")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("cert_path: "+absoluteCertPath+"\n"), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, absoluteCertPath, cfg.CertPath,
+		"absolute cert_path must be used unchanged")
+}
+
+// --- TenantAdminConfig accessors (ADR-027, Issue #3182) ---
+
+// TestTenantAdminConfig_GetDeleteHoldPeriod covers every branch of the accessor:
+// a nil receiver (section absent from the config file), a present section that
+// leaves delete_hold_period unset (zero value), and an explicit override.
+func TestTenantAdminConfig_GetDeleteHoldPeriod(t *testing.T) {
+	const defaultHold = 720 * time.Hour
+
+	tests := []struct {
+		name string
+		cfg  *TenantAdminConfig
+		want time.Duration
+	}{
+		{
+			name: "nil receiver defaults to 30 days",
+			cfg:  nil,
+			want: defaultHold,
+		},
+		{
+			name: "zero value defaults to 30 days",
+			cfg:  &TenantAdminConfig{},
+			want: defaultHold,
+		},
+		{
+			name: "explicit zero duration defaults to 30 days",
+			cfg:  &TenantAdminConfig{DeleteHoldPeriod: Duration(0)},
+			want: defaultHold,
+		},
+		{
+			name: "configured value is honoured",
+			cfg:  &TenantAdminConfig{DeleteHoldPeriod: Duration(2 * time.Hour)},
+			want: 2 * time.Hour,
+		},
+		{
+			name: "sub-second value is honoured",
+			cfg:  &TenantAdminConfig{DeleteHoldPeriod: Duration(time.Millisecond)},
+			want: time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.GetDeleteHoldPeriod())
+		})
+	}
+}
+
+// TestTenantAdminConfig_GetDeleteRequiresDualControl covers every branch: nil
+// receiver, present section with the pointer unset, and both explicit values.
+// The default must be true — dual control is fail-closed.
+func TestTenantAdminConfig_GetDeleteRequiresDualControl(t *testing.T) {
+	dualControlOn := true
+	dualControlOff := false
+
+	tests := []struct {
+		name string
+		cfg  *TenantAdminConfig
+		want bool
+	}{
+		{
+			name: "nil receiver requires dual control",
+			cfg:  nil,
+			want: true,
+		},
+		{
+			name: "unset pointer requires dual control",
+			cfg:  &TenantAdminConfig{},
+			want: true,
+		},
+		{
+			name: "explicit true requires dual control",
+			cfg:  &TenantAdminConfig{DeleteRequiresDualControl: &dualControlOn},
+			want: true,
+		},
+		{
+			name: "explicit false disables dual control",
+			cfg:  &TenantAdminConfig{DeleteRequiresDualControl: &dualControlOff},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.GetDeleteRequiresDualControl())
+		})
+	}
+}
+
+// TestTenantAdminConfig_YAMLRoundTrip verifies the accessors read what the YAML
+// loader produces, including the section-present-but-fields-absent case that
+// exercises the zero-value default.
+func TestTenantAdminConfig_YAMLRoundTrip(t *testing.T) {
+	t.Run("fields absent falls back to defaults", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte("tenant_admin: {}\n"), &cfg))
+		require.NotNil(t, cfg.TenantAdmin, "tenant_admin section must be parsed")
+		assert.Equal(t, 720*time.Hour, cfg.TenantAdmin.GetDeleteHoldPeriod())
+		assert.True(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
+	})
+
+	t.Run("section absent leaves nil receiver on defaults", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte("listen_addr: 0.0.0.0:8443\n"), &cfg))
+		require.Nil(t, cfg.TenantAdmin)
+		assert.Equal(t, 720*time.Hour, cfg.TenantAdmin.GetDeleteHoldPeriod())
+		assert.True(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
+	})
+
+	t.Run("explicit values are parsed", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte(
+			"tenant_admin:\n  delete_hold_period: 48h\n  delete_requires_dual_control: false\n"), &cfg))
+		require.NotNil(t, cfg.TenantAdmin)
+		assert.Equal(t, 48*time.Hour, cfg.TenantAdmin.GetDeleteHoldPeriod())
+		assert.False(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
+	})
+}
+
+// --- Issue #3713: WebAuthn relying-party configuration ---
+
+// TestWebAuthnConfig_YAML verifies the webauthn: section parses into WebAuthnConfig.
+func TestWebAuthnConfig_YAML(t *testing.T) {
+	var cfg Config
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_display_name: "CFGMS Controller"
+  rp_origins:
+    - "https://cfgms.example.com"
+    - "https://admin.cfgms.example.com"
+`
+	require.NoError(t, yaml.Unmarshal([]byte(content), &cfg))
+	require.NotNil(t, cfg.WebAuthn)
+	assert.Equal(t, "cfgms.example.com", cfg.WebAuthn.RPID)
+	assert.Equal(t, "CFGMS Controller", cfg.WebAuthn.RPDisplayName)
+	assert.Equal(t, []string{"https://cfgms.example.com", "https://admin.cfgms.example.com"}, cfg.WebAuthn.RPOrigins)
+}
+
+// TestWebAuthnConfig_Absent verifies that an omitted webauthn: section leaves
+// cfg.WebAuthn nil — the passkey endpoints must stay at 503 (no silent default).
+func TestWebAuthnConfig_Absent(t *testing.T) {
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte("listen_addr: 0.0.0.0:8443\n"), &cfg))
+	assert.Nil(t, cfg.WebAuthn)
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+// TestConfig_ValidateWebAuthn_NilIsValid verifies the zero-value Config (WebAuthn unset)
+// is always a valid startup configuration — REQUIRED per Issue #3713 AC: an unset
+// relying-party configuration must never be rejected and must never fall back to a
+// local-development identifier.
+func TestConfig_ValidateWebAuthn_NilIsValid(t *testing.T) {
+	cfg := &Config{}
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+// TestConfig_ValidateWebAuthn_RejectsEmptyOrigins is a REQUIRED test (Issue #3713 AC):
+// a configuration that sets rp_id but lists no origins must be rejected at startup.
+func TestConfig_ValidateWebAuthn_RejectsEmptyOrigins(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{RPID: "cfgms.example.com"}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rp_origins must not be empty")
+}
+
+// TestConfig_ValidateWebAuthn_RejectsNonHTTPSOrigin is a REQUIRED test (Issue #3713 AC):
+// a configuration listing a non-HTTPS origin must be rejected at startup.
+func TestConfig_ValidateWebAuthn_RejectsNonHTTPSOrigin(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPID:      "cfgms.example.com",
+		RPOrigins: []string{"http://cfgms.example.com"},
+	}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestConfig_ValidateWebAuthn_RejectsLoopbackOrigin guards against exactly the
+// resolution the Issue #3713 amendment forbids: adding a loopback origin to make the
+// two `cfg` CLI browser relays (stepup.go, webauthn.go) work again would make a
+// plaintext loopback origin permanently valid for every passkey ceremony the
+// controller ever runs. A bare http:// loopback origin must be rejected the same as
+// any other non-HTTPS origin — there is no exception path here.
+func TestConfig_ValidateWebAuthn_RejectsLoopbackOrigin(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPID:      "cfgms.example.com",
+		RPOrigins: []string{"http://127.0.0.1"},
+	}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestConfig_ValidateWebAuthn_RejectsOriginsWithoutRPID verifies that a config
+// listing origins without an rp_id is rejected rather than silently ignored.
+func TestConfig_ValidateWebAuthn_RejectsOriginsWithoutRPID(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPOrigins: []string{"https://cfgms.example.com"},
+	}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rp_id must be set")
+}
+
+// TestConfig_ValidateWebAuthn_AcceptsValidConfig verifies a well-formed relying-party
+// configuration passes validation.
+func TestConfig_ValidateWebAuthn_AcceptsValidConfig(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPID:          "cfgms.example.com",
+		RPDisplayName: "CFGMS Controller",
+		RPOrigins:     []string{"https://cfgms.example.com"},
+	}}
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+// TestLoadWithPath_WebAuthnRejectsInsecureOriginAtStartup is a REQUIRED test
+// (Issue #3713 AC): LoadWithPath must fail closed when the config file sets an
+// insecure origin, so the controller never starts with a broken relying party.
+func TestLoadWithPath_WebAuthnRejectsInsecureOriginAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_origins:
+    - "http://cfgms.example.com"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	_, err := LoadWithPath(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestLoadWithPath_WebAuthnRejectsEmptyOriginsAtStartup is a REQUIRED test
+// (Issue #3713 AC): LoadWithPath must fail closed when rp_id is set with no origins.
+func TestLoadWithPath_WebAuthnRejectsEmptyOriginsAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	_, err := LoadWithPath(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rp_origins must not be empty")
+}
+
+// TestLoadWithPath_WebAuthnUnsetLeavesDefaultsUntouched is a REQUIRED test
+// (Issue #3713 AC): a config file with no webauthn: section loads successfully with
+// cfg.WebAuthn nil — never a local-development fallback identifier.
+func TestLoadWithPath_WebAuthnUnsetLeavesDefaultsUntouched(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := "listen_addr: \"127.0.0.1:8080\"\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.WebAuthn)
+}
+
+// TestLoadWithPath_WebAuthnValidConfigLoads is a REQUIRED test (Issue #3713 AC): a
+// representative production configuration with rp_id, rp_display_name, and an HTTPS
+// origin list loads successfully.
+func TestLoadWithPath_WebAuthnValidConfigLoads(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_display_name: "CFGMS Controller"
+  rp_origins:
+    - "https://cfgms.example.com"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.WebAuthn)
+	assert.Equal(t, "cfgms.example.com", cfg.WebAuthn.RPID)
+	assert.Equal(t, "CFGMS Controller", cfg.WebAuthn.RPDisplayName)
+	assert.Equal(t, []string{"https://cfgms.example.com"}, cfg.WebAuthn.RPOrigins)
+}
+
+// TestAuditSinkConfig_DefaultsToLocal is a REQUIRED test (Issue #4036 AC): a
+// controller with no audit config section resolves to the "local" sink, so a
+// basic deployment starts with zero extra infrastructure (ADR-033).
+func TestAuditSinkConfig_DefaultsToLocal(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := "listen_addr: \"127.0.0.1:8080\"\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	t.Setenv("CFGMS_AUDIT_SINK", "")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Audit, "an absent audit section must stay nil, not be materialised with a zero value")
+	assert.Equal(t, AuditSinkLocal, cfg.Audit.ResolvedSink(),
+		"an absent audit section must resolve to the local sink")
+}
+
+// TestAuditSinkConfig_YAMLExplicitWorm verifies that audit.sink: worm is parsed
+// from YAML (Issue #4036, ADR-033).
+func TestAuditSinkConfig_YAMLExplicitWorm(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+audit:
+  sink: worm
+  worm:
+    bucket: "cfgms-audit"
+    region: "us-east-1"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+	t.Setenv("CFGMS_AUDIT_SINK", "")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Audit, "audit.sink: worm must materialise the audit config section")
+	assert.Equal(t, "worm", cfg.Audit.Sink)
+	assert.Equal(t, AuditSinkWORM, cfg.Audit.ResolvedSink())
+	require.NotNil(t, cfg.Audit.WORM)
+	assert.Equal(t, "cfgms-audit", cfg.Audit.WORM["bucket"])
+	assert.Equal(t, "us-east-1", cfg.Audit.WORM["region"])
+}
+
+// TestAuditSinkConfig_EnvVarOverride verifies that CFGMS_AUDIT_SINK overrides
+// audit.sink, both materialising an absent section and overriding a YAML value
+// (Issue #4036, ADR-033).
+func TestAuditSinkConfig_EnvVarOverride(t *testing.T) {
+	t.Setenv("CFGMS_AUDIT_SINK", "worm")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Audit, "CFGMS_AUDIT_SINK must materialise the audit config section")
+	assert.Equal(t, "worm", cfg.Audit.Sink)
+	assert.Equal(t, AuditSinkWORM, cfg.Audit.ResolvedSink())
+}
+
+// TestAuditSinkConfig_EnvVarOverridesYAML verifies CFGMS_AUDIT_SINK takes
+// precedence over a sink configured in the config file (Issue #4036, ADR-033).
+func TestAuditSinkConfig_EnvVarOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := "audit:\n  sink: worm\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	t.Setenv("CFGMS_AUDIT_SINK", "local")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Audit)
+	assert.Equal(t, "local", cfg.Audit.Sink,
+		"CFGMS_AUDIT_SINK must override a config-file audit.sink value")
 }

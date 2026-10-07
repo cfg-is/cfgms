@@ -15,6 +15,11 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 )
 
+// ValidationIssuePermission is the ValidationIssue.Type used for RBAC failures. Callers
+// classify a failed validation by issue type; a permission failure is an authorization
+// decision rather than a malformed request.
+const ValidationIssuePermission = "permission_validation"
+
 // DefaultRollbackValidator implements the RollbackValidator interface
 type DefaultRollbackValidator struct {
 	moduleRegistry ModuleRegistry
@@ -127,7 +132,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 	// Validate permissions
 	if err := v.validatePermissions(ctx, request); err != nil {
 		results.Errors = append(results.Errors, ValidationIssue{
-			Type:     "permission_validation",
+			Type:     ValidationIssuePermission,
 			Severity: "error",
 			Message:  fmt.Sprintf("Permission denied: %v", err),
 		})
@@ -382,7 +387,13 @@ func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, requ
 	}
 
 	userID, _ := ctx.Value(ctxkeys.UserIDKey).(string)
-	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	// The RBAC lookup's tenant: "" for a root-scoped or system-internal caller,
+	// the caller's tenant otherwise; a context with no usable scope is refused
+	// (Issue #4665).
+	tenantID, _, ok := ctxkeys.TenantRestriction(ctx)
+	if !ok {
+		return fmt.Errorf("rollback refused: caller has no tenant scope")
+	}
 
 	if request.Emergency || request.RollbackType == RollbackTypeEmergency {
 		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{

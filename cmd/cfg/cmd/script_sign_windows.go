@@ -39,7 +39,7 @@ func authenticodeSign(filePath string) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("Authenticode signing failed: %s", msg)
+		return fmt.Errorf("signing failed: %s", msg)
 	}
 	return nil
 }

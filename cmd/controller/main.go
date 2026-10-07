@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/spf13/cobra"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	controllerapi "github.com/cfgis/cfgms/features/controller/api"
@@ -21,7 +25,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
-	"github.com/spf13/cobra"
 
 	// Import logging providers to register them
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
@@ -151,6 +154,18 @@ func runController(configPath string, initMode bool, listenAPIAddr, listenTransp
 		return fmt.Errorf("failed to create controller server: %w", err)
 	}
 
+	// Issue #3713: construct and install the WebAuthn relying party before the API
+	// server starts serving. cfg.WebAuthn was already validated by config.LoadWithPath
+	// (ValidateWebAuthn); wa is nil, nil when the operator has not configured it, which
+	// leaves the passkey endpoints answering 503 exactly as before this wiring existed.
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure webauthn relying party: %w", err)
+	}
+	if wa != nil {
+		srv.GetAPIServer().SetWebAuthn(wa)
+	}
+
 	logger.Info("Starting controller server",
 		"operation", "server_start",
 		"log_provider", loggingConfig.Provider,
@@ -229,6 +244,27 @@ func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr
 		}
 		cfg.Transport.ListenAddr = listenTransportAddr
 	}
+}
+
+// buildWebAuthnRelyingParty constructs the WebAuthn relying party from the
+// controller's webauthn configuration block (Issue #3713).
+//
+// Returns (nil, nil) when cfg.WebAuthn is unset or its rp_id is empty — the passkey
+// login and step-up endpoints keep answering 503, exactly as they did before this
+// wiring existed. There is no local-development fallback identifier: an unset
+// configuration must never silently produce a relying party, because that would let a
+// phishing-resistant authenticator verify against an identifier the operator never
+// chose. config.LoadWithPath already runs ValidateWebAuthn before this is reached, so
+// the error path here is defense in depth, not the primary validation gate.
+func buildWebAuthnRelyingParty(cfg *config.Config) (*webauthn.WebAuthn, error) {
+	if cfg.WebAuthn == nil || cfg.WebAuthn.RPID == "" {
+		return nil, nil
+	}
+	displayName := cfg.WebAuthn.RPDisplayName
+	if displayName == "" {
+		displayName = cfg.WebAuthn.RPID
+	}
+	return controllerapi.NewWebAuthnFromConfig(cfg.WebAuthn.RPID, displayName, cfg.WebAuthn.RPOrigins)
 }
 
 // buildInstallCommand builds the `cfgms-controller install` subcommand.
@@ -463,6 +499,7 @@ func buildBootstrapAdminCommand() *cobra.Command {
 		regenerate bool
 		revoke     string
 		list       bool
+		rootScoped bool
 	)
 
 	cmd := &cobra.Command{
@@ -476,6 +513,14 @@ URL. The holder of a bundle can authenticate to the controller REST API as a ful
 Operations:
   --name <name> --output <path>   Issue a new bundle for a named operator or system.
                                   Name must be alphanumeric+hyphens, max 64 chars.
+  --root-scoped                   Only valid with --name. Marks the issued cert as a
+                                  root-scoped SaaS-operator credential (ADR-025 Decision
+                                  1): subject to the root<->MSP tenant boundary rather
+                                  than unrestricted access, and requires an active grant
+                                  or break-glass crossing to reach tenants below "root".
+                                  Do not use for single-root or on-prem deployments'
+                                  primary admin — that would lock it out of its own
+                                  fleet. Issuance is audited.
   --regenerate                    Regenerate the system admin bundle at the configured
                                   path. Requires interactive confirmation (type 'yes').
                                   After regenerating, revoke the old bundle serial:
@@ -488,7 +533,7 @@ Operations:
 Bundles are written with mode 0600. Treat them like root SSH keys.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBootstrapAdmin(configPath, name, outputPath, regenerate, revoke, list)
+			return runBootstrapAdmin(configPath, name, outputPath, regenerate, revoke, list, rootScoped)
 		},
 	}
 
@@ -498,12 +543,13 @@ Bundles are written with mode 0600. Treat them like root SSH keys.`,
 	cmd.Flags().BoolVar(&regenerate, "regenerate", false, "Regenerate the system admin bundle (requires confirmation)")
 	cmd.Flags().StringVar(&revoke, "revoke", "", "Revoke a bundle by serial number")
 	cmd.Flags().BoolVar(&list, "list", false, "List all issued and revoked admin certs")
+	cmd.Flags().BoolVar(&rootScoped, "root-scoped", false, "Mark the new bundle as a root-scoped SaaS-operator credential (ADR-025 Decision 1); only valid with --name")
 
 	return cmd
 }
 
 // runBootstrapAdmin executes the bootstrap-admin operation.
-func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, revoke string, list bool) error {
+func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, revoke string, list bool, rootScoped bool) error {
 	// Exactly one operation must be specified.
 	active := 0
 	if name != "" {
@@ -527,6 +573,9 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 	if name != "" && outputPath == "" {
 		return fmt.Errorf("--output is required with --name")
 	}
+	if rootScoped && name == "" {
+		return fmt.Errorf("--root-scoped is only valid with --name")
+	}
 
 	cfg, err := config.LoadWithPath(configPath)
 	if err != nil {
@@ -537,7 +586,7 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 
 	switch {
 	case name != "":
-		if err := initialization.IssueAdminBundle(cfg, logger, name, outputPath); err != nil {
+		if err := initialization.IssueAdminBundle(cfg, logger, name, outputPath, rootScoped); err != nil {
 			return err
 		}
 		fmt.Printf("Admin bundle issued: %s\n", outputPath)
@@ -562,13 +611,12 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 
 // runBootstrapAdminList prints all issued admin certs and their revocation status.
 func runBootstrapAdminList(cfg *config.Config) error {
-	certPath := cfg.CertPath
-	if certPath == "" && cfg.Certificate != nil {
-		certPath = cfg.Certificate.CAPath
+	if cfg.Certificate == nil || cfg.Certificate.CAPath == "" {
+		return fmt.Errorf("certificate path not configured (certificate.ca_path required)")
 	}
-	if certPath == "" {
-		return fmt.Errorf("certificate path not configured (cert_path or certificate.ca_path required)")
-	}
+	// StoragePath must be the parent of the "ca/" subdirectory; NewManager derives the
+	// real CA directory as filepath.Join(StoragePath,"ca").
+	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
 
 	certManager, err := certpkg.NewManager(&certpkg.ManagerConfig{
 		StoragePath:    certPath,

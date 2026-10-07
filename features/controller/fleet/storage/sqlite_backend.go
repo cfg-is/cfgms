@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,6 +48,38 @@ type SQLiteBackend struct {
 		getStats        *sql.Stmt
 		getNextVersion  *sql.Stmt
 	}
+}
+
+// sqliteTimestampLayout is the canonical on-disk representation for every
+// DATETIME column this backend writes.
+//
+// The column is TEXT-affinity, so `WHERE timestamp >= ?` is a string comparison,
+// not a temporal one. Binding a time.Time directly left the driver to render it
+// with String(), which uses the value's own location — a record written at
+// 01:30 UTC by a controller in UTC-4 was stored as "2026-08-13 21:30:00 -0400"
+// and compared, character by character, against UTC bounds. It sorted into the
+// previous day, so DNA history was attributed to the wrong daily bucket and
+// trend and compliance reporting silently drew from the wrong rows. String()
+// also appends a monotonic reading ("m=+0.02...") when the value carries one,
+// which is neither comparable nor parseable back.
+//
+// Normalising to UTC before formatting makes the comparison temporal again.
+// The layout keeps the shape the driver already round-trips, so reads are
+// unchanged, and it orders correctly under string comparison: the separator
+// after the seconds field is '.' when a fraction follows and ' ' otherwise, and
+// ' ' < '.' < any digit, so shorter fractions sort before longer ones that
+// extend them. Format(".999999999") drops trailing zeros exactly as String()
+// does, which is what keeps the two representations interchangeable.
+//
+// CI never caught this: GitHub runners are UTC, where the rendered zone matches
+// the query zone and the skew is zero.
+const sqliteTimestampLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+
+// sqliteTimestamp renders t in the canonical UTC layout for binding to a
+// DATETIME column. Every write and every time-range bound must pass through
+// here — a single un-normalised site reintroduces the cross-zone comparison.
+func sqliteTimestamp(t time.Time) string {
+	return t.UTC().Format(sqliteTimestampLayout)
 }
 
 // NewSQLiteBackend creates a new SQLite-based DNA storage backend
@@ -135,14 +168,6 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 	return backend, nil
 }
 
-// extractDNAAttr extracts an attribute from DNA, returning empty string if not found.
-func extractDNAAttr(dna *commonpb.DNA, key string) string {
-	if dna == nil || dna.Attributes == nil {
-		return ""
-	}
-	return dna.Attributes[key]
-}
-
 // StoreRecord stores a DNA record with compressed data in SQLite
 func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, compressedData []byte) error {
 	b.mutex.Lock()
@@ -154,15 +179,12 @@ func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, comp
 		return fmt.Errorf("failed to marshal DNA to JSON: %w", err)
 	}
 
-	// Extract fleet query fields from DNA attributes for indexed columns
-	osVal := extractDNAAttr(record.DNA, "os")
-	arch := extractDNAAttr(record.DNA, "architecture")
-	hostname := extractDNAAttr(record.DNA, "hostname")
-
-	// Execute insert with prepared statement
+	// Execute insert with prepared statement.
+	// The os/architecture/hostname columns accept empty strings now that
+	// the flat dna.Attributes read path is retired (Issue #3329).
 	_, err = b.stmts.insertRecord.ExecContext(ctx,
 		record.DeviceID,
-		record.StoredAt,
+		sqliteTimestamp(record.StoredAt),
 		record.Version,
 		string(dnaJSON),
 		record.ContentHash,
@@ -171,9 +193,9 @@ func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, comp
 		record.CompressionRatio,
 		record.ShardID,
 		record.TenantID,
-		osVal,
-		arch,
-		hostname,
+		"", // os — flat attributes path retired (Issue #3329)
+		"", // architecture — flat attributes path retired
+		"", // hostname — flat attributes path retired
 		record.Status,
 	)
 
@@ -209,7 +231,7 @@ func (b *SQLiteBackend) StoreReference(ctx context.Context, record *DNARecord) e
 		record.DeviceID,
 		record.ContentHash,
 		record.Version,
-		record.StoredAt,
+		sqliteTimestamp(record.StoredAt),
 		record.ShardID,
 	)
 
@@ -367,22 +389,50 @@ func (b *SQLiteBackend) prepareStatements() error {
 	var err error
 
 	// Insert DNA record statement
+	// ON CONFLICT keeps the write idempotent when two DNA snapshots for the same
+	// device resolve to the same version. GetNextVersion (MAX(version)+1) runs
+	// outside this insert's lock, so a duplicate/concurrent publish — e.g. the
+	// heartbeat path and the ring-subscription path both firing on reconnect — can
+	// assign the same (device_id, version); without the upsert the second insert
+	// fails the UNIQUE constraint, crashing DNA persist and churning the control
+	// channel. The latest snapshot wins.
 	b.stmts.insertRecord, err = b.db.Prepare(`
 		INSERT INTO dna_history
 		(device_id, timestamp, version, dna_json, content_hash,
 		 original_size, compressed_size, compression_ratio, shard_id,
 		 tenant_id, os, architecture, hostname, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(device_id, version) DO UPDATE SET
+			timestamp=excluded.timestamp,
+			dna_json=excluded.dna_json,
+			content_hash=excluded.content_hash,
+			original_size=excluded.original_size,
+			compressed_size=excluded.compressed_size,
+			compression_ratio=excluded.compression_ratio,
+			shard_id=excluded.shard_id,
+			tenant_id=excluded.tenant_id,
+			os=excluded.os,
+			architecture=excluded.architecture,
+			hostname=excluded.hostname,
+			status=excluded.status
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(device_id, version) DO UPDATE SET
+			content_hash=excluded.content_hash,
+			timestamp=excluded.timestamp,
+			shard_id=excluded.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert reference statement: %w", err)
@@ -504,4 +554,245 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// pruneCandidate holds the minimal data needed to evaluate one version for pruning.
+type pruneCandidate struct {
+	version     int64
+	contentHash string
+	storedAt    time.Time
+	inHistory   bool // true = row lives in dna_history; false = reference-only (dna_references)
+}
+
+// PruneDevice removes dna_history and dna_references rows for deviceID that exceed
+// the given retention bounds.
+//
+// maxCount > 0 keeps the newest N versions (by version number); 0 disables the cap.
+// Non-zero cutoff prunes any row whose timestamp is before that instant; zero disables.
+//
+// Implements the dedup-safe algorithm: a dna_history row is never deleted while any
+// live dna_references row (from any device) still points at its content_hash.
+// The write mutex is held for the entire check-and-delete cycle so no concurrent
+// Store/StoreReference call can interleave between the reference count check and
+// the delete.
+//
+// Returns the count of rows actually deleted.
+func (b *SQLiteBackend) PruneDevice(ctx context.Context, deviceID string, maxCount int, cutoff time.Time) (int64, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin prune transaction for %s: %w", deviceID, err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after successful Commit
+
+	deleted, err := pruneDeviceInTx(ctx, tx, deviceID, maxCount, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit prune transaction for %s: %w", deviceID, err)
+	}
+	return deleted, nil
+}
+
+// PruneAllDevices applies retention bounds to every device in the store.
+// Errors for individual devices are logged and skipped so a single bad row does not
+// abort the full fleet sweep.
+func (b *SQLiteBackend) PruneAllDevices(ctx context.Context, maxCount int, cutoff time.Time) (int64, error) {
+	// Collect device IDs under a short read lock so we do not hold a write lock
+	// across the full fleet sweep.
+	b.mutex.RLock()
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT DISTINCT device_id FROM dna_history
+		UNION
+		SELECT DISTINCT device_id FROM dna_references
+	`)
+	if err != nil {
+		b.mutex.RUnlock()
+		return 0, fmt.Errorf("failed to enumerate devices for global retention sweep: %w", err)
+	}
+	var deviceIDs []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			_ = rows.Close()
+			b.mutex.RUnlock()
+			return 0, fmt.Errorf("failed to scan device ID during global sweep: %w", scanErr)
+		}
+		deviceIDs = append(deviceIDs, id)
+	}
+	_ = rows.Close()
+	b.mutex.RUnlock()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("device enumeration row error: %w", err)
+	}
+
+	var total int64
+	for _, id := range deviceIDs {
+		n, pruneErr := b.PruneDevice(ctx, id, maxCount, cutoff)
+		if pruneErr != nil {
+			b.logger.Error("Failed to prune device during global retention sweep",
+				"device_id", logging.SanitizeLogValue(id), "error", pruneErr)
+			continue // do not abort the full sweep on a single device failure
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// pruneDeviceInTx is the inner implementation of the dedup-safe pruning algorithm,
+// running inside an already-open transaction. Caller must hold b.mutex (write lock).
+//
+// Algorithm (per story spec):
+//  1. Collect all (version, content_hash, storedAt) for the device from both tables.
+//  2. Identify candidates: versions exceeding maxCount cap OR older than cutoff.
+//  3. Split candidates into reference-only (dna_references) and history-owning (dna_history).
+//  4. Delete reference-only candidates from dna_references first — this ensures the
+//     subsequent live-reference count for history candidates only sees truly live rows.
+//  5. For each history candidate, count remaining dna_references WHERE content_hash matches.
+//     If count > 0 another device still needs this content — skip the dna_history delete.
+//     If count == 0 no live reference remains — delete the dna_history row.
+func pruneDeviceInTx(ctx context.Context, tx *sql.Tx, deviceID string, maxCount int, cutoff time.Time) (int64, error) {
+	// Collect history rows for this device.
+	hRows, err := tx.QueryContext(ctx,
+		`SELECT version, content_hash, timestamp FROM dna_history WHERE device_id = ?`,
+		deviceID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query dna_history for %s: %w", deviceID, err)
+	}
+	histByVersion := make(map[int64]pruneCandidate)
+	for hRows.Next() {
+		var c pruneCandidate
+		c.inHistory = true
+		if err := hRows.Scan(&c.version, &c.contentHash, &c.storedAt); err != nil {
+			_ = hRows.Close()
+			return 0, fmt.Errorf("failed to scan dna_history row for %s: %w", deviceID, err)
+		}
+		histByVersion[c.version] = c
+	}
+	if err := hRows.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close dna_history rows for %s: %w", deviceID, err)
+	}
+
+	// Collect reference rows for this device.
+	rRows, err := tx.QueryContext(ctx,
+		`SELECT version, content_hash, timestamp FROM dna_references WHERE device_id = ?`,
+		deviceID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query dna_references for %s: %w", deviceID, err)
+	}
+	refByVersion := make(map[int64]pruneCandidate)
+	for rRows.Next() {
+		var c pruneCandidate
+		c.inHistory = false
+		if err := rRows.Scan(&c.version, &c.contentHash, &c.storedAt); err != nil {
+			_ = rRows.Close()
+			return 0, fmt.Errorf("failed to scan dna_references row for %s: %w", deviceID, err)
+		}
+		refByVersion[c.version] = c
+	}
+	if err := rRows.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close dna_references rows for %s: %w", deviceID, err)
+	}
+
+	// Build sorted (descending) list of all versions across both tables.
+	allVersions := make([]int64, 0, len(histByVersion)+len(refByVersion))
+	for v := range histByVersion {
+		allVersions = append(allVersions, v)
+	}
+	for v := range refByVersion {
+		if _, alreadyInHist := histByVersion[v]; !alreadyInHist {
+			allVersions = append(allVersions, v)
+		}
+	}
+	sort.Slice(allVersions, func(i, j int) bool { return allVersions[i] > allVersions[j] })
+
+	// keepByCount: versions within the count cap (newest N). Only populated when maxCount > 0.
+	keepByCount := make(map[int64]bool)
+	if maxCount > 0 {
+		for i, v := range allVersions {
+			if i < maxCount {
+				keepByCount[v] = true
+			}
+		}
+	}
+
+	// Classify candidates.
+	var histCandidates []pruneCandidate
+	var refCandidates []pruneCandidate
+	for _, v := range allVersions {
+		var c pruneCandidate
+		if h, ok := histByVersion[v]; ok {
+			c = h
+		} else {
+			c = refByVersion[v]
+		}
+
+		prunable := false
+		if maxCount > 0 && !keepByCount[v] {
+			prunable = true // exceeds count cap
+		}
+		if !cutoff.IsZero() && c.storedAt.Before(cutoff) {
+			prunable = true // older than retention period
+		}
+		if !prunable {
+			continue
+		}
+		if c.inHistory {
+			histCandidates = append(histCandidates, c)
+		} else {
+			refCandidates = append(refCandidates, c)
+		}
+	}
+
+	if len(histCandidates) == 0 && len(refCandidates) == 0 {
+		return 0, nil
+	}
+
+	// Step 4: delete reference-only candidates first.
+	// After this point, any remaining dna_references row is a truly live reference —
+	// not a row that was also a candidate in this same prune pass.
+	var deleted int64
+	for _, c := range refCandidates {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM dna_references WHERE device_id = ? AND version = ?`,
+			deviceID, c.version)
+		if err != nil {
+			return deleted, fmt.Errorf("failed to delete dna_references row (device=%s, version=%d): %w",
+				deviceID, c.version, err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+	}
+
+	// Step 5: for each history candidate, check whether any live dna_references row
+	// still points at its content_hash. The ref candidates for this device and pass
+	// were already deleted in step 4, so only truly live references remain.
+	for _, c := range histCandidates {
+		var liveRefCount int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM dna_references WHERE content_hash = ?`,
+			c.contentHash).Scan(&liveRefCount); err != nil {
+			return deleted, fmt.Errorf("failed to count live refs for content_hash (device=%s, version=%d): %w",
+				deviceID, c.version, err)
+		}
+		if liveRefCount > 0 {
+			// Another device (or a non-pruned version of this device) still references
+			// this content — the dna_history row has become shared canonical storage.
+			continue
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM dna_history WHERE device_id = ? AND version = ?`,
+			deviceID, c.version)
+		if err != nil {
+			return deleted, fmt.Errorf("failed to delete dna_history row (device=%s, version=%d): %w",
+				deviceID, c.version, err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+	}
+
+	return deleted, nil
 }

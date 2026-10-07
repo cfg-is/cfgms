@@ -13,6 +13,7 @@ package dispatcher
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -20,7 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/config/signature"
-	script "github.com/cfgis/cfgms/features/modules/script"
+	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -31,7 +32,23 @@ const (
 	// maxScriptContentBytes is the decoded size cap for script_content params.
 	// gRPC default max recv is 4 MB; 1 MB decoded ≈ 1.33 MB base64 leaves margin.
 	maxScriptContentBytes = 1 << 20 // 1 MiB
+
+	// defaultLockGraceMultiplier is multiplied by an execution's own Timeout to
+	// compute the per-device lock TTL used by the sweep. A value of 2 gives 100%
+	// headroom above the declared script timeout before a lock is considered wedged.
+	defaultLockGraceMultiplier = 2.0
 )
+
+// lockMetaEntry holds per-device lock metadata used by the TTL sweep and the
+// cancel-release path. executionID is stored alongside acquiredAt so that
+// ReleaseDeviceForCancelledExecution can verify that a late cancel does not
+// accidentally release a lock now held by a newer execution for the same device.
+type lockMetaEntry struct {
+	acquiredAt  time.Time
+	executionID string
+	// lockTTL is exec.Timeout * lockGraceMultiplier. Zero means use d.defaultLockTTL.
+	lockTTL time.Duration
+}
 
 // Dispatcher drains the ExecutionQueue and sends CommandExecuteScript to stewards.
 //
@@ -40,10 +57,18 @@ const (
 // (so nothing is dequeued when the device is already busy) and released only
 // inside handleCompletionEvent or on send failure, ensuring exactly one
 // execution is in-flight per device at any given time.
+//
+// Three release paths ensure the lock is never held permanently:
+//  1. handleCompletionEvent (normal completion)
+//  2. TTL sweep in pollLoop (no completion event within lockTTL)
+//  3. ReleaseDeviceForCancelledExecution (explicit cancellation via CancelRun)
 type Dispatcher struct {
-	queue        *script.ExecutionQueue
-	controlPlane controlplaneInterfaces.ControlPlaneProvider
-	signer       signature.Signer // optional; when nil commands are sent unsigned
+	queue              *script.ExecutionQueue
+	controlPlane       controlplaneInterfaces.ControlPlaneProvider
+	signer             signature.Signer            // optional; when nil commands are sent unsigned
+	isLocallyConnected func(stewardID string) bool // optional; nil = dispatch to every queued device
+	termSource         TermSource                  // optional; when nil commands carry term 0
+	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
 	deviceLocks  sync.Map
@@ -57,6 +82,19 @@ type Dispatcher struct {
 	// grantManager, when set, creates and consumes per-execution relay grants
 	// (Issue #1675). Set once via SetGrantManager before Start; nil = no grants.
 	grantManager GrantManager
+
+	// lockMetaMu guards lockMetaMap for atomic check-and-delete in the cancel and
+	// TTL-sweep paths. Separate from mu so neither sweep nor cancel blocks Stop.
+	lockMetaMu  sync.Mutex
+	lockMetaMap map[string]lockMetaEntry
+
+	// defaultLockTTL is used when a lock's execution has zero Timeout.
+	// Set to 10 × pollInterval in New — conservative, covering multi-minute scripts.
+	defaultLockTTL time.Duration
+
+	// lockGraceMultiplier is applied to exec.Timeout to compute the per-execution
+	// lock TTL. Configurable via Config.LockGraceMultiplier; defaults to 2.
+	lockGraceMultiplier float64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -90,6 +128,11 @@ type GrantManager interface {
 }
 
 // Config holds Dispatcher configuration.
+// TermSource provides the current fencing term for outbound commands.
+type TermSource interface {
+	GetTerm() uint64
+}
+
 type Config struct {
 	Queue        *script.ExecutionQueue
 	ControlPlane controlplaneInterfaces.ControlPlaneProvider
@@ -98,10 +141,31 @@ type Config struct {
 	// Should be set to the same signer used by the command publisher so all
 	// controller-issued commands carry consistent signatures.
 	Signer signature.Signer
+	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
+	// execute_script delivery. Public-beta deployments must set this true.
+	RequireSignedAdhoc bool
+	// IsLocallyConnected reports whether a steward's control-plane session is
+	// held by this node. When set, the dispatcher only dispatches to locally
+	// connected stewards: with a cluster-shared execution queue (Issue #4528)
+	// every node sees every device's work, and the node holding the session is
+	// the one that must deliver it and receive its result. Nil dispatches to
+	// every device in the queue (single-node behaviour).
+	IsLocallyConnected func(stewardID string) bool
+	// TermSource stamps the current fencing term onto every execute_script
+	// command, as the command publisher does for all other commands (#3390).
+	// Stewards that have seen a stamped command reject term 0 (ADR-029
+	// Decision 6), so a cluster without it can never run ad-hoc scripts
+	// (Issue #4510). Nil sends term 0 (single-server behaviour).
+	TermSource TermSource
 	// PollInterval is how often the background loop polls all devices.
 	// Defaults to 30 s when zero.
 	PollInterval time.Duration
-	Logger       logging.Logger
+	// LockGraceMultiplier is applied to each execution's Timeout to compute the
+	// per-device lock TTL for the sweep. Defaults to 2 (100% grace headroom above
+	// the declared script timeout). When the execution has no declared Timeout,
+	// 10 × PollInterval is used instead. Configurable mainly for tests.
+	LockGraceMultiplier float64
+	Logger              logging.Logger
 }
 
 // New creates a new Dispatcher. Call Start to begin operation.
@@ -115,22 +179,36 @@ func New(cfg *Config) (*Dispatcher, error) {
 	if cfg.Logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
+	if cfg.RequireSignedAdhoc && cfg.Signer == nil {
+		return nil, fmt.Errorf("signed ad-hoc execution requires a command signer")
+	}
 
 	interval := cfg.PollInterval
 	if interval == 0 {
 		interval = defaultPollInterval
 	}
 
+	graceMultiplier := cfg.LockGraceMultiplier
+	if graceMultiplier == 0 {
+		graceMultiplier = defaultLockGraceMultiplier
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Dispatcher{
-		queue:        cfg.Queue,
-		controlPlane: cfg.ControlPlane,
-		signer:       cfg.Signer,
-		pollInterval: interval,
-		logger:       cfg.Logger,
-		ctx:          ctx,
-		cancel:       cancel,
+		queue:               cfg.Queue,
+		controlPlane:        cfg.ControlPlane,
+		signer:              cfg.Signer,
+		isLocallyConnected:  cfg.IsLocallyConnected,
+		termSource:          cfg.TermSource,
+		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
+		pollInterval:        interval,
+		logger:              cfg.Logger,
+		lockMetaMap:         make(map[string]lockMetaEntry),
+		defaultLockTTL:      10 * interval,
+		lockGraceMultiplier: graceMultiplier,
+		ctx:                 ctx,
+		cancel:              cancel,
 	}, nil
 }
 
@@ -162,6 +240,11 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	if err := d.controlPlane.SubscribeEvents(ctx, filter, d.handleCompletionEvent); err != nil {
 		return fmt.Errorf("dispatcher: subscribe events: %w", err)
 	}
+
+	// Drain any executions queued before Start was called. Running this
+	// synchronously before the goroutine starts ensures callers that queue
+	// executions after Start returns never race with the startup dispatch.
+	d.dispatchAll(d.ctx)
 
 	d.wg.Add(1)
 	go d.pollLoop()
@@ -214,31 +297,136 @@ func (d *Dispatcher) lockForDevice(deviceID string) chan struct{} {
 
 // tryAcquireDevice attempts a non-blocking send on the device's channel.
 // Returns true if the lock was acquired, false if another dispatch is in-flight.
+// On acquisition, a lockMetaEntry is recorded with the current time so the TTL
+// sweep can detect wedged locks. The executionID is filled in later via
+// setLockExecution once the dequeued execution is known.
 func (d *Dispatcher) tryAcquireDevice(deviceID string) bool {
 	ch := d.lockForDevice(deviceID)
 	select {
 	case ch <- struct{}{}:
+		d.lockMetaMu.Lock()
+		d.lockMetaMap[deviceID] = lockMetaEntry{acquiredAt: time.Now()}
+		d.lockMetaMu.Unlock()
 		return true
 	default:
 		return false
 	}
 }
 
-// releaseDevice drains the device's channel, freeing the slot for the next dispatch.
+// setLockExecution updates the lock metadata for deviceID with the in-flight
+// executionID and its computed TTL. Called immediately after DequeueForDevice
+// returns the execution so the cancel and TTL-sweep paths can match by ID.
+func (d *Dispatcher) setLockExecution(deviceID, executionID string, timeout time.Duration) {
+	d.lockMetaMu.Lock()
+	defer d.lockMetaMu.Unlock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok {
+		return
+	}
+	entry.executionID = executionID
+	if timeout > 0 {
+		entry.lockTTL = time.Duration(float64(timeout) * d.lockGraceMultiplier)
+	}
+	d.lockMetaMap[deviceID] = entry
+}
+
+// releaseDevice drains the device's channel and clears its lock metadata,
+// freeing the slot for the next dispatch.
 func (d *Dispatcher) releaseDevice(deviceID string) {
 	ch := d.lockForDevice(deviceID)
 	select {
 	case <-ch:
 	default:
 	}
+	d.lockMetaMu.Lock()
+	delete(d.lockMetaMap, deviceID)
+	d.lockMetaMu.Unlock()
 }
 
-// pollLoop fires dispatchAll immediately on startup, then on each poll interval tick.
+// releaseDeviceIfExecution releases the device lock only when the currently-held
+// executionID matches. This prevents a stale cancel or late sweep entry from
+// accidentally releasing a lock now held by a newer execution for the same device.
+// Returns true if the lock was released.
+//
+// The metadata is deleted under lockMetaMu before the channel is drained. Between
+// deletion and drain, tryAcquireDevice cannot succeed (channel still full), so no
+// new dispatch can start in that window.
+func (d *Dispatcher) releaseDeviceIfExecution(deviceID, executionID string) bool {
+	d.lockMetaMu.Lock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok || entry.executionID != executionID {
+		d.lockMetaMu.Unlock()
+		return false
+	}
+	delete(d.lockMetaMap, deviceID)
+	d.lockMetaMu.Unlock()
+
+	ch := d.lockForDevice(deviceID)
+	select {
+	case <-ch:
+	default:
+	}
+	return true
+}
+
+// ReleaseDeviceForCancelledExecution releases the per-device dispatch lock for
+// deviceID when the currently-held execution matches executionID. It is called
+// by run.Manager.CancelRun so the device is unblocked immediately on cancellation
+// rather than waiting for the TTL sweep.
+//
+// Returns true if the lock was released; false if the lock is held by a different
+// (newer) execution or is not currently held.
+func (d *Dispatcher) ReleaseDeviceForCancelledExecution(deviceID, executionID string) bool {
+	released := d.releaseDeviceIfExecution(deviceID, executionID)
+	if released {
+		d.logger.Info("Device lock released for cancelled execution",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(executionID))
+	}
+	return released
+}
+
+// sweepExpiredLocks checks all held device locks and releases any whose TTL has
+// elapsed without a completion event. The TTL is derived from the execution's own
+// Timeout (× lockGraceMultiplier); zero-Timeout executions use defaultLockTTL.
+// A Warn-level event with "event"="device_lock_ttl_released" is emitted for each
+// release so wedge incidents are distinguishable in logs from normal completions.
+func (d *Dispatcher) sweepExpiredLocks() {
+	now := time.Now()
+
+	d.lockMetaMu.Lock()
+	type expiredEntry struct {
+		deviceID    string
+		executionID string
+	}
+	var expired []expiredEntry
+	for deviceID, meta := range d.lockMetaMap {
+		ttl := meta.lockTTL
+		if ttl == 0 {
+			ttl = d.defaultLockTTL
+		}
+		if now.Sub(meta.acquiredAt) > ttl {
+			expired = append(expired, expiredEntry{deviceID, meta.executionID})
+		}
+	}
+	d.lockMetaMu.Unlock()
+
+	for _, e := range expired {
+		if d.releaseDeviceIfExecution(e.deviceID, e.executionID) {
+			d.logger.Warn("Device lock TTL exceeded; releasing wedged lock",
+				"event", "device_lock_ttl_released",
+				"device_id", logging.SanitizeLogValue(e.deviceID),
+				"execution_id", logging.SanitizeLogValue(e.executionID))
+		}
+	}
+}
+
+// pollLoop fires sweepExpiredLocks then dispatchAll on each poll interval tick.
+// sweepExpiredLocks runs first so that any freed device slots are immediately
+// available for the following dispatchAll.
+// The initial dispatch on startup is handled synchronously by Start.
 func (d *Dispatcher) pollLoop() {
 	defer d.wg.Done()
-
-	// Drain on startup without waiting for the first tick.
-	d.dispatchAll(d.ctx)
 
 	ticker := time.NewTicker(d.pollInterval)
 	defer ticker.Stop()
@@ -248,6 +436,7 @@ func (d *Dispatcher) pollLoop() {
 		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
+			d.sweepExpiredLocks()
 			d.dispatchAll(d.ctx)
 		}
 	}
@@ -282,6 +471,12 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Issue #4528: with a shared queue, only the node holding the steward's
+	// session dispatches to it, so the dispatching node is also the node that
+	// receives the result. Other nodes leave the work queued.
+	if d.isLocallyConnected != nil && !d.isLocallyConnected(deviceID) {
+		return
+	}
 
 	// Acquire per-device slot BEFORE dequeuing.
 	if !d.tryAcquireDevice(deviceID) {
@@ -306,6 +501,9 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// the queue's background maintenance (RequeueStale) will move them back to queued
 	// after dispatchTimeout so they can be picked up in a future cycle.
 	exec := executions[0]
+
+	// Record executionID and lock TTL now that we know the execution.
+	d.setLockExecution(deviceID, exec.ExecutionID, exec.Timeout)
 
 	prepared, err := d.queue.PrepareExecutionForDevice(ctx, deviceID, "", exec)
 	if err != nil {
@@ -332,6 +530,34 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// no second execution is dispatched while the first is running.
 }
 
+// metaInt reads an integer metadata value. A durable queue store returns
+// metadata through a JSON round-trip, so numbers arrive as float64 (or
+// json.Number) rather than int; reading only int would reset a retry counter
+// to 0 on every attempt and retry an idempotent failure forever (Issue #4528).
+func metaInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+// currentTerm returns the fencing term from the configured TermSource, or 0 when
+// none is set.
+func (d *Dispatcher) currentTerm() uint64 {
+	if d.termSource == nil {
+		return 0
+	}
+	return d.termSource.GetTerm()
+}
+
 // sendCommand builds and transmits a CommandExecuteScript via the control plane.
 func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *script.QueuedExecution, prepared *script.PreparedExecution) error {
 	content := prepared.ScriptContent
@@ -348,6 +574,24 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		"execution_id":   exec.ExecutionID,
 		"script_content": encodedContent,
 		"shell":          string(exec.Shell),
+	}
+	for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key", "nonce", "expires_at"} {
+		if value, ok := exec.Metadata[key].(string); ok && value != "" {
+			params[key] = value
+		}
+	}
+	// Issue #3694: forward the operator-signed target list alongside the signature
+	// metadata above — the steward independently verifies its own ID is a member
+	// before executing an inline command.
+	if targets := extractMetaStringSlice(exec.Metadata, "targets"); len(targets) > 0 {
+		params["targets"] = targets
+	}
+	if d.requireSignedAdhoc && exec.ScriptRef == "" {
+		for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key"} {
+			if _, ok := params[key]; !ok {
+				return fmt.Errorf("signed ad-hoc execution missing %s", key)
+			}
+		}
 	}
 
 	if exec.ExecutionContext != "" {
@@ -369,7 +613,10 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		params["required_api_scope"] = scope
 
 		if d.grantManager != nil {
-			tenantID, _ := exec.Metadata["tenant_id"].(string)
+			tenantID, ok := exec.Metadata["tenant_id"].(string)
+			if !ok || tenantID == "" {
+				return fmt.Errorf("create execution grant: missing or invalid tenant_id in script metadata")
+			}
 			ttl := exec.Timeout
 			if ttl <= 0 {
 				ttl = 15 * time.Minute // matches defaultScriptTimeoutSec in steward handler
@@ -386,6 +633,7 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		StewardID: deviceID,
 		Timestamp: time.Now(),
 		Params:    params,
+		Term:      d.currentTerm(),
 	}
 
 	signed := &controlplaneTypes.SignedCommand{Command: *cmd}
@@ -400,6 +648,11 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 			return fmt.Errorf("sign command: %w", err)
 		}
 		signed.Signature = sig
+	}
+	if d.requireSignedAdhoc && (signed.Signature == nil ||
+		signed.Signature.Signature == "" ||
+		!signed.Signature.Algorithm.IsValid()) {
+		return fmt.Errorf("signed ad-hoc execution refused unsigned command")
 	}
 
 	if err := d.controlPlane.SendCommand(ctx, signed); err != nil {
@@ -467,17 +720,17 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		if ec, ok := event.Details["exit_code"].(float64); ok {
 			result.ExitCode = int(ec)
 		}
-		// The steward emits stdout_preview/stderr_preview (execute_script.go);
-		// accept the bare stdout/stderr keys too for forward compatibility
-		// (Issue #1995, root cause D — key alignment).
-		if stdout, ok := event.Details["stdout_preview"].(string); ok {
+		// Prefer the full capped stdout/stderr keys (Issue #1978: steward now sends up to 1 MB
+		// under the "stdout"/"stderr" keys). Fall back to stdout_preview/stderr_preview (4 KB)
+		// for compatibility with older stewards that only send preview keys.
+		if stdout, ok := event.Details["stdout"].(string); ok {
 			result.Stdout = stdout
-		} else if stdout, ok := event.Details["stdout"].(string); ok {
+		} else if stdout, ok := event.Details["stdout_preview"].(string); ok {
 			result.Stdout = stdout
 		}
-		if stderr, ok := event.Details["stderr_preview"].(string); ok {
+		if stderr, ok := event.Details["stderr"].(string); ok {
 			result.Stderr = stderr
-		} else if stderr, ok := event.Details["stderr"].(string); ok {
+		} else if stderr, ok := event.Details["stderr_preview"].(string); ok {
 			result.Stderr = stderr
 		}
 		// On a command_failed event there is no result; surface the error string
@@ -489,6 +742,21 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		}
 		if durMs, ok := event.Details["duration_ms"].(float64); ok {
 			result.Duration = time.Duration(durMs) * time.Millisecond
+		}
+
+		// 4 MB controller ceiling: defense-in-depth against a compromised or buggy steward
+		// bypassing the steward-side 1 MB cap (Issue #1978). Drop oversized output rather
+		// than storing unbounded data. The steward-side cap (1 MB) should prevent this from
+		// triggering under normal operation.
+		const controllerOutputCapBytes = 4 * 1024 * 1024
+		if len(result.Stdout)+len(result.Stderr) > controllerOutputCapBytes {
+			d.logger.Error("Execution output exceeds 4 MB controller ceiling; dropping output",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"stdout_bytes", len(result.Stdout),
+				"stderr_bytes", len(result.Stderr))
+			result.Stdout = ""
+			result.Stderr = ""
 		}
 	}
 
@@ -505,7 +773,7 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			runID, _ = qe.Metadata["workflow_run_id"].(string)
 			jobID, _ = qe.Metadata["job_id"].(string)
 			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
-			retryCount, _ = qe.Metadata["retry_count"].(int)
+			retryCount = metaInt(qe.Metadata["retry_count"])
 			origQE = qe
 			break
 		}

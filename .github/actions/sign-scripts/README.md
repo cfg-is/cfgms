@@ -144,7 +144,7 @@ jobs:
 ## Requirements
 
 - **CFGMS v0.4.0+** — the `cfg script sign` subcommand was introduced in this
-  release.  See [Script Signing CI Guide](../../docs/guides/script-signing-ci.md)
+  release.  See [Script Signing CI Guide](../../../docs/guides/script-signing-ci.md)
   for the full setup walkthrough.
 - **`contents: write` permission** — the action commits `.sig` files back to
   the branch.  Add `permissions: contents: write` to the job or workflow.

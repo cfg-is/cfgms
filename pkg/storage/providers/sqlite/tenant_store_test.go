@@ -56,6 +56,23 @@ func TestTenantStore_GetNotFound(t *testing.T) {
 
 	_, err := store.GetTenant(ctx, "nonexistent")
 	assert.Error(t, err)
+	assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+}
+
+// TestTenantStore_MissingTenantContract holds this provider to the shared
+// missing-tenant sentinel contract. Callers (notably the tenant API handlers)
+// classify a missing tenant with errors.Is; a provider that signalled it only
+// through message text would make that classification silently fail and turn the
+// resulting 404/500 split into a cross-tenant existence oracle.
+func TestTenantStore_MissingTenantContract(t *testing.T) {
+	business.TenantStoreMissingTenantContract(t, newTenantStore(t))
+}
+
+// TestTenantStore_LifecycleContract holds this provider to the shared suspension
+// provenance persistence contract (ADR-027 Decision 2, Issue #3158). Both
+// DirectlySuspended and CascadeSuspendedFrom must survive a store round-trip.
+func TestTenantStore_LifecycleContract(t *testing.T) {
+	business.TenantStoreLifecycleContract(t, newTenantStore(t))
 }
 
 func TestTenantStore_Update(t *testing.T) {
@@ -85,6 +102,7 @@ func TestTenantStore_UpdateNotFound(t *testing.T) {
 
 	err := store.UpdateTenant(ctx, &business.TenantData{ID: "nonexistent", Name: "X"})
 	assert.Error(t, err)
+	assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
 }
 
 func TestTenantStore_Delete(t *testing.T) {
@@ -107,7 +125,9 @@ func TestTenantStore_DeleteNotFound(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()
 
-	assert.Error(t, store.DeleteTenant(ctx, "nonexistent"))
+	err := store.DeleteTenant(ctx, "nonexistent")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
 }
 
 func TestTenantStore_List(t *testing.T) {

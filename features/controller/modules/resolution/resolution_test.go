@@ -134,6 +134,9 @@ func initSignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, ver
 	git("-C", repoDir, "config", "user.name", "CFGMS Test")
 	git("add", ".")
 	git("commit", "-m", "Initial module commit")
+	// The resolver pins to the requested version by checking out a git ref of
+	// that exact name (Issue #4409); tag the commit so "version" resolves.
+	git("tag", version)
 
 	return pubKey
 }
@@ -172,6 +175,9 @@ func initUnsignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, v
 	git("-C", repoDir, "config", "user.name", "CFGMS Test")
 	git("add", ".")
 	git("commit", "-m", "Initial module commit")
+	// The resolver pins to the requested version by checking out a git ref of
+	// that exact name (Issue #4409); tag the commit so "version" resolves.
+	git("tag", version)
 }
 
 // --- tests ---

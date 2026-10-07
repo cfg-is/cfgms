@@ -15,9 +15,61 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// listScripts sends GET /api/v1/scripts through the same
+// requirePermission("script","admin") gate routes_scripts.go registers.
+// script:admin requires AssuranceStrong (Issue #3687), so a Machine-assurance
+// API-key credential can no longer reach it — tests present a principal directly.
+func listScripts(server *Server, principal *Principal) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts", nil)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	handler := server.requirePermission("script", "admin")(http.HandlerFunc(server.handleListScripts))
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// getScriptLibraryItem sends GET /api/v1/scripts/{id} through the same
+// requirePermission("script","admin") gate routes_scripts.go registers.
+func getScriptLibraryItem(server *Server, principal *Principal, id string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/"+id, nil)
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"id": id})
+	rec := httptest.NewRecorder()
+	handler := server.requirePermission("script", "admin")(http.HandlerFunc(server.handleGetScriptLibraryItem))
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// putScriptPrivilege sends PUT /api/v1/scripts/{id}/privilege through the same
+// requirePermission("script","admin") gate routes_scripts.go registers.
+func putScriptPrivilege(server *Server, principal *Principal, id, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/"+id+"/privilege", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"id": id})
+	rec := httptest.NewRecorder()
+	handler := server.requirePermission("script", "admin")(http.HandlerFunc(server.handlePutScriptPrivilege))
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// postScriptRetry sends POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry
+// through the same requirePermission("steward","execute-scripts") gate
+// routes_stewards.go registers. steward:execute-scripts requires AssuranceStrong
+// (Issue #3687), so a Machine-assurance API-key credential can no longer reach it.
+func postScriptRetry(server *Server, principal *Principal, stewardID, executionID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+stewardID+"/scripts/executions/"+executionID+"/retry", nil)
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"id": stewardID, "execution_id": executionID})
+	rec := httptest.NewRecorder()
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostScriptRetry))
+	handler.ServeHTTP(rec, req)
+	return rec
+}
 
 // newTestScriptTracker opens an in-memory SQLite database and returns a ready
 // ExecutionTrackingStore. The database is closed automatically via t.Cleanup.
@@ -342,12 +394,9 @@ func TestHandleGetScriptStatus_ServiceUnavailable(t *testing.T) {
 // TestHandlePostScriptRetry_NotImplemented verifies that the retry handler returns 501.
 func TestHandlePostScriptRetry_NotImplemented(t *testing.T) {
 	server, _ := setupScriptServer(t)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	principal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/steward-1/scripts/executions/exec-1/retry", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := postScriptRetry(server, principal, "steward-1", "exec-1")
 
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 
@@ -355,6 +404,21 @@ func TestHandlePostScriptRetry_NotImplemented(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
 	require.NotNil(t, errResp.Error)
 	assert.Equal(t, "NOT_IMPLEMENTED", errResp.Error.Code)
+}
+
+// TestHandlePostScriptRetry_CrossTenant_NotFound is the [REQUIRED TEST] for Issue
+// #4335: a tenant-a caller cannot retry a script execution against a steward
+// registered to tenant-b.
+func TestHandlePostScriptRetry_CrossTenant_NotFound(t *testing.T) {
+	server, _ := setupScriptServer(t)
+	stewardID := registerStewardInTenant(t, server.controllerService, "tenant-b",
+		map[string]string{"hostname": "retry-cross-tenant-host", "os": "linux"})
+
+	principal := runPrincipal("exec-caller-a", []string{"steward:execute-scripts"}, "tenant-a")
+	rec := postScriptRetry(server, principal, stewardID, "exec-1")
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"tenant-a caller must not be able to retry a script on tenant-b's steward: %s", rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -395,15 +459,12 @@ func seedLibraryScript(t *testing.T, repo *script.GitScriptRepository, id, name 
 // TestHandleListScripts_ReturnsSeededScripts verifies GET /api/v1/scripts returns scripts from the repo.
 func TestHandleListScripts_ReturnsSeededScripts(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
 	seedLibraryScript(t, repo, "backup-all", "Backup All")
 	seedLibraryScript(t, repo, "health-check", "Health Check")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := listScripts(server, principal)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -427,12 +488,9 @@ func TestHandleListScripts_ReturnsSeededScripts(t *testing.T) {
 // TestHandleListScripts_ServiceUnavailable verifies 503 when no repo is wired.
 func TestHandleListScripts_ServiceUnavailable(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := listScripts(server, principal)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
@@ -440,14 +498,11 @@ func TestHandleListScripts_ServiceUnavailable(t *testing.T) {
 // TestHandleGetScriptLibraryItem_Found verifies GET /api/v1/scripts/{id} returns a real script.
 func TestHandleGetScriptLibraryItem_Found(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
 	seedLibraryScript(t, repo, "deploy-agent", "Deploy Agent")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/deploy-agent", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := getScriptLibraryItem(server, principal, "deploy-agent")
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -463,12 +518,9 @@ func TestHandleGetScriptLibraryItem_Found(t *testing.T) {
 // TestHandleGetScriptLibraryItem_NotFound verifies 404 for an unknown script ID.
 func TestHandleGetScriptLibraryItem_NotFound(t *testing.T) {
 	server, _ := setupScriptLibraryServer(t)
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/does-not-exist", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := getScriptLibraryItem(server, principal, "does-not-exist")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
@@ -478,16 +530,12 @@ func TestHandleGetScriptLibraryItem_NotFound(t *testing.T) {
 func TestHandlePutScriptPrivilege_ScopeNotHeldByCallerReturns403(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
 	// Caller has script:admin but NOT config:push.
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
 	seedLibraryScript(t, repo, "priv-test", "Priv Test")
 
 	body := `{"required_api_scope": ["config:push"]}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/priv-test/privilege", strings.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := putScriptPrivilege(server, principal, "priv-test", body)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "must return 403 when granting scope caller does not hold")
 }
@@ -497,16 +545,12 @@ func TestHandlePutScriptPrivilege_ScopeNotHeldByCallerReturns403(t *testing.T) {
 func TestHandlePutScriptPrivilege_DNAPathWithoutReadDNAReturns403(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
 	// Caller has script:admin but NOT steward:read-dna.
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
 	seedLibraryScript(t, repo, "dna-priv-test", "DNA Priv Test")
 
 	body := `{"param_platform_bindings": {"os_version": "OS.Version"}}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/dna-priv-test/privilege", strings.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := putScriptPrivilege(server, principal, "dna-priv-test", body)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "must return 403 when binding DNA paths without steward:read-dna")
 }
@@ -515,16 +559,12 @@ func TestHandlePutScriptPrivilege_DNAPathWithoutReadDNAReturns403(t *testing.T) 
 func TestHandlePutScriptPrivilege_AllowedWhenCallerHoldsScopes(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
 	// Caller has script:admin AND steward:read-scripts.
-	apiKey := NewTestKey(t, server, []string{"script:admin", "steward:read-scripts"})
+	principal := runPrincipal("admin-caller", []string{"script:admin", "steward:read-scripts"}, "test-tenant")
 
 	seedLibraryScript(t, repo, "ok-priv", "OK Priv")
 
 	body := `{"required_api_scope": ["steward:read-scripts"]}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/ok-priv/privilege", strings.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := putScriptPrivilege(server, principal, "ok-priv", body)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -538,16 +578,12 @@ func TestHandlePutScriptPrivilege_AllowedWhenCallerHoldsScopes(t *testing.T) {
 // TestHandlePutScriptPrivilege_DNAPathAllowedWithReadDNA verifies DNA binding when caller has steward:read-dna.
 func TestHandlePutScriptPrivilege_DNAPathAllowedWithReadDNA(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
-	apiKey := NewTestKey(t, server, []string{"script:admin", "steward:read-dna"})
+	principal := runPrincipal("admin-caller", []string{"script:admin", "steward:read-dna"}, "test-tenant")
 
 	seedLibraryScript(t, repo, "dna-ok", "DNA OK")
 
 	body := `{"param_platform_bindings": {"os_version": "OS.Version"}}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/dna-ok/privilege", strings.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := putScriptPrivilege(server, principal, "dna-ok", body)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 }
@@ -555,28 +591,18 @@ func TestHandlePutScriptPrivilege_DNAPathAllowedWithReadDNA(t *testing.T) {
 // TestHandlePutScriptPrivilege_TenantIsolation verifies that privilege metadata is tenant-scoped.
 func TestHandlePutScriptPrivilege_TenantIsolation(t *testing.T) {
 	server, repo := setupScriptLibraryServer(t)
-	// Create keys for different tenants.
-	keyTenantA := NewEphemeralTestKey(t, server, []string{"script:admin"}, "tenant-a", 5*time.Minute)
-	keyTenantB := NewEphemeralTestKey(t, server, []string{"script:admin"}, "tenant-b", 5*time.Minute)
+	// Principals for different tenants.
+	principalA := runPrincipal("admin-tenant-a", []string{"script:admin"}, "tenant-a")
+	principalB := runPrincipal("admin-tenant-b", []string{"script:admin"}, "tenant-b")
 
 	seedLibraryScript(t, repo, "shared-id", "Shared Script")
 
 	// Tenant A sets privilege (no required scopes so no scope ceiling issue).
-	body := `{}`
-	reqA := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/shared-id/privilege", strings.NewReader(body))
-	reqA.Header.Set("X-API-Key", keyTenantA)
-	reqA.Header.Set("Content-Type", "application/json")
-	recA := httptest.NewRecorder()
-	server.router.ServeHTTP(recA, reqA)
+	recA := putScriptPrivilege(server, principalA, "shared-id", `{}`)
 	require.Equal(t, http.StatusOK, recA.Code)
 
 	// Tenant B sets privilege with different data.
-	bodyB := `{"required_api_scope": []}`
-	reqB := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/shared-id/privilege", strings.NewReader(bodyB))
-	reqB.Header.Set("X-API-Key", keyTenantB)
-	reqB.Header.Set("Content-Type", "application/json")
-	recB := httptest.NewRecorder()
-	server.router.ServeHTTP(recB, reqB)
+	recB := putScriptPrivilege(server, principalB, "shared-id", `{"required_api_scope": []}`)
 	require.Equal(t, http.StatusOK, recB.Code)
 }
 
@@ -589,14 +615,78 @@ func TestHandlePutScriptPrivilege_ServiceUnavailable(t *testing.T) {
 	require.NoError(t, err)
 	server.SetScriptRepository(repo)
 
-	apiKey := NewTestKey(t, server, []string{"script:admin"})
+	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
-	body := `{}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/any-id/privilege", strings.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	rec := putScriptPrivilege(server, principal, "any-id", `{}`)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestScriptStewardRoutes_CrossTenant_NotFound covers the four remaining
+// authorizeStewardScopeLenient gates in this file (executions list, single
+// execution, metrics, status) alongside the retry gate above: a test-tenant caller
+// must not read tenant-b's script history, and the refusal must not disclose that
+// the steward — or its execution record — exists.
+func TestScriptStewardRoutes_CrossTenant_NotFound(t *testing.T) {
+	server, tracker := setupScriptServer(t)
+	stewardID := registerStewardInTenant(t, server.controllerService, "tenant-b",
+		map[string]string{"hostname": "scripts-cross-tenant-host", "os": "linux"})
+	seedExecution(t, tracker, "exec-cross-tenant", stewardID, "scripts/tenant-b-only.sh", "completed")
+
+	// NewTestKey is scoped to "test-tenant", not "tenant-b".
+	apiKey := NewTestKey(t, server, []string{"steward:read-scripts"})
+
+	routes := map[string]string{
+		"executions": "/api/v1/stewards/" + stewardID + "/scripts/executions",
+		"execution":  "/api/v1/stewards/" + stewardID + "/scripts/executions/exec-cross-tenant",
+		"metrics":    "/api/v1/stewards/" + stewardID + "/scripts/metrics",
+		"status":     "/api/v1/stewards/" + stewardID + "/scripts/status",
+	}
+
+	for name, path := range routes {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("X-API-Key", apiKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusNotFound, rec.Code,
+				"%s must refuse an out-of-scope caller: %s", path, rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			require.NotNil(t, errResp.Error)
+			assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code,
+				"the cross-tenant answer must be indistinguishable from a genuine miss")
+			assert.NotContains(t, rec.Body.String(), "tenant-b-only.sh",
+				"no execution detail may leak in the refusal")
+		})
+	}
+}
+
+// TestScriptStewardRoutes_OwningTenant_Returns200 is the over-denial control for the
+// gates exercised above: the steward's own tenant still reads its script history.
+func TestScriptStewardRoutes_OwningTenant_Returns200(t *testing.T) {
+	server, tracker := setupScriptServer(t)
+	stewardID := registerStewardInTenant(t, server.controllerService, "test-tenant",
+		map[string]string{"hostname": "scripts-same-tenant-host", "os": "linux"})
+	seedExecution(t, tracker, "exec-same-tenant", stewardID, "scripts/owned.sh", "completed")
+
+	apiKey := NewTestKey(t, server, []string{"steward:read-scripts"})
+
+	for name, path := range map[string]string{
+		"executions": "/api/v1/stewards/" + stewardID + "/scripts/executions",
+		"execution":  "/api/v1/stewards/" + stewardID + "/scripts/executions/exec-same-tenant",
+		"metrics":    "/api/v1/stewards/" + stewardID + "/scripts/metrics",
+		"status":     "/api/v1/stewards/" + stewardID + "/scripts/status",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("X-API-Key", apiKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code,
+				"%s must not deny the owning tenant: %s", path, rec.Body.String())
+		})
+	}
 }

@@ -8,6 +8,7 @@ package saas
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -321,6 +322,10 @@ func (m *M365TenantManager) invalidateM365Index() {
 	m.indexMu.Unlock()
 }
 
+// ErrNoRootTenantForDiscovery is returned when an M365 tenant is discovered on a
+// deployment with no resolvable root tenant to create it under (Issue #4542).
+var ErrNoRootTenantForDiscovery = errors.New("no root tenant to place discovered M365 tenants under: create the deployment's root tenant first")
+
 func (m *M365TenantManager) createCFGMSTenant(ctx context.Context, m365Tenant *TenantInfo, discoveryMethod string, discoveredAt time.Time) error {
 	m365Metadata := &tenant.M365TenantMetadata{
 		M365TenantID:    m365Tenant.TenantID,
@@ -337,7 +342,18 @@ func (m *M365TenantManager) createCFGMSTenant(ctx context.Context, m365Tenant *T
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
+	// Discovered customer tenants go beneath the deployment root: a deployment has
+	// exactly one tenant with no parent (Issue #4542), and discovery has no MSP
+	// tenant on its call path to place them under. With no resolvable root (no
+	// tenants yet, or an ambiguous tree) discovery fails rather than make a
+	// customer tenant the deployment root.
+	rootTenantID := m.cfgmsTenantManager.RootTenantID(ctx)
+	if rootTenantID == "" {
+		return ErrNoRootTenantForDiscovery
+	}
+
 	req := &tenant.TenantRequest{
+		ParentID:    rootTenantID,
 		Name:        m365Tenant.DisplayName,
 		Description: fmt.Sprintf("M365 Tenant (%s)", m365Tenant.Domain),
 		Metadata: map[string]string{

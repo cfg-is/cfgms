@@ -24,15 +24,38 @@ type IPExtractor interface {
 // TenantExtractor extracts the tenant ID from an HTTP request (post-auth)
 type TenantExtractor func(r *http.Request) string
 
-// defaultIPExtractor parses the IP from r.RemoteAddr
+// ipv6KeyPrefixBits is the prefix length IPv6 clients are bucketed by. A single
+// IPv6 client normally controls a whole /64, so keying on the full address
+// would let it rotate through 2^64 distinct per-IP buckets.
+const ipv6KeyPrefixBits = 64
+
+// IPKey normalises a client IP address into a per-IP throttle key. IPv4
+// addresses (including IPv4-mapped IPv6) are keyed per address; IPv6 addresses
+// are keyed by their /64 prefix (e.g. "2001:db8:1:2::/64"). A value that does
+// not parse as an IP is returned unchanged so callers still get a stable key.
+func IPKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.String()
+	}
+	mask := net.CIDRMask(ipv6KeyPrefixBits, 8*net.IPv6len)
+	return (&net.IPNet{IP: parsed.Mask(mask), Mask: mask}).String()
+}
+
+// defaultIPExtractor parses the IP from r.RemoteAddr and normalises it with
+// IPKey. It does not consult forwarded headers; deployments behind a reverse
+// proxy supply a trusted-proxy-aware extractor via WithIPExtractor.
 type defaultIPExtractor struct{}
 
 func (defaultIPExtractor) Extract(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return IPKey(r.RemoteAddr)
 	}
-	return host
+	return IPKey(host)
 }
 
 // AuthDefenseSystem orchestrates the three-tier defense:
@@ -223,6 +246,8 @@ func (d *AuthDefenseSystem) ShouldLog() bool {
 	}
 
 	// Above threshold: sample
+	// #nosec G404 -- this random value controls diagnostic log sampling only;
+	// every defense and authorization decision is made before this branch.
 	if rand.Float64() < d.config.LogSampleRate {
 		return true
 	}

@@ -6,16 +6,136 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode
+// verifies AC5: when the supervise loop exits on its own (terminal failure —
+// no rollback available), Execute must return svcSpecificEC=true with a
+// non-zero exit code so that Win32_Service.ExitCode is non-zero and the SCM
+// applies its configured RESTART recovery actions.
+//
+// The three independent self-heal caps are:
+//   - SCM's OS-configured reset period (sc failure reset=86400)
+//   - launcher MaxRollbackCycles (default 1): governs how many times the
+//     launcher itself will roll back before giving up and surfacing a terminal
+//     failure to the SCM.
+//   - Known-good restart-in-place loop: a proven binary is retried
+//     indefinitely; SCM recovery fires only when a non-known-good binary
+//     exhausts rollback budget and the launcher process exits.
+//
+// Expected Win32_Service state after terminal failure:
+//
+//	ExitCode:        ERROR_SERVICE_SPECIFIC_ERROR (1066)
+//	ServiceExitCode: the launcher's own exit code (1 for supervise error)
+func TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode(t *testing.T) {
+	// Empty root with no current version: Supervise returns an error immediately.
+	root := t.TempDir()
+
+	r := make(chan svc.ChangeRequest)
+	status := make(chan svc.Status, 10)
+
+	h := &windowsServiceHandler{
+		// --max-rollbacks 0: no rollback budget → terminal failure on first child error.
+		args: []string{"--root", root, "--max-rollbacks", "0"},
+	}
+
+	svcSpecific, exitCode := h.Execute(nil, r, status)
+
+	if !svcSpecific {
+		t.Errorf("Execute returned svcSpecificEC=false on terminal failure; want true so SCM " +
+			"records ERROR_SERVICE_SPECIFIC_ERROR and applies recovery actions (AC5)")
+	}
+	if exitCode == 0 {
+		t.Errorf("Execute returned exitCode=0 on terminal failure; want non-zero so " +
+			"Win32_Service.ExitCode is non-zero and SCM recovery fires (AC5)")
+	}
+}
+
+// TestWindowsServiceHandler_AdminStop_DoesNotTriggerRecovery verifies AC5
+// (negative case): an SCM-initiated Stop must NOT trigger recovery — it must
+// return svcSpecificEC=false so Win32_Service.ExitCode stays 0 (clean stop).
+func TestWindowsServiceHandler_AdminStop_DoesNotTriggerRecovery(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+
+	// Child sleeps long. Use a 10ms startup window so the child is considered
+	// past it before Stop arrives (~100ms after Running is reported).
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("FAKE_STEWARD_SLEEP_MS", "60000")
+	t.Setenv("FAKE_STEWARD_EXIT_CODE", "0")
+
+	r := make(chan svc.ChangeRequest, 1)
+	status := make(chan svc.Status, 20)
+
+	h := &windowsServiceHandler{
+		args: []string{
+			"--root", l.Root,
+			"--startup-window", "10ms",
+			"--child-args", "-test.run=TestHelperProcess",
+		},
+	}
+
+	type execResult struct {
+		svcSpecific bool
+		code        uint32
+	}
+	resultCh := make(chan execResult, 1)
+	go func() {
+		s, c := h.Execute(nil, r, status)
+		resultCh <- execResult{s, c}
+	}()
+
+	// Drain status until Running, then wait for the startup window to elapse,
+	// then send Stop.
+	deadline := time.Now().Add(15 * time.Second)
+	var runningStatus svc.Status
+	for {
+		select {
+		case st := <-status:
+			if st.State == svc.Running {
+				runningStatus = st
+				goto sendStop
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("service did not reach Running state within 15s")
+		}
+	}
+sendStop:
+	// Give the startup window (10ms) time to elapse so ranFor > StartupWindow
+	// when the child is killed. This ensures ctx cancel is seen as a clean
+	// shutdown rather than a startup failure.
+	time.Sleep(100 * time.Millisecond)
+	r <- svc.ChangeRequest{Cmd: svc.Stop, CurrentStatus: runningStatus}
+
+	select {
+	case res := <-resultCh:
+		if res.svcSpecific {
+			t.Errorf("Execute returned svcSpecificEC=true on admin Stop; " +
+				"must be false (clean stop, no SCM recovery) (AC5)")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Execute did not return after Stop within 15s")
+	}
+}
 
 // TestAttachChildToJobObject_KillsChildOnLauncherExit covers the #1928
 // guarantee: an abnormal launcher exit must take the supervised steward
@@ -158,3 +278,92 @@ func runOuterLauncher() {
 	os.Exit(2)
 }
 
+// TestSupervise_RepairsMissingServiceRegistration (REQUIRED, #2465): the
+// dedicated repair ticker the supervise loop launches (runServiceRegistrationRepair)
+// re-creates a service registration that is deleted mid-flight, within one check
+// interval, and logs a greppable self-repair event.
+//
+// It drives runServiceRegistrationRepair directly with the real per-tick action
+// (repairServiceIfMissing) bound to a UNIQUE throwaway service — not via a full
+// Supervise() run, which would need a live steward child, and not against the
+// real CFGMSSteward name, which would delete the host's running steward. This is
+// the exact goroutine + per-tick function Supervise wires in production.
+func TestSupervise_RepairsMissingServiceRegistration(t *testing.T) {
+	scm := requireSCM(t)
+	name := uniqueTestServiceName(t)
+
+	// Create the service, then delete it out from under us — the incident's
+	// "AV remediation deleted the registration" failure mode.
+	s, err := scm.CreateService(name, testRepairExePath, mgr.Config{StartType: mgr.StartAutomatic})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	existing, err := scm.OpenService(name)
+	require.NoError(t, err)
+	require.NoError(t, existing.Delete())
+	require.NoError(t, existing.Close())
+
+	// DeleteService only marks the service for deletion; the SCM purges the
+	// registration once every open handle to it has closed, which happens
+	// asynchronously relative to CloseServiceHandle returning (Issue #4159).
+	// Immediately after Close() above, OpenService can still succeed for a
+	// short, unbounded-in-theory window, so the precondition polls for the
+	// real, observable deleted state instead of asserting on a state the SCM
+	// has not necessarily reached yet.
+	require.Eventually(t, func() bool {
+		ok, err := serviceRegistrationOK(name)
+		return err == nil && !ok
+	}, 5*time.Second, 10*time.Millisecond, "precondition: registration must reach deleted state")
+
+	// Run the repair ticker on a short interval, targeting the test service.
+	// buf is mutex-guarded because the ticker goroutine writes to it concurrently
+	// with the assertion read below; repaired signals once the per-tick action has
+	// both re-created the registration AND written its event, establishing a
+	// happens-before edge so the read after <-repaired sees the completed write.
+	buf := &syncBuffer{}
+	sup := &Supervisor{Stderr: buf}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repaired := make(chan struct{}, 1)
+	go sup.runServiceRegistrationRepair(ctx, 100*time.Millisecond, func(w io.Writer) {
+		repairServiceIfMissing(w, name, testRepairExePath, nil)
+		if ok, err := serviceRegistrationOK(name); err == nil && ok {
+			select {
+			case repaired <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	select {
+	case <-repaired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the supervise repair ticker did not re-create the deleted registration within 3s")
+	}
+	cancel()
+
+	ok, err := serviceRegistrationOK(name)
+	require.NoError(t, err)
+	require.True(t, ok, "registration must exist after the repair ticker ran")
+	assert.Contains(t, buf.String(), "event=service_registration_repaired",
+		"the repair must emit a greppable structured event")
+}
+
+// syncBuffer is a minimal mutex-guarded io.Writer for tests that read a buffer
+// written by a background goroutine — avoids the data race a bare bytes.Buffer
+// would incur under `go test -race`.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

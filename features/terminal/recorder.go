@@ -13,10 +13,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sync"
 	"time"
 
@@ -87,10 +91,41 @@ type DefaultSessionRecorder struct {
 	hmacKey      []byte
 }
 
+// recordQueueDepth bounds the per-session in-flight recording backlog. Frames
+// are copied into this buffer by RecordData (a fast, lock-free channel send) and
+// drained to disk by a dedicated writer goroutine. The depth is large enough to
+// absorb realistic output bursts without applying backpressure to the terminal
+// output path; if a burst still overruns it, the newest frame is dropped with a
+// warning rather than blocking output relay (best-effort recording, matching the
+// existing resilience stance where recording errors never fail terminal I/O).
+const recordQueueDepth = 4096
+
+// recordingSessionIDPattern permits only the opaque identifier alphabet emitted
+// by the terminal session manager. Recording IDs become filenames, so path
+// separators and dot components must never reach filesystem operations.
+var recordingSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// recordChunk is one queued recording frame awaiting durable write. The data is
+// an owned copy, so the caller may reuse its buffer immediately after enqueue.
+//
+// A chunk with a non-nil barrier carries no data: it is an ordering marker the
+// pump closes once every frame queued ahead of it has reached disk. See flush.
+type recordChunk struct {
+	data      []byte
+	direction DataDirection
+	barrier   chan struct{}
+}
+
 // recordingWriter manages writing data for a single session in the binary
 // length-prefixed format: [4-byte content len][content][32-byte HMAC].
+//
+// Disk I/O is decoupled from callers: enqueue performs a non-blocking channel
+// send and a dedicated pump goroutine performs the HMAC compute and file writes.
+// This keeps Session.HandleOutput (and WriteData) off the synchronous disk path
+// so a slow disk or an active recorder can never stall terminal output.
 type recordingWriter struct {
 	sessionID        string
+	logger           logging.Logger
 	file             *os.File
 	useCompression   bool
 	hmacKey          []byte
@@ -104,12 +139,82 @@ type recordingWriter struct {
 	size             int64
 	maxSize          int64
 	mu               sync.Mutex
+
+	queue     chan recordChunk // buffered backlog of frames pending durable write
+	stop      chan struct{}    // closed by close() to signal the pump to drain and exit
+	drained   chan struct{}    // closed by the pump once every queued frame is written
+	stopOnce  sync.Once
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// recordingFileMode is the mode for recording and metadata files. Recordings hold
+// every keystroke and output byte of a privileged shell (credentials, tokens, key
+// material), so they are owner-read/write only and never group- or world-readable.
+const recordingFileMode = 0o600
+
+// recordingDirMode is the mode for the recording storage directory: owner-only, so
+// no other local account can list or read session recordings.
+const recordingDirMode = 0o700
+
+// createRecordingFile creates a recording artifact at path with owner-only
+// permissions, failing if the path already exists. O_EXCL is required, not
+// cosmetic: os.Create follows symlinks and truncates, so a local user able to
+// pre-create <session>.rec (or its .meta) as a symlink could otherwise have the
+// controller truncate an arbitrary file it can write. O_EXCL also guarantees a
+// completed recording is never silently overwritten by a session ID collision.
+// The file is created through an *os.Root rather than by absolute path, so a
+// name derived from a session ID cannot resolve outside the storage directory
+// even if the ID pattern is later loosened. O_EXCL and the root confinement
+// cover different attacks and are both required: the root stops traversal out
+// of the directory, O_EXCL stops clobbering or following anything already
+// sitting at that name inside it.
+func createRecordingFile(root *os.Root, name string) (*os.File, error) {
+	return root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, recordingFileMode)
+}
+
+// ensureSecureRecordingDir creates the recording storage directory and asserts it
+// is a real, owner-only directory owned by this process's user.
+//
+// os.MkdirAll returns nil for a pre-existing path without re-applying the mode, so
+// on a shared or predictable parent directory an unprivileged local user can
+// pre-create the storage directory world-readable (harvesting every recording) or
+// as a symlink into a directory it controls. Lstat rejects the symlink case, and
+// Chmod re-asserts owner-only permissions — it fails with EPERM when the directory
+// belongs to another user, which surfaces the pre-creation attack as a hard error.
+func ensureSecureRecordingDir(path string) error {
+	if err := os.MkdirAll(path, recordingDirMode); err != nil {
+		return fmt.Errorf("failed to create storage directory: %w", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("failed to inspect storage directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("recording storage path is a symlink, refusing to use it: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("recording storage path is not a directory: %s", path)
+	}
+
+	// Windows permission bits are synthetic and Chmod there only toggles the
+	// read-only attribute, so the comparison would never converge.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != recordingDirMode {
+		if err := os.Chmod(path, recordingDirMode); err != nil {
+			return fmt.Errorf("failed to restrict permissions on storage directory: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // computeEventChecksum binds (sequence, previous, content) under the HMAC key.
 func computeEventChecksum(key []byte, sequence int64, previous []byte, content []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	seqBytes := make([]byte, 8)
+	// #nosec G115 -- sequence is a monotonic, 1-based counter; the conversion
+	// preserves its non-negative value for the checksum wire encoding.
 	binary.BigEndian.PutUint64(seqBytes, uint64(sequence))
 	mac.Write(seqBytes)
 	mac.Write(previous)
@@ -129,8 +234,14 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 	if config.MaxRecordingMB <= 0 {
 		config.MaxRecordingMB = 100
 	}
-	if err := os.MkdirAll(config.StoragePath, 0750); err != nil {
-		return nil, fmt.Errorf("failed to create storage directory: %w", err)
+	if int64(config.MaxRecordingMB) > math.MaxUint32/(1024*1024) {
+		return nil, fmt.Errorf("max recording size exceeds uint32 frame format")
+	}
+	// ensureSecureRecordingDir supersedes a plain MkdirAll: it also rejects a
+	// symlinked storage path and re-asserts owner-only permissions, which a
+	// pre-created directory would otherwise keep.
+	if err := ensureSecureRecordingDir(config.StoragePath); err != nil {
+		return nil, err
 	}
 
 	recorder := &DefaultSessionRecorder{
@@ -168,6 +279,10 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 
 // StartRecording starts recording a new session.
 func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *SessionMetadata) error {
+	if !recordingSessionIDPattern.MatchString(sessionID) {
+		return fmt.Errorf("invalid recording session ID")
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -178,13 +293,20 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 	filename := fmt.Sprintf("%s.rec", sessionID)
 	filePath := filepath.Join(r.storagePath, filename)
 
-	file, err := os.Create(filePath)
+	recordingRoot, err := os.OpenRoot(r.storagePath)
+	if err != nil {
+		return fmt.Errorf("failed to open recording root: %w", err)
+	}
+	defer func() { _ = recordingRoot.Close() }()
+
+	file, err := createRecordingFile(recordingRoot, filename)
 	if err != nil {
 		return fmt.Errorf("failed to create recording file: %w", err)
 	}
 
 	writer := &recordingWriter{
 		sessionID:        sessionID,
+		logger:           r.logger,
 		file:             file,
 		useCompression:   r.config.Compression,
 		hmacKey:          r.hmacKey,
@@ -192,14 +314,24 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 		events:           make([]RecordEvent, 0),
 		metadata:         metadata,
 		startTime:        time.Now(),
-		maxSize:          int64(r.config.MaxRecordingMB * 1024 * 1024),
+		maxSize:          int64(r.config.MaxRecordingMB) * 1024 * 1024,
+		queue:            make(chan recordChunk, recordQueueDepth),
+		stop:             make(chan struct{}),
+		drained:          make(chan struct{}),
 	}
+
+	go writer.pump()
 
 	r.activeWrites[sessionID] = writer
 
+	// sessionID is already rejected above unless it matches
+	// recordingSessionIDPattern, and filePath is derived from it, so neither
+	// can carry a CR/LF payload here. Wrapped anyway: the guard lives 45 lines
+	// up and a later refactor that moves or relaxes it would silently turn
+	// these two into real findings. Defence in depth, not a bug fix.
 	r.logger.Info("Started recording session",
-		"session_id", sessionID,
-		"file", filePath,
+		"session_id", logging.SanitizeLogValue(sessionID),
+		"file", logging.SanitizeLogValue(filePath),
 		"compression", r.config.Compression)
 
 	return nil
@@ -224,8 +356,21 @@ func (r *DefaultSessionRecorder) RecordData(sessionID string, data []byte, direc
 		r.mu.RUnlock()
 	}
 
-	return writer.writeData(data, direction)
+	if !writer.enqueue(data, direction) {
+		// Backlog is full: drop this frame rather than block the terminal output
+		// path. Recording is best-effort; the caller (Session.HandleOutput /
+		// WriteData) already treats recording errors as non-fatal.
+		r.logger.Warn("Terminal recording frame dropped; disk writer is not draining fast enough",
+			"session_id", logging.RedactedID(sessionID))
+	}
+	return nil
 }
+
+// ErrNoActiveRecording reports that EndRecording was asked to finalize a session
+// that has no in-flight recording — it was already finalized, or never started.
+// Session teardown paths use errors.Is to distinguish this benign case from a
+// genuine finalization failure.
+var ErrNoActiveRecording = errors.New("no active recording for session")
 
 // EndRecording ends recording for a session.
 func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
@@ -234,11 +379,11 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 
 	writer, exists := r.activeWrites[sessionID]
 	if !exists {
-		return fmt.Errorf("no active recording for session: %s", sessionID)
+		return fmt.Errorf("%w: %s", ErrNoActiveRecording, sessionID)
 	}
 
 	if err := writer.close(); err != nil {
-		r.logger.Warn("Error closing recording writer", "session_id", sessionID, "error", err)
+		r.logger.Warn("Error closing recording writer", "session_id", logging.SanitizeLogValue(sessionID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	delete(r.activeWrites, sessionID)
@@ -251,9 +396,30 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 	return nil
 }
 
+// isShortRead reports whether err is io.ReadFull signalling that the file ended
+// before the requested bytes were available: io.EOF when nothing at all was
+// read, io.ErrUnexpectedEOF when the read stopped part-way through.
+func isShortRead(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // GetRecording retrieves a session recording. It decodes the binary format,
 // stripping length prefixes and HMACs, and returns only the content bytes.
+//
+// A recording that is still in progress can be retrieved: the returned data is
+// everything recorded as of the call. The writer's pump goroutine is drained
+// first so the file is read at a frame boundary, and a frame the pump appends
+// while the read is under way is treated as end-of-data rather than an error —
+// an in-flight append can only truncate the tail, never invalidate the frames
+// that precede it.
 func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecording, error) {
+	r.mu.RLock()
+	writer, recordingActive := r.activeWrites[sessionID]
+	r.mu.RUnlock()
+	if recordingActive {
+		writer.flush()
+	}
+
 	recPath := filepath.Join(r.storagePath, fmt.Sprintf("%s.rec", sessionID))
 
 	if _, err := os.Stat(recPath); os.IsNotExist(err) {
@@ -279,8 +445,11 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	for {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(file, lenBuf[:]); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
+			}
+			if recordingActive && errors.Is(err, io.ErrUnexpectedEOF) {
+				break // partial length prefix from a concurrent append
 			}
 			return nil, fmt.Errorf("failed to read event length: %w", err)
 		}
@@ -288,11 +457,17 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 		contentLen := binary.BigEndian.Uint32(lenBuf[:])
 		frameContent := make([]byte, contentLen)
 		if _, err := io.ReadFull(file, frameContent); err != nil {
+			if recordingActive && isShortRead(err) {
+				break // frame still being appended
+			}
 			return nil, fmt.Errorf("failed to read event content: %w", err)
 		}
 
 		// Skip the 32-byte HMAC — callers get only the content bytes.
 		if _, err := io.ReadFull(file, make([]byte, 32)); err != nil {
+			if recordingActive && isShortRead(err) {
+				break // frame still being appended
+			}
 			return nil, fmt.Errorf("failed to read event HMAC: %w", err)
 		}
 
@@ -448,7 +623,7 @@ func (r *DefaultSessionRecorder) Close() error {
 	for sessionID, writer := range r.activeWrites {
 		if err := writer.close(); err != nil {
 			r.logger.Warn("Error closing writer during recorder shutdown",
-				"session_id", sessionID, "error", err)
+				"session_id", logging.SanitizeLogValue(sessionID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 
@@ -487,6 +662,99 @@ func (r *DefaultSessionRecorder) cleanupLegacyFiles() {
 	}
 }
 
+// enqueue copies data and hands it to the pump goroutine via a non-blocking
+// channel send. It returns false only when the backlog is full (frame dropped),
+// so callers on the terminal output path never block on disk I/O.
+func (w *recordingWriter) enqueue(data []byte, direction DataDirection) bool {
+	// Own a copy: the caller may reuse its buffer as soon as this returns.
+	buf := make([]byte, len(data))
+	copy(buf, data)
+
+	select {
+	case <-w.stop:
+		// Recording is being finalized; refuse further frames.
+		return false
+	default:
+	}
+
+	select {
+	case w.queue <- recordChunk{data: buf, direction: direction}:
+		return true
+	default:
+		return false
+	}
+}
+
+// flush blocks until every frame enqueued before the call has been written to
+// disk, leaving the recording file at a whole-frame boundary.
+//
+// Readers need this because a frame is persisted as three separate writes
+// ([length][content][HMAC]) by the pump goroutine: a reader that opens the file
+// while an append is in flight can observe a length prefix whose content bytes
+// have not landed yet and fail with a short read. Enqueuing an ordering marker
+// behind the pending frames — rather than sampling a "queue empty" flag — is
+// what makes the wait exact: the marker is released only after the write that
+// preceded it returned.
+//
+// Frames enqueued after flush returns are not covered; the reader's snapshot is
+// "everything recorded as of the call". It never blocks the recording path and
+// returns immediately once the writer is finalized.
+func (w *recordingWriter) flush() {
+	barrier := make(chan struct{})
+
+	// The send blocks while the backlog is full, which is correct — the pump is
+	// draining it. w.drained covers the finalized writer, whose pump has exited
+	// and will never observe the marker.
+	select {
+	case w.queue <- recordChunk{barrier: barrier}:
+	case <-w.drained:
+		return
+	}
+
+	select {
+	case <-barrier:
+	case <-w.drained:
+	}
+}
+
+// pump drains queued frames to disk on a dedicated goroutine, preserving
+// per-session ordering. On stop it flushes every remaining buffered frame before
+// signaling drained, so EndRecording/Close observe a complete recording.
+func (w *recordingWriter) pump() {
+	defer close(w.drained)
+	for {
+		select {
+		case chunk := <-w.queue:
+			w.writeChunk(chunk)
+		case <-w.stop:
+			for {
+				select {
+				case chunk := <-w.queue:
+					w.writeChunk(chunk)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// writeChunk persists a single frame. Write errors (size-limit reached, disk
+// failure) are logged and the pump stays alive — recording is best-effort and
+// must never take down terminal I/O.
+func (w *recordingWriter) writeChunk(chunk recordChunk) {
+	if chunk.barrier != nil {
+		// Ordering marker, not data: every frame queued before it has now been
+		// written, so release the waiter in flush.
+		close(chunk.barrier)
+		return
+	}
+	if err := w.writeData(chunk.data, chunk.direction); err != nil {
+		w.logger.Warn("Failed to persist terminal recording frame",
+			"session_id", logging.RedactedID(w.sessionID), "error", err)
+	}
+}
+
 // writeData writes one event in the binary length-prefixed format:
 // [4-byte content length][content bytes][32-byte HMAC].
 // HMAC is computed over the post-compression bytes that land on disk.
@@ -502,12 +770,16 @@ func (w *recordingWriter) writeData(data []byte, direction DataDirection) error 
 	if err != nil {
 		return fmt.Errorf("failed to compress event: %w", err)
 	}
+	if len(content) > math.MaxUint32 {
+		return fmt.Errorf("recording frame exceeds uint32 length prefix")
+	}
 
 	// Sequence is 1-based; advance before computing HMAC.
 	w.sequence++
 	checksum := computeEventChecksum(w.hmacKey, w.sequence, w.previousChecksum, content)
 
 	var lenBuf [4]byte
+	// #nosec G115 -- content length is explicitly bounded by MaxUint32 above.
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(content)))
 
 	if _, err := w.file.Write(lenBuf[:]); err != nil {
@@ -537,15 +809,40 @@ func (w *recordingWriter) writeData(data []byte, direction DataDirection) error 
 	return nil
 }
 
-// close finalises the recording file and writes the metadata JSON.
+// close stops the pump, waits for every queued frame to be flushed to disk, then
+// finalises the recording file and writes the metadata JSON. It is idempotent.
 func (w *recordingWriter) close() error {
+	w.closeOnce.Do(func() {
+		// Signal the pump to drain, then wait for it to finish so metadata anchors
+		// (first/last checksum, event count) reflect the complete recording.
+		w.stopOnce.Do(func() { close(w.stop) })
+		<-w.drained
+		w.closeErr = w.finalize()
+	})
+	return w.closeErr
+}
+
+// finalize writes out the recording file's trailer metadata. It runs only after
+// the pump has exited, so it has exclusive access to the writer's fields.
+func (w *recordingWriter) finalize() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	closeErr := w.file.Close()
 
-	metadataPath := w.file.Name() + ".meta"
-	metaFile, createErr := os.Create(metadataPath)
+	// finalize runs long after StartRecording returned, so it opens its own root
+	// over the storage directory rather than reusing that call's. The sidecar
+	// gets the same confinement and O_EXCL treatment as the recording itself.
+	metadataRoot, rootErr := os.OpenRoot(filepath.Dir(w.file.Name()))
+	if rootErr != nil {
+		if closeErr != nil {
+			return closeErr
+		}
+		return fmt.Errorf("failed to open recording root: %w", rootErr)
+	}
+	defer func() { _ = metadataRoot.Close() }()
+
+	metaFile, createErr := createRecordingFile(metadataRoot, filepath.Base(w.file.Name())+".meta")
 	if createErr != nil {
 		if closeErr != nil {
 			return closeErr

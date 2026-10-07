@@ -1,5 +1,18 @@
 # Standalone steward configuration for Docker E2E testing
 # Matches QUICK_START.md Option A workflow
+#
+# Two things this file must get right, both previously wrong:
+#
+#   allowed_base_path is the file module's mandatory security boundary
+#   (features/modules/stdlib/file: ErrAllowedBasePathRequired). Without it every
+#   resource fails validation before touching the filesystem — the steward
+#   converged, reported "failed: 3", and left /test-workspace empty while the
+#   suite asserted the files existed.
+#
+#   The permission field is `permissions` (an integer), not `mode`. `mode` is
+#   not a FileConfig field: it was silently dropped on the file resource, whose
+#   0644 expectation then passed only because that is the default, and it made
+#   the directory resource fail outright with "invalid input".
 
 steward:
   id: quickstart-steward
@@ -10,25 +23,29 @@ resources:
     module: file
     config:
       path: /test-workspace/hello-cfgms.txt
+      allowed_base_path: /test-workspace
       content: |
         Hello from CFGMS!
         This file was created by CFGMS standalone mode.
         No controller, no network, no complexity!
       state: present
-      mode: "0644"
+      permissions: 0644
 
   # Create a directory
   - name: test-directory
     module: directory
     config:
       path: /test-workspace/cfgms-test
+      allowed_base_path: /test-workspace
+      type: directory
       state: present
-      mode: "0755"
+      permissions: 0755
 
   # Create a second file in that directory
   - name: info-file
     module: file
     config:
       path: /test-workspace/cfgms-test/info.txt
+      allowed_base_path: /test-workspace
       content: "CFGMS standalone mode is working!"
       state: present

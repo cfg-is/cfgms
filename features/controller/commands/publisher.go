@@ -23,6 +23,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// TermSource provides the current Raft term for command fencing (#3390, ADR-029 Decision 5).
+// Accepted as an interface so the commands package does not import pkg/ha directly.
+type TermSource interface {
+	GetTerm() uint64
+}
+
 // Publisher publishes commands to stewards via the ControlPlaneProvider.
 type Publisher struct {
 	mu sync.RWMutex
@@ -33,6 +39,10 @@ type Publisher struct {
 	// signer signs commands before transmission (Story #919).
 	// When nil commands are sent without a signature (unsecured/transitional mode).
 	signer signature.Signer
+
+	// termSource stamps the current Raft term onto outbound commands (#3390).
+	// When nil the term field is zero (pre-fencing behaviour).
+	termSource TermSource
 
 	// Command tracking
 	pending map[string]*pendingCommand
@@ -62,6 +72,10 @@ type Config struct {
 	// When nil, commands are sent unsigned.
 	Signer signature.Signer
 
+	// TermSource stamps the current Raft term onto every outbound command (#3390).
+	// When nil the term field is zero (pre-fencing behaviour).
+	TermSource TermSource
+
 	// Logger for command logging
 	Logger logging.Logger
 }
@@ -78,15 +92,24 @@ func New(cfg *Config) (*Publisher, error) {
 	return &Publisher{
 		controlPlane: cfg.ControlPlane,
 		signer:       cfg.Signer,
+		termSource:   cfg.TermSource,
 		pending:      make(map[string]*pendingCommand),
 		logger:       cfg.Logger,
 	}, nil
 }
 
-// signCommand wraps cmd in a SignedCommand, signing it when a signer is available.
-func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+// currentTerm returns the Raft term from the configured TermSource, or 0 when none is set.
+func (p *Publisher) currentTerm() uint64 {
+	if p.termSource == nil {
+		return 0
+	}
+	return p.termSource.GetTerm()
+}
+
+// signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when non-nil.
+func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer) (*controlplaneTypes.SignedCommand, error) {
 	sc := &controlplaneTypes.SignedCommand{Command: *cmd}
-	if p.signer == nil {
+	if signer == nil {
 		return sc, nil
 	}
 	// Sign the canonical form (string params + UTC timestamp) that survives the
@@ -96,12 +119,51 @@ func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTy
 	if err != nil {
 		return nil, fmt.Errorf("marshal command for signing: %w", err)
 	}
-	sig, err := p.signer.Sign(cmdBytes)
+	sig, err := signer.Sign(cmdBytes)
 	if err != nil {
 		return nil, fmt.Errorf("sign command: %w", err)
 	}
 	sc.Signature = sig
 	return sc, nil
+}
+
+// signCommand wraps cmd in a SignedCommand using the publisher's configured signer.
+func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+	return p.signCommandWith(cmd, p.signer)
+}
+
+// PublishCommandWithSigner publishes a command signed with the provided signer instead
+// of the publisher's configured signer. Used when push_signing_cert must be signed
+// with the rotating (previous) cert so stewards can verify it before their trust set
+// is updated (Issue #1844).
+func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}, signer signature.Signer) (string, error) {
+	commandID := uuid.New().String()
+
+	cmd := &controlplaneTypes.Command{
+		ID:        commandID,
+		Type:      cmdType,
+		StewardID: stewardID,
+		Timestamp: time.Now(),
+		Params:    params,
+		Term:      p.currentTerm(),
+	}
+
+	sc, err := p.signCommandWith(cmd, signer)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign command: %w", err)
+	}
+
+	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
+		return "", fmt.Errorf("failed to send command: %w", err)
+	}
+
+	p.logger.Info("Sent command to steward",
+		"command_id", commandID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"type", cmdType,
+		"signed", sc.Signature != nil)
+
+	return commandID, nil
 }
 
 // PublishCommand publishes a command to a specific steward.
@@ -116,6 +178,7 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 		StewardID: stewardID,
 		Timestamp: time.Now(),
 		Params:    params,
+		Term:      p.currentTerm(),
 	}
 
 	sc, err := p.signCommand(cmd)
@@ -129,7 +192,7 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 
 	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"type", cmdType,
 		"signed", sc.Signature != nil)
 
@@ -200,9 +263,9 @@ func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTy
 
 	// Log event
 	p.logger.Info("Received event from steward",
-		"steward_id", event.StewardID,
-		"event_type", event.Type,
-		"command_id", event.CommandID)
+		"steward_id", logging.SanitizeLogValue(event.StewardID),
+		"event_type", logging.SanitizeLogValue(string(event.Type)),
+		"command_id", logging.SanitizeLogValue(event.CommandID))
 
 	return nil
 }
@@ -219,7 +282,7 @@ func (p *Publisher) handleCommandTimeout(commandID string) {
 	if exists {
 		p.logger.Warn("Command timed out",
 			"command_id", commandID,
-			"steward_id", pending.StewardID,
+			"steward_id", logging.SanitizeLogValue(pending.StewardID),
 			"type", pending.Type,
 			"timeout", pending.Timeout)
 
@@ -287,7 +350,7 @@ func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (st
 	}
 
 	p.logger.Info("Triggered config sync",
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"command_id", commandID)
 
 	return commandID, nil
@@ -301,7 +364,7 @@ func (p *Publisher) TriggerDNASync(ctx context.Context, stewardID string) (strin
 	}
 
 	p.logger.Info("Triggered DNA sync",
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"command_id", commandID)
 
 	return commandID, nil

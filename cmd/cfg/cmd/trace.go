@@ -19,10 +19,10 @@ import (
 var (
 	// Trace command flags
 	traceURL         string
-	traceAPIKey      string
 	traceFormat      string
 	traceTLSCACert   string
 	traceTLSInsecure bool
+	traceServerName  string
 )
 
 // traceCmd represents the trace command
@@ -49,48 +49,28 @@ Examples:
 
 func init() {
 	traceCmd.Flags().StringVar(&traceURL, "url", "", "Controller API URL (required)")
-	traceCmd.Flags().StringVar(&traceAPIKey, "api-key", "", "API key for authentication")
 	traceCmd.Flags().StringVar(&traceFormat, "format", "text", "Output format (text, json)")
 	traceCmd.Flags().StringVar(&traceTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	traceCmd.Flags().BoolVar(&traceTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	traceCmd.Flags().StringVar(&traceServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	_ = traceCmd.MarkFlagRequired("url")
 }
 
-// getTraceClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getTraceClient creates an API client using an active session or an admin mTLS bundle.
 func getTraceClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(traceURL, "/")
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	// Fallback: API key path
-	apiKey := traceAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := traceTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := traceServerName
 
-	tlsCACertPath := traceTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runTrace(cmd *cobra.Command, args []string) error {

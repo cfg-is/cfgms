@@ -1,0 +1,15 @@
+# OWASP ZAP baseline scan override rules for CFGMS controller DAST (Issue #2950).
+# Controls which alerts are reported and at what severity.
+#
+# Format (tab-separated):
+#   plugin_id <TAB> threshold
+#   threshold: IGNORE | INFO | LOW | MEDIUM | HIGH | FAIL
+#   IDs: https://www.zaproxy.org/docs/alerts/
+#
+# Policy: only suppress alerts that are confirmed false positives for the
+# self-contained CI scanning surface (localhost, self-signed cert, flatfile
+# storage). All production-relevant findings should remain visible.
+# See docs/development/security-workflow-guide.md §6 for the full policy.
+#
+# Populate this file after the first manual scan run reveals the alert
+# baseline. Review every finding before adding a suppression.

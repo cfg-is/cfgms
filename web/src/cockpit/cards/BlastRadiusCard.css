@@ -1,0 +1,110 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Blast-radius evidence card styles (Story #3610).
+ *
+ * Reference: docs/design/mockups/troubleshooting-cockpit.html §.card.graph
+ * Tokens: docs/design/web-ui-design-tokens.css (aliased as @design-tokens in vite.config.ts)
+ *
+ * Node classes map to neutral (non-health) tokens only:
+ *   .blast-radius-card__node-root  → --tint-blue fill / --accent stroke (pivot entity)
+ *   .blast-radius-card__node       → --bg-elevated fill / --border stroke (neighbour)
+ * Health colouring is deferred to DEX epics.
+ */
+
+@import '@design-tokens';
+
+/* ── Card shell ──────────────────────────────────────────────────────────────*/
+
+.blast-radius-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────────*/
+
+.blast-radius-card__header {
+  margin: 0;
+  padding: 11px var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.blast-radius-card__sub {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ── Graph wrapper ───────────────────────────────────────────────────────────*/
+
+.blast-radius-card__gwrap {
+  padding: var(--space-3) var(--space-4);
+}
+
+.blast-radius-card__svg {
+  width: 100%;
+  display: block;
+}
+
+/* ── SVG graph primitives ────────────────────────────────────────────────────*/
+
+.blast-radius-card__edge {
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+/* Root (pivot) node: tint-blue fill, accent stroke */
+.blast-radius-card__node-root {
+  fill: var(--tint-blue);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+/* Neighbour node: elevated fill, border stroke */
+.blast-radius-card__node {
+  fill: var(--bg-elevated);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.blast-radius-card__label-root {
+  fill: var(--accent);
+}
+
+.blast-radius-card__label {
+  fill: var(--text-secondary);
+}
+
+/* ── No-dependents message ───────────────────────────────────────────────────*/
+
+.blast-radius-card__no-deps {
+  margin: 0;
+  padding: var(--space-2) 0 var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  text-align: center;
+}
+
+/* ── Loading / error states ──────────────────────────────────────────────────*/
+
+.blast-radius-card__loading,
+.blast-radius-card__error {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.blast-radius-card__error {
+  color: var(--state-crit);
+}

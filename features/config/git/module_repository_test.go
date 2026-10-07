@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,7 +46,15 @@ func TestEnsureModuleRepository_ClonesWhenMissing(t *testing.T) {
 
 	clonePath, err := mrm.ensureModuleRepository(context.Background(), repo)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(mrm.cacheDir, "mod-a"), clonePath)
+
+	// ensureModuleRepository resolves the cache dir through security.ValidateAndCleanPath,
+	// which eval-symlinks it for the containment check (Issue #4340) — on macOS this turns
+	// /var into /private/var, and on Windows it expands 8.3 short names (RUNNER~1) into
+	// their long form. The expected path must go through the same resolution or the
+	// comparison is comparing two different spellings of the same directory.
+	wantCacheDir, err := filepath.EvalSymlinks(mrm.cacheDir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(wantCacheDir, "mod-a"), clonePath)
 
 	// .git directory must exist in the cloned path
 	_, statErr := os.Stat(filepath.Join(clonePath, ".git"))
@@ -204,8 +213,23 @@ func TestWriteModuleSpec_WriteError(t *testing.T) {
 		Spec: ModuleSpec{Metadata: ModuleMetadata{Name: "test"}},
 	}
 
-	// specPath descends through "blocker" (a file), so MkdirAll must fail.
+	// specPath descends through "blocker" (a file), so the write must be refused.
+	// writeModuleSpec goes through pkg/security's bounded write helper
+	// (Issue #4340): on Linux/macOS, resolving a path through a regular file
+	// fails as ENOTDIR inside ValidateAndCleanPath itself ("path validation
+	// failed"); on Windows, the equivalent syscall error is reported as
+	// ERROR_PATH_NOT_FOUND, which Go maps to os.ErrNotExist rather than a
+	// distinct "not a directory" error, so ValidateAndCleanPath takes its
+	// non-existent-ancestor fallback path, succeeds, and the block is only hit
+	// later by os.MkdirAll ("failed to create directory"). What matters, and
+	// what both platforms guarantee, is that the write never happens — the
+	// exact stage that reports the failure is a platform-specific error-code
+	// distinction, not the behavior under test.
 	err := mrm.writeModuleSpec(context.Background(), root, filepath.Join("blocker", "sub", "module.yaml"), module)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create directory")
+	assert.True(t,
+		strings.Contains(err.Error(), "path validation failed") || strings.Contains(err.Error(), "failed to create directory"),
+		"expected a path-validation or directory-creation failure, got: %v", err)
+	_, statErr := os.Stat(filepath.Join(root, "blocker", "sub", "module.yaml"))
+	assert.Error(t, statErr, "blocked write must not have created the spec file")
 }

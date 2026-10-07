@@ -5,7 +5,6 @@
 
 steward:
   id: ""
-  mode: controller
   # Short convergence interval so TestDriftAutoCorrection observes a correction
   # within its 90s window (default is 30m).
   converge_interval: "10s"

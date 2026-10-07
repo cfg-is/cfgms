@@ -5,6 +5,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -37,6 +38,12 @@ type Store interface {
 
 	// IsTenantAncestor checks if one tenant is an ancestor of another
 	IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error)
+
+	// Pending-deletion pipeline (ADR-027 Decisions 3-4, Issue #3182)
+	RequestDeletion(ctx context.Context, pending *business.PendingDeletion) error
+	CancelDeletion(ctx context.Context, subtreeRootID string) error
+	ApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error)
+	GetPendingDeletion(ctx context.Context, subtreeRootID string) (*business.PendingDeletion, error)
 }
 
 // NewStorageAdapter wraps a business.TenantStore in tenant.Store.
@@ -47,10 +54,29 @@ func NewStorageAdapter(store business.TenantStore) Store {
 }
 
 // Common errors
+
 var (
-	ErrTenantNotFound    = fmt.Errorf("tenant not found")
-	ErrTenantExists      = fmt.Errorf("tenant already exists")
+	// ErrTenantNotFound aliases the storage-layer sentinel rather than declaring a
+	// second "tenant is missing" error. Manager passes store errors through
+	// untouched, so a caller that matched this value while a provider returned the
+	// storage sentinel would never match — the divergence that let a missing-tenant
+	// lookup be misclassified as a backend fault.
+	ErrTenantNotFound    = business.ErrTenantDoesNotExist
+	ErrTenantExists      = business.ErrTenantAlreadyExists
 	ErrInvalidParent     = fmt.Errorf("invalid parent tenant")
 	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
 	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")
+	ErrCannotSuspendRoot = fmt.Errorf("cannot suspend root tenant")
+	// ErrTopLevelTenantExists is returned when a tenant with no parent is created
+	// while one already exists: a deployment has exactly one root tenant, the
+	// single tenant with no parent (ADR-032, Issue #4542).
+	ErrTopLevelTenantExists = fmt.Errorf("a top-level tenant already exists; create the tenant under a parent")
+
+	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
+	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")
+	ErrPendingDeletionExists   = business.ErrPendingDeletionExists
+	ErrPendingDeletionNotFound = business.ErrPendingDeletionNotFound
+	ErrHoldNotElapsed          = business.ErrHoldNotElapsed
+	ErrMembershipChanged       = business.ErrMembershipChanged
+	ErrSameApprover            = business.ErrSameApprover
 )

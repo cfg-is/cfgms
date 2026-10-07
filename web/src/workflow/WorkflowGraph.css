@@ -1,0 +1,227 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * WorkflowGraph styles (Story #3037) — token-based, no hardcoded colors.
+ * All values are var(--…) consumed from @design-tokens.
+ * Mirrors the .node / .nico / .nhead / .nttl / .ntype / .nfoot / .port /
+ * .badge / svg.links path language in docs/design/mockups/workflow-studio.html.
+ */
+
+@import '@design-tokens';
+
+/* ── Root container ─────────────────────────────────────────────────────────── */
+
+.wfg-root {
+  width: 100%;
+  height: 100%;
+  min-height: 500px;
+  background: var(--bg-primary);
+}
+
+/* Dot-grid canvas background uses the --grid-dot token; ReactFlow <Background>
+   receives gap/size props, color is controlled below via the RF CSS override. */
+.wfg-root .react-flow__background {
+  background-color: var(--bg-primary);
+}
+.wfg-root .react-flow__background pattern circle {
+  fill: color-mix(in srgb, var(--text-primary) 14%, transparent);
+}
+
+/* ── Node card ──────────────────────────────────────────────────────────────── */
+
+.wfg-node {
+  width: 150px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  /* Neutral card drop shadow, verbatim from the mockup's .node rule — the same
+     theme-independent literal already used by Workflow.css / Config.css. Every
+     *palette* value below is a token; --shadow is the page-level drop for full
+     cards and is far too large for a 150px node. */
+  box-shadow: 0 6px 16px -12px rgba(60, 45, 30, 0.5);
+  overflow: visible;
+  position: relative;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+/* ── Run states ─────────────────────────────────────────────────────────────── */
+
+.wfg-node.done {
+  border-color: var(--state-ok);
+}
+
+.wfg-node.running {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--accent-weak),
+    0 8px 20px -10px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.wfg-node.failed {
+  border-color: var(--state-crit);
+}
+
+.wfg-node.pending {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+/* ── Badge ──────────────────────────────────────────────────────────────────── */
+
+.wfg-badge {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  border: 2px solid var(--bg-surface);
+}
+
+/* Badge glyph sits on a saturated state fill; --accent-ink is the token for
+   text on a filled swatch and flips with the theme (white on light, ink on
+   dark), so the glyph stays legible in both. */
+.wfg-node.done .wfg-badge {
+  background: var(--state-ok);
+  color: var(--accent-ink);
+}
+
+.wfg-node.running .wfg-badge {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.wfg-node.failed .wfg-badge {
+  background: var(--state-crit);
+  color: var(--accent-ink);
+}
+
+/* ── Node header ────────────────────────────────────────────────────────────── */
+
+.wfg-nhead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px 8px;
+}
+
+/* ── Icon chip (matches .nico in the mockup) ────────────────────────────────── */
+
+.wfg-nico {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  flex: none;
+}
+
+/* Type tints — mirrors .nico.{type} in workflow-studio.html */
+.wfg-nico.trig    { background: var(--accent-weak);  color: var(--accent);      border-color: var(--accent);      }
+.wfg-nico.module  { background: var(--tint-green);   color: var(--state-ok);    border-color: var(--state-ok);    }
+.wfg-nico.cond    { background: var(--tint-blue);    color: var(--accent);      border-color: var(--accent);      }
+.wfg-nico.wait    { background: var(--tint-orange);  color: var(--state-warn);  border-color: var(--state-warn);  }
+.wfg-nico.gate    { background: var(--tint-orange);  color: var(--state-warn);  border-color: var(--state-warn);  }
+.wfg-nico.notify  { background: var(--tint-blue);    color: var(--accent);                                        }
+
+/* ── Title and type label ───────────────────────────────────────────────────── */
+
+.wfg-nttl {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  word-break: break-all;
+}
+
+.wfg-ntype {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────────── */
+
+.wfg-nfoot {
+  padding: 0 11px 9px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* ── Ports ──────────────────────────────────────────────────────────────────── */
+
+.wfg-port-wrap {
+  display: contents;
+}
+
+.wfg-plabel {
+  position: absolute;
+  right: 14px;
+  font-size: 8.5px;
+  font-weight: 700;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* ReactFlow handle dots */
+.wfg-root .react-flow__handle {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--bg-surface);
+  border: 2px solid var(--border);
+}
+
+/* ── Edge styling ───────────────────────────────────────────────────────────── */
+
+.wfg-root .react-flow__edge-path {
+  stroke: var(--border);
+  stroke-width: 2;
+}
+
+.wfg-root .react-flow__edge.done .react-flow__edge-path {
+  stroke: var(--state-ok);
+}
+
+.wfg-root .react-flow__edge.active .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-dasharray: 6 5;
+  animation: wfg-dash 1s linear infinite;
+}
+
+.wfg-root .react-flow__edge.pend .react-flow__edge-path {
+  stroke: var(--border);
+  stroke-dasharray: 4 5;
+  opacity: 0.6;
+}
+
+@keyframes wfg-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+
+/* ── Reduced motion ─────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .wfg-root .react-flow__edge.active .react-flow__edge-path {
+    animation: none;
+  }
+}

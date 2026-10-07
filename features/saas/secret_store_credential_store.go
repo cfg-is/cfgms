@@ -36,6 +36,8 @@ func NewSecretStoreCredentialStore(secretStore secretsif.SecretStore) *SecretSto
 
 // StoreToken stores an access token keyed by tenantID.
 func (s *SecretStoreCredentialStore) StoreToken(tenantID string, token *auth.AccessToken) error {
+	// #nosec G117 -- token JSON is immediately passed to the configured
+	// SecretStore; it is never logged, returned, or written to a plain data store.
 	data, err := json.Marshal(token)
 	if err != nil {
 		return fmt.Errorf("failed to marshal token for tenant %s: %w", tenantID, err)
@@ -71,6 +73,8 @@ func (s *SecretStoreCredentialStore) DeleteToken(tenantID string) error {
 
 // StoreDelegatedToken stores a delegated access token for a user within a tenant.
 func (s *SecretStoreCredentialStore) StoreDelegatedToken(tenantID, userID string, token *auth.AccessToken) error {
+	// #nosec G117 -- delegated token JSON is immediately persisted through the
+	// tenant-scoped SecretStore and is not exposed through logs or responses.
 	data, err := json.Marshal(token)
 	if err != nil {
 		return fmt.Errorf("failed to marshal delegated token for tenant %s user %s: %w", tenantID, userID, err)
@@ -141,6 +145,8 @@ func (s *SecretStoreCredentialStore) DeleteUserContext(tenantID, userID string) 
 
 // StoreConfig stores OAuth2 configuration for a tenant.
 func (s *SecretStoreCredentialStore) StoreConfig(tenantID string, config *auth.OAuth2Config) error {
+	// #nosec G117 -- OAuth client-secret JSON is intentionally serialized only
+	// as the value of the tenant-scoped SecretStore request.
 	data, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config for tenant %s: %w", tenantID, err)

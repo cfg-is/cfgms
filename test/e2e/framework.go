@@ -5,9 +5,18 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,8 +30,8 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 
-	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/terminal"
@@ -32,6 +41,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
@@ -63,7 +73,7 @@ type E2ETestFramework struct {
 	cancel  context.CancelFunc
 
 	// Core components
-	controller         *controller.Controller
+	controller         *server.Server
 	stewards           map[string]*steward.Steward   // Standalone stewards (Phase 1)
 	registeredStewards map[string]*RegisteredSteward // gRPC-connected stewards (Phase 3)
 	certManager        *cert.Manager
@@ -250,7 +260,7 @@ func (f *E2ETestFramework) initializeCertificates() error {
 	f.metrics.ComponentStartTimes["certificates"] = time.Now()
 
 	certPath := filepath.Join(f.tempDir, "certs")
-	if err := os.MkdirAll(certPath, 0755); err != nil {
+	if err := os.MkdirAll(certPath, 0700); err != nil {
 		return fmt.Errorf("failed to create cert directory: %w", err)
 	}
 
@@ -333,11 +343,29 @@ func (f *E2ETestFramework) initializeController() error {
 	// Story #1919 made getHTTPListenAddr() honor cfg.ListenAddr, exposing
 	// the harness bug: with ListenAddr set to ControllerPort=8080, registration
 	// to HTTPPort=9080 was hitting nothing. Bind HTTP on HTTPPort to match.
+	//
+	// The dedicated metrics listener is fail-closed: DefaultConfig leaves it empty
+	// so a deployment has to choose an address, and Server.Start refuses to bind
+	// anything — including the public API this harness registers stewards
+	// against — until one is set. Reserve a concrete loopback port, which is what
+	// a deployment configures.
+	//
+	// external_url is likewise required: the public API refuses to serve TLS
+	// until it can confirm the server certificate actually covers the hostname
+	// clients are told to use. The harness issues its server certificate for
+	// "localhost" below, and registers stewards against that name.
+	metricsAddr, err := pkgtestutil.ReserveLoopbackAddress()
+	if err != nil {
+		return fmt.Errorf("failed to reserve metrics listener address: %w", err)
+	}
+
 	config := &controllerConfig.Config{
-		ListenAddr: fmt.Sprintf("localhost:%d", f.config.HTTPPort),
-		CertPath:   filepath.Join(f.tempDir, "certs"), // Legacy cert path
-		DataDir:    filepath.Join(f.tempDir, "controller-data"),
-		LogLevel:   "info",
+		ListenAddr:        fmt.Sprintf("localhost:%d", f.config.HTTPPort),
+		ExternalURL:       fmt.Sprintf("https://localhost:%d", f.config.HTTPPort),
+		MetricsListenAddr: metricsAddr,
+		CertPath:          filepath.Join(f.tempDir, "certs"), // Legacy cert path
+		DataDir:           filepath.Join(f.tempDir, "controller-data"),
+		LogLevel:          "info",
 		Storage: &controllerConfig.StorageConfig{
 			Provider:     "flatfile",
 			FlatfileRoot: filepath.Join(f.tempDir, "storage-flatfile"),
@@ -375,28 +403,39 @@ func (f *E2ETestFramework) initializeController() error {
 
 	// Create storage directories
 	storageDir := filepath.Join(f.tempDir, "storage-flatfile")
-	if err := os.MkdirAll(storageDir, 0755); err != nil {
+	if err := os.MkdirAll(storageDir, 0700); err != nil {
 		return fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
-	ctrl, err := controller.New(config, f.logger)
+	ctrl, err := server.New(config, f.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create controller: %w", err)
 	}
 
-	// Start controller in background
+	// Start controller in background. Start's error was previously only logged,
+	// which made every fail-closed startup check surface as an unrelated symptom
+	// much later — a refused listener shows up as "connection refused" in whatever
+	// test registers first, and on Windows as a temp-dir cleanup failure, because
+	// Stop short-circuits on a controller that never started and so never releases
+	// its SQLite handles. Capture it and report it as itself.
+	startErr := make(chan error, 1)
 	go func() {
-		if err := ctrl.Start(f.ctx); err != nil {
-			f.logger.Error("Controller start failed", "error", err)
-		}
+		startErr <- ctrl.Start()
 	}()
 
-	// Wait for controller to start (give it some time)
-	time.Sleep(f.config.ComponentStartup)
+	select {
+	case err := <-startErr:
+		if err != nil {
+			return fmt.Errorf("controller failed to start: %w", err)
+		}
+	case <-time.After(f.config.ComponentStartup):
+		// Start blocks while the controller serves; reaching the budget without an
+		// error is the normal path.
+	}
 
 	f.controller = ctrl
 	f.addCleanup(func() error {
-		err := ctrl.Stop(context.Background())
+		err := ctrl.Stop()
 		// Ignore "controller not running" errors during cleanup
 		if err != nil && err.Error() == "controller not running" {
 			return nil
@@ -479,16 +518,12 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 		return "", fmt.Errorf("controller not initialized - cannot create registration token")
 	}
 
-	// Get the registration token store from the controller
-	tokenStoreInterface := f.controller.GetRegistrationTokenStore()
-	if tokenStoreInterface == nil {
+	// Get the registration token store from the controller. The server exposes
+	// it as a registration.Store, so no type assertion is needed — only a nil
+	// check for the not-yet-initialized case.
+	tokenStore := f.controller.GetRegistrationTokenStore()
+	if tokenStore == nil {
 		return "", fmt.Errorf("registration token store not available")
-	}
-
-	// Type assert to registration.Store
-	tokenStore, ok := tokenStoreInterface.(registration.Store)
-	if !ok {
-		return "", fmt.Errorf("invalid registration token store type")
 	}
 
 	// Create a new registration token
@@ -514,7 +549,10 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 }
 
 // RegistrationResponse represents the HTTP registration response
-// Story #294 Phase 3: Used for steward registration via controller API
+// Story #294 Phase 3: Used for steward registration via controller API.
+// No client_key field: the steward generates its own keypair locally and
+// submits a CSR; the controller never generates or sees a private key for
+// this credential (Issue #3780).
 type RegistrationResponse struct {
 	StewardID        string `json:"steward_id"`
 	TenantID         string `json:"tenant_id"`
@@ -522,8 +560,34 @@ type RegistrationResponse struct {
 	ControllerURL    string `json:"controller_url"`
 	TransportAddress string `json:"transport_address"`
 	ClientCert       string `json:"client_cert,omitempty"`
-	ClientKey        string `json:"client_key,omitempty"`
 	CACert           string `json:"ca_cert,omitempty"`
+}
+
+// generateE2ERegistrationKeypairAndCSR generates a fresh ECDSA P-256 keypair and a
+// self-signed PEM CERTIFICATE REQUEST over its public key, mirroring
+// features/steward/registration/client_http.go's generateStewardKeypair /
+// buildRegistrationCSR (Issue #3780). Returns the PKCS8 PEM-encoded private key
+// (held only by the caller, never transmitted) and the CSR PEM to submit.
+func generateE2ERegistrationKeypairAndCSR(commonName string) (keyPEM, csrPEM string, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate registration keypair: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal registration private key: %w", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: commonName},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, priv)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create registration CSR: %w", err)
+	}
+	csrPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
+	return keyPEM, csrPEM, nil
 }
 
 // RegisterStewardWithController performs full steward registration flow via HTTP + gRPC transport
@@ -561,8 +625,27 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		protocol = "https"
 	}
 	registrationURL := fmt.Sprintf("%s://localhost:%d/api/v1/register", protocol, f.config.HTTPPort)
+
+	// Generate a fresh device identity for each registration (ADR-010 §1, Issue #2095).
+	// Each call produces a unique DeviceID to prevent 409 conflicts within the same tenant.
+	identPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate device identity key: %w", err)
+	}
+	identHash := sha256.Sum256(identPub)
+
+	// Generate the steward's mTLS keypair locally and submit only the public half
+	// as a CSR (Issue #3780); clientKeyPEM never leaves this process.
+	clientKeyPEM, csrPEM, err := generateE2ERegistrationKeypairAndCSR(stewardName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate steward registration keypair: %w", err)
+	}
+
 	reqBody := map[string]string{
-		"token": token,
+		"token":            token,
+		"device_id":        hex.EncodeToString(identHash[:]),
+		"identity_key_pub": base64.StdEncoding.EncodeToString(identPub),
+		"csr_pem":          csrPEM,
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {
@@ -616,11 +699,13 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		"tenant_id", regResp.TenantID,
 		"transport_address", regResp.TransportAddress)
 
-	// Step 4: Create TLS config from registration certificates
+	// Step 4: Create TLS config from registration certificates, combining the
+	// controller-issued certificate with the locally held private key
+	// (Issue #3780) — no client_key field exists on the wire response to read.
 	tlsConfig, err := f.createTLSConfigFromPEM(
 		[]byte(regResp.CACert),
 		[]byte(regResp.ClientCert),
-		[]byte(regResp.ClientKey),
+		[]byte(clientKeyPEM),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
@@ -668,7 +753,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		TransportAddress: regResp.TransportAddress,
 		ControllerURL:    regResp.ControllerURL,
 		ClientCert:       regResp.ClientCert,
-		ClientKey:        regResp.ClientKey,
+		ClientKey:        clientKeyPEM,
 		CACert:           regResp.CACert,
 		heartbeatDone:    heartbeatDone,
 	}
@@ -708,11 +793,13 @@ func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clie
 		return nil, fmt.Errorf("failed to load client certificate: %w", err)
 	}
 
-	// Create TLS config with ALPN protocol for gRPC-over-QUIC
+	// Create TLS config with ALPN protocol for gRPC-over-QUIC.
+	// QUIC is TLS 1.3-only and the dialer now rejects anything lower outright, so
+	// TLS 1.2 here is not a weaker-but-working setting — it fails the handshake.
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
-		MinVersion:   tls.VersionTLS12,
+		MinVersion:   tls.VersionTLS13,
 		ServerName:   "localhost",                          // Connect via localhost in tests
 		NextProtos:   []string{quictransport.ALPNProtocol}, // Required for QUIC transport
 	}

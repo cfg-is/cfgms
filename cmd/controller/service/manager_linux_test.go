@@ -71,8 +71,20 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	assert.Contains(t, unit, "[Unit]")
 	assert.Contains(t, unit, "[Service]")
 	assert.Contains(t, unit, "[Install]")
-	assert.Contains(t, unit, "Restart=always")
+	assert.Contains(t, unit, "Restart=on-failure")
 	assert.Contains(t, unit, "RestartSec=10")
+	assert.Contains(t, unit, "User=cfgms")
+	assert.Contains(t, unit, "Group=cfgms")
+	assert.Contains(t, unit, "LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key")
+	assert.Contains(t, unit, "Environment=CFGMS_SECRETS_KEY_FILE=%d/cfgms-secrets-key")
+	assert.Contains(t, unit, "InaccessiblePaths=/etc/cfgms/secrets.key")
+	assert.Contains(t, unit, "NoNewPrivileges=true")
+	assert.Contains(t, unit, "ProtectSystem=strict")
+	assert.Contains(t, unit, "PrivateTmp=true")
+	assert.Contains(t, unit, "CapabilityBoundingSet=\n")
+	assert.Contains(t, unit, "SystemCallFilter=@system-service")
+	assert.Contains(t, unit, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6")
+	assert.Contains(t, unit, "ReadWritePaths=/var/lib/cfgms /var/log/cfgms")
 	assert.Contains(t, unit, `--config "`+configPath+`"`)
 	assert.Contains(t, unit, linuxInstallPath)
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
@@ -85,7 +97,7 @@ func TestGenerateSystemdUnit(t *testing.T) {
 
 func TestGenerateSystemdUnitContainsRestartPolicy(t *testing.T) {
 	unit := generateSystemdUnit("/etc/cfgms/controller.cfg")
-	assert.Contains(t, unit, "Restart=always", "Restart=always required")
+	assert.Contains(t, unit, "Restart=on-failure", "only failures should trigger restart")
 	assert.Contains(t, unit, "RestartSec=10", "RestartSec=10 required")
 }
 
@@ -142,4 +154,15 @@ func TestSystemdUnitFilePermissions(t *testing.T) {
 	require.NoError(t, err)
 	// 0600: owner rw (root only); systemd reads as root, group read is unnecessary
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+// TestLinuxManagerStageBinaryAndRestart_SourceNotFound verifies that
+// StageBinaryAndRestart fails fast at the copy step when the source binary
+// does not exist.
+func TestLinuxManagerStageBinaryAndRestart_SourceNotFound(t *testing.T) {
+	m := New("/usr/bin/cfgms-controller")
+	err := m.StageBinaryAndRestart("/nonexistent/ghost-binary", "/etc/cfgms/controller.cfg")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage binary",
+		"error must indicate failure in the copy/stage step")
 }

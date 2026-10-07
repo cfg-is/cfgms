@@ -14,3 +14,7 @@ import "os"
 func atomicRename(src, dst string) error {
 	return os.Rename(src, dst)
 }
+
+// isSharingViolation is Windows-only in practice: POSIX opens have no share
+// modes, so no error here is one. See rename_windows.go.
+func isSharingViolation(error) bool { return false }

@@ -52,6 +52,9 @@ func TestConvergenceLoopStopsOnContextCancel(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	// Disable DNA collection: this test exercises convergence loop lifecycle only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -74,6 +77,9 @@ func TestConvergenceLoopStopsOnShutdown(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	// Disable DNA collection: this test exercises convergence loop lifecycle only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx := context.Background()
 
@@ -107,6 +113,9 @@ func TestStandaloneRunsInitialConvergenceOnStart(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	// Disable DNA collection: this test exercises initial convergence success only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -129,10 +138,11 @@ func TestDetectUnmanagedDNADrift_IDMismatch(t *testing.T) {
 
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
-	// Inject a previousDNA with a sentinel ID that the real DNA collector will not produce.
-	// The collector derives IDs from stable hardware identifiers (MAC + hostname), so the
-	// real ID will always differ from the sentinel "guaranteed-mismatch-id-xyz".
+	// Inject a previousDNA with a sentinel ID that the DNA collector will not
+	// produce. The collector derives IDs from stable hardware identifiers (MAC +
+	// hostname), so the collected ID will always differ from the sentinel below.
 	steward.SetPreviousDNA(s, &commonpb.DNA{Id: "guaranteed-mismatch-id-xyz"})
 
 	ctx := context.Background()
@@ -155,6 +165,7 @@ func TestDetectUnmanagedDNADrift_SameID(t *testing.T) {
 
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 

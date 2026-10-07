@@ -17,6 +17,24 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
+// orderByColumns is the closed set of columns buildTimeRangeQuery may sort
+// by, mirroring exactly the SELECT list's queryable columns (fields/created_at
+// are excluded — the former is JSONB, the latter is not exposed for sorting).
+// A column name not in this set is never interpolated into the ORDER BY
+// clause, regardless of what a caller supplies.
+var orderByColumns = map[string]bool{
+	"timestamp":      true,
+	"level":          true,
+	"message":        true,
+	"service_name":   true,
+	"component":      true,
+	"tenant_id":      true,
+	"session_id":     true,
+	"correlation_id": true,
+	"trace_id":       true,
+	"span_id":        true,
+}
+
 // QueryTimeRange queries log entries within a time range using optimized TimescaleDB queries
 func (p *TimescaleProvider) QueryTimeRange(ctx context.Context, query interfaces.TimeRangeQuery) ([]interfaces.LogEntry, error) {
 	if !p.initialized {
@@ -220,9 +238,18 @@ func (p *TimescaleProvider) buildTimeRangeQuery(query interfaces.TimeRangeQuery)
 		sqlQuery += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	// Add ORDER BY
+	// Add ORDER BY. orderByColumns is an allow-list, not a sanitizer: SQL
+	// identifiers can never be passed as a placeholder argument the way a
+	// value can, so a column name reaching this string must be validated
+	// against a fixed set before it can be interpolated at all. query.OrderBy
+	// is a `json:"order_by"`-tagged field on a request-deserializable type
+	// (interfaces.TimeRangeQuery) — no caller in this codebase sets it from
+	// untrusted input today, but that is a property of the callers, not of
+	// this function, and the field exists precisely so a future caller can.
+	// Any value outside the allow-list falls back to the same "timestamp"
+	// default already used for an empty OrderBy.
 	orderBy := "timestamp"
-	if query.OrderBy != "" && query.OrderBy != "timestamp" {
+	if query.OrderBy != "" && query.OrderBy != "timestamp" && orderByColumns[query.OrderBy] {
 		orderBy = query.OrderBy
 	}
 

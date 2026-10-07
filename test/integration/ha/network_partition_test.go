@@ -39,9 +39,9 @@ func TestNetworkPartition(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	// Wait for initial cluster formation
@@ -83,8 +83,8 @@ func TestNetworkPartition(t *testing.T) {
 
 		// Verify majority partition (east + central) maintains leadership
 		majorityControllers := []string{
-			"https://localhost:9080", // east
-			"https://localhost:9081", // central
+			controllerEastURL,    // east
+			controllerCentralURL, // central
 		}
 
 		require.Eventually(t, func() bool {
@@ -209,9 +209,9 @@ func TestPartitionRecovery(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	// Wait for initial cluster
@@ -287,7 +287,7 @@ func TestPartitionRecovery(t *testing.T) {
 		time.Sleep(10 * time.Second)
 
 		// Only west should be running - test if it can maintain operations
-		westHealthy := waitForHealthy(ctx, "https://localhost:9082", 30*time.Second) == nil
+		westHealthy := waitForHealthy(ctx, controllerWestURL, 30*time.Second) == nil
 		assert.True(t, westHealthy, "West controller should remain healthy")
 
 		// Wait for other controllers to come back

@@ -6,6 +6,7 @@ package quic
 import (
 	"crypto/tls"
 	"net"
+	"sync"
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
@@ -22,6 +23,9 @@ type Conn struct {
 	stream     *quicgo.Stream
 	localAddr  net.Addr
 	remoteAddr net.Addr
+	closeOnce  sync.Once
+	closeErr   error
+	onClose    func()
 }
 
 // Compile-time check that Conn implements net.Conn.
@@ -31,11 +35,16 @@ var _ net.Conn = (*Conn)(nil)
 // pre-computed addresses. The quicConn reference is required so that
 // TLSConnectionState can expose the peer certificate after the handshake.
 func newConn(quicConn *quicgo.Conn, stream *quicgo.Stream, localAddr, remoteAddr net.Addr) *Conn {
+	return newConnWithCloseHook(quicConn, stream, localAddr, remoteAddr, nil)
+}
+
+func newConnWithCloseHook(quicConn *quicgo.Conn, stream *quicgo.Stream, localAddr, remoteAddr net.Addr, onClose func()) *Conn {
 	return &Conn{
 		quicConn:   quicConn,
 		stream:     stream,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
+		onClose:    onClose,
 	}
 }
 
@@ -58,8 +67,14 @@ func (c *Conn) Write(b []byte) (int, error) {
 // only the stream write half, and the peer must wait for the QUIC idle
 // timeout (~90s) to detect the disconnect.
 func (c *Conn) Close() error {
-	_ = c.stream.Close() // error ignored: CloseWithError below tears down the whole connection
-	return c.quicConn.CloseWithError(0, "")
+	c.closeOnce.Do(func() {
+		_ = c.stream.Close() // CloseWithError below tears down the whole connection
+		c.closeErr = c.quicConn.CloseWithError(0, "")
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return c.closeErr
 }
 
 // LocalAddr returns the local QUIC connection address.

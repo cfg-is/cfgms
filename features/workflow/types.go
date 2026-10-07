@@ -78,6 +78,11 @@ type Step struct {
 	// Name is the unique identifier for this step within the workflow
 	Name string `yaml:"name" json:"name"`
 
+	// ID is the stable structural identity for this step, computed from its
+	// position in the step tree (e.g. "s0", "s0.s1"). Never persisted; always
+	// recomputed by AssignStepIDs on every read/execute pass.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
 	// Type defines the step execution type (task, sequential, parallel, conditional)
 	Type StepType `yaml:"type" json:"type"`
 
@@ -226,6 +231,21 @@ const (
 
 	// StepTypeTransform executes data transformation operations
 	StepTypeTransform StepType = "transform"
+
+	// StepTypeQueryRingHealth queries the health of a deployment ring for rollout gating.
+	// Counts on-version, failed, and pending stewards in the ring and exposes the results
+	// as step outputs (on_version_pct, failed_pct, pending_count).
+	StepTypeQueryRingHealth StepType = "query_ring_health"
+
+	// StepTypeSetHARole writes the ha_role block into a steward's device-scope config,
+	// triggering the steward's existing convergence loop to register the VM as a cluster role.
+	// Implemented by features/workflow/nodes in S2.
+	StepTypeSetHARole StepType = "set_ha_role"
+
+	// StepTypeMoveResourceToCluster moves a VM resource definition from device scope
+	// (stewards/<id>) to cluster-policies scope (<clusterName>), completing FC-role promotion.
+	// Implemented by features/workflow/nodes in S3.
+	StepTypeMoveResourceToCluster StepType = "move_resource_to_cluster"
 )
 
 // Condition defines execution conditions for conditional steps
@@ -326,6 +346,15 @@ type WorkflowExecution struct {
 	// WorkflowName is the name of the workflow being executed
 	WorkflowName string `json:"workflow_name"`
 
+	// TenantID is the authenticated tenant that owns this execution, resolved by
+	// the engine from the caller's verified context (ctxkeys.TenantID) at
+	// ExecuteWorkflow time. Unlike Variables and a step's Config — both of which
+	// are writable by whoever authored or triggered the workflow — this field is
+	// never populated from workflow-author-controlled data. Step executors read
+	// it to authorize tenant-scoped actions instead of trusting a workflow-
+	// supplied tenant_id (Issue #4338).
+	TenantID string `json:"tenant_id,omitempty"`
+
 	// Status is the current execution status
 	Status ExecutionStatus `json:"status"`
 
@@ -407,23 +436,23 @@ func (we *WorkflowExecution) GetVariables() map[string]interface{} {
 }
 
 // SetStepResult safely sets a step result
-func (we *WorkflowExecution) SetStepResult(stepName string, result StepResult) {
+func (we *WorkflowExecution) SetStepResult(stepID string, result StepResult) {
 	we.mutex.Lock()
 	defer we.mutex.Unlock()
 	if we.StepResults == nil {
 		we.StepResults = make(map[string]StepResult)
 	}
-	we.StepResults[stepName] = result
+	we.StepResults[stepID] = result
 }
 
 // GetStepResult safely gets a step result
-func (we *WorkflowExecution) GetStepResult(stepName string) (StepResult, bool) {
+func (we *WorkflowExecution) GetStepResult(stepID string) (StepResult, bool) {
 	we.mutex.RLock()
 	defer we.mutex.RUnlock()
 	if we.StepResults == nil {
 		return StepResult{}, false
 	}
-	result, exists := we.StepResults[stepName]
+	result, exists := we.StepResults[stepID]
 	return result, exists
 }
 
@@ -474,13 +503,13 @@ func (we *WorkflowExecution) GetStepResults() map[string]StepResult {
 }
 
 // HasStepResult safely checks if a step result exists
-func (we *WorkflowExecution) HasStepResult(stepName string) bool {
+func (we *WorkflowExecution) HasStepResult(stepID string) bool {
 	we.mutex.RLock()
 	defer we.mutex.RUnlock()
 	if we.StepResults == nil {
 		return false
 	}
-	_, exists := we.StepResults[stepName]
+	_, exists := we.StepResults[stepID]
 	return exists
 }
 
@@ -496,10 +525,10 @@ func (we *WorkflowExecution) HasVariable(varName string) bool {
 }
 
 // SetCurrentStep safely sets the current step
-func (we *WorkflowExecution) SetCurrentStep(stepName string) {
+func (we *WorkflowExecution) SetCurrentStep(stepID string) {
 	we.mutex.Lock()
 	defer we.mutex.Unlock()
-	we.CurrentStep = stepName
+	we.CurrentStep = stepID
 }
 
 // GetCurrentStep safely gets the current step
@@ -627,8 +656,11 @@ type WorkflowEngine interface {
 
 // StepExecutor defines the interface for executing individual steps
 type StepExecutor interface {
-	// ExecuteStep executes a single workflow step
-	ExecuteStep(ctx context.Context, step Step, variables map[string]interface{}) (StepResult, error)
+	// ExecuteStep executes a single workflow step. execution carries the
+	// engine-injected authenticated tenant (execution.TenantID) that
+	// tenant-scoped step executors must authorize against — never the
+	// author-writable execution.Variables or step.Config (Issue #4338).
+	ExecuteStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
 // HTTPConfig defines configuration for HTTP-based workflow steps
@@ -975,8 +1007,11 @@ type StackFrame struct {
 
 // ExecutionStep represents a step in the execution trace
 type ExecutionStep struct {
-	// StepName is the name of the executed step
+	// StepName is the human-readable name of the executed step
 	StepName string `json:"step_name"`
+
+	// StepID is the stable structural ID (position-derived) for canvas join
+	StepID string `json:"step_id,omitempty"`
 
 	// StepType is the type of step
 	StepType StepType `json:"step_type"`

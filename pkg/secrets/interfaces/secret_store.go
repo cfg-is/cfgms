@@ -16,6 +16,15 @@ var ErrTenantRequired = errors.New("TenantID is required for multi-tenant secret
 // ErrSecretNotFound is returned when a requested secret key does not exist in the store.
 var ErrSecretNotFound = errors.New("secret not found")
 
+// ErrSecretExpired is returned by a direct read of a secret whose expiry has passed.
+// The record exists but must not be used; it is not a storage fault (Issue #4574).
+var ErrSecretExpired = errors.New("secret expired")
+
+// ErrSecretUndecryptable is returned by a direct read of a record that exists but
+// cannot be decrypted or parsed — tampered, corrupt, or written under another key.
+// Retrying will not help; it is not a storage fault (Issue #4574).
+var ErrSecretUndecryptable = errors.New("secret cannot be decrypted")
+
 // SecretStore defines the interface for storing and retrieving secrets
 // All implementations MUST encrypt secrets at rest - no cleartext storage allowed
 type SecretStore interface {
@@ -28,6 +37,37 @@ type SecretStore interface {
 	// Bulk operations
 	GetSecrets(ctx context.Context, keys []string) (map[string]*Secret, error)
 	StoreSecrets(ctx context.Context, secrets map[string]*SecretRequest) error
+
+	// CompareAndSwapSecret atomically stores req at key only if the secret
+	// currently stored there has version expectedVersion. Pass expectedVersion
+	// 0 to require that no secret currently exists at key (a create-if-absent
+	// claim). A version mismatch is reported as ok=false with a nil error, so
+	// callers can distinguish "lost the race" from a genuine store failure —
+	// err is reserved for infrastructure failures. On success, ok is true and
+	// newVersion is the version now stored. This is the primitive multi-writer
+	// state transitions (pending -> approved, approved -> collected, revoke,
+	// issue-and-rebind) must use instead of a per-process mutex, which provides
+	// no protection once a concurrent request can land on a different node
+	// (Issue #3775 / ADR-031).
+	//
+	// An expired secret does not exist. A provider that implements secret expiry
+	// must treat a record past its ExpiresAt exactly as it treats an absent one,
+	// for every expectedVersion: 0 succeeds against it and takes it over, and any
+	// non-zero value fails against it — no reader can obtain a version for an
+	// expired record, so a caller presenting one is by definition stale. Every
+	// read path already refuses expired records, so the alternative is a record
+	// that is invisible to readers yet permanently blocks a create-if-absent claim
+	// — which turns a TTL-bounded claim (the renewal claim, #3724) into a
+	// permanent lockout when the claiming process crashes before releasing it.
+	// newVersion after such a takeover continues the record's own version sequence
+	// rather than restarting at 1, so versions stay monotonic per key; callers must
+	// use the returned value and never assume expectedVersion+1.
+	//
+	// Atomicity is only as strong as the backend. Providers whose swap is atomic
+	// across controller nodes additionally implement
+	// ClusterAtomicCompareAndSwapper; see that interface before relying on this
+	// in cluster mode.
+	CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *SecretRequest) (newVersion int, ok bool, err error)
 
 	// Versioning support (if provider supports it)
 	GetSecretVersion(ctx context.Context, key string, version int) (*Secret, error)
@@ -44,6 +84,46 @@ type SecretStore interface {
 	// Health and status
 	HealthCheck(ctx context.Context) error
 	Close() error
+}
+
+// ClusterAtomicCompareAndSwapper is implemented by SecretStore instances whose
+// CompareAndSwapSecret is atomic across CFGMS controller nodes, not merely within
+// one process or one host.
+//
+// The distinction is not academic. Every caller of CompareAndSwapSecret in the
+// controller mints or invalidates a credential on the strength of winning it —
+// the approved->collected transition (#3719), enrolment-token spend (#3717),
+// CLI-login collect (#3721), account revoke, and the renewal claim (#3724). If
+// two nodes can both win, two client certificates are issued for one approval.
+//
+// This is deliberately a property of the constructed store rather than of the
+// provider: the same provider is cluster-atomic or not depending on the backend
+// it was configured with (the SOPS provider backed by PostgreSQL has a genuine
+// conditional write; backed by a local directory it has a file lock). A store
+// that does not implement this interface must be assumed not to be cluster-atomic.
+type ClusterAtomicCompareAndSwapper interface {
+	CompareAndSwapIsClusterAtomic() bool
+}
+
+// CompareAndSwapIsClusterAtomic reports whether store's CompareAndSwapSecret is
+// atomic across controller nodes. A store that does not implement
+// ClusterAtomicCompareAndSwapper reports false: absence of the claim is not
+// evidence for it.
+func CompareAndSwapIsClusterAtomic(store SecretStore) bool {
+	c, ok := store.(ClusterAtomicCompareAndSwapper)
+	return ok && c.CompareAndSwapIsClusterAtomic()
+}
+
+// TenantSecretAccessor is implemented by a SecretStore that can address a secret by
+// an explicit (tenantID, key) pair (Issue #4574). The combined "<tenant_id>/<key>"
+// reference taken by GetSecret and DeleteSecret is ambiguous once tenant IDs are
+// hierarchical and keys may contain "/"; a caller that already knows the tenant
+// should use this interface when the store offers it. GetTenantSecret must read the
+// backing store, not a per-instance cache, so changes made through another store
+// instance are observed immediately. Not-found is reported as ErrSecretNotFound.
+type TenantSecretAccessor interface {
+	GetTenantSecret(ctx context.Context, tenantID, key string) (*Secret, error)
+	DeleteTenantSecret(ctx context.Context, tenantID, key string) error
 }
 
 // Secret represents a stored secret with metadata

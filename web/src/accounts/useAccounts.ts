@@ -1,0 +1,720 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+/*
+ * Account fetch hooks (Issue #2733, #3133, #2974, #3134, #3132, #3574).
+ *
+ * Endpoints covered:
+ *   GET    /api/v1/accounts                                → useWebAccountList
+ *   POST   /api/v1/accounts                               → createWebAccount (step-up gated; mints enrollment link)
+ *   PUT    /api/v1/accounts/{u}                           → updateWebAccount (Issue #3132; permissions/disabled/reset_credentials)
+ *   POST   /api/v1/accounts/{u}/enrollment-link/revoke    → revokeEnrollmentLink
+ *   GET    /api/v1/rbac/roles                                  → useRoleList
+ *   GET    /api/v1/rbac/permissions                           → usePermissionList
+ *   POST   /api/v1/rbac/roles                                 → createRole
+ *   PUT    /api/v1/rbac/roles/{id}                            → updateRole
+ *   DELETE /api/v1/rbac/roles/{id}                            → deleteRole
+ *   GET    /api/v1/rbac/subjects/{id}/roles                   → useSubjectRoles (Issue #3134)
+ *   POST   /api/v1/rbac/subjects/{id}/roles                   → assignSubjectRole (Issue #3134)
+ *   DELETE /api/v1/rbac/subjects/{id}/roles/{role_id}         → revokeSubjectRole (Issue #3134)
+ *
+ * Security A9.1: username/role name/description values originate from
+ * user-supplied content. All string fields are coerced via str(). Callers
+ * must render them as text nodes only, never via dangerouslySetInnerHTML.
+ *
+ * M-AUTH-2: role create/update/delete and subject role grant/revoke are
+ * sensitive operations. Each carries an operator justification in the
+ * X-Justification header — the controller rejects the operation and records an
+ * audit failure without one.
+ *
+ * Step-up (Issue #2974, ADR-021 Decision 6): account-create is gated at
+ * AssuranceStrong. The apiFetch interceptor handles the 401 + CFGMS-StepUp
+ * response transparently via the StepUpModal — callers do not need extra
+ * step-up logic. No password is ever sent or stored.
+ *
+ * Response shape: list endpoints return the standard { data: [...] }
+ * envelope, matching writeSuccessResponse in the server.
+ */
+import { useCallback, useEffect, useState } from 'react'
+import { apiFetch } from '../api/client.ts'
+
+// ── Primitive coercers ────────────────────────────────────────────────────────
+
+function str(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function strArr(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((v): v is string => typeof v === 'string')
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export interface WebAccountInfo {
+  id: string
+  username: string
+  tenant_id: string
+  permissions: string[]
+  disabled: boolean // Issue #3132
+  created_at: string
+  has_outstanding_enrollment_link: boolean // Issue #2974
+}
+
+/**
+ * Result of creating a new web account (POST /api/v1/accounts).
+ * The enrollment_magic_link is the raw token shown ONCE to the admin for
+ * out-of-band handoff. It is never returned in subsequent list or get responses.
+ * No password is ever set — accounts are passkey-only (ADR-021 Amendment 1).
+ */
+export interface WebAccountCreateResult {
+  account: WebAccountInfo
+  /** Raw enrollment token (>=128-bit random, hex-encoded). Shown once. */
+  enrollment_magic_link: string
+}
+
+export interface RoleInfo {
+  id: string
+  name: string
+  description: string
+  permissions: string[]
+  tenant_id: string
+  created_at: string
+  updated_at: string
+}
+
+export interface PermissionInfo {
+  id: string
+  name: string
+  description: string
+  resource_type: string
+  actions: string[]
+}
+
+// ── Parse helpers ─────────────────────────────────────────────────────────────
+
+export function parseWebAccountInfo(value: unknown): WebAccountInfo | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const id = str(r.id)
+  if (!id) return null
+  return {
+    id,
+    username: str(r.username),
+    tenant_id: str(r.tenant_id),
+    permissions: strArr(r.permissions),
+    disabled: r.disabled === true,
+    created_at: str(r.created_at),
+    has_outstanding_enrollment_link: r.has_outstanding_enrollment_link === true,
+  }
+}
+
+/**
+ * Parse a WebAccountCreateResult from POST /api/v1/accounts response data.
+ * The enrollment_magic_link is safe to display (hex-encoded, no injection risk).
+ */
+export function parseWebAccountCreateResult(data: unknown): WebAccountCreateResult | null {
+  if (typeof data !== 'object' || data === null) return null
+  const r = data as Record<string, unknown>
+  const account = parseWebAccountInfo(data)
+  if (account === null) return null
+  return {
+    account,
+    enrollment_magic_link: str(r.enrollment_magic_link),
+  }
+}
+
+export function parseWebAccountList(data: unknown): WebAccountInfo[] {
+  if (!Array.isArray(data)) throw new Error('unexpected response shape')
+  const list: WebAccountInfo[] = []
+  for (const item of data) {
+    const a = parseWebAccountInfo(item)
+    if (a !== null) list.push(a)
+  }
+  return list
+}
+
+export function parseRoleInfo(value: unknown): RoleInfo | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const id = str(r.id)
+  if (!id) return null
+  return {
+    id,
+    name: str(r.name),
+    description: str(r.description),
+    permissions: strArr(r.permissions),
+    tenant_id: str(r.tenant_id),
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
+  }
+}
+
+export function parseRoleList(data: unknown): RoleInfo[] {
+  if (!Array.isArray(data)) throw new Error('unexpected response shape')
+  const list: RoleInfo[] = []
+  for (const item of data) {
+    const r = parseRoleInfo(item)
+    if (r !== null) list.push(r)
+  }
+  return list
+}
+
+export function parsePermissionInfo(value: unknown): PermissionInfo | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const id = str(r.id)
+  if (!id) return null
+  return {
+    id,
+    name: str(r.name),
+    description: str(r.description),
+    resource_type: str(r.resource_type),
+    actions: strArr(r.actions),
+  }
+}
+
+export function parsePermissionList(data: unknown): PermissionInfo[] {
+  if (!Array.isArray(data)) throw new Error('unexpected response shape')
+  const list: PermissionInfo[] = []
+  for (const item of data) {
+    const p = parsePermissionInfo(item)
+    if (p !== null) list.push(p)
+  }
+  return list
+}
+
+// ── Generic fetch outcome ─────────────────────────────────────────────────────
+
+interface FetchOutcome<T> {
+  key: string
+  data?: T
+  error?: string
+  fetchedAtMs: number
+}
+
+// ── useWebAccountList ─────────────────────────────────────────────────────────
+
+export interface UseWebAccountListResult {
+  accounts: WebAccountInfo[]
+  loading: boolean
+  error: string | null
+  retry: () => void
+}
+
+export function useWebAccountList(): UseWebAccountListResult {
+  const [attempt, setAttempt] = useState(0)
+  const [outcome, setOutcome] = useState<FetchOutcome<WebAccountInfo[]> | null>(null)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
+  const key = `accounts:${attempt}`
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/v1/accounts')
+      .then(async (response) => {
+        if (!response.ok)
+          throw new Error(`GET /api/v1/accounts — ${response.status}`)
+        const body: unknown = await response.json()
+        const parsed = parseWebAccountList(
+          (body as Record<string, unknown> | null)?.data,
+        )
+        if (cancelled) return
+        setOutcome({ key, data: parsed, fetchedAtMs: Date.now() })
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setOutcome({
+          key,
+          error:
+            cause instanceof Error && cause.message
+              ? cause.message
+              : 'GET /api/v1/accounts — request failed',
+          fetchedAtMs: Date.now(),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key, attempt])
+
+  const current = outcome?.key === key ? outcome : null
+  return {
+    accounts: current?.data ?? [],
+    loading: current === null,
+    error: current?.error ?? null,
+    retry,
+  }
+}
+
+// ── useRoleList ───────────────────────────────────────────────────────────────
+
+export interface UseRoleListResult {
+  roles: RoleInfo[]
+  loading: boolean
+  error: string | null
+  retry: () => void
+}
+
+export function useRoleList(): UseRoleListResult {
+  const [attempt, setAttempt] = useState(0)
+  const [outcome, setOutcome] = useState<FetchOutcome<RoleInfo[]> | null>(null)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
+  const key = `roles:${attempt}`
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/v1/rbac/roles')
+      .then(async (response) => {
+        if (!response.ok)
+          throw new Error(`GET /api/v1/rbac/roles — ${response.status}`)
+        const body: unknown = await response.json()
+        const parsed = parseRoleList(
+          (body as Record<string, unknown> | null)?.data,
+        )
+        if (cancelled) return
+        setOutcome({ key, data: parsed, fetchedAtMs: Date.now() })
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setOutcome({
+          key,
+          error:
+            cause instanceof Error && cause.message
+              ? cause.message
+              : 'GET /api/v1/rbac/roles — request failed',
+          fetchedAtMs: Date.now(),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key, attempt])
+
+  const current = outcome?.key === key ? outcome : null
+  return {
+    roles: current?.data ?? [],
+    loading: current === null,
+    error: current?.error ?? null,
+    retry,
+  }
+}
+
+// ── usePermissionList ─────────────────────────────────────────────────────────
+
+export interface UsePermissionListResult {
+  permissions: PermissionInfo[]
+  loading: boolean
+  error: string | null
+}
+
+export function usePermissionList(): UsePermissionListResult {
+  const [outcome, setOutcome] = useState<FetchOutcome<PermissionInfo[]> | null>(null)
+  const key = 'permissions:0'
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/v1/rbac/permissions')
+      .then(async (response) => {
+        if (!response.ok)
+          throw new Error(`GET /api/v1/rbac/permissions — ${response.status}`)
+        const body: unknown = await response.json()
+        const parsed = parsePermissionList(
+          (body as Record<string, unknown> | null)?.data,
+        )
+        if (cancelled) return
+        setOutcome({ key, data: parsed, fetchedAtMs: Date.now() })
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setOutcome({
+          key,
+          error:
+            cause instanceof Error && cause.message
+              ? cause.message
+              : 'GET /api/v1/rbac/permissions — request failed',
+          fetchedAtMs: Date.now(),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key])
+
+  const current = outcome?.key === key ? outcome : null
+  return {
+    permissions: current?.data ?? [],
+    loading: current === null,
+    error: current?.error ?? null,
+  }
+}
+
+// ── Web account mutations (Issue #2974) ──────────────────────────────────────
+
+/**
+ * Create a new web-admin account (step-up gated via apiFetch interceptor).
+ *
+ * No password is ever sent — accounts are passkey-only (ADR-021 Amendment 1).
+ * The response includes a single-use enrollment_magic_link shown exactly once.
+ * The apiFetch interceptor handles the 401 + CFGMS-StepUp challenge transparently
+ * via the StepUpModal, so callers do not need to handle step-up explicitly.
+ */
+export async function createWebAccount(
+  username: string,
+  tenantId?: string,
+  permissions?: string[],
+): Promise<WebAccountCreateResult> {
+  const body: Record<string, unknown> = { username }
+  if (tenantId && tenantId.trim()) body.tenant_id = tenantId.trim()
+  if (permissions && permissions.length > 0) body.permissions = permissions
+
+  const response = await apiFetch('/api/v1/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Create failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+  const respBody = (await response.json()) as Record<string, unknown>
+  const result = parseWebAccountCreateResult(respBody.data ?? respBody)
+  if (result === null) throw new Error('Unexpected response shape from account create')
+  return result
+}
+
+/**
+ * Revoke an outstanding (unredeemed) enrollment magic link for an account.
+ * Requires AssuranceStrong — step-up is handled by apiFetch interceptor.
+ */
+export async function revokeEnrollmentLink(username: string): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/accounts/${encodeURIComponent(username)}/enrollment-link/revoke`,
+    { method: 'POST' },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Revoke failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+}
+
+// ── Web account update (Issue #3132) ─────────────────────────────────────────
+
+export interface WebAccountUpdateOptions {
+  permissions?: string[]
+  disabled?: boolean
+  resetCredentials?: boolean
+}
+
+export interface WebAccountUpdateResult {
+  account: WebAccountInfo
+  /** Present only when reset_credentials was true and a new link was minted. */
+  enrollmentMagicLink?: string
+}
+
+/**
+ * Update a web-admin account (PUT /api/v1/accounts/{username}).
+ *
+ * All options are optional — omitted fields retain their current server-side
+ * values. Set resetCredentials to true to revoke all passkeys and mint a fresh
+ * enrollment magic link (returned as enrollmentMagicLink in the result when
+ * the server issues one — show it exactly once, same as the create flow).
+ */
+export async function updateWebAccount(
+  username: string,
+  options: WebAccountUpdateOptions,
+): Promise<WebAccountUpdateResult> {
+  const body: Record<string, unknown> = {}
+  if (options.permissions !== undefined) body.permissions = options.permissions
+  if (options.disabled !== undefined) body.disabled = options.disabled
+  if (options.resetCredentials) body.reset_credentials = true
+
+  const response = await apiFetch(
+    `/api/v1/accounts/${encodeURIComponent(username)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Update failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+  const respBody = (await response.json()) as Record<string, unknown>
+  const data = (respBody.data ?? respBody) as Record<string, unknown>
+  const account = parseWebAccountInfo(data)
+  if (account === null) throw new Error('Unexpected response shape from account update')
+  const enrollmentMagicLink =
+    typeof data.enrollment_magic_link === 'string' && data.enrollment_magic_link
+      ? data.enrollment_magic_link
+      : undefined
+  return { account, enrollmentMagicLink }
+}
+
+// ── Justification (M-AUTH-2) ──────────────────────────────────────────────────
+
+/** Server floor: features/rbac/sensitive_operations.go rejects shorter values. */
+export const JUSTIFICATION_MIN_LENGTH = 10
+/** Server ceiling: features/rbac/sensitive_operations.go rejects longer values. */
+export const JUSTIFICATION_MAX_LENGTH = 1000
+
+/**
+ * Validate an operator-supplied justification against the same bounds the
+ * controller enforces, returning an operator-facing message or null when valid.
+ *
+ * M-AUTH-2: role create/update/delete are sensitive operations. The RBAC
+ * manager rejects them before any store write unless a justification of
+ * 10–1000 characters is present, and records it on the audit event. Checking
+ * here keeps the feedback specific instead of surfacing a generic 500.
+ *
+ * The value travels as an HTTP header, so it must also be a valid header
+ * value: no control characters (header injection / request splitting) and no
+ * code points above U+00FF (the fetch Headers ByteString limit — a pasted
+ * smart quote would otherwise throw inside apiFetch).
+ */
+export function validateJustification(justification: string): string | null {
+  const trimmed = justification.trim()
+  if (trimmed.length === 0) return 'Justification is required'
+  if (trimmed.length < JUSTIFICATION_MIN_LENGTH)
+    return `Justification must be at least ${JUSTIFICATION_MIN_LENGTH} characters`
+  if (trimmed.length > JUSTIFICATION_MAX_LENGTH)
+    return `Justification must be at most ${JUSTIFICATION_MAX_LENGTH} characters`
+  if (/[^\x20-\x7E\xA0-\xFF]/.test(trimmed))
+    return 'Justification must use plain text characters only'
+  return null
+}
+
+/**
+ * Build the request headers for a role mutation (role CRUD and subject role
+ * grant/revoke), throwing when the justification is unusable so no request
+ * leaves the browser without one.
+ */
+function mutationHeaders(justification: string, withBody: boolean): Headers {
+  const invalid = validateJustification(justification)
+  if (invalid !== null) throw new Error(invalid)
+  const headers = new Headers({ 'X-Justification': justification.trim() })
+  if (withBody) headers.set('Content-Type', 'application/json')
+  return headers
+}
+
+// ── Role mutations ────────────────────────────────────────────────────────────
+
+/*
+ * No tenant_id is sent by any role mutation: the caller's tenant is authoritative
+ * only on the server, which derives it from the session context
+ * (handlers_rbac.go — callerTenantForRole) and rejects a mismatched body value
+ * with 403 TENANT_MISMATCH. A browser-supplied tenant would be a cross-tenant
+ * write vector, so the client never sends one.
+ */
+export async function createRole(
+  name: string,
+  description: string,
+  permissionIds: string[],
+  justification: string,
+): Promise<void> {
+  const response = await apiFetch('/api/v1/rbac/roles', {
+    method: 'POST',
+    headers: mutationHeaders(justification, true),
+    body: JSON.stringify({ name, description, permissions: permissionIds }),
+  })
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Create failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+}
+
+/*
+ * The role's tenant attribution survives the edit without the client sending it:
+ * handleUpdateRole loads the stored role, refuses the write when it belongs to
+ * another tenant (404) or is a system role (403), and carries the stored
+ * tenant_id — plus hierarchy links and creation time — into the replacement
+ * record itself.
+ */
+export async function updateRole(
+  id: string,
+  name: string,
+  description: string,
+  permissionIds: string[],
+  justification: string,
+): Promise<void> {
+  const response = await apiFetch(`/api/v1/rbac/roles/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: mutationHeaders(justification, true),
+    body: JSON.stringify({ name, description, permissions: permissionIds }),
+  })
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Update failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+}
+
+export async function deleteRole(id: string, justification: string): Promise<void> {
+  const response = await apiFetch(`/api/v1/rbac/roles/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: mutationHeaders(justification, false),
+  })
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Delete failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+}
+
+// ── Subject role management (Issue #3134) ────────────────────────────────────
+
+export interface UseSubjectRolesResult {
+  roles: RoleInfo[]
+  loading: boolean
+  error: string | null
+  retry: () => void
+}
+
+export function useSubjectRoles(subjectId: string): UseSubjectRolesResult {
+  const [attempt, setAttempt] = useState(0)
+  const [outcome, setOutcome] = useState<FetchOutcome<RoleInfo[]> | null>(null)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
+  const key = `subject-roles:${subjectId}:${attempt}`
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch(`/api/v1/rbac/subjects/${encodeURIComponent(subjectId)}/roles`)
+      .then(async (response) => {
+        if (!response.ok)
+          throw new Error(
+            `GET /api/v1/rbac/subjects/${subjectId}/roles — ${response.status}`,
+          )
+        const body: unknown = await response.json()
+        const parsed = parseRoleList(
+          (body as Record<string, unknown> | null)?.data,
+        )
+        if (cancelled) return
+        setOutcome({ key, data: parsed, fetchedAtMs: Date.now() })
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setOutcome({
+          key,
+          error:
+            cause instanceof Error && cause.message
+              ? cause.message
+              : `GET /api/v1/rbac/subjects/${subjectId}/roles — request failed`,
+          fetchedAtMs: Date.now(),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key, subjectId, attempt])
+
+  const current = outcome?.key === key ? outcome : null
+  return {
+    roles: current?.data ?? [],
+    loading: current === null,
+    error: current?.error ?? null,
+    retry,
+  }
+}
+
+/**
+ * Thrown when POST /api/v1/rbac/subjects/{id}/roles is refused by the server's
+ * escalation-prevention check, because the assignment would let the subject
+ * escalate their own privileges. The UI renders this as a distinct, non-generic
+ * message block so the admin understands the refusal is intentional, not a
+ * generic server error.
+ */
+export class EscalationError extends Error {
+  readonly isEscalationPrevention = true as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'EscalationError'
+  }
+}
+
+/**
+ * 403 codes the assign endpoint returns that are NOT escalation prevention
+ * (handlers_rbac_subjects.go, handlers_rbac.go). Rendering the
+ * escalation-prevention notice for these would tell the admin the grant was
+ * blocked to stop a privilege escalation when in fact the request was
+ * malformed (no justification) or aimed at an immutable system role.
+ */
+const NON_ESCALATION_FORBIDDEN_CODES = new Set(['JUSTIFICATION_REQUIRED', 'SYSTEM_ROLE_IMMUTABLE'])
+
+function errorEnvelope(errBody: Record<string, unknown>): Record<string, unknown> {
+  const err = errBody?.error
+  return typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : {}
+}
+
+function errorMessage(errBody: Record<string, unknown>): string {
+  const message = errorEnvelope(errBody).message
+  return typeof message === 'string' ? message : ''
+}
+
+function errorCode(errBody: Record<string, unknown>): string {
+  const code = errorEnvelope(errBody).code
+  return typeof code === 'string' ? code : ''
+}
+
+/*
+ * M-AUTH-2: subject role grant and revoke are sensitive operations. Manager.AssignRole
+ * and Manager.RevokeRole (features/rbac/manager.go) run ValidateSensitiveOperation
+ * before any store write and refuse with ErrJustificationRequired unless the context
+ * carries a justification, which the handler reads from the X-Justification header and
+ * records on the audit event. Both mutations therefore travel through mutationHeaders,
+ * which throws on an unusable justification so no privilege change leaves the browser
+ * without an operator reason attached.
+ */
+export async function assignSubjectRole(
+  subjectId: string,
+  roleId: string,
+  justification: string,
+): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/rbac/subjects/${encodeURIComponent(subjectId)}/roles`,
+    {
+      method: 'POST',
+      headers: mutationHeaders(justification, true),
+      body: JSON.stringify({ role_id: roleId }),
+    },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg = errorMessage(errBody) || `Assign failed — ${response.status}`
+    if (response.status === 403 && !NON_ESCALATION_FORBIDDEN_CODES.has(errorCode(errBody))) {
+      throw new EscalationError(errMsg)
+    }
+    throw new Error(errMsg)
+  }
+}
+
+export async function revokeSubjectRole(
+  subjectId: string,
+  roleId: string,
+  justification: string,
+): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/rbac/subjects/${encodeURIComponent(subjectId)}/roles/${encodeURIComponent(roleId)}`,
+    { method: 'DELETE', headers: mutationHeaders(justification, false) },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg = errorMessage(errBody) || `Revoke failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+}

@@ -16,7 +16,42 @@
 
 set -euo pipefail
 
+# Root-then-drop (Issue #4343): agent-dispatch.sh review-pr launches this as
+# the container's entrypoint with no `-u`, so it starts as root (see
+# Dockerfile). `agent` carries no sudoers entry and no other escalation path,
+# so the egress firewall must be set up here, as root, before this process
+# re-execs itself as `agent` for everything else -- one-way, before reading
+# any PR content. Must be the very first thing this script does.
+if [[ "$(id -u)" -eq 0 ]]; then
+    init-firewall.sh
+    exec runuser -u agent -- "$0" "$@"
+fi
+
+# Helper library for prompt context assembly, incl. ac_resolve_agent_model
+# (Issue #3030). Layout differs between the source tree (this script lives
+# under .devcontainer/scripts/, agent-context.sh under .devcontainer/) and the
+# container (both flattened as siblings under /usr/local/bin/ — see Dockerfile
+# COPY + the runtime -v mount in agent-dispatch.sh) — try the flattened path
+# first since that's the hot path in production.
+_AC_DIR="$(dirname "${BASH_SOURCE[0]}")"
+if [[ -f "${_AC_DIR}/agent-context.sh" ]]; then
+    source "${_AC_DIR}/agent-context.sh"
+else
+    source "${_AC_DIR}/../agent-context.sh"
+fi
+
 PROMPT_FILE="/workspace/.acceptance-review-prompt.md"
+
+# Distributed-lease release (multi-host cron coordination). agent-dispatch.sh
+# review-pr acquired pr-<N> and passed it as CFGMS_LEASE_KEY; release it on exit
+# so whichever cron host comes back first can pick up the next phase (fix on
+# FAIL, or merge on PASS). TTL reclaim is the backstop if this container dies.
+release_cfgms_lease() {
+  [ -n "${CFGMS_LEASE_KEY:-}" ] || return 0
+  [ -f /workspace/scripts/pipeline-helper.sh ] || return 0
+  bash /workspace/scripts/pipeline-helper.sh lease-release "$CFGMS_LEASE_KEY" >/dev/null 2>&1 || true
+}
+trap release_cfgms_lease EXIT
 
 # --- Phase 0: Environment setup ---
 
@@ -39,7 +74,14 @@ print(int((exp_ms / 1000) - time.time()))" 2>/dev/null || echo "0")
 
 if [ "$TOKEN_REMAINING" -lt 300 ] 2>/dev/null; then
     echo "OAuth token expired or expiring in <5min (${TOKEN_REMAINING}s remaining), refreshing..."
-    if claude -p 'ping' --dangerously-skip-permissions --model haiku >/dev/null 2>&1; then
+    # Run from outside /workspace: by this point /workspace is already a
+    # checkout of the PR branch under review, and this call has nothing to do
+    # with reviewing its content -- it exists purely to refresh the OAuth
+    # token. Starting `claude` there anyway would let it pick up that branch's
+    # own CLAUDE.md/hooks for no reason connected to the review itself (Issue
+    # #4343); running from a neutral directory keeps this incidental call from
+    # being an execution surface for whatever the checked-out branch contains.
+    if (cd /tmp && claude -p 'ping' --dangerously-skip-permissions --model haiku >/dev/null 2>&1); then
         echo "OAuth token refreshed (persisted via symlink)"
     else
         echo "ERROR: OAuth token refresh failed — credentials may be expired"
@@ -61,11 +103,19 @@ PR_NUM=$(grep -oP 'pr:\K[0-9]+' "$PROMPT_FILE" | head -1 || echo "")
 STORY_NUM=$(grep -oP 'story:\K[0-9]+' "$PROMPT_FILE" | head -1 || echo "")
 ITEM_ID=$(grep -oP -- '--project-item \K\S+' "$PROMPT_FILE" | head -1 || echo "")
 PROJECT_QUEUE="/workspace/scripts/project-queue.sh"
-echo "Starting Acceptance Reviewer (pr=${PR_NUM} story=${STORY_NUM} item=${ITEM_ID})..."
+# Model/effort resolved from .claude/model-routing.yaml (Issue #3030) —
+# see ac_resolve_agent_model in agent-context.sh.
+mapfile -t RESOLVED_MODEL < <(ac_resolve_agent_model "acceptance-review")
+AGENT_MODEL="${RESOLVED_MODEL[0]}"
+AGENT_EFFORT="${RESOLVED_MODEL[1]}"
+
+echo "Starting Acceptance Reviewer (pr=${PR_NUM} story=${STORY_NUM} item=${ITEM_ID} model=${AGENT_MODEL} effort=${AGENT_EFFORT})..."
 
 EXIT_CODE=0
 PROMPT_CONTENT=$(cat "$PROMPT_FILE")
-claude --dangerously-skip-permissions --model claude-sonnet-4-6 -p "$PROMPT_CONTENT" || EXIT_CODE=$?
+# Background Bash is killed when a headless turn ends (Issue #4178).
+PROMPT_CONTENT+=$'\n\n'"${AC_HEADLESS_NO_BG_WAIT_RULE}"
+claude --dangerously-skip-permissions --model "$AGENT_MODEL" -p "$PROMPT_CONTENT" || EXIT_CODE=$?
 
 # --- Phase 2: Failsafe project status reset ---
 # The agent is instructed to update project status before exiting.
@@ -89,9 +139,72 @@ cat > /tmp/agent-result.json <<RESULT_EOF
   "pr_num": ${PR_NUM:-null},
   "story_num": ${STORY_NUM:-null},
   "exit_code": ${EXIT_CODE},
+  "model": "${AGENT_MODEL}",
+  "effort": "${AGENT_EFFORT}",
   "timestamp": "$(date -Iseconds)"
 }
 RESULT_EOF
+
+# --- Token accounting (Issue #3028, harness-sourced per #3041) ---
+# Reviewers were previously unmeasured: the container is --rm, so its transcript
+# and spend vanished on exit. Best-effort throughout; no telemetry failure may
+# change the reviewer's exit code.
+#
+# The reporter resolves from the harness, never from /workspace (the PR branch
+# under review) — a branch that predates, edits, or deletes the reporter must
+# not be able to disable its own accounting. agent-dispatch.sh review-pr
+# bind-mounts .claude/metrics from the host at runtime, the same no-rebuild
+# pattern already used for this script and setup-env.sh; entrypoint.sh's own
+# copy is baked into the image (see Dockerfile) as a fallback path. A failure
+# to record usage must be loud (stdout WARN + an explicit usage_error marker
+# in the manifest), never a silently-absent "usage" key.
+CLAUDE_PROJECTS_DIR="${HOME}/.claude/projects"
+TOKEN_REPORT="/usr/local/share/cfgms-metrics/token_report.py"
+
+usage_status="ok"
+if [ ! -f "$TOKEN_REPORT" ]; then
+    usage_status="reporter_missing"
+    echo "WARN: token reporter not found at ${TOKEN_REPORT} — result manifest carries no usage"
+elif [ ! -d "$CLAUDE_PROJECTS_DIR" ]; then
+    usage_status="no_projects_dir"
+    echo "WARN: no persisted session directory at ${CLAUDE_PROJECTS_DIR} — result manifest carries no usage"
+elif ! python3 "$TOKEN_REPORT" --projects-dir "$CLAUDE_PROJECTS_DIR" \
+        --format totals --quiet > /tmp/agent-usage.json 2>/dev/null; then
+    usage_status="reporter_failed"
+    echo "WARN: token report failed — result manifest carries no usage"
+fi
+
+if [ "$usage_status" = "ok" ]; then
+    if ! python3 - <<'USAGE_MERGE'
+import json
+
+with open("/tmp/agent-result.json") as handle:
+    result = json.load(handle)
+with open("/tmp/agent-usage.json") as handle:
+    result["usage"] = json.load(handle)
+with open("/tmp/agent-result.json", "w") as handle:
+    json.dump(result, handle, indent=2)
+USAGE_MERGE
+    then
+        usage_status="merge_failed"
+        echo "WARN: could not merge token usage into result"
+    fi
+fi
+
+if [ "$usage_status" != "ok" ]; then
+    python3 - "$usage_status" <<'USAGE_MARK' || echo "WARN: could not write usage_error marker into result"
+import json, sys
+
+with open("/tmp/agent-result.json") as handle:
+    result = json.load(handle)
+result["usage"] = None
+result["usage_error"] = sys.argv[1]
+with open("/tmp/agent-result.json", "w") as handle:
+    json.dump(result, handle, indent=2)
+USAGE_MARK
+fi
+
+cp /tmp/agent-result.json "${CLAUDE_PROJECTS_DIR}/agent-result.json" 2>/dev/null || true
 
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo "Acceptance Reviewer completed (pr=${PR_NUM})"

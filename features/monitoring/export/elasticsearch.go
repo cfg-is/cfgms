@@ -480,7 +480,7 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 	var bulkResponse map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&bulkResponse); err != nil {
 		// Log warning but don't fail - data was likely indexed
-		ee.logger.WarnCtx(ctx, "Could not parse bulk response", "error", err)
+		ee.logger.WarnCtx(ctx, "Could not parse bulk response", "error", logging.SanitizeLogValue(err.Error()))
 	} else if hasErrors, ok := bulkResponse["errors"].(bool); ok && hasErrors {
 		ee.logger.WarnCtx(ctx, "Some documents failed to index",
 			"total_documents", len(documents))

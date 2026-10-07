@@ -7,6 +7,442 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-10-07
+
+Stable snapshot promoted to `main`, covering the v0.10.0–v0.10.5 roadmap milestones. Bundles the
+controller-served web console, passkey-first operator identity with step-up and operator-signed
+endpoint payloads, the clustered controller (shared Postgres, lease-backed authority, any-node
+service), the DNA fragment model and Entity Graph, the stdlib module set, Hyper-V failover-cluster
+management, and a fleet-wide tenant-containment hardening pass. See
+[`docs/product/roadmap.md`](docs/product/roadmap.md) for the full narrative.
+
+### Added
+
+- **Web console foundation** — React + TypeScript + Vite SPA in `web/` (Issue #2488) served by
+  the controller from its single TLS endpoint with a strict CSP (Issue #2494); authenticated app
+  shell with tenant switcher, search and alerts (PR #2678), client router and steward asset page
+  (PR #2740), and the fleet overview table with live filter, sort, DNA columns, saved views and
+  an asset-DNA drawer (Issues #2497, #2498) (Epic #2344).
+- **Web management & visibility** — fleet-wide search with the `cfg` selector grammar
+  (Issue #2726), audit log browse/filter (Issue #2727), fleet health aggregate tiles
+  (Issue #2729), configuration management (Issue #2730), workflow management (Issue #2731),
+  module review queue (Issue #2732), and account/role administration (Issue #2733) (Epic #2713).
+- **Web enrollment & fleet operations** — registration console with token lifecycle, IP-trust,
+  and approve / approve-all / approve-by-CIDR with dry-run preview (Issues #2935, #2936, #2969,
+  #2970, #2971); refresh-request queue (Issues #2941, #2973); installer artifacts and deploy
+  hand-off page (Issue #2937); row actions, bulk selection, bulk tag edit, move-tenant and
+  decommission (Issues #2938, #2939, #2972); Logs and Modules asset tabs (Issue #2940); session
+  probe on mount (Issue #2933) (Epic #2857).
+- **Web tenant & access administration** — tenant list/update REST and tenant tree view
+  (Issues #3125, #3131); account get/update with edit, password reset and enable/disable
+  (Issues #3126, #3132); role create/edit/delete and subject↔role binding REST + UI
+  (Issues #3128, #3133, #3134); certificate get/revoke REST and lifecycle view (Issues #3129,
+  #3135); tenant deletion pipeline with dual-control approval (Issue #3182) and suspend/restore
+  cascade with provenance tracking (Issue #3158) (Epic #2858).
+- **Web operator completeness** — create config for an unconfigured steward (Issue #2980),
+  structured diff in rollback preview (Issue #2981), per-steward push results (Issue #2982),
+  Config/Tenant ID pickers (Issue #2983), structured workflow step authoring and variable inputs
+  (Issues #2984, #2985), read-only workflow flowchart and browse drawer (Issues #3037, #3039),
+  trigger schedule/webhook configuration (PR #3011), and a scripts/runs/jobs surface with a
+  confirm-before-run gate backed by new `GET /runs` and `GET /jobs` (Issues #2987, #2988)
+  (Epic #2859).
+- **Web visibility surfaces** — `/reports` dashboard with KPI tiles, trend chart and template
+  generation (Issues #3270, #3271); fleet-wide and per-steward compliance views (Issues #3272,
+  #3273) derived from a real drift signal (Issues #3264, #3265); monitoring health and anomalies
+  view (Issue #3274); alert center with acknowledge/silence (Issues #3266, #3267, #3275); chart
+  and stat-tile design conventions (Issues #3268, #3269) (Epic #2860).
+- **Live operations: remote shell and task manager** — steward Terminal RPC dial-out PTY bridge
+  (Issue #2760), controller WebSocket route with relay session brokering (Issue #2761) and an
+  asset-page Shell tab (Issue #2762); cross-platform process/service snapshot collector, telemetry
+  subscribe/stream RPC, web fan-out and Task Manager tab (Issues #2763, #2764, #2765, #2766)
+  (Epic #2738).
+- **Troubleshooting cockpit** — case store and case CRUD/pin REST with tenant-subtree filtering
+  (Issues #3602, #3605, #3606), intake device-claim resolution (Issue #3604), `/cases` route,
+  index and cockpit shell (Issues #3608, #3614), and an evidence canvas with drift-diff,
+  blast-radius, change-timeline and remediation cards (Issues #3607, #3609–#3612) fed live by a
+  Watch-cursor WebSocket fan-out (Issue #3613) (Epic #2854).
+- **Passkey web authentication** — web session core with HttpOnly SameSite cookies and
+  double-submit CSRF (Issues #2492, #2493, ADR-018); WebAuthn passkey registration establishing
+  `AssuranceStrong` (Issue #2782); first-passkey enrollment via single-use magic link
+  (Issues #2966, #2968); self-service passkey management with an anti-lockout guard
+  (Issue #2992); passkey bootstrap and recovery through the mTLS admin certificate (Issue #2783).
+- **Identity assurance and step-up** — graduated assurance levels with a per-permission registry
+  replacing the `IsAdmin` bit (Issues #2780, #2781, #2787), step-up challenge with user-presence
+  enforcement (Issue #2784), silent WebAuthn session continuity with IP-change downgrade
+  (Issue #2788), `cfg` step-up client (PR #2843), web step-up modal and `Manager.Elevate`
+  (Issues #2786, #2965, #2967), and per-tenant assurance policy (Issues #2839, #2845)
+  (Epics #2737, #2931, ADR-021).
+- **Unified administrator identity** — one account per operator across passkey and mTLS: admin
+  certificates bound to accounts by serial (Issues #3578, #3580), CLI session scope resolved from
+  the bound account (Issue #3576), atomic resumable certificate rotation (Issue #3579),
+  offboarding cascade revoking certificates and sessions (Issues #3575, #3581), and `cfg` account
+  lifecycle verbs (Issue #3582) (Epic #3178).
+- **Zero-standing-privilege `cfg` sessions** — auth-tier middleware with mTLS-only Tier 3
+  (Issues #2222, #2224, #2225, #2226), controller session-token issuance/revocation
+  (Issue #2232), OS-keychain token storage (Issue #2233), encrypted-at-rest admin credential
+  (Issue #2231), `cfg connect`/`disconnect` with rolling renewal (Issue #2248), connection
+  registry (Issue #2217), and install-to-PATH targets (Issue #2216) (Epics #2213, #1419, ADR-014).
+- **Browser-authenticated CLI enrolment** — enrolment tokens and a pending credential-request
+  queue (Issue #3717), approval with marker authority (Issue #3718), headless enrolment
+  (Issue #3720), single-use collection (PR #3738), unattended renewal (Issue #3724), revocation
+  and containment (Issue #3725), `cfg` browser login via controller rendezvous (PR #3744), and
+  web confirmation and approval screens (Issues #3722, #3723) (Epic #3711).
+- **Operator-signed endpoint payloads** — canonical signed envelope binding target, nonce and
+  expiry (Issues #3690, #3694), CSR-based zero-custody signing credentials (Issues #3692, #3693,
+  #3696), WebAuthn payload signing (PR #3734) verified by the steward (Issue #3697), signed
+  operator-certificate revocation manifest consumed and delivered to stewards (Issues #3691,
+  #3699, #4400), blast-radius bound with audit trail (Issue #3698), and a CLI presence relay for
+  user-presence commands (Issue #4287) (Epic #3571).
+- **Clustered controller** — complete Postgres provider and shared DNA/fleet state
+  (Issues #2117, #2118), cluster-mode storage selection and second-node bootstrap (Issue #2119),
+  shared CA trust anchor from OpenBao (Issue #2018), durable shared session store
+  (Issues #2736, #2775), cluster-mode startup gates (Issues #2272, #2286), and node membership,
+  drain and decommission with CLI (Issues #2278, #2288, PR #2284) (Epics #2051, #2735).
+- **Any-to-any provider migration** — `cfg migrate` engine (Issue #2258) covering
+  flatfile/SQLite ↔ Postgres (Issue #2265), file ↔ OpenBao secrets including the CA key
+  (Issue #2270), local ↔ S3 installer blobs (PR #2285), and a generalized
+  `cfg storage migrate` with dry-run reports (Issue #2321) (Epic #2256).
+- **Lease-backed leadership authority** — `HasLeadership()` on a monotonic-clock leader lease
+  (PR #3448, ADR-029), commands stamped with a fencing term (Issue #3390) and fenced on the
+  steward with a persisted ratchet (Issues #3436, #3437), and authority gating on certificate,
+  drain, bundle-approval, rollout, installer and decommission endpoints (Issues #3538–#3544)
+  (Epics #3386, #3411).
+- **Cluster service model** — fenced database lease primitive backing leadership
+  (Issues #3756, #3760), lease-claimed singleton scheduling (Issue #3762), transactional delivery
+  rows (Issue #3757), shared steward-routing table with controller-to-controller delivery
+  (Issue #3764), a node registry (Issue #3763), durable nonce store (Issue #3755), one database
+  pool per node (Issue #3758), per-tenant admission control (Issue #3759), and cluster-visible
+  revocation and abuse counters (PRs #3860, #3899) (Epic #3751, ADR-031).
+- **SaaS topology foundations** — realm-qualified tenant IDs (Issue #3782), path-length-aware CA
+  init with subordinate-CA signing (Issue #3777), and CSR-based registration and
+  registration-refresh signing (Issues #3780, #3781) (Epic #3752, ADR-032).
+- **Cluster fleet durability and store completeness** — durable enrollment state (Issue #3403),
+  fleet list and inventory served from the shared store (Issues #3480, #3494, #3495),
+  collision-free steward IDs (Issue #3526); subsystems declare required stores and composition
+  fails closed, with absent optional capabilities surfaced in health (Issues #3407, #3408, #3409)
+  (Epics #3400, #3406).
+- **Audit sink architecture** — configurable audit sink selection (Issue #4036), `AuditStore`
+  required and fail-closed (Issue #4035), and a forward-only WORM shipper with Object Lock probe
+  and buffer-and-flush on outage (Issues #4037, #4039) (Epic #4033, ADR-033).
+- **Steward module foundation** — `features/modules/` split into `stdlib/` and `extended/`
+  (Issue #2469), canonical-fragment contract with `owns:` declaration (Issue #2471), stdlib
+  completeness gate (Issue #2473), and new stdlib modules `user`, `cert_trust`, `time` and
+  `hostname` (Issues #2474, #2475, #2476, #2460) plus the `patch` Windows backend (Issue #2472)
+  (Epic #2460, ADR-016).
+- **Module runtime and trust** — installed bundle modules run through the module runtime and are
+  verified on read-back (Issues #4410, #4425), unified Windows module transport (Issue #4393),
+  git source resolver pinned to the requested ref (Issue #4409), `additional_publishers`
+  resolved in strict mode (Issue #4398), `script_signing.policy` as a fleet-wide floor
+  (Issue #4399), and all three `module_trust` modes proven on the load path (Issue #4426).
+- **New and extended modules** — `github_runner` (Issues #2188, #2427), local `activedirectory`
+  extended module registered (Issue #4445), Microsoft Entra ID `entra_user` and `entra_group`
+  with tenant-partitioned execution credentials (Issues #4325, #4420), and the `package` module's
+  declarative provider allowlist with SYSTEM-context installs (PR #2821).
+- **Capability-driven observation** — `observe_when` manifest field and resolution against
+  baseline DNA (Issues #3101, #3103), a Tier-2 whole-domain observe sweep (Issue #3104), and an
+  observe read-only conformance helper (Issue #3102) (Epic #2890, ADR-024).
+- **osquery integration** — safe query invocation (Issue #3562), `always_pull` activation
+  (Issue #3563), curated `host:*` facts (Issues #3564, #3565, #3568), and ad-hoc fleet queries
+  via catalog RPC and gated REST dispatch (Issues #3566, #3569) (Epic #2855).
+- **Module Monitor and event stream** — event-driven Monitor wired into the convergence loop
+  (Issues #2112, #2113, #2435), pluggable EventBus with correlation IDs (Issue #2139),
+  convergence outcome events, per-call module timeouts and streamed script output
+  (Issues #2141, #2142, #2143), and `GET /stewards/{id}/logs` (Issue #2144) (Epics #2110, #2135,
+  ADR-012).
+- **Reboot windows** — `reboot_window` schema, tenant cascade and timezone resolution
+  (Issues #2975, #2976), steward-side reboot Gate with a deferred outcome (Issues #2977, #4411),
+  fail-closed patch Gate (Issue #2978), and authoring endpoints and CLI (Issue #2979)
+  (Epic #2898, ADR-026).
+- **Registration refresh** — device identity key and refresh handshake so stewards offline past
+  certificate expiry can recover (Issues #2093, #2094, #2095, #2096), with admin CLI and refresh
+  policy (Issue #2097) (Epic #1845, ADR-011).
+- **Steward install and version management** — launcher-managed installs on Linux, macOS and
+  Windows MSI (PR #2346, Issues #2379, #2380), build-time publisher key and version stamping
+  (Issue #2377), canonical log directories (Issue #2378), controller-trust anchoring
+  (Issue #1517, ADR-013), `desired_version` auto-converge with self-fetch (Issue #2260,
+  PR #2863), deployment rings and a rollout API with ring-advance and halt (Issues #2271, #2339,
+  #2340), and steward move and decommission (Issues #2341, #2408) (Epics #2257, #2376).
+- **Timeout-safe long module operations** — `sync_config` apply decoupled from the command
+  deadline, bounded auto-retry, and a distinct retry-exhausted status (Issues #3801, #3802,
+  #3803) (Epic #3799).
+- **DNA sync and history** — current-state heartbeat hashing and snapshot sync (Issues #2521,
+  #2522), durable history with retention (Issues #2525, #2526), divergence-triggered full sync
+  (PR #2555), data-plane DNA persistence with a write-integrity guard and required-field contract
+  (Issues #2616, #2617, #2618, #2642), periodic refresh (Issue #1915), and Hyper-V host and
+  virtualization attributes (Issue #1950) (Epics #2520, #1932).
+- **DNA fragment model** — fragment proto, canonical serialization, two-level Merkle hash,
+  assembler with authority resolver, and partial-sync protocol (Issues #2901, #2902, #2903,
+  #2905, #2906), with host facts partitioned into `host:*` fragments (Issues #2910, #3332)
+  (Epics #2852, #2911, ADR-017).
+- **Entity Graph** — `pkg/entitygraph` contract and store with edges, claim-scoped ingest,
+  drift/desired-state, temporal reads, durable Watch feed and retention (Issues #2871, #2873–#2878,
+  ADR-022, ADR-023); REST read API and operator-asserted edges (Issues #2880, #3374); populated
+  by DNA fragments, drift-diff and apply-outcome records, the tenant tree, a MAC/GUID correlator
+  and Hyper-V topology edges (Issues #2907, #3368, #3369, #3370, #3373, #3375, #4413)
+  (Epics #2851, #2853).
+- **Hyper-V provisioning from install media** — VM create from ISO or cloud image with seed
+  VHDX, unattended-profile model, Debian preseed and Windows autounattend profiles, existence
+  gating and a completion reconciler (Issues #2043–#2048, #2050, #2080), and post-enrollment
+  cleanup (Issue #2081) (Epics #1851, #2077, ADR-009, ADR-010).
+- **Hyper-V failover-cluster management** — cluster resource read/write with CNO gating
+  (Issues #2199, #2202), membership Monitor (Issue #2241), HA-role VMs with declarative role
+  properties and cluster-access lifecycle (Issues #2240, #2314, #2319, #2330), `cluster.cfg`
+  cascade with owner-gated convergence (Issues #2420–#2425, #2577), durable provisioning records
+  (Issues #2371, #2447), and the `promote-hv-role` workflow and CLI (Issues #2667–#2671)
+  (Epics #2198, #2306, #2418, #2576, #2657).
+- **`hyperv.vm` resource** — live storage relocation (Issue #2411), checkpoint-aware comparison
+  and declarative checkpoint policy (Issues #2626, #2627), in-place rename via `old_name`
+  (Issue #2776), configurable `secure_boot` (Issue #3169), whole-domain observe (Issue #2891),
+  and an operator write path for profile overrides (Issue #3785) (Epic #2625).
+- **Fleet targeting and orchestration** — unified selector surface with hostname, `id:`,
+  tenant-path and tag keys (Issues #1913, #2438–#2444), durable steward tags and `cfg steward tag`
+  (Issues #2542, #2544, #2545), role-based config targeting (Issues #2543, #2546), rolling batch
+  jobs with quorum awareness and rollback (Issues #2294–#2299), config broadcast with push status
+  (Issue #2366), and connection/session monitoring APIs (Issues #2367, #2368) (Epics #2359,
+  #2537, #2343, #415).
+- **Workflow engine** — in-controller runtime for controller-kind modules (Issue #1914),
+  parameterized descriptor execution (Issue #2659), GitHub App runner-token provider
+  (Issue #2191), and `cfg workflow list/status/cancel` (Issue #2276).
+- **Architecture decisions** — ADR-009 through ADR-033 record the work above, including
+  ADR-019 third-party module inclusion and delegated publisher trust (PR #2357), ADR-020 DNA
+  required-field declaration, ADR-025 tenant access boundary and ADR-027 tenant suspension and
+  cascading deletion (PR #3152), and ADR-030 controller secret material at rest.
+
+### Changed
+
+- **Public installer download serves the root tenant's artifacts** — `GET
+  /api/v1/installer/download/{platform}/{arch}` resolves the deployment's root tenant by position
+  (the single parentless tenant) instead of a tenant literally named `root`, and a root admin's
+  uploads land in that tenant by default (Issue #4634). An upgraded deployment whose top tenant
+  has a different ID starts serving its root-uploaded artifacts publicly, where it previously
+  served nothing; upload to a client tenant with `?tenant=<id>` to keep an artifact out of the
+  public download.
+- **Controller HA no longer uses Raft.** Leadership is a fenced database lease and membership is
+  a node registry; any node serves requests and inline leadership gates were removed from the
+  request path (Issues #3760, #3761, #3763, ADR-031).
+- Steward registration and registration refresh use a CSR-based signing flow; the steward's
+  private key no longer crosses the wire (Issues #3780, #3781).
+- Tenant scope is an explicit three-state value instead of "empty string means root", with one
+  canonical tenant context key (Issues #4316, #4326).
+- `cfg` fleet configuration files standardize on the `.cfg` extension (Issue #2532).
+- The controller refuses to start on a `0.0.0.0` bind without an external address (Issue #1901),
+  includes `external_address` in its certificate SANs (Issue #2017), and no longer defaults
+  `external_url` to localhost (Issue #3196).
+- Smoketest-gated in-place restart is the supported controller upgrade path; the port-swap
+  orchestrator is frozen as experimental (Issues #2015, #2019).
+- Heartbeat staleness is measured by controller receipt time and persisted durably
+  (Issues #2037, #2463); the steward `UpgradeStore` is durable SQLite (Issue #2464).
+- `patch` rejects a declared `maintenance.window` at validation in favor of reboot windows
+  (Issue #2892).
+- Shipped container images move to Alpine 3.24 and Debian 13 trixie and drop curl
+  (Issues #3842, #4236); Go toolchain 1.27.1 (Issues #3627, #3836).
+- Canonical documentation rewritten to current state: product vision, regenerated config schema,
+  corrected storage default, repaired links and runbooks (PRs #4201–#4217).
+- Development infrastructure: CI split between pull request and merge queue with native
+  Windows/macOS unit tests on the PR side (Issues #2595, #4219), blocking golangci-lint and
+  log-injection gates (Issues #3442, #4086), a dead-package and no-Python architecture check
+  (Issues #4317, #4303), and pipeline/agent tooling including a multi-lab security-review sweep
+  (Epics #3026, #3900).
+
+- An empty tenant is never root (Issue #4665, ADR-025 Amendment 7):
+  - A credential that is neither root nor bound to a tenant is refused with `403 NO_TENANT_SCOPE`.
+  - An API key, a non-root account or a case created without a tenant belongs to the caller's own
+    tenant rather than `default`.
+  - Per-steward config get/put/delete use the steward's own tenant.
+  - Config and deployment listings accept a `?tenant_id` the caller is authorized for.
+- Certificate provisioning always issues steward certificates. A request with a custom
+  `organization`, or a `steward_id`/`common_name` naming a controller cluster node, is refused with
+  `403`; scripts that set `organization` must drop it (Issue #4665).
+- Signing-CA rotation requires an admin certificate; a root web or `cfg` session is refused
+  (Issue #4665).
+
+### Fixed
+
+- **RC end-to-end validation fixes** (v0.10.5 RC, 2026-10-02 – 2026-10-06):
+  - Root tenant resolved by position instead of the hard-coded `default`; a second parentless
+    tenant is refused (Issue #4542).
+  - A healthy steward that loses its identity re-registers instead of stranding: bounded
+    stored-identity reconnect with a re-admission handshake (Issue #4532); a decommissioned
+    steward releases its `device_id` for re-enrollment (Issue #4534).
+  - Commands published by any cluster node carry the current lease fencing token, so stewards no
+    longer reject commands from non-holder nodes (Issues #4566, #4502, #4510); runs and the
+    execution queue are shared across nodes (Issue #4528); internal delivery is enabled at
+    bootstrap (Issue #4512).
+  - Workflows work for root-scoped admins: stored under the root tenant (or a crossed client
+    tenant), executions run under that tenant (Issue #4576); `cfg workflow run` accepts the
+    shipped examples, duration strings and the `workflow:` wrapper, and create/update keep
+    `on_failure` and `error_workflows` (Issue #4577).
+  - Workflow triggers work for root-scoped admins, triggered executions carry the trigger's
+    tenant (Issue #4640), and triggers persist in the durable trigger store with credentials in
+    the secret store, re-arming on restart (Issue #4641); every cluster node reconciles its
+    trigger registrations with the shared store, so a trigger created, changed or deleted
+    through one node takes effect on all of them (Issue #4660).
+  - Workflow executions started through the API or a trigger run to completion instead of being
+    cancelled when the starting request or callback returns; a trigger timeout bounds the
+    execution it starts (Issue #4658).
+  - The web console Installer page no longer loops on passkey re-login; installer artifacts
+    resolve a root admin's tenant instead of answering `401` (Issue #4634).
+  - Passkey enrollment and login work against a real controller (Issue #4505); `cfg` runs the
+    presence relay on admin mTLS bundle clients (Issue #4508).
+  - Certificates are back-dated so they verify on trailing clocks (Issue #4536); schema init
+    upgrades pre-#3754/#3757 Postgres databases (Issue #4499).
+  - Cluster mode honours `storage.cluster.s3` for the installer blob store (bucket, region,
+    S3-compatible endpoint, credentials via `${VAR}`/`<VAR>_FILE`), with each
+    `CFGMS_S3_INSTALLER_*` variable overriding its key; it was documented but ignored, leaving
+    installers failing against the default AWS endpoint (Issue #4662).
+  - Root accounts act as root on every credential path: a root-scope account's web, passkey and
+    `cfg` sessions and the bootstrap admin certificate are bound to the deployment's root tenant
+    and carry root scope from the account's `root_scope` flag, instead of an empty tenant that
+    some handlers refused and others read as unrestricted (Issue #4665).
+  - Public installer downloads keep serving artifacts uploaded under a tenant literally named
+    `root`, as the earlier documentation instructed, when the deployment's root tenant has another
+    ID: the root tenant's own artifact wins, and the legacy one is read as a fallback, logged at
+    WARN (Issue #4667). Re-upload public installers as root; the fallback is removed in 0.10.6. On
+    a deployment where a non-root tenant is itself named `root`, that tenant's installers are
+    served publicly through the fallback until then.
+  - A steward waiting on operator approval of its re-admission checks about every 15 seconds
+    (jittered), so an approval takes effect promptly instead of after up to five minutes of connect
+    backoff (Issue #4669).
+  - A steward that was offline during a signing-cert rotation trusts the new cert when it
+    reconnects. Commands that reach a steward before it has subscribed for them — the on-connect
+    signing-cert refresh and queued deliveries — are held and delivered in arrival order instead of
+    being dropped; the lost refresh had left such a steward rejecting every config and command
+    until re-enrolled. A config transfer refused because its signer was not yet trusted is fetched
+    again once a pushed signing cert is applied (Issue #4678).
+  - A controller's first signing-cert rotation records the certificate it replaces, so stewards
+    that are offline during it accept the refreshed certificate when they reconnect; previously
+    only rotations after the first did, and a steward that missed the first one was stranded. A
+    rotation that cannot load the certificate it replaces is refused (Issue #4686).
+- RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
+- Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
+  (Issue #4262); file logging provider no longer leaks handles after Close on Windows
+  (Issue #4145); SQLite retries `SQLITE_BUSY` and normalizes DNA timestamps to UTC
+  (Issues #2068, #3306, #4189).
+- Postgres: session timestamps rounded to microsecond precision (Issue #3864), audit-chain head
+  seeding type error (Issue #3863), NULL-safe RLS unscoped reads (Issue #3478), and tenant-scoped
+  `device_id` uniqueness across providers (Issues #3506, #3508, #4350).
+- Script timeouts kill the whole Windows process tree via a Job Object (Issue #2715); WMI and
+  PowerShell subprocess cleanup is bounded on cancellation (Issue #3600); `time` module works in
+  non-admin Windows sessions (Issue #4147); `hostname` handles a missing `wmic.exe` (PR #2707).
+- Steward: on-connect 30s context no longer truncates `module.Set` (Issue #2480), Monitor
+  create-retry loop is bounded (Issue #3876), failed mTLS config is fatal (Issue #1662), and
+  convergence fixes for `script`, `package` (apt) and `github_runner` (Issues #2478, #2479,
+  #2481).
+- Control plane: refused stewards keep an escalating reconnect backoff (Issue #3481), the initial
+  dial retries until the context expires (Issue #3849), and leaked QUIC goroutines are closed
+  (Issue #2160).
+- Controller config: `certificate.ca_path` honored (Issue #3171), REST `cert_path` resolved from
+  the config file directory (Issue #3197), and root-anchored paths no longer re-anchored on
+  Windows (Issue #3460).
+- API routing: dead `POST /api/v1/webhooks/git-push` route restored (Issue #3263), `GET
+  /api/v1/modules` registered and `cfg module approve` routed (Issue #4270), detailed
+  health/metrics routes wired (Issue #4208), and config upload validation returns `400`
+  (Issue #2482).
+- DNA and Entity Graph: persist rejections surface as errors instead of silent acceptance
+  (Issue #2641), DNA sync now writes to the Entity Graph (PR #4449), timestamp comparison across
+  UTC midnight (Issue #3707), and directory DNA query filters applied (Issue #4368) with O(1)
+  indexer stats (Issue #4239).
+- Hyper-V: seed VHD mounts no longer leak and are dismounted after a deadline kill (Issue #3168),
+  and seed-phase failures are gated and diagnosable (Issue #2467).
+- osquery batch-mode semicolon requirement and `cpu_family` mapping (Issue #3570).
+
+### Security
+
+- **RC end-to-end validation fixes** (v0.10.5 RC):
+  - Tenant-crossing boundary (ADR-025) applied to tenant-selected writes — role configs, Hyper-V
+    profiles, registration tokens and IP trust (Issue #4571) — to ad-hoc run dispatch
+    (Issue #4554), and with the boundary's root-scope predicate in crossing handlers
+    (Issues #4545, #4549). A selected tenant is carried onward by its stored ID.
+  - Composed workflows (nested steps, error workflows, components) resolve by name from the
+    executing tenant's store only; a definition referencing a workflow by filesystem path is
+    refused and the controller never loads workflow definitions from disk; composition depth,
+    cycles and per-execution breadth are bounded (Issue #4638).
+  - API keys are listed and revoked against the store on every cluster node (Issue #4574);
+    in-memory WebAuthn ceremony and throttle state is bounded (Issue #4572); the client IP is
+    resolved through `trusted_proxies` and IPv6 is bucketed by /64 (Issue #4573).
+  - Credentials carried in URL paths are redacted from request and audit logs (Issue #4520).
+- **CodeQL triage and fixes** — M365 OAuth callback values are escaped against reflected XSS
+  and the page is now rendered with `html/template` (Issues #4489, #4495); `DeleteSecret` no
+  longer returns the key or storage path, so API-key hashes stay out of errors and logs
+  (Issue #4489); controller command publisher log fields are sanitized against log injection
+  (Issue #4494).
+- **Maintenance lease renewal** — a transient renewal error is retried within the lease's
+  latency budget instead of being treated as a lost lease, preventing duplicate maintenance runs
+  across controllers (Issue #4487).
+- **go-winio Close/Accept deadlock** — module pipe listeners upgraded past the upstream race
+  that could hang steward module shutdown on Windows (Issue #4459).
+- **Dependency CVE updates** — pyjwt 2.15.0 and urllib3 2.8.0 in the scanner image (PR #4462)
+  with semgrep 1.179.0 (Issue #4491); undici 7.30.0 and brace-expansion in `web/` (PR #4463);
+  grpc v1.83.2 for CVE-2026-84445 (PR #3989); `golang.org/x/net`/`x/crypto` HIGH CVEs
+  (Issue #2130); nanoid 3.3.18 for CVE-2026-67213 (PR #3250).
+- **Tenant containment** — registration, token, role, trust-admin, credential, identity and
+  operational handlers enforce tenant containment (Issues #4334, #4335, #4336); service,
+  transport, terminal, workflow executors and config paths tenant-scoped (Issues #4337, #4338,
+  #4340, #4346); RLS write policies (Issue #4321); access-level fail-open and suspend race closed
+  (Issue #4347); Entity Graph `owning_tenant` bound to the authenticated peer (Issue #4319).
+- **Tenant-subtree scoping** of tenants, roles, certificates, accounts, stewards, compliance,
+  reports, secrets, sessions and config listing (Issues #2869, #3137–#3147, #3281, #3310, #3347,
+  #3429, #3438), with session scope derived from actual tenant scope (Issue #3194).
+- **Fail-closed defaults** — stewards fail closed without mTLS material (Issue #4318) and enforce
+  module trust and script signing against configuration downgrade (Issue #4324); controller never
+  leaves a cleartext bootstrap admin credential (Issue #4342), seals credentials instead of
+  passing them through `EnvironmentFile=` (Issue #3462), and fails closed on an ephemeral secret
+  store (Issue #2998).
+- **Input and log hygiene** — path validation, integrity verification and cache-key scoping
+  (Issue #4348); path containment checked before symlink resolution (Issue #2120); LIKE
+  metacharacters escaped in tenant predicates (Issues #4074, #4320); audit checksum covers every
+  field with nested secret redaction (Issue #4098); sanitized logged errors (Issues #4073, #4341);
+  registration token redaction (Issues #2173, #2932); passkey-management IDOR fixed
+  (Issue #2992); HttpOnly on logout cookie deletion (Issue #2687); security headers on 404/405
+  responses (Issue #4183).
+- **Security tooling** — OWASP ZAP DAST baseline (Issue #2950), OpenSSF Scorecard (Issue #2951),
+  CodeQL and Dependabot for `web/` (Issue #2949), and Go native fuzz targets for config, DNA
+  transport, EIDs, certificate PEM and CIM/WMI parsing (Issues #2952, #2953) (Epic #2861).
+
+- **Tenant-crossing boundary on actions** (Issue #4665):
+  - A root operator subject to the ADR-025 boundary needs an active grant or break-glass crossing
+    to act on a client tenant's records. Without one the request gets the tenant-crossing
+    challenge; bulk approvals skip those records instead.
+  - Covered: accounts, certificates and cert bindings, tokens, registrations and refreshes,
+    credential requests, API keys, roles, cases, sessions, rollouts, runs, rollbacks, steward
+    config, push, move, visibility and decommission, and selector-driven jobs, upgrades, osquery
+    and signed operator payloads.
+  - Lists and record reads keep their existing breadth.
+  - Background jobs and fleet-wide internal reads run under an explicit system context, and a
+    context with no caller is refused.
+  - An architecture rule keeps every other root-allow decision annotated with its reason.
+
+### Removed
+
+- **BREAKING**: Raft consensus (`go.etcd.io/raft/v3`) removed from the controller; clustered
+  deployments use the database lease and node registry (Issue #3763).
+- **BREAKING**: Password web login removed — web login is passkey-only (Issue #2993) — and `cfg`
+  no longer authenticates with API keys (Issue #3688).
+- **BREAKING**: `commonpb.DNA.attributes` and the flat `DNARecord` store removed from the DNA-sync
+  wire protocol in favor of fragments (Issues #3322, #3329, #3331).
+- Steward install `hyperv`/`winrm` flags (Issue #1894) and unconsumed `steward.mode` and
+  `steward.logging.format` config keys (Issue #4209).
+- Unreachable code deleted after capability mapping: `features/siem` (Issue #4327), RBAC JIT and
+  delegation paths (Issue #4328), the orphan reports implementation (Issue #4332), the network
+  Active Directory module (Issue #4447), and stale `api/proto` duplicates, the git config
+  provider and the workflow transform engine (Issue #4405).
+- Loopback WebAuthn ceremony relay in `cfg` (Issue #3728).
+
+### Known limitations
+
+- **Module distribution is not yet end to end.** Listing and approving cached modules works, and a
+  steward runs a correctly signed bundle installed in its module directory, but there is no shipped
+  bundle signing tool, the controller does not fetch from module sources or cache module binaries,
+  and stewards cannot pull modules from the controller. Tracked by Epic #4654.
+- **Workflow execution status is node-local.** A workflow execution's status and step results are
+  held in memory on the controller node that ran it: on a clustered controller, other nodes answer
+  `404` for it, and a restart forgets it. Workflow definitions and triggers are shared. Tracked by
+  Issue #4675.
+- **Clustered controllers: each node has its own config-signing certificate.** A steward trusts
+  the signing certificate of the node it enrolled through. On a clustered controller, keep stewards
+  connecting through the node they enrolled through, and do not rotate the signing certificate.
+  Single-node controllers are unaffected. A cluster-wide signing identity is tracked by Epic #4687.
+
 ## [0.9.7] - 2026-06-15
 
 Stable snapshot promoted to `main`. Bundles the controller in-place upgrade work (now proven
@@ -158,7 +594,7 @@ Consolidation + AGPL governance release. Bundles the v0.9.0–v0.9.5 work that h
 - Patch type policies (Critical: 7 days, Important: 14 days)
 - Major version upgrade support (Win 10->11, 23H2->24H2)
 - Windows Update COM API integration (no WSUS dependency)
-- Generic maintenance windows honored by all reboot operations
+- Patch configs declaring maintenance.window or maintenance.schedule are rejected at validation with a clear error (reboot windows are not yet implemented)
 
 #### Performance Monitoring
 - Endpoint performance metrics (CPU, memory, disk, network)

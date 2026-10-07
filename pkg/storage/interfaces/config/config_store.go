@@ -33,6 +33,35 @@ type ConfigStore interface {
 	GetConfigStats(ctx context.Context) (*ConfigStats, error)
 }
 
+// ConditionalConfigStore is the optional conditional-write extension to
+// ConfigStore. StoreConfig is an unconditional overwrite that derives the new
+// version from a preceding read, so a caller building a compare-and-set on top of
+// it has a read-check-write whose atomicity extends no further than whatever lock
+// the caller happens to hold. That is sufficient within one process and worthless
+// once a second controller node can write the same key concurrently.
+//
+// A backend implements this interface only when it can decide the version
+// comparison and the write in a single atomic step at the storage layer itself —
+// a SQL "UPDATE ... WHERE version = $expected" or an "INSERT ... ON CONFLICT DO
+// NOTHING", not a mutex around two statements. Backends that cannot do that must
+// NOT implement it: callers use its presence as the signal that a
+// compare-and-set is safe across nodes (Issue #3775 / ADR-031), and an
+// implementation that only serializes within one process would make that signal
+// a lie.
+type ConditionalConfigStore interface {
+	ConfigStore
+
+	// CompareAndSwapConfig stores config only if the entry currently stored under
+	// config.Key has exactly version expectedVersion. expectedVersion 0 requires
+	// that no entry exists at all (create-if-absent).
+	//
+	// A version mismatch — including a create-if-absent against an existing entry —
+	// is reported as ok=false with a nil error, so callers can distinguish losing
+	// the race from a genuine storage failure. On success ok is true and newVersion
+	// is the version now stored.
+	CompareAndSwapConfig(ctx context.Context, config *ConfigEntry, expectedVersion int64) (newVersion int64, ok bool, err error)
+}
+
 // ConfigKey uniquely identifies a configuration entry
 type ConfigKey struct {
 	TenantID  string `json:"tenant_id"`       // Multi-tenant isolation

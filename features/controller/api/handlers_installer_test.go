@@ -25,9 +25,11 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // newFSBlobStore creates a temporary filesystem BlobStore for tests.
@@ -50,8 +52,16 @@ func setupTestServerWithBlobStore(t *testing.T) (*Server, blob.BlobStore) {
 }
 
 // withTenant returns a copy of r with tenantID injected into the context.
+//
+// An empty tenantID means a root admin caller: the request carries an explicit
+// root TenantScope, as the authentication middleware gives a root principal —
+// an empty tenant alone grants nothing (Issue #4665).
 func withTenant(r *http.Request, tenantID string) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantID, tenantID))
+	ctx := context.WithValue(r.Context(), ctxkeys.TenantID, tenantID)
+	if tenantID == "" {
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	}
+	return r.WithContext(ctx)
 }
 
 // withVars returns a copy of r with gorilla/mux route variables injected.
@@ -119,8 +129,11 @@ func TestHandleUploadInstallerArtifact_InvalidArch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestHandleUploadInstallerArtifact_NoAuth verifies that a missing tenant ID returns 401.
-func TestHandleUploadInstallerArtifact_NoAuth(t *testing.T) {
+// TestHandleUploadInstallerArtifact_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleUploadInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64",
@@ -130,7 +143,7 @@ func TestHandleUploadInstallerArtifact_NoAuth(t *testing.T) {
 
 	server.handleUploadInstallerArtifact(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- List ---
@@ -156,8 +169,11 @@ func TestHandleListInstallerArtifacts_Empty(t *testing.T) {
 	assert.Empty(t, items)
 }
 
-// TestHandleListInstallerArtifacts_NoAuth verifies the list endpoint returns 401 without auth.
-func TestHandleListInstallerArtifacts_NoAuth(t *testing.T) {
+// TestHandleListInstallerArtifacts_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleListInstallerArtifacts_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/artifacts", nil)
@@ -165,7 +181,7 @@ func TestHandleListInstallerArtifacts_NoAuth(t *testing.T) {
 
 	server.handleListInstallerArtifacts(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Get single ---
@@ -213,8 +229,11 @@ func TestHandleGetInstallerArtifact_InvalidArch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestHandleGetInstallerArtifact_NoAuth verifies that GET single without auth returns 401.
-func TestHandleGetInstallerArtifact_NoAuth(t *testing.T) {
+// TestHandleGetInstallerArtifact_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleGetInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/artifacts/linux/amd64", nil)
@@ -223,7 +242,7 @@ func TestHandleGetInstallerArtifact_NoAuth(t *testing.T) {
 
 	server.handleGetInstallerArtifact(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Delete ---
@@ -256,8 +275,11 @@ func TestHandleDeleteInstallerArtifact_InvalidArch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestHandleDeleteInstallerArtifact_NoAuth verifies that DELETE without auth returns 401.
-func TestHandleDeleteInstallerArtifact_NoAuth(t *testing.T) {
+// TestHandleDeleteInstallerArtifact_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleDeleteInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
@@ -266,7 +288,7 @@ func TestHandleDeleteInstallerArtifact_NoAuth(t *testing.T) {
 
 	server.handleDeleteInstallerArtifact(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Round-trip ---
@@ -493,15 +515,7 @@ func extractTarGz(t *testing.T, data []byte) map[string][]byte {
 // It also writes an init marker with the computed CA fingerprint to caPath.
 func setupTestCertManager(t *testing.T, caPath string) (*cert.Manager, string) {
 	t.Helper()
-	certMgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
+	certMgr := newSharedTestCertManager(t)
 
 	caCertPEM, err := certMgr.GetCACertificate()
 	require.NoError(t, err)
@@ -547,7 +561,7 @@ func TestHandleDownloadInstallPackage_WithCA(t *testing.T) {
 	artifactContent := []byte("fake-linux-amd64-installer-binary")
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader(artifactContent),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))
@@ -588,7 +602,7 @@ func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
 	artifactContent := []byte("fake-windows-amd64-installer-binary")
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "windows-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "windows-amd64"},
 		bytes.NewReader(artifactContent),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))
@@ -614,6 +628,55 @@ func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
 
 	// README must still be present.
 	assert.Contains(t, files, "installer/README.txt")
+}
+
+func TestHandleDownloadInstallPackage_CacheValidatorsAndRanges(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	require.NoError(t, store.PutBlob(
+		context.Background(),
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
+		bytes.NewReader([]byte("range-test-installer-binary")),
+		blob.BlobMeta{ContentType: "application/octet-stream"},
+	))
+
+	request := func(rangeHeader, etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		rec := httptest.NewRecorder()
+		server.handleDownloadInstallPackage(rec, req)
+		return rec
+	}
+
+	full := request("", "")
+	require.Equal(t, http.StatusOK, full.Code)
+	require.Greater(t, full.Body.Len(), 10)
+	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
+	assert.Equal(t, "public, max-age=300, must-revalidate", full.Header().Get("Cache-Control"))
+	etag := full.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	partial := request("bytes=0-9", "")
+	require.Equal(t, http.StatusPartialContent, partial.Code)
+	assert.Equal(t, full.Body.Bytes()[:10], partial.Body.Bytes())
+
+	notModified := request("", etag)
+	assert.Equal(t, http.StatusNotModified, notModified.Code)
+	assert.Zero(t, notModified.Body.Len())
+
+	multiple := request("bytes=0-1,8-9", "")
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, multiple.Code)
+
+	server.publicDownloadCache.invalidate(installerDownloadCacheKey("linux", "amd64"))
+	rebuilt := request("", "")
+	require.Equal(t, http.StatusOK, rebuilt.Code)
+	assert.Equal(t, full.Body.Bytes(), rebuilt.Body.Bytes(), "generated package must be deterministic")
+	assert.Equal(t, etag, rebuilt.Header().Get("ETag"))
 }
 
 // TestHandleDownloadInstallPackage_NotFound verifies that a missing artifact returns
@@ -670,6 +733,101 @@ func TestHandleDownloadInstallPackage_InvalidArch(t *testing.T) {
 	assert.Equal(t, "INVALID_ARCH", errResp.Error.Code)
 }
 
+// --- Any-node service (Issue #3761) ---
+
+// TestInstallerHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for this
+// file (Issue #3761, ADR-031 Decision 1): handleUploadInstallerArtifact and
+// handleDeleteInstallerArtifact used to return 503 and leave s.blobStore untouched
+// when the serving node held no lease-backed leadership. Any-node service means every
+// cluster node accepts both writes — the shared blob store is the serialization point,
+// not leadership — so against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired) the upload must land in the store and the
+// delete must remove what is there.
+func TestInstallerHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	newNonAuthoritativeServer := func(t *testing.T) (*Server, blob.BlobStore) {
+		t.Helper()
+		server, store := setupTestServerWithBlobStore(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+		return server, store
+	}
+
+	t.Run("upload succeeds and writes to blobStore", func(t *testing.T) {
+		server, store := newNonAuthoritativeServer(t)
+
+		body := bytes.NewBufferString("fake-installer-content")
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+		req = withTenant(req, "test-tenant")
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+
+		server.handleUploadInstallerArtifact(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"upload must succeed regardless of leadership: %s", rec.Body.String())
+
+		blobs, err := store.ListBlobs(context.Background(), blob.BlobKey{
+			TenantID:  "test-tenant",
+			Namespace: "installers",
+		})
+		require.NoError(t, err)
+		assert.Len(t, blobs, 1, "the uploaded artifact must land in the blob store")
+	})
+
+	t.Run("delete succeeds and removes the artifact", func(t *testing.T) {
+		server, store := newNonAuthoritativeServer(t)
+
+		// Pre-store an artifact so the delete has something real to remove.
+		require.NoError(t, store.PutBlob(
+			context.Background(),
+			blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"},
+			bytes.NewBufferString("existing-artifact"),
+			blob.BlobMeta{ContentType: "application/octet-stream"},
+		))
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+		req = withTenant(req, "test-tenant")
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+
+		server.handleDeleteInstallerArtifact(rec, req)
+
+		require.Equal(t, http.StatusNoContent, rec.Code)
+
+		blobs, err := store.ListBlobs(context.Background(), blob.BlobKey{
+			TenantID:  "test-tenant",
+			Namespace: "installers",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, blobs, "the artifact must actually be deleted on a non-authoritative node")
+	})
+}
+
+// TestInstallerHandlers_SucceedOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
+// existing upload/delete logic unchanged — removing the gate must not have broken
+// the leader path either.
+func TestInstallerHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	body := bytes.NewBufferString("content")
+	uploadReq := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	uploadReq = withTenant(uploadReq, "test-tenant")
+	uploadReq = withVars(uploadReq, map[string]string{"platform": "linux", "arch": "amd64"})
+	uploadRec := httptest.NewRecorder()
+
+	server.handleUploadInstallerArtifact(uploadRec, uploadReq)
+	require.Equal(t, http.StatusOK, uploadRec.Code, uploadRec.Body.String())
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+	deleteReq = withTenant(deleteReq, "test-tenant")
+	deleteReq = withVars(deleteReq, map[string]string{"platform": "linux", "arch": "amd64"})
+	deleteRec := httptest.NewRecorder()
+
+	server.handleDeleteInstallerArtifact(deleteRec, deleteReq)
+	assert.Equal(t, http.StatusNoContent, deleteRec.Code)
+}
+
 // TestHandleDownloadInstallPackage_RouterNoAuth verifies that the download route is
 // accessible without an API key (no auth required).
 func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
@@ -677,7 +835,7 @@ func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
 
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader([]byte("dummy")),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))
@@ -690,4 +848,78 @@ func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
 	// Must succeed — the download route is public.
 	assert.Equal(t, http.StatusOK, rec.Code, "download endpoint must be accessible without auth")
 	assert.Equal(t, "application/gzip", rec.Header().Get("Content-Type"))
+}
+
+// serverWithRootTenant returns a blob-backed test server whose root tenant — the
+// single parentless tenant — is rootID instead of the conventional "root".
+func serverWithRootTenant(t *testing.T, rootID string) (*Server, blob.BlobStore) {
+	t.Helper()
+	server, store := setupTestServerWithBlobStore(t)
+	ctx := context.Background()
+	// The manager refuses to delete the root tenant, so swap it in the store
+	// behind the manager.
+	v, ok := testTenantStores.Load(server.tenantManager)
+	require.True(t, ok, "server was not built by a setupTestServer variant")
+	ts := v.(tenant.Store)
+	require.NoError(t, ts.DeleteTenant(ctx, testRootTenantID))
+	now := time.Now()
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{
+		ID: rootID, Name: rootID, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
+	require.Equal(t, rootID, server.rootTenantID(ctx), "precondition: the root tenant resolves by position")
+	return server, store
+}
+
+func putInstaller(t *testing.T, store blob.BlobStore, tenantID, name string, content []byte) {
+	t.Helper()
+	require.NoError(t, store.PutBlob(context.Background(),
+		blob.BlobKey{TenantID: tenantID, Namespace: "installers", Name: name},
+		bytes.NewReader(content), blob.BlobMeta{ContentType: "application/octet-stream"}))
+}
+
+func downloadInstaller(server *Server, platform, arch string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/"+platform+"/"+arch, nil)
+	req = withVars(req, map[string]string{"platform": platform, "arch": arch})
+	rec := httptest.NewRecorder()
+	server.handleDownloadInstallPackage(rec, req)
+	return rec
+}
+
+// TestHandleDownloadInstallPackage_LegacyRootNamespace guards Issue #4667: the
+// public download serves the positional root tenant's artifact, and — while a
+// deployment migrates — falls back, read-only, to an artifact uploaded under the
+// legacy literal "root" namespace the download used before #4634.
+func TestHandleDownloadInstallPackage_LegacyRootNamespace(t *testing.T) {
+	const linuxArtifact = "installer/linux-amd64/cfgms-steward-amd64"
+
+	t.Run("root tenant's own artifact", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
+	})
+
+	t.Run("legacy root namespace fallback", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, legacyInstallerTenant, "linux-amd64", []byte("legacy"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("legacy"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
+	})
+
+	t.Run("root tenant's own artifact wins over the legacy one", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, legacyInstallerTenant, "linux-amd64", []byte("legacy"))
+		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
+	})
+
+	t.Run("neither namespace has the artifact", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, legacyInstallerTenant, "windows-amd64", []byte("other platform"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
 }

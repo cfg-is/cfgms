@@ -44,6 +44,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "steward",
 		Actions:      []string{"create", "read", "update", "delete"},
 	},
+	{
+		Id:           "steward.decommission",
+		Name:         "Decommission Steward",
+		Description:  "Permanently decommission a steward from the fleet (tombstones the record; requires mTLS)",
+		ResourceType: "steward",
+		Actions:      []string{"delete"},
+	},
 
 	// Configuration Management Permissions
 	{
@@ -88,6 +95,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "configuration",
 		Actions:      []string{"create", "update"},
 	},
+	{
+		Id:           "steward.event.log",
+		Name:         "Emit Steward Event Log",
+		Description:  "Allow steward to stream event log entries to the controller; grants emit-only access with no read capability",
+		ResourceType: "steward",
+		Actions:      []string{"create"},
+	},
 
 	// Tenant Management Permissions
 	{
@@ -110,6 +124,20 @@ var DefaultPermissions = []*common.Permission{
 		Description:  "Full tenant management",
 		ResourceType: "tenant",
 		Actions:      []string{"create", "read", "update", "delete"},
+	},
+	{
+		Id:           "tenant.delete",
+		Name:         "Request Tenant Deletion",
+		Description:  "Request deletion of a fully-suspended tenant subtree and cancel an in-flight deletion request (ADR-027 Decisions 3-4)",
+		ResourceType: "tenant",
+		Actions:      []string{"delete"},
+	},
+	{
+		Id:           "tenant.approve-delete",
+		Name:         "Approve Tenant Deletion",
+		Description:  "Dual-control approval of a tenant deletion after the hold period elapses (ADR-027 Decision 4); requires user-presence proof",
+		ResourceType: "tenant",
+		Actions:      []string{"delete"},
 	},
 
 	// RBAC Management Permissions
@@ -222,6 +250,36 @@ var DefaultPermissions = []*common.Permission{
 		Actions:      []string{"emergency.access"},
 	},
 
+	// ADR-025 Decision 2(b): tenant.crossing-break-glass authorises a root-scoped
+	// SaaS-operator principal (Amendment 1 A1.3) to cross the root<->MSP boundary
+	// (Decision 1) into a specific MSP tenant it does not otherwise have access to.
+	// Deliberately a separate permission from emergency.break-glass above — that one
+	// is scoped to system resources only and must never be extended to reach a
+	// tenant's own configuration or data.
+	{
+		Id:           "tenant.crossing-break-glass",
+		Name:         "Tenant-Crossing Break-Glass Access",
+		Description:  "Authorises a justified, time-boxed break-glass elevation across the ADR-025 root<->MSP tenant boundary. Must never be granted to non-emergency roles.",
+		ResourceType: "tenant",
+		Actions:      []string{"crossing.break-glass"},
+	},
+
+	// Reboot Window Permissions (ADR-026 decision 3: distinct from config.update)
+	{
+		Id:           "reboot_window.read",
+		Name:         "Read Reboot Window",
+		Description:  "Read reboot_window configuration and the resolved next occurrence for a tenant or steward",
+		ResourceType: "reboot_window",
+		Actions:      []string{"read"},
+	},
+	{
+		Id:           "reboot_window.override",
+		Name:         "Override Reboot Window",
+		Description:  "Create or update reboot_window configuration at tenant or device level; intentionally distinct from config.update (ADR-026 decision 3)",
+		ResourceType: "reboot_window",
+		Actions:      []string{"create", "update"},
+	},
+
 	// Rollback Permissions
 	{
 		Id:           "rollback.emergency",
@@ -267,10 +325,25 @@ var DefaultRoles = []*common.Role{
 			"config.read",
 			"config.validate",
 			"config.status.report",
+			"steward.event.log",
 			"module.execute",
 		},
 		IsSystemRole: true,
 		TenantId:     "", // System-wide role
+	},
+	{
+		Id:          "agent.dev",
+		Name:        "Agent Developer",
+		Description: "Least-privilege read-only role for dev agent containers bound to agent-test sub-tenants; includes config.validate but no write or admin permissions",
+		PermissionIds: []string{
+			"steward.read",
+			"config.read",
+			"module.read",
+			"tenant.read",
+			"config.validate",
+		},
+		IsSystemRole: true,
+		TenantId:     "", // System-wide; assignment is scoped to a tenant via RoleAssignment.TenantId
 	},
 
 	// Tenant Roles (will be created per tenant)

@@ -158,6 +158,25 @@ linters-settings:
 
 linters:
   disable-all: true
+  # v2-format path exclusions. The legacy `run.skip-dirs` above is v1 syntax
+  # that golangci-lint v2 ignores; without this stanza a local `web/` with
+  # node_modules installed gets linted (the flatted npm package ships Go
+  # files). CI never installs node_modules before linting, so the gap only
+  # bites local runs. Full v1→v2 config migration is a separate story.
+  exclusions:
+    paths:
+      - web/
+    rules:
+      # SA1019 (use of a deprecated symbol) is managed manually, not enforced
+      # by the linter — mirrors the policy in staticcheck.conf and the intent
+      # of the (v1-schema, currently non-functional) linters-settings block.
+      # Required for intentionally-retained, wire backward-compatible deprecated
+      # fields such as commonpb.DNA.Attributes (ADR-017 / Epic #2852): the field
+      # is deprecated but kept for wire compatibility, so its transitional
+      # consumers must not fail the build.
+      - linters:
+          - staticcheck
+        text: "SA1019"
   enable:
     # Central Provider Architecture Enforcement (CRITICAL)
     # NOTE: depguard disabled - architectural enforcement via make check-architecture

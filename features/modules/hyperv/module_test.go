@@ -150,6 +150,13 @@ func (s *inlineSecretStore) StoreSecret(_ context.Context, req *secretsif.Secret
 	return nil
 }
 
+func (s *inlineSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsif.SecretRequest) (int, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.Key] = req.Value
+	return 1, true, nil
+}
+
 // Stub implementations for the rest of the SecretStore interface.
 func (s *inlineSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
 func (s *inlineSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
@@ -281,11 +288,11 @@ func TestWinRMClient_UsesInvokeCommandArgumentList(t *testing.T) {
 	store := newInlineStore("user-key", "admin", "pass-key", "hunter2")
 
 	client := &winrmClient{
-		host:          "testhost",
-		userSecretKey: "user-key",
-		passSecretKey: "pass-key",
-		store:         store,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "testhost",
+		userStoreRef: "user-key",
+		passStoreRef: "pass-key",
+		store:        store,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	_, err := client.ExecutePS(context.Background(), "Get-VM -Name $VMName", map[string]string{
@@ -314,11 +321,11 @@ func TestWinRMClient_NoArgsCase(t *testing.T) {
 	store := newInlineStore("u", "admin", "p", "pass")
 
 	client := &winrmClient{
-		host:          "h",
-		userSecretKey: "u",
-		passSecretKey: "p",
-		store:         store,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "h",
+		userStoreRef: "u",
+		passStoreRef: "p",
+		store:        store,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	const cmd = "Get-VM | Select-Object Name"
@@ -341,11 +348,11 @@ func TestWinRMClient_DeterministicArgOrder(t *testing.T) {
 	store := newInlineStore("u", "admin", "p", "pass")
 
 	client := &winrmClient{
-		host:          "h",
-		userSecretKey: "u",
-		passSecretKey: "p",
-		store:         store,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "h",
+		userStoreRef: "u",
+		passStoreRef: "p",
+		store:        store,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	// Multiple params in non-alphabetical key insertion order.
@@ -410,11 +417,11 @@ func TestCredentialLifetime(t *testing.T) {
 
 	recorder := &recordingShell{}
 	client := &winrmClient{
-		host:          "testhost",
-		userSecretKey: "user-key",
-		passSecretKey: "pass-key",
-		store:         counting,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "testhost",
+		userStoreRef: "user-key",
+		passStoreRef: "pass-key",
+		store:        counting,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	ctx := context.Background()
@@ -466,11 +473,11 @@ func TestModule_NoCredentialInLogs_TransportError(t *testing.T) {
 	store := newInlineStore("user-key", "admin", "pass-key", "s3cr3t")
 
 	m := &hypervModule{
-		executor:      &stubHypervExecutor{},
-		host:          "testhost",
-		userSecretKey: "user-key",
-		passSecretKey: "pass-key",
-		detector:      &fakeDetector{result: true},
+		executor:     &stubHypervExecutor{},
+		host:         "testhost",
+		userStoreRef: "user-key",
+		passStoreRef: "pass-key",
+		detector:     &fakeDetector{result: true},
 		transport: &testWinRMTransport{
 			execErr: errors.New("connection refused"),
 		},
@@ -508,9 +515,67 @@ func TestModule_Configure_ExtractsAllKeys_WinRM(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "10.0.0.1", m.host)
-	assert.Equal(t, "svc-user", m.userSecretKey)
-	assert.Equal(t, "svc-pass", m.passSecretKey)
+	assert.Equal(t, "svc-user", m.userStoreRef)
+	assert.Equal(t, "svc-pass", m.passStoreRef)
 	assert.NotNil(t, m.transport, "transport must be wired after Configure")
+}
+
+// TestModule_Configure_ClusterNameFromHARole verifies that Configure derives the
+// S5 cluster scope cap from a vm resource's nested ha_role.cluster_name when no
+// top-level cluster_name key is present. A cascaded ha_role vm resource carries
+// the cluster name ONLY under ha_role, so without this derivation m.clusterName
+// stays empty, probeClusterRoleMembership is gated off, Get never reports
+// ha_role, and the resource is re-detected as unapplied "added" drift on every
+// converge cycle — never reporting converged (Story #2577).
+func TestModule_Configure_ClusterNameFromHARole(t *testing.T) {
+	store := newInlineStore()
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(store))
+
+	// A representative cascaded ha_role vm resource: cluster name only nested.
+	// Pin transport: "winrm" so this test compiles and passes on Linux CI (the
+	// ps-host path falls through to winrm on non-Windows and requires winrm_host).
+	cfg := mapConfigState{
+		"transport":         "winrm",
+		"winrm_host":        "hyperv-host.local",
+		"winrm_user_secret": "svc-user",
+		"winrm_pass_secret": "svc-pass",
+		"name":              "cfgms-e2e-ha-01",
+		"vhd_path":          `C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx`,
+		"ha_role": map[string]interface{}{
+			"cluster_name": "cfg-lab",
+		},
+	}
+	require.NoError(t, m.Configure(cfg))
+	assert.Equal(t, "cfg-lab", m.clusterName,
+		"cluster scope cap must be derived from ha_role.cluster_name when top-level cluster_name is absent")
+}
+
+// TestModule_Configure_TopLevelClusterNameWins verifies that an explicit
+// top-level cluster_name key still takes precedence over the nested
+// ha_role.cluster_name (the derivation only fills the gap when the top-level key
+// is absent — it never overrides an operator-declared scope cap).
+func TestModule_Configure_TopLevelClusterNameWins(t *testing.T) {
+	store := newInlineStore()
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(store))
+
+	// Pin transport: "winrm" so this test passes on Linux CI (ps-host falls through
+	// to winrm on non-Windows and requires winrm_host).
+	cfg := mapConfigState{
+		"transport":         "winrm",
+		"winrm_host":        "hyperv-host.local",
+		"winrm_user_secret": "svc-user",
+		"winrm_pass_secret": "svc-pass",
+		"name":              "cfgms-e2e-ha-01",
+		"cluster_name":      "explicit-cluster",
+		"ha_role": map[string]interface{}{
+			"cluster_name": "cfg-lab",
+		},
+	}
+	require.NoError(t, m.Configure(cfg))
+	assert.Equal(t, "explicit-cluster", m.clusterName,
+		"an explicit top-level cluster_name must win over the ha_role-derived value")
 }
 
 func TestModule_Configure_NilConfig(t *testing.T) {
@@ -551,6 +616,55 @@ func TestModule_Configure_MissingPassSecretKey_WinRM(t *testing.T) {
 	assert.ErrorIs(t, err, errPassSecretKeyRequired)
 }
 
+// TestWithHostCommandTransport_PinIsUsedAndSurvivesConfigure verifies the
+// exported host-boundary seam (WithHostCommandTransport): the pinned transport
+// is the one the module actually issues its PowerShell through, and Configure —
+// which runs on every convergence pass and would otherwise select a PS-host or
+// WinRM transport — wires the rest of the module without replacing it. Without
+// the survival half, a caller outside this package could not drive the real
+// module through the real executor at all: the executor calls Configure before
+// every Get/Set.
+func TestWithHostCommandTransport_PinIsUsedAndSurvivesConfigure(t *testing.T) {
+	transport := &testWinRMTransport{output: `{"found":false}`}
+	mod := New(&fakeDetector{result: true}, WithHostCommandTransport(transport))
+	m, ok := mod.(*hypervModule)
+	require.True(t, ok)
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+
+	// No winrm_* keys and no transport key: the unpinned path would take the
+	// ps-host branch and, where no PS host exists, fall through to WinRM and
+	// fail with errHostRequired.
+	require.NoError(t, m.Configure(mapConfigState{"tenant_id": "ops"}),
+		"a pinned host transport must make Configure's transport selection a no-op")
+	assert.Same(t, transport, m.transport, "Configure must not replace a pinned transport")
+	assert.Equal(t, "ops", m.tenantID, "Configure must still wire the rest of the module")
+
+	state, err := m.Get(context.Background(), "vm:stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, "absent", state.AsMap()["state"],
+		"the pinned transport's scripted host answer must be what the module reports")
+
+	transport.mu.Lock()
+	calls := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 1, calls, "the module must issue its host commands through the pinned transport")
+}
+
+// TestWithHostCommandTransport_NilLeavesSelectionInPlace verifies the option is
+// inert when handed nil, so a caller cannot accidentally disarm Configure's
+// normal transport selection.
+func TestWithHostCommandTransport_NilLeavesSelectionInPlace(t *testing.T) {
+	mod := New(&fakeDetector{result: true}, WithHostCommandTransport(nil))
+	m, ok := mod.(*hypervModule)
+	require.True(t, ok)
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+	assert.False(t, m.transportPinned)
+
+	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
+	assert.ErrorIs(t, err, errHostRequired,
+		"a nil transport must leave the normal Configure-driven selection (and its validation) in place")
+}
+
 // TestModule_Configure_RejectsUnknownTransport verifies the explicit
 // allowlist on the "transport" config key.
 func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {
@@ -559,6 +673,83 @@ func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {
 	err := m.Configure(mapConfigState{"transport": "bogus"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown transport")
+}
+
+// TestModule_Configure_RejectsInvalidDebugSSHKey verifies Configure rejects a
+// debug_ssh_authorized_key that is not a single-line SSH public key — in
+// particular a value carrying a newline, which would otherwise inject
+// additional cloud-config YAML structure into cloudInitUserDataTemplate's
+// ssh_authorized_keys: list item (Issue #3788).
+func TestModule_Configure_RejectsInvalidDebugSSHKey(t *testing.T) {
+	payloads := []string{
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA operator\nruncmd:\n  - [ evil ]", // newline injects a second YAML key
+		"not-a-key-at-all",       // fails the type/base64 allowlist entirely
+		"ssh-ed25519",            // missing the base64 body
+		"ssh-ed25519 \"; evil\"", // quote is not in the allowed comment charset
+	}
+	for _, payload := range payloads {
+		m := &hypervModule{executor: &stubHypervExecutor{}}
+		require.NoError(t, m.SetSecretStore(newInlineStore()))
+		err := m.Configure(mapConfigState{"debug_ssh_authorized_key": payload})
+		require.Error(t, err, "payload %q must be rejected", payload)
+		assert.ErrorIs(t, err, errInvalidDebugSSHKey, "payload %q should return errInvalidDebugSSHKey", payload)
+	}
+}
+
+// TestModule_Configure_AcceptsValidDebugSSHKey verifies a well-formed
+// single-line SSH public key (with and without a trailing comment) passes
+// Configure's allowlist.
+func TestModule_Configure_AcceptsValidDebugSSHKey(t *testing.T) {
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+	cfg := mapConfigState{
+		"transport":                "winrm",
+		"winrm_host":               "10.0.0.1",
+		"winrm_user_secret":        "svc-user",
+		"winrm_pass_secret":        "svc-pass",
+		"debug_ssh_authorized_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADEBUGKEY operator@lab",
+	}
+	require.NoError(t, m.Configure(cfg))
+	assert.Equal(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADEBUGKEY operator@lab", m.debugSSHAuthorizedKey)
+}
+
+// TestModule_Configure_RejectsInvalidEnrollToken verifies Configure rejects an
+// enroll_token carrying a newline, quote, or shell metacharacter — the value
+// is interpolated unquoted into the preseed late_command shell line
+// (linux_profile.go) and a cmd.exe command line (windows_profile.go),
+// Issue #3788.
+func TestModule_Configure_RejectsInvalidEnrollToken(t *testing.T) {
+	payloads := []string{
+		"tok\nin-target rm -rf /", // newline injects a second preseed command
+		`tok"; Remove-VM; "`,      // quote breaks out of the cmd.exe quoted arg
+		"tok; evil",               // shell metacharacter
+		"tok$(evil)",              // subexpression
+	}
+	for _, payload := range payloads {
+		m := &hypervModule{executor: &stubHypervExecutor{}}
+		require.NoError(t, m.SetSecretStore(newInlineStore()))
+		err := m.Configure(mapConfigState{"enroll_token": payload})
+		require.Error(t, err, "payload %q must be rejected", payload)
+		assert.ErrorIs(t, err, errInvalidEnrollToken, "payload %q should return errInvalidEnrollToken", payload)
+	}
+}
+
+// TestModule_Configure_RejectsInvalidEnrollCAFingerprint verifies Configure
+// rejects an enroll_ca_fingerprint carrying a newline, quote, or shell
+// metacharacter — same injection-prone sinks as enroll_token.
+func TestModule_Configure_RejectsInvalidEnrollCAFingerprint(t *testing.T) {
+	payloads := []string{
+		"AB12\nin-target rm -rf /",
+		`AB12"; Remove-VM; "`,
+		"AB12; evil",
+	}
+	for _, payload := range payloads {
+		m := &hypervModule{executor: &stubHypervExecutor{}}
+		require.NoError(t, m.SetSecretStore(newInlineStore()))
+		err := m.Configure(mapConfigState{"enroll_ca_fingerprint": payload})
+		require.Error(t, err, "payload %q must be rejected", payload)
+		assert.ErrorIs(t, err, errInvalidEnrollCAFingerprint, "payload %q should return errInvalidEnrollCAFingerprint", payload)
+	}
 }
 
 // ─── Module interface compliance tests ─────────────────────────────────────────

@@ -4,6 +4,9 @@ package drift
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -16,10 +19,34 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-func createTestDNA(id string, attributes map[string]string) *commonpb.DNA {
+// createTestDNA builds a DNA from a fragment-id → state map. Each entry becomes
+// a commonpb.Fragment whose canonical_bytes is the state text and whose
+// fragment_hash is the SHA-256 of those bytes — the representation the drift
+// engine diffs (ADR-017). Two snapshots differing in one entry's state differ
+// in exactly that fragment's hash. Fragments are emitted in sorted fragment-id
+// order so fixtures are deterministic.
+func createTestDNA(id string, state map[string]string) *commonpb.DNA {
+	ids := make([]string, 0, len(state))
+	for fragmentID := range state {
+		ids = append(ids, fragmentID)
+	}
+	sort.Strings(ids)
+
+	fragments := make([]*commonpb.Fragment, 0, len(ids))
+	for _, fragmentID := range ids {
+		canonical := []byte(state[fragmentID])
+		sum := sha256.Sum256(canonical)
+		fragments = append(fragments, &commonpb.Fragment{
+			FragmentId:     fragmentID,
+			Authority:      "osquery",
+			CanonicalBytes: canonical,
+			FragmentHash:   hex.EncodeToString(sum[:]),
+		})
+	}
+
 	return &commonpb.DNA{
 		Id:          id,
-		Attributes:  attributes,
+		Fragments:   fragments,
 		LastUpdated: timestamppb.New(time.Now()),
 	}
 }

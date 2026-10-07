@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,18 +148,109 @@ func (s *FleetTestSuite) ensureContainerRunning(t *testing.T, container string, 
 	}
 }
 
-// waitForStewardLogEntry polls the steward log for a line containing want until timeout.
+// waitForStewardLogEntry polls all steward log files for a line containing want until timeout.
+// It uses docker cp rather than docker exec so it can read logs even when the container is
+// stopped between restart cycles (e.g., steward exiting immediately after ErrRefreshRejected).
 func (s *FleetTestSuite) waitForStewardLogEntry(t *testing.T, container, want string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		log, err := s.readStewardLog(t, container)
-		if err == nil && strings.Contains(log, want) {
+		if s.stewardLogsContain(t, container, want) {
 			return true
 		}
 		time.Sleep(2 * time.Second)
 	}
 	return false
+}
+
+// stewardLogsContain copies all steward log files from the container (docker cp works on
+// running AND stopped containers) and returns true if any file contains want.
+func (s *FleetTestSuite) stewardLogsContain(t *testing.T, container, want string) bool {
+	t.Helper()
+	tmpDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := exec.CommandContext(ctx, "docker", "cp",
+		container+":/tmp/cfgms/.", tmpDir).CombinedOutput(); err != nil {
+		return false
+	}
+	entries, _ := os.ReadDir(tmpDir)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		if err == nil && strings.Contains(string(content), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// stewardLogCount copies all steward log files from the container and returns how
+// many times any of wants occurs across them. Log files persist across container
+// restarts and subtests, so a wait for an event captures this count before the
+// action that should produce it and waits for it to grow (Issue #4671).
+func (s *FleetTestSuite) stewardLogCount(t *testing.T, container string, wants ...string) int {
+	t.Helper()
+	tmpDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := exec.CommandContext(ctx, "docker", "cp",
+		container+":/tmp/cfgms/.", tmpDir).CombinedOutput(); err != nil {
+		return 0
+	}
+	entries, _ := os.ReadDir(tmpDir)
+	count := 0
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		for _, want := range wants {
+			count += strings.Count(string(content), want)
+		}
+	}
+	return count
+}
+
+// waitForNewStewardLogEntry waits until any of wants occurs more often than the
+// before count captured with stewardLogCount — that is, until the event is logged
+// anew, not merely present from an earlier run (Issue #4671).
+func (s *FleetTestSuite) waitForNewStewardLogEntry(t *testing.T, container string, before int, timeout time.Duration, wants ...string) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.stewardLogCount(t, container, wants...) > before {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
+// requireNewStewardSession waits for container's steward to log a new control
+// session after a restart (session-marker count above before). The controller
+// keeps the stopped process's connection_state=connected until it notices the
+// drop, so a convergence wait alone can return before the new session exists and
+// let a push go to a dead stream (Issue #4676).
+func (s *FleetTestSuite) requireNewStewardSession(t *testing.T, container string, before int) {
+	t.Helper()
+	if !s.waitForNewStewardLogEntry(t, container, before, 90*time.Second, stewardSessionMarkers...) {
+		log, _ := s.readStewardLog(t, container)
+		t.Fatalf("%s: steward did not open a new control session within 90s after restart\nlog tail:\n%s",
+			container, lastLines(log, 60))
+	}
+}
+
+// stewardSessionMarkers are the steward log lines written when a control session
+// to the controller is established (cmd/steward/main.go).
+var stewardSessionMarkers = []string{
+	"Connected to controller via gRPC transport",
+	"Reconnected to controller via stored identity",
 }
 
 // TestFleetRotation is the ordered entry point for all signing-cert rotation scenarios.
@@ -289,6 +382,7 @@ func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 	// back up no matter how the test exits — without this, a t.Fatalf mid-test
 	// would leave the container stopped and break every subsequent test in the
 	// package (notably TestFleetComposeStartup).
+	sessionsBefore := s.stewardLogCount(t, container, stewardSessionMarkers...)
 	s.containerStop(t, container)
 	t.Cleanup(func() { s.ensureContainerRunning(t, container, 90*time.Second) })
 	t.Log("OfflineDuringOverlapReconnect: steward-2 stopped before rotation")
@@ -299,6 +393,7 @@ func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 
 	// Bring steward-2 back online during the overlap window.
 	s.containerStart(t, container, 90*time.Second)
+	s.requireNewStewardSession(t, container, sessionsBefore)
 
 	// The stored cert survives docker stop/start; steward ID must be unchanged.
 	newID, err := s.getStewardIDFromLogs(t, container)
@@ -321,7 +416,8 @@ func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 		t.Fatalf("config upload for %s after offline-during-overlap reconnect: %v", container, err)
 	}
 	if !s.waitForManagedFile(t, container, 60*time.Second) {
-		t.Errorf("%s: managed-file must appear after reconnect during overlap", container)
+		log, _ := s.readStewardLog(t, container)
+		t.Errorf("%s: managed-file must appear after reconnect during overlap\nlog tail:\n%s", container, lastLines(log, 60))
 	}
 	t.Logf("OfflineDuringOverlapReconnect: %s reconnected during overlap and applied config", container)
 }
@@ -339,6 +435,7 @@ func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
 	// Stop steward-2 before rotation. Register a cleanup that brings it back up
 	// regardless of test outcome so a failure mid-test cannot leave the fleet
 	// in a broken state for subsequent tests.
+	sessionsBefore := s.stewardLogCount(t, container, stewardSessionMarkers...)
 	s.containerStop(t, container)
 	t.Cleanup(func() { s.ensureContainerRunning(t, container, 90*time.Second) })
 	t.Log("OfflinePastWindow: steward-2 stopped before rotation")
@@ -350,6 +447,7 @@ func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
 
 	// Bring steward-2 back online after overlap has expired.
 	s.containerStart(t, container, 90*time.Second)
+	s.requireNewStewardSession(t, container, sessionsBefore)
 
 	newID, err := s.getStewardIDFromLogs(t, container)
 	if err != nil {
@@ -371,7 +469,8 @@ func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
 		t.Fatalf("config upload for %s after offline-past-window reconnect: %v", container, err)
 	}
 	if !s.waitForManagedFile(t, container, 60*time.Second) {
-		t.Errorf("%s: managed-file must appear after past-window reconnect", container)
+		log, _ := s.readStewardLog(t, container)
+		t.Errorf("%s: managed-file must appear after past-window reconnect\nlog tail:\n%s", container, lastLines(log, 60))
 	}
 	t.Logf("OfflinePastWindow: %s reconnected past overlap, refresh-on-connect delivered cert, config applied", container)
 }
@@ -423,8 +522,9 @@ func (s *FleetTestSuite) testRefreshOnConnectNewSteward(t *testing.T) {
 			t.Errorf("%s (%s): must remain connected after rotation", container, stewardID)
 		}
 		if !s.waitForStewardLogEntry(t, container, result.NewSerial, 30*time.Second) {
-			t.Errorf("%s: log must contain new serial %s after refresh-on-connect push",
-				container, result.NewSerial)
+			log, _ := s.readStewardLog(t, container)
+			t.Errorf("%s: log must contain new serial %s after refresh-on-connect push\nlog tail:\n%s",
+				container, result.NewSerial, lastLines(log, 60))
 		}
 	}
 	t.Logf("RefreshOnConnectNewSteward: both existing stewards received refresh push with new serial %s",

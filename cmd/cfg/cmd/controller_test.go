@@ -174,7 +174,12 @@ func TestGetControllerClient_BundleFound_UsesMTLS(t *testing.T) {
 	assert.Equal(t, "https://flag-url.local:9443", client.baseURL)
 }
 
-func TestGetControllerClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
+// TestGetControllerClient_NoBundleFlag_FailsWithNoCredential proves the
+// API-key downgrade path is gone: --no-bundle opts out of bundle discovery,
+// and with no active session either, getControllerClient must fail naming
+// the required credential instead of silently falling back to an API key
+// (Issue #3688).
+func TestGetControllerClient_NoBundleFlag_FailsWithNoCredential(t *testing.T) {
 	tmpDir := t.TempDir()
 	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
 	generateTestBundleFile(t, bundleFilePath, "https://bundle-controller.local:9443")
@@ -184,14 +189,12 @@ func TestGetControllerClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
 	origBundlePath := bundlePath
 	origNoBundle := noBundle
 	origHealthURL := healthURL
-	origHealthAPIKey := healthAPIKey
 	t.Cleanup(func() {
 		userConfigDirFn = origUserConfigDirFn
 		systemBundlePathFn = origSystemBundlePathFn
 		bundlePath = origBundlePath
 		noBundle = origNoBundle
 		healthURL = origHealthURL
-		healthAPIKey = origHealthAPIKey
 	})
 	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
 	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
@@ -200,17 +203,11 @@ func TestGetControllerClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
 	bundlePath = bundleFilePath
 	noBundle = true // explicit opt-out
 	healthURL = "https://api-key-controller.local:9080"
-	healthAPIKey = "ctrl-test-key"
 
 	client, err := getControllerClient()
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// --no-bundle means API key path; no mTLS certificates
-	assert.Equal(t, "https://api-key-controller.local:9080", client.baseURL)
-	assert.Equal(t, "ctrl-test-key", client.apiKey)
-	transport := client.httpClient.Transport.(*http.Transport)
-	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, errNoCredential)
 }
 
 func newControllerHealthServer(t *testing.T) *httptest.Server {
@@ -345,6 +342,56 @@ func TestRunControllerMetrics_TextOutput(t *testing.T) {
 
 	assert.Contains(t, output, "Controller Metrics")
 	assert.Contains(t, output, "Transport")
+}
+
+// Metrics live on the private metrics listener (#3156, Issue #4208), so
+// CFGMS_METRICS_URL is honoured ahead of CFGMS_API_URL when --url is absent.
+func TestRunControllerMetrics_MetricsURLEnvWinsOverAPIURL(t *testing.T) {
+	server := newControllerHealthServer(t)
+	defer server.Close()
+
+	origURL := healthURL
+	origFormat := healthFormat
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		healthFormat = origFormat
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = ""
+	healthFormat = "text"
+	controllerTLSInsecure = true
+	t.Setenv("CFGMS_API_URL", "https://public-api.invalid:1")
+	t.Setenv("CFGMS_METRICS_URL", server.URL)
+
+	output := captureStdout(t, func() {
+		err := runControllerMetrics(controllerMetricsCmd, nil)
+		require.NoError(t, err)
+	})
+	assert.Contains(t, output, "Controller Metrics")
+}
+
+// A 404 means the command reached the public API listener, which does not
+// serve metrics: say where they are rather than echoing a router 404.
+func TestRunControllerMetrics_NotFoundPointsAtPrivateListener(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := runControllerMetrics(controllerMetricsCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metrics_listen_addr")
 }
 
 func TestRunControllerMetrics_JSONOutput(t *testing.T) {
@@ -578,4 +625,161 @@ func TestSigningCertRotateCmd_OverlapDaysFlagRegistered(t *testing.T) {
 	f := signingCertRotateCmd.Flags().Lookup("overlap-days")
 	require.NotNil(t, f, "--overlap-days flag must be registered on signing-cert rotate")
 	assert.Equal(t, "30", f.DefValue, "--overlap-days default must be 30")
+}
+
+func TestClusterDrainCmd_PostsToDrainEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"draining"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDrainCmd.RunE(clusterDrainCmd, []string{"test-node"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/cluster/nodes/test-node/drain", gotPath)
+}
+
+func TestClusterDecommissionCmd_PostsToDecommissionEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"decommissioned"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDecommissionCmd.RunE(clusterDecommissionCmd, []string{"test-node"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/cluster/nodes/test-node/decommission", gotPath)
+}
+
+func TestClusterDrainCmd_HTTP403_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDrainCmd.RunE(clusterDrainCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mTLS")
+}
+
+func TestClusterDecommissionCmd_HTTP403_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDecommissionCmd.RunE(clusterDecommissionCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mTLS")
+}
+
+func TestClusterDecommissionCmd_HTTP409_ReturnsBodyAsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte("node is not in draining state"))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDecommissionCmd.RunE(clusterDecommissionCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "draining state")
+}
+
+func TestClusterDrainCmd_OtherHTTPError_ReturnsStatusAndBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDrainCmd.RunE(clusterDrainCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestClusterCmd_SubcommandsRegistered(t *testing.T) {
+	var clusterFound bool
+	for _, sub := range controllerCmd.Commands() {
+		if sub.Use == "cluster" {
+			clusterFound = true
+			var drainFound, decommissionFound bool
+			for _, csub := range sub.Commands() {
+				switch csub.Use {
+				case "drain <node-id>":
+					drainFound = true
+				case "decommission <node-id>":
+					decommissionFound = true
+				}
+			}
+			assert.True(t, drainFound, "cluster must have a drain subcommand")
+			assert.True(t, decommissionFound, "cluster must have a decommission subcommand")
+		}
+	}
+	assert.True(t, clusterFound, "controllerCmd must have a cluster subcommand")
 }

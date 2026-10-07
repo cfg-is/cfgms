@@ -10,15 +10,24 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
+	clusterdeliverypb "github.com/cfgis/cfgms/api/proto/clusterdelivery"
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -27,21 +36,28 @@ import (
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/controller/tagstore"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
+	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/tenant"
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -50,63 +66,198 @@ import (
 
 // Server represents the REST API server component of the controller
 type Server struct {
-	mu                             sync.RWMutex
-	cfg                            *config.Config
-	logger                         logging.Logger
-	httpServer                     *http.Server
-	router                         *mux.Router
-	controllerService              *service.ControllerService
-	configService                  *service.ConfigurationServiceV2
-	certProvisioningService        *service.CertificateProvisioningService
-	rbacService                    *service.RBACService
-	certManager                    *cert.Manager
-	tenantManager                  *tenant.Manager
-	rbacManager                    *rbac.Manager
-	systemMonitor                  *monitoring.SystemMonitor
-	healthCollector                *health.Collector
-	haManager                      *ha.Manager
-	apiKeys                        map[string]*APIKey                // In-memory cache for fast lookup
-	secretStore                    secretsif.SecretStore             // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore         registration.Store                // Registration token store for steward registration
-	corsConfig                     *CORSConfig                       // CORS configuration
-	signerCertSerial               string                            // Story #378: Serial of cert used for config signing
-	authDefense                    *authdefense.AuthDefenseSystem    // Story #380: Three-tier auth defense
-	rollbackManager                rollback.RollbackManager          // Story #416: Rollback system
-	reportsHandler                 *reportapi.Handler                // Story #416: Reports engine
-	workflowHandler                *WorkflowHandler                  // Story #414: Workflow engine REST API
-	approvalHook                   RegistrationApprovalHook          // Issue #422: Registration approval hook
-	fleetQuery                     fleet.FleetQuery                  // Issue #603: Single query path for device filtering
-	gitSyncWebhookHandler          http.Handler                      // Issue #666: git-sync webhook endpoint (optional)
-	auditManager                   *audit.Manager                    // Issue #775: registration audit events
-	scriptTracker                  script.ExecutionTracker           // Issue #708: durable execution audit records
-	scriptAuditLogger              *script.AuditLogger               // Issue #708: in-memory execution metrics
-	scriptMonitor                  *script.ExecutionMonitor          // Issue #708: active execution tracking
-	scriptRepo                     script.ScriptRepository           // Issue #1670: git-backed script library
-	privilegeStore                 cfgconfig.ConfigStore             // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus               leaderStatus                      // Issue #1318: leader check for config push (nil = leader)
-	commandPublisher               *commands.Publisher               // Issue #1319: fan-out config push to active stewards
-	pushStore                      business.PushStore                // Issue #1320: durable push-state persistence for HA failover
-	registry                       registry.Registry                 // Issue #1323: active steward connection registry
-	mountPointValidator            MountPointValidator               // Issue #1396: config source connection test
-	configSourceSecretStore        secretsif.SecretStore             // Issue #1396: secrets for config source validator
-	configSourceRateLimits         sync.Map                          // Issue #1396: per-tenant rate-limit counters
-	pendingStore                   business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
-	ipTrustStore                   business.IPTrustStore             // Issue #1698: operator IP-trust management
-	runManager                     *controllerrun.Manager            // Issue #1673: run/job/execution model
-	runExecutionQueue              *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
-	trustedProxies                 []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
-	blobStore                      blob.BlobStore                    // Issue #1702: installer artifact storage
-	signingRotationService         *service.SigningRotationService   // Issue #1816: signing cert rotation endpoint
-	moduleCacheLister              resolution.CacheLister            // Issue #1884: controller module cache for required_modules resolution
-	moduleBundleResolver           resolution.BundleResolver         // Issue #1884: git source resolver for uncached modules
-	moduleBundleApprover           resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
-	moduleTrustStore               trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
-	stewardBinaryTrustStore        trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
-	testAutoApproveStewardBinaries bool                              // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
-	upgradeStore                   business.UpgradeStore             // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
-	stopCleanup                    chan struct{}                     // signals startAPIKeyCleanup to exit
-	cleanupDone                    chan struct{}                     // closed when cleanup goroutine exits
-	closeOnce                      sync.Once                         // idempotent Close
+	mu                              sync.RWMutex
+	cfg                             *config.Config
+	logger                          logging.Logger
+	httpServer                      *http.Server
+	metricsHTTPServer               *http.Server
+	internalHTTPServer              *http.Server
+	deliveryHandler                 *internaldelivery.Server // ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery RPC
+	deliveryListenAddr              string
+	deliveryPeerNodeIDs             func() []string // cluster node IDs authorized to call the delivery RPC (nil denies every caller)
+	deliveryGRPCServer              *grpc.Server
+	router                          *mux.Router
+	metricsRouter                   *mux.Router
+	internalRouter                  *mux.Router
+	apiRouter                       *mux.Router // /api/v1 subrouter; used by Set* methods for lazy route registration
+	controllerService               *service.ControllerService
+	configService                   *service.ConfigurationServiceV2
+	certProvisioningService         *service.CertificateProvisioningService
+	rbacService                     *service.RBACService
+	certManager                     *cert.Manager
+	tenantManager                   *tenant.Manager
+	rbacManager                     *rbac.Manager
+	systemMonitor                   *monitoring.SystemMonitor
+	healthCollector                 *health.Collector
+	healthDetailHandler             *health.Handler // Issue #4208: detailed health/metrics/alerts/trace handler; nil when constructed without a collector, alert manager and trace manager
+	haManager                       *ha.Manager
+	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
+	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
+	apiKeyClock                     func() time.Time                         // Issue #4574: clock for API-key re-validation; nil → time.Now. Overridable in tests.
+	apiKeyIdx                       *apiKeyIndex                             // Issue #4574: key hash → tenant locator for the durable API-key records
+	apiKeyIndexWG                   sync.WaitGroup                           // Issue #4574: tracks detached API-key index scans so Close() can wait for them before secretStore.Close()
+	apiKeyTombstones                map[string]time.Time                     // Issue #4574: key hash → deletion time for keys deleted on this node (guarded by mu, lazily made); blocks a racing load from re-caching a deleted key
+	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
+	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
+	registrationTokenStore          registration.Store                       // Registration token store for steward registration
+	corsConfig                      *CORSConfig                              // CORS configuration
+	signerCertSerial                string                                   // Story #378: Serial of cert used for config signing
+	authDefense                     *authdefense.AuthDefenseSystem           // Story #380: Three-tier auth defense
+	publicDownloadGuard             *publicDownloadGuard                     // PB-015: successful anonymous-download rate/concurrency budgets
+	publicDownloadCache             *publicDownloadCache                     // PB-015: bounded/coalesced installer and steward-binary response cache
+	rollbackManager                 rollback.RollbackManager                 // Story #416: Rollback system
+	reportsHandler                  *reportapi.Handler                       // Story #416: Reports engine
+	dataProvider                    reportinterfaces.DataProvider            // Issue #3265: drift-based compliance derivation
+	workflowHandler                 *WorkflowHandler                         // Story #414: Workflow engine REST API
+	approvalHook                    RegistrationApprovalHook                 // Issue #422: Registration approval hook
+	fleetQuery                      fleet.FleetQuery                         // ADR-031 Decision 3, Issue #3764: one cluster-safe-by-construction fleet source (retires the Issue #603/#3495 node-local vs. cluster-wide split)
+	gitSyncWebhookHandler           http.Handler                             // Issue #666: git-sync webhook endpoint (optional)
+	auditManager                    *audit.Manager                           // Issue #775: registration audit events
+	scriptTracker                   script.ExecutionTracker                  // Issue #708: durable execution audit records
+	scriptAuditLogger               *script.AuditLogger                      // Issue #708: in-memory execution metrics
+	scriptMonitor                   *script.ExecutionMonitor                 // Issue #708: active execution tracking
+	scriptRepo                      script.ScriptRepository                  // Issue #1670: git-backed script library
+	privilegeStore                  cfgconfig.ConfigStore                    // Issue #1670: controller-side script privilege metadata
+	commandPublisher                *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
+	pushStore                       business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
+	commandStore                    business.CommandStore                    // Issue #3757: durable delivery-lifecycle outbox for steward-directed writes (ADR-031 Decision 2)
+	registry                        registry.Registry                        // Issue #1323: active steward connection registry
+	mountPointValidator             MountPointValidator                      // Issue #1396: config source connection test
+	configSourceSecretStore         secretsif.SecretStore                    // Issue #1396: secrets for config source validator
+	configSourceRateLimits          sync.Map                                 // Issue #1396: per-tenant rate-limit counters
+	pendingStore                    business.PendingRegistrationStore        // Issue #1696: durable pending-registration queue
+	ipTrustStore                    business.IPTrustStore                    // Issue #1698: operator IP-trust management
+	alertStore                      business.AlertStore                      // Issue #3266: alert acknowledge and silence
+	runManager                      *controllerrun.Manager                   // Issue #1673: run/job/execution model
+	runExecutionQueue               *script.ExecutionQueue                   // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies                  []net.IPNet                              // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	blobStore                       blob.BlobStore                           // Issue #1702: installer artifact storage
+	signingRotationService          *service.SigningRotationService          // Issue #1816: signing cert rotation endpoint
+	moduleCacheLister               resolution.CacheLister                   // Issue #1884: controller module cache for required_modules resolution
+	moduleBundleResolver            resolution.BundleResolver                // Issue #1884: git source resolver for uncached modules
+	moduleBundleApprover            resolution.BundleApprover                // Issue #1884: approval workflow for newly resolved modules
+	moduleTrustStore                trust.TrustStore                         // Issue #1884: publisher trust store consulted during approval
+	moduleBundleReviewer            resolution.BundleReviewer                // Issue #2728: human approve/reject for queued module bundles
+	stewardBinaryTrustStore         trust.TrustStore                         // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
+	testAutoApproveStewardBinaries  bool                                     // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
+	upgradeStore                    business.UpgradeStore                    // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
+	stewardStore                    business.StewardStore                    // Issue #2096: durable fleet-registry store for device-ID refresh gate
+	pendingRefreshStore             business.PendingRefreshStore             // Issue #2096: durable pending-refresh queue
+	refreshPolicyStore              business.RefreshPolicyStore              // Issue #2096: per-tenant refresh policy
+	auditStore                      business.AuditStore                      // Issue #2098: direct audit store for test-mode count endpoint
+	nonceStore                      business.NonceStore                      // Issue #3755, ADR-031: durable registration-refresh nonce store (any-node)
+	popVerifier                     PoPVerifier                              // Issue #2096: injectable for revoked-before-PoP testing
+	isolationEngine                 *tenantsecurity.TenantIsolationEngine    // Issue #2123: tenant isolation enforcement for scoped API keys
+	stewardEventLoggingManager      *logging.LoggingManager                  // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
+	sessionManager                  session.Manager                          // Issue #2232: admin session token issuance/revocation
+	sessionCfg                      session.Config                           // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
+	webSessionManager               session.Manager                          // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
+	csrfTokens                      sync.Map                                 // Issue #2493: sessionID → session-bound CSRF token; populated on login, deleted on logout/revoke
+	membershipStore                 cluster.MembershipStore                  // Issue #2283: cluster node membership (nil when cluster not configured)
+	routingStore                    business.RoutingStore                    // Issue #3895: shared steward-routing table (ADR-031 Decision 3), consulted for the decommission drain-wait's target-node session count; nil falls back to the local registry
+	decommissionTimeout             time.Duration                            // Issue #3895: how long the decommission drain-wait polls before forcing decommission; defaults to defaultDecommissionTimeout in NewServer, overridable in tests
+	clusterDraining                 atomic.Bool                              // Issue #2283: true after drain is initiated; causes /health to return 503
+	batchJobStore                   business.BatchJobStore                   // Issue #2296: durable batch-job persistence
+	batchJobExecutor                jobExecutor                              // Issue #2296: rolling-batch executor for fleet-wide updates
+	rolloutStore                    business.RolloutStore                    // Issue #2340: durable rollout-orchestration-state persistence
+	onRolloutSoak                   func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
+	onRolloutTerminal               func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
+	rolloutHaltChans                sync.Map                                 // Issue #3761: map[rolloutID string]chan struct{} — per-process fast-path halt signal; moved from a package-level var so two Server instances sharing one rolloutStore behave like two cluster nodes, not one shared process.
+	rolloutHaltPollInterval         time.Duration                            // Issue #3761: how often runRollout re-reads the rollout record from rolloutStore during a ring soak to notice a halt persisted by a peer node; defaults to 5s in NewServer, overridable in tests.
+	stopCleanup                     chan struct{}                            // signals startAPIKeyCleanup to exit
+	cleanupDone                     chan struct{}                            // closed when cleanup goroutine exits
+	closeOnce                       sync.Once                                // idempotent Close
+	roleConfigStore                 cfgconfig.ConfigStore                    // Issue #2543: role-config storage under role-policies namespace
+	hypervProfileConfigStore        cfgconfig.ConfigStore                    // Issue #3785: hyperv profile storage under hyperv-profiles namespace
+	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
+	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
+	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
+	webAuthnPresenceSessions        sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
+	presenceTokens                  sync.Map                                 // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
+	webAuthnElevateSessions         sync.Map                                 // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
+	webAuthnElevateThrottle         sync.Map                                 // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	operatorPayloadSignSessions     sync.Map                                 // Issue #3695: pending operator-payload sign ceremonies; key=sessionID, value=*operatorPayloadSignSession
+	operatorPayloadSignThrottle     sync.Map                                 // Issue #3695: per-session/per-IP failed sign-ceremony throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyLoginSessions            sync.Map                                 // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
+	passkeyLoginThrottle            sync.Map                                 // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyEnrollSessions           sync.Map                                 // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
+	passkeyLoginPending             atomic.Int64                             // Issue #4572: count of pending passkeyLoginSessions entries; enforces the begin cap
+	passkeyLoginSessionCap          int                                      // Issue #4572: pending passkey login cap; 0 means maxPendingPasskeyLoginSessions (tests shrink it)
+	passkeyLoginPendingByClient     sync.Map                                 // Issue #4572: per-client pending passkey login count; key=clientIPKey, value=*atomic.Int64
+	passkeyLoginSessionClientCap    int                                      // Issue #4572: per-client pending cap; 0 means maxPendingPasskeyLoginSessionsPerClient (tests shrink it)
+	stopWebAuthnCeremonySweep       chan struct{}                            // Issue #4572: signals the WebAuthn ceremony expiry sweep to exit
+	webAuthnCeremonySweepDone       chan struct{}                            // Issue #4572: closed when the WebAuthn ceremony sweep goroutine exits
+	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
+	egConfigstoreWriter             egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
+	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
+	egWriter                        egWriteProvider                          // Issue #3374: operator edge assertion write path
+	terminalHandler                 http.Handler                             // Issue #2761: terminal WebSocket relay handler
+	tenantStore                     business.TenantStore                     // Issue #2839: tenant hierarchy for per-tenant assurance resolution
+	assurancePolicyStore            business.AssurancePolicyStore            // Issue #2839: per-tenant assurance-policy overrides
+	blastRadiusPolicyStore          business.BlastRadiusPolicyStore          // Issue #3698: per-tenant operator-payload blast-radius overrides
+	tenantCrossingStore             business.TenantCrossingStore             // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	casesStore                      business.CaseStore                       // Issue #3605: cockpit investigation case CRUD
+	egWatchProv                     egWatchProvider                          // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
+	watchPongWait                   time.Duration                            // Issue #3613: cockpit watch keepalive window; 0 = defaultWatchPongWait
+	watchPingInterval               time.Duration                            // Issue #3613: cockpit watch ping cadence; 0 = defaultWatchPingInterval
+	absentCapabilities              []interfaces.AbsentCapability            // Issue #3409: declared-optional capabilities absent in this deployment
+	osqueryDispatcher               stewardOsqueryDispatcher                 // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
+	enrolmentTokenMintLimiter       *sourceRateLimiter                       // Issue #3717: per-source rate limit on enrolment-token mint
+	credentialRequestLodgeLimiter   *sourceRateLimiter                       // Issue #3717: per-source rate limit on credential-request lodge
+	stopCredentialRequestSweep      chan struct{}                            // Issue #3717: signals runCredentialRequestExpirySweep to exit
+	credentialRequestSweepDone      chan struct{}                            // Issue #3717: closed when the sweep goroutine exits
+	credentialRequestSweepLease     lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the credential-request/enrolment-token expiry sweep
+	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
+	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
+	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
+	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
+	cliLoginLodgeLimiter            *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login lodge
+	cliLoginCollectLimiter          *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login collect
+	stopCliLoginSweep               chan struct{}                            // Issue #3721: signals the cli-login expiry sweep to exit
+	cliLoginSweepDone               chan struct{}                            // Issue #3721: closed when the cli-login sweep goroutine exits
+	cliLoginSweepLease              lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-login expiry sweep
+	cliPresenceLodgeLimiter         *sourceRateLimiter                       // Issue #4287: per-source rate limit on cli-presence lodge
+	cliPresenceCollectLimiter       *sourceRateLimiter                       // Issue #4287: per-source rate limit on cli-presence collect
+	registrationRefreshLimiter      *sourceRateLimiter                       // Issue #4532: per-source rate limit on the registration-refresh handshake
+	stopCliPresenceSweep            chan struct{}                            // Issue #4287: signals the cli-presence expiry sweep to exit
+	cliPresenceSweepDone            chan struct{}                            // Issue #4287: closed when the cli-presence sweep goroutine exits
+	cliPresenceSweepLease           lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-presence expiry sweep
+
+	// Listeners retained so Close can shut them regardless of whether their serve
+	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
+	// it already tracks, and tracking begins inside Serve. A Start followed
+	// promptly by a Close would otherwise leak a bound socket — fatal for the
+	// metrics listener, which binds a fixed port and cannot silently rebind.
+	publicTLSListener   net.Listener
+	metricsTLSListener  net.Listener
+	internalTLSListener net.Listener
+}
+
+// SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
+// GET /api/v1/health returns HTTP 503 so the load balancer stops routing new
+// steward connections to this node. Called by cluster.Drain() after setting the
+// membership state; safe to call concurrently with handleHealth.
+func (s *Server) SetDraining(draining bool) {
+	s.clusterDraining.Store(draining)
+}
+
+// SetAbsentCapabilities stores the declared-optional capabilities that are absent
+// in this deployment. Call once at composition time; the value is served verbatim
+// by GET /api/v1/ha/status (Issue #3409). Thread-safe.
+func (s *Server) SetAbsentCapabilities(caps []interfaces.AbsentCapability) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.absentCapabilities = caps
+}
+
+// SetOsqueryDispatcher wires the steward-side osquery dispatch interface (Issue #3569).
+// When nil (default), POST /api/v1/osquery/query returns 503. Call after New() and
+// before Start(). The dispatcher is implemented by *osquery.OsqueryHandler, which
+// registers connected steward streams via its HandleGRPC method.
+func (s *Server) SetOsqueryDispatcher(d stewardOsqueryDispatcher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.osqueryDispatcher = d
 }
 
 // APIKey represents an API key for external authentication
@@ -118,7 +269,38 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
+
+	// recordRef names the durable secret-store record this cache entry mirrors: the
+	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by
+	// handleCreateAPIKey or generateEphemeralKey, and every key lazy-loaded by
+	// loadAPIKeyFromStore, carries one, and authenticateMiddleware re-validates such
+	// entries against the store (Issue #4574). Empty only for the env-gated test keys
+	// seeded in New, which have no durable record to revoke.
+	recordRef string
+	// validatedAt is when this entry was last confirmed present in the secret store.
+	validatedAt time.Time
 }
+
+// apiKeyRevalidateInterval bounds how long a cached, store-backed API key is
+// trusted before authenticateMiddleware re-reads its record from the secret store
+// (Issue #4574). The store is the source of truth: a key deleted on another
+// controller node stops authenticating here at most this long after the delete.
+// The node that serves the delete evicts its own cache entry immediately.
+const apiKeyRevalidateInterval = 30 * time.Second
+
+// apiKeyMaxStaleness is the hard ceiling on serving a cached API key whose
+// re-validation failed because the store was unavailable (Issue #4574). A record that
+// is gone, expired, or cannot be decrypted is not an outage and is never covered by it.
+//
+// Failing closed on the first transient store error would lock every API-key
+// client out of every node for the length of any storage blip; serving
+// indefinitely would let a revoked key outlive its revocation for as long as this
+// node cannot reach the store. The compromise: while the last successful
+// validation is younger than this bound the cached entry keeps serving (and every
+// request retries the store); once it is older, the request is refused until the
+// store answers again. A not-found, expired or undecryptable record is never treated
+// as transient — it evicts the entry and rejects the request at once.
+const apiKeyMaxStaleness = 2 * time.Minute
 
 // ServerConfig contains configuration for the REST API server
 type ServerConfig struct {
@@ -153,15 +335,44 @@ func New(
 	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
 	pushStore business.PushStore, // Issue #1320: durable push-state persistence for HA failover
 	blobStore blob.BlobStore, // Issue #1702: installer artifact storage
+	healthAlertManager health.AlertManager, // Issue #4208: reused from server.go's health.NewAlertManager instance
+	healthTraceManager health.TraceManager, // Issue #4208: reused from server.go's health.NewTraceManager instance
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// Issue #4208: health.NewHandler's methods (detailed health, metrics, alerts,
+	// traces) existed and were unit-tested but had no caller outside their own
+	// package. Constructed only when all three dependencies are present — some
+	// lightweight test servers intentionally omit them, in which case the
+	// /api/v1/health/... detail routes are simply not registered (registerHealthDetailRoutes).
+	var healthDetailHandler *health.Handler
+	if healthCollector != nil && healthAlertManager != nil && healthTraceManager != nil {
+		healthDetailHandler = health.NewHandler(healthCollector, healthAlertManager, healthTraceManager)
 	}
 
 	// M-AUTH-1: Initialize central secrets provider for API key storage
 	secretStore, err := NewSecretStore(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
+	// ADR-031 Decision 4: cluster-singleton lease claims for the two expiry
+	// sweeps below. NewBackgroundLoopLease is nil-receiver-safe — a nil
+	// haManager (OSS single-node) yields a SingletonJob that always runs,
+	// matching this sweep's pre-#3762 unconditional behavior.
+	credentialRequestSweepLease, err := haManager.NewBackgroundLoopLease("controller-credential-request-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct credential-request expiry lease job: %w", err)
+	}
+	cliLoginSweepLease, err := haManager.NewBackgroundLoopLease("controller-cli-login-request-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct cli-login expiry lease job: %w", err)
+	}
+	cliPresenceSweepLease, err := haManager.NewBackgroundLoopLease("controller-cli-presence-request-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct cli-presence expiry lease job: %w", err)
 	}
 
 	// Issue #1695: Parse TrustedProxies CIDRs once at startup so per-request
@@ -191,10 +402,12 @@ func New(
 		rbacManager:             rbacManager,
 		systemMonitor:           systemMonitor,
 		healthCollector:         healthCollector,
+		healthDetailHandler:     healthDetailHandler, // Issue #4208
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
 		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		apiKeyIdx:               newAPIKeyIndex(),         // Issue #4574: API-key hash → tenant locator
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 		approvalHook:            &IPTrustApprovalHook{},   // Issue #1695: nil store → fail-closed (quarantine all)
 		trustedProxies:          trustedProxies,           // Issue #1695: parsed from TrustedProxies config
@@ -202,19 +415,70 @@ func New(
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
+		publicDownloadGuard:     newPublicDownloadGuard(defaultPublicDownloadGuardConfig()),
+		publicDownloadCache:     newPublicDownloadCache(),
+		popVerifier:             ed25519PoPVerifier{},    // Issue #2096: default PoP verifier; override in tests
+		sessionCfg:              session.DefaultConfig(), // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
+		// Issue #3717: per-source rate limits on enrolment-token mint and credential-request
+		// lodge. Limits are deliberately generous (mint is an occasional admin action; lodge
+		// is a one-shot per enrolling machine) — they exist to bound abuse, not normal use.
+		enrolmentTokenMintLimiter:     newSourceRateLimiter(10, time.Minute),
+		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
+		stopCredentialRequestSweep:    make(chan struct{}),
+		credentialRequestSweepDone:    make(chan struct{}),
+		credentialRequestSweepLease:   credentialRequestSweepLease,
+		// Issue #3719: collect is polled by a waiting machine, so its budget is more
+		// generous than lodge's one-shot allowance.
+		credentialRequestCollectLimiter: newSourceRateLimiter(30, time.Minute),
+		// Issue #3721: per-source rate limits on cli-login lodge and collect, mirroring
+		// the credential-request lodge/collect budgets.
+		cliLoginLodgeLimiter:   newSourceRateLimiter(20, time.Minute),
+		cliLoginCollectLimiter: newSourceRateLimiter(30, time.Minute),
+		stopCliLoginSweep:      make(chan struct{}),
+		cliLoginSweepDone:      make(chan struct{}),
+		cliLoginSweepLease:     cliLoginSweepLease,
+		// Issue #4287: per-source rate limits on cli-presence lodge and collect,
+		// mirroring the cli-login lodge/collect budgets — both routes are
+		// authenticated here, but a compromised low-privilege credential is still
+		// bounded from hammering either one.
+		cliPresenceLodgeLimiter:   newSourceRateLimiter(20, time.Minute),
+		cliPresenceCollectLimiter: newSourceRateLimiter(30, time.Minute),
+		// Issue #4532: challenge + complete/claim per re-admission. Generous
+		// because many stewards at one site share a NAT address and re-admit
+		// together after an outage; it bounds abuse, not a site's recovery.
+		registrationRefreshLimiter: newSourceRateLimiter(240, time.Minute),
+		stopCliPresenceSweep:       make(chan struct{}),
+		cliPresenceSweepDone:       make(chan struct{}),
+		cliPresenceSweepLease:      cliPresenceSweepLease,
+		// Issue #4572: in-memory WebAuthn ceremony/throttle expiry sweep.
+		stopWebAuthnCeremonySweep: make(chan struct{}),
+		webAuthnCeremonySweepDone: make(chan struct{}),
+		// Issue #3761: default poll interval for runRollout to notice a halt persisted
+		// by a peer node during a ring soak; tests shrink this for determinism.
+		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
+		// Issue #3895: default decommission drain-wait timeout; tests shrink this for
+		// determinism.
+		decommissionTimeout: defaultDecommissionTimeout,
 	}
 
-	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
-	if haManager != nil {
-		server.pushLeaderStatus = haManager
+	// Issue #4346: wire the certificate provisioning service's cross-tenant
+	// containment check to the same authoritative steward registry this
+	// server itself resolves ownership from. Service-layer defense-in-depth
+	// alongside handleProvisionCertificate's own containment check (Issue
+	// #4334) — several service-layer callers can exist beyond that one handler.
+	if certProvisioningService != nil && controllerService != nil {
+		certProvisioningService.SetTenantResolver(controllerService)
 	}
 
 	// Story #380: Initialize three-tier auth defense system
 	server.authDefense = authdefense.New(
 		authdefense.DefaultConfig(),
 		logger,
+		// Issue #4573: key Tier-1 per-IP limiting on the trusted-proxy-aware,
+		// IPv6-/64-normalised client address shared with every per-IP throttle.
+		authdefense.WithIPExtractor(serverIPExtractor{s: server}),
 		authdefense.WithTenantExtractor(func(r *http.Request) string {
 			if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
 				return tid
@@ -231,7 +495,20 @@ func New(
 
 	// M-AUTH-1: Load existing API keys from secret store
 	if err := server.loadAPIKeysFromStore(); err != nil {
-		logger.Warn("Failed to load API keys from store", "error", err)
+		logger.Warn("Failed to load API keys from store", "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
+	if err := server.scanAPIKeysForPrivilegedAccess(context.Background()); err != nil {
+		logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
+	}
+
+	// Issue #3574: Scan for accounts whose stored permissions contain IDs that
+	// isKnownPermission no longer recognizes (stale grants after the permission-ID
+	// rename in #3574). Those grants match nothing hasPermission will honor; this
+	// log makes the break observable to operators instead of silently denying requests.
+	if err := server.scanAccountsForStalePermissions(context.Background()); err != nil {
+		logger.Warn("Startup scan for accounts with stale permissions failed; continuing", "error", err)
 	}
 
 	// Seed test API keys only when explicitly requested via environment variable.
@@ -240,21 +517,49 @@ func New(
 		for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
 			if keyVal := os.Getenv(envVar); keyVal != "" {
 				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-					Key:         keyVal,
-					Permissions: []string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
-					TenantID:    "default",
+					Key: keyVal,
+					// The ha:read-* grants let test/integration/ha observe the
+					// cluster it just started. Every HA route is permission-gated
+					// (routes_ha.go), so without them the suite's polling helpers
+					// read 403 bodies as "no leader" and "empty node ID" and fail
+					// with assertion messages that never mention authorization.
+					//
+					// steward:read-dna and config:push cover the other endpoints
+					// that suite calls: GET /stewards/{id}/dna for the config hash
+					// and POST /config/push for configuration continuity.
+					Permissions: []string{
+						"steward:read", "steward:read-dna", "steward:auth-refresh",
+						"config:push",
+						"workflow:execute", "workflow:read",
+						"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+					},
+					// Steward lookups are tenant-scoped. These keys exist to observe
+					// the stewards started by the HA compose profile, which register
+					// with the seeded "integration_reusable" token and therefore land
+					// in test-tenant-integration (features/controller/server.Server,
+					// CFGMS_SEED_TEST_TOKENS block). Scoping the keys to "default"
+					// put them in a tenant containing no stewards at all, so
+					// GET /api/v1/stewards/{id} answered STEWARD_NOT_FOUND for a
+					// steward that had registered successfully seconds earlier.
+					TenantID: "test-tenant-integration",
 				}
 			}
 		}
 
 		// Issue #1709: installer key uses a separate block (not the EAST/CENTRAL/WEST loop)
-		// because it requires different permissions and must upload under the "root" tenant
-		// so the public download endpoint (which always looks up tenant "root") can find it.
+		// because it requires different permissions and must upload under the root
+		// tenant, whose artifacts the public download endpoint serves. The root tenant
+		// is resolved by position (Issue #4667), as the download resolves it; the
+		// literal "root" is kept only when no root tenant resolves yet.
 		if keyVal := os.Getenv("CFGMS_API_KEY_INSTALLER"); keyVal != "" {
+			installerTenant := server.rootTenantID(context.Background())
+			if installerTenant == "" {
+				installerTenant = legacyInstallerTenant
+			}
 			server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
 				Key:         keyVal,
 				Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
-				TenantID:    "root",
+				TenantID:    installerTenant,
 			}
 		}
 
@@ -291,16 +596,17 @@ func New(
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
 
-	// Issue #603: Initialize fleet query using the controller service as the steward provider
+	// ADR-031 Decision 3, Issue #3764: one cluster-safe-by-construction fleet
+	// source for every consumer. Retires the Issue #603/#3495 node-local vs.
+	// cluster-wide split — dispatch through pkg/controlplane/internaldelivery's
+	// ClusterAwareSender (wired in cluster mode) resolves node locality itself,
+	// so a fleet-wide steward list is no longer unsafe to dispatch against.
 	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
 
 	// Issue #1521: register save=deploy fanout callback so every successful SetConfiguration
 	// automatically distributes to all active stewards of the affected tenant.
 	if configService != nil && commandPublisher != nil {
 		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
-			if checker := server.pushLeaderStatus; checker != nil && !checker.IsLeader() {
-				return
-			}
 			cfg := &push.StewardConfiguration{
 				ConfigID:  cfgID,
 				TenantID:  tenantID,
@@ -308,13 +614,17 @@ func New(
 				AppliedAt: time.Now().UTC(),
 				Source:    "save-deploy",
 			}
-			allStewards := controllerService.GetAllStewards()
+			// Fleet-wide read filtered to tenantID below; system-internal, since a
+			// save=deploy fanout has no caller of its own (Issue #4665).
+			allStewards := controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
 			var tenantStewards []*service.StewardInfo
 			for _, st := range allStewards {
 				if st.TenantID == tenantID {
 					tenantStewards = append(tenantStewards, st)
 				}
 			}
+			// #nosec G118 -- save-deploy fan-out is an explicitly asynchronous,
+			// tenant-bounded callback and publisher operations enforce deadlines.
 			go func() {
 				result := push.Fanout(context.Background(), cfg, tenantStewards, commandPublisher, logger)
 				logger.Info("Save=deploy fan-out complete",
@@ -330,47 +640,164 @@ func New(
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
 
+	// Issue #3717: background sweep for expired enrolment tokens and pending
+	// credential requests — reaped on a timer, not only lazily on read.
+	server.startCredentialRequestSweep()
+
+	// Issue #3721: background sweep for expired cli-login requests — reaped on a
+	// timer, not only lazily on read, so an "expiry" audit event fires even when
+	// nobody is actively polling collect.
+	server.startCliLoginRequestSweep()
+
+	// Issue #4287: background sweep for expired cli-presence requests, mirroring the
+	// cli-login sweep above.
+	server.startCliPresenceRequestSweep()
+
+	// Issue #4572: background sweep for expired in-memory WebAuthn ceremony and
+	// throttle entries, so an abandoned ceremony does not stay resident forever.
+	server.startWebAuthnCeremonySweep()
+
 	return server, nil
 }
 
 // controllerServiceAdapter adapts *service.ControllerService to fleet.StewardProvider.
+// Population source is ListFleetStewards (ADR-031 Decision 3, Issue #3764): the single
+// cluster-safe-by-construction fleet source, replacing the former node-local
+// controllerServiceAdapter / cluster-wide clusterServiceAdapter split (Issue #603, #3495).
+// Dispatching to any steward this adapter returns is safe regardless of which controller
+// node currently holds its connection — see ListFleetStewards's doc comment.
 type controllerServiceAdapter struct {
 	svc *service.ControllerService
 }
 
 func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
-	infos := a.svc.GetAllStewards()
+	// System-internal (ctxkeys.WithSystem, Issue #4665): tenant scoping is applied
+	// downstream by MemoryQuery.Search via Filter.TenantSubtree/TenantID, not at
+	// the provider level, and a bare context would be refused.
+	infos := a.svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	result := make([]fleet.StewardData, 0, len(infos))
 	for _, info := range infos {
-		var attrs map[string]string
-		if info.DNA != nil {
-			attrs = info.DNA.Attributes
-		}
-		result = append(result, fleet.StewardData{
-			ID:            info.ID,
-			TenantID:      info.TenantID,
-			Status:        info.Status,
-			LastHeartbeat: info.LastHeartbeat,
-			DNAAttributes: attrs,
-		})
+		// ListFleetStewards already copies Tags from the tag store.
+		result = append(result, buildStewardFleetData(info, info.Tags))
 	}
 	return result
+}
+
+// buildStewardFleetData converts *service.StewardInfo to fleet.StewardData with both
+// DNAAttributes (flattened from fragments + ctrlTags merged) and DNAFragments populated.
+// controllerServiceAdapter passes info.Tags (already populated by ListFleetStewards).
+// (Issue #3495, #3764)
+func buildStewardFleetData(info *service.StewardInfo, ctrlTags []string) fleet.StewardData {
+	var attrs map[string]string
+	var frags []*commonpb.Fragment
+	if info.DNA != nil {
+		attrs = service.FlattenDNAFragments(info.DNA.Fragments)
+		frags = info.DNA.Fragments
+	}
+	if len(ctrlTags) > 0 {
+		attrs = mergeControllerTags(attrs, ctrlTags)
+	}
+	return fleet.StewardData{
+		ID:            info.ID,
+		TenantID:      info.TenantID,
+		Status:        info.Status,
+		LastHeartbeat: info.LastHeartbeat,
+		DNAAttributes: attrs,
+		DNAFragments:  frags,
+		Hidden:        info.Hidden,
+	}
+}
+
+// mergeControllerTags returns a copy of attrs with controller-stored ctrlTags merged into the
+// "tags" key. If attrs already carries a DNA-reported "tags" value, the two sets are unioned
+// (DNA tags first, duplicates dropped). Returns attrs unchanged when ctrlTags is empty.
+// Never mutates the input map.
+func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]string {
+	if len(ctrlTags) == 0 {
+		return attrs
+	}
+	merged := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	seen := make(map[string]struct{})
+	var all []string
+	for _, t := range strings.Split(merged["tags"], ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	for _, t := range ctrlTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	merged["tags"] = strings.Join(all, ",")
+	return merged
 }
 
 // setupRouter initializes the HTTP router with all routes and middleware
 func (s *Server) setupRouter() {
 	s.router = mux.NewRouter()
+	s.metricsRouter = mux.NewRouter()
+	s.internalRouter = mux.NewRouter()
 
 	// Add middleware
+	s.router.Use(s.securityHeadersMiddleware)
+	s.router.Use(s.authDefense.Middleware) // Per-source budget covers public and authenticated surfaces.
+	s.router.Use(s.requestBodyLimitMiddleware)
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
+	// gorilla/mux's Use() middleware chain is only built for matched routes
+	// (mux.Router.Match skips it whenever MatchErr != nil), so unmatched-route 404s and
+	// method-mismatch 405s bypass every middleware registered above — including
+	// securityHeadersMiddleware — unless these two fields are wired explicitly
+	// (Issue #4183, DAST 10035/10049).
+	s.router.NotFoundHandler = s.notFoundHandler()
+	s.router.MethodNotAllowedHandler = s.methodNotAllowedHandler()
+
+	// The private metrics listener retains the same source budgets, browser
+	// hardening, authentication, and request validation as the public API.
+	// It intentionally has no SPA fallback or non-metrics product routes.
+	s.metricsRouter.Use(s.securityHeadersMiddleware)
+	s.metricsRouter.Use(s.authDefense.Middleware)
+	s.metricsRouter.Use(s.requestBodyLimitMiddleware)
+	s.metricsRouter.Use(s.loggingMiddleware)
+	s.metricsRouter.Use(s.contentTypeMiddleware)
+	registerPrivateMetricsRoutes(s, s.metricsRouter)
+
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
-	api.Use(s.authDefense.Middleware) // Story #380: Rate limiting before auth
-	api.Use(s.authenticationMiddleware)
+	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
+	// requireTier(TierAny) removed: it was a no-op passthrough (Issue #2780 migrates to assurance-based enforcement).
 	api.Use(s.validationMiddleware)
+	api.Use(s.csrfMiddleware) // Issue #2493: session-bound CSRF for unsafe cookie-auth methods
+	// Issue #2966: enrollment confinement — a cookie-authenticated session with zero enrolled
+	// passkeys is refused all api routes; first-passkey enrollment is on the base router.
+	api.Use(s.enrollmentConfinementMiddleware)
+	s.apiRouter = api // saved so Set* methods can lazy-register routes after construction
+
+	// --- Tier 0 (TierPublic) — no authentication required ---
+	//   GET  /api/v1/health
+	//   GET  /api/v1/ready
+	//   POST /api/v1/register
+	//   GET  /api/v1/registration/status/{pending_id}
+	//   POST /api/v1/stewards/{device_id}/refresh/challenge   (PoP-auth in handler)
+	//   POST /api/v1/stewards/{device_id}/refresh/complete    (PoP-auth in handler)
+	//   GET  /api/v1/installer/download/{platform}/{arch}
+	//   GET  /api/v1/public/steward-binaries/{version}/{platform}/{arch}
 
 	// Health check (no auth required) — liveness / object-presence.
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
@@ -385,39 +812,36 @@ func (s *Server) setupRouter() {
 	// Registration status poll (no API-key auth — authenticated by regtoken Bearer header)
 	s.router.HandleFunc("/api/v1/registration/status/{pending_id}", s.handleRegistrationStatus).Methods("GET")
 
-	// Test-mode config upload (no auth required - for integration tests only)
-	// Use separate path to avoid conflict with authenticated subrouter
-	// TODO: Remove or protect this endpoint in production
-	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
+	// Integration-test administration routes are registered only in binaries
+	// compiled with -tags=cfgms_test_endpoints. The production implementation
+	// of registerTestRoutes is a no-op, so an environment variable can never
+	// expose these handlers in a release binary.
+	registerTestRoutes(s)
 
-	// Steward management endpoints (require API key authentication)
-	stewards := api.PathPrefix("/stewards").Subrouter()
-	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
-	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
-	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
-	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
-	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
+	// Registration-refresh endpoints (unauthenticated — authenticated by device key PoP).
+	// Registered on the base router like /api/v1/register (Issue #2096).
+	// One per-source budget across the three, bounding abuse of the public
+	// handshake (Issue #4532).
+	s.router.Handle("/api/v1/stewards/{device_id}/refresh/challenge",
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshChallenge))).Methods("POST", "OPTIONS")
+	s.router.Handle("/api/v1/stewards/{device_id}/refresh/complete",
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshComplete))).Methods("POST", "OPTIONS")
+	s.router.Handle("/api/v1/stewards/{device_id}/refresh/claim",
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshClaim))).Methods("POST", "OPTIONS")
 
-	// Configuration management endpoints
-	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
-	stewards.Handle("/{id}/config", s.requirePermission("steward", "write-config")(http.HandlerFunc(s.handleUpdateStewardConfig))).Methods("PUT")
-	stewards.Handle("/{id}/config", s.requirePermission("steward", "delete-config")(http.HandlerFunc(s.handleDeleteStewardConfig))).Methods("DELETE")
-	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
-	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
+	// All routes on the api subrouter require authentication (enforced by authenticationMiddleware).
+	// Routes whose permissions appear in permissionAssurance additionally enforce an assurance-level
+	// minimum via requirePermission — see assurance.go and Issue #2780 (ADR-021 migration).
 
-	// QUIC connection management endpoints
-	// Script management endpoints
-	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")
-	stewards.Handle("/{id}/scripts/executions/{execution_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecution))).Methods("GET")
-	stewards.Handle("/{id}/scripts/executions/{execution_id}/retry", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostScriptRetry))).Methods("POST")
-	stewards.Handle("/{id}/scripts/metrics", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptMetrics))).Methods("GET")
-	stewards.Handle("/{id}/scripts/status", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptStatus))).Methods("GET")
+	// Feature route registrars — each named-subrouter block is self-registered from its own
+	// routes_*.go file via package init(). Adding a new endpoint only requires a new file;
+	// no edit to this function body is needed (Issue #2796).
+	for _, register := range routeRegistrars {
+		register(s, api)
+	}
 
-	// Script library endpoints (Issue #1670)
-	scripts := api.PathPrefix("/scripts").Subrouter()
-	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
-	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
-	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
+	// Audit log readback endpoint (Issue #2190)
+	api.Handle("/audit/entries", s.requirePermission("audit", "list")(http.HandlerFunc(s.handleListAuditEntries))).Methods("GET")
 
 	// Configuration list endpoint (Issue #1570)
 	api.Handle("/configs", s.requirePermission("config", "list")(http.HandlerFunc(s.handleListConfigs))).Methods("GET")
@@ -425,212 +849,138 @@ func (s *Server) setupRouter() {
 	// Configuration deployments endpoint (Issue #1598)
 	api.Handle("/configs/{id}/deployments", s.requirePermission("config", "list-deployments")(http.HandlerFunc(s.handleGetConfigDeployments))).Methods("GET")
 
-	// Fleet selector resolve endpoint (Issue #1640)
-	fleetRouter := api.PathPrefix("/fleet").Subrouter()
-	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
-
-	// Configuration push endpoint (Issue #1318)
-	cfgPush := api.PathPrefix("/config").Subrouter()
-	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
-
-	// Certificate management endpoints
-	certs := api.PathPrefix("/certificates").Subrouter()
-	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
-	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
-	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
-
-	// RBAC management endpoints
-	rbac := api.PathPrefix("/rbac").Subrouter()
-
-	// Permissions
-	rbac.Handle("/permissions", s.requirePermission("rbac", "list-permissions")(http.HandlerFunc(s.handleListPermissions))).Methods("GET")
-	rbac.Handle("/permissions/{id}", s.requirePermission("rbac", "read-permission")(http.HandlerFunc(s.handleGetPermission))).Methods("GET")
-
-	// Roles
-	rbac.Handle("/roles", s.requirePermission("rbac", "list-roles")(http.HandlerFunc(s.handleListRoles))).Methods("GET")
-	rbac.Handle("/roles", s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole))).Methods("POST")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "read-role")(http.HandlerFunc(s.handleGetRole))).Methods("GET")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
-
-	// API key management endpoints (for managing API keys themselves)
-	apiKeys := api.PathPrefix("/api-keys").Subrouter()
-	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
-	apiKeys.Handle("", s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey))).Methods("POST")
-	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
-	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
-
-	// Registration token management endpoints (Story #264)
-	regTokens := api.PathPrefix("/registration/tokens").Subrouter()
-	regTokens.Handle("", s.requirePermission("registration", "list-tokens")(http.HandlerFunc(s.handleListRegistrationTokens))).Methods("GET")
-	regTokens.Handle("", s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken))).Methods("POST")
-	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
-	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
-	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
-	regTokens.Handle("/{tenant_id}/rotate", s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken))).Methods("POST")
+	// Session management endpoints (Issue #2232, #2368, #2780, #3584).
+	// POST /sessions mints a new long-lived Bearer credential — requirePermission enforces
+	// session:create (Min: AssuranceStrong in permissionAssurance). A Basic-assurance
+	// caller (web-session cookie or existing cfg-CLI Bearer) cannot satisfy that bar, closing
+	// the self-perpetuating-compromise gap. A tenant-scoped account explicitly granted
+	// session:create can mint a CLI Bearer session after passkey step-up; the resulting
+	// session is confined to the account's permission grants (Issue #3576 ensures the
+	// principal is re-derived from the bound account on every Bearer request).
+	// GET /sessions and DELETE /sessions/{id} are grantable via session:list / session:revoke
+	// (Issue #3584), and intentionally absent from permissionAssurance — revoking a session
+	// is a de-escalation action that must work even when the strong authenticator is unavailable.
+	api.Handle("/sessions", s.requirePermission("session", "create")(http.HandlerFunc(s.handleSessionCreate))).Methods("POST")
+	api.Handle("/sessions", s.requirePermission("session", "list")(http.HandlerFunc(s.handleSessionList))).Methods("GET")
+	api.Handle("/sessions/{id}", s.requirePermission("session", "revoke")(http.HandlerFunc(s.handleSessionRevoke))).Methods("DELETE")
 
 	// Registration approval endpoints (Issue #1568)
 	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
 	api.Handle("/registration/{id}/approve", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration))).Methods("POST")
 	api.Handle("/registration/{id}/deny", s.requirePermission("registration", "deny")(http.HandlerFunc(s.handleDenyRegistration))).Methods("POST")
 
-	// Bulk registration approval and IP-trust management (Issue #1698)
+	// Bulk registration approval and IP-trust management (Issue #1698, #2969)
 	api.Handle("/registration/approve-all", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations))).Methods("POST")
-	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
+	// Preview (dry-run) must be registered before the mutation POST to avoid path ambiguity.
+	api.Handle("/registration/approve-by-cidr/preview", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleApproveByCIDRPreview))).Methods("GET")
+	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve-by-cidr")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
+	api.Handle("/registration/ip-trust", s.requirePermission("registration", "list-ip-trust")(http.HandlerFunc(s.handleListIPTrust))).Methods("GET")
 	api.Handle("/registration/ip-trust", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust))).Methods("POST")
 	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
 	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")
 
-	// Monitoring endpoints
-	monitoring := api.PathPrefix("/monitoring").Subrouter()
-	monitoring.Handle("/health", s.requirePermission("monitoring", "read-health")(http.HandlerFunc(s.handleSystemHealth))).Methods("GET")
-	monitoring.Handle("/metrics", s.requirePermission("monitoring", "read-metrics")(http.HandlerFunc(s.handleSystemMetrics))).Methods("GET")
-	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
+	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
+	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
+	api.Handle("/stewards/refresh/pending",
+		s.requirePermission("refresh", "list-pending")(http.HandlerFunc(s.handleListPendingRefreshes))).Methods("GET")
+	api.Handle("/stewards/refresh/{pending_id}/approve",
+		s.requirePermission("refresh", "approve")(http.HandlerFunc(s.handleApproveRefresh))).Methods("POST")
+	api.Handle("/stewards/refresh/{pending_id}/reject",
+		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
 
-	// Platform monitoring endpoints
-	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
-	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
-	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
+	// Web CSRF / logout / passkey-login endpoints (Issue #2493, #2993, ADR-018 §3,4).
+	// Registered on the BASE router (TierPublic pattern) and explicitly wrapped in
+	// authDefense.Middleware. The api subrouter chain at line ~414 does NOT cover
+	// base-router routes (security A5.4), so wrapping is mandatory here.
+	s.router.Handle("/api/v1/web/csrf",
+		s.authDefense.Middleware(http.HandlerFunc(s.handleGetWebCSRF))).Methods("GET")
+	s.router.Handle("/api/v1/web/logout",
+		s.authDefense.Middleware(http.HandlerFunc(s.handleWebLogout))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/login/begin",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginBegin))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/login/finish",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginFinish))).Methods("POST")
 
-	// High Availability (HA) endpoints
-	ha := api.PathPrefix("/ha").Subrouter()
-	ha.Handle("/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleHAStatus))).Methods("GET")
-	ha.Handle("/cluster", s.requirePermission("ha", "read-cluster")(http.HandlerFunc(s.handleHACluster))).Methods("GET")
-	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
-	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
-
-	// Compliance reporting endpoints (Story #212)
-	// Steward-specific compliance endpoints
-	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
-	stewards.Handle("/{id}/compliance/report", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardComplianceReport))).Methods("GET")
-
-	// Module inventory endpoint (Issue #1949)
-	stewards.Handle("/{id}/modules", s.requirePermission("steward", "read-modules")(http.HandlerFunc(s.handleGetStewardModules))).Methods("GET")
-
-	// System-wide compliance endpoints
-	compliance := api.PathPrefix("/compliance").Subrouter()
-	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
-
-	// Tenant management endpoints (Issue #1396, Issue #1848)
-	tenants := api.PathPrefix("/tenants").Subrouter()
-	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
-	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
-	tenants.Handle("/{id}/config-source/test",
-		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
-
-	// Installer artifact management endpoints (Issue #1702).
-	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
-	installer := api.PathPrefix("/installer/artifacts").Subrouter()
-	installer.Handle("", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleListInstallerArtifacts))).Methods("GET")
-	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "upload")(http.HandlerFunc(s.handleUploadInstallerArtifact))).Methods("PUT")
-	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
-	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
-
-	// Steward binary publish/get endpoints (Issue #1944).
-	// Distinct from the installer artifact namespace; blobs live under "steward-binaries".
-	stewardBinaries := api.PathPrefix("/installer/steward-binaries").Subrouter()
-	stewardBinaries.Handle("/{version}/{platform}/{arch}",
-		s.requirePermission("installer", "publish:steward")(http.HandlerFunc(s.handlePublishStewardBinary))).Methods("POST")
-	stewardBinaries.Handle("/{version}/{platform}/{arch}",
-		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetStewardBinary))).Methods("GET")
-
-	// Steward upgrade dispatch endpoints (Issue #1945).
-	// Always registered — handlers return 503 when upgradeStore is nil (nil-safe by design).
-	stewardUpgrade := api.PathPrefix("/stewards/upgrade").Subrouter()
-	stewardUpgrade.Handle("",
-		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleDispatchUpgrade))).Methods("POST")
-	stewardUpgrade.Handle("/{upgrade_id}",
-		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleUpgradeStatus))).Methods("GET")
-	stewardUpgrade.Handle("/{upgrade_id}/rollback",
-		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleUpgradeRollback))).Methods("POST")
+	// First-passkey enrollment routes (Issue #2966: ADR-021 Amendment 1).
+	// Registered on the BASE router (public pattern): the enrollment token is the bearer
+	// credential; no web session is required. Self-scoped to the account the token identifies —
+	// never to a caller-supplied {username}. Token is passed via X-Enrollment-Token header.
+	s.router.Handle("/api/v1/web/passkey/enroll/begin",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyEnrollBegin))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/enroll/finish",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyEnrollFinish))).Methods("POST")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
-	s.router.HandleFunc("/api/v1/installer/download/{platform}/{arch}", s.handleDownloadInstallPackage).Methods("GET")
+	s.router.Handle(
+		"/api/v1/installer/download/{platform}/{arch}",
+		s.publicDownloadGuard.middleware(s.trustedProxies, http.HandlerFunc(s.handleDownloadInstallPackage)),
+	).Methods("GET")
 
 	// Steward binary public download — no auth required (Issue #1948).
 	// The binary's Ed25519 signature authenticates content at the steward side.
 	// Steward mTLS certs lack the admin marker required by the authenticated GET endpoint.
-	s.router.HandleFunc("/api/v1/public/steward-binaries/{version}/{platform}/{arch}", s.handleGetStewardBinaryPublic).Methods("GET")
+	s.router.Handle(
+		"/api/v1/public/steward-binaries/{version}/{platform}/{arch}",
+		s.publicDownloadGuard.middleware(s.trustedProxies, http.HandlerFunc(s.handleGetStewardBinaryPublic)),
+	).Methods("GET")
 
-	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
-	// run manager is not wired (transport-disabled deployments).
-	runs := api.PathPrefix("/runs").Subrouter()
-	runs.Handle("/script", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunScript))).Methods("POST")
-	runs.Handle("/command", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunCommand))).Methods("POST")
-	runs.Handle("/{run_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRun))).Methods("GET")
-	runs.Handle("/{run_id}/jobs", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRunJobs))).Methods("GET")
-	runs.Handle("/{run_id}", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handleDeleteRun))).Methods("DELETE")
+	// Steward-scoped revocation manifest — no API key/admin-cert/session auth; the
+	// steward's own mTLS certificate authenticates it (Issue #4400). Registered on the
+	// base router for the same reason as the steward-binary download immediately
+	// above: a steward certificate carries no CFGMS admin marker, so it produces no
+	// principal via authenticationMiddleware and can never reach the api subrouter.
+	// The handler itself resolves and authorizes the caller from r.TLS.PeerCertificates
+	// (see handleGetStewardRevocationManifest's doc comment) — this is not an
+	// unauthenticated route, just one authenticated outside the admin-principal system.
+	s.router.HandleFunc(
+		"/api/v1/public/steward-revocation-manifest",
+		s.handleGetStewardRevocationManifest,
+	).Methods("GET")
 
-	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
-	// No route is pre-registered here; the endpoint only exists when a git-sync
-	// handler is explicitly wired in after server creation.
-
-	// Raft message endpoint: mTLS peer CN verification is enforced inside HandleMessage
-	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
-	// Raft status endpoint: requires HA read-status permission via API authentication
-	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
-
-	// Rollback management endpoints (Story #416)
-	if s.rollbackManager != nil {
-		// Read the principal from the request context (set by authenticationMiddleware)
-		// so both mTLS admin principals and scoped API-key principals are evaluated.
-		rollbackPrincipalExtractor := func(r *http.Request) *Principal {
-			p, _ := r.Context().Value(principalContextKey).(*Principal)
-			return p
+	// Git-sync webhook (Issue #666, #3263): pre-registered here so gorilla/mux can
+	// match it before the SPA PathPrefix("/") catch-all below (routes are matched in
+	// registration order).  The handler is resolved lazily at request time so it can
+	// be wired via SetGitSyncWebhookHandler after New() returns.  Returns 503 until
+	// the handler is wired; delegates via h.ServeHTTP once it is.
+	s.router.HandleFunc("/api/v1/webhooks/git-push", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		h := s.gitSyncWebhookHandler
+		s.mu.RUnlock()
+		if h == nil {
+			http.Error(w, "git-sync webhook service not available", http.StatusServiceUnavailable)
+			return
 		}
-		// Resolve the steward's registered tenant from the controller registry.
-		// This is the authoritative cross-tenant check — it cannot be bypassed by
-		// the caller supplying a fabricated steward_tenant_path in the request body.
-		stewardTenantLookup := func(stewardID string) string {
-			if s.controllerService != nil {
-				if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
-					return info.TenantID
-				}
-			}
-			return ""
-		}
-		rollbackHandler := NewRollbackHandler(s.rollbackManager, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
-		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
-		// Require config/rollback permission for all rollback endpoints — same gate pattern
-		// as every other mutating endpoint in this server.
-		rollbackRouter.Use(s.requirePermission("config", "rollback"))
-		rollbackHandler.RegisterRoutes(rollbackRouter)
-		s.logger.Info("Rollback API routes registered")
+		h.ServeHTTP(w, r)
+	}).Methods("POST")
+
+	// The private mTLS-only internal listener (created by Start) still serves
+	// the internal controller-to-controller delivery gRPC service (Issue
+	// #3764). It carried the Raft message/status HTTP routes before Issue
+	// #3763 deleted the Raft transport those handlers delegated to; GET
+	// /api/v1/ha/status's lease-backed is_leader field is the surviving status
+	// surface (ADR-031 Decision 5).
+	s.internalRouter.Use(s.requestBodyLimitMiddleware)
+	s.internalRouter.Use(s.loggingMiddleware)
+	s.internalRouter.Use(s.contentTypeMiddleware)
+
+	// Terminal WebSocket relay is registered by routes_terminal.go (Issue #2761).
+	// The handler is wired via SetTerminalHandler after server construction.
+
+	// SPA catch-all: lowest-precedence handler for the embedded web UI (Issue #2494).
+	// All /api/* and /raft/* routes registered above take precedence via gorilla/mux
+	// ordering; unmatched paths in those namespaces are refused by spaHandler itself.
+	// A binary built without a frontend build embeds only the tracked
+	// web/dist/index.html placeholder. Serving that would look like a working
+	// (but permanently stale) SPA, so "/" is left unrouted and the reason is
+	// logged loudly instead (Issue #3043).
+	spa, spaErr := newEmbeddedSPAHandler(spaAssets)
+	if spaErr != nil {
+		s.logger.Error("Embedded SPA assets unavailable; refusing to route \"/\" (web UI will be unavailable)",
+			"error", logging.SanitizeLogValue(spaErr.Error()))
+	} else {
+		s.router.PathPrefix("/").Handler(spa)
 	}
-
-	// Reports engine endpoints (Story #416)
-	if s.reportsHandler != nil {
-		reportsRouter := api.PathPrefix("/reports").Subrouter()
-		s.reportsHandler.RegisterRoutes(reportsRouter)
-		s.logger.Info("Reports API routes registered")
-	}
-
-	// Workflow engine endpoints (Issue #414)
-	if s.workflowHandler != nil {
-		workflowRouter := api.PathPrefix("/workflows").Subrouter()
-		s.workflowHandler.RegisterWorkflowRoutes(workflowRouter)
-
-		triggerRouter := api.PathPrefix("/triggers").Subrouter()
-		s.workflowHandler.RegisterTriggerRoutes(triggerRouter)
-		s.logger.Info("Workflow and trigger API routes registered")
-	}
-
-	// TODO(#997): Wire terminal WebSocket handler when HTTP route is added (gated on epic #750).
-	// When the terminal route is registered, parse CFGMS_TERMINAL_ALLOWED_ORIGINS and pass the
-	// resulting slice to terminal.NewWebSocketHandler as the third argument. Parsing pattern
-	// mirrors CFGMS_ALLOWED_ORIGINS (comma-separated, strings.TrimSpace per entry, empty filtered):
-	//
-	//   var terminalOrigins []string
-	//   if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
-	//       for _, o := range strings.Split(raw, ",") {
-	//           if trimmed := strings.TrimSpace(o); trimmed != "" {
-	//               terminalOrigins = append(terminalOrigins, trimmed)
-	//           }
-	//       }
-	//   }
-	//   terminalHandler, err := terminal.NewWebSocketHandler(sessionManager, s.logger, terminalOrigins)
-	//   // then register: api.Handle("/terminal/ws/{steward_id}", ...).Methods("GET")
 }
 
 // Start starts the HTTP server
@@ -640,49 +990,256 @@ func (s *Server) Start() error {
 
 	// Determine listen address for HTTP server (different from gRPC)
 	httpAddr := s.getHTTPListenAddr()
-
-	// Create HTTP server
-	s.httpServer = &http.Server{
-		Addr:         httpAddr,
-		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	metricsAddr := s.cfg.MetricsListenAddr
+	if err := config.ValidatePrivateListenerAddress(metricsAddr); err != nil {
+		return fmt.Errorf("invalid private metrics listener: %w", err)
 	}
 
-	// Configure TLS if available
-	if s.shouldUseTLS() {
-		tlsConfig, err := s.setupTLS()
+	// Public API TLS is mandatory. Certificate discovery and validation happen
+	// synchronously before a listener goroutine is started, so unreadable,
+	// malformed, expired, or identity-mismatched material cannot silently
+	// downgrade the controller to plaintext HTTP.
+	tlsConfig, err := s.setupTLS()
+	if err != nil {
+		return fmt.Errorf("refusing to start public API without valid TLS: %w", err)
+	}
+	if err := s.validatePublicAPITLSConfig(tlsConfig); err != nil {
+		return fmt.Errorf("refusing to start public API without valid TLS: %w", err)
+	}
+
+	var internalAddr string
+	var internalTLSConfig *tls.Config
+	if s.cfg.HA.IsClusterMode() {
+		internalAddr = s.cfg.InternalListenAddr
+		if err := validatePrivateListenAddr(internalAddr); err != nil {
+			return fmt.Errorf("invalid internal Raft listener: %w", err)
+		}
+		internalTLSConfig, err = s.internalRaftTLSConfig(tlsConfig)
 		if err != nil {
-			s.logger.Warn("Failed to setup TLS for HTTP server, starting without TLS", "error", err)
-		} else if tlsConfig != nil {
-			s.httpServer.TLSConfig = tlsConfig
+			return fmt.Errorf("refusing to start internal Raft listener without mTLS: %w", err)
+		}
+	}
+
+	// Bind synchronously so Start cannot report success while a listener is
+	// unavailable. The TLS wrappers use the already preflighted configurations.
+	publicListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("bind public API listener: %w", err)
+	}
+	metricsListener, err := net.Listen("tcp", metricsAddr)
+	if err != nil {
+		_ = publicListener.Close()
+		return fmt.Errorf("bind private metrics listener: %w", err)
+	}
+	var internalListener net.Listener
+	if internalTLSConfig != nil {
+		internalListener, err = net.Listen("tcp", internalAddr)
+		if err != nil {
+			_ = publicListener.Close()
+			_ = metricsListener.Close()
+			return fmt.Errorf("bind private Raft listener: %w", err)
+		}
+	}
+
+	// Internal controller-to-controller delivery RPC (ADR-031 Decision 3, Issue
+	// #3764): a separate listener from the Raft one above — gRPC needs to own
+	// its connections directly rather than sharing net/http's listener — reusing
+	// the same mTLS trust material (internalTLSConfig, the HA peer CA).
+	var deliveryListener net.Listener
+	if internalTLSConfig != nil && s.deliveryHandler != nil && s.deliveryListenAddr != "" {
+		if err := validatePrivateListenAddr(s.deliveryListenAddr); err != nil {
+			_ = publicListener.Close()
+			_ = metricsListener.Close()
+			if internalListener != nil {
+				_ = internalListener.Close()
+			}
+			return fmt.Errorf("invalid internal delivery listener: %w", err)
+		}
+		deliveryListener, err = net.Listen("tcp", s.deliveryListenAddr)
+		if err != nil {
+			_ = publicListener.Close()
+			_ = metricsListener.Close()
+			if internalListener != nil {
+				_ = internalListener.Close()
+			}
+			return fmt.Errorf("bind private delivery listener: %w", err)
+		}
+	}
+
+	// Create HTTPS server only after TLS preflight and listener binding succeed.
+	s.httpServer = &http.Server{
+		Addr:              publicListener.Addr().String(),
+		Handler:           s.router,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		TLSConfig:         tlsConfig,
+	}
+	metricsTLSConfig := tlsConfig.Clone()
+	metricsTLSConfig.MinVersion = tls.VersionTLS13
+	s.metricsHTTPServer = &http.Server{
+		Addr:              metricsListener.Addr().String(),
+		Handler:           s.metricsRouter,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		TLSConfig:         metricsTLSConfig,
+	}
+	if internalTLSConfig != nil {
+		s.internalHTTPServer = &http.Server{
+			Addr:              internalListener.Addr().String(),
+			Handler:           s.internalRouter,
+			ReadTimeout:       15 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+			TLSConfig:         internalTLSConfig,
 		}
 	}
 
 	// Start server in goroutine
+	publicServer := s.httpServer
+	publicTLSListener := tls.NewListener(publicListener, tlsConfig)
+	metricsServer := s.metricsHTTPServer
+	metricsTLSListener := tls.NewListener(metricsListener, metricsTLSConfig)
+	s.publicTLSListener = publicTLSListener
+	s.metricsTLSListener = metricsTLSListener
 	go func() {
-		s.mu.RLock()
-		server := s.httpServer
-		s.mu.RUnlock()
-
-		if server != nil {
-			var err error
-			if server.TLSConfig != nil {
-				s.logger.Info("Starting HTTPS REST API server", "address", httpAddr)
-				err = server.ListenAndServeTLS("", "") // Certificates in TLSConfig
-			} else {
-				s.logger.Info("Starting HTTP REST API server", "address", httpAddr)
-				err = server.ListenAndServe()
-			}
-
-			if err != nil && err != http.ErrServerClosed {
-				s.logger.Error("HTTP server failed", "error", err)
-			}
+		s.logger.Info("Starting HTTPS REST API server", "address", publicServer.Addr)
+		if serveErr := publicServer.Serve(publicTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
+			s.logger.Error("HTTP server failed", "error", serveErr)
 		}
 	}()
+	go func() {
+		s.logger.Info("Starting private HTTPS metrics server", "address", metricsServer.Addr)
+		if serveErr := metricsServer.Serve(metricsTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
+			s.logger.Error("Private metrics server failed", "error", serveErr)
+		}
+	}()
+	if s.internalHTTPServer != nil {
+		internalServer := s.internalHTTPServer
+		internalTLSListener := tls.NewListener(internalListener, internalTLSConfig)
+		s.internalTLSListener = internalTLSListener
+		go func() {
+			s.logger.Info("Starting private mTLS Raft server", "address", internalServer.Addr)
+			if serveErr := internalServer.Serve(internalTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
+				s.logger.Error("Private Raft server failed", "error", serveErr)
+			}
+		}()
+	}
+	if deliveryListener != nil {
+		// The listener's client CA pool is the public API pool (controller CA,
+		// which also signs every steward and admin client certificate) plus the
+		// HA peer CA, so the handshake alone does not establish "peer controller
+		// node". The interceptor is what enforces that identity, mirroring the
+		// CN allowlist pkg/ha's Raft transport applies on the sibling internal
+		// listener. It is constructed here rather than by the caller so the
+		// delivery service can never be served unauthenticated; a nil node-ID
+		// source denies every call.
+		peerAuth := internaldelivery.NewPeerAuthorizer(s.deliveryPeerNodeIDs, s.logger)
+		deliveryServer := grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(internalTLSConfig)),
+			grpc.UnaryInterceptor(peerAuth.UnaryInterceptor),
+		)
+		clusterdeliverypb.RegisterDeliveryServiceServer(deliveryServer, s.deliveryHandler)
+		s.deliveryGRPCServer = deliveryServer
+		go func() {
+			s.logger.Info("Starting private mTLS internal delivery server", "address", deliveryListener.Addr().String())
+			if serveErr := deliveryServer.Serve(deliveryListener); serveErr != nil {
+				s.logger.Error("Private internal delivery server failed", "error", serveErr)
+			}
+		}()
+	}
 
-	s.logger.Info("REST API server started", "address", httpAddr)
+	s.logger.Info("REST API server started", "address", publicServer.Addr, "private_metrics_address", metricsServer.Addr)
+	return nil
+}
+
+func validatePrivateListenAddr(address string) error {
+	return config.ValidatePrivateListenerAddress(address)
+}
+
+func (s *Server) internalRaftTLSConfig(publicTLS *tls.Config) (*tls.Config, error) {
+	if publicTLS == nil || len(publicTLS.Certificates) == 0 {
+		return nil, fmt.Errorf("server certificate is unavailable")
+	}
+	internalTLS := publicTLS.Clone()
+	internalTLS.MinVersion = tls.VersionTLS13
+	internalTLS.ClientAuth = tls.RequireAndVerifyClientCert
+
+	var haCA []byte
+	if s.haManager != nil {
+		haCA = s.haManager.GetCACertPEM()
+	}
+
+	if internalTLS.ClientCAs == nil {
+		// The inherited public TLS config carries no client CA pool, so the HA
+		// peer CA is the only trust anchor available for the internal Raft
+		// listener. pkg/cert is the single construction point for CA pools; it
+		// also rejects empty or unparseable PEM, which keeps this listener from
+		// starting with a pool that trusts nothing.
+		pool, err := cert.NewCertPoolFromPEM(haCA)
+		if err != nil {
+			return nil, fmt.Errorf("no trusted client CA is configured: %w", err)
+		}
+		internalTLS.ClientCAs = pool
+		return internalTLS, nil
+	}
+
+	if len(haCA) > 0 {
+		// Adding the HA peer CA to an inherited pool must not silently no-op:
+		// unparseable PEM means peers would be rejected at handshake time.
+		if _, err := cert.NewCertPoolFromPEM(haCA); err != nil {
+			return nil, fmt.Errorf("HA peer CA is invalid: %w", err)
+		}
+		internalTLS.ClientCAs.AppendCertsFromPEM(haCA)
+		return internalTLS, nil
+	}
+
+	// Inherited pool with no HA CA to add: reject an empty pool rather than
+	// serving mTLS that can never verify a client.
+	if len(internalTLS.ClientCAs.Subjects()) == 0 { //nolint:staticcheck // SA1019: Subjects() is only deprecated for system pools; this pool is built in-process from PEM, where it is the only way to detect an empty trust store.
+		return nil, fmt.Errorf("no trusted client CA is configured")
+	}
+	return internalTLS, nil
+}
+
+// validatePublicAPITLSConfig binds the loaded certificate to the configured
+// public API identity. Go's server-side TLS stack validates the key pair during
+// handshakes but does not verify that a server certificate covers the hostname
+// clients are told to use.
+func (s *Server) validatePublicAPITLSConfig(tlsConfig *tls.Config) error {
+	if tlsConfig == nil || len(tlsConfig.Certificates) == 0 {
+		return fmt.Errorf("TLS configuration has no server certificate")
+	}
+
+	leaf, err := cert.ValidateServerCertificate(tlsConfig.Certificates[0], time.Now())
+	if err != nil {
+		return err
+	}
+
+	if s.cfg == nil || s.cfg.ExternalURL == "" {
+		return fmt.Errorf("external_url is required to verify the public API certificate identity")
+	}
+	publicURL, err := url.Parse(s.cfg.ExternalURL)
+	if err != nil {
+		return fmt.Errorf("invalid external_url: %w", err)
+	}
+	if !strings.EqualFold(publicURL.Scheme, "https") {
+		return fmt.Errorf("external_url must use https")
+	}
+	hostname := publicURL.Hostname()
+	if hostname == "" {
+		return fmt.Errorf("external_url must include a hostname")
+	}
+	if err := leaf.VerifyHostname(hostname); err != nil {
+		return fmt.Errorf("public API certificate does not match external_url hostname %q: %w", hostname, err)
+	}
 	return nil
 }
 
@@ -700,11 +1257,99 @@ func (s *Server) Close(ctx context.Context) error {
 			firstErr = fmt.Errorf("api server close: timed out waiting for cleanup goroutine: %w", ctx.Err())
 		}
 
+		// Issue #3717: signal the credential-request expiry sweep to exit alongside
+		// the API-key cleanup goroutine. Guarded by nil checks (unlike stopCleanup
+		// above) because several tests build a *Server literal directly without
+		// going through New(), and startCredentialRequestSweep — unlike
+		// startAPIKeyCleanup — is never separately special-cased by those helpers.
+		if s.stopCredentialRequestSweep != nil {
+			close(s.stopCredentialRequestSweep)
+			select {
+			case <-s.credentialRequestSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for credential-request sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
+		// Issue #3721: signal the cli-login expiry sweep to exit alongside the
+		// credential-request sweep. Guarded by a nil check for the same reason —
+		// several tests build a *Server literal directly without going through New().
+		if s.stopCliLoginSweep != nil {
+			close(s.stopCliLoginSweep)
+			select {
+			case <-s.cliLoginSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for cli-login sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
+		// Issue #4287: signal the cli-presence expiry sweep to exit alongside the
+		// cli-login sweep. Guarded by a nil check for the same reason — several tests
+		// build a *Server literal directly without going through New().
+		if s.stopCliPresenceSweep != nil {
+			close(s.stopCliPresenceSweep)
+			select {
+			case <-s.cliPresenceSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for cli-presence sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
+		// Issue #4572: signal the WebAuthn ceremony expiry sweep to exit. Guarded by a
+		// nil check for the same reason — several tests build a *Server literal directly
+		// without going through New().
+		if s.stopWebAuthnCeremonySweep != nil {
+			close(s.stopWebAuthnCeremonySweep)
+			select {
+			case <-s.webAuthnCeremonySweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for WebAuthn ceremony sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
 		// Stop audit manager before closing the HTTP server so that any
 		// in-flight audit writes can still reach storage.
 		if s.auditManager != nil {
 			if err := s.auditManager.Stop(ctx); err != nil && firstErr == nil {
 				firstErr = err
+			}
+		}
+
+		// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
+		if s.runExecutionQueue != nil {
+			s.runExecutionQueue.Stop()
+		}
+
+		// Stop the config service's router cache goroutine (configrouting source cache).
+		if s.configService != nil {
+			s.configService.Close()
+		}
+
+		// Issue #3715: wait for any in-flight cert-binding last-used persistence
+		// goroutines (spawned by recordCertBindingUse) to finish before secretStore
+		// is closed below — otherwise a goroutine can still be writing to the store
+		// after Close() returns, racing whatever the caller does next (e.g. a test's
+		// t.TempDir() cleanup deleting the directory out from under an in-flight write).
+		certBindingDone := make(chan struct{})
+		go func() {
+			s.certBindingLastUsedWG.Wait()
+			// Issue #4574: detached API-key index scans read the same store.
+			s.apiKeyIndexWG.Wait()
+			close(certBindingDone)
+		}()
+		select {
+		case <-certBindingDone:
+		case <-ctx.Done():
+			if firstErr == nil {
+				firstErr = fmt.Errorf("api server close: timed out waiting for cert-binding last-used persistence: %w", ctx.Err())
 			}
 		}
 
@@ -747,7 +1392,82 @@ func (s *Server) Close(ctx context.Context) error {
 				firstErr = err
 			}
 		}
+		if s.metricsHTTPServer != nil {
+			if err := s.metricsHTTPServer.Shutdown(ctx); err != nil && firstErr == nil {
+				s.logger.Error("Failed to shutdown private metrics server gracefully", "error", err)
+				firstErr = err
+			}
+		}
+		if s.internalHTTPServer != nil {
+			if err := s.internalHTTPServer.Shutdown(ctx); err != nil && firstErr == nil {
+				s.logger.Error("Failed to shutdown private Raft server gracefully", "error", err)
+				firstErr = err
+			}
+		}
+		if s.deliveryGRPCServer != nil {
+			// grpc.Server has no context-aware Shutdown; bound GracefulStop by ctx
+			// the same way the auth-defense/secret-store teardown above does, so a
+			// slow-draining internal delivery RPC cannot hang Close indefinitely.
+			deliveryStopped := make(chan struct{})
+			go func() {
+				s.deliveryGRPCServer.GracefulStop()
+				close(deliveryStopped)
+			}()
+			select {
+			case <-deliveryStopped:
+			case <-ctx.Done():
+				// The hard Stop is deliberately NOT called synchronously here.
+				// grpc-go's stop() holds the server mutex while it waits for
+				// in-flight handlers, and GracefulStop is already inside that
+				// wait — so a synchronous Stop() blocks on that mutex for
+				// exactly as long as the RPC this fallback exists to abandon,
+				// turning the timeout into the indefinite hang it is meant to
+				// prevent. Firing it in the background still force-closes the
+				// connections in the cases where the drain is stuck on a
+				// lingering connection rather than a running handler (there
+				// the mutex is released across the wait), and Close stays
+				// bounded by ctx either way. The listener itself is already
+				// closed: GracefulStop closes listeners before it starts
+				// draining, so no port is held past this point.
+				go s.deliveryGRPCServer.Stop()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out stopping internal delivery server: %w", ctx.Err())
+				}
+			}
+		}
+
 	})
+
+	// Deliberately OUTSIDE closeOnce. The once above guards one-shot teardown of
+	// caches, stores and goroutines, but listeners are re-created by every Start.
+	// A Server that is stopped and started again therefore holds fresh listeners
+	// that a once-guarded Close could never reach, leaking the socket for the life
+	// of the process.
+	//
+	// Shutdown normally closes these already; it only closes listeners its server
+	// is tracking, and tracking starts inside Serve, which runs in a goroutine
+	// spawned just after bind. A Start followed promptly by a Close can outrun it.
+	//
+	// The public and Raft listeners take an OS-assigned port, so a leak there is
+	// invisible and the next Start just binds elsewhere. The metrics listener binds
+	// a FIXED port — ValidatePrivateListenerAddress rejects port 0 — so the same
+	// leak makes the next Start fail with "address already in use".
+	//
+	// Closing an already-closed listener is a harmless no-op error.
+	//
+	// Guarded by s.mu because Start writes these fields under the same lock. The
+	// once-body above releases s.mu via defer before returning, and on a second
+	// Close it never runs at all, so acquiring here cannot deadlock.
+	s.mu.Lock()
+	listeners := []net.Listener{s.publicTLSListener, s.metricsTLSListener, s.internalTLSListener}
+	s.publicTLSListener, s.metricsTLSListener, s.internalTLSListener = nil, nil, nil
+	s.mu.Unlock()
+	for _, l := range listeners {
+		if l != nil {
+			_ = l.Close()
+		}
+	}
+
 	return firstErr
 }
 
@@ -759,34 +1479,115 @@ func (s *Server) Stop() error {
 	return s.Close(ctx)
 }
 
-// SetRollbackManager sets the rollback manager for rollback API routes (Story #416)
+// SetRollbackManager sets the rollback manager and registers rollback API routes (Story #416).
+// Call this after New() returns but before Start() is called.
 func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollbackManager = m
+	if m == nil {
+		return
+	}
+	// Read the principal from the request context (set by authenticationMiddleware)
+	// so both mTLS admin principals and scoped API-key principals are evaluated.
+	rollbackPrincipalExtractor := func(r *http.Request) *Principal {
+		p, _ := r.Context().Value(principalContextKey).(*Principal)
+		return p
+	}
+	// Resolve the steward's registered tenant from the controller registry.
+	// This is the authoritative cross-tenant check — it cannot be bypassed by
+	// the caller supplying a fabricated steward_tenant_path in the request body.
+	// The live registry is per-node, so a steward that is offline or attached to a
+	// peer controller is resolved from its durable record (stewardOwnerTenant), as
+	// every other steward-scoped handler does (Issue #4665).
+	stewardTenantLookup := func(stewardID string) string {
+		if s.controllerService == nil {
+			return ""
+		}
+		tenant, _ := s.stewardOwnerTenant(context.Background(), stewardID)
+		return tenant
+	}
+	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
+	rollbackHandler.tenantAccess = s.tenantAccessForScope
+	rollbackRouter := s.apiRouter.PathPrefix("/rollback").Subrouter()
+	// Require config/rollback permission for all rollback endpoints — same gate pattern
+	// as every other mutating endpoint in this server.
+	rollbackRouter.Use(s.requirePermission("config", "rollback"))
+	rollbackHandler.RegisterRoutes(rollbackRouter)
+	s.logger.Info("Rollback API routes registered")
 }
 
-// SetReportsHandler sets the reports handler for reports API routes (Story #416)
+// SetReportsHandler sets the reports handler and registers reports API routes (Story #416).
+// Wires requirePermission into the handler so every reports route is RBAC-gated:
+// report:read for all GET endpoints, report:generate for POST /reports/generate (Issue #3282).
+// Call this after New() returns but before Start() is called.
 func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reportsHandler = h
+	if h == nil {
+		return
+	}
+	h.SetRequirePermFn(s.requirePermission)
+	reportsRouter := s.apiRouter.PathPrefix("/reports").Subrouter()
+	h.RegisterRoutes(reportsRouter)
+	s.logger.Info("Reports API routes registered")
 }
 
-// SetWorkflowHandler sets the workflow handler for workflow and trigger API routes (Issue #414).
-// Propagates the server's fleet query so that script dispatch targeting is wired at setup time (Issue #609).
+// SetDataProvider wires the reports DataProvider for drift-based compliance derivation (Issue #3265).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetDataProvider(dp reportinterfaces.DataProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dataProvider = dp
+}
+
+// SetWorkflowHandler sets the workflow handler and registers workflow and trigger API routes
+// (Issue #414). Propagates the server's fleet query so that script dispatch targeting is wired
+// at setup time (Issue #609). Wires requirePermission into the handler so every workflow route
+// is RBAC-gated and the trigger subrouter carries a coarse-grained trigger:manage gate (Issue #2725).
+// Call this after New() returns but before Start() is called.
 func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowHandler = h
+	// ADR-031 Decision 3, Issue #3764: s.fleetQuery is now the single
+	// cluster-safe-by-construction fleet source (the former clusterFleetQuery
+	// split is retired). Both workflow nodes that would consume a propagated
+	// fleet.FleetQuery are unreachable in production (see Issue #3495, Problem
+	// being fixed), so this rewiring has no behavioural effect today.
 	if h != nil && s.fleetQuery != nil {
 		h.SetFleetQuery(s.fleetQuery)
 	}
+	if h == nil {
+		return
+	}
+	h.SetRequirePermFn(s.requirePermission)
+	h.SetTenantResolution(s.rootTenantID, s.selectAuthorizedTenant)
+	workflowRouter := s.apiRouter.PathPrefix("/workflows").Subrouter()
+	if err := h.RegisterWorkflowRoutes(workflowRouter); err != nil {
+		// SetRequirePermFn was just called above with a non-nil gate, so this is
+		// unreachable in a correctly wired server; RegisterWorkflowRoutes' fail-closed
+		// contract (Issue #4316) makes that guarantee worth asserting rather than
+		// leaving workflow routes silently unregistered if it ever regresses.
+		panic(fmt.Sprintf("SetWorkflowHandler: %v", err))
+	}
+	triggerRouter := s.apiRouter.PathPrefix("/triggers").Subrouter()
+	triggerRouter.Use(s.requirePermission("trigger", "manage"))
+	h.RegisterTriggerRoutes(triggerRouter)
+	s.logger.Info("Workflow and trigger API routes registered")
 }
 
 // GetRouter returns the HTTP router for testing purposes.
 func (s *Server) GetRouter() http.Handler {
 	return s.router
+}
+
+// GetSecretStore returns the central secrets provider so callers outside the api
+// package (e.g. server.initializeWorkflowHandler) can thread it into subsystems
+// that require secret access (Issue #2374).
+func (s *Server) GetSecretStore() secretsif.SecretStore {
+	return s.secretStore
 }
 
 // SetApprovalHook replaces the registration approval hook (Issue #422).
@@ -828,6 +1629,59 @@ func (s *Server) SetPrivilegeStore(cs cfgconfig.ConfigStore) {
 	s.privilegeStore = cs
 }
 
+// SetRoleConfigStore wires the config store used to persist role configs under
+// the role-policies namespace (Issue #2543).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetRoleConfigStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.roleConfigStore = cs
+}
+
+// SetTagStore wires the tag store for steward tag management (Issue #2545).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetTagStore(ts *tagstore.Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tagStore = ts
+}
+
+// TagStore returns the wired tag store, or nil when unwired. Exposed so
+// controller startup wiring can be regression-tested (the tag REST endpoints
+// 503 when this is nil — Issue #2545/#2548).
+func (s *Server) TagStore() *tagstore.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tagStore
+}
+
+// RoleConfigStore returns the wired role-config store, or nil when unwired.
+// Exposed so controller startup wiring can be regression-tested (the role REST
+// endpoints 503 when this is nil — Issue #2543/#2548).
+func (s *Server) RoleConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.roleConfigStore
+}
+
+// SetHypervProfileConfigStore wires the config store used to persist hyperv
+// VM-provisioning profiles under the hyperv-profiles namespace (Issue #3785).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetHypervProfileConfigStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hypervProfileConfigStore = cs
+}
+
+// HypervProfileConfigStore returns the wired hyperv-profile config store, or nil
+// when unwired. Exposed so controller startup wiring can be regression-tested
+// (the hyperv profile REST endpoints 503 when this is nil — Issue #3785).
+func (s *Server) HypervProfileConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hypervProfileConfigStore
+}
+
 // SetRegistry wires the active-steward connection registry so that
 // GET /api/v1/stewards/{id} can report connection_state and active_sessions
 // (Issue #1323). Call this after New() returns but before Start() is called.
@@ -835,6 +1689,30 @@ func (s *Server) SetRegistry(r registry.Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.registry = r
+}
+
+// SetDeliveryHandler wires the internal controller-to-controller delivery RPC
+// service (ADR-031 Decision 3, Issue #3764). handler must be constructed
+// against the same registry passed to SetRegistry and the node-local (not
+// cluster-aware) control-plane provider, so the delivery service's own local
+// delivery attempt can never recurse into cluster forwarding. listenAddr is
+// the internal delivery gRPC listener address (cfg.InternalDeliveryListenAddr).
+// Call this after New() returns but before Start() is called. A nil handler
+// or empty listenAddr leaves the delivery service unstarted — the expected
+// state for a single-node (non-cluster) deployment.
+//
+// peerNodeIDs supplies the cluster node IDs whose client certificates may call
+// the delivery RPC; it is evaluated per RPC so membership changes apply without
+// a restart. The listener's mTLS trust anchor is wider than the peer set (the
+// controller CA also signs steward and admin certificates), so this is the
+// control that keeps a steward or admin certificate from reaching the service.
+// A nil peerNodeIDs denies every caller.
+func (s *Server) SetDeliveryHandler(handler *internaldelivery.Server, listenAddr string, peerNodeIDs func() []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliveryHandler = handler
+	s.deliveryListenAddr = listenAddr
+	s.deliveryPeerNodeIDs = peerNodeIDs
 }
 
 // Registry returns the wired active-steward connection registry, or nil if
@@ -846,18 +1724,15 @@ func (s *Server) Registry() registry.Registry {
 	return s.registry
 }
 
-// SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.
-// The handler is mounted at POST /api/v1/webhooks/git-push and uses its own
-// HMAC-SHA256 signature validation (no API-key auth). Call this after New()
-// returns but before Start() is called (Issue #666).
+// SetGitSyncWebhookHandler wires the git-sync push-event webhook handler.
+// The route POST /api/v1/webhooks/git-push is pre-registered in setupRouter()
+// and resolves this handler lazily at request time; it returns 503 until this
+// method is called.  Call this after New() returns but before Start() is called
+// (Issue #666, #3263).
 func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gitSyncWebhookHandler = h
-	if h != nil {
-		s.router.Handle("/api/v1/webhooks/git-push", h).Methods("POST")
-		s.logger.Info("git-sync webhook endpoint registered at /api/v1/webhooks/git-push")
-	}
 }
 
 // SetRunManager wires the run manager and execution queue for ad-hoc run endpoints
@@ -885,6 +1760,33 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.ipTrustStore = store
 }
 
+// IPTrustStore returns the wired IP-trust store, or nil when unwired. Exposed so
+// controller startup wiring can be regression-tested: the three
+// /api/v1/registration/ip-trust endpoints 503 when this is nil, which is exactly
+// what shipped until story #3096 found the setter had no production caller.
+func (s *Server) IPTrustStore() business.IPTrustStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ipTrustStore
+}
+
+// PendingStore returns the wired pending-registration store, or nil when
+// unwired. Exposed alongside IPTrustStore so both halves of the registration
+// admission path can be regression-tested from controller startup (#3096).
+func (s *Server) PendingStore() business.PendingRegistrationStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pendingStore
+}
+
+// SetAlertStore wires the alert store for alert acknowledge and silence (Issue #3266).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetAlertStore(store business.AlertStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alertStore = store
+}
+
 // SetUpgradeStore wires the durable UpgradeStore used by the steward upgrade
 // dispatch endpoint (Issue #1945). When nil, POST /api/v1/stewards/upgrade
 // returns 503. No silent in-memory fallback.
@@ -894,6 +1796,182 @@ func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
 	s.upgradeStore = store
 }
 
+// SetRolloutStore wires the durable RolloutStore used by the ring-advance rollout
+// endpoints (Issue #2340). When nil, POST /api/v1/rollout returns 503.
+func (s *Server) SetRolloutStore(store business.RolloutStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rolloutStore = store
+}
+
+// SetStewardStore wires the durable StewardStore used by the registration-refresh
+// endpoints (Issue #2096). When nil, the refresh endpoints return 503.
+func (s *Server) SetStewardStore(store business.StewardStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardStore = store
+}
+
+// SetPendingRefreshStore wires the durable PendingRefreshStore for the
+// registration-refresh approval queue (Issue #2096).
+func (s *Server) SetPendingRefreshStore(store business.PendingRefreshStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingRefreshStore = store
+}
+
+// SetRefreshPolicyStore wires the per-tenant RefreshPolicyStore (Issue #2096).
+func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshPolicyStore = store
+}
+
+// SetNonceStore wires the durable NonceStore for the registration-refresh
+// challenge/response nonce (Issue #3755, ADR-031 amendment to ADR-011). When
+// nil, the challenge and complete endpoints return 503.
+func (s *Server) SetNonceStore(store business.NonceStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nonceStore = store
+}
+
+// NonceStore returns the wired nonce store, or nil when unwired. Exposed so the
+// controller startup wiring can be regression-tested (Issue #3755) — handler
+// tests call SetNonceStore directly and therefore cannot catch a composition
+// root that never calls the setter.
+func (s *Server) NonceStore() business.NonceStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nonceStore
+}
+
+// SetTenantStore wires the TenantStore for tenant-hierarchy resolution (Issue #2839).
+// TenantStore is a core, always-present store — wired unconditionally at startup.
+func (s *Server) SetTenantStore(store business.TenantStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantStore = store
+}
+
+// SetAssurancePolicyStore wires the per-tenant AssurancePolicyStore (Issue #2839).
+// When nil (default), resolveAssuranceRequirement returns the global permissionAssurance
+// floor unchanged — no behavior change for existing tests that build a bare Server.
+func (s *Server) SetAssurancePolicyStore(store business.AssurancePolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.assurancePolicyStore = store
+}
+
+// SetBlastRadiusPolicyStore wires the per-tenant BlastRadiusPolicyStore (Issue #3698).
+// When nil (default), resolveMaxTargetsForTenant returns defaultMaxOperatorPayloadTargets
+// unchanged for every tenant — the bound is still enforced, just not per-tenant
+// configurable, so a bare Server without this store wired stays safe rather than open.
+func (s *Server) SetBlastRadiusPolicyStore(store business.BlastRadiusPolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blastRadiusPolicyStore = store
+}
+
+// SetCommandStore wires the durable command/delivery outbox store (Issue #3757,
+// ADR-031 Decision 2). When nil (default), handleConfigPush skips creating
+// durable delivery rows entirely and falls back to synchronous best-effort
+// fan-out only — the same degraded posture other optional stores use (e.g.
+// pushStore, egConfigstoreWriter) when their backing provider is unavailable.
+func (s *Server) SetCommandStore(store business.CommandStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandStore = store
+}
+
+// SetAuditStore wires a direct AuditStore reference for the test-mode count endpoint
+// (Issue #2098). Production code uses s.auditManager; this allows test endpoints to
+// query audit entries without needing sqlite3 CLI in the controller container.
+func (s *Server) SetAuditStore(store business.AuditStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditStore = store
+}
+
+// SetTenantCrossingStore wires the ADR-025 Decision 2 tenant-crossing grant/break-glass
+// store. When nil (default), isCallerAuthorizedForTenant fails closed: a root-scoped
+// caller is denied access to any strict descendant of "root" (no crossing mechanism
+// available means no crossing can be active) — no behavior change for existing tests
+// that build a bare Server.
+func (s *Server) SetTenantCrossingStore(store business.TenantCrossingStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantCrossingStore = store
+}
+
+// SetRateCounterStore wires a cluster-visible, database-backed
+// business.RateCounterStore into the per-source rate limiters and the
+// operator-payload sign-ceremony throttle (Issue #3896, ADR-031 follow-up to
+// Issue #3761's clusterBudgetDivisor even-distribution approximation),
+// replacing the per-process in-memory counters those consult by default with a
+// shared, fleet-wide count.
+//
+// No-op unless s.haManager reports ha.ClusterMode — SingleServerMode and
+// BlueGreenMode deployments keep every consumer on its in-memory default
+// unconditionally, even when store is non-nil, matching the deployment-shape
+// gate clusterBudgetDivisor applied for those shapes. store may also be nil
+// (the running storage provider does not implement RateCounterStoreCreator);
+// either case leaves every consumer on its in-memory backend.
+func (s *Server) SetRateCounterStore(store business.RateCounterStore) {
+	if store == nil || s.haManager == nil || s.haManager.GetDeploymentMode() != ha.ClusterMode {
+		return
+	}
+	s.mu.Lock()
+	s.rateCounterStore = store
+	s.mu.Unlock()
+	for routeName, limiter := range map[string]*sourceRateLimiter{
+		"enrolment-token-mint":       s.enrolmentTokenMintLimiter,
+		"credential-request-lodge":   s.credentialRequestLodgeLimiter,
+		"credential-request-collect": s.credentialRequestCollectLimiter,
+		"cli-login-lodge":            s.cliLoginLodgeLimiter,
+		"cli-login-collect":          s.cliLoginCollectLimiter,
+		"cli-presence-lodge":         s.cliPresenceLodgeLimiter,
+		"cli-presence-collect":       s.cliPresenceCollectLimiter,
+		"registration-refresh":       s.registrationRefreshLimiter,
+	} {
+		if limiter != nil {
+			limiter.useSharedCounter(routeName, store, s.logger)
+		}
+	}
+}
+
+// RateCounterStore returns the wired cluster-visible rate counter store, or nil
+// when this deployment shape left every consumer on its in-memory default.
+// Exposed so the controller startup wiring can be regression-tested (Issue
+// #3896, same rationale as NonceStore above): the api-package tests call
+// SetRateCounterStore directly and therefore cannot catch a composition root
+// that never calls the setter.
+func (s *Server) RateCounterStore() business.RateCounterStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rateCounterStore
+}
+
+// SetPoPVerifier replaces the proof-of-possession verifier.
+// Used in tests to assert the verifier is never called for revoked devices.
+func (s *Server) SetPoPVerifier(v PoPVerifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v != nil {
+		s.popVerifier = v
+	}
+}
+
+// SetIsolationEngine wires the tenant isolation engine used by requirePermission
+// to enforce tenant-scoped API-key isolation (Issue #2123). When nil (default),
+// isolation checks are skipped — only set in deployments that require tenant
+// boundary enforcement for agent credentials.
+func (s *Server) SetIsolationEngine(engine *tenantsecurity.TenantIsolationEngine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.isolationEngine = engine
+}
+
 // SetSigningRotationService wires the signing rotation service for the
 // POST /api/v1/certificates/signing/rotate endpoint (Issue #1816).
 // Call this after New() returns but before Start() is called.
@@ -901,6 +1979,172 @@ func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signingRotationService = svc
+}
+
+// SetSessionManager wires the session Manager for admin session-token issuance and
+// revocation (Issue #2232). When nil (default), POST /api/v1/sessions and
+// DELETE /api/v1/sessions/{id} return 503. Call after New() but before Start().
+func (s *Server) SetSessionManager(mgr session.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionManager = mgr
+}
+
+// SetCertManager wires the certificate Manager used for cert issuance,
+// revocation, and rotation. Exposed for tests that need to inject a Manager
+// backed by a failure-injecting RevocationStore (real implementation, not a
+// mock — see certinterfaces.RevocationStore) to exercise a revocation-failure
+// path deterministically.
+func (s *Server) SetCertManager(mgr *cert.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.certManager = mgr
+}
+
+// SetWebSessionManager wires the web session Manager used to authenticate browser
+// clients via the cfgms_session HttpOnly cookie (Issue #2492, ADR-018 §1,2).
+// Uses explicit Config (idle 60m / absolute 12h / grace 30s) — distinct from the
+// cfg-CLI sessionManager (idle 15m / absolute 8h). When nil (default), the cookie
+// branch in authenticationMiddleware is bypassed. Call after New() but before Start().
+func (s *Server) SetWebSessionManager(mgr session.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.webSessionManager = mgr
+}
+
+// SetDurableSessionStore wires both session managers with a shared durable session.Store
+// (Issue #2736, epic #2735). The CLI manager uses ADR-014 defaults (idle 15m / absolute 8h /
+// grace 30s); the web manager uses a longer-lived config (idle 60m / absolute 12h / grace 30s).
+// Sharing the same store lets sessions survive controller restarts and validate across cluster
+// nodes. Call after New() but before Start(); it overwrites any prior SetSessionManager /
+// SetWebSessionManager wiring.
+func (s *Server) SetDurableSessionStore(store session.Store) {
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Copy the CLI config and assign the "cli" channel so the CLI manager rejects
+	// tokens issued by the web manager, and vice versa (Issue #3310).
+	cliCfg := s.sessionCfg
+	cliCfg.Channel = "cli"
+	s.sessionManager = session.NewManager(cliCfg, store, time.Now)
+	s.webSessionManager = session.NewManager(webCfg, store, time.Now)
+}
+
+// SetMembershipStore wires the cluster MembershipStore used by the drain endpoint
+// (Issue #2283). When nil (default), POST /api/v1/cluster/nodes/{id}/drain returns
+// 503. Call after New() but before Start().
+func (s *Server) SetMembershipStore(store cluster.MembershipStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.membershipStore = store
+}
+
+// SetRoutingStore wires the shared steward-routing table consulted by the
+// decommission drain-wait to resolve the target node's session count under
+// any-node routing (Issue #3895). When nil (default), the decommission
+// handler falls back to the local registry's Count(), which is only correct
+// when the request happens to land on the node being decommissioned. Call
+// after New() but before Start().
+func (s *Server) SetRoutingStore(store business.RoutingStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routingStore = store
+}
+
+// SetBatchJobStore wires the durable BatchJobStore used by the batch job endpoints
+// (Issue #2296). When nil (default), POST /api/v1/jobs and GET /api/v1/jobs/{id}
+// return 503. Call after New() but before Start().
+func (s *Server) SetBatchJobStore(store business.BatchJobStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchJobStore = store
+}
+
+// SetBatchJobExecutor wires the rolling-batch executor used to run batch jobs
+// asynchronously (Issue #2296). When nil (default), job creation still persists
+// the record but does not start execution. Call after New() but before Start().
+func (s *Server) SetBatchJobExecutor(exec jobExecutor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchJobExecutor = exec
+}
+
+// SetStewardEventLoggingManager injects the dedicated steward-event
+// LoggingManager. Call after New() and before Start(). The manager is used by
+// handleGetStewardLogs (S6) to serve per-steward event queries.
+func (s *Server) SetStewardEventLoggingManager(m *logging.LoggingManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardEventLoggingManager = m
+}
+
+// SetTelemetryHandler wires the telemetry fan-out WebSocket handler and lazily
+// registers GET /api/v1/telemetry/ws/{id} behind the steward:telemetry permission
+// gate with cross-tenant isolation (Issue #2765). The wrapper enforces the same
+// tenant-ancestry check as handleGetStewardDNA: a scoped API-key principal can only
+// subscribe to stewards in its own tenant subtree; 404 is returned for out-of-scope
+// stewards. Call after New() and before Start().
+func (s *Server) SetTelemetryHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.telemetryHandler = h
+	if h == nil {
+		return
+	}
+	s.apiRouter.Handle(
+		"/telemetry/ws/{id}",
+		s.requirePermission("steward", "telemetry")(s.tenantScopedTelemetryWrapper(h)),
+	).Methods("GET")
+	s.logger.Info("Telemetry WebSocket endpoint registered at /api/v1/telemetry/ws/{id}")
+}
+
+// SetTerminalHandler wires the terminal WebSocket relay handler (Issue #2761).
+// The route GET /api/v1/terminal/ws/{steward_id} is already registered by
+// routes_terminal.go; this call stores the handler so that the route closure can
+// dispatch to it. Call after New() and before Start().
+func (s *Server) SetTerminalHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.terminalHandler = h
+}
+
+// tenantScopedTelemetryWrapper wraps a WebSocket handler with cross-tenant isolation.
+// It replicates the steward-scoping logic from handleGetStewardDNA so that a scoped
+// API-key principal cannot subscribe to telemetry for stewards outside its tenant tree.
+// The {id} path variable carries the steward ID, consistent with other steward routes.
+func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		stewardID := vars["id"]
+		if stewardID == "" {
+			s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+			return
+		}
+		callerTenant := callerTenantFilter(r.Context())
+		info, exists := s.controllerService.GetStewardInfo(stewardID)
+		if callerTenant != "" { //architecture:allow-root-scope -- telemetry stream is a read; root read breadth (ADR-025 A7.2)
+			stewardTenant := ""
+			if exists {
+				stewardTenant = info.TenantID
+			}
+			sameTenant := stewardTenant == callerTenant
+			ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+			if !exists || (!sameTenant && !ancestorTenant) {
+				// 404 instead of 403 to avoid disclosing steward existence across tenants.
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+				return
+			}
+		} else if !exists {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // SetModuleResolution wires the controller-side module resolution dependencies
@@ -923,6 +2167,95 @@ func (s *Server) SetModuleResolution(
 	s.moduleBundleResolver = resolver
 	s.moduleBundleApprover = approver
 	s.moduleTrustStore = store
+}
+
+// ModuleBundleResolver returns the currently wired git source resolver, or nil
+// if startup did not construct one (Issue #4409). Exposed so wiring tests
+// outside the api package can assert that the production startup path actually
+// supplied a resolver, not just that SetModuleResolution is reachable.
+func (s *Server) ModuleBundleResolver() resolution.BundleResolver {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.moduleBundleResolver
+}
+
+// SetModuleBundleReviewer wires the human-decision interface for module bundle approval.
+// When nil (default), POST .../approve and POST .../reject return 503.
+// Call after New() but before Start().
+func (s *Server) SetModuleBundleReviewer(r resolution.BundleReviewer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moduleBundleReviewer = r
+}
+
+// SetConfigStoreWriter wires the ConfigStore → desired-state entity-graph writer
+// (Issue #2879). When set, handleConfigPush records desired-state observations
+// for every targeted steward immediately on push acceptance.
+func (s *Server) SetConfigStoreWriter(w egConfigstoreIngestor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egConfigstoreWriter = w
+}
+
+// SetEntityGraphProvider wires the entity graph read provider into the REST
+// API, enabling the /api/v1/entities/* endpoints (Issue #2880).
+func (s *Server) SetEntityGraphProvider(p egReadProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egProvider = p
+}
+
+// SetEntityGraphWriteProvider wires the entity graph write provider into the REST
+// API, enabling the POST /api/v1/entities/edges endpoint (Issue #3374).
+func (s *Server) SetEntityGraphWriteProvider(p egWriteProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egWriter = p
+}
+
+// SetEntityGraphWatchProvider wires the entity graph watch provider into the REST
+// API, enabling the GET /api/v1/cases/{id}/watch WebSocket endpoint (Issue #3613).
+// When nil (default), the endpoint returns 503. Call after New() but before Start().
+func (s *Server) SetEntityGraphWatchProvider(p egWatchProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egWatchProv = p
+}
+
+// EntityGraphWatchProvider returns the wired watch provider, or nil when unwired.
+// Exposed so controller startup wiring can be regression-tested (Issue #3613).
+func (s *Server) EntityGraphWatchProvider() egWatchProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egWatchProv
+}
+
+// EntityGraphProvider returns the wired entity graph read provider, or nil when
+// unwired. Exposed so controller startup wiring can be regression-tested (the
+// entity REST endpoints 503 when this is nil — Issue #2880/#3253).
+func (s *Server) EntityGraphProvider() egReadProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egProvider
+}
+
+// ConfigStoreWriter returns the wired ConfigStore desired-state entity-graph
+// writer, or nil when unwired. Exposed so controller startup wiring can be
+// regression-tested (Issue #2879/#3253).
+func (s *Server) ConfigStoreWriter() egConfigstoreIngestor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egConfigstoreWriter
+}
+
+// EntityGraphWriteProvider returns the wired entity graph write provider, or
+// nil when unwired. Exposed so controller startup wiring can be
+// regression-tested (the POST /api/v1/entities/edges endpoint 503s when this
+// is nil — Issue #3374/#3253).
+func (s *Server) EntityGraphWriteProvider() egWriteProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egWriter
 }
 
 // getHTTPListenAddr determines the HTTP listen address with the
@@ -959,22 +2292,6 @@ func (s *Server) getHTTPListenAddr() string {
 	// Default to port 9080 for HTTP API (gRPC typically on 8080)
 	// Bind to 0.0.0.0 for Docker compatibility
 	return "0.0.0.0:9080"
-}
-
-// shouldUseTLS determines if TLS should be enabled for the HTTP server
-func (s *Server) shouldUseTLS() bool {
-	return s.certManager != nil || s.hasLegacyCertificates()
-}
-
-// hasLegacyCertificates checks if legacy certificate files exist
-func (s *Server) hasLegacyCertificates() bool {
-	certFile := filepath.Join(s.cfg.CertPath, "server.crt")
-	keyFile := filepath.Join(s.cfg.CertPath, "server.key")
-
-	_, certErr := os.Stat(certFile)
-	_, keyErr := os.Stat(keyFile)
-
-	return certErr == nil && keyErr == nil
 }
 
 // setupTLS configures TLS for the HTTP server
@@ -1141,6 +2458,19 @@ func (s *Server) GetListenAddr() string {
 	return s.getHTTPListenAddr()
 }
 
+// GetMetricsListenAddr returns the dedicated private metrics server address.
+func (s *Server) GetMetricsListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.metricsHTTPServer != nil {
+		return s.metricsHTTPServer.Addr
+	}
+	if s.cfg == nil {
+		return ""
+	}
+	return s.cfg.MetricsListenAddr
+}
+
 // startAPIKeyCleanup starts a background goroutine to clean up expired API keys.
 // The goroutine exits when Close is called.
 func (s *Server) startAPIKeyCleanup() {
@@ -1148,6 +2478,11 @@ func (s *Server) startAPIKeyCleanup() {
 		defer close(s.cleanupDone)
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
+		// Issue #4574: this goroutine is the single background refresher of the
+		// API-key index, so keys created on other controller nodes become locatable
+		// here within apiKeyRevalidateInterval without any request paying for a scan.
+		indexTicker := time.NewTicker(apiKeyRevalidateInterval)
+		defer indexTicker.Stop()
 
 		s.logger.Info("Started API key cleanup background process", "interval", "10 minutes")
 
@@ -1157,6 +2492,16 @@ func (s *Server) startAPIKeyCleanup() {
 				return
 			case <-ticker.C:
 				s.cleanupExpiredAPIKeys()
+			case <-indexTicker.C:
+				if s.secretStore == nil {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), apiKeyRevalidateInterval)
+				if err := s.refreshAPIKeyIndex(ctx); err != nil {
+					s.logger.Warn("API key index refresh failed",
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+				cancel()
 			}
 		}
 	}()
@@ -1230,44 +2575,282 @@ func (s *Server) configureCORS() {
 	}
 }
 
+// envAllowEphemeralSecrets is the dev/test-only override that downgrades the
+// ephemeral-secret-store hard fail to a WARN. Never set in production: an
+// ephemeral store loses all passkeys and account records on controller
+// restart, locking out every human account (ADR-021 Amendment 1).
+//
+// Scope: this flag governs the storage-location decision only. Store creation
+// failures and a failing store health check remain fail-closed regardless of
+// its value — one flag must not switch off two independent controls.
+const envAllowEphemeralSecrets = "CFGMS_ALLOW_EPHEMERAL_SECRETS"
+
+// resolveEphemeralPath normalises p for prefix comparison.
+//
+// filepath.EvalSymlinks only succeeds on a path that exists, which made the
+// comparison asymmetric: os.TempDir() always exists and was resolved, while a
+// candidate secrets path that has not been created yet was left as written. The
+// two sides then normalised differently and the prefix check missed — on macOS
+// (/var/folders/… → /private/var/folders/…) and on Windows (8.3 short names such
+// as C:\Users\RUNNER~1 → C:\Users\runneradmin). Linux CI has neither a symlinked
+// TMPDIR nor short-name aliasing, so both sides matched there and the defect was
+// invisible until the cross-platform build ran in the merge queue.
+//
+// Because the caller is a fail-closed guard, a miss returns "not ephemeral" and
+// lets a controller start with its secret store on a volume that is wiped on
+// reboot — the guard failed open on exactly the two platforms it was not
+// exercised on.
+//
+// Resolving the deepest existing ancestor and re-appending the remainder gives
+// both sides the same normalisation whether or not the full path exists yet.
+func resolveEphemeralPath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if rest == "" {
+				return filepath.Clean(resolved)
+			}
+			return filepath.Clean(filepath.Join(resolved, rest))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the root without finding an existing ancestor: nothing is
+			// resolvable, so compare the path as written.
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// hasPathPrefix reports whether path sits under prefix, honouring the platform's
+// path-case semantics. Windows paths are case-insensitive, so a configured
+// C:\TEMP\secrets must match an os.TempDir() of C:\Temp — a case-sensitive
+// comparison there would fail open the same way the symlink asymmetry did.
+func hasPathPrefix(path, prefix string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix))
+	}
+	return strings.HasPrefix(path, prefix)
+}
+
+// isEphemeralSecretsPath returns true when secretsPath lives under a directory
+// that is wiped on reboot: os.TempDir(), /dev/shm/, or /run/user/. Symlinks and
+// Windows short names are resolved first (see resolveEphemeralPath) so that
+// macOS /tmp → /private/tmp, or a path written through an 8.3 alias, cannot
+// bypass the check.
+func isEphemeralSecretsPath(secretsPath string) bool {
+	withSep := func(p string) string {
+		return resolveEphemeralPath(p) + string(filepath.Separator)
+	}
+	p := withSep(secretsPath)
+	if hasPathPrefix(p, withSep(os.TempDir())) {
+		return true
+	}
+	// The tmpfs prefixes below are written with forward slashes, but
+	// filepath.Clean inside resolveEphemeralPath rewrites separators to the
+	// host's — on Windows "/dev/shm/cfgms" becomes "\dev\shm\cfgms" and no
+	// forward-slash prefix can ever match. Comparing in slash form keeps the
+	// check platform-independent. A POSIX tmpfs path configured on Windows is
+	// nonsense either way, but this guard is fail-closed: classifying it as
+	// ephemeral is the safe direction.
+	slashed := filepath.ToSlash(p)
+	for _, prefix := range []string{"/dev/shm/", "/run/user/"} {
+		if hasPathPrefix(slashed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDatabaseDSNEphemeral returns true when the database DSN points to an
+// in-memory or tmp-path SQLite database that will not survive a restart.
+func isDatabaseDSNEphemeral(dsn string) bool {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return false
+	}
+	if dsn == ":memory:" {
+		return true
+	}
+	// Handle SQLite file URIs: file::memory:, file:/tmp/foo.db, file::memory:?cache=shared
+	if strings.HasPrefix(dsn, "file:") {
+		filePart := strings.SplitN(dsn[len("file:"):], "?", 2)[0]
+		if filePart == ":memory:" || filePart == "" {
+			return true
+		}
+		return isEphemeralSecretsPath(filePart)
+	}
+	// Bare absolute paths (e.g. "/tmp/foo.db")
+	if filepath.IsAbs(dsn) {
+		return isEphemeralSecretsPath(dsn)
+	}
+	return false
+}
+
+// isEphemeralSQLitePath returns true when a SQLite database path resolves to a
+// database that does not survive a restart: an in-memory database (":memory:"
+// or any "mode=memory" DSN) or a file under a directory wiped on reboot.
+func isEphemeralSQLitePath(path string) bool {
+	if path == ":memory:" || strings.Contains(path, "mode=memory") {
+		return true
+	}
+	if strings.HasPrefix(path, "file:") {
+		return isDatabaseDSNEphemeral(path)
+	}
+	return isEphemeralSecretsPath(path)
+}
+
+// sqliteSecretsPath resolves the SQLite database file that backs the secret
+// store: storage.config.path first, then storage.sqlite_path (the key the OSS
+// composite storage manager uses). An empty result means the sqlite backend
+// would fall back to an in-memory database.
+func sqliteSecretsPath(storage *config.StorageConfig) string {
+	if v, ok := storage.Config["path"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(storage.SQLitePath)
+}
+
+// resolveSecretsBackend builds the storage-provider configuration handed to the
+// secrets backend and reports why that configuration is ephemeral, if it is.
+//
+// Constructing the configuration and judging its durability in one place is
+// deliberate: the guard must inspect the exact map the backend receives.
+// Branching on cfg.Storage.Provider alone let storage.provider: sqlite through
+// on the strength of a persistent CFGMS_SECRETS_REPO_PATH — a value the sqlite
+// backend never reads, since it keys off "path" and treats an absent "path" as
+// ":memory:" (pkg/storage/providers/sqlite/plugin.go getPath).
+//
+// The returned map is the storage_config passed to the SOPS provider, so the
+// judged configuration and the used configuration can no longer diverge.
+func resolveSecretsBackend(storage *config.StorageConfig, secretsPath string) (map[string]interface{}, string) {
+	switch strings.ToLower(strings.TrimSpace(storage.Provider)) {
+	case "database":
+		// Database provider consumes the full connection configuration; only an
+		// in-memory or tmp-path SQLite DSN is non-durable.
+		dsn, _ := storage.Config["dsn"].(string)
+		if isDatabaseDSNEphemeral(dsn) {
+			return storage.Config, fmt.Sprintf(
+				"database DSN %q is ephemeral (in-memory or tmp-path SQLite). "+
+					"Passkeys and account records will be lost on controller restart. "+
+					"Fix: use a persistent database DSN. "+
+					"Dev/test only: set %s=true to override.",
+				dsn, envAllowEphemeralSecrets)
+		}
+		return storage.Config, ""
+
+	case "sqlite":
+		backend := make(map[string]interface{}, len(storage.Config)+1)
+		for k, v := range storage.Config {
+			backend[k] = v
+		}
+		path := sqliteSecretsPath(storage)
+		backend["path"] = path
+		switch {
+		case path == "":
+			return backend, fmt.Sprintf(
+				"storage.provider is sqlite but no database path is configured, so the secret "+
+					"store resolves to an in-memory database that is discarded on controller "+
+					"restart, locking out all human accounts. CFGMS_SECRETS_REPO_PATH does not "+
+					"apply to a sqlite-backed secret store. "+
+					"Fix: set storage.sqlite_path (or storage.config.path) to a persistent file "+
+					"such as /var/lib/cfgms/secrets.db, or use storage.provider: flatfile. "+
+					"Dev/test only: set %s=true to override.",
+				envAllowEphemeralSecrets)
+		case isEphemeralSQLitePath(path):
+			return backend, fmt.Sprintf(
+				"sqlite database path %q is ephemeral (in-memory, or under a directory wiped on "+
+					"reboot). Passkeys and account records will be lost on controller restart. "+
+					"Fix: set storage.sqlite_path to a persistent file outside %s. "+
+					"Dev/test only: set %s=true to override.",
+				path, os.TempDir(), envAllowEphemeralSecrets)
+		}
+		return backend, ""
+
+	default:
+		// File-backed providers (flatfile) store secret data under secretsPath.
+		// storage.flatfile_root configures the business-data composite manager,
+		// not the secret store, so the resolved secrets path is what matters here.
+		backend := map[string]interface{}{"root": secretsPath}
+		if isEphemeralSecretsPath(secretsPath) {
+			return backend, fmt.Sprintf(
+				"secrets path %q is under an ephemeral directory (%s). "+
+					"Passkeys and account records stored here will be lost on "+
+					"controller restart, locking out all human accounts. "+
+					"Fix: set CFGMS_SECRETS_REPO_PATH to a persistent directory outside %s, "+
+					"or use storage.provider: database. "+
+					"Dev/test only: set %s=true to override.",
+				secretsPath, os.TempDir(), os.TempDir(), envAllowEphemeralSecrets)
+		}
+		return backend, ""
+	}
+}
+
 // NewSecretStore initializes and returns the central secrets provider for the controller.
 // It is exported so that cmd/controller/main.go can initialize the store before logging
 // is configured, while server.New continues to call it internally unchanged.
+//
+// Fail-closed guard: the function refuses to start when the storage
+// configuration handed to the secrets backend resolves to an ephemeral location
+// — a secrets path under a tmp directory, /dev/shm or /run/user, an in-memory or
+// tmp-path database DSN, or a sqlite backend with a missing/in-memory/tmp-path
+// database file — because a controller restart would wipe every passkey and
+// account record, locking out all human accounts (ADR-021 Amendment 1).
+// Set CFGMS_ALLOW_EPHEMERAL_SECRETS=true to downgrade that rejection to a WARN
+// for dev/test environments only; store creation and health-check failures stay
+// fail-closed regardless.
 func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	logger := logging.ForComponent("controller")
-	// Determine secrets storage path
+	if cfg == nil || cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration is required for secret storage")
+	}
+
+	// Determine the explicit secret-data path. Production must never fall back
+	// to a shared temporary directory.
 	secretsPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
 	if secretsPath == "" {
-		// Use temporary directory for testing/development
-		tmpDir := os.TempDir()
-		secretsPath = filepath.Join(tmpDir, "cfgms-secrets-test")
-		logger.Debug("Using temporary secrets storage for testing", "path", secretsPath)
+		if strings.TrimSpace(cfg.DataDir) == "" {
+			return nil, fmt.Errorf("secret storage path is required: configure data_dir or CFGMS_SECRETS_REPO_PATH")
+		}
+		secretsPath = filepath.Join(cfg.DataDir, "secrets")
+	}
+
+	keyFile := strings.TrimSpace(os.Getenv("CFGMS_SECRETS_KEY_FILE"))
+	if keyFile == "" {
+		return nil, fmt.Errorf("CFGMS_SECRETS_KEY_FILE is required; plaintext secret storage is prohibited")
+	}
+
+	allowEphemeral := strings.EqualFold(strings.TrimSpace(os.Getenv(envAllowEphemeralSecrets)), "true")
+
+	// Guard: fail closed on ephemeral secret storage (ADR-021 Amendment 1).
+	// A controller restart wipes passkeys and account records stored in
+	// ephemeral locations, locking out all human accounts. The decision is made
+	// from the storage configuration actually handed to the secrets backend, so
+	// no provider can pass the guard on a value it never reads.
+	storageConfig, ephemeralReason := resolveSecretsBackend(cfg.Storage, secretsPath)
+
+	if ephemeralReason != "" {
+		if !allowEphemeral {
+			return nil, fmt.Errorf("refusing ephemeral secret storage — %s", ephemeralReason)
+		}
+		logger.Warn("DANGER: secret store is using ephemeral storage",
+			"reason", logging.SanitizeLogValue(ephemeralReason),
+			"risk", "passkeys and account records will be lost on controller restart; all human accounts will be locked out",
+			"override", envAllowEphemeralSecrets+"=true")
 	}
 
 	// Create secrets provider configuration
-	// M-AUTH-1: Use global storage provider for secrets (flatfile or database)
+	// M-AUTH-1: Encrypt before handing bytes to flat-file or database storage.
 	secretsConfig := map[string]interface{}{
 		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
 		"cache_enabled":    true,
 		"cache_ttl":        300,  // 5 minutes
 		"cache_max_size":   1000, // Cache up to 1000 secrets
-	}
-
-	// Pass storage config based on provider type
-	if cfg.Storage.Provider == "database" {
-		// For database provider, use the full database configuration
-		secretsConfig["storage_config"] = cfg.Storage.Config
-	} else {
-		// For flatfile provider, set the root directory
-		secretsConfig["storage_config"] = map[string]interface{}{
-			"root": secretsPath,
-		}
-	}
-
-	// Optional: KMS key ID for SOPS encryption
-	if kmsKeyID := os.Getenv("CFGMS_SOPS_KMS_KEY"); kmsKeyID != "" {
-		secretsConfig["kms_key_id"] = kmsKeyID
-		logger.Info("Using KMS key for secrets encryption", "key_id", kmsKeyID)
+		"key_file":         keyFile,
+		// storageConfig is the same map the ephemeral guard judged above.
+		"storage_config": storageConfig,
 	}
 
 	// Create secret store using SOPS provider
@@ -1276,28 +2859,135 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 		return nil, fmt.Errorf("failed to create secret store: %w", err)
 	}
 
-	// Verify store is healthy
+	// Fail-closed guard: in cluster mode the secret store must have a
+	// compare-and-swap that is atomic across controller nodes (Issue #3775).
+	//
+	// Every credential-issuing transition in this package — enrolment-token spend,
+	// approved->collected, CLI-login collect, account revoke, the renewal claim —
+	// is guarded by CompareAndSwapSecret and mints a certificate on the strength of
+	// winning it. A store whose swap is only node-local lets two nodes both win one
+	// approval and both mint a certificate, so it must be refused here rather than
+	// documented as a limitation: assertClusterBackendsReady gates the storage
+	// provider, and nothing else gates this. The condition is a property of the
+	// backend the store was actually built on, asked of the constructed store, not
+	// inferred from the provider name.
+	if cfg.HA.IsClusterMode() && !secretsif.CompareAndSwapIsClusterAtomic(store) {
+		_ = store.Close()
+		return nil, fmt.Errorf(
+			"cluster mode requires a secret store whose compare-and-swap is atomic across nodes; "+
+				"backend %q does not provide one. Configure storage.provider: database (PostgreSQL "+
+				"conditional writes) for the secret store, or use a cluster-capable secrets provider",
+			cfg.Storage.Provider)
+	}
+
+	// Verify store is healthy. Fail closed unconditionally: a broken store at
+	// startup means passkeys and account records are inaccessible. This is
+	// a separate control from the ephemeral-path guard and is deliberately not
+	// governed by envAllowEphemeralSecrets — that flag only downgrades the
+	// ephemeral-location rejection, and must never disable store-health
+	// validation as a side effect.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := store.HealthCheck(ctx); err != nil {
-		logger.Warn("Secret store health check failed", "error", err)
-		// Don't fail on health check - store may still be usable
+		_ = store.Close()
+		return nil, fmt.Errorf("secret store health check failed: %w", err)
 	}
 
 	logger.Info("Secret store initialized",
 		"provider", "sops",
 		"backend", cfg.Storage.Provider,
 		"secrets_path", secretsPath,
-		"encryption", "SOPS (AES-256-GCM)")
+		"encryption", "AES-256-GCM envelope")
 	return store, nil
 }
 
-// M-AUTH-1: Load API keys from secret store into memory cache
+// M-AUTH-1: API keys are loaded into the memory cache lazily, on first use.
+// Issue #4574: what is built up front is the API-key index (key hash → tenant), with
+// one store listing, so a cache miss never needs a store-wide scan of its own.
 func (s *Server) loadAPIKeysFromStore() error {
-	// API keys are now stored in the central secrets provider
-	// They are loaded on-demand when authentication is performed
-	// This lazy-loading approach provides better performance and security
+	if s.secretStore == nil {
+		return nil
+	}
+	if err := s.refreshAPIKeyIndex(context.Background()); err != nil {
+		return fmt.Errorf("failed to build API key index: %w", err)
+	}
+	s.logger.Info("Secret store ready - API key index built; keys load on first access")
+	return nil
+}
 
-	s.logger.Info("Secret store ready - API keys will be loaded on first access")
+// Issue #2226, #2780: scanAPIKeysForPrivilegedAccess reports API keys that hold permissions
+// requiring assurance levels above AssuranceMachine. Those permissions are unreachable via
+// API key (requirePermission returns 403 without a step-up challenge); operators should
+// revoke or reprovision the affected keys. The scan consumes permissionAssurance from
+// assurance.go so the enforcement and the scan can never drift.
+func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+		},
+	})
+	if err != nil {
+		s.logger.Warn("Startup scan: failed to list API keys from secret store", "error", err)
+		return err
+	}
+	for _, meta := range secrets {
+		var overlapping []string
+		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
+			if req, found := permissionAssurance[p]; found && req.Min > session.AssuranceMachine {
+				overlapping = append(overlapping, p)
+			}
+		}
+		if len(overlapping) > 0 {
+			s.logger.Warn(
+				"API key holds permissions requiring elevated assurance; "+
+					"unreachable via API key — consider revoking this key",
+				"key_id", logging.SanitizeLogValue(meta.Metadata["id"]),
+				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
+				"overlapping_permissions", logging.SanitizeLogValue(strings.Join(overlapping, ",")),
+			)
+		}
+	}
+	return nil
+}
+
+// Issue #3574: scanAccountsForStalePermissions enumerates every account in the secret
+// store and logs a warning for any account whose stored Permissions slice contains an ID that
+// isKnownPermission no longer recognizes. Stale grants (permission IDs renamed or removed)
+// silently match nothing hasPermission will honor; this scan makes the break observable at
+// startup so operators can update affected accounts rather than silently seeing all requests
+// denied.
+func (s *Server) scanAccountsForStalePermissions(ctx context.Context) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: accountSecretType,
+		},
+	})
+	if err != nil {
+		s.logger.Warn("Startup scan: failed to list accounts from secret store", "error", err)
+		return err
+	}
+	for _, meta := range secrets {
+		var stale []string
+		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
+			if !isKnownPermission(p) {
+				stale = append(stale, p)
+			}
+		}
+		if len(stale) > 0 {
+			s.logger.Warn(
+				"Account holds unrecognized permission IDs (stale after rename); "+
+					"those grants match nothing — update the account's permissions",
+				"username", logging.SanitizeLogValue(meta.Metadata["username"]),
+				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
+				"stale_permissions", logging.SanitizeLogValue(strings.Join(stale, ",")),
+			)
+		}
+	}
 	return nil
 }

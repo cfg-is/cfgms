@@ -24,22 +24,20 @@ scrape_configs:
   # CFGMS Controller monitoring
   - job_name: 'cfgms-controller'
     static_configs:
-      - targets: ['cfgms-controller:9080']
+      - targets: ['cfgms-controller:9090']
     metrics_path: '/api/v1/monitoring/metrics'
     scrape_interval: 30s
     scrape_timeout: 10s
-    scheme: http
+    scheme: https
     params:
       format: ['prometheus']
-    basic_auth:
-      username: 'monitoring'
-      password: 'your-api-key'
-    # Optional: TLS configuration for HTTPS
-    # tls_config:
-    #   ca_file: /etc/ssl/certs/ca.pem
-    #   cert_file: /etc/ssl/certs/client.pem
-    #   key_file: /etc/ssl/private/client.key
-    #   insecure_skip_verify: false
+    authorization:
+      type: Bearer
+      credentials: 'your-api-key'
+    tls_config:
+      ca_file: /etc/ssl/certs/cfgms-ca.pem
+      server_name: cfgms-controller
+      insecure_skip_verify: false
 
   # CFGMS Health checks
   - job_name: 'cfgms-health'
@@ -48,23 +46,31 @@ scrape_configs:
     metrics_path: '/api/v1/monitoring/health'
     scrape_interval: 15s
     scrape_timeout: 5s
-    scheme: http
-    basic_auth:
-      username: 'monitoring'
-      password: 'your-api-key'
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: 'your-api-key'
+    tls_config:
+      ca_file: /etc/ssl/certs/cfgms-ca.pem
+      server_name: cfgms-controller
+      insecure_skip_verify: false
 
   # Multiple controller instances (for scaled deployments)
   - job_name: 'cfgms-controllers'
     static_configs:
       - targets: 
-        - 'cfgms-controller-1:9080'
-        - 'cfgms-controller-2:9080'
-        - 'cfgms-controller-3:9080'
+        - 'cfgms-controller-1:9090'
+        - 'cfgms-controller-2:9090'
+        - 'cfgms-controller-3:9090'
     metrics_path: '/api/v1/monitoring/metrics'
     scrape_interval: 30s
-    basic_auth:
-      username: 'monitoring'
-      password: 'your-api-key'
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: 'your-api-key'
+    tls_config:
+      ca_file: /etc/ssl/certs/cfgms-ca.pem
+      insecure_skip_verify: false
 
 # Remote write configuration for long-term storage
 remote_write:

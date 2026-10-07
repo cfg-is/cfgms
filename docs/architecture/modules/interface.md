@@ -8,7 +8,7 @@ Go consumers should import the stable wrapper types from `pkg/modules/contract`
 rather than the generated package directly.
 
 For module system overview and available modules, see [Module System](README.md).
-For ADR design rationale, see [ADR-006](../../adr/ADR-006-module-packaging-and-distribution.md).
+For ADR design rationale, see [ADR-006](../decisions/006-module-packaging-and-distribution.md).
 
 ## Overview
 
