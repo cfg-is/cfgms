@@ -1261,3 +1261,117 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     expect(screen.queryByTestId('allow-support-btn')).not.toBeInTheDocument()
   })
 })
+
+// ── Boundary rows (ADR-025 Amendment 6, A6.4) ─────────────────────────────────
+
+describe('TenantAdminView — boundary rows', () => {
+  const rootSession = { username: 'root-admin', tenant_id: '', root_scope: true }
+  const boundary = (over: Record<string, unknown> = {}) =>
+    makeTenant({
+      id: 'msp-b', name: 'MSP B', parent_id: 'root', boundary: true, accessible: false,
+      tech_count: 4, device_count: 120, client_count: 3, ...over,
+    })
+  const crossing = {
+    ID: 'c-1', TenantID: 'msp-b', PrincipalID: 'root-op', Kind: 'break_glass', GrantedBy: 'root-op',
+    Justification: 'outage response', CreatedAt: '2026-01-01T00:00:00Z',
+    ExpiresAt: new Date(Date.now() + 20 * 60_000).toISOString(), RevokedAt: null,
+  }
+
+  function renderRoot(rest: (url: string, init?: RequestInit) => Response) {
+    window.sessionStorage.clear()
+    routeWithLogin(rootSession, rest)
+    return render(
+      <MemoryRouter initialEntries={['/tenants']}>
+        <AuthProvider>
+          <SignInHarness username={rootSession.username} />
+          <TenantAdminView />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  it('renders one normal row and two locked rows, and nothing else', async () => {
+    renderRoot((url) =>
+      url.endsWith('/api/v1/tenants')
+        ? makeTenantsResponse([
+            makeTenant({ id: 'root', name: 'root' }),
+            boundary(),
+            boundary({ id: 'msp-c', name: 'MSP C', tech_count: 1, client_count: 1, device_count: 1 }),
+          ])
+        : jsonResponse(404, {}),
+    )
+    await signIn()
+    await waitFor(() => expect(screen.getAllByTestId('boundary-row')).toHaveLength(2))
+    expect(screen.getAllByTestId('tenant-row')).toHaveLength(1)
+    expect(screen.queryByTestId('boundary-empty-state')).not.toBeInTheDocument()
+    const rows = screen.getAllByTestId('boundary-row')
+    expect(rows[0]).toHaveTextContent('MSP B')
+    expect(rows[0]).toHaveTextContent('access boundary')
+    expect(rows[0]).toHaveTextContent('120 devices')
+    expect(rows[0]).toHaveTextContent('4 techs')
+    expect(rows[0]).toHaveTextContent('3 client tenants')
+    expect(rows[1]).toHaveTextContent('1 client tenant')
+    expect(rows[1]).not.toHaveTextContent('1 client tenants')
+  })
+
+  it('gives a boundary row no expand toggle, no actions and no child rows', async () => {
+    renderRoot((url) =>
+      url.endsWith('/api/v1/tenants')
+        ? makeTenantsResponse([
+            makeTenant({ id: 'root', name: 'root' }),
+            boundary(),
+            // Even a row that names the boundary row as parent is never nested beneath it.
+            makeTenant({ id: 'stray', name: 'stray', parent_id: 'msp-b' }),
+          ])
+        : jsonResponse(404, {}),
+    )
+    await signIn()
+    const row = await screen.findByTestId('boundary-row')
+    expect(within(row).getAllByRole('button')).toHaveLength(1)
+    expect(within(row).getByRole('button')).toHaveTextContent('Request break-glass')
+    expect(within(row).queryByRole('link')).not.toBeInTheDocument()
+    expect(row.querySelector('[data-testid*="toggle"], [aria-expanded]')).toBeNull()
+    // The stray row is a top-level row (no indent spacer width), not a child of the boundary row.
+    const stray = screen.getByText('stray').closest('tr') as HTMLElement
+    const spacer = stray.querySelector('span[aria-hidden="true"]') as HTMLElement
+    expect(spacer.style.width).toBe('0px')
+  })
+
+  it('opens the break-glass dialog targeting that MSP', async () => {
+    renderRoot((url) =>
+      url.endsWith('/api/v1/tenants')
+        ? makeTenantsResponse([makeTenant({ id: 'root', name: 'root' }), boundary({ id: 'msp-b' }), boundary({ id: 'msp-c', name: 'MSP C' })])
+        : jsonResponse(404, {}),
+    )
+    await signIn()
+    const rows = await screen.findAllByTestId('boundary-row')
+    fireEvent.click(within(rows[1]!).getByTestId('boundary-break-glass-btn'))
+    expect(screen.getByTestId('break-glass-dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('break-glass-tenant-input')).toHaveValue('msp-c')
+  })
+
+  it('refetches after break-glass and renders the MSP as a normal row', async () => {
+    let invoked = false
+    renderRoot((url) => {
+      if (url.endsWith('/api/v1/tenants')) {
+        return makeTenantsResponse(
+          invoked
+            ? [makeTenant({ id: 'root', name: 'root' }), makeTenant({ id: 'msp-b', name: 'MSP B', parent_id: 'root' })]
+            : [makeTenant({ id: 'root', name: 'root' }), boundary()],
+        )
+      }
+      if (url.endsWith('/api/v1/tenants/msp-b/break-glass')) {
+        invoked = true
+        return jsonResponse(201, { data: crossing })
+      }
+      return jsonResponse(404, {})
+    })
+    await signIn()
+    fireEvent.click(await screen.findByTestId('boundary-break-glass-btn'))
+    fireEvent.change(screen.getByTestId('break-glass-justification-input'), { target: { value: 'outage response' } })
+    fireEvent.click(screen.getByTestId('break-glass-submit-btn'))
+    await waitFor(() => expect(screen.queryByTestId('boundary-row')).not.toBeInTheDocument())
+    expect(screen.getAllByTestId('tenant-row')).toHaveLength(2)
+    expect(screen.getByText('MSP B')).toBeInTheDocument()
+  })
+})

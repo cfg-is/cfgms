@@ -61,6 +61,19 @@ describe('parseTenantInfo', () => {
     expect(result?.cascade_suspended_from).toBeNull()
   })
 
+  it('maps boundary-row fields from the list response', () => {
+    const t = parseTenantInfo({
+      id: 'msp-b', name: 'MSP B', parent_id: 'root', boundary: true, accessible: false,
+      tech_count: 4, device_count: 120, client_count: 3,
+    })
+    expect(t).toMatchObject({ boundary: true, accessible: false, techCount: 4, deviceCount: 120, clientTenantCount: 3 })
+  })
+
+  it('defaults a full row to non-boundary and accessible with zero counts', () => {
+    expect(parseTenantInfo({ id: 'a' })).toMatchObject({ boundary: false, accessible: true, techCount: 0, clientTenantCount: 0 })
+    expect(parseTenantInfo({ id: 'a', boundary: false, accessible: true })).toMatchObject({ boundary: false, accessible: true })
+  })
+
   it('parses device_count into deviceCount, defaulting to 0', () => {
     expect(parseTenantInfo({ id: 'a', device_count: 7 })?.deviceCount).toBe(7)
     expect(parseTenantInfo({ id: 'a' })?.deviceCount).toBe(0)
