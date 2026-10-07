@@ -317,14 +317,19 @@ func telemetryToProto(t telemetry.Telemetry, stewardID string) *transportpb.Tele
 			DiskWriteBytes: p.DiskWriteBytes,
 			NetRxBytes:     p.NetRxBytes,
 			NetTxBytes:     p.NetTxBytes,
+			Status:         p.Status,
+			Description:    p.Description,
 		}
 	}
 	services := make([]*transportpb.ServiceSnapshot, len(t.Services))
 	for i, s := range t.Services {
 		services[i] = &transportpb.ServiceSnapshot{
-			FragmentId: s.FragmentID,
-			Name:       s.Name,
-			State:      s.State,
+			FragmentId:  s.FragmentID,
+			Name:        s.Name,
+			State:       s.State,
+			DisplayName: s.DisplayName,
+			StartType:   s.StartType,
+			Pid:         safePID(s.PID),
 		}
 	}
 	var host *transportpb.HostTotals

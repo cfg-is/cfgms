@@ -27,6 +27,13 @@
 //     collection (libproc/IOKit) is deferred — no macOS CI runner — but the
 //     interface compiles cleanly there.
 //
+// # Service and process detail
+//
+// Service snapshots carry DisplayName, StartType and the main PID; process
+// snapshots carry a Status ("running"/"suspended") and a Description. These
+// are descriptive telemetry only — none enter hashed DNA — and FragmentID
+// remains the join key against DNA.
+//
 // # Overhead
 //
 // Snapshot is usermode only (no kernel driver, no eBPF, no ETW) and cheap enough
@@ -80,6 +87,14 @@ type ProcessSnapshot struct {
 	// NetRxBytes / NetTxBytes — reserved; always zero (see type doc).
 	NetRxBytes uint64 `json:"net_rx_bytes"`
 	NetTxBytes uint64 `json:"net_tx_bytes"`
+	// Status is the process run status: "running" or "suspended" (Linux: stopped
+	// by a signal or ptrace, state T/t; Windows: every thread waiting with the
+	// Suspended wait reason). Descriptive telemetry only.
+	Status string `json:"status"`
+	// Description is the OS-provided process description when one is cheaply
+	// available; empty otherwise (currently always empty — neither /proc nor
+	// SystemProcessInformation carries one).
+	Description string `json:"description"`
 }
 
 // ServiceSnapshot is a point-in-time view of one installed service / systemd unit.
@@ -90,6 +105,16 @@ type ServiceSnapshot struct {
 	// "start-pending", …). Values are the platform's native state strings,
 	// lower-cased where practical; callers should treat them as opaque labels.
 	State string `json:"state"`
+	// DisplayName is the human-readable service name (systemd Description; SCM
+	// DisplayName). Falls back to empty when the platform has none.
+	DisplayName string `json:"display_name"`
+	// StartType is how the service starts: "auto", "auto-delayed", "manual",
+	// "disabled", "boot", "system" (Windows) or the systemd UnitFileState
+	// ("enabled", "disabled", "static", …) mapped onto the same vocabulary
+	// where it has an equivalent. Empty when unknown.
+	StartType string `json:"start_type"`
+	// PID is the service's main process id; 0 when the service is not running.
+	PID int `json:"pid"`
 	// FragmentID is the ADR-017 object-canonical entity reference
 	// ("service:<name-without-.service>"), matching how the `service` stdlib
 	// module and osquery address the same entity, so a controller can join this
