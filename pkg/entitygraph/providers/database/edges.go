@@ -131,10 +131,10 @@ func (p *DatabaseEntityGraphProvider) GetEdges(ctx context.Context, filter inter
 	if filter.Source != "" {
 		conds = append(conds, "ep.source = "+addArg(filter.Source))
 	}
-	if filter.TenantFilter != "" {
+	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
 		conds = append(conds,
-			tenantSubtreeCond("fi.owning_tenant", filter.TenantFilter, &n, &args),
-			tenantSubtreeCond("ti.owning_tenant", filter.TenantFilter, &n, &args),
+			tenantSubtreeCond("fi.owning_tenant", cut, &n, &args),
+			tenantSubtreeCond("ti.owning_tenant", cut, &n, &args),
 		)
 	}
 

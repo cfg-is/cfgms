@@ -127,10 +127,11 @@ func TestHandleFleetHealth_TenantIsolation(t *testing.T) {
 func TestHandleFleetHealth_SubtreeIncludesDescendants(t *testing.T) {
 	now := time.Now()
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
 	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
 		stewards: []fleet.StewardData{
 			{ID: "s-root", TenantID: "msp-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
-			{ID: "s-child", TenantID: "msp-a/client-1", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s-child", TenantID: "client-1", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
 			{ID: "s-other", TenantID: "msp-b", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
 		},
 	})
@@ -591,17 +592,21 @@ func resolveIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
 // subtree (exact tenant + descendants), not just the exact tenant.
 func TestHandleResolveSelector_SubtreeBoundary_DefaultSubtree(t *testing.T) {
 	server := setupTestServer(t)
-	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+	seedTenantTree(t, server)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: []fleet.StewardData{
+		{ID: "s-msp-a", TenantID: "msp-a", Status: "online", LastHeartbeat: time.Now()},
+		{ID: "s-client-1", TenantID: "client-1", Status: "online", LastHeartbeat: time.Now()},
+		{ID: "s-msp-b", TenantID: "msp-b", Status: "online", LastHeartbeat: time.Now()},
+		{ID: "s-msp-ab", TenantID: "msp-ab", Status: "online", LastHeartbeat: time.Now()},
+	}})
 
-	// Operator at msp-a/client-1 with "all" selector — should see client-1 AND client-1/servers/web.
-	rec := postResolveSelectorWithTenant(server, `{"selector":"all"}`, "msp-a/client-1")
+	// Operator at msp-a with the "all" selector sees msp-a AND its child client-1,
+	// resolved from the tenant tree's ParentID ancestry — never msp-b or msp-ab.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"all"}`, "msp-a")
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	ids := resolveIDs(t, rec)
-	assert.Contains(t, ids, "s-msp-a-client-1", "exact tenant must be included")
-	assert.Contains(t, ids, "s-msp-a-client-1-web", "descendant tenant must be included")
-	assert.NotContains(t, ids, "s-msp-a-client-2", "sibling tenant must be excluded")
-	assert.NotContains(t, ids, "s-msp-b-client-1", "different MSP must be excluded")
+	assert.ElementsMatch(t, []string{"s-msp-a", "s-client-1"}, ids)
 }
 
 // TestHandleResolveSelector_SubtreeBoundary_ExplicitDescendantAllowed verifies
@@ -660,9 +665,11 @@ func TestHandleResolveSelector_SubtreeBoundary_ParentTargetsDescendant(t *testin
 	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/all"}`, "msp-a")
 	require.Equal(t, http.StatusOK, rec.Code)
 
+	// A selector path matches the named tenant exactly; it is not a string-prefix
+	// test over tenant IDs (ADR-025 A1.1), so the grandchild is not reached by it.
 	ids := resolveIDs(t, rec)
 	assert.Contains(t, ids, "s-msp-a-client-1")
-	assert.Contains(t, ids, "s-msp-a-client-1-web")
+	assert.NotContains(t, ids, "s-msp-a-client-1-web")
 	assert.NotContains(t, ids, "s-msp-a-client-2")
 }
 
@@ -692,7 +699,7 @@ func TestHandleResolveSelector_SubtreeBoundary_ExplicitOwnTenantAllowed(t *testi
 
 	ids := resolveIDs(t, rec)
 	assert.Contains(t, ids, "s-msp-a-client-1")
-	assert.Contains(t, ids, "s-msp-a-client-1-web")
+	assert.NotContains(t, ids, "s-msp-a-client-1-web", "selector path matches the named tenant exactly, never by prefix")
 }
 
 // TestHandleResolveSelector_TenantIsolation verifies that a caller authenticated

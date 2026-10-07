@@ -40,26 +40,6 @@ func TestResolveSourceClass_Database(t *testing.T) {
 	}
 }
 
-func TestTenantVisible_Database(t *testing.T) {
-	tests := []struct {
-		owning string
-		filter string
-		want   bool
-	}{
-		{"root/msp-a", "", true},                    // empty filter sees everything
-		{"root/msp-a", "root/msp-a", true},          // exact match
-		{"root/msp-a/client-1", "root/msp-a", true}, // subtree match
-		{"root/msp-ab", "root/msp-a", false},        // prefix but not a child path
-		{"root/msp-b", "root/msp-a", false},         // sibling
-		{"root/msp-a", "root/msp-b", false},         // wrong root
-	}
-	for _, tc := range tests {
-		t.Run(tc.owning+"|"+tc.filter, func(t *testing.T) {
-			assert.Equal(t, tc.want, tenantVisible(tc.owning, tc.filter))
-		})
-	}
-}
-
 func TestSourceClassRank_Ordering(t *testing.T) {
 	// enforcing-module must rank strictly lower (higher precedence) than all others.
 	enfRank := sourceClassRank(types.SourceClassEnforcingModule)
@@ -186,4 +166,19 @@ func TestEscapeLIKE_Database(t *testing.T) {
 	for _, tc := range cases {
 		require.Equal(t, tc.want, escapeLIKE(tc.in), "input: %q", tc.in)
 	}
+}
+
+func TestEffectivePolicyDays_AncestorOverride_Database(t *testing.T) {
+	overrides := []dbRetentionOverride{{tenantPath: "msp-a", historyDays: 60, tombstoneDays: 10}}
+	ancestors := map[string][]string{"client-1": {"msp-a"}}
+
+	h, ts := dbEffectivePolicyDays("client-1", 30, 37, overrides, ancestors)
+	assert.Equal(t, 60, h, "descendant inherits the ancestor override")
+	assert.Equal(t, 10, ts)
+
+	h, _ = dbEffectivePolicyDays("client-1", 30, 37, overrides, nil)
+	assert.Equal(t, 30, h, "no resolved ancestry falls back to the default")
+
+	h, _ = dbEffectivePolicyDays("msp-ab", 30, 37, overrides, ancestors)
+	assert.Equal(t, 30, h, "name-sharing sibling does not inherit")
 }

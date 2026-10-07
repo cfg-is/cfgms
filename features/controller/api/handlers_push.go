@@ -118,7 +118,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.TenantSubtree = parsedTenantPath
 	} else {
-		filter.TenantSubtree = cfg.TenantID
+		s.scopeFilterToTenantSubtree(r.Context(), &filter, cfg.TenantID)
 	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)

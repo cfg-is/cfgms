@@ -47,10 +47,10 @@ func (p *SQLiteEntityGraphProvider) RunRetentionGC(ctx context.Context, policy i
 
 	now := time.Now().UTC()
 
-	if err := p.sweepTombstones(ctx, now, historyDays, tombstoneDays, overrides); err != nil {
+	if err := p.sweepTombstones(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: retention gc: sweep tombstones: %w", err)
 	}
-	if err := p.pruneHistory(ctx, now, historyDays, tombstoneDays, overrides); err != nil {
+	if err := p.pruneHistory(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: retention gc: prune history: %w", err)
 	}
 	if err := p.sweepOrphanPayloads(ctx); err != nil {
@@ -112,20 +112,24 @@ func (p *SQLiteEntityGraphProvider) loadRetentionOverrides(ctx context.Context) 
 
 // effectivePolicyDays returns (historyDays, tombstoneDays) for owningTenant,
 // applying the most-specific matching override (longest prefix) from overrides.
-func effectivePolicyDays(owningTenant string, defaultHistory, defaultTombstone int, overrides []retentionOverride) (int, int) {
-	bestLen := -1
+func effectivePolicyDays(owningTenant string, defaultHistory, defaultTombstone int, overrides []retentionOverride, ancestors map[string][]string) (int, int) {
 	h, ts := defaultHistory, defaultTombstone
-	for _, r := range overrides {
-		if r.tenantPath == owningTenant || strings.HasPrefix(owningTenant, r.tenantPath+"/") {
-			if len(r.tenantPath) > bestLen {
-				bestLen = len(r.tenantPath)
-				if r.historyDays > 0 {
-					h = r.historyDays
-				}
-				if r.tombstoneDays > 0 {
-					ts = r.tombstoneDays
-				}
+	// Chain is the owning tenant followed by its ancestors, nearest first, as
+	// resolved by the caller from the tenant tree's ParentID ancestry. A tenant
+	// with no resolved ancestry is matched on its own override only.
+	chain := append([]string{owningTenant}, ancestors[owningTenant]...)
+	for _, id := range chain {
+		for _, r := range overrides {
+			if r.tenantPath != id {
+				continue
 			}
+			if r.historyDays > 0 {
+				h = r.historyDays
+			}
+			if r.tombstoneDays > 0 {
+				ts = r.tombstoneDays
+			}
+			return h, ts
 		}
 	}
 	return h, ts
@@ -135,7 +139,7 @@ func effectivePolicyDays(owningTenant string, defaultHistory, defaultTombstone i
 // and whose absence timestamp predates the effective tombstone horizon.
 // Removal covers eg_observation_log, eg_entity_current, eg_entity_index,
 // eg_edge_projection, and eg_drift_projection.
-func (p *SQLiteEntityGraphProvider) sweepTombstones(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []retentionOverride) error {
+func (p *SQLiteEntityGraphProvider) sweepTombstones(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []retentionOverride, ancestors map[string][]string) error {
 	// Load candidates: subjects whose latest observation is an absence,
 	// along with the absence timestamp and current owning_tenant.
 	rows, err := p.db.QueryContext(ctx, `
@@ -175,7 +179,7 @@ func (p *SQLiteEntityGraphProvider) sweepTombstones(ctx context.Context, now tim
 	}
 
 	for _, c := range candidates {
-		_, tombDays := effectivePolicyDays(c.owningTenant, defaultHistory, defaultTombstone, overrides)
+		_, tombDays := effectivePolicyDays(c.owningTenant, defaultHistory, defaultTombstone, overrides, ancestors)
 		horizon := now.AddDate(0, 0, -tombDays)
 
 		absenceTime, parseErr := time.Parse(time.RFC3339Nano, c.observedAt)
@@ -229,7 +233,7 @@ func (p *SQLiteEntityGraphProvider) sweepTombstones(ctx context.Context, now tim
 //   - log rows referenced by eg_entity_current.log_seq (latest current-state)
 //   - log rows referenced by eg_edge_projection.log_seq (latest edge state)
 //   - the latest drift-diff log row for subjects with a non-resolved drift record
-func (p *SQLiteEntityGraphProvider) pruneHistory(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []retentionOverride) error {
+func (p *SQLiteEntityGraphProvider) pruneHistory(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []retentionOverride, ancestors map[string][]string) error {
 	// Collect all pinned log IDs (never-prune-current invariant).
 	pinned, err := p.loadPinnedLogSeqs(ctx)
 	if err != nil {
@@ -252,7 +256,7 @@ func (p *SQLiteEntityGraphProvider) pruneHistory(ctx context.Context, now time.T
 	// Process each subject independently so per-tenant policies apply correctly.
 	for _, subject := range subjectTenants {
 		owningTenant := tenantBySubject[subject]
-		histDays, _ := effectivePolicyDays(owningTenant, defaultHistory, defaultTombstone, overrides)
+		histDays, _ := effectivePolicyDays(owningTenant, defaultHistory, defaultTombstone, overrides, ancestors)
 		cutoff := now.AddDate(0, 0, -histDays)
 		cutoffStr := rfc3339(cutoff)
 

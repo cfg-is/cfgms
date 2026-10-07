@@ -97,17 +97,8 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	})
 	// Issue #4320: every tenant subtree predicate must escape LIKE metacharacters
 	// in the caller-supplied tenant path.
-	t.Run("QueryEntitiesTenantSubtreeEscapesLikeMetacharacters", func(t *testing.T) {
-		testEGQueryEntitiesTenantSubtreeEscapesLikeMetacharacters(t, factory)
-	})
-	t.Run("GetEdgesTenantSubtreeEscapesLikeMetacharacters", func(t *testing.T) {
-		testEGGetEdgesTenantSubtreeEscapesLikeMetacharacters(t, factory)
-	})
-	t.Run("NeighborhoodTenantSubtreeEscapesLikeMetacharacters", func(t *testing.T) {
-		testEGNeighborhoodTenantSubtreeEscapesLikeMetacharacters(t, factory)
-	})
-	t.Run("ListDriftedTenantSubtreeEscapesLikeMetacharacters", func(t *testing.T) {
-		testEGListDriftedTenantSubtreeEscapesLikeMetacharacters(t, factory)
+	t.Run("TenantSubtreeIDs", func(t *testing.T) {
+		testEGTenantSubtreeIDs(t, factory)
 	})
 }
 
@@ -2506,198 +2497,34 @@ func testEGRetentionTombstoneEscapesLikeMetacharacters(t *testing.T, factory Ent
 	})
 }
 
-// testEGQueryEntitiesTenantSubtreeEscapesLikeMetacharacters verifies Issue #4320:
-// QueryEntities' tenant subtree predicate (entity_reads.go) treats the caller's
-// TenantFilter as a literal, not a SQL LIKE pattern. ValidateTenantID does not
-// reject '%' or '_', so an ordinary tenant path containing either character must
-// still match only its own literal subtree — never a sibling tenant that merely
-// looks like a wildcard match against the unescaped pattern.
-func testEGQueryEntitiesTenantSubtreeEscapesLikeMetacharacters(t *testing.T, factory EntityGraphProviderFactory) {
-	t.Helper()
-	p := factory(t)
-	ctx := context.Background()
-
-	seed := func(t *testing.T, subject, tenant string) {
-		t.Helper()
-		egReport(ctx, t, p, "observer:scan", subject, map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": tenant,
-		})
-	}
-	subjectsUnder := func(t *testing.T, filter string) []string {
-		t.Helper()
-		page, err := p.QueryEntities(ctx, interfaces.EntityFilter{TenantFilter: filter}, interfaces.PageToken{PageSize: 50})
-		require.NoError(t, err)
-		subs := make([]string, 0, len(page.Entities))
-		for _, e := range page.Entities {
-			subs = append(subs, e.Entity.EID.String())
-		}
-		return subs
-	}
-
-	// '_' is a single-character LIKE wildcard. Unescaped, filter "root/qeu_a" would,
-	// via pattern "root/qeu_a/%", also match a sibling tenant differing only at
-	// that one character position.
-	t.Run("Underscore", func(t *testing.T) {
-		wanted := "host:qeu-under-auth/wanted1"
-		unrelated := "host:qeu-under-auth/unrelated1"
-		seed(t, wanted, "root/qeu_a/child1")
-		seed(t, unrelated, "root/qeuXa/child1")
-
-		subs := subjectsUnder(t, "root/qeu_a")
-		assert.Contains(t, subs, wanted, "literal descendant of the underscore-containing tenant must match")
-		assert.NotContains(t, subs, unrelated, "sibling tenant differing only at the underscore position must not match")
-	})
-
-	// '%' is a multi-character LIKE wildcard. Unescaped, filter "root/qep%a" would,
-	// via pattern "root/qep%a/%", also match any tenant the wildcard can stretch to cover.
-	t.Run("Percent", func(t *testing.T) {
-		wanted := "host:qeu-pct-auth/wanted1"
-		unrelated := "host:qeu-pct-auth/unrelated1"
-		seed(t, wanted, "root/qep%a/child1")
-		seed(t, unrelated, "root/qepXYZa/child1")
-
-		subs := subjectsUnder(t, "root/qep%a")
-		assert.Contains(t, subs, wanted, "literal descendant of the percent-containing tenant must match")
-		assert.NotContains(t, subs, unrelated, "unrelated tenant matched only via the wildcarded percent must not match")
-	})
-
-	// REQUIRED: exact match and legitimate-descendant behaviour is unchanged, and a
-	// tenant path is not a prefix-match for a longer sibling name.
-	t.Run("ExactAndDescendantUnaffected", func(t *testing.T) {
-		exact := "host:qeu-exact-auth/exact1"
-		descendant := "host:qeu-exact-auth/descendant1"
-		seed(t, exact, "root/qeu-exact")
-		seed(t, descendant, "root/qeu-exact/child1")
-
-		subs := subjectsUnder(t, "root/qeu-exact")
-		assert.Contains(t, subs, exact, "exact tenant match must still work")
-		assert.Contains(t, subs, descendant, "legitimate descendant must still match")
-	})
-
-	t.Run("PrefixSiblingUnaffected", func(t *testing.T) {
-		sibling := "host:qeu-prefix-auth/sibling1"
-		seed(t, sibling, "root/qeu-prefix-ab")
-
-		subs := subjectsUnder(t, "root/qeu-prefix-a")
-		assert.NotContains(t, subs, sibling, "a longer sibling tenant name sharing a prefix must not match")
-	})
-}
-
-// testEGGetEdgesTenantSubtreeEscapesLikeMetacharacters verifies Issue #4320 for the
-// edges.go tenant predicate, which is applied independently to both edge endpoints
-// (the fi/ti joined columns).
-func testEGGetEdgesTenantSubtreeEscapesLikeMetacharacters(t *testing.T, factory EntityGraphProviderFactory) {
-	t.Helper()
-	p := factory(t)
-	ctx := context.Background()
-
-	check := func(t *testing.T, suffix, tenantFilter, wantedToTenant, unrelatedToTenant string) {
-		t.Helper()
-		from := egEID(t, "host:tge-"+suffix+"-auth/from1")
-		wantedTo := egEID(t, "host:tge-"+suffix+"-auth/wanted-to1")
-		unrelatedTo := egEID(t, "host:tge-"+suffix+"-auth/unrelated-to1")
-
-		egReport(ctx, t, p, "observer:scan", from.String(), map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": tenantFilter + "/parent",
-		})
-		egReport(ctx, t, p, "observer:scan", wantedTo.String(), map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": wantedToTenant,
-		})
-		egReport(ctx, t, p, "observer:scan", unrelatedTo.String(), map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": unrelatedToTenant,
-		})
-		egReportEdge(ctx, t, p, "observer:scan", from.String(), wantedTo.String(), "contains")
-		egReportEdge(ctx, t, p, "observer:scan", from.String(), unrelatedTo.String(), "contains")
-
-		fromRef := from
-		edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef, TenantFilter: tenantFilter})
-		require.NoError(t, err)
-
-		tos := make([]string, 0, len(edges))
-		for _, e := range edges {
-			tos = append(tos, e.Edge.To.String())
-		}
-		assert.Contains(t, tos, wantedTo.String(), "edge to a legitimate descendant tenant must be visible")
-		assert.NotContains(t, tos, unrelatedTo.String(), "edge to a tenant matched only via an unescaped LIKE metacharacter must not be visible")
-	}
-
-	t.Run("Underscore", func(t *testing.T) {
-		check(t, "under", "root/tge_a", "root/tge_a/child1", "root/tgeXa/child1")
-	})
-	t.Run("Percent", func(t *testing.T) {
-		check(t, "pct", "root/tge%a", "root/tge%a/child1", "root/tgeXYZa/child1")
-	})
-}
-
-// testEGNeighborhoodTenantSubtreeEscapesLikeMetacharacters verifies Issue #4320 for
-// the neighborhood.go tenant predicate. GetNeighborhood derives its tenant filter
-// implicitly from the root entity's own owning_tenant, so a root whose owning_tenant
-// contains a LIKE metacharacter must still bound the hop query to its literal subtree.
-func testEGNeighborhoodTenantSubtreeEscapesLikeMetacharacters(t *testing.T, factory EntityGraphProviderFactory) {
-	t.Helper()
-	p := factory(t)
-	ctx := context.Background()
-
-	check := func(t *testing.T, suffix, rootTenant, wantedPeerTenant, unrelatedPeerTenant string) {
-		t.Helper()
-		root := egEID(t, "host:tnh-"+suffix+"-auth/root1")
-		wantedPeer := egEID(t, "host:tnh-"+suffix+"-auth/wanted1")
-		unrelatedPeer := egEID(t, "host:tnh-"+suffix+"-auth/unrelated1")
-
-		egReport(ctx, t, p, "observer:scan", root.String(), map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": rootTenant,
-		})
-		egReport(ctx, t, p, "observer:scan", wantedPeer.String(), map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": wantedPeerTenant,
-		})
-		egReport(ctx, t, p, "observer:scan", unrelatedPeer.String(), map[string]interface{}{
-			"entity_kind": "host", "owning_tenant": unrelatedPeerTenant,
-		})
-		egReportEdge(ctx, t, p, "observer:scan", root.String(), wantedPeer.String(), "contains")
-		egReportEdge(ctx, t, p, "observer:scan", root.String(), unrelatedPeer.String(), "contains")
-
-		n, err := p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1)
-		require.NoError(t, err)
-
-		tos := make([]string, 0, len(n.Edges))
-		for _, e := range n.Edges {
-			tos = append(tos, e.To.String())
-		}
-		assert.Contains(t, tos, wantedPeer.String(), "edge to a legitimate descendant of the root's own tenant must be visible")
-		assert.NotContains(t, tos, unrelatedPeer.String(), "edge to a tenant matched only via an unescaped LIKE metacharacter must not be visible")
-	}
-
-	t.Run("Underscore", func(t *testing.T) {
-		check(t, "under", "root/tnh_a", "root/tnh_a/child1", "root/tnhXa/child1")
-	})
-	t.Run("Percent", func(t *testing.T) {
-		check(t, "pct", "root/tnh%a", "root/tnh%a/child1", "root/tnhXYZa/child1")
-	})
-}
-
-// testEGListDriftedTenantSubtreeEscapesLikeMetacharacters verifies Issue #4320 for
-// the drift.go tenant predicate — the i.owning_tenant JOIN condition in
-// ListDrifted's useEntityJoin branch.
-func testEGListDriftedTenantSubtreeEscapesLikeMetacharacters(t *testing.T, factory EntityGraphProviderFactory) {
+// testEGTenantSubtreeIDs verifies Issue #4657: a tenant cut is decided from the
+// caller-resolved descendant-ID set (TenantSubtreeIDs), never from a string
+// prefix of the tenant ID. With tenants msp-a, client-1 (child of msp-a), msp-b
+// and msp-ab, a cut for msp-a carrying {client-1} sees msp-a and client-1 and
+// neither msp-b nor msp-ab; with no resolved set it sees only msp-a (fail closed).
+func testEGTenantSubtreeIDs(t *testing.T, factory EntityGraphProviderFactory) {
 	t.Helper()
 	p := factory(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 
-	seedDrifted := func(t *testing.T, subject, tenant string) {
-		t.Helper()
+	owners := map[string]string{
+		"host:tsi-auth/own":    "msp-a",
+		"host:tsi-auth/child":  "client-1",
+		"host:tsi-auth/other":  "msp-b",
+		"host:tsi-auth/lookal": "msp-ab",
+		"host:tsi-auth/pathy":  "msp-a/client-1", // never a real tenant ID; must not match by prefix
+	}
+	for subject, tenant := range owners {
 		egReport(ctx, t, p, "observer:scan", subject, map[string]interface{}{
 			"entity_kind": "host", "owning_tenant": tenant,
 		})
 		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
 			Source: "enforcing-module:drift-reporter",
 			Observations: []types.Observation{{
-				Source:     "enforcing-module:drift-reporter",
-				Subject:    subject,
-				Kind:       types.ObservationKindDriftDiff,
-				Confidence: types.ConfidenceHigh,
-				ObservedAt: now,
-				RecordedAt: now,
+				Source: "enforcing-module:drift-reporter", Subject: subject,
+				Kind: types.ObservationKindDriftDiff, Confidence: types.ConfidenceHigh,
+				ObservedAt: now, RecordedAt: now,
 				Payload: map[string]interface{}{
 					"config_revision": "rev-1",
 					"fields": []interface{}{
@@ -2707,37 +2534,94 @@ func testEGListDriftedTenantSubtreeEscapesLikeMetacharacters(t *testing.T, facto
 			}},
 		}))
 	}
-	driftedSubjectsUnder := func(t *testing.T, filter string) []string {
+	// One edge per non-root owner, all from the msp-a-owned host.
+	own := egEID(t, "host:tsi-auth/own")
+	for subject := range owners {
+		if subject == "host:tsi-auth/own" {
+			continue
+		}
+		egReportEdge(ctx, t, p, "observer:scan", own.String(), subject, "contains")
+	}
+
+	wantSet := []string{"host:tsi-auth/own", "host:tsi-auth/child"}
+	wantExact := []string{"host:tsi-auth/own"}
+
+	queried := func(t *testing.T, ids []string) []string {
 		t.Helper()
-		states, err := p.ListDrifted(ctx, interfaces.DriftFilter{TenantFilter: filter})
+		page, err := p.QueryEntities(ctx, interfaces.EntityFilter{TenantFilter: "msp-a", TenantSubtreeIDs: ids, Kind: "host"}, interfaces.PageToken{PageSize: 50})
 		require.NoError(t, err)
-		subs := make([]string, 0, len(states))
-		for _, s := range states {
-			subs = append(subs, s.EID.String())
+		var subs []string
+		for _, e := range page.Entities {
+			if strings.HasPrefix(e.Entity.EID.String(), "host:tsi-auth/") {
+				subs = append(subs, e.Entity.EID.String())
+			}
 		}
 		return subs
 	}
-
-	t.Run("Underscore", func(t *testing.T) {
-		wanted := "host:tld-under-auth/wanted1"
-		unrelated := "host:tld-under-auth/unrelated1"
-		seedDrifted(t, wanted, "root/tld_a/child1")
-		seedDrifted(t, unrelated, "root/tldXa/child1")
-
-		subs := driftedSubjectsUnder(t, "root/tld_a")
-		assert.Contains(t, subs, wanted, "drifted entity under the literal underscore tenant subtree must be listed")
-		assert.NotContains(t, subs, unrelated, "sibling tenant matched only via unescaped underscore must not be listed")
+	t.Run("QueryEntities", func(t *testing.T) {
+		assert.ElementsMatch(t, wantSet, queried(t, []string{"client-1"}))
+		assert.ElementsMatch(t, wantExact, queried(t, nil), "no resolved descendants must see only the tenant's own entities")
 	})
 
-	t.Run("Percent", func(t *testing.T) {
-		wanted := "host:tld-pct-auth/wanted1"
-		unrelated := "host:tld-pct-auth/unrelated1"
-		seedDrifted(t, wanted, "root/tld%a/child1")
-		seedDrifted(t, unrelated, "root/tldXYZa/child1")
+	t.Run("GetEntity", func(t *testing.T) {
+		_, err := p.GetEntity(ctx, egEID(t, "host:tsi-auth/child"), interfaces.GetEntityOpts{TenantFilter: "msp-a", TenantSubtreeIDs: []string{"client-1"}})
+		require.NoError(t, err)
+		_, err = p.GetEntity(ctx, egEID(t, "host:tsi-auth/child"), interfaces.GetEntityOpts{TenantFilter: "msp-a"})
+		require.Error(t, err, "descendant must not be visible without a resolved set")
+		for _, subj := range []string{"host:tsi-auth/other", "host:tsi-auth/lookal", "host:tsi-auth/pathy"} {
+			_, err = p.GetEntity(ctx, egEID(t, subj), interfaces.GetEntityOpts{TenantFilter: "msp-a", TenantSubtreeIDs: []string{"client-1"}})
+			require.Error(t, err, "%s must stay outside the msp-a cut", subj)
+		}
+	})
 
-		subs := driftedSubjectsUnder(t, "root/tld%a")
-		assert.Contains(t, subs, wanted, "drifted entity under the literal percent tenant subtree must be listed")
-		assert.NotContains(t, subs, unrelated, "unrelated tenant matched only via unescaped percent must not be listed")
+	t.Run("GetEdges", func(t *testing.T) {
+		edgeTos := func(ids []string) []string {
+			edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &own, TenantFilter: "msp-a", TenantSubtreeIDs: ids})
+			require.NoError(t, err)
+			var tos []string
+			for _, e := range edges {
+				tos = append(tos, e.Edge.To.String())
+			}
+			return tos
+		}
+		assert.ElementsMatch(t, []string{"host:tsi-auth/child"}, edgeTos([]string{"client-1"}))
+		assert.Empty(t, edgeTos(nil))
+	})
+
+	t.Run("ListDrifted", func(t *testing.T) {
+		drifted := func(ids []string) []string {
+			states, err := p.ListDrifted(ctx, interfaces.DriftFilter{TenantFilter: "msp-a", TenantSubtreeIDs: ids})
+			require.NoError(t, err)
+			var subs []string
+			for _, s := range states {
+				subs = append(subs, s.EID.String())
+			}
+			return subs
+		}
+		assert.ElementsMatch(t, wantSet, drifted([]string{"client-1"}))
+		assert.ElementsMatch(t, wantExact, drifted(nil))
+	})
+
+	// Neighborhood derives its cut from the root's own tenant and carries no
+	// resolved set, so only same-tenant neighbours are followed.
+	t.Run("NeighborhoodIsExactTenantOnly", func(t *testing.T) {
+		n, err := p.GetNeighborhood(ctx, own, nil, types.TraversalOutbound, 1)
+		require.NoError(t, err)
+		assert.Empty(t, n.Edges, "no neighbour shares the root's own tenant")
+	})
+
+	// A tenant ID containing a LIKE metacharacter is a bound literal, not a pattern.
+	t.Run("MetacharacterIDsAreLiteral", func(t *testing.T) {
+		egReport(ctx, t, p, "observer:scan", "host:tsi-meta/wanted", map[string]interface{}{"entity_kind": "host", "owning_tenant": "tenant_a"})
+		egReport(ctx, t, p, "observer:scan", "host:tsi-meta/wild", map[string]interface{}{"entity_kind": "host", "owning_tenant": "tenantXa"})
+		page, err := p.QueryEntities(ctx, interfaces.EntityFilter{TenantFilter: "tenant_a", Kind: "host"}, interfaces.PageToken{PageSize: 50})
+		require.NoError(t, err)
+		var subs []string
+		for _, e := range page.Entities {
+			subs = append(subs, e.Entity.EID.String())
+		}
+		assert.Contains(t, subs, "host:tsi-meta/wanted")
+		assert.NotContains(t, subs, "host:tsi-meta/wild")
 	})
 }
 

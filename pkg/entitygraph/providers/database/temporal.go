@@ -54,7 +54,7 @@ func computeAttributeChanges(atT1, atT2 map[string]interface{}) []interfaces.Att
 // entityStateAsOf projects the merged entity state at or before asOf from the
 // observation log. Returns nil when no state observations existed at that time.
 func (p *DatabaseEntityGraphProvider) entityStateAsOf(ctx context.Context, subject string, asOf time.Time) (map[string]interface{}, error) {
-	rows, err := p.queryCurrentRows(ctx, subject, "", &asOf)
+	rows, err := p.queryCurrentRows(ctx, subject, &asOf)
 	if err != nil {
 		return nil, err
 	}

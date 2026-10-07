@@ -50,7 +50,7 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: lookup entity index: %w", err)
 		}
-		if !tenantVisible(owningTenant, opts.TenantFilter) {
+		if !interfaces.NewTenantCut(opts.TenantFilter, opts.TenantSubtreeIDs).Visible(owningTenant) {
 			return nil, errNotFound
 		}
 	}
@@ -58,7 +58,7 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 	// Fetch all per-source current rows without tenant filtering — visibility
 	// has already been confirmed via the index lookup above, so all source
 	// rows for the subject are accessible to the authorized caller.
-	rows, err := p.queryCurrentRows(ctx, subject, "", opts.AsOf)
+	rows, err := p.queryCurrentRows(ctx, subject, opts.AsOf)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 
 	// Wire collapse-group resolution when requested (ADR-022 §3).
 	if opts.CollapseGroup {
-		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, opts.TenantFilter)
+		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, interfaces.NewTenantCut(opts.TenantFilter, opts.TenantSubtreeIDs))
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: resolve collapse group: %w", err)
 		}
@@ -126,15 +126,14 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 // queryCurrentRows returns the per-source current-state rows for a subject.
 // When asOf is nil it reads the eg_entity_current projection; when asOf is set
 // it reconstructs the latest observation per source at or before asOf from the
-// immutable log. The tenant filter, when non-empty, restricts rows to the
-// tenant path or its subtree.
+// immutable log.
 //
 // Both branches exclude the kinds that never state the entity's current state —
 // desired-state, drift-diff, lifecycle and apply-outcome. eg_entity_current
 // never holds those kinds except desired-state (kept there for dedup), and the
 // as-of log reconstruction must apply the same rule or a later apply-outcome or
 // drift-diff row would be read back as the source's current state.
-func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subject, tenantFilter string, asOf *time.Time) ([]currentRow, error) {
+func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subject string, asOf *time.Time) ([]currentRow, error) {
 	var query string
 	args := []interface{}{subject}
 
@@ -143,10 +142,6 @@ func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subj
 			 FROM eg_entity_current c
 			 JOIN eg_payload_content p ON p.content_hash = c.payload_hash
 			 WHERE c.subject = $1 AND c.kind != 'desired-state'`
-		if tenantFilter != "" {
-			query += ` AND (c.tenant_path = $2 OR c.tenant_path LIKE $3)`
-			args = append(args, tenantFilter, tenantFilter+"/%")
-		}
 	} else {
 		// DISTINCT ON keeps the newest log row per source at or before asOf.
 		query = `SELECT DISTINCT ON (l.source) l.source, l.source_class, l.kind, l.confidence, l.observed_at, l.recorded_at, l.payload_hash, p.payload_json
@@ -155,10 +150,6 @@ func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subj
 			 WHERE l.subject = $1 AND l.observed_at <= $2
 			   AND l.kind NOT IN ('desired-state', 'drift-diff', 'lifecycle', 'apply-outcome')`
 		args = append(args, asOf.UTC().Format(time.RFC3339Nano))
-		if tenantFilter != "" {
-			query += ` AND (l.tenant_path = $3 OR l.tenant_path LIKE $4)`
-			args = append(args, tenantFilter, tenantFilter+"/%")
-		}
 		query += ` ORDER BY l.source, l.observed_at DESC, l.id DESC`
 	}
 
@@ -220,7 +211,7 @@ func (p *DatabaseEntityGraphProvider) QueryEntities(ctx context.Context, filter 
 		n++
 	}
 	if filter.TenantFilter != "" {
-		conds = append(conds, tenantSubtreeCond("owning_tenant", filter.TenantFilter, &n, &args))
+		conds = append(conds, tenantSubtreeCond("owning_tenant", interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs), &n, &args))
 	}
 
 	query := "SELECT subject FROM eg_entity_index"

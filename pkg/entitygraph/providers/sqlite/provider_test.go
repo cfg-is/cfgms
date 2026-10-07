@@ -141,28 +141,31 @@ func TestTenantFilter(t *testing.T) {
 		Source: "observer:scan",
 		Observations: []types.Observation{
 			obs(eid.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
-				"entity_kind": "host", "owning_tenant": "root/msp-a/client-1",
+				"entity_kind": "host", "owning_tenant": "client-1",
 			}),
 		},
 	}))
 
-	_, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/msp-a"})
-	require.NoError(t, err, "matching tenant subtree is visible")
+	_, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "msp-a", TenantSubtreeIDs: []string{"client-1"}})
+	require.NoError(t, err, "descendant in the resolved set is visible")
 
-	_, err = p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/msp-b"})
+	_, err = p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "msp-a"})
+	require.ErrorIs(t, err, ErrNotFound, "descendant is invisible without a resolved set")
+
+	_, err = p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "msp-b", TenantSubtreeIDs: []string{"client-2"}})
 	require.ErrorIs(t, err, ErrNotFound, "other tenant subtree is invisible")
 
-	// Prefix-collision guard: "root/msp-a" must not match "root/msp-a-other" or "root/msp-ab".
+	// Prefix-collision guard: "msp-a" must not match "msp-ab".
 	eid2 := mustEID(t, "host:prefix-tenant")
 	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
 		Source: "observer:scan",
 		Observations: []types.Observation{
 			obs(eid2.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
-				"entity_kind": "host", "owning_tenant": "root/msp-ab",
+				"entity_kind": "host", "owning_tenant": "msp-ab",
 			}),
 		},
 	}))
-	_, err = p.GetEntity(ctx, eid2, interfaces.GetEntityOpts{TenantFilter: "root/msp-a"})
+	_, err = p.GetEntity(ctx, eid2, interfaces.GetEntityOpts{TenantFilter: "msp-a", TenantSubtreeIDs: []string{"client-1"}})
 	require.ErrorIs(t, err, ErrNotFound, "sibling tenant sharing a name prefix must not be visible")
 }
 
@@ -581,4 +584,23 @@ func TestGetTimeline_ApplyOutcomeKind(t *testing.T) {
 		assert.Equal(t, "applied", payload["status"])
 		assert.Equal(t, "hyperv", payload["module_name"])
 	}
+}
+
+func TestEffectivePolicyDays_AncestorOverride(t *testing.T) {
+	overrides := []retentionOverride{{tenantPath: "msp-a", historyDays: 60, tombstoneDays: 10}}
+	ancestors := map[string][]string{"client-1": {"msp-a"}}
+
+	h, ts := effectivePolicyDays("client-1", 30, 37, overrides, ancestors)
+	require.Equal(t, 60, h, "descendant inherits the ancestor override")
+	require.Equal(t, 10, ts)
+
+	h, ts = effectivePolicyDays("client-1", 30, 37, overrides, nil)
+	require.Equal(t, 30, h, "no resolved ancestry falls back to the default")
+	require.Equal(t, 37, ts)
+
+	h, _ = effectivePolicyDays("msp-ab", 30, 37, overrides, ancestors)
+	require.Equal(t, 30, h, "name-sharing sibling does not inherit")
+
+	h, _ = effectivePolicyDays("msp-a", 30, 37, overrides, nil)
+	require.Equal(t, 60, h, "exact tenant keeps its own override")
 }

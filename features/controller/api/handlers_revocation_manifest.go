@@ -71,8 +71,8 @@ const OperatorPayloadSignGrant = "operator-payload:sign"
 //     authorizes no execution.
 //   - TenantID is the owning account's tenant path, and RootScope is true only for an
 //     unscoped platform-administrator account (TenantID == "" by explicit grant). A
-//     steward accepts an entry only when RootScope is set or its own tenant path is the
-//     entry's tenant or a descendant of it — without this the roster's fleet-wide reach
+//     steward accepts an entry only when RootScope is set or its own tenant is the
+//     entry's tenant or listed in the entry's CoveredTenantIDs — without this the roster's fleet-wide reach
 //     would let a credential registered in one tenant authorize execution in another.
 type AuthorizedWebAuthnCredential struct {
 	Kind         string   `json:"kind"`
@@ -81,6 +81,12 @@ type AuthorizedWebAuthnCredential struct {
 	TenantID     string   `json:"tenant_id"`
 	RootScope    bool     `json:"root_scope"`
 	Grants       []string `json:"grants"`
+	// CoveredTenantIDs are the IDs of TenantID's descendant tenants, resolved by the
+	// controller from the tenant tree's ParentID ancestry (ADR-025 A1.1: a tenant ID
+	// is a single token and never carries its ancestry). A steward has no tenant
+	// store, so this signed list is its only evidence that its tenant sits beneath
+	// TenantID; absent, the entry covers TenantID alone.
+	CoveredTenantIDs []string `json:"covered_tenant_ids,omitempty"`
 }
 
 // WebAuthnRelyingParty carries the controller's WebAuthn relying-party binding in the
@@ -240,6 +246,7 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 	}
 
 	var entries []AuthorizedWebAuthnCredential
+	coveredByTenant := map[string][]string{}
 	for _, meta := range metas {
 		username := meta.Metadata["username"]
 		if username == "" {
@@ -252,14 +259,16 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 		if !accountHoldsOperatorPayloadSigning(acct) {
 			continue
 		}
+		covered := s.signedCoveredTenantIDs(ctx, acct, coveredByTenant)
 		for _, credential := range acct.Credentials {
 			entries = append(entries, AuthorizedWebAuthnCredential{
-				Kind:         AuthorizedWebAuthnCredentialKind,
-				CredentialID: credential.ID,
-				PublicKey:    credential.PublicKey,
-				TenantID:     acct.TenantID,
-				RootScope:    acct.RootScope,
-				Grants:       []string{OperatorPayloadSignGrant},
+				Kind:             AuthorizedWebAuthnCredentialKind,
+				CredentialID:     credential.ID,
+				PublicKey:        credential.PublicKey,
+				TenantID:         acct.TenantID,
+				RootScope:        acct.RootScope,
+				Grants:           []string{OperatorPayloadSignGrant},
+				CoveredTenantIDs: covered,
 			})
 		}
 	}
@@ -267,6 +276,24 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 		return bytes.Compare(entries[i].CredentialID, entries[j].CredentialID) < 0
 	})
 	return entries, nil
+}
+
+// signedCoveredTenantIDs returns the sorted descendant tenant IDs a roster entry for
+// acct carries in CoveredTenantIDs. A root-scope or tenant-less account covers no
+// listed tenant (a root-scope entry already covers the fleet), and a failed walk
+// yields none, so the entry then covers its own tenant only (fail closed). Results
+// are memoised in cache per build because accounts commonly share a tenant.
+func (s *Server) signedCoveredTenantIDs(ctx context.Context, acct *account, cache map[string][]string) []string {
+	if acct.RootScope || acct.TenantID == "" {
+		return nil
+	}
+	if ids, ok := cache[acct.TenantID]; ok {
+		return ids
+	}
+	ids := s.tenantDescendantIDs(ctx, acct.TenantID)
+	sort.Strings(ids)
+	cache[acct.TenantID] = ids
+	return ids
 }
 
 // webAuthnRelyingPartyBinding returns the configured relying-party ID and origins for

@@ -30,7 +30,7 @@ const (
 	// a real controller's webauthn.Config holds.
 	sigTestRPID              = "controller.test"
 	sigTestAssertionOrigin   = "https://controller.test"
-	sigTestStewardTenant     = "root/msp-a/client-1"
+	sigTestStewardTenant     = "client-1"
 	sigTestFlagsUserPresent  = 0x01
 	sigTestFlagsUserVerified = 0x04
 )
@@ -555,36 +555,70 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_ForeignTenantCredential_Rejec
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
 	entry.RootScope = false
-	entry.TenantID = "root/msp-b"
+	entry.TenantID = "msp-b"
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{entry})
 
 	env, proof := sigTestWebAuthnProof(t, priv, credID, manifestJSON, []byte("echo hi"), "bash",
 		[]string{"steward-test"}, "nonce-1", time.Now().Add(5*time.Minute))
 
-	// The steward's own tenant is root/msp-a/client-1 — not covered by root/msp-b.
+	// The steward's own tenant is client-1 — not covered by msp-b.
 	err := newSigTestWebAuthnVerifier(caPool).Verify(env, proof)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tenant")
 }
 
-// TestWebAuthnOperatorCredentialVerifier_Verify_AncestorTenantCredential_Accepted verifies
-// the tenant check is subtree containment, not exact equality: an operator scoped to an
-// ancestor of this steward's tenant is authorized.
-func TestWebAuthnOperatorCredentialVerifier_Verify_AncestorTenantCredential_Accepted(t *testing.T) {
+// verifyTenantScopedEntry signs a manifest carrying one entry scoped to entryTenant
+// with the given covered descendant IDs and verifies it on a steward in stewardTenant.
+func verifyTenantScopedEntry(t *testing.T, entryTenant string, covered []string, stewardTenant string) error {
+	t.Helper()
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
 	priv, pubKey := sigTestWebAuthnKeypair(t)
-	credID := []byte("unit-cred-ancestor-tenant")
+	credID := []byte("unit-cred-tenant-scope")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
 	entry.RootScope = false
-	entry.TenantID = "root/msp-a" // sigTestStewardTenant is root/msp-a/client-1
+	entry.TenantID = entryTenant
+	entry.CoveredTenantIDs = covered
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{entry})
 
 	env, proof := sigTestWebAuthnProof(t, priv, credID, manifestJSON, []byte("echo hi"), "bash",
 		[]string{"steward-test"}, "nonce-1", time.Now().Add(5*time.Minute))
 
-	assert.NoError(t, newSigTestWebAuthnVerifier(caPool).Verify(env, proof))
+	v := newSigTestWebAuthnVerifier(caPool)
+	v.stewardTenant = stewardTenant
+	return v.Verify(env, proof)
+}
+
+// TestWebAuthnOperatorCredentialVerifier_Verify_AncestorTenantCredential verifies the
+// tenant check is containment decided from the signed entry's CoveredTenantIDs, never
+// from the shape of a tenant ID: an entry scoped to msp-a that lists client-1 covers a
+// steward in client-1, and covers neither msp-b nor the name-sharing msp-ab.
+func TestWebAuthnOperatorCredentialVerifier_Verify_AncestorTenantCredential(t *testing.T) {
+	covered := []string{"client-1"}
+
+	assert.NoError(t, verifyTenantScopedEntry(t, "msp-a", covered, "client-1"),
+		"entry scoped to msp-a is honoured for a steward in client-1")
+	assert.NoError(t, verifyTenantScopedEntry(t, "msp-a", nil, "msp-a"),
+		"an entry always covers its own tenant")
+
+	for _, foreign := range []string{"msp-b", "msp-ab"} {
+		err := verifyTenantScopedEntry(t, "msp-a", covered, foreign)
+		require.Error(t, err, "steward in %s must be refused", foreign)
+		assert.Contains(t, err.Error(), "tenant")
+	}
+}
+
+// TestWebAuthnOperatorCredentialVerifier_Verify_AncestorEntryWithoutCoveredIDs_Rejected
+// verifies an entry with no resolved descendant information covers its own tenant only,
+// and that a path-shaped tenant ID never matches by prefix.
+func TestWebAuthnOperatorCredentialVerifier_Verify_AncestorEntryWithoutCoveredIDs_Rejected(t *testing.T) {
+	err := verifyTenantScopedEntry(t, "msp-a", nil, "client-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tenant")
+
+	err = verifyTenantScopedEntry(t, "msp-a", nil, "msp-a/client-1")
+	require.Error(t, err, "a tenant-ID prefix must not grant coverage")
 }
 
 // TestWebAuthnOperatorCredentialVerifier_Verify_TenantScopedCredential_UnknownStewardTenant_Rejected
@@ -598,7 +632,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_TenantScopedCredential_Unknow
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
 	entry.RootScope = false
-	entry.TenantID = "root/msp-a"
+	entry.TenantID = "msp-a"
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{entry})
 
 	env, proof := sigTestWebAuthnProof(t, priv, credID, manifestJSON, []byte("echo hi"), "bash",
@@ -620,7 +654,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_RootScopeEntryWithTenant_Reje
 	credID := []byte("unit-cred-contradictory-scope")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
-	entry.TenantID = "root/msp-b" // RootScope stays true
+	entry.TenantID = "msp-b" // RootScope stays true
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{entry})
 
 	env, proof := sigTestWebAuthnProof(t, priv, credID, manifestJSON, []byte("echo hi"), "bash",

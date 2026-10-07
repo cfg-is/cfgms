@@ -74,10 +74,10 @@ func (p *DatabaseEntityGraphProvider) RunRetentionGC(ctx context.Context, policy
 
 	now := time.Now().UTC()
 
-	if err := p.dbSweepTombstones(ctx, now, historyDays, tombstoneDays, overrides); err != nil {
+	if err := p.dbSweepTombstones(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/database: retention gc: sweep tombstones: %w", err)
 	}
-	if err := p.dbPruneHistory(ctx, now, historyDays, tombstoneDays, overrides); err != nil {
+	if err := p.dbPruneHistory(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/database: retention gc: prune history: %w", err)
 	}
 	if err := p.dbSweepOrphanPayloads(ctx); err != nil {
@@ -136,20 +136,24 @@ func (p *DatabaseEntityGraphProvider) dbLoadRetentionOverrides(ctx context.Conte
 	return out, rows.Err()
 }
 
-func dbEffectivePolicyDays(owningTenant string, defaultHistory, defaultTombstone int, overrides []dbRetentionOverride) (int, int) {
-	bestLen := -1
+func dbEffectivePolicyDays(owningTenant string, defaultHistory, defaultTombstone int, overrides []dbRetentionOverride, ancestors map[string][]string) (int, int) {
 	h, ts := defaultHistory, defaultTombstone
-	for _, r := range overrides {
-		if r.tenantPath == owningTenant || strings.HasPrefix(owningTenant, r.tenantPath+"/") {
-			if len(r.tenantPath) > bestLen {
-				bestLen = len(r.tenantPath)
-				if r.historyDays > 0 {
-					h = r.historyDays
-				}
-				if r.tombstoneDays > 0 {
-					ts = r.tombstoneDays
-				}
+	// Chain is the owning tenant followed by its ancestors, nearest first, as
+	// resolved by the caller from the tenant tree's ParentID ancestry. A tenant
+	// with no resolved ancestry is matched on its own override only.
+	chain := append([]string{owningTenant}, ancestors[owningTenant]...)
+	for _, id := range chain {
+		for _, r := range overrides {
+			if r.tenantPath != id {
+				continue
 			}
+			if r.historyDays > 0 {
+				h = r.historyDays
+			}
+			if r.tombstoneDays > 0 {
+				ts = r.tombstoneDays
+			}
+			return h, ts
 		}
 	}
 	return h, ts
@@ -157,7 +161,7 @@ func dbEffectivePolicyDays(owningTenant string, defaultHistory, defaultTombstone
 
 // dbSweepTombstones fully removes subjects whose most-recent log row is 'absence'
 // and whose absence timestamp predates the effective tombstone horizon.
-func (p *DatabaseEntityGraphProvider) dbSweepTombstones(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []dbRetentionOverride) error {
+func (p *DatabaseEntityGraphProvider) dbSweepTombstones(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []dbRetentionOverride, ancestors map[string][]string) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT l.subject,
 		       l.observed_at,
@@ -195,7 +199,7 @@ func (p *DatabaseEntityGraphProvider) dbSweepTombstones(ctx context.Context, now
 	}
 
 	for _, c := range candidates {
-		_, tombDays := dbEffectivePolicyDays(c.owningTenant, defaultHistory, defaultTombstone, overrides)
+		_, tombDays := dbEffectivePolicyDays(c.owningTenant, defaultHistory, defaultTombstone, overrides, ancestors)
 		horizon := now.AddDate(0, 0, -tombDays)
 
 		absenceTime, parseErr := time.Parse(time.RFC3339Nano, c.observedAt)
@@ -241,7 +245,7 @@ func (p *DatabaseEntityGraphProvider) dbSweepTombstones(ctx context.Context, now
 
 // dbPruneHistory removes non-pinned observation log rows older than the
 // effective history depth for each subject's owning tenant.
-func (p *DatabaseEntityGraphProvider) dbPruneHistory(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []dbRetentionOverride) error {
+func (p *DatabaseEntityGraphProvider) dbPruneHistory(ctx context.Context, now time.Time, defaultHistory, defaultTombstone int, overrides []dbRetentionOverride, ancestors map[string][]string) error {
 	pinned, err := p.dbLoadPinnedLogSeqs(ctx)
 	if err != nil {
 		return fmt.Errorf("entitygraph/database: prune history: load pinned: %w", err)
@@ -259,7 +263,7 @@ func (p *DatabaseEntityGraphProvider) dbPruneHistory(ctx context.Context, now ti
 
 	for _, subject := range subjects {
 		owningTenant := tenantBySubject[subject]
-		histDays, _ := dbEffectivePolicyDays(owningTenant, defaultHistory, defaultTombstone, overrides)
+		histDays, _ := dbEffectivePolicyDays(owningTenant, defaultHistory, defaultTombstone, overrides, ancestors)
 		cutoff := now.AddDate(0, 0, -histDays)
 		cutoffStr := cutoff.UTC().Format(time.RFC3339Nano)
 

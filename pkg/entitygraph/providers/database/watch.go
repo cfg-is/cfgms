@@ -241,7 +241,7 @@ func dbWatchFilterMatches(ev interfaces.WatchEvent, tenantPath string, f interfa
 	}
 
 	if f.TenantFilter != "" && ev.EventKind != "edge-updated" {
-		if !tenantVisible(tenantPath, f.TenantFilter) {
+		if !interfaces.NewTenantCut(f.TenantFilter, f.TenantSubtreeIDs).Visible(tenantPath) {
 			return false
 		}
 	}

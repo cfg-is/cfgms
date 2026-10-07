@@ -224,8 +224,8 @@ func (p *DatabaseEntityGraphProvider) ListDrifted(ctx context.Context, filter in
 		query = `SELECT d.subject, d.detected_at, d.config_revision, d.lifecycle_status, d.fields_json
 				 FROM eg_drift_projection d
 				 JOIN eg_entity_index i ON i.subject = d.subject`
-		if filter.TenantFilter != "" {
-			conds = append(conds, tenantSubtreeCond("i.owning_tenant", filter.TenantFilter, &n, &args))
+		if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
+			conds = append(conds, tenantSubtreeCond("i.owning_tenant", cut, &n, &args))
 		}
 		if filter.Kind != "" {
 			conds = append(conds, fmt.Sprintf("i.entity_kind = $%d", n))

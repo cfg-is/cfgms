@@ -454,10 +454,11 @@ func TestGetDriftEvents_TenantScope_ExcludesOtherTenants(t *testing.T) {
 	}
 }
 
-// TestGetDriftEvents_TenantSubtree_IncludesDescendants verifies that the tenant cut
-// is a subtree cut: an MSP-scoped caller sees its client tenants' drift, and a
-// sibling tenant sharing a name prefix is not swept in.
-func TestGetDriftEvents_TenantSubtree_IncludesDescendants(t *testing.T) {
+// TestGetDriftEvents_TenantScope_IsNotAPrefixMatch verifies the entity graph's tenant
+// cut is never a string-prefix test over tenant IDs (ADR-025 A1.1): a report scoped to
+// a tenant sees only entities that tenant owns until the caller supplies a resolved
+// descendant set, and neither a path-shaped child nor a name-sharing sibling is swept in.
+func TestGetDriftEvents_TenantScope_IsNotAPrefixMatch(t *testing.T) {
 	egp := newTestEGProvider(t)
 	now := time.Now()
 
@@ -483,8 +484,8 @@ func TestGetDriftEvents_TenantSubtree_IncludesDescendants(t *testing.T) {
 	for _, e := range events {
 		devices = append(devices, e.DeviceID)
 	}
-	assert.ElementsMatch(t, []string{"msp-host", "client-host"}, devices,
-		"the subtree cut includes descendants and excludes prefix-sharing siblings")
+	assert.ElementsMatch(t, []string{"msp-host"}, devices,
+		"the tenant cut matches the owning tenant exactly and never by ID prefix")
 }
 
 // TestGetDriftEvents_MultipleTenantScopes_QueriesEachSeparately verifies that a

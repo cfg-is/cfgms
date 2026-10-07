@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"strings"
+	"slices"
 	"sync"
 	"time"
 
@@ -70,6 +70,12 @@ type authorizedWebAuthnCredential struct {
 	TenantID     string   `json:"tenant_id"`
 	RootScope    bool     `json:"root_scope"`
 	Grants       []string `json:"grants"`
+	// CoveredTenantIDs are the IDs of TenantID's descendant tenants, resolved by the
+	// controller from the tenant tree's ParentID ancestry (ADR-025 A1.1: a tenant ID
+	// is a single token and never carries its ancestry). A steward has no tenant
+	// store, so this signed list is its only evidence that its tenant sits beneath
+	// TenantID; absent, the entry covers TenantID alone.
+	CoveredTenantIDs []string `json:"covered_tenant_ids,omitempty"`
 }
 
 // webauthnRelyingParty mirrors features/controller/api.WebAuthnRelyingParty — the
@@ -404,8 +410,10 @@ func entryGrantsOperatorPayloadSigning(entry *authorizedWebAuthnCredential) bool
 
 // entryAuthorizedForTenant reports whether entry's owning tenant covers this steward.
 // A root-scope entry (an unscoped platform administrator) covers the whole fleet; any
-// other entry covers only its own tenant path and that path's descendants, matching how
-// the controller scopes a tenant-bound principal's reach.
+// other entry covers its own tenant and the descendant tenants the controller resolved
+// into the signed entry's CoveredTenantIDs, matching how the controller scopes a
+// tenant-bound principal's reach. Descent is never inferred from the shape of a tenant
+// ID, and an entry carrying no covered IDs covers its own tenant only.
 func (v *webauthnOperatorCredentialVerifier) entryAuthorizedForTenant(entry *authorizedWebAuthnCredential) bool {
 	if entry.RootScope {
 		return entry.TenantID == ""
@@ -413,5 +421,5 @@ func (v *webauthnOperatorCredentialVerifier) entryAuthorizedForTenant(entry *aut
 	if entry.TenantID == "" || v.stewardTenant == "" {
 		return false
 	}
-	return v.stewardTenant == entry.TenantID || strings.HasPrefix(v.stewardTenant, entry.TenantID+"/")
+	return v.stewardTenant == entry.TenantID || slices.Contains(entry.CoveredTenantIDs, v.stewardTenant)
 }

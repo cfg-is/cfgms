@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -792,6 +793,29 @@ func (s *Server) tenantSubtreeIDs(ctx context.Context, callerTenant string) tena
 		}
 	}
 	return set
+}
+
+// scopeFilterToTenantSubtree scopes f to tenantID's subtree: TenantSubtree is the
+// tenant itself and TenantSubtreeIDs its ParentID descendants, resolved once per
+// request. A failed or unavailable resolution leaves only the tenant itself
+// (fail closed). An empty tenantID leaves the filter unrestricted.
+func (s *Server) scopeFilterToTenantSubtree(ctx context.Context, f *fleet.Filter, tenantID string) {
+	f.TenantSubtree = tenantID
+	f.TenantSubtreeIDs = s.tenantDescendantIDs(ctx, tenantID)
+}
+
+// tenantDescendantIDs returns the IDs of tenantID's ParentID descendants,
+// excluding tenantID itself, for layers that take the tenant and its resolved
+// descendants as separate inputs. It is empty when tenantID is empty, the tenant
+// manager is unavailable or the walk fails (fail closed).
+func (s *Server) tenantDescendantIDs(ctx context.Context, tenantID string) []string {
+	var ids []string
+	for id := range s.tenantSubtreeIDs(ctx, tenantID) {
+		if id != tenantID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // isWithinTenantScope reports whether resourceTenant is within callerTenant's

@@ -76,6 +76,12 @@ type authorizedWebAuthnCredential struct {
 	TenantID     string   `json:"tenant_id"`
 	RootScope    bool     `json:"root_scope"`
 	Grants       []string `json:"grants"`
+	// CoveredTenantIDs are the IDs of TenantID's descendant tenants, resolved by the
+	// controller from the tenant tree's ParentID ancestry (ADR-025 A1.1: a tenant ID
+	// is a single token and never carries its ancestry). A steward has no tenant
+	// store, so this signed list is its only evidence that its tenant sits beneath
+	// TenantID; absent, the entry covers TenantID alone.
+	CoveredTenantIDs []string `json:"covered_tenant_ids,omitempty"`
 }
 
 // webauthnRelyingParty mirrors features/controller/api.WebAuthnRelyingParty

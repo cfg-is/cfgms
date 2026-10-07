@@ -20,19 +20,6 @@ import (
 // defaultPageSize bounds QueryEntities when the caller supplies no page size.
 const defaultPageSize = 100
 
-// tenantVisible reports whether an entity owned by owningTenant is visible to a
-// caller scoped to tenantFilter. An empty filter sees everything; otherwise the
-// owning tenant must equal the filter or be a strict descendant separated by
-// '/'. The separator is required to avoid matching a sibling tenant whose name
-// merely shares a common prefix (e.g. filter "root/msp-a" must NOT match
-// owningTenant "root/msp-ab"). This is the sole access-control axis (ADR-023 §111-119).
-func tenantVisible(owningTenant, tenantFilter string) bool {
-	if tenantFilter == "" {
-		return true
-	}
-	return owningTenant == tenantFilter || strings.HasPrefix(owningTenant, tenantFilter+"/")
-}
-
 // GetEntity returns the current entity state, provenance, and freshness,
 // applying the caller's tenant cut and source-precedence attribute merge.
 // When opts.AsOf is set the state is projected from the observation log at that
@@ -56,7 +43,7 @@ func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interface
 	}
 
 	// Apply the tenant cut. A filtered-out entity is indistinguishable from missing.
-	if !tenantVisible(owningTenant, opts.TenantFilter) {
+	if !interfaces.NewTenantCut(opts.TenantFilter, opts.TenantSubtreeIDs).Visible(owningTenant) {
 		return nil, fmt.Errorf("entitygraph/sqlite: entity %s: %w", subject, ErrNotFound)
 	}
 
@@ -108,7 +95,7 @@ func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interface
 
 	// Wire collapse-group resolution when requested (ADR-022 §3).
 	if opts.CollapseGroup {
-		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, opts.TenantFilter)
+		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, interfaces.NewTenantCut(opts.TenantFilter, opts.TenantSubtreeIDs))
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/sqlite: resolve collapse group: %w", err)
 		}
@@ -129,9 +116,8 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 		conds = append(conds, "entity_kind = ?")
 		args = append(args, filter.Kind)
 	}
-	if filter.TenantFilter != "" {
-		// Use filter+"/" to avoid matching sibling tenants that share a name prefix.
-		conds = append(conds, tenantSubtreeCond("owning_tenant", filter.TenantFilter, &args))
+	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
+		conds = append(conds, tenantSubtreeCond("owning_tenant", cut, &args))
 	}
 
 	where := ""

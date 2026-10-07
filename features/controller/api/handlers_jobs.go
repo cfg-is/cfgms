@@ -108,7 +108,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.TenantSubtree = parsedTenantPath
 	} else if tenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
-		filter.TenantSubtree = tenantID
+		s.scopeFilterToTenantSubtree(r.Context(), &filter, tenantID)
 	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
