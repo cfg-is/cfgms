@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -22,12 +23,25 @@ const (
 	ActionResultSelfProtect = "self_protect"
 	ActionResultUnsupported = "unsupported"
 	ActionResultNotFound    = "not_found"
-	ActionResultDenied      = "permission_denied"
-	ActionResultFailed      = "failed"
+	// ActionResultProcessChanged means the PID now belongs to a process whose image name
+	// differs from the one the operator saw (the PID was reused).
+	ActionResultProcessChanged = "process_changed"
+	ActionResultDenied         = "permission_denied"
+	ActionResultFailed         = "failed"
 )
 
 // actionTargetKindService is the target kind of the service verbs.
 const actionTargetKindService = "service"
+
+// actionTargetKindProcess is the target kind of the process verbs. The target name is
+// the decimal PID and the single parameter "image" is the image name the operator saw.
+const actionTargetKindProcess = "process"
+
+// actionImageParam is the only parameter of the process verbs.
+const actionImageParam = "image"
+
+// actionImagePattern bounds the image name: no control characters or path separators.
+var actionImagePattern = regexp.MustCompile(`^[^\x00-\x1f/\\]{1,256}$`)
 
 // actionTargetNamePattern bounds a target name before it reaches any OS API.
 var actionTargetNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.@:-]{1,256}$`)
@@ -36,6 +50,7 @@ var actionTargetNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.@:-]{1,256}$`)
 type actionVerb struct {
 	targetKind string
 	serviceOp  ServiceOp
+	processOp  ProcessOp
 }
 
 // stewardActionVerbs is the closed allowlist. Anything else is rejected outright.
@@ -43,6 +58,10 @@ var stewardActionVerbs = map[string]actionVerb{
 	"service.start":   {targetKind: actionTargetKindService, serviceOp: ServiceOpStart},
 	"service.stop":    {targetKind: actionTargetKindService, serviceOp: ServiceOpStop},
 	"service.restart": {targetKind: actionTargetKindService, serviceOp: ServiceOpRestart},
+
+	"process.end":     {targetKind: actionTargetKindProcess, processOp: ProcessOpEnd},
+	"process.suspend": {targetKind: actionTargetKindProcess, processOp: ProcessOpSuspend},
+	"process.resume":  {targetKind: actionTargetKindProcess, processOp: ProcessOpResume},
 }
 
 // stewardActionParamKeys are the only keys a steward_action command may carry: the
@@ -56,14 +75,14 @@ var stewardActionParamKeys = map[string]bool{
 }
 
 // RegisterStewardActionHandler registers the steward_action command handler on h,
-// backed by the platform's in-process service controller.
+// backed by the platform's in-process service and process controllers.
 func (h *Handler) RegisterStewardActionHandler() {
-	h.registerStewardAction(newPlatformServiceController())
+	h.registerStewardAction(newPlatformServiceController(), newPlatformProcessController())
 }
 
-func (h *Handler) registerStewardAction(ctrl ServiceController) {
+func (h *Handler) registerStewardAction(ctrl ServiceController, procs ProcessController) {
 	h.RegisterHandler(cpTypes.CommandStewardAction, func(ctx context.Context, cmd *cpTypes.Command) error {
-		return h.handleStewardAction(ctx, cmd, ctrl)
+		return h.handleStewardAction(ctx, cmd, ctrl, procs)
 	})
 }
 
@@ -75,7 +94,7 @@ func (h *Handler) registerStewardAction(ctrl ServiceController) {
 // the self-protect guard runs; only then is an OS call made. Rejections before the OS
 // call return an error and perform nothing. Outcomes (ok, self_protect, unsupported,
 // not_found, failed) are reported through EventScriptCompleted.
-func (h *Handler) handleStewardAction(ctx context.Context, cmd *cpTypes.Command, ctrl ServiceController) error {
+func (h *Handler) handleStewardAction(ctx context.Context, cmd *cpTypes.Command, ctrl ServiceController, procs ProcessController) error {
 	verb, _ := cmd.Params["verb"].(string)
 	kind, name, targetErr := decodeActionTarget(cmd.Params["target"])
 	parameters, paramsErr := decodeActionParameters(cmd.Params["parameters"])
@@ -123,11 +142,15 @@ func (h *Handler) handleStewardAction(ctx context.Context, cmd *cpTypes.Command,
 	if !actionTargetNamePattern.MatchString(name) {
 		return rejectAction(h, cmd, "invalid target name", errors.New("target name does not match the allowed pattern"))
 	}
+
+	executionID, _ := cmd.Params["execution_id"].(string)
+
+	if spec.targetKind == actionTargetKindProcess {
+		return h.handleProcessAction(ctx, cmd, procs, spec, verb, name, parameters, executionID)
+	}
 	if len(parameters) != 0 {
 		return rejectAction(h, cmd, "unexpected param", errors.New("verb takes no parameters"))
 	}
-
-	executionID, _ := cmd.Params["execution_id"].(string)
 
 	if spec.serviceOp == ServiceOpStop || spec.serviceOp == ServiceOpRestart {
 		self, err := ctrl.IsStewardService(ctx, name)
@@ -174,6 +197,60 @@ func (h *Handler) handleStewardAction(ctx context.Context, cmd *cpTypes.Command,
 			"command_id", cmd.ID,
 			"verb", logging.SanitizeLogValue(verb),
 			"target", logging.SanitizeLogValue(name))
+	}
+	h.sendActionResult(ctx, cmd, executionID, code)
+	return nil
+}
+
+// handleProcessAction runs a process verb. The target name is the decimal PID; the one
+// parameter is the image name the operator saw. System PIDs, the steward itself and its
+// parent are refused with self_protect before any OS call; the controller then verifies
+// the image name against the live process and reports process_changed on a mismatch.
+func (h *Handler) handleProcessAction(ctx context.Context, cmd *cpTypes.Command, procs ProcessController,
+	spec actionVerb, verb, name string, parameters map[string]string, executionID string) error {
+	pid, err := strconv.ParseInt(name, 10, 32)
+	if err != nil {
+		return rejectAction(h, cmd, "invalid target name", errors.New("process target name must be a decimal PID"))
+	}
+	image, ok := parameters[actionImageParam]
+	if len(parameters) != 1 || !ok || !actionImagePattern.MatchString(image) {
+		return rejectAction(h, cmd, "invalid parameters", errors.New("process verbs take exactly one valid image parameter"))
+	}
+
+	if isProtectedPID(int(pid)) {
+		h.logger.Warn("steward_action: refused to act on a protected process",
+			"command_id", cmd.ID,
+			"verb", logging.SanitizeLogValue(verb),
+			"pid", pid)
+		h.sendActionResult(ctx, cmd, executionID, ActionResultSelfProtect)
+		return nil
+	}
+
+	code := ActionResultOK
+	if err := procs.Control(ctx, spec.processOp, int(pid), image); err != nil {
+		switch {
+		case errors.Is(err, ErrProcessUnsupported):
+			code = ActionResultUnsupported
+		case errors.Is(err, ErrProcessNotFound):
+			code = ActionResultNotFound
+		case errors.Is(err, ErrProcessChanged):
+			code = ActionResultProcessChanged
+		case errors.Is(err, ErrProcessPermissionDenied):
+			code = ActionResultDenied
+		default:
+			code = ActionResultFailed
+		}
+		h.logger.Warn("steward_action: process operation did not complete",
+			"command_id", cmd.ID,
+			"verb", logging.SanitizeLogValue(verb),
+			"pid", pid,
+			"result_code", code,
+			"error", logging.SanitizeLogValue(err.Error()))
+	} else {
+		h.logger.Info("steward_action: completed",
+			"command_id", cmd.ID,
+			"verb", logging.SanitizeLogValue(verb),
+			"pid", pid)
 	}
 	h.sendActionResult(ctx, cmd, executionID, code)
 	return nil

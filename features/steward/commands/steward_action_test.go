@@ -75,7 +75,7 @@ func newActionFixture(t *testing.T) *actionFixture {
 	})
 	require.NoError(t, err)
 	ctrl := &recordingServiceController{self: map[string]bool{"cfgms-steward.service": true, "cfgms-steward": true}}
-	h.registerStewardAction(ctrl)
+	h.registerStewardAction(ctrl, newPlatformProcessController())
 	return &actionFixture{h: h, ctrl: ctrl, signer: signer, events: &events, mu: &mu}
 }
 
@@ -96,7 +96,7 @@ func (f *actionFixture) signedAction(t *testing.T, verb, kind, name string, para
 }
 
 func (f *actionFixture) run(cmd *cpTypes.Command) error {
-	return f.h.handleStewardAction(context.Background(), cmd, f.ctrl)
+	return f.h.handleStewardAction(context.Background(), cmd, f.ctrl, newPlatformProcessController())
 }
 
 func (f *actionFixture) lastEvent(t *testing.T) *cpTypes.Event {
@@ -381,6 +381,9 @@ func TestPlatformServiceController_UnknownServiceNotFoundOrUnsupported(t *testin
 func TestStewardActionFilesDoNotShellOut(t *testing.T) {
 	files, err := filepath.Glob("service_control*.go")
 	require.NoError(t, err)
+	procFiles, err := filepath.Glob("process_control*.go")
+	require.NoError(t, err)
+	files = append(files, procFiles...)
 	files = append(files, "steward_action.go")
 	for _, f := range files {
 		b, err := os.ReadFile(f)
