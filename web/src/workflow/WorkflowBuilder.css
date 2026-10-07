@@ -1,0 +1,199 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * WorkflowBuilder styles (Issue #4615) — token-based, no hardcoded colors.
+ * Mirrors .editbar / .palette / .canvctl in
+ * docs/design/mockups/workflow-studio.html (editor mode). Node cards reuse the
+ * .wfg-* rules from WorkflowGraph.css.
+ */
+
+@import '@design-tokens';
+
+.bld-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+.bld-state {
+  align-items: center;
+  justify-content: center;
+}
+
+.bld-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.bld-wfname,
+.bld-name {
+  font-weight: 700;
+  font-size: var(--text-base);
+}
+
+.bld-name {
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+}
+
+.bld-spacer {
+  flex: 1;
+}
+
+.bld-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--tint-orange);
+  border-bottom: 1px solid var(--state-warn);
+  color: var(--text-primary);
+}
+
+.bld-stage {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.bld-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.bld-palette {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 172px;
+  padding: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  box-shadow: var(--pop-sh);
+}
+
+.bld-ph {
+  padding: 2px 4px 6px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.bld-pitem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: grab;
+  text-align: left;
+}
+
+.bld-pitem:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.bld-pitem .wfg-nico {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 8px;
+}
+
+.bld-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.bld-node.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.bld-canvas .react-flow__controls {
+  box-shadow: var(--pop-sh);
+}
+
+.bld-canvas .react-flow__controls-button {
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  fill: var(--text-primary);
+}
+
+.bld-inspector {
+  width: 300px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+}
+
+.bld-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bld-field .lbl {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.bld-field input,
+.bld-field select,
+.bld-field textarea {
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.bld-field textarea {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  resize: vertical;
+}

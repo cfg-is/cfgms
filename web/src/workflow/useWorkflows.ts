@@ -59,6 +59,10 @@ export interface WorkflowStep {
   loop?: boolean                // true for for/while/foreach container steps
   fan_out?: boolean
   fan_in?: boolean
+  // Step-type blocks authored by the workflow builder (Issue #4615). Durations
+  // are integer nanoseconds, as time.Duration marshals in features/workflow.
+  approval?: { message: string; approver_permission?: string; timeout: number }
+  notify?: { url: string; title: string; message?: string; severity?: string }
   /*
    * Verbatim step JSON as the controller sent it. The typed fields above model
    * only what the renderers need; features/workflow/types.go Step also carries
@@ -164,6 +168,23 @@ function parseStep(value: unknown): WorkflowStep | null {
   if (r.loop !== undefined) step.loop = bool(r.loop)
   if (r.fan_out !== undefined) step.fan_out = bool(r.fan_out)
   if (r.fan_in !== undefined) step.fan_in = bool(r.fan_in)
+  if (typeof r.approval === 'object' && r.approval !== null) {
+    const a = r.approval as Record<string, unknown>
+    step.approval = {
+      message: str(a.message),
+      approver_permission: a.approver_permission !== undefined ? str(a.approver_permission) : undefined,
+      timeout: num(a.timeout),
+    }
+  }
+  if (typeof r.notify === 'object' && r.notify !== null) {
+    const n = r.notify as Record<string, unknown>
+    step.notify = {
+      url: str(n.url),
+      title: str(n.title),
+      message: n.message !== undefined ? str(n.message) : undefined,
+      severity: n.severity !== undefined ? str(n.severity) : undefined,
+    }
+  }
   return step
 }
 

@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach } from 'vitest'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
 import type { VersionedWorkflow } from './useWorkflows.ts'
 import { parseVersionedWorkflow } from './useWorkflows.ts'
@@ -222,9 +223,18 @@ function renderDrawer(
   rootPath = 'root/msp-a/client-1',
 ) {
   return render(
-    <TenantScopeProvider rootPath={rootPath}>
-      <WorkflowDrawer workflow={workflow} onClose={onClose} />
-    </TenantScopeProvider>,
+    <MemoryRouter>
+      <TenantScopeProvider rootPath={rootPath}>
+        <WorkflowDrawer workflow={workflow} onClose={onClose} />
+      </TenantScopeProvider>
+      <Routes>
+        <Route path="*" element={null} />
+        <Route
+          path="/workflows/:name/builder"
+          element={<div data-testid="builder-route" />}
+        />
+      </Routes>
+    </MemoryRouter>,
   )
 }
 
@@ -252,7 +262,7 @@ describe('WorkflowDrawer — header', () => {
     expect(screen.getByTestId('drawer-tenant-path')).toHaveTextContent('root')
   })
 
-  it('renders "Open builder" affordance as a stub button', () => {
+  it('renders "Open builder" affordance in the drawer header', () => {
     renderDrawer()
     expect(screen.getByTestId('drawer-open-builder')).toBeInTheDocument()
   })
@@ -262,6 +272,14 @@ describe('WorkflowDrawer — header', () => {
     renderDrawer(makeWorkflow(), onClose)
     fireEvent.click(screen.getByTestId('drawer-close'))
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('WorkflowDrawer — Open builder (Issue #4615)', () => {
+  it('navigates to the full-screen builder route for the workflow', () => {
+    renderDrawer()
+    fireEvent.click(screen.getByTestId('drawer-open-builder'))
+    expect(screen.getByTestId('builder-route')).toBeInTheDocument()
   })
 })
 

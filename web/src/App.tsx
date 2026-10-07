@@ -17,6 +17,7 @@
  *   /config          → AppShell layout → ConfigListView
  *   /modules         → AppShell layout → ModuleReviewQueue
  *   /workflows       → AppShell layout → WorkflowListView
+ *   /workflows/:name/builder, /workflows/new/builder → WorkflowBuilder (full-screen, no shell; Issue #4615)
  *   /accounts        → AppShell layout → AccountsView
  *   /certificates    → AppShell layout → CertificatesView
  *   /registration    → AppShell layout → RegistrationConsolePage
@@ -60,6 +61,7 @@ import FleetOverview from './fleet/FleetOverview.tsx'
 import StewardAssetPage from './fleet/StewardAssetPage.tsx'
 import AuditView from './audit/AuditView.tsx'
 import ConfigListView from './config/ConfigListView.tsx'
+import WorkflowBuilder from './workflow/WorkflowBuilder.tsx'
 import WorkflowListView from './workflow/WorkflowListView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
 import CertificatesView from './certificates/CertificatesView.tsx'
@@ -99,6 +101,9 @@ function App() {
           element={
             <RequireAuth>
               <Routes>
+                {/* Full-screen workflow builder: outside the app shell (Issue #4615) */}
+                <Route path="/workflows/new/builder" element={<WorkflowBuilder />} />
+                <Route path="/workflows/:name/builder" element={<WorkflowBuilder />} />
                 <Route path="/" element={<AppShell />}>
                   <Route index element={<FleetOverview />} />
                   <Route path="stewards/:id" element={<StewardAssetPage />} />
