@@ -141,6 +141,58 @@ func (e *Engine) executeWebhookStep(ctx context.Context, step Step, execution *W
 	return nil
 }
 
+// executeNotifyStep sends a structured notification through the same HTTP
+// client (and therefore the same URL/SSRF validation) as webhook steps.
+func (e *Engine) executeNotifyStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Notify == nil {
+		return fmt.Errorf("notify configuration is required for notify steps")
+	}
+
+	vars := execution.GetVariables()
+	rendered, err := renderNotifyConfig(step.Notify, vars)
+	if err != nil {
+		return fmt.Errorf("template rendering failed for step %q: %w", step.Name, err)
+	}
+
+	severity := rendered.Severity
+	if severity == "" {
+		severity = NotifySeverityInfo
+	}
+
+	httpConfig := &HTTPConfig{
+		URL:     rendered.URL,
+		Method:  "POST",
+		Headers: rendered.Headers,
+		Body: map[string]interface{}{
+			"title":        rendered.Title,
+			"message":      rendered.Message,
+			"severity":     severity,
+			"workflow":     execution.WorkflowName,
+			"execution_id": execution.ID,
+			"step":         step.Name,
+		},
+		Auth:           rendered.Auth,
+		Timeout:        rendered.Timeout,
+		Retry:          rendered.Retry,
+		ExpectedStatus: []int{200, 201, 202, 204},
+	}
+
+	response, err := e.httpClient.ExecuteRequest(ctx, httpConfig)
+	if err != nil {
+		return fmt.Errorf("notify request failed: %w", err)
+	}
+
+	e.mutex.Lock()
+	execution.SetVariable(step.Name+"_notify_status", response.StatusCode)
+	e.mutex.Unlock()
+
+	e.logger.Info("Notify step completed",
+		"step", step.Name,
+		"status_code", response.StatusCode)
+
+	return nil
+}
+
 // executeDelayStep executes a delay workflow step
 func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
 	if step.Delay == nil {

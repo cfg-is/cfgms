@@ -120,6 +120,9 @@ type Step struct {
 	// Webhook configuration for webhook steps
 	Webhook *WebhookConfig `yaml:"webhook,omitempty" json:"webhook,omitempty"`
 
+	// Notify configuration for notify steps
+	Notify *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
+
 	// Delay configuration for delay steps
 	Delay *DelayConfig `yaml:"delay,omitempty" json:"delay,omitempty"`
 
@@ -198,6 +201,9 @@ const (
 
 	// StepTypeWebhook handles webhook-based operations
 	StepTypeWebhook StepType = "webhook"
+
+	// StepTypeNotify sends a structured message through the outbound webhook path
+	StepTypeNotify StepType = "notify"
 
 	// StepTypeDelay introduces delays in workflow execution
 	StepTypeDelay StepType = "delay"
@@ -766,6 +772,42 @@ type WebhookConfig struct {
 	Auth *AuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
 
 	// Timeout for the webhook request
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// Retry configuration
+	Retry *RetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+}
+
+// Notification severities accepted by NotifyConfig.Severity.
+const (
+	NotifySeverityInfo     = "info"
+	NotifySeverityWarning  = "warning"
+	NotifySeverityCritical = "critical"
+)
+
+// NotifyConfig defines configuration for notify workflow steps. Delivery uses
+// the same SSRF-hardened HTTP client as webhook steps; the message is POSTed
+// as JSON {title, message, severity, workflow, execution_id, step}.
+type NotifyConfig struct {
+	// URL is the destination endpoint (validated like a webhook URL)
+	URL string `yaml:"url" json:"url"`
+
+	// Title is the short notification title (required)
+	Title string `yaml:"title" json:"title"`
+
+	// Message is the notification body
+	Message string `yaml:"message,omitempty" json:"message,omitempty"`
+
+	// Severity is info, warning or critical (default: info)
+	Severity string `yaml:"severity,omitempty" json:"severity,omitempty"`
+
+	// Headers contains HTTP headers to send with the request
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Auth is the authentication configuration
+	Auth *AuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
+	// Timeout for the request
 	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 
 	// Retry configuration

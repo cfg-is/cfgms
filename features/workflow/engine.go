@@ -532,6 +532,8 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = e.executeAPIStep(ctx, step, execution)
 	case StepTypeWebhook:
 		err = e.executeWebhookStep(ctx, step, execution)
+	case StepTypeNotify:
+		err = e.executeNotifyStep(ctx, step, execution)
 	case StepTypeDelay:
 		err = e.executeDelayStep(ctx, step, execution)
 	case StepTypeApproval:
@@ -1429,6 +1431,10 @@ func retryConfigForStep(step Step) *RetryConfig {
 	case StepTypeWebhook:
 		if step.Webhook != nil {
 			return step.Webhook.Retry
+		}
+	case StepTypeNotify:
+		if step.Notify != nil {
+			return step.Notify.Retry
 		}
 	}
 	return nil
