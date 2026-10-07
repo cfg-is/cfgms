@@ -11,9 +11,9 @@
  *   MonitoringConfig → GET /api/v1/monitoring/config
  *   AnomaliesData    → GET /api/v1/monitoring/anomalies
  *
- * Component health (GET /api/v1/monitoring/components/{component}/health)
- * always returns 503 ("Platform monitor not initialized") — the view renders
- * that section as a designed Error state without fetching on load.
+ * Component health (GET /api/v1/monitoring/components/{component}/health) is
+ * fetched on demand by useComponentHealth once a component is selected. A 404
+ * (unknown component) or 5xx surfaces as that panel's error only.
  *
  * All three endpoints are fetched in parallel. Each section exposes an
  * independent error field so the view can render partial results: a config
@@ -219,6 +219,69 @@ export function useMonitoring(): UseMonitoringResult {
     healthError: current?.healthError ?? null,
     configError: current?.configError ?? null,
     anomaliesError: current?.anomaliesError ?? null,
+    retry,
+  }
+}
+
+export interface ComponentHealth {
+  status: string
+  message: string
+  lastChecked: string
+}
+
+export interface UseComponentHealthResult {
+  data: ComponentHealth | null
+  loading: boolean
+  error: string | null
+  retry: () => void
+}
+
+function parseComponentHealth(body: unknown): ComponentHealth {
+  if (typeof body !== 'object' || body === null) {
+    throw new Error('unexpected component health response shape')
+  }
+  const r = body as Record<string, unknown>
+  return {
+    status: typeof r.status === 'string' ? r.status : 'unknown',
+    message: typeof r.message === 'string' ? r.message : '',
+    lastChecked: typeof r.last_checked === 'string' ? r.last_checked : '',
+  }
+}
+
+interface ComponentFetchState {
+  key: string
+  result: EndpointResult<ComponentHealth>
+}
+
+/** Fetches one component's health; idle (not loading) when name is null. */
+export function useComponentHealth(name: string | null): UseComponentHealthResult {
+  const [attempt, setAttempt] = useState(0)
+  const [state, setState] = useState<ComponentFetchState | null>(null)
+
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
+
+  const key = name === null ? '' : `${attempt}:${name}`
+
+  useEffect(() => {
+    if (name === null) return
+    let cancelled = false
+    fetchEndpoint(
+      `/api/v1/monitoring/components/${encodeURIComponent(name)}/health`,
+      parseComponentHealth,
+    ).then((result) => {
+      if (!cancelled) setState({ key, result })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [key, name])
+
+  const current = name !== null && state?.key === key ? state.result : null
+
+  return {
+    data: current?.data ?? null,
+    loading: name !== null && current === null,
+    error: current?.error ?? null,
     retry,
   }
 }

@@ -11,8 +11,9 @@
  *      dependency map (from SystemHealth's components/dependencies maps).
  *   2. Anomalies — always-empty list with a designed Empty state (the
  *      server returns [] today; the section is drawn to match the mockup).
- *   3. Component detail — always-503 designed Error state matching the
- *      "Platform monitor not initialized" posture described in the story.
+ *   3. Component detail — health for the component selected in section 1,
+ *      from GET /api/v1/monitoring/components/{component}/health. A 404/5xx
+ *      is that panel's Error state only; the summary stays.
  *   4. Monitoring config — read-only key-value groups from /config.
  *
  * Status pill colour mapping (cstate from visibility-surfaces.html):
@@ -21,7 +22,8 @@
  *   "unhealthy"    → crit
  *   everything else → neutral  (covers "no_connections", "available", etc.)
  */
-import { useMonitoring } from './useMonitoring.ts'
+import { useState } from 'react'
+import { useComponentHealth, useMonitoring } from './useMonitoring.ts'
 import './MonitoringView.css'
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -196,7 +198,11 @@ function HealthSection({
   health,
   healthError,
   onRetry,
+  selected,
+  onSelect,
 }: {
+  selected: string | null
+  onSelect: (name: string) => void
   health: { status: string; timestamp: string; version: string; uptime: string; components: Record<string, string>; dependencies: Record<string, string> } | null
   healthError: string | null
   onRetry: () => void
@@ -236,8 +242,20 @@ function HealthSection({
 
       <div className="mv-cgrid mv-mt10">
         {Object.entries(health.components).map(([name, status]) => (
-          <div className="mv-ccard" key={name} data-testid={`component-${name}`}>
-            <span className="mv-cname mv-mono">{name.replace(/_/g, ' ')}</span>
+          <div
+            className={`mv-ccard${selected === name ? ' selected' : ''}`}
+            key={name}
+            data-testid={`component-${name}`}
+          >
+            <button
+              type="button"
+              className="mv-csel mv-cname mv-mono"
+              aria-pressed={selected === name}
+              data-testid={`component-select-${name}`}
+              onClick={() => onSelect(name)}
+            >
+              {name.replace(/_/g, ' ')}
+            </button>
             <StatusPill status={status} />
           </div>
         ))}
@@ -309,23 +327,57 @@ function AnomaliesSection({
   )
 }
 
-// ── Component-detail section (designed error — always 503) ─────────────────
+// ── Component-detail section ───────────────────────────────────────────────
 
-function ComponentDetailSection() {
+function ComponentDetailSection({ selected }: { selected: string | null }) {
+  const { data, loading, error, retry } = useComponentHealth(selected)
+
+  let body
+  if (selected === null) {
+    body = (
+      <div className="mv-notice" data-testid="component-detail-empty">
+        <p>Select a component to see its health.</p>
+      </div>
+    )
+  } else if (loading) {
+    body = (
+      <span
+        className="mv-skel"
+        style={{ height: '60px', display: 'block' }}
+        data-testid="component-detail-loading"
+        aria-label="Loading component detail"
+      />
+    )
+  } else if (error !== null) {
+    body = <SectionError message={error} onRetry={retry} testId="component-detail-error" />
+  } else if (data !== null) {
+    const ts = data.lastChecked
+      ? data.lastChecked.replace('T', ' ').replace('Z', ' UTC')
+      : ''
+    body = (
+      <div data-testid="component-detail">
+        <StatusPill status={data.status} testId="component-detail-status" />
+        {data.message && (
+          <p className="mv-detail-msg" data-testid="component-detail-message">
+            {data.message}
+          </p>
+        )}
+        {ts && (
+          <p className="mv-timestamp">
+            Checked <span className="mv-mono">{ts}</span>
+          </p>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="mv-panel">
-      <h2>
-        Component detail
-        <span className="mv-soon">soon</span>
-      </h2>
-      <p className="mv-panel-sub">Per-component health</p>
-      <div className="mv-notice" data-testid="component-detail-unavailable">
-        <p>Per-component detail is unavailable.</p>
-        <p className="mv-notice-np">
-          The platform monitor is not initialised, so components cannot be
-          inspected individually. The summary above still reflects live checks.
-        </p>
-      </div>
+      <h2>Component detail</h2>
+      <p className="mv-panel-sub">
+        {selected === null ? 'Per-component health' : <span className="mv-mono">{selected}</span>}
+      </p>
+      {body}
     </div>
   )
 }
@@ -395,6 +447,7 @@ export default function MonitoringView() {
     anomaliesError,
     retry,
   } = useMonitoring()
+  const [selected, setSelected] = useState<string | null>(null)
 
   if (loading) {
     return (
@@ -434,11 +487,17 @@ export default function MonitoringView() {
     <div className="mv-content">
       <PageHeader />
 
-      <HealthSection health={health} healthError={healthError} onRetry={retry} />
+      <HealthSection
+        health={health}
+        healthError={healthError}
+        onRetry={retry}
+        selected={selected}
+        onSelect={setSelected}
+      />
 
       <div className="mv-two">
         <AnomaliesSection anomalies={anomalies} anomaliesError={anomaliesError} />
-        <ComponentDetailSection />
+        <ComponentDetailSection selected={selected} />
       </div>
 
       <ConfigSection config={config} configError={configError} />
