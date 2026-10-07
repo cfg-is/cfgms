@@ -17,17 +17,11 @@
  * unchanged state — same treatment as ModuleReviewQueue's action-error block.
  */
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router'
+import AlertSeverity from './AlertSeverity.tsx'
 import { useAlerts } from './useAlerts.ts'
 
 const SILENCE_HOURS = 24
-
-function severityColor(severity: string): string {
-  switch (severity) {
-    case 'critical': return 'var(--state-crit)'
-    case 'warning': return 'var(--state-warn)'
-    default: return 'var(--text-faint)'
-  }
-}
 
 export default function AlertCenter() {
   const [open, setOpen] = useState(false)
@@ -117,11 +111,7 @@ export default function AlertCenter() {
           )}
           {alerts.map((alert) => (
             <div key={alert.id} className="row" data-testid="alert-row">
-              <span
-                className="dot"
-                aria-hidden="true"
-                style={{ color: severityColor(alert.severity) }}
-              />
+              <AlertSeverity severity={alert.severity} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div>{alert.description}</div>
                 <div className="sub">{alert.device_id}</div>
@@ -148,6 +138,10 @@ export default function AlertCenter() {
               </div>
             </div>
           ))}
+          <div className="sep" />
+          <Link to="/alerts" className="alert-viewall" onClick={() => setOpen(false)}>
+            View all alerts
+          </Link>
         </div>
       )}
     </div>

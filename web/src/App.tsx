@@ -73,6 +73,7 @@ import CliLogin from './pages/CliLogin.tsx'
 import CliPresence from './pages/CliPresence.tsx'
 import ReportsDashboardView from './reports/ReportsDashboardView.tsx'
 import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
+import AlertsView from './alerts/AlertsView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
 import TenantAdminView from './tenants/TenantAdminView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
@@ -113,6 +114,7 @@ function App() {
                   <Route path="passkeys" element={<PasskeysView />} />
                   <Route path="reports" element={<ReportsDashboardView />} />
                   <Route path="compliance" element={<ComplianceSummaryView />} />
+                  <Route path="alerts" element={<AlertsView />} />
                   <Route path="monitoring" element={<MonitoringView />} />
                   <Route path="tenants" element={<TenantAdminView />} />
                   <Route path="installer" element={<InstallerPage />} />

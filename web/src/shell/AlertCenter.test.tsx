@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
 import AlertCenter from './AlertCenter.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -51,20 +52,20 @@ afterEach(() => {
 
 describe('AlertCenter', () => {
   it('renders a bell button with no badge when there are no alerts', () => {
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     const button = screen.getByRole('button', { name: /notifications/i })
     expect(button).toBeInTheDocument()
     expect(screen.queryByTestId('alert-badge')).not.toBeInTheDocument()
   })
 
   it('opens a popover showing the designed empty state when there are no alerts', async () => {
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     await waitFor(() => expect(screen.getByText(/no notifications/i)).toBeInTheDocument())
   })
 
   it('closes on Escape', async () => {
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     await waitFor(() => expect(screen.getByRole('menu')).toBeInTheDocument())
     fireEvent.keyDown(document, { key: 'Escape' })
@@ -80,7 +81,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     expect(screen.queryByTestId('alert-badge')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
@@ -102,7 +103,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     await waitFor(() => expect(screen.getAllByTestId('alert-row')).toHaveLength(2))
@@ -124,7 +125,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     await waitFor(() => expect(screen.getByText('Disk usage high')).toBeInTheDocument())
@@ -149,7 +150,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     // Wait for alert row to appear
@@ -196,7 +197,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
@@ -243,7 +244,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
 
@@ -285,7 +286,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
 
@@ -325,7 +326,7 @@ describe('AlertCenter', () => {
     })
 
     try {
-      render(<AlertCenter />)
+      render(<MemoryRouter><AlertCenter /></MemoryRouter>)
       fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
       await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
 
@@ -355,7 +356,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
 
@@ -379,7 +380,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     await waitFor(() => expect(screen.getByText(/failed to load alerts/i)).toBeInTheDocument())
@@ -398,7 +399,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     await waitFor(() => expect(screen.getByText(/failed to load alerts/i)).toBeInTheDocument())
@@ -419,7 +420,7 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
 
     await waitFor(() => expect(screen.getByText(/failed to load alerts/i)).toBeInTheDocument())
@@ -436,12 +437,43 @@ describe('AlertCenter', () => {
       return Promise.resolve(new Response(null, { status: 204 }))
     })
 
-    render(<AlertCenter />)
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
 
     // Already acknowledged: no Acknowledge button, but Silence is still present
     expect(screen.queryByRole('button', { name: /acknowledge/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /silence/i })).toBeInTheDocument()
+  })
+
+  it('renders severity as icon plus text label for warning and critical', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(
+          alertsResponse([
+            makeAlert({ id: 'c', severity: 'critical' }),
+            makeAlert({ id: 'w', severity: 'warning' }),
+          ]),
+        )
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+    const { container } = render(<MemoryRouter><AlertCenter /></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+    await waitFor(() => expect(screen.getAllByTestId('alert-severity')).toHaveLength(2))
+    expect(screen.getByText('Critical')).toBeInTheDocument()
+    expect(screen.getByText('Warning')).toBeInTheDocument()
+    expect(container.querySelector('.dot')).toBeNull()
+    const sevs = screen.getAllByTestId('alert-severity')
+    expect(sevs[0]?.querySelector('path')?.getAttribute('d')).not.toBe(
+      sevs[1]?.querySelector('path')?.getAttribute('d'),
+    )
+  })
+
+  it('has a View all alerts link to /alerts', () => {
+    render(<MemoryRouter><AlertCenter /></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+    expect(screen.getByRole('link', { name: /view all alerts/i })).toHaveAttribute('href', '/alerts')
   })
 })

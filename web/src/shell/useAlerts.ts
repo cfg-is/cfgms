@@ -33,6 +33,8 @@ export interface Alert {
   description: string
   acknowledged: boolean
   silenced: boolean
+  acknowledged_by: string
+  silenced_by: string
 }
 
 /** Outcome of an alert mutation; mirrors modules/useModuleQueue.ts ActionResult. */
@@ -45,11 +47,17 @@ export interface UseAlertsResult {
   error: string | null
   acknowledge: (id: string) => Promise<ActionResult>
   silence: (id: string, until: Date) => Promise<ActionResult>
+  unsilence: (id: string) => Promise<ActionResult>
   refresh: () => void
 }
 
+export interface UseAlertsOptions {
+  /** Request silenced alerts too (include_silenced=true). Default false. */
+  includeSilenced?: boolean
+}
+
 interface AlertsState {
-  key: number
+  key: string
   alerts?: Alert[]
   totalAlerts?: number
   error?: string
@@ -67,6 +75,8 @@ function parseAlert(value: unknown): Alert | null {
     description: typeof r.description === 'string' ? r.description : '',
     acknowledged: r.acknowledged === true,
     silenced: r.silenced === true,
+    acknowledged_by: typeof r.acknowledged_by === 'string' ? r.acknowledged_by : '',
+    silenced_by: typeof r.silenced_by === 'string' ? r.silenced_by : '',
   }
 }
 
@@ -95,7 +105,8 @@ async function postAlertAction(path: string, init: RequestInit): Promise<ActionR
   }
 }
 
-export function useAlerts(open: boolean): UseAlertsResult {
+export function useAlerts(open: boolean, options: UseAlertsOptions = {}): UseAlertsResult {
+  const includeSilenced = options.includeSilenced === true
   const [gen, setGen] = useState(0)
   const [state, setState] = useState<AlertsState | null>(null)
 
@@ -104,11 +115,14 @@ export function useAlerts(open: boolean): UseAlertsResult {
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    const key = gen
-    apiFetch('/api/v1/reports/dashboard/alerts')
+    const key = `${gen}:${includeSilenced}`
+    const path = includeSilenced
+      ? '/api/v1/reports/dashboard/alerts?include_silenced=true'
+      : '/api/v1/reports/dashboard/alerts'
+    apiFetch(path)
       .then(async (r) => {
         if (!r.ok) {
-          throw new Error(`GET /api/v1/reports/dashboard/alerts — ${r.status}`)
+          throw new Error(`GET ${path} — ${r.status}`)
         }
         const body = await r.json() as unknown
         if (typeof body !== 'object' || body === null) {
@@ -141,9 +155,9 @@ export function useAlerts(open: boolean): UseAlertsResult {
     return () => {
       cancelled = true
     }
-  }, [open, gen])
+  }, [open, gen, includeSilenced])
 
-  const current = state?.key === gen ? state : null
+  const current = state?.key === `${gen}:${includeSilenced}` ? state : null
   const loading = open && current === null
 
   const acknowledge = useCallback(
@@ -174,6 +188,18 @@ export function useAlerts(open: boolean): UseAlertsResult {
     [refresh],
   )
 
+  const unsilence = useCallback(
+    async (id: string): Promise<ActionResult> => {
+      const result = await postAlertAction(
+        `/api/v1/alerts/${encodeURIComponent(id)}/unsilence`,
+        { method: 'POST' },
+      )
+      if (result.ok) refresh()
+      return result
+    },
+    [refresh],
+  )
+
   return {
     alerts: current?.alerts ?? [],
     totalAlerts: current?.totalAlerts ?? 0,
@@ -181,6 +207,7 @@ export function useAlerts(open: boolean): UseAlertsResult {
     error: current?.error ?? null,
     acknowledge,
     silence,
+    unsilence,
     refresh,
   }
 }
