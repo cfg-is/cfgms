@@ -1342,8 +1342,8 @@ func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 // REQUIRED TEST from ADR-025 Decision 1: a root-scoped caller — identified by the
 // explicit RootScoped marker (Amendment 1 A1.3), never inferred from an empty
 // callerTenant — without an active grant or break-glass session must not see a genuine
-// root/msp-a descendant through GET /api/v1/tenants. List denial is silent (the
-// descendant is simply omitted); the single-resource GET counterpart instead returns a
+// root/msp-a descendant through GET /api/v1/tenants. The list shows the MSP only as a
+// boundary row (Issue #4647); the single-resource GET counterpart instead returns a
 // step-up-shaped 401 challenge — see
 // TestAuthorizeRootScopedCaller_DeniedRealDescendantWithoutCrossing in
 // handlers_tenant_crossing_test.go.
@@ -1363,8 +1363,11 @@ func TestHandleListTenants_RootScopedCallerDeniedRealDescendantWithoutCrossing(t
 	require.Equal(t, http.StatusOK, rec.Code)
 	ids := tenantIDsFromListResponse(t, rec.Body.Bytes())
 	assert.Contains(t, ids, "root", "root-scoped caller must see the root tenant itself")
-	assert.NotContains(t, ids, "msp-a",
-		"a real root/msp-a descendant must not be visible absent an active grant or break-glass session")
+	byID := rowsByID(listAsPrincipal(t, server, caller))
+	require.Len(t, byID["msp-a"], 1)
+	assert.Equal(t, true, byID["msp-a"][0]["boundary"],
+		"without a crossing, an MSP is visible only as a boundary row (A6.4)")
+	assert.Equal(t, false, byID["msp-a"][0]["accessible"])
 }
 
 // TestHandleListTenants_RootScopedCallerAllowedWithActiveGrant is the REQUIRED TEST's

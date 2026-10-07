@@ -497,8 +497,10 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 // descendant of it in the ParentID hierarchy (isCallerAuthorizedForTenant, ADR-025
 // Amendment 1 A1.2). A root-scoped caller (ADR-025 Amendment 1 A1.3) sees "root" plus
 // only those descendants it holds an active grant or break-glass crossing for (ADR-025
-// Decision 1) — items it lacks a crossing for are silently omitted, not challenged:
-// a bulk list has no single resource to attach a step-up challenge to.
+// Decision 1). Each MSP (direct child of root) it lacks a crossing for is returned as a
+// boundary row — MSP-level facts only, accessible=false (ADR-025 Amendment 6, A6.4) — so
+// break-glass has a target. Tenants below such an MSP are omitted: a bulk list has no
+// single resource to attach a step-up challenge to, and naming a client would leak it.
 func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
@@ -523,7 +525,7 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	counts, err := s.subtreeDeviceCounts(r.Context(), all, result)
+	rollup, err := s.rollupTenants(r.Context(), all)
 	if err != nil {
 		s.logger.Error("Tenant device count failed",
 			"caller_tenant", logging.SanitizeLogValue(callerTenant),
@@ -531,10 +533,17 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to list tenants", "LIST_FAILED")
 		return
 	}
+	counts := subtreeDeviceCounts(rollup, result)
 
-	items := make([]tenantListItem, 0, len(result))
+	items := make([]any, 0, len(result))
 	for _, td := range result {
-		items = append(items, tenantListItem{TenantData: td, DeviceCount: counts[td.ID]})
+		items = append(items, tenantListItem{TenantData: td, DeviceCount: counts[td.ID], Accessible: true})
+	}
+	if subjectToTenantCrossingBoundary(principal) {
+		for _, td := range s.boundaryMSPs(r.Context(), principal, all) {
+			tr := rollup[td.ID]
+			items = append(items, newTenantBoundaryRow(td, tr))
+		}
 	}
 
 	s.logger.Debug("Listed tenants",
@@ -551,6 +560,61 @@ type tenantListItem struct {
 	// DeviceCount is the number of stewards in the tenant's subtree that the caller
 	// may see. Same counting rule as the billing roll-up (ADR-025 Amendment 6).
 	DeviceCount int `json:"device_count"`
+	// Boundary is always false on a full row; Accessible is always true (Issue #4647).
+	Boundary   bool `json:"boundary"`
+	Accessible bool `json:"accessible"`
+}
+
+// tenantBoundaryRow is the list item for a walled-off MSP (ADR-025 Amendment 6, A6.4):
+// MSP-level facts only. It is a dedicated struct, never a copy of TenantData with
+// fields cleared, so a field added to TenantData cannot reach a caller that holds no
+// crossing. ClientCount is a count of direct clients and names none of them.
+type tenantBoundaryRow struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ParentID    string `json:"parent_id"`
+	Status      string `json:"status,omitempty"`
+	Boundary    bool   `json:"boundary"`
+	Accessible  bool   `json:"accessible"`
+	TechCount   int    `json:"tech_count"`
+	DeviceCount int    `json:"device_count"`
+	ClientCount int    `json:"client_count"`
+}
+
+func newTenantBoundaryRow(td *business.TenantData, tr *tenantRollup) tenantBoundaryRow {
+	row := tenantBoundaryRow{ID: td.ID, Name: td.Name, ParentID: td.ParentID, Boundary: true}
+	// Only active or suspended is reported, and never why a tenant is suspended.
+	if td.Status == business.TenantStatusActive || td.Status == business.TenantStatusSuspended {
+		row.Status = string(td.Status)
+	}
+	if tr != nil {
+		row.TechCount = tr.SubtreeTechs
+		row.DeviceCount = tr.SubtreeEndpoints
+		row.ClientCount = len(tr.Children)
+	}
+	return row
+}
+
+// boundaryMSPs returns the direct children of the root tenant for which principal's
+// decision is tenantAuthNeedsCrossing. The direct-child test is mandatory: tenants below
+// an MSP also decide NeedsCrossing, and listing them would name clients. An MSP the
+// caller may access (grant or break-glass) is tenantAuthAllowed and shows only as a
+// normal row.
+func (s *Server) boundaryMSPs(ctx context.Context, principal *Principal, all []*business.TenantData) []*business.TenantData {
+	root := s.rootTenantID(ctx)
+	if root == "" {
+		return nil
+	}
+	var out []*business.TenantData
+	for _, td := range all {
+		if td.ParentID != root || td.ID == root {
+			continue
+		}
+		if s.authorizeTenantAccess(ctx, principal, td.ID) == tenantAuthNeedsCrossing {
+			out = append(out, td)
+		}
+	}
+	return out
 }
 
 // subtreeDeviceCounts returns, for each tenant in visible, the number of billable
@@ -560,11 +624,7 @@ type tenantListItem struct {
 // owned by a tenant the caller cannot see are subtracted from each visible ancestor, so
 // an ancestor's count never includes a tenant the caller cannot see (e.g. a root-scoped
 // caller without a crossing).
-func (s *Server) subtreeDeviceCounts(ctx context.Context, all, visible []*business.TenantData) (map[string]int, error) {
-	rollup, err := s.rollupTenants(ctx, all)
-	if err != nil {
-		return nil, err
-	}
+func subtreeDeviceCounts(rollup map[string]*tenantRollup, visible []*business.TenantData) map[string]int {
 	counts := make(map[string]int, len(visible))
 	visibleSet := make(map[string]struct{}, len(visible))
 	for _, td := range visible {
@@ -593,7 +653,7 @@ func (s *Server) subtreeDeviceCounts(ctx context.Context, all, visible []*busine
 			cur = anc.ParentID
 		}
 	}
-	return counts, nil
+	return counts
 }
 
 // tenantInputRejectionPrefixes enumerates the error classes tenant.Manager produces
