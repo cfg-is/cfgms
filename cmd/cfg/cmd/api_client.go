@@ -686,6 +686,12 @@ type APITenantResponse struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   string            `json:"created_at"`
 	UpdatedAt   string            `json:"updated_at"`
+
+	// Boundary rows (ADR-025 Amendment 6): an MSP the caller holds no crossing for.
+	Boundary    bool `json:"boundary,omitempty"`
+	TechCount   int  `json:"tech_count,omitempty"`
+	DeviceCount int  `json:"device_count,omitempty"`
+	ClientCount int  `json:"client_count,omitempty"`
 }
 
 // ErrTenantAlreadyExists is returned by CreateTenantViaAPI when the server responds HTTP 409.

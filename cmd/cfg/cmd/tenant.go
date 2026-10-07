@@ -191,6 +191,8 @@ func orDash(s string) string {
 
 // renderTenantList writes the text rendering of the tenant list: one row per
 // tenant (id, parent, path, status), or an explicit line when there are none.
+// A boundary row (an MSP the caller holds no crossing for) is marked not accessible
+// and shows its tech, device and client counts instead of a path.
 func renderTenantList(w io.Writer, tenants []APITenantResponse) {
 	if len(tenants) == 0 {
 		_, _ = fmt.Fprintln(w, "no tenants")
@@ -203,6 +205,12 @@ func renderTenantList(w io.Writer, tenants []APITenantResponse) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tPARENT\tPATH\tSTATUS")
 	for _, t := range tenants {
+		if t.Boundary {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", t.ID, orDash(t.ParentID), t.ID,
+				fmt.Sprintf("%s [not accessible: %d techs, %d devices, %d clients]",
+					orDash(t.Status), t.TechCount, t.DeviceCount, t.ClientCount))
+			continue
+		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", t.ID, orDash(t.ParentID), tenantPath(t.ID, byID), orDash(t.Status))
 	}
 	_ = tw.Flush()
