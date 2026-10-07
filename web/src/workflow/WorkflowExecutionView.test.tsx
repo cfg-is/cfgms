@@ -20,6 +20,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import WorkflowExecutionView from './WorkflowExecutionView.tsx'
+import type { WorkflowExecution } from './useWorkflows.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -76,12 +77,19 @@ function makeCancelResponse(execId: string, status = 200) {
   })
 }
 
-function renderView(workflowName = 'wf-test') {
+function renderView(
+  workflowName = 'wf-test',
+  onExecutionChange?: (e: WorkflowExecution | null) => void,
+) {
   const onClose = vi.fn()
   const result = render(
     <MemoryRouter>
       <AuthProvider>
-        <WorkflowExecutionView workflowName={workflowName} onClose={onClose} />
+        <WorkflowExecutionView
+          workflowName={workflowName}
+          onClose={onClose}
+          onExecutionChange={onExecutionChange}
+        />
       </AuthProvider>
     </MemoryRouter>,
   )
@@ -717,5 +725,34 @@ describe('WorkflowExecutionView — variables and step results (required AC #298
     expect(
       (window as unknown as Record<string, unknown>).__xssStep,
     ).toBeUndefined()
+  })
+})
+
+describe('WorkflowExecutionView — onExecutionChange', () => {
+  it('reports null before a run and the polled execution after execute', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) return Promise.resolve(makeExecuteResponse('exec-1'))
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(
+          makeExecutionStatusResponse(
+            makeExecution({ id: 'exec-1', status: 'running', current_step: 'step-2' }),
+          ),
+        )
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+    const onChange = vi.fn()
+    renderView('wf-test', onChange)
+    await waitFor(() => expect(screen.getByTestId('exec-empty')).toBeInTheDocument())
+    expect(onChange).toHaveBeenLastCalledWith(null)
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: 'exec-1', current_step: 'step-2' }),
+      ),
+    )
   })
 })

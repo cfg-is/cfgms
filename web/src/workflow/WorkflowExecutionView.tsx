@@ -22,7 +22,7 @@ import {
   useExecutionStatus,
   type WorkflowExecution,
 } from './useWorkflows.ts'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 function execStatusTone(status: string): string {
   switch (status) {
@@ -86,11 +86,14 @@ function ExecRow({
 interface WorkflowExecutionViewProps {
   workflowName: string
   onClose?: () => void
+  /** Called with the polled active execution (null until one is started). */
+  onExecutionChange?: (e: WorkflowExecution | null) => void
 }
 
 export default function WorkflowExecutionView({
   workflowName,
   onClose,
+  onExecutionChange,
 }: WorkflowExecutionViewProps) {
   const {
     executions,
@@ -101,6 +104,16 @@ export default function WorkflowExecutionView({
 
   const [activeExecId, setActiveExecId] = useState<string | null>(null)
   const { execution: activeExec } = useExecutionStatus(workflowName, activeExecId)
+
+  // Keep the latest callback in a ref so a new function identity from the
+  // parent does not re-fire the effect; only a changed execution does.
+  const onExecutionChangeRef = useRef(onExecutionChange)
+  useEffect(() => {
+    onExecutionChangeRef.current = onExecutionChange
+  })
+  useEffect(() => {
+    onExecutionChangeRef.current?.(activeExec)
+  }, [activeExec])
 
   const [confirmExecute, setConfirmExecute] = useState(false)
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)

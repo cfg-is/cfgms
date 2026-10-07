@@ -7,7 +7,9 @@
  * reflow when the drawer opens or closes.
  *
  * Tab slots: Run (WorkflowExecutionView) and Schedule (TriggerPanel, filtered
- * to this workflow) are mounted (#4580); Preview (F4) is still a placeholder. Steps tab (Story #3213) restores
+ * to this workflow) are mounted (#4580); Preview renders the read-only
+ * WorkflowGraph, overlaying the active execution reported by the Run tab
+ * (#4581). Steps tab (Story #3213) restores
  * the structured step authoring and variable editor lost in #3039.
  *
  * Last-run status pill: derived from useWorkflowExecutions(workflow.name) —
@@ -35,6 +37,7 @@ import type { VersionedWorkflow, WorkflowExecution, WorkflowStep } from './useWo
 import { useWorkflowExecutions } from './useWorkflows.ts'
 import WorkflowExecutionView from './WorkflowExecutionView.tsx'
 import TriggerPanel from './TriggerPanel.tsx'
+import WorkflowGraph from './WorkflowGraph.tsx'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 
 type DrawerTab = 'run' | 'schedule' | 'preview' | 'steps'
@@ -580,6 +583,8 @@ function mostRecentExecution(
 
 export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>('run')
+  // Delivered by the Run tab's single poll; the preview only reads it.
+  const [activeExecution, setActiveExecution] = useState<WorkflowExecution | null>(null)
   const { scope } = useTenantScope()
   // Every workflow in a single GET /api/v1/workflows response belongs to the
   // request's scoped tenant (workflowStoreForRequest), so the current scope
@@ -679,6 +684,7 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
             <WorkflowExecutionView
               workflowName={workflow.name}
               onClose={() => setActiveTab('steps')}
+              onExecutionChange={setActiveExecution}
             />
           </div>
         )}
@@ -692,7 +698,18 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
         )}
         {activeTab === 'preview' && (
           <div data-testid="drawer-pane-preview">
-            <p className="mut">Workflow preview — coming in a later story.</p>
+            {workflow.steps.length === 0 ? (
+              <div className="notice empty" data-testid="preview-empty">
+                <div className="ic">◍</div>
+                <h3>No steps yet</h3>
+                <p>Add steps on the Steps tab to see what this workflow does.</p>
+              </div>
+            ) : (
+              <WorkflowGraph
+                steps={workflow.steps}
+                execution={activeExecution ?? undefined}
+              />
+            )}
           </div>
         )}
         {activeTab === 'steps' && (

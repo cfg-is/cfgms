@@ -52,6 +52,7 @@ interface WorkflowApi {
   stored: Record<string, unknown> | null
   puts: Record<string, unknown>[]
   offline: boolean
+  currentStep?: string
   storeFails: boolean
   triggers: Record<string, unknown>[]
   calls: string[]
@@ -88,6 +89,7 @@ function createWorkflowApi(): WorkflowApi {
         jsonResponse(200, {
           id: 'exec-new', workflow_name: 'onboard-user', status: 'running',
           start_time: '2026-01-01T00:00:00Z',
+          ...(api.currentStep ? { current_step: api.currentStep } : {}),
         }),
       )
     }
@@ -797,5 +799,42 @@ describe('WorkflowDrawer — Schedule tab (TriggerPanel)', () => {
     renderDrawer()
     fireEvent.click(screen.getByTestId('drawer-tab-schedule'))
     expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0)
+  })
+})
+
+describe('WorkflowDrawer — What it does tab (WorkflowGraph preview)', () => {
+  const threeSteps = [
+    { id: 'a', name: 'alpha', type: 'script' },
+    { id: 'b', name: 'beta', type: 'script' },
+    { id: 'c', name: 'gamma', type: 'script' },
+  ]
+
+  it('renders one node per step and no placeholder', async () => {
+    renderDrawer(makeWorkflow(workflowFromApi({ steps: threeSteps })))
+    fireEvent.click(screen.getByTestId('drawer-tab-preview'))
+    expect(await screen.findByTestId('node-a')).toBeInTheDocument()
+    expect(screen.getByTestId('node-b')).toBeInTheDocument()
+    expect(screen.getByTestId('node-c')).toBeInTheDocument()
+    expect(screen.queryByText(/coming in a later story/)).toBeNull()
+    expect(screen.getByTestId('node-a').className).not.toContain('running')
+  })
+
+  it('marks the current step of an execution started from the Run tab', async () => {
+    api.currentStep = 'b'
+    renderDrawer(makeWorkflow(workflowFromApi({ steps: threeSteps })))
+    fireEvent.click(await screen.findByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+    await screen.findByText('step: b')
+    fireEvent.click(screen.getByTestId('drawer-tab-preview'))
+    await waitFor(() =>
+      expect(screen.getByTestId('node-b').className).toContain('running'),
+    )
+    expect(screen.getByTestId('node-a').className).not.toContain('running')
+  })
+
+  it('shows the empty state for a workflow with zero steps', () => {
+    renderDrawer(makeWorkflow(workflowFromApi({ steps: [] })))
+    fireEvent.click(screen.getByTestId('drawer-tab-preview'))
+    expect(screen.getByTestId('preview-empty')).toBeInTheDocument()
   })
 })
