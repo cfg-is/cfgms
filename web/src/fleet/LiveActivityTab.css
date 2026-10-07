@@ -1,0 +1,43 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+.live-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.live-fresh {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-muted, var(--faint));
+}
+
+.live-filter {
+  max-width: 240px;
+  flex: 1;
+  min-width: 130px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.live-btn {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.live-btn:hover {
+  border-color: var(--accent, var(--border));
+}

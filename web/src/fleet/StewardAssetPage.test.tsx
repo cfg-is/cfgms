@@ -15,7 +15,7 @@
  * mocked so ShellTab renders without a canvas/layout engine in jsdom.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import StewardAssetPage, { PanelContent, TABS } from './StewardAssetPage.tsx'
 
@@ -48,6 +48,10 @@ const fetchMock = vi.fn<typeof fetch>()
 // Minimal WebSocket stub — keeps LiveActivityPanel and ShellTab from throwing
 // when their tabs mount during StewardAssetPage tests.
 class StubWebSocket {
+  static last: StubWebSocket | null = null
+  constructor() {
+    StubWebSocket.last = this
+  }
   readyState: number = WebSocket.CONNECTING
   onopen: (() => void) | null = null
   onclose: ((ev: { code: number }) => void) | null = null
@@ -234,6 +238,19 @@ describe('tab strip', () => {
     // LiveActivityTab renders a loading indicator, not the "soon" placeholder.
     expect(screen.getByTestId('live-loading')).toBeInTheDocument()
     expect(screen.queryByText(/Live Activity is not yet available/i)).not.toBeInTheDocument()
+  })
+
+  it('offline Live Activity "View last-known DNA" switches to the DNA tab', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    fireEvent.click(screen.getByRole('tab', { name: /^Live Activity/i }))
+    act(() => {
+      StubWebSocket.last!.onmessage?.({ data: JSON.stringify({ type: 'disconnect' }) })
+    })
+    fireEvent.click(screen.getByRole('button', { name: /view last-known dna/i }))
+
+    expect(screen.getByRole('tab', { name: /^DNA/i })).toHaveAttribute('aria-selected', 'true')
   })
 
   it('Live Activity tab has no soon badge', () => {

@@ -315,7 +315,7 @@ describe('error states', () => {
     expect(alert.textContent?.toLowerCase()).toMatch(/offline|disconnect/i)
   })
 
-  it('shows a connection error when WebSocket closes unexpectedly', () => {
+  it('shows an interrupted state when WebSocket closes unexpectedly', () => {
     render(<LiveActivityTab stewardId="stw-001" />)
     const ws = FakeWebSocket.instances[0]!
     act(() => {
@@ -323,7 +323,149 @@ describe('error states', () => {
       ws.closeWithCode(1006, '')
     })
 
-    const alert = screen.getByRole('alert')
-    expect(alert).toBeInTheDocument()
+    expect(screen.getByRole('alert').textContent).toMatch(/interrupted/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Filter
+// ---------------------------------------------------------------------------
+
+function mountWithSnapshot(props: { onViewDna?: () => void } = {}) {
+  render(<LiveActivityTab stewardId="stw-001" {...props} />)
+  const ws = FakeWebSocket.instances[0]!
+  act(() => {
+    ws.open()
+    ws.deliver(makeSnapshot())
+  })
+  return ws
+}
+
+describe('filter', () => {
+  it('narrows both tables case-insensitively by process name and service name', () => {
+    mountWithSnapshot()
+    fireEvent.change(screen.getByLabelText(/filter/i), { target: { value: 'NGINX' } })
+    expect(screen.queryByText('postgres')).not.toBeInTheDocument()
+    expect(screen.queryByText('sshd')).not.toBeInTheDocument()
+    expect(screen.getAllByText('nginx')).toHaveLength(2)
+  })
+
+  it('matches processes by PID', () => {
+    mountWithSnapshot()
+    fireEvent.change(screen.getByLabelText(/filter/i), { target: { value: '99' } })
+    expect(screen.getByText('postgres')).toBeInTheDocument()
+    expect(screen.queryByText('init')).not.toBeInTheDocument()
+  })
+
+  it('shows an empty state with a clear-filter action when nothing matches', () => {
+    mountWithSnapshot()
+    fireEvent.change(screen.getByLabelText(/filter/i), { target: { value: 'zzz-none' } })
+    expect(screen.getByText(/no matches/i)).toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: /processes/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /clear filter/i }))
+    expect(screen.getByText('postgres')).toBeInTheDocument()
+    expect(screen.getByLabelText(/filter/i)).toHaveValue('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pause / resume and freshness
+// ---------------------------------------------------------------------------
+
+describe('pause and resume', () => {
+  const updated = () => makeSnapshot({
+    processes: [
+      { pid: 7, name: 'fresh-proc', cpu_percent: 1, memory_bytes: 1, disk_read_bytes: 0, disk_write_bytes: 0, net_rx_bytes: 0, net_tx_bytes: 0 },
+    ],
+    services: [],
+  })
+
+  it('freezes displayed rows while paused and shows the latest snapshot on Resume', () => {
+    const ws = mountWithSnapshot()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    expect(screen.getByText('Paused')).toBeInTheDocument()
+
+    act(() => ws.deliver(updated()))
+    expect(screen.queryByText('fresh-proc')).not.toBeInTheDocument()
+    expect(screen.getByText('postgres')).toBeInTheDocument()
+    expect(ws.closed).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+    expect(screen.getByText('fresh-proc')).toBeInTheDocument()
+    expect(screen.queryByText('postgres')).not.toBeInTheDocument()
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument()
+  })
+})
+
+describe('freshness', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('shows seconds since the last applied snapshot without re-rendering the tables', () => {
+    vi.useFakeTimers()
+    const ws = mountWithSnapshot()
+    expect(screen.getByText(/updated/).textContent).toContain('0s')
+    const table = screen.getByRole('table', { name: /processes/i })
+    const row = table.querySelector('tbody tr')
+
+    act(() => { vi.advanceTimersByTime(5000) })
+    expect(screen.getByText(/updated/).textContent).toContain('5s')
+    // Same DOM node: the table was not re-rendered or remounted by the tick.
+    expect(table.querySelector('tbody tr')).toBe(row)
+
+    act(() => ws.deliver(makeSnapshot()))
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(screen.getByText(/updated/).textContent).toContain('1s')
+  })
+
+  it('treats a silent stream as interrupted after the receive timeout', () => {
+    vi.useFakeTimers()
+    const ws = mountWithSnapshot()
+    act(() => { vi.advanceTimersByTime(36_000) })
+    expect(screen.getByRole('alert').textContent).toMatch(/interrupted/i)
+    expect(ws.closed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Interrupted vs offline
+// ---------------------------------------------------------------------------
+
+describe('interrupted vs offline', () => {
+  it('renders distinct copy and CTAs for each', () => {
+    const onViewDna = vi.fn()
+    const ws = mountWithSnapshot({ onViewDna })
+    act(() => ws.deliver({ type: 'disconnect' }))
+    expect(screen.getByRole('alert').textContent).toMatch(/steward offline/i)
+    expect(screen.queryByRole('button', { name: /reconnect/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /view last-known dna/i }))
+    expect(onViewDna).toHaveBeenCalledTimes(1)
+    cleanup()
+
+    FakeWebSocket.instances = []
+    const ws2 = mountWithSnapshot({ onViewDna })
+    act(() => ws2.closeWithCode(1006, ''))
+    const text = screen.getByRole('alert').textContent ?? ''
+    expect(text).toMatch(/interrupted/i)
+    expect(text).not.toMatch(/steward offline/i)
+    expect(screen.queryByRole('button', { name: /last-known dna/i })).not.toBeInTheDocument()
+  })
+
+  it('Reconnect opens a new WebSocket and resumes streaming', () => {
+    const ws = mountWithSnapshot()
+    act(() => ws.closeWithCode(1006, ''))
+    fireEvent.click(screen.getByRole('button', { name: /reconnect/i }))
+
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(screen.getByTestId('live-loading')).toBeInTheDocument()
+    const ws2 = FakeWebSocket.instances[1]!
+    expect(ws2.url).toBe(ws.url)
+    act(() => {
+      ws2.open()
+      ws2.deliver(makeSnapshot())
+    })
+    expect(screen.getByText('postgres')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
