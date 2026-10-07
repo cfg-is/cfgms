@@ -2183,3 +2183,28 @@ func TestHandleListTenants_DeviceCount_NoStewardStore_Zero(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, float64(0), deviceCountsFromListResponse(t, rec.Body.Bytes())["dc-nostore"])
 }
+
+// failingListStewardStore wraps a real flat-file steward store, overriding only
+// ListStewards to force a deterministic failure (same shape as controlCharAuditStore).
+type failingListStewardStore struct {
+	business.StewardStore
+}
+
+func (failingListStewardStore) ListStewards(context.Context) ([]*business.StewardRecord, error) {
+	return nil, errors.New("backend dial tcp 10.0.0.5:5432: connection refused")
+}
+
+func TestHandleListTenants_DeviceCount_StewardStoreFailure_Returns500NoLeak(t *testing.T) {
+	server := setupTestServer(t)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "dc-fail", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(failingListStewardStore{st})
+
+	req := makeAdminRequest(t, http.MethodGet, "/api/v1/tenants", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "10.0.0.5", "backend error text must not reach the client")
+}
