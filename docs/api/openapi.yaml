@@ -63,6 +63,70 @@ paths:
                     registered_at:
                       type: string
                       format: date-time
+  /registration/tokens:
+    get:
+      summary: List registration tokens
+      description: |
+        Lists registration tokens. Each entry carries the stable `token_id` and the
+        6-character `token_prefix`, never the secret. `label` is the operator-written
+        description given at mint time; it is omitted for tokens minted without one.
+        Requires the `registration:list-tokens` permission.
+      operationId: listRegistrationTokens
+      tags:
+        - Registration
+      responses:
+        '200':
+          description: Registration tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RegistrationToken'
+                  total:
+                    type: integer
+    post:
+      summary: Create a registration token
+      description: |
+        Mints a registration token. The response is the only time the full secret
+        (`token`) is returned. Requires the `registration:create-token` permission.
+      operationId: createRegistrationToken
+      tags:
+        - Registration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tenant_id
+                - controller_url
+              properties:
+                tenant_id:
+                  type: string
+                controller_url:
+                  type: string
+                group:
+                  type: string
+                label:
+                  type: string
+                  maxLength: 100
+                  description: Optional free-text description. At most 100 characters, printable only (control characters are rejected). Empty is allowed. Never part of the token secret.
+                expires_in:
+                  type: string
+      responses:
+        '201':
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationToken'
+        '400':
+          description: Invalid request, including an over-length or control-character `label`
   /health:
     get:
       summary: Health check endpoint
@@ -930,6 +994,37 @@ components:
         type: string
 
   schemas:
+    RegistrationToken:
+      type: object
+      properties:
+        token_id:
+          type: string
+          description: Stable UUID, safe to expose
+        token:
+          type: string
+          description: Full secret — returned by create and rotate only
+        token_prefix:
+          type: string
+        tenant_id:
+          type: string
+        controller_url:
+          type: string
+        group:
+          type: string
+        label:
+          type: string
+          description: Operator-written free text given at mint time; omitted when empty
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+        revoked_at:
+          type: string
+          format: date-time
     AlertState:
       type: object
       properties:

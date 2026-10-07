@@ -112,6 +112,7 @@ func CreateToken(req *TokenCreateRequest) (*Token, error) {
 		TenantID:      req.TenantID,
 		ControllerURL: req.ControllerURL,
 		Group:         req.Group,
+		Label:         req.Label,
 		CreatedAt:     time.Now(),
 		ExpiresAt:     expiresAt,
 	}

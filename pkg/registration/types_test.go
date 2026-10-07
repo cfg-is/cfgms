@@ -3,10 +3,12 @@
 package registration
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestToken_IsValid_Revoked(t *testing.T) {
@@ -79,4 +81,23 @@ func TestToken_Revoke(t *testing.T) {
 	assert.True(t, tok.Revoked)
 	assert.NotNil(t, tok.RevokedAt)
 	assert.False(t, tok.IsValid())
+}
+
+func TestValidateLabel(t *testing.T) {
+	ok := []string{"", "Front desk", "ünïcode ✓", strings.Repeat("é", MaxLabelLength)}
+	for _, l := range ok {
+		assert.NoError(t, ValidateLabel(l), "label %q", l)
+	}
+	bad := []string{strings.Repeat("a", MaxLabelLength+1), "a\nb", "a\x00b", "a\tb", "a\x7fb", "a\xffb"}
+	for _, l := range bad {
+		assert.Error(t, ValidateLabel(l), "label %q", l)
+	}
+}
+
+func TestCreateToken_CarriesLabel(t *testing.T) {
+	tok, err := CreateToken(&TokenCreateRequest{TenantID: "t", ControllerURL: "grpc://c:1", Label: "lbl"})
+	require.NoError(t, err)
+	assert.Equal(t, "lbl", tok.Label)
+	assert.Equal(t, "lbl", tokenToData(tok).Label)
+	assert.Equal(t, "lbl", dataToToken(tokenToData(tok)).Label)
 }

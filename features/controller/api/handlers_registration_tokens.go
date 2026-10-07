@@ -27,6 +27,7 @@ type TokenResponse struct {
 	TenantID      string  `json:"tenant_id"`
 	ControllerURL string  `json:"controller_url"`
 	Group         string  `json:"group,omitempty"`
+	Label         string  `json:"label,omitempty"` // operator-written free text (Issue #4599)
 	CreatedAt     string  `json:"created_at"`
 	ExpiresAt     *string `json:"expires_at,omitempty"`
 	Revoked       bool    `json:"revoked"`
@@ -79,6 +80,10 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "controller_url is required", http.StatusBadRequest)
 		return
 	}
+	if err := registration.ValidateLabel(req.Label); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Tenant subtree enforcement (Issue #4336): reads ctxkeys.TenantScope directly
 	// rather than callerTenantID/isWithinTenantScope, so an unset scope (a plumbing
@@ -118,7 +123,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		"token_prefix", token.Token[:min(len(token.Token), 6)],
 		"tenant_id", logging.SanitizeLogValue(token.TenantID))
 	s.emitTokenManagementAudit(r, "registration_token.created",
-		token.Token[:min(len(token.Token), 6)], token.ID, token.TenantID)
+		token.Token[:min(len(token.Token), 6)], token.ID, token.TenantID, token.Label)
 
 	// Return full token response — create is the one-time mint window where the secret is disclosed.
 	resp := tokenToResponse(token)
@@ -485,6 +490,7 @@ func tokenToResponse(token *registration.Token) TokenResponse {
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
 		Group:         token.Group,
+		Label:         token.Label,
 		CreatedAt:     token.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		Revoked:       token.Revoked,
 	}
@@ -515,7 +521,8 @@ func tokenToResponseRedacted(token *registration.Token) TokenResponse {
 // (create, rotate, revoke, delete). It is a no-op when auditManager is nil.
 // tokenID is the stable UUID (registration.Token.ID) — never the secret — recorded
 // as the resource name so the audit trail can be correlated to a token by ID.
-func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tokenID, tenantID string) {
+// An optional operator-written label is recorded sanitised as a detail.
+func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tokenID, tenantID string, label ...string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -536,6 +543,9 @@ func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, 
 		Resource("registration_token", tokenPrefix, tokenID).
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)
+	if len(label) > 0 && label[0] != "" {
+		b = b.Detail("label", logging.SanitizeLogValue(label[0]))
+	}
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
 		s.logger.Warn("Failed to emit token management audit event",
 			"error", err, "action", action)

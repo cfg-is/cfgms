@@ -750,6 +750,7 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 			tenant_id VARCHAR(255) NOT NULL,
 			controller_url VARCHAR(1000) NOT NULL,
 			group_name VARCHAR(255) DEFAULT '',
+			label VARCHAR(100) NOT NULL DEFAULT '',
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
 			revoked BOOLEAN NOT NULL DEFAULT FALSE,
@@ -765,6 +766,13 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 	// assign a UUID to every pre-existing row so the web UI can address them.
 	if err := s.BackfillRegistrationTokenIDs(ctx, db); err != nil {
 		return err
+	}
+
+	// Migration for deployments created before the operator label (Issue #4599).
+	// Idempotent: ADD COLUMN IF NOT EXISTS is a no-op on an up-to-date table.
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE cfgms_registration_tokens ADD COLUMN IF NOT EXISTS label VARCHAR(100) NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("failed to add label column to cfgms_registration_tokens: %w", err)
 	}
 
 	// A claim gates certificate issuance for one device identity. Registration
