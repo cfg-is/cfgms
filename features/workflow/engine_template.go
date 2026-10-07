@@ -174,3 +174,27 @@ func renderWebhookConfig(cfg *WebhookConfig, vars map[string]interface{}) (*Webh
 
 	return &copy, nil
 }
+
+// renderNotifyConfig renders {{ }} templates in a NotifyConfig's URL, title,
+// message and headers against the execution variables.
+func renderNotifyConfig(cfg *NotifyConfig, vars map[string]interface{}) (*NotifyConfig, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	copy := *cfg
+
+	var err error
+	if copy.URL, err = renderStepString(cfg.URL, vars); err != nil {
+		return nil, fmt.Errorf("notify.url: %w", err)
+	}
+	if copy.Title, err = renderStepString(cfg.Title, vars); err != nil {
+		return nil, fmt.Errorf("notify.title: %w", err)
+	}
+	if copy.Message, err = renderStepString(cfg.Message, vars); err != nil {
+		return nil, fmt.Errorf("notify.message: %w", err)
+	}
+	if copy.Headers, err = renderStringMap(cfg.Headers, vars); err != nil {
+		return nil, fmt.Errorf("notify.headers: %w", err)
+	}
+	return &copy, nil
+}

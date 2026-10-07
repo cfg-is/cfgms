@@ -74,6 +74,7 @@ type stepDefinition struct {
 	Condition *conditionDefinition   `yaml:"condition,omitempty"`
 	Delay     *delayDefinition       `yaml:"delay,omitempty"`
 	Approval  *approvalDefinition    `yaml:"approval,omitempty"`
+	Notify    *NotifyConfig          `yaml:"notify,omitempty"`
 	Timeout   string                 `yaml:"timeout,omitempty"`
 	OnFailure string                 `yaml:"on_failure,omitempty"`
 	Variables map[string]interface{} `yaml:"variables,omitempty"`
@@ -188,6 +189,8 @@ func (p *Parser) convertSteps(stepDefs []stepDefinition) ([]Step, error) {
 				Message:  stepDef.Delay.Message,
 			}
 		}
+
+		step.Notify = stepDef.Notify
 
 		// Convert approval config
 		if stepDef.Approval != nil {
@@ -313,6 +316,21 @@ func (p *Parser) validateStep(step Step, stepNames map[string]bool) error {
 		if step.Approval.Timeout <= 0 {
 			return fmt.Errorf("timeout must be positive for approval steps")
 		}
+	case StepTypeNotify:
+		if step.Notify == nil {
+			return fmt.Errorf("notify configuration is required for notify steps")
+		}
+		if step.Notify.URL == "" {
+			return fmt.Errorf("url is required for notify steps")
+		}
+		if step.Notify.Title == "" {
+			return fmt.Errorf("title is required for notify steps")
+		}
+		switch step.Notify.Severity {
+		case "", NotifySeverityInfo, NotifySeverityWarning, NotifySeverityCritical:
+		default:
+			return fmt.Errorf("invalid severity %q for notify steps: must be info, warning or critical", step.Notify.Severity)
+		}
 	case StepTypeConditional:
 		if step.Condition == nil {
 			return fmt.Errorf("condition is required for conditional steps")
@@ -381,7 +399,7 @@ func (p *Parser) validateCondition(condition Condition) error {
 func isValidStepType(stepType StepType) bool {
 	switch stepType {
 	case StepTypeTask, StepTypeSequential, StepTypeParallel, StepTypeConditional,
-		StepTypeDelay, StepTypeApproval, StepTypeSetHARole, StepTypeMoveResourceToCluster:
+		StepTypeDelay, StepTypeNotify, StepTypeApproval, StepTypeSetHARole, StepTypeMoveResourceToCluster:
 		return true
 	default:
 		return false

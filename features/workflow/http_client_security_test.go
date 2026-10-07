@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestHTTPClientRejectsUnsafeDestinations(t *testing.T) {
@@ -100,5 +102,39 @@ func TestWorkflowRedirectOriginCheck(t *testing.T) {
 	}
 	if sameOrigin(parse("http://example.com/a"), parse("https://example.com/a")) {
 		t.Error("cross-scheme redirect was accepted")
+	}
+}
+
+// TestNotifyStepRejectsUnsafeDestinations verifies notify steps are refused for
+// the same destinations as webhook steps: both go through the engine's shared
+// HTTP client and its URL validation.
+func TestNotifyStepRejectsUnsafeDestinations(t *testing.T) {
+	t.Parallel()
+
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	for _, target := range []string{
+		"http://127.0.0.1/hook",
+		"http://[::1]/hook",
+		"http://localhost/hook",
+		"http://10.0.0.1/hook",
+		"http://169.254.169.254/latest/meta-data/",
+	} {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			execution := &WorkflowExecution{ID: "e", WorkflowName: "w"}
+			notifyErr := engine.executeNotifyStep(context.Background(),
+				Step{Name: "n", Type: StepTypeNotify, Notify: &NotifyConfig{URL: target, Title: "t"}}, execution)
+			webhookErr := engine.executeWebhookStep(context.Background(),
+				Step{Name: "w", Type: StepTypeWebhook, Webhook: &WebhookConfig{URL: target}}, execution)
+			if notifyErr == nil {
+				t.Fatalf("notify accepted unsafe destination %q", target)
+			}
+			if webhookErr == nil {
+				t.Fatalf("webhook accepted unsafe destination %q", target)
+			}
+			if !strings.Contains(notifyErr.Error(), "invalid HTTP configuration") {
+				t.Errorf("notify error not from shared URL validation: %v", notifyErr)
+			}
+		})
 	}
 }

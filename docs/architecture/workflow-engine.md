@@ -157,3 +157,34 @@ An approval step needs the engine to be built with `WithApprovalStore` and a sec
 provider, and the run needs a tenant. Without them the run fails with a clear error.
 Approval steps inside a workflow that another workflow calls are not supported: the called
 run would stop at the gate while its caller waits for it.
+
+## Notify steps
+
+A `notify` step sends a structured message to a destination URL. It does not introduce a separate notification service: delivery goes through the same outbound HTTP client as `webhook` steps, so the same URL validation applies. Loopback, private, link-local and other internal destinations are refused, as are non-HTTP(S) schemes and URLs carrying credentials.
+
+```yaml
+- name: tell-ops
+  type: notify
+  notify:
+    url: https://hooks.acme-corp.example/workflow
+    title: "Deploy {{ .env }} finished"
+    message: "All hosts converged"
+    severity: warning        # info (default) | warning | critical
+    headers: {X-Source: cfgms}
+    timeout: 10s
+    retry:
+      max_attempts: 3
+      initial_delay: 1s
+      retryable_status_codes: [502, 503]
+```
+
+`url` and `title` are required, and `severity` must be `info`, `warning` or `critical`; the parser rejects the workflow otherwise. `url`, `title`, `message` and `headers` are rendered as templates against the execution variables.
+
+The step POSTs this JSON body (a 200, 201, 202 or 204 response is success):
+
+```json
+{"title": "...", "message": "...", "severity": "info",
+ "workflow": "<workflow name>", "execution_id": "<id>", "step": "<step name>"}
+```
+
+`retry` is honoured by the HTTP client, using the same semantics as a webhook step's `retry`. The response status is stored in the `<step>_notify_status` variable.
