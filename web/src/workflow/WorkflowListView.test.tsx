@@ -353,3 +353,55 @@ describe('WorkflowListView — security (A9.1)', () => {
     expect((window as unknown as Record<string, unknown>).__xss_list).toBeUndefined()
   })
 })
+
+// ── Create workflow (Issue #4582) ─────────────────────────────────────────────
+
+describe('WorkflowListView — new workflow', () => {
+  function fillAndSubmit(name: string) {
+    fireEvent.change(screen.getByTestId('new-wf-name'), { target: { value: name } })
+    fireEvent.change(screen.getByTestId('new-wf-step-name'), { target: { value: 's1' } })
+    fireEvent.click(screen.getByTestId('new-wf-submit'))
+  }
+
+  it('create success refreshes the list with the new workflow', async () => {
+    let created = false
+    fetchMock.mockImplementation(async (_url, init) => {
+      if (init?.method === 'POST') {
+        created = true
+        return new Response('{}', { status: 201 })
+      }
+      return makeWorkflowListResponse(
+        created ? [makeWorkflow(), makeWorkflow({ name: 'fresh' })] : [makeWorkflow()],
+      )
+    })
+    renderWorkflowListView()
+    await screen.findByTestId('workflow-table')
+    fireEvent.click(screen.getByTestId('new-workflow-btn'))
+    fillAndSubmit('fresh')
+    await waitFor(() => expect(screen.getAllByTestId('workflow-row')).toHaveLength(2))
+    expect(screen.getAllByText('fresh').length).toBeGreaterThan(0)
+    expect(screen.queryByTestId('new-wf-name')).toBeNull()
+  })
+
+  it('409 shows the inline error and leaves the list unchanged', async () => {
+    fetchMock.mockImplementation(async (_url, init) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ error: 'already exists' }), { status: 409 })
+      }
+      return makeWorkflowListResponse([makeWorkflow()])
+    })
+    renderWorkflowListView()
+    await screen.findByTestId('workflow-table')
+    fireEvent.click(screen.getByTestId('new-workflow-btn'))
+    fillAndSubmit('wf-1')
+    expect((await screen.findByTestId('new-wf-name-error')).textContent).toBe('already exists')
+    expect(screen.getAllByTestId('workflow-row')).toHaveLength(1)
+  })
+
+  it('empty state offers the create action', async () => {
+    fetchMock.mockResolvedValue(makeWorkflowListResponse([]))
+    renderWorkflowListView()
+    fireEvent.click(await screen.findByTestId('workflow-empty-create-btn'))
+    expect(screen.getByTestId('new-wf-name')).toBeInTheDocument()
+  })
+})
