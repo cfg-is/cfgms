@@ -41,6 +41,12 @@ interface Transport {
   writes: { method: string; url: string; body: Record<string, unknown> }[]
   failList: boolean
   failWrite: string | null
+  validateStatus: number
+  validateBody: Record<string, unknown>
+  executeStatus: number
+  cancelStatus: number
+  execution: Record<string, unknown>
+  calls: { method: string; url: string }[]
 }
 
 let t: Transport
@@ -52,7 +58,13 @@ function write(i: number) {
 }
 
 function install() {
-  t = { stored: new Map(), writes: [], failList: false, failWrite: null }
+  t = {
+    stored: new Map(), writes: [], failList: false, failWrite: null,
+    validateStatus: 200, validateBody: { valid: true, issues: [] },
+    executeStatus: 202, cancelStatus: 200,
+    execution: { id: 'ex1', workflow_name: 'wf', status: 'running', start_time: 't', current_step: 's1', step_results: {} },
+    calls: [],
+  }
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const method = (init?.method ?? 'GET').toUpperCase()
@@ -60,6 +72,13 @@ function install() {
       if (t.failList) return Promise.resolve(json(500, { error: 'boom' }))
       return Promise.resolve(json(200, { workflows: [...t.stored.values()], count: t.stored.size }))
     }
+    t.calls.push({ method, url })
+    if (url.endsWith('/api/v1/workflows/validate')) {
+      return Promise.resolve(json(t.validateStatus, t.validateBody))
+    }
+    if (url.endsWith('/execute')) return Promise.resolve(json(t.executeStatus, { execution_id: 'ex1' }))
+    if (url.endsWith('/cancel')) return Promise.resolve(json(t.cancelStatus, { error: 'forbidden' }))
+    if (method === 'GET' && url.includes('/executions/')) return Promise.resolve(json(200, t.execution))
     if (method === 'PUT' || method === 'POST') {
       const body = JSON.parse(init?.body as string) as Record<string, unknown>
       t.writes.push({ method, url, body })
@@ -319,5 +338,107 @@ describe('WorkflowBuilder — unsaved-changes guard', () => {
     const dirty = new Event('beforeunload', { cancelable: true })
     window.dispatchEvent(dirty)
     expect(dirty.defaultPrevented).toBe(true)
+  })
+})
+
+describe('WorkflowBuilder — validate and run (Issue #4616)', () => {
+  const TWO = [
+    { id: 's1', name: 'first', type: 'script' },
+    { id: 's2', name: 'second', type: 'script' },
+  ]
+
+  it('shows server issues on the offending node and a clear valid state', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    t.validateBody = { valid: false, issues: [{ path: 'steps[1].config', step_name: 'second', message: 'config required' }, { path: 'name', message: 'bad name' }] }
+    fireEvent.click(screen.getByTestId('builder-validate'))
+    expect(await screen.findByTestId('validate-invalid')).toHaveTextContent('2 issues')
+    expect(screen.getByTestId('node-issue-n1')).toHaveTextContent('config required')
+    expect(screen.queryByTestId('node-issue-n0')).toBeNull()
+    expect(screen.getByTestId('validate-workflow-issues')).toHaveTextContent('bad name')
+
+    t.validateBody = { valid: true, issues: [] }
+    fireEvent.click(screen.getByTestId('builder-validate'))
+    expect(await screen.findByTestId('validate-valid')).toBeInTheDocument()
+    expect(screen.queryByTestId('node-issue-n1')).toBeNull()
+  })
+
+  it('renders a validate 503 as an error', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    t.validateStatus = 503
+    t.validateBody = { error: 'workflow engine not available' }
+    fireEvent.click(screen.getByTestId('builder-validate'))
+    expect(await screen.findByTestId('validate-error')).toHaveTextContent('workflow engine not available')
+  })
+
+  it('[REQUIRED] Run with unsaved edits is blocked with a Save prompt', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    fireEvent.click(screen.getByTestId('palette-notify'))
+    fireEvent.click(screen.getByTestId('builder-run'))
+    expect(await screen.findByTestId('builder-notice')).toHaveTextContent(/Save the workflow before running/)
+    expect(t.calls.some((c) => c.url.endsWith('/execute'))).toBe(false)
+    expect(screen.queryByTestId('run-bar')).toBeNull()
+  })
+
+  it('[REQUIRED] the run bar tracks a polled execution to completion and Cancel calls the cancel endpoint', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    fireEvent.click(screen.getByTestId('builder-run'))
+    expect(await screen.findByTestId('run-bar-status')).toHaveTextContent('running')
+    expect(screen.getByTestId('run-bar-progress')).toHaveTextContent('step 0/2')
+    expect(screen.getByTestId('node-n0')).toHaveClass('running')
+
+    fireEvent.click(screen.getByTestId('run-bar-cancel'))
+    await waitFor(() => expect(t.calls.some((c) => c.method === 'POST' && c.url.endsWith('/workflows/wf/executions/ex1/cancel'))).toBe(true))
+    // 200 from cancel → no denial shown
+    expect(screen.queryByTestId('run-bar-cancel-error')).toBeNull()
+  })
+
+  it('advances to completion as the poll returns new state', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      fireEvent.click(screen.getByTestId('builder-run'))
+      expect(await screen.findByTestId('run-bar-status')).toHaveTextContent('running')
+      t.execution = {
+        id: 'ex1', workflow_name: 'wf', status: 'completed', start_time: 't',
+        step_results: { s1: { status: 'completed' }, s2: { status: 'completed' } },
+      }
+      await vi.advanceTimersByTimeAsync(3100)
+      await waitFor(() => expect(screen.getByTestId('run-bar-status')).toHaveTextContent('completed'))
+      expect(screen.getByTestId('run-bar-progress')).toHaveTextContent('step 2/2')
+      expect(screen.getByTestId('node-n1')).toHaveClass('done')
+      expect(screen.queryByTestId('run-bar-cancel')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders the cancel denial', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    fireEvent.click(screen.getByTestId('builder-run'))
+    await screen.findByTestId('run-bar-cancel')
+    t.cancelStatus = 403
+    fireEvent.click(screen.getByTestId('run-bar-cancel'))
+    expect(await screen.findByTestId('run-bar-cancel-error')).toHaveTextContent('forbidden')
+  })
+
+  it('renders a 403 on run start as the Error state', async () => {
+    seed('wf', TWO)
+    mount('/workflows/wf/builder')
+    await screen.findByTestId('workflow-builder')
+    t.executeStatus = 403
+    fireEvent.click(screen.getByTestId('builder-run'))
+    expect(await screen.findByTestId('run-bar-error')).toHaveTextContent('403')
   })
 })

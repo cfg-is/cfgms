@@ -39,7 +39,15 @@ import {
 import '@xyflow/react/dist/style.css'
 import Dagre from '@dagrejs/dagre'
 import { apiFetch } from '../api/client.ts'
-import { useWorkflowList, type VersionedWorkflow } from './useWorkflows.ts'
+import {
+  useExecutionStatus,
+  useValidateWorkflow,
+  useWorkflowList,
+  type ValidationIssue,
+  type VersionedWorkflow,
+  type WorkflowExecution,
+} from './useWorkflows.ts'
+import RunBar from './RunBar.tsx'
 import {
   PALETTE,
   addNode,
@@ -76,6 +84,8 @@ interface BNodeData extends Record<string, unknown> {
   opaque: boolean
   tone: string
   icon: string
+  issues: string[]
+  runState: string
 }
 type BNode = RFNode<BNodeData, 'builderNode'>
 
@@ -91,7 +101,7 @@ function toneFor(step: StepJSON): { tone: string; icon: string } {
 function BuilderNodeCard({ id, data, selected }: NodeProps<BNode>) {
   return (
     <div
-      className={`wfg-node bld-node${selected ? ' selected' : ''}`}
+      className={`wfg-node bld-node${selected ? ' selected' : ''}${data.issues.length > 0 ? ' has-issue' : ''}${data.runState ? ` ${data.runState}` : ''}`}
       data-testid={`node-${id}`}
       data-node-id={id}
       data-opaque={data.opaque ? 'true' : 'false'}
@@ -105,12 +115,46 @@ function BuilderNodeCard({ id, data, selected }: NodeProps<BNode>) {
         </div>
       </div>
       {data.opaque && <div className="wfg-nfoot">edit in inspector</div>}
+      {data.issues.map((m, i) => (
+        <div key={i} className="bld-issue" data-testid={`node-issue-${id}`}>{m}</div>
+      ))}
       <Handle type="source" position={Position.Right} />
     </div>
   )
 }
 
 const nodeTypes = { builderNode: BuilderNodeCard }
+
+// ── Validation and run-state mapping ─────────────────────────────────────────
+
+/* "steps[2].config" → 2: the top-level step an issue path points into. */
+function issueStepIndex(path: string): number | null {
+  const m = /^steps\[(\d+)\]/.exec(path)
+  return m === null ? null : Number(m[1])
+}
+
+/* Own-property statuses only: step ids are user-authored (see WorkflowGraph). */
+function stepStatuses(execution: WorkflowExecution | null): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const [id, result] of Object.entries(execution?.step_results ?? {})) {
+    if (typeof result !== 'object' || result === null) continue
+    const status = (result as Record<string, unknown>).status
+    if (typeof status === 'string') out.set(id, status)
+  }
+  return out
+}
+
+function runStateFor(step: StepJSON, execution: WorkflowExecution | null, statuses: Map<string, string>): string {
+  if (execution === null) return ''
+  const key = typeof step.id === 'string' && step.id !== '' ? step.id : typeof step.name === 'string' ? step.name : ''
+  if (execution.current_step && execution.current_step === key) return 'running'
+  switch (statuses.get(key)) {
+    case 'completed': return 'done'
+    case 'failed': return 'failed'
+    case 'running': return 'running'
+    default: return 'pending'
+  }
+}
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -342,6 +386,12 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [newName, setNewName] = useState('')
+  const validation = useValidateWorkflow()
+  const [execId, setExecId] = useState<string | null>(null)
+  const [runStartError, setRunStartError] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+  const runName = isNew ? newName.trim() : workflow.name
+  const run = useExecutionStatus(execId !== null ? runName : null, execId)
   const blocked = unsaveableFields(workflow.raw)
 
   // Unsaved-changes guard for tab close / reload; in-app exits go through leave().
@@ -361,13 +411,15 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
   }
 
   /* Apply a structural edit: re-run the deterministic layout and mark dirty. */
+  const validationReset = validation.reset
   const commit = useCallback((next: BuilderGraph) => {
     setGraph(next)
     setPositions(layoutGraph(next))
     setDirty(true)
     setSaved(false)
     setNotice(null)
-  }, [])
+    validationReset()
+  }, [validationReset])
 
   function handleAdd(kind: PaletteKind, intoContainer?: string) {
     const result = addNode(graph, kind, intoContainer)
@@ -397,6 +449,50 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
     setSelectedId(null)
   }
 
+  function requestBody(name: string, steps: StepJSON[]): Record<string, unknown> {
+    const body: Record<string, unknown> = { name, steps }
+    if (workflow.description) body.description = workflow.description
+    if (workflow.version) body.version = workflow.version
+    if (workflow.variables !== undefined) body.variables = workflow.variables
+    // PUT rebuilds the workflow from the body; omitting timeout would turn a
+    // bounded workflow into an unbounded one.
+    if (typeof workflow.timeout === 'number') body.timeout = workflow.timeout
+    return body
+  }
+
+  async function handleValidate() {
+    await validation.validate(requestBody(runName, graphToSteps(graph)))
+  }
+
+  async function handleRun() {
+    if (dirty || isNew) {
+      setNotice('Save the workflow before running it — Run executes the saved version, never an unsaved draft.')
+      return
+    }
+    setStarting(true)
+    setRunStartError(null)
+    setExecId(null)
+    try {
+      const response = await apiFetch(`/api/v1/workflows/${encodeURIComponent(workflow.name)}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variables: {} }),
+      })
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+        throw new Error(typeof errBody.error === 'string' && errBody.error ? errBody.error : `Run failed — ${response.status}`)
+      }
+      const result = (await response.json()) as Record<string, unknown>
+      const id = typeof result.execution_id === 'string' && result.execution_id ? result.execution_id : null
+      if (id === null) throw new Error('Run failed — no execution id returned')
+      setExecId(id)
+    } catch (cause: unknown) {
+      setRunStartError(cause instanceof Error && cause.message ? cause.message : 'Run failed')
+    } finally {
+      setStarting(false)
+    }
+  }
+
   async function handleSave() {
     const steps = graphToSteps(graph)
     const refusal = validateSteps(steps)
@@ -417,13 +513,7 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
     setSaveError(null)
     setSaved(false)
     try {
-      const body: Record<string, unknown> = { name, steps }
-      if (workflow.description) body.description = workflow.description
-      if (workflow.version) body.version = workflow.version
-      if (workflow.variables !== undefined) body.variables = workflow.variables
-      // PUT rebuilds the workflow from the body; omitting timeout would turn a
-      // bounded workflow into an unbounded one.
-      if (typeof workflow.timeout === 'number') body.timeout = workflow.timeout
+      const body = requestBody(name, steps)
       const response = await apiFetch(
         isNew ? '/api/v1/workflows' : `/api/v1/workflows/${encodeURIComponent(name)}`,
         {
@@ -446,6 +536,19 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
     }
   }
 
+  const ordered = useMemo(() => orderNodes(graph), [graph])
+  const issuesByNode = useMemo(() => {
+    const out = new Map<string, string[]>()
+    for (const issue of validation.result?.issues ?? []) {
+      const idx = issueStepIndex(issue.path)
+      const node = idx === null ? undefined : ordered.at(idx)
+      if (node === undefined) continue
+      out.set(node.id, [...(out.get(node.id) ?? []), issue.message])
+    }
+    return out
+  }, [validation.result, ordered])
+  const statuses = useMemo(() => stepStatuses(run.execution), [run.execution])
+
   const rfNodes: BNode[] = useMemo(
     () =>
       graph.nodes.map((n) => {
@@ -461,10 +564,12 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
             opaque: isOpaque(n.step),
             tone,
             icon,
+            issues: issuesByNode.get(n.id) ?? [],
+            runState: runStateFor(n.step, run.execution, statuses),
           },
         }
       }),
-    [graph.nodes, positions, selectedId],
+    [graph.nodes, positions, selectedId, issuesByNode, run.execution, statuses],
   )
   const rfEdges: RFEdge[] = useMemo(
     () => graph.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
@@ -472,7 +577,15 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
   )
 
   const selected = graph.nodes.find((n) => n.id === selectedId)
-  const stepCount = orderNodes(graph).length
+  const stepCount = ordered.length
+  const completedSteps = ordered.filter((n) => {
+    const s = runStateFor(n.step, run.execution, statuses)
+    return s === 'done' || s === 'failed'
+  }).length
+  const orphanIssues: ValidationIssue[] = (validation.result?.issues ?? []).filter((i) => {
+    const idx = issueStepIndex(i.path)
+    return idx === null || ordered.at(idx) === undefined
+  })
 
   return (
     <div className="bld-root" data-testid="workflow-builder">
@@ -505,6 +618,24 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
         {saved && <span className="mut" data-testid="builder-save-success">Saved.</span>}
         <button
           type="button"
+          className="wf-btn-secondary"
+          onClick={handleValidate}
+          disabled={validation.validating}
+          data-testid="builder-validate"
+        >
+          {validation.validating ? 'Validating…' : 'Validate'}
+        </button>
+        <button
+          type="button"
+          className="wf-btn-secondary"
+          onClick={handleRun}
+          disabled={starting}
+          data-testid="builder-run"
+        >
+          {starting ? 'Starting…' : 'Run'}
+        </button>
+        <button
+          type="button"
           className="wf-btn"
           onClick={handleSave}
           disabled={saving || blocked.length > 0}
@@ -513,6 +644,45 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
+
+      {validation.error !== null && (
+        <div className="bld-validation" role="alert" data-testid="validate-error">
+          <span className="wf-form-error">{validation.error}</span>
+        </div>
+      )}
+      {validation.result !== null && (
+        <div className="bld-validation" data-testid="validate-result">
+          {validation.result.valid ? (
+            <span className="pill ok" data-testid="validate-valid"><span className="dot" />Valid</span>
+          ) : (
+            <>
+              <span className="pill crit" data-testid="validate-invalid">
+                <span className="dot" />
+                {validation.result.issues.length} {validation.result.issues.length === 1 ? 'issue' : 'issues'}
+              </span>
+              {orphanIssues.length > 0 && (
+                <ul data-testid="validate-workflow-issues">
+                  {orphanIssues.map((i, k) => (
+                    <li key={k}>{i.path ? `${i.path}: ` : ''}{i.message}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {(starting || execId !== null || runStartError !== null) && (
+        <RunBar
+          workflowName={runName}
+          executionId={execId}
+          execution={run.execution}
+          error={runStartError ?? run.error}
+          completedSteps={completedSteps}
+          totalSteps={stepCount}
+          onDismiss={() => { setExecId(null); setRunStartError(null) }}
+        />
+      )}
 
       {notice !== null && (
         <div className="bld-notice" role="alert" data-testid="builder-notice">
@@ -589,6 +759,7 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
               setDirty(true)
               setSaved(false)
               setNotice(null)
+              validationReset()
             }}
             onDelete={() => handleDelete(selected.id)}
             onRefuse={setNotice}
