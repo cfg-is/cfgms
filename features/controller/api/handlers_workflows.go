@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,8 +16,10 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -38,6 +41,13 @@ type WorkflowHandler struct {
 	// (Issue #4576); while unset, a root-scoped caller is refused.
 	rootTenantFn      func(ctx context.Context) string
 	authorizeTenantFn func(w http.ResponseWriter, r *http.Request, tenantID string) (string, bool)
+	// auditManager records approval decisions (Issue #4610); nil disables auditing.
+	auditManager *audit.Manager
+	// holdsPermissionFn reports whether the request's principal holds a permission.
+	// The approval decision checks the gate's own approver_permission with it, in
+	// addition to the route's workflow:approve. While unset, a gate that names an
+	// approver permission cannot be decided.
+	holdsPermissionFn func(r *http.Request, permissionID string) bool
 }
 
 // NewWorkflowHandler creates a new WorkflowHandler.
@@ -84,6 +94,17 @@ func (h *WorkflowHandler) SetTenantResolution(
 	h.authorizeTenantFn = authorize
 }
 
+// SetAuditManager wires the audit manager that records approval decisions (Issue #4610).
+func (h *WorkflowHandler) SetAuditManager(m *audit.Manager) {
+	h.auditManager = m
+}
+
+// SetPermissionCheck wires how the approval decision checks that the caller holds
+// the approval gate's own approver_permission (Issue #4610).
+func (h *WorkflowHandler) SetPermissionCheck(fn func(r *http.Request, permissionID string) bool) {
+	h.holdsPermissionFn = fn
+}
+
 // RegisterWorkflowRoutes registers workflow CRUD and execution routes on the provided subrouter.
 // Each route is wrapped with the permission gate set by SetRequirePermFn (Issue #2725).
 //
@@ -104,6 +125,9 @@ func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) error {
 	}
 	router.Handle("", wrap("list", h.handleListWorkflows)).Methods("GET")
 	router.Handle("", wrap("write", h.handleCreateWorkflow)).Methods("POST")
+	// Approval routes precede /{id} so "approvals" is never read as a workflow name.
+	router.Handle("/approvals", wrap("read", h.handleListApprovals)).Methods("GET")
+	router.Handle("/approvals/{approval_id}/decision", wrap("approve", h.handleDecideApproval)).Methods("POST")
 	router.Handle("/{id}", wrap("read", h.handleGetWorkflow)).Methods("GET")
 	router.Handle("/{id}", wrap("write", h.handleUpdateWorkflow)).Methods("PUT")
 	router.Handle("/{id}", wrap("write", h.handleDeleteWorkflow)).Methods("DELETE")
@@ -765,6 +789,228 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{
 		"cancelled": execID,
 	})
+}
+
+// approvalView is the API shape of a workflow approval. It never carries the
+// checkpoint reference or resume-claim state.
+type approvalView struct {
+	ApprovalID         string     `json:"approval_id"`
+	WorkflowName       string     `json:"workflow_name"`
+	ExecutionID        string     `json:"execution_id"`
+	StepID             string     `json:"step_id"`
+	StepName           string     `json:"step_name"`
+	Message            string     `json:"message"`
+	ApproverPermission string     `json:"approver_permission,omitempty"`
+	RequestedBy        string     `json:"requested_by,omitempty"`
+	Status             string     `json:"status"`
+	RequestedAt        time.Time  `json:"requested_at"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	DecidedBy          string     `json:"decided_by,omitempty"`
+	DecidedAt          *time.Time `json:"decided_at,omitempty"`
+	Justification      string     `json:"justification,omitempty"`
+}
+
+func toApprovalView(a *business.WorkflowApproval) approvalView {
+	v := approvalView{
+		ApprovalID:         a.ApprovalID,
+		WorkflowName:       a.WorkflowName,
+		ExecutionID:        a.ExecutionID,
+		StepID:             a.StepID,
+		StepName:           a.StepName,
+		Message:            a.Message,
+		ApproverPermission: a.ApproverPermission,
+		RequestedBy:        a.RequestedBy,
+		Status:             a.Status,
+		RequestedAt:        a.RequestedAt,
+		DecidedBy:          a.DecidedBy,
+		Justification:      a.Justification,
+	}
+	if !a.ExpiresAt.IsZero() {
+		v.ExpiresAt = &a.ExpiresAt
+	}
+	if !a.DecidedAt.IsZero() {
+		v.DecidedAt = &a.DecidedAt
+	}
+	return v
+}
+
+// ApprovalDecisionRequest is the body of POST /api/v1/workflows/approvals/{approval_id}/decision.
+type ApprovalDecisionRequest struct {
+	Decision      string `json:"decision"` // "approve" or "reject"
+	Justification string `json:"justification"`
+}
+
+// maxApprovalDecisionBody bounds the decision request body.
+const maxApprovalDecisionBody = 16 << 10
+
+// approvalStore returns the engine's approval store, writing a 503 when the
+// engine or its store is not available.
+func (h *WorkflowHandler) approvalStore(w http.ResponseWriter) (business.ApprovalStore, bool) {
+	if h.engine == nil || h.engine.ApprovalStore() == nil {
+		h.sendError(w, http.StatusServiceUnavailable, "workflow approvals not available")
+		return nil, false
+	}
+	return h.engine.ApprovalStore(), true
+}
+
+// handleListApprovals handles GET /api/v1/workflows/approvals: the caller's
+// tenant's pending approvals, oldest first.
+func (h *WorkflowHandler) handleListApprovals(w http.ResponseWriter, r *http.Request) {
+	store, ok := h.approvalStore(w)
+	if !ok {
+		return
+	}
+	tenantStore, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
+	tenantID := tenantStore.TenantID()
+	pending, err := store.ListPending(r.Context(), tenantID)
+	if err != nil {
+		h.logger.Error("Failed to list workflow approvals", "error", logging.SanitizeLogValue(err.Error()))
+		h.sendError(w, http.StatusInternalServerError, "failed to list approvals")
+		return
+	}
+	views := make([]approvalView, 0, len(pending))
+	for _, a := range pending {
+		views = append(views, toApprovalView(a))
+	}
+	h.sendJSON(w, http.StatusOK, map[string]interface{}{
+		"approvals": views,
+		"total":     len(views),
+	})
+}
+
+// handleDecideApproval handles POST /api/v1/workflows/approvals/{approval_id}/decision.
+// The route gate has already required workflow:approve at strong assurance. Here the
+// approval is looked up in the caller's tenant only (a foreign approval is a 404), the
+// gate's own approver_permission is checked, the run's initiator is refused, and the
+// decision is recorded with a compare-and-set before the run is resumed.
+func (h *WorkflowHandler) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
+	store, ok := h.approvalStore(w)
+	if !ok {
+		return
+	}
+	tenantStore, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
+	tenantID := tenantStore.TenantID()
+	approvalID := mux.Vars(r)["approval_id"]
+
+	var req ApprovalDecisionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxApprovalDecisionBody)).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var status string
+	switch req.Decision {
+	case "approve":
+		status = business.ApprovalStatusApproved
+	case "reject":
+		status = business.ApprovalStatusRejected
+	default:
+		h.sendError(w, http.StatusBadRequest, `decision must be "approve" or "reject"`)
+		return
+	}
+
+	rec, err := store.GetApproval(r.Context(), tenantID, approvalID)
+	if err != nil {
+		if errors.Is(err, business.ErrApprovalNotFound) {
+			h.sendError(w, http.StatusNotFound, "approval not found")
+			return
+		}
+		h.logger.Error("Failed to load workflow approval", "error", logging.SanitizeLogValue(err.Error()))
+		h.sendError(w, http.StatusInternalServerError, "failed to load approval")
+		return
+	}
+
+	if rec.ApproverPermission != "" && (h.holdsPermissionFn == nil || !h.holdsPermissionFn(r, rec.ApproverPermission)) {
+		h.sendError(w, http.StatusForbidden, "caller lacks the permission this approval requires")
+		return
+	}
+
+	// A decision is attributed to a named principal, and a lapsed gate stays lapsed
+	// even before ExpireDue has swept it.
+	principalID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+	if principalID == "" {
+		h.sendError(w, http.StatusForbidden, "decision requires an identified principal")
+		return
+	}
+	if !rec.ExpiresAt.IsZero() && !time.Now().Before(rec.ExpiresAt) {
+		h.sendError(w, http.StatusConflict, "approval has expired")
+		return
+	}
+	if principalID == rec.RequestedBy {
+		h.sendJSON(w, http.StatusForbidden, map[string]interface{}{
+			"error": "the principal that started a run cannot approve it",
+			"code":  "SELF_APPROVAL",
+		})
+		return
+	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if err := store.DecideApproval(r.Context(), tenantID, approvalID, status, principalID, justification, time.Now()); err != nil {
+		switch {
+		case errors.Is(err, business.ErrApprovalAlreadyDecided):
+			h.sendError(w, http.StatusConflict, "approval already decided")
+		case errors.Is(err, business.ErrApprovalNotFound):
+			h.sendError(w, http.StatusNotFound, "approval not found")
+		default:
+			h.logger.Error("Failed to record workflow approval decision", "error", logging.SanitizeLogValue(err.Error()))
+			h.sendError(w, http.StatusInternalServerError, "failed to record decision")
+		}
+		return
+	}
+	h.emitApprovalDecisionAudit(r.Context(), rec, req.Decision, principalID, justification)
+
+	// The decision is durable. A resume that cannot start now is retried by engine
+	// recovery, so the caller is told the decision stands rather than that it failed.
+	resumed := true
+	var executionStatus string
+	exec, err := h.engine.ResumeFromApproval(r.Context(), rec.TenantID, rec.ApprovalID)
+	if err != nil {
+		resumed = false
+		h.logger.Warn("Approved workflow run could not be resumed; recovery will retry",
+			"approval_id", logging.SanitizeLogValue(rec.ApprovalID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	} else if exec != nil {
+		executionStatus = string(exec.GetStatus())
+	}
+	h.sendJSON(w, http.StatusOK, map[string]interface{}{
+		"approval_id":      rec.ApprovalID,
+		"decision":         req.Decision,
+		"execution_id":     rec.ExecutionID,
+		"resumed":          resumed,
+		"execution_status": executionStatus,
+	})
+}
+
+// emitApprovalDecisionAudit records who decided which approval, how, and why.
+func (h *WorkflowHandler) emitApprovalDecisionAudit(ctx context.Context, rec *business.WorkflowApproval, decision, principalID, justification string) {
+	if h.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(rec.TenantID).
+		Type(business.AuditEventAuthorization).
+		Action("workflow.approval_decided").
+		User(principalID, business.AuditUserTypeHuman).
+		Resource("workflow_approval", logging.SanitizeLogValue(rec.ApprovalID), logging.SanitizeLogValue(rec.WorkflowName)).
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityMedium).
+		Details(map[string]interface{}{
+			"approval_id":   logging.SanitizeLogValue(rec.ApprovalID),
+			"execution_id":  logging.SanitizeLogValue(rec.ExecutionID),
+			"decision":      decision,
+			"justification": logging.SanitizeLogValue(justification),
+			"requested_by":  logging.SanitizeLogValue(rec.RequestedBy),
+		})
+	if err := h.auditManager.RecordEvent(ctx, b); err != nil {
+		h.logger.Warn("Failed to emit approval decision audit event",
+			"approval_id", logging.SanitizeLogValue(rec.ApprovalID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // sendJSON writes a JSON response with the given status code.

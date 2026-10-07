@@ -170,6 +170,7 @@ var knownPermissions = map[string]bool{
 	"workflow:write":   true,
 	"workflow:execute": true,
 	"workflow:cancel":  true,
+	"workflow:approve": true, // Issue #4610: decide a pending approval gate
 	// Trigger management (Issue #2725)
 	"trigger:manage": true,
 	// Module bundle approval management (Issue #2728)

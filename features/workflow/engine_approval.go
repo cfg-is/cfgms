@@ -56,6 +56,9 @@ func WithNodeID(nodeID string) EngineOption {
 	}
 }
 
+// ApprovalStore returns the engine's approval store, or nil when none is configured.
+func (e *Engine) ApprovalStore() business.ApprovalStore { return e.approvalStore }
+
 func defaultApprovalNodeID() string {
 	host, _ := os.Hostname()
 	return fmt.Sprintf("%s-%d-%d", host, os.Getpid(), executionIDCounter.Add(1))

@@ -64,6 +64,10 @@ var permissionAssurance = map[string]Requirement{
 	"cluster:drain-node":        {Min: session.AssuranceStrong}, // POST /cluster/nodes/{id}/drain
 	"cluster:decommission-node": {Min: session.AssuranceStrong}, // POST /cluster/nodes/{id}/decommission
 
+	// Workflow approval decision (Issue #4610): approving or rejecting a gate releases or
+	// fails a suspended run, so it needs a phishing-resistant factor.
+	"workflow:approve": {Min: session.AssuranceStrong}, // POST /workflows/approvals/{approval_id}/decision
+
 	// Session credential-minting — new in Issue #2780.
 	// session:list and session:revoke are intentionally absent: revoking a session
 	// is a de-escalation/safety action that must not be gated on AssuranceStrong

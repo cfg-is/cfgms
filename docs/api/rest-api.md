@@ -2233,6 +2233,78 @@ Cross-tenant cancellations return `403 Forbidden`. Already-terminal executions r
 - `403 Forbidden` — workflow is not visible in the calling tenant's namespace
 - `409 Conflict` — execution is already in a terminal state (`completed`, `failed`, or `cancelled`)
 
+### Workflow Approvals
+
+An approval step suspends a run until an operator decides it. Both endpoints are scoped to the caller's tenant, resolved as for the workflow endpoints; an approval in another tenant is indistinguishable from an unknown ID and returns `404`.
+
+#### GET /api/v1/workflows/approvals
+
+List the caller's tenant's pending approvals, oldest first. Requires `workflow:read`.
+
+**Response:** `200 OK`
+
+```json
+{
+  "approvals": [
+    {
+      "approval_id": "appr-exec-123-gate",
+      "workflow_name": "deploy-prod",
+      "execution_id": "exec-123",
+      "step_id": "gate",
+      "step_name": "gate",
+      "message": "ship it?",
+      "approver_permission": "workflow:approve",
+      "requested_by": "alice",
+      "status": "pending",
+      "requested_at": "2026-07-07T12:00:00Z",
+      "expires_at": "2026-07-07T13:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+#### POST /api/v1/workflows/approvals/{approval_id}/decision
+
+Approve or reject a pending approval. Approving resumes the suspended run; rejecting fails it.
+
+**Authentication:** Required. The `workflow:approve` permission requires strong assurance: a caller below it receives `401` with a `WWW-Authenticate: CFGMS-StepUp` challenge. If the approval step names an `approver_permission`, the caller must also hold that permission.
+
+**Request:**
+
+```json
+{
+  "decision": "approve",
+  "justification": "change window confirmed"
+}
+```
+
+`decision` is `approve` or `reject`.
+
+**Response:** `200 OK`
+
+```json
+{
+  "approval_id": "appr-exec-123-gate",
+  "decision": "approve",
+  "execution_id": "exec-123",
+  "resumed": true,
+  "execution_status": "running"
+}
+```
+
+`resumed` is `false` when the decision was recorded but the resume could not start immediately; engine recovery resumes it.
+
+**Error responses:**
+
+- `400 Bad Request` — `decision` is not `approve` or `reject`
+- `401 Unauthorized` — step-up required
+- `403 Forbidden` — the caller lacks the step's `approver_permission`, or started the run (`code: SELF_APPROVAL`)
+- `404 Not Found` — no such approval in the caller's tenant
+- `409 Conflict` — the approval was already decided or has expired
+
+Every decision writes a `workflow.approval_decided` audit event recording the principal, approval, decision and justification.
+
 ### Workflow Triggers
 
 Trigger endpoints manage scheduled and event-driven workflow execution. The `/triggers` subrouter is registered alongside `/workflows` when a `WorkflowHandler` is wired in (`server.go:717`). All routes inherit the API subrouter's authentication middleware. Trigger types: `schedule`, `webhook`, `siem`, `manual`.
