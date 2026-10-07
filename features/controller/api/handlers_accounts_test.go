@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -3259,4 +3260,63 @@ func TestAccounts_ListTenantScope_ParentSeesChildNotSibling(t *testing.T) {
 	assert.Contains(t, usernames, "lt-client1-user", "descendant tenant's accounts must be listed")
 	assert.NotContains(t, usernames, "lt-msp-b-user", "sibling tenant's accounts must not be listed")
 	assert.NotContains(t, usernames, "lt-msp-ab-user", "shared-prefix sibling's accounts must not be listed")
+}
+
+// TestAccounts_ListIncludesRoles is the [REQUIRED TEST] for Issue #4602: roles are
+// returned for every account on the page, and a caller without
+// rbac:list-subject-roles gets the list with no roles field.
+func TestAccounts_ListIncludesRoles(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		rec := postAccount(t, server, admin, AccountRequest{
+			Username: fmt.Sprintf("roles-user-%d", i),
+			TenantID: "tenant-roles",
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	}
+	createRoleForTenant(t, server, "tenant-roles", "role-alpha", "Alpha")
+	createRoleForTenant(t, server, "tenant-roles", "role-beta", "Beta")
+
+	_, accounts := listAccounts(t, server, admin)
+	require.Len(t, accounts, n)
+	// Give the first two accounts roles; the third keeps none.
+	byName := map[string]AccountInfo{}
+	for _, a := range accounts {
+		byName[a.Username] = a
+	}
+	for _, name := range []string{"roles-user-0", "roles-user-1"} {
+		createSubjectForTenant(t, server, "tenant-roles", byName[name].ID, name)
+	}
+	rec := callHandleAssignSubjectRole(server, "tenant-roles", byName["roles-user-0"].ID, "role-alpha")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	rec = callHandleAssignSubjectRole(server, "tenant-roles", byName["roles-user-1"].ID, "role-alpha")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	rec = callHandleAssignSubjectRole(server, "tenant-roles", byName["roles-user-1"].ID, "role-beta")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	listRec, accounts := listAccounts(t, server, admin)
+	require.Equal(t, http.StatusOK, listRec.Code)
+	require.Len(t, accounts, n)
+	got := map[string][]string{}
+	for _, a := range accounts {
+		require.NotNil(t, a.Roles, "roles must be present for %s", a.Username)
+		got[a.Username] = *a.Roles
+	}
+	assert.Equal(t, []string{"Alpha"}, got["roles-user-0"])
+	assert.ElementsMatch(t, []string{"Alpha", "Beta"}, got["roles-user-1"])
+	assert.Empty(t, got["roles-user-2"])
+
+	// A caller without the RBAC read permission still gets the list, no roles field.
+	limited := &Principal{ID: "limited", Name: "limited", Assurance: session.AssuranceBasic,
+		Permissions: []string{"account:list"}}
+	listRec, accounts = listAccounts(t, server, limited)
+	require.Equal(t, http.StatusOK, listRec.Code)
+	require.Len(t, accounts, n)
+	for _, a := range accounts {
+		assert.Nil(t, a.Roles, "roles must be omitted for %s", a.Username)
+	}
+	assert.NotContains(t, listRec.Body.String(), `"roles"`)
 }

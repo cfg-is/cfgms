@@ -1510,3 +1510,28 @@ describe('AccountsView — enable/disable toggle (Issue #3132)', () => {
     })
   })
 })
+
+describe('AccountsView — role chips on the collapsed row (Issue #4602)', () => {
+  it('renders role chips with +N overflow', async () => {
+    fetchMock.mockResolvedValue(
+      makeAccountsResponse([makeAccount({ roles: ['alpha', 'beta', 'gamma', 'delta'] })]),
+    )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getAllByTestId('account-role-chip')).toHaveLength(2))
+    expect(screen.getAllByTestId('account-role-chip')[0]).toHaveTextContent('alpha')
+    expect(screen.getByTestId('account-role-overflow')).toHaveTextContent('+2')
+  })
+
+  it('shows "No roles" for an account with an empty roles list', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ roles: [] })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('account-no-roles')).toHaveTextContent('No roles'))
+  })
+
+  it('shows a dash, not "No roles", when the roles field is absent', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('account-roles-cell')).toHaveTextContent('—'))
+    expect(screen.queryByTestId('account-no-roles')).not.toBeInTheDocument()
+  })
+})
