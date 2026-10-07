@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -251,4 +252,103 @@ func TestCreateTenantCommand_TopLevelRefusalFails(t *testing.T) {
 		require.ErrorIs(t, err, ErrTopLevelTenantExists)
 	})
 	assert.NotContains(t, output, "already exists: root")
+}
+
+// withTenantClient points the tenant commands at server for one test.
+func withTenantClient(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	origURL, origInsecure, origJSON := tenantAPIURL, tenantTLSInsecure, tenantJSONOutput
+	t.Cleanup(func() {
+		tenantAPIURL, tenantTLSInsecure, tenantJSONOutput = origURL, origInsecure, origJSON
+	})
+	tenantAPIURL = server.URL
+	tenantTLSInsecure = true
+	tenantJSONOutput = false
+}
+
+func newTenantListServer(t *testing.T, data string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/tenants" {
+			_, _ = w.Write([]byte(`{"data":` + data + `,"timestamp":"2026-01-01T00:00:00Z"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+func TestTenantList_Empty(t *testing.T) {
+	server := newTenantListServer(t, `[]`)
+	defer server.Close()
+	withTenantClient(t, server)
+
+	out := captureStdout(t, func() { require.NoError(t, runTenantList(tenantListCmd, nil)) })
+	assert.Contains(t, out, "no tenants")
+
+	tenantJSONOutput = true
+	out = captureStdout(t, func() { require.NoError(t, runTenantList(tenantListCmd, nil)) })
+	assert.Equal(t, "[]", strings.TrimSpace(out))
+}
+
+func TestTenantList_TextRows(t *testing.T) {
+	server := newTenantListServer(t, `[{"id":"root","name":"root","status":"active"},{"id":"msp-a","name":"msp-a","parent_id":"root","status":"active"},{"id":"c1","name":"c1","parent_id":"msp-a","status":"suspended"}]`)
+	defer server.Close()
+	withTenantClient(t, server)
+
+	out := captureStdout(t, func() { require.NoError(t, runTenantList(tenantListCmd, nil)) })
+	assert.Contains(t, out, "PATH")
+	assert.Regexp(t, `c1\s+msp-a\s+root/msp-a/c1\s+suspended`, out)
+	assert.Regexp(t, `root\s+-\s+root\s+active`, out)
+}
+
+func TestTenantList_JSONByteIdentical(t *testing.T) {
+	data := `[{"id":"root","name":"root","status":"active","created_at":"2026-01-01T00:00:00Z","extra_field":{"k":1}}]`
+	server := newTenantListServer(t, data)
+	defer server.Close()
+	withTenantClient(t, server)
+	tenantJSONOutput = true
+
+	out := captureStdout(t, func() { require.NoError(t, runTenantList(tenantListCmd, nil)) })
+	assert.Equal(t, data+"\n", out)
+}
+
+func TestTenantGet_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"TENANT_NOT_FOUND","message":"tenant does not exist"}}`))
+	}))
+	defer server.Close()
+	withTenantClient(t, server)
+
+	var err error
+	out := captureStdout(t, func() { err = runTenantGet(tenantGetCmd, []string{"missing"}) })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tenant does not exist")
+	assert.Empty(t, out, "no tenant fields may be printed on a 404")
+}
+
+func TestTenantGet_TextAndJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/tenants/c1":
+			_, _ = w.Write([]byte(`{"data":{"id":"c1","name":"c1","parent_id":"root","status":"active"}}`))
+		case "/api/v1/tenants/root":
+			_, _ = w.Write([]byte(`{"data":{"id":"root","name":"root","status":"active"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	withTenantClient(t, server)
+
+	out := captureStdout(t, func() { require.NoError(t, runTenantGet(tenantGetCmd, []string{"c1"})) })
+	assert.Contains(t, out, "root/c1")
+	assert.Contains(t, out, "active")
+
+	tenantJSONOutput = true
+	out = captureStdout(t, func() { require.NoError(t, runTenantGet(tenantGetCmd, []string{"c1"})) })
+	assert.Equal(t, `{"id":"c1","name":"c1","parent_id":"root","status":"active"}`+"\n", out)
 }

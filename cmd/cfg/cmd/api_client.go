@@ -725,30 +725,77 @@ func (c *APIClient) CreateTenantViaAPI(ctx context.Context, req *APITenantCreate
 
 // GetTenantViaAPI retrieves a tenant by ID via the controller REST API.
 func (c *APIClient) GetTenantViaAPI(ctx context.Context, tenantID string) (*APITenantResponse, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+tenantID, nil)
+	tenant, _, err := c.GetTenantRawViaAPI(ctx, tenantID)
+	return tenant, err
+}
+
+// GetTenantRawViaAPI retrieves a tenant by ID and also returns the response's
+// data payload exactly as the server sent it, for --json output.
+func (c *APIClient) GetTenantRawViaAPI(ctx context.Context, tenantID string) (*APITenantResponse, json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+url.PathEscape(tenantID), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("tenant not found: %s", tenantID)
+		return nil, nil, fmt.Errorf("tenant not found: %s%s", tenantID, serverMessageSuffix(resp))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp)
+		return nil, nil, c.parseError(resp)
 	}
 
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return nil, nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	var tenant APITenantResponse
 	if err := json.Unmarshal(envelope.Data, &tenant); err != nil {
-		return nil, fmt.Errorf("failed to decode tenant data: %w", err)
+		return nil, nil, fmt.Errorf("failed to decode tenant data: %w", err)
 	}
-	return &tenant, nil
+	return &tenant, envelope.Data, nil
+}
+
+// ListTenantsViaAPI lists the tenants visible to the caller via GET /api/v1/tenants.
+// It returns the decoded tenants and the response's data payload exactly as the
+// server sent it, for --json output.
+func (c *APIClient) ListTenantsViaAPI(ctx context.Context) ([]APITenantResponse, json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var tenants []APITenantResponse
+	if err := json.Unmarshal(envelope.Data, &tenants); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode tenant list: %w", err)
+	}
+	return tenants, envelope.Data, nil
+}
+
+// serverMessageSuffix returns ": <message>" from a {"error":{"message":...}} body, or "".
+func serverMessageSuffix(resp *http.Response) string {
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&body) == nil && body.Error.Message != "" {
+		return ": " + body.Error.Message
+	}
+	return ""
 }
 
 // APIDispatchUpgradeRequest is the request body for POST /api/v1/stewards/upgrade.
