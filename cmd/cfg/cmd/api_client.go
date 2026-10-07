@@ -550,13 +550,27 @@ func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path s
 			return nil, fmt.Errorf("failed to buffer request body: %w", err)
 		}
 	}
-	return c.execRequest(ctx, method, path, bodyBytes, contentType, true, "")
+	return c.execRequest(ctx, method, path, bodyBytes, contentType, nil, true, "")
+}
+
+// doRequestWithHeaders is doRequest plus extra request headers. The headers are
+// re-sent on the step-up replay and the bundle-auth fallback retry.
+func (c *APIClient) doRequestWithHeaders(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to buffer request body: %w", err)
+		}
+	}
+	return c.execRequest(ctx, method, path, bodyBytes, "application/json", headers, true, "")
 }
 
 // execRequest is the inner send-and-receive loop shared by doRequestWithContentType
 // and the 401-fallback retry path. allowFallback prevents infinite recursion.
 // presenceToken, when non-empty, is attached as X-Presence-Token (step-up retry path).
-func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBytes []byte, contentType string, allowFallback bool, presenceToken string) (*http.Response, error) {
+func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBytes []byte, contentType string, extraHeaders http.Header, allowFallback bool, presenceToken string) (*http.Response, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base URL: %w", err)
@@ -602,6 +616,11 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 	if c.bearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 	}
+	for name, values := range extraHeaders {
+		for _, v := range values {
+			req.Header.Add(name, v)
+		}
+	}
 	if presenceToken != "" {
 		req.Header.Set("X-Presence-Token", presenceToken)
 	}
@@ -629,7 +648,7 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 					return nil, stepUpErr
 				}
 				if token != "" {
-					return c.execRequest(ctx, method, path, bodyBytes, contentType, false, token)
+					return c.execRequest(ctx, method, path, bodyBytes, contentType, extraHeaders, false, token)
 				}
 				return nil, fmt.Errorf("step-up required")
 			}
@@ -642,7 +661,7 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 			if fallbackErr == nil && fallbackClient != nil {
 				_ = resp.Body.Close()
 				fmt.Fprintln(os.Stderr, "session expired or revoked — falling back to bundle auth")
-				return fallbackClient.execRequest(ctx, method, path, bodyBytes, contentType, false, "")
+				return fallbackClient.execRequest(ctx, method, path, bodyBytes, contentType, extraHeaders, false, "")
 			}
 		}
 	}
@@ -783,6 +802,173 @@ func (c *APIClient) ListTenantsViaAPI(ctx context.Context) ([]APITenantResponse,
 		return nil, nil, fmt.Errorf("failed to decode tenant list: %w", err)
 	}
 	return tenants, envelope.Data, nil
+}
+
+// APITenantCrossing is a tenant-crossing record (grant or break-glass) as the
+// controller serialises it. The server type carries no JSON tags, so the keys
+// are the Go field names.
+type APITenantCrossing struct {
+	ID            string  `json:"ID"`
+	TenantID      string  `json:"TenantID"`
+	PrincipalID   string  `json:"PrincipalID"`
+	Kind          string  `json:"Kind"`
+	GrantedBy     string  `json:"GrantedBy"`
+	Justification string  `json:"Justification,omitempty"`
+	CreatedAt     string  `json:"CreatedAt"`
+	ExpiresAt     string  `json:"ExpiresAt"`
+	RevokedAt     *string `json:"RevokedAt"`
+}
+
+// APICrossingGrantRequest is the body of POST /api/v1/tenants/{id}/access-grants.
+type APICrossingGrantRequest struct {
+	PrincipalID     string `json:"principal_id"`
+	DurationMinutes int    `json:"duration_minutes"`
+}
+
+// crossingError turns a non-success tenant-crossing response into an error that
+// carries the server's message and code. A crossing challenge (401 or 403 body
+// with break_glass_endpoint) points the operator at `cfg tenant break-glass`.
+func crossingError(resp *http.Response, action string) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	var msg, code string
+	var challenge struct {
+		RequiredAssurance  string `json:"required_assurance"`
+		BreakGlassEndpoint string `json:"break_glass_endpoint"`
+	}
+	if json.Unmarshal(body, &env) == nil && len(env.Error) > 0 {
+		var obj struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(env.Error, &obj) == nil {
+			msg, code = obj.Message, obj.Code
+		} else {
+			_ = json.Unmarshal(env.Error, &msg)
+		}
+	}
+	_ = json.Unmarshal(body, &challenge)
+
+	if challenge.BreakGlassEndpoint != "" {
+		if msg == "" {
+			msg = "access to this tenant requires an active crossing"
+		}
+		return fmt.Errorf("%s: %s; run `cfg tenant break-glass <tenant> --justification \"...\"` to gain access", action, msg)
+	}
+	if msg == "" {
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			msg = "session expired or step-up verification not completed; log in again"
+		case http.StatusForbidden:
+			msg = "forbidden"
+		case http.StatusNotFound:
+			msg = "not found"
+		default:
+			msg = fmt.Sprintf("unexpected status %d", resp.StatusCode)
+		}
+	}
+	if code != "" {
+		return fmt.Errorf("%s: %s (%s)", action, msg, code)
+	}
+	return fmt.Errorf("%s: %s", action, msg)
+}
+
+// decodeCrossingData decodes a {"data": ...} envelope into out and returns the
+// data payload as received.
+func decodeCrossingData(resp *http.Response, out interface{}) (json.RawMessage, error) {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	if err := json.Unmarshal(envelope.Data, out); err != nil {
+		return nil, fmt.Errorf("failed to decode crossing data: %w", err)
+	}
+	return envelope.Data, nil
+}
+
+// BreakGlassTenant invokes POST /api/v1/tenants/{id}/break-glass. The
+// justification travels only in the X-Justification header; the body is empty.
+func (c *APIClient) BreakGlassTenant(ctx context.Context, tenantID, justification string) (*APITenantCrossing, json.RawMessage, error) {
+	h := http.Header{}
+	h.Set("X-Justification", justification)
+	resp, err := c.doRequestWithHeaders(ctx, "POST", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/break-glass", nil, h)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, nil, crossingError(resp, "break-glass failed")
+	}
+	var cr APITenantCrossing
+	raw, err := decodeCrossingData(resp, &cr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &cr, raw, nil
+}
+
+// CreateTenantAccessGrant calls POST /api/v1/tenants/{id}/access-grants.
+func (c *APIClient) CreateTenantAccessGrant(ctx context.Context, tenantID string, req *APICrossingGrantRequest) (*APITenantCrossing, json.RawMessage, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/access-grants", bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, nil, crossingError(resp, "grant failed")
+	}
+	var cr APITenantCrossing
+	raw, err := decodeCrossingData(resp, &cr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &cr, raw, nil
+}
+
+// ListTenantCrossings calls GET /api/v1/tenants/{id}/access-grants and returns
+// every crossing record plus the data payload as received.
+func (c *APIClient) ListTenantCrossings(ctx context.Context, tenantID string) ([]APITenantCrossing, json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/access-grants", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, crossingError(resp, "listing crossings failed")
+	}
+	var list []APITenantCrossing
+	raw, err := decodeCrossingData(resp, &list)
+	if err != nil {
+		return nil, nil, err
+	}
+	return list, raw, nil
+}
+
+// EndTenantCrossing calls DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}.
+func (c *APIClient) EndTenantCrossing(ctx context.Context, tenantID, crossingID string) (*APITenantCrossing, json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/access-grants/"+url.PathEscape(crossingID), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, crossingError(resp, "end-crossing failed")
+	}
+	var cr APITenantCrossing
+	raw, err := decodeCrossingData(resp, &cr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &cr, raw, nil
 }
 
 // serverMessageSuffix returns ": <message>" from a {"error":{"message":...}} body, or "".
