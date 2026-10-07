@@ -191,6 +191,7 @@ type Server struct {
 	healthTraceManager      *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
 	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
+	workflowEngine          *workflow.Engine                         // Issue #4609: owns approval-gate recovery; shut down on Stop
 	gitSyncer               *gitsync.Syncer                          // Issue #666: git-sync write-through component
 	webhookHandler          *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
 	storageManager          *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
@@ -2092,10 +2093,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
-	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
+	workflowHandler, triggerMgr, workflowEngine := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
 	if workflowHandler != nil {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
+		srv.workflowEngine = workflowEngine
 		logger.Info("Workflow engine wired to HTTP API server")
 
 		// ADR-031 Decision 4: cluster-singleton lease claim for the cron
@@ -2451,7 +2453,7 @@ func initializeWorkflowHandler(
 	logger logging.Logger,
 	secrets secretsif.SecretStore,
 	configService *service.ConfigurationServiceV2,
-) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
+) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl, *workflow.Engine) {
 	// Workflow module factory: looks up controller-kind module bundles by
 	// name in the controller's module cache (#1883) and fork/execs them as
 	// workflow-kind module subprocesses connected over the WorkflowModuleClient
@@ -2466,7 +2468,13 @@ func initializeWorkflowHandler(
 
 	setHARoleExecutor := workflownodes.NewSetHARoleNodeExecutor(configStore, configService)
 	moveResourceToClusterExecutor := workflownodes.NewMoveResourceToClusterNodeExecutor(configStore, configService)
-	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor)
+	// The approval store is the durable home of approval gates (Issue #4609); a nil
+	// store (provider without one) makes approval steps fail with a clear error.
+	engineOpts := []workflow.EngineOption{}
+	if approvalStore := storageManager.GetApprovalStore(); approvalStore != nil {
+		engineOpts = append(engineOpts, workflow.WithApprovalStore(approvalStore))
+	}
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor, engineOpts...)
 	// Composed workflows (nested steps, error workflows, components) resolve by
 	// name from the executing tenant's workflow store (Issue #4638).
 	workflowEngine.SetWorkflowResolver(workflow.NewStoreWorkflowResolver(configStore))
@@ -2488,7 +2496,7 @@ func initializeWorkflowHandler(
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
 
 	logger.Info("Workflow engine and trigger manager initialized (Issue #414)")
-	return handler, triggerMgr
+	return handler, triggerMgr, workflowEngine
 }
 
 // workflowEngineAdapter implements trigger.WorkflowTrigger by delegating to the workflow engine.
@@ -2815,6 +2823,13 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Resume approval-gated runs the previous process left behind and start the
+	// periodic sweep that expires due approvals (Issue #4609). The engine owns the
+	// sweep's lifetime; Stop shuts it down.
+	if s.workflowEngine != nil {
+		s.workflowEngine.StartApprovalRecovery(ctxkeys.WithSystem(context.Background()), approvalRecoveryInterval)
+	}
+
 	// Start workflow trigger manager (Issue #414)
 	if s.triggerManager != nil {
 		if err := s.triggerManager.Start(ctxkeys.WithSystem(context.Background())); err != nil {
@@ -2935,6 +2950,10 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// approvalRecoveryInterval is how often each node sweeps for expired approvals and
+// decided-but-unresumed runs.
+const approvalRecoveryInterval = 30 * time.Second
+
 // Stop gracefully shuts down the server
 func (s *Server) Stop() error {
 	s.mu.Lock()
@@ -2973,6 +2992,12 @@ func (s *Server) Stop() error {
 		if err := s.terminalSessionMgr.Stop(context.Background()); err != nil {
 			s.logger.Warn("Failed to stop terminal session manager", "error", err)
 		}
+	}
+
+	// Stop approval recovery and cancel runs resumed from approvals; their
+	// claims lapse and another engine finishes them (Issue #4609).
+	if s.workflowEngine != nil {
+		s.workflowEngine.Shutdown()
 	}
 
 	// Stop workflow trigger manager (Issue #414)
