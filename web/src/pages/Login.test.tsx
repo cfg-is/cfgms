@@ -317,6 +317,11 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     // is relative to the test file (same directory), so the glob returns
     // "./Login.tsx" which ends with just "Login.tsx".
     { path: 'Login.tsx', key: 'cfgms.login.username' },
+    // Active break-glass banner (Issue #4588) — {tenantId, crossingId,
+    // expiresAt, reason} echoed by the break-glass response so the banner
+    // survives a reload. Non-secret, session-scoped, and re-validated against
+    // the server on mount (useTenantCrossings.ts); not auth data.
+    { path: 'tenants/useTenantCrossings.ts', key: 'cfgms.tenants.crossingBanner' },
   ]
 
   it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {

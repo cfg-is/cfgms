@@ -49,6 +49,15 @@ import {
   type TenantInfo,
 } from './useTenants.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
+import {
+  useCrossingBanner,
+  useTenantCrossings,
+  isCrossingActive,
+  type Crossing,
+} from './useTenantCrossings.ts'
+import BreakGlassDialog from './BreakGlassDialog.tsx'
+import CrossingBanner from './CrossingBanner.tsx'
+import SupportAccessDialog from './SupportAccessDialog.tsx'
 
 // ── Tree building ──────────────────────────────────────────────────────────────
 
@@ -185,7 +194,7 @@ function ErrorNotice({ detail, onRetry }: { detail: string; onRetry: () => void 
 
 // ── Boundary empty state (ADR-025) ────────────────────────────────────────────
 
-function BoundaryEmptyState() {
+function BoundaryEmptyState({ onRequestBreakGlass }: { onRequestBreakGlass: () => void }) {
   return (
     <div className="notice empty" data-testid="boundary-empty-state">
       <div className="ic">🔒</div>
@@ -198,8 +207,80 @@ function BoundaryEmptyState() {
       </p>
       <p style={{ fontSize: '0.875rem', color: 'var(--color-muted)' }}>
         Preferred path: ask the MSP to enable support access from their own tenant.
-        Break-glass invocation is a separate, out-of-scope action.
+        Otherwise request a time-boxed, justified break-glass session.
       </p>
+      <button
+        type="button"
+        className="wf-btn-danger"
+        onClick={onRequestBreakGlass}
+        data-testid="request-break-glass-btn"
+      >
+        Request break-glass →
+      </button>
+    </div>
+  )
+}
+
+// ── Support-access crossing list ──────────────────────────────────────────────
+
+function CrossingList({
+  tenantId,
+  version,
+  nowMs,
+  onClose,
+}: {
+  tenantId: string
+  /** Bumped by the parent after a new grant so the list refetches. */
+  version: number
+  nowMs: number
+  onClose: () => void
+}) {
+  const { crossings, loading, error, refetch } = useTenantCrossings(tenantId, version)
+  return (
+    <div className="wf-form-panel" data-testid="crossing-list">
+      <div className="wf-form">
+        <div className="wf-form-row">
+          <span className="wf-form-label">
+            Support access for <b>{tenantId}</b>
+          </span>
+          <button type="button" className="wf-btn-secondary" onClick={onClose} data-testid="crossing-list-close-btn">
+            Close
+          </button>
+        </div>
+        {loading ? (
+          <div data-testid="crossing-list-loading">Loading…</div>
+        ) : error !== null ? (
+          <div className="wf-form-error" role="alert" data-testid="crossing-list-error">
+            {error}{' '}
+            <button type="button" className="wf-btn-secondary" onClick={refetch} data-testid="crossing-list-retry-btn">
+              Retry
+            </button>
+          </div>
+        ) : crossings.length === 0 ? (
+          <div data-testid="crossing-list-empty">No support access has been granted.</div>
+        ) : (
+          <table className="tbl" data-testid="crossing-list-table">
+            <thead>
+              <tr>
+                <th>Principal</th>
+                <th>Kind</th>
+                <th>Expires</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {crossings.map((c: Crossing) => (
+                <tr key={c.id} data-testid="crossing-row" data-crossing-id={c.id}>
+                  <td>{c.principalId}</td>
+                  <td>{c.kind}</td>
+                  <td>{c.expiresAt ? new Date(c.expiresAt).toLocaleString() : '—'}</td>
+                  <td>{c.revokedAt !== null ? 'Revoked' : isCrossingActive(c, nowMs) ? 'Active' : 'Expired'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   )
 }
@@ -426,6 +507,7 @@ function TenantRow({
   onCancelDelete,
   onApproveDelete,
   onEdit,
+  onAllowSupport,
 }: {
   node: TreeNode
   dualControlLocked: boolean
@@ -437,6 +519,8 @@ function TenantRow({
   onCancelDelete: (id: string) => void
   onApproveDelete: (id: string) => void
   onEdit: (tenant: TenantInfo) => void
+  /** Present only for sessions that may grant support access (not root-scoped). */
+  onAllowSupport?: (tenant: TenantInfo) => void
 }) {
   const { tenant, depth, children } = node
   const suspended = isSuspended(tenant)
@@ -576,6 +660,16 @@ function TenantRow({
             >
               Edit
             </button>
+            {onAllowSupport && (
+              <button
+                type="button"
+                className="wf-btn-secondary"
+                onClick={() => onAllowSupport(tenant)}
+                data-testid="allow-support-btn"
+              >
+                Allow support access
+              </button>
+            )}
           </div>
         </td>
       </tr>
@@ -634,6 +728,11 @@ export default function TenantAdminView() {
   const [dualControlLockedIds, setDualControlLockedIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   )
+  const banner = useCrossingBanner()
+  const [showBreakGlass, setShowBreakGlass] = useState(false)
+  const [supportTenant, setSupportTenant] = useState<TenantInfo | null>(null)
+  const [listTenantId, setListTenantId] = useState<string | null>(null)
+  const [listVersion, setListVersion] = useState(0)
   // Clock for the hold countdowns, re-read every minute so a row approaching
   // eligibility updates without a refetch.
   const nowMs = useSyncExternalStore(subscribeToClock, clockSnapshot)
@@ -749,6 +848,24 @@ export default function TenantAdminView() {
     retry()
   }
 
+  function handleBreakGlassInvoked(crossing: Crossing) {
+    banner.adopt(crossing)
+    setShowBreakGlass(false)
+    // The crossing exposes the tenant's subtree; reload the tree.
+    retry()
+  }
+
+  function handleBannerEnded() {
+    banner.clear()
+    retry()
+  }
+
+  function handleGrantCreated() {
+    if (supportTenant !== null) setListTenantId(supportTenant.id)
+    setListVersion((v) => v + 1)
+    setSupportTenant(null)
+  }
+
   function handleEditSaved() {
     setEditingTenant(null)
     retry()
@@ -760,6 +877,10 @@ export default function TenantAdminView() {
         <h1>Tenants</h1>
         <p>Tenant hierarchy, cascade suspension, and the delete pipeline.</p>
       </div>
+
+      {banner.entry !== null && (
+        <CrossingBanner entry={banner.entry} onEnded={handleBannerEnded} onExpired={banner.revalidate} />
+      )}
 
       <section className="panel">
         <div className="ptool">
@@ -800,6 +921,15 @@ export default function TenantAdminView() {
           />
         )}
 
+        {listTenantId !== null && (
+          <CrossingList
+            tenantId={listTenantId}
+            version={listVersion}
+            nowMs={nowMs}
+            onClose={() => setListTenantId(null)}
+          />
+        )}
+
         {actionError && (
           <div className="wf-form-error" style={{ padding: '8px 14px' }} role="alert" data-testid="action-error">
             {actionError}
@@ -817,7 +947,7 @@ export default function TenantAdminView() {
         ) : error !== null ? (
           <ErrorNotice detail={error} onRetry={retry} />
         ) : showBoundaryState ? (
-          <BoundaryEmptyState />
+          <BoundaryEmptyState onRequestBreakGlass={() => setShowBreakGlass(true)} />
         ) : tenants.length === 0 ? (
           <div className="notice empty" data-testid="tenants-empty">
             <div className="ic">◍</div>
@@ -846,12 +976,25 @@ export default function TenantAdminView() {
                   onCancelDelete={handleCancelDelete}
                   onApproveDelete={handleApproveDelete}
                   onEdit={setEditingTenant}
+                  onAllowSupport={isRootScoped ? undefined : setSupportTenant}
                 />
               ))}
             </tbody>
           </table>
         )}
       </section>
+
+      {showBreakGlass && (
+        <BreakGlassDialog onInvoked={handleBreakGlassInvoked} onClose={() => setShowBreakGlass(false)} />
+      )}
+      {supportTenant !== null && (
+        <SupportAccessDialog
+          tenantId={supportTenant.id}
+          tenantName={supportTenant.name}
+          onGranted={handleGrantCreated}
+          onClose={() => setSupportTenant(null)}
+        />
+      )}
     </>
   )
 }
