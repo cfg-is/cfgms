@@ -1390,6 +1390,77 @@ paths:
           $ref: '#/components/responses/NotFound'
         '503':
           description: Tenant crossing store not configured
+  /billing/report:
+    get:
+      summary: Cross-MSP billing report
+      description: |
+        Every MSP (direct child of the root tenant) with tech and endpoint counts and
+        metrics, and each MSP's clients under an opaque stored label. Requires
+        `tenant:billing-read`; callable by a root-scoped caller (no grant needed), a caller
+        bound to the root tenant, or an unscoped certificate-authenticated caller that holds
+        the permission. Any other caller gets `403` `BILLING_ROOT_ONLY`. A client is a direct
+        child of an MSP with its whole subtree rolled up into it. Endpoint counts exclude
+        stewards in a terminal state (deregistered, archived, dormant, revoked); tech counts
+        exclude disabled accounts. The response has no client name, client tenant ID or
+        client-level metrics.
+      operationId: getRootBillingReport
+      tags:
+        - Tenants
+      responses:
+        '200':
+          description: Cross-MSP billing report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      msps:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RootBillingMSP'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller is not the root operator (BILLING_ROOT_ONLY) or lacks tenant:billing-read
+  /tenants/{id}/billing-report:
+    get:
+      summary: Billing report for one tenant subtree
+      description: |
+        The billing report for the subtree of `{id}`, with real client names and IDs.
+        Requires `tenant:billing-read`. A caller outside `{id}`'s subtree gets `404`; a
+        root-scoped caller without a crossing into `{id}` gets the tenant-crossing challenge.
+        A client is a direct child of `{id}` with its whole subtree rolled up into it.
+        Endpoint counts exclude stewards in a terminal state (deregistered, archived,
+        dormant, revoked); tech counts exclude disabled accounts.
+      operationId: getTenantBillingReport
+      tags:
+        - Tenants
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant ID (typically an MSP)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Billing report for the subtree
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TenantBillingReport'
+        '401':
+          description: Tenant-crossing step-up challenge for a root-scoped caller without a crossing
+        '403':
+          description: Caller lacks tenant:billing-read
+        '404':
+          $ref: '#/components/responses/NotFound'
   /reports/dashboard/alerts:
     get:
       summary: Dashboard alert feed
@@ -1635,6 +1706,66 @@ components:
         type: string
 
   schemas:
+    BillingMetrics:
+      type: object
+      properties:
+        endpoints_online: {type: integer, minimum: 0, description: Stewards with status active}
+        endpoints_offline: {type: integer, minimum: 0, description: Stewards with status lost}
+        endpoints_pending: {type: integer, minimum: 0, description: Stewards with status registered}
+        endpoints_by_platform:
+          type: object
+          properties:
+            windows: {type: integer}
+            linux: {type: integer}
+            darwin: {type: integer}
+            other: {type: integer}
+        endpoints_by_version:
+          type: object
+          additionalProperties: {type: integer}
+    BillingOwnCounts:
+      type: object
+      description: Counts attached to the MSP itself rather than to a client.
+      properties:
+        tech_count: {type: integer, minimum: 0}
+        endpoint_count: {type: integer, minimum: 0}
+    RootBillingMSP:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        tech_count: {type: integer, minimum: 0}
+        endpoint_count: {type: integer, minimum: 0}
+        client_count: {type: integer, minimum: 0}
+        metrics: {$ref: '#/components/schemas/BillingMetrics'}
+        msp_own: {$ref: '#/components/schemas/BillingOwnCounts'}
+        clients:
+          type: array
+          items:
+            type: object
+            description: A client under an opaque label. Carries no name or tenant ID.
+            properties:
+              label: {type: string}
+              endpoint_count: {type: integer, minimum: 0}
+              tech_count: {type: integer, minimum: 0}
+    TenantBillingReport:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        tech_count: {type: integer, minimum: 0}
+        endpoint_count: {type: integer, minimum: 0}
+        client_count: {type: integer, minimum: 0}
+        metrics: {$ref: '#/components/schemas/BillingMetrics'}
+        msp_own: {$ref: '#/components/schemas/BillingOwnCounts'}
+        clients:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              name: {type: string}
+              endpoint_count: {type: integer, minimum: 0}
+              tech_count: {type: integer, minimum: 0}
     StewardActionRequest:
       type: object
       required: [action, justification, nonce, expires_at, targets]

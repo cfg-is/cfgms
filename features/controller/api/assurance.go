@@ -25,6 +25,9 @@ type Requirement struct {
 // Authoring rule: new permission IDs that require elevated assurance belong here, not
 // in a separate Tier-3 list. The registry is the single source of truth consumed by
 // both requirePermission (enforcement) and scanAPIKeysForPrivilegedAccess (startup check).
+//
+// tenant:billing-read (ADR-025 Amendment 6) is intentionally absent: it is a read, at the
+// same tier as tenant:read.
 var permissionAssurance = map[string]Requirement{
 	// Former tier3Permissions set — 20 entries, all migrated to Min: AssuranceStrong.
 	"certificate:provision":          {Min: session.AssuranceStrong},                            // POST /certificates/provision

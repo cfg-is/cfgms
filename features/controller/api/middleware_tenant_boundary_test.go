@@ -48,6 +48,7 @@ type tenantBoundaryRoute struct {
 // refresh-policy, assurance-policy) silently sat outside it.
 var tenantBoundaryRouteTable = []tenantBoundaryRoute{
 	{http.MethodGet, "/api/v1/tenants/{id}", "id", "tenant:read", false},
+	{http.MethodGet, "/api/v1/tenants/{id}/billing-report", "id", "tenant:billing-read", false},
 	{http.MethodPut, "/api/v1/tenants/{id}", "id", "tenant:update", false},
 	{http.MethodPost, "/api/v1/tenants/{id}/suspend", "id", "tenant:manage", false},
 	{http.MethodPost, "/api/v1/tenants/{id}/restore", "id", "tenant:manage", false},
