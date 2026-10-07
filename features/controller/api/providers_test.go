@@ -55,6 +55,9 @@ func newTestSQLiteStewardStore(t *testing.T) business.StewardStore {
 		"path": filepath.Join(t.TempDir(), "stewards.db"),
 	})
 	require.NoError(t, err, "creating sqlite steward store")
+	// Registered after t.TempDir(), so it runs first (LIFO) and releases the
+	// file handle before the directory is removed (required on Windows).
+	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 
