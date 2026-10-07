@@ -55,6 +55,7 @@
  * than being wrapped by it, for the identical reason /login/confirm does.
  */
 import { Routes, Route } from 'react-router'
+import BillingReportView from './billing/BillingReportView.tsx'
 import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
 import AppShell from './shell/AppShell.tsx'
 import FleetOverview from './fleet/FleetOverview.tsx'
@@ -118,6 +119,7 @@ function App() {
                   <Route path="refresh" element={<RefreshQueuePage />} />
                   <Route path="passkeys" element={<PasskeysView />} />
                   <Route path="reports" element={<ReportsDashboardView />} />
+                  <Route path="billing" element={<BillingReportView />} />
                   <Route path="compliance" element={<ComplianceSummaryView />} />
                   <Route path="alerts" element={<AlertsView />} />
                   <Route path="monitoring" element={<MonitoringView />} />
