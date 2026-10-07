@@ -54,6 +54,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	hypervcompletion "github.com/cfgis/cfgms/features/modules/hyperv/completion"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"
@@ -185,6 +186,7 @@ type Server struct {
 	quicListener            *quictransport.Listener               // Shared QUIC listener (Story #515)
 	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
+	systemMonitor           *monitoring.SystemMonitor
 	alertManager            *health.DefaultAlertManager
 	healthTraceManager      *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
 	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
@@ -1672,6 +1674,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Installer artifact blob store initialized", "root", blobRoot)
 	}
 
+	// Platform monitor: controller collector with real-probe services for the
+	// component health/metrics endpoints. Started in Start, stopped in Stop.
+	systemMonitor, err := newControllerMonitor(logger, monitorDeps{
+		healthCollector: healthCollector,
+		controlPlane:    controlPlane,
+		certManager:     certManager,
+		rbacManager:     rbacManager,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize system monitor: %w", err)
+	}
+
 	// Initialize HTTP API server
 	httpServer, err := api.New(
 		cfg,
@@ -1683,7 +1697,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certManager,
 		tenantManager,
 		rbacManager,
-		nil, // systemMonitor
+		systemMonitor,
 		haManager,
 		regStore,                      // registrationTokenStore
 		signerCertSerial,              // Story #378: signer cert serial for registration
@@ -1972,6 +1986,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
+		systemMonitor:           systemMonitor,
 		alertManager:            healthAlertManager,
 		healthTraceManager:      healthTraceManager,
 		storageManager:          storageManager,
@@ -2864,6 +2879,13 @@ func (s *Server) Start() error {
 			s.logger.Info("Health collector started", "interval", "30s")
 		}
 	}
+	if s.systemMonitor != nil {
+		if err := s.systemMonitor.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			s.logger.Warn("Failed to start system monitor", "error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			s.logger.Info("System monitor started")
+		}
+	}
 	if s.alertManager != nil {
 		if err := s.alertManager.Start(context.Background()); err != nil {
 			s.logger.Warn("Failed to start alert manager", "error", err)
@@ -2925,6 +2947,13 @@ func (s *Server) Stop() error {
 		if err := s.healthCollector.Stop(); err != nil {
 			s.logger.Warn("Failed to stop health collector", "error", err)
 		}
+	}
+	if s.systemMonitor != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.systemMonitor.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop system monitor", "error", logging.SanitizeLogValue(err.Error()))
+		}
+		cancel()
 	}
 	if s.alertManager != nil {
 		if err := s.alertManager.Stop(); err != nil {

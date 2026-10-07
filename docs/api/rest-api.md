@@ -1545,7 +1545,13 @@ Health status for a specific component.
 
 **Parameters:**
 
-- `component` (path): Component name (e.g., `controller`, `storage`)
+- `component` (path): One of `grpc_server`, `storage`, `certificate_ca`, `rbac_service`, `transport`
+
+**Response (200):** `status` (`healthy`, `degraded` or `unhealthy`), `message`, and
+`last_checked` (RFC 3339). Nothing else is returned. A component whose probe fails reports
+`unhealthy` with the message `Health check failed`; the underlying error is logged, never served.
+
+**Errors:** `404` for a component name that is not monitored.
 
 #### GET /api/v1/monitoring/components/{component}/metrics
 
@@ -1558,7 +1564,12 @@ Metrics for a specific component.
 
 **Parameters:**
 
-- `component` (path): Component name
+- `component` (path): Same component names as the health endpoint
+
+**Response (200):** the component's metrics as a JSON object (fields vary by component).
+
+**Errors:** `404` for a component name that is not monitored; `503` when that component's
+metrics are currently unavailable.
 
 ### High Availability
 

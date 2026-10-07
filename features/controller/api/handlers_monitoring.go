@@ -3,10 +3,14 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/features/monitoring"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // SystemHealth represents system health information
@@ -185,41 +189,98 @@ func (s *Server) handleMonitoringAnomalies(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// componentHealthResponse is the only shape the component health endpoint serves.
+// It deliberately has no details field: probe details can carry raw error text.
+type componentHealthResponse struct {
+	Status      string    `json:"status"`
+	Message     string    `json:"message"`
+	LastChecked time.Time `json:"last_checked"`
+}
+
+// controllerCollector resolves the monitor's controller collector, or nil when
+// no platform monitor is wired.
+func (s *Server) controllerCollector() *monitoring.ControllerCollector {
+	if s.systemMonitor == nil {
+		return nil
+	}
+	c, ok := s.systemMonitor.GetCollector("controller")
+	if !ok {
+		return nil
+	}
+	cc, _ := c.(*monitoring.ControllerCollector)
+	return cc
+}
+
 // handleMonitoringComponentHealth handles GET /api/v1/monitoring/components/{component}/health
 //
 // component is a controller-level infrastructure name (e.g. "grpc_server", "storage"),
 // not a tenant-scoped resource; there is no per-tenant component data and no owning
-// tenant to check the caller against. Currently a stub that always returns 503
-// regardless of component, matching handleMonitoringConfig/handleMonitoringAnomalies
-// (same file, no tenant concept either).
+// tenant to check the caller against. It returns the registered service's real status,
+// message and last-check time, and 404 for a name with no registered service.
 //
 //architecture:allow-unscoped-tenant-read -- controller-level infrastructure name, no owning tenant (Issue #4335)
 func (s *Server) handleMonitoringComponentHealth(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	component := vars["component"]
-
+	component := mux.Vars(r)["component"]
 	if component == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request", "Component name is required")
 		return
 	}
 
-	s.writeErrorResponse(w, http.StatusServiceUnavailable, "Monitoring not available", "Platform monitor not initialized")
+	cc := s.controllerCollector()
+	if cc == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Monitoring not available", "Platform monitor is not running")
+		return
+	}
+
+	h, err := cc.GetServiceHealth(r.Context(), component)
+	if errors.Is(err, monitoring.ErrServiceNotFound) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Component not found", "No such monitored component")
+		return
+	}
+	if err != nil {
+		s.logger.Warn("Component health lookup failed",
+			"component", logging.SanitizeLogValue(component),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Internal error", "Component health unavailable")
+		return
+	}
+
+	s.writeSuccessResponse(w, componentHealthResponse{
+		Status:      h.Status,
+		Message:     h.Message,
+		LastChecked: h.LastChecked,
+	})
 }
 
 // handleMonitoringComponentMetrics handles GET /api/v1/monitoring/components/{component}/metrics
 //
 // component is a controller-level infrastructure name, not a tenant-scoped resource;
-// see handleMonitoringComponentHealth (same file) for the full rationale.
+// see handleMonitoringComponentHealth (same file) for the full rationale. Registered
+// only on the private metrics router.
 //
 //architecture:allow-unscoped-tenant-read -- controller-level infrastructure name, no owning tenant (Issue #4335)
 func (s *Server) handleMonitoringComponentMetrics(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	component := vars["component"]
-
+	component := mux.Vars(r)["component"]
 	if component == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request", "Component name is required")
 		return
 	}
 
-	s.writeErrorResponse(w, http.StatusServiceUnavailable, "Monitoring not available", "Platform monitor not initialized")
+	cc := s.controllerCollector()
+	if cc == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Monitoring not available", "Platform monitor is not running")
+		return
+	}
+
+	metrics, err := cc.GetServiceMetrics(r.Context(), component)
+	switch {
+	case errors.Is(err, monitoring.ErrServiceNotFound):
+		s.writeErrorResponse(w, http.StatusNotFound, "Component not found", "No such monitored component")
+		return
+	case err != nil:
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Metrics unavailable", "Component metrics are currently unavailable")
+		return
+	}
+
+	s.writeSuccessResponse(w, metrics)
 }

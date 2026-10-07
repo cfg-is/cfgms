@@ -780,6 +780,90 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /monitoring/components/{component}/health:
+    get:
+      summary: Get component health
+      description: |
+        Returns the live status, message and last-check time of one controller component.
+        Known components: `grpc_server`, `storage`, `certificate_ca`, `rbac_service`, `transport`.
+        A failing probe reports `unhealthy` with a generic message; probe error text is never returned.
+        Requires `monitoring:read-component-health`.
+      operationId: getComponentHealth
+      tags:
+        - Monitoring
+      parameters:
+        - name: component
+          in: path
+          required: true
+          description: Component name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Component health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [status, message, last_checked]
+                    properties:
+                      status:
+                        type: string
+                        enum: [healthy, degraded, unhealthy]
+                      message:
+                        type: string
+                      last_checked:
+                        type: string
+                        format: date-time
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /monitoring/components/{component}/metrics:
+    get:
+      summary: Get component metrics
+      description: Returns the metrics of one controller component (same names as the health endpoint) from the dedicated private metrics listener. The public product listener returns 404 for this path. Requires `monitoring:read-component-metrics`.
+      operationId: getComponentMetrics
+      tags:
+        - Monitoring
+      servers:
+        - url: https://localhost:9090/api/v1
+          description: Private metrics listener; replace localhost only with an explicitly configured private address
+      parameters:
+        - name: component
+          in: path
+          required: true
+          description: Component name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Component metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: The component's metrics are currently unavailable
+
   /alerts/{alertId}/unsilence:
     post:
       summary: Unsilence an alert
