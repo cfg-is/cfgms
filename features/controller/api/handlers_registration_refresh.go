@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -879,17 +878,30 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 
 	// TenantID is always taken from the authenticated context for scoped callers;
 	// unscoped admins (TenantID=="") may use the query param to filter.
+	// A scoped caller sees its own tenant and every descendant: the store is read
+	// unfiltered and narrowed by the caller's ancestry-resolved subtree.
 	callerTenant := callerTenantFilter(r.Context())
-	tenantID := callerTenant
-	if tenantID == "" {
-		tenantID = r.URL.Query().Get("tenant_id")
+	tenantID := r.URL.Query().Get("tenant_id")
+	var callerSubtree tenantSubtreeSet
+	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		tenantID = ""
+		callerSubtree = s.tenantSubtreeIDs(r.Context(), callerTenant)
 	}
 
 	entries, err := s.pendingRefreshStore.ListPendingRefresh(r.Context(), tenantID)
 	if err != nil {
-		s.logger.Error("Failed to list pending refreshes", "error", err)
+		s.logger.Error("Failed to list pending refreshes", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to list pending refreshes", http.StatusInternalServerError)
 		return
+	}
+	if callerSubtree != nil {
+		scoped := make([]*business.PendingRefreshEntry, 0, len(entries))
+		for _, e := range entries {
+			if callerSubtree.Contains(e.TenantID) {
+				scoped = append(scoped, e)
+			}
+		}
+		entries = scoped
 	}
 
 	out := make([]APIPendingRefreshEntry, 0, len(entries))
@@ -948,9 +960,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant: a scoped caller may only approve refreshes within their tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers only; a root caller passes authorizeTenantAccess below, refused as 404 like every other outcome
-		sameTenant := entry.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenant, entry.TenantID) {
 			// 404 to avoid disclosing existence of pending refreshes across tenants.
 			http.Error(w, "pending refresh not found", http.StatusNotFound)
 			return
@@ -1142,9 +1152,7 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
-		sameTenant := tenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenant, tenantID) {
 			http.Error(w, "tenant not found", http.StatusNotFound)
 			return
 		}
@@ -1179,9 +1187,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
-		sameTenant := tenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenant, tenantID) {
 			http.Error(w, "tenant not found", http.StatusNotFound)
 			return
 		}

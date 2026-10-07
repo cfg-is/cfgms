@@ -1162,6 +1162,64 @@ func TestHandleListPendingRefreshes_ScopedCallerSeesOnlyOwnTenant(t *testing.T) 
 	assert.Equal(t, "refresh-own-tenant", entries[0].PendingID)
 }
 
+// TestHandleListPendingRefreshes_ScopedCallerSeesDescendantNotSibling is the
+// [REQUIRED TEST] for Issue #4656: with real tenants msp-a, client-1 (child of
+// msp-a), msp-b and msp-ab, a caller scoped to msp-a sees client-1's entries and
+// none of msp-b's or the shared-prefix sibling msp-ab's.
+func TestHandleListPendingRefreshes_ScopedCallerSeesDescendantNotSibling(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+	seedScopeTenants(t, f.server)
+	for id, tenantID := range map[string]string{
+		"refresh-msp-a":    "msp-a",
+		"refresh-client-1": "client-1",
+		"refresh-msp-b":    "msp-b",
+		"refresh-msp-ab":   "msp-ab",
+	} {
+		f.addPending(t, &business.PendingRefreshEntry{
+			PendingID: id,
+			DeviceID:  id,
+			TenantID:  tenantID,
+			Status:    business.PendingRefreshStatusPending,
+			CreatedAt: time.Now().UTC(),
+			ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+		})
+	}
+
+	apiKey := NewEphemeralTestKey(t, f.server, []string{"refresh:list-pending"}, "msp-a", 5*time.Minute)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/refresh/pending", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	f.server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []APIPendingRefreshEntry
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.PendingID] = true
+	}
+	assert.Equal(t, map[string]bool{"refresh-msp-a": true, "refresh-client-1": true}, got)
+}
+
+// TestHandleGetRefreshPolicy_ScopedCallerReadsDescendant verifies a caller scoped
+// to msp-a reads a descendant's policy and is denied a sibling's.
+func TestHandleGetRefreshPolicy_ScopedCallerReadsDescendant(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+	seedScopeTenants(t, f.server)
+	apiKey := NewEphemeralTestKey(t, f.server, []string{"refresh:get-policy"}, "msp-a", 5*time.Minute)
+
+	get := func(tenantID string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tenantID+"/refresh-policy", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		f.server.router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	assert.Equal(t, http.StatusOK, get("client-1"))
+	assert.Equal(t, http.StatusNotFound, get("msp-b"))
+	assert.Equal(t, http.StatusNotFound, get("msp-ab"))
+}
+
 func TestHandleGetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
 	f := newRefreshFixture(t, newTestCertManager(t))
 	// Key scoped to "other-tenant" — must not read policy for testTenantID.

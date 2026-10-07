@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -23,12 +24,14 @@ import (
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // reportsStack is the reports stack the controller wires in production
@@ -53,12 +56,57 @@ func newReportsStack(t *testing.T) *reportsStack {
 	registry := service.NewControllerService(logger)
 	alertStore := newTestAlertStore(t)
 
+	handler := New(newEngine(t, egProvider, logger), exporters.New(logger), registry, alertStore, logger)
+	handler.SetTenantAncestry(newTestTenantAncestry(t))
+
 	return &reportsStack{
-		handler:    New(newEngine(t, egProvider, logger), exporters.New(logger), registry, alertStore, logger),
+		handler:    handler,
 		registry:   registry,
 		egProvider: egProvider,
 		alertStore: alertStore,
 	}
+}
+
+// newTestTenantAncestry builds a real tenant manager over durable test storage
+// holding root > msp-a > client-1, root > msp-b and root > msp-ab (a sibling whose
+// ID merely shares msp-a's prefix), and returns its ancestry lookup.
+func newTestTenantAncestry(t *testing.T) TenantAncestryFunc {
+	t.Helper()
+	storageManager := pkgtesting.SetupTestStorage(t)
+	m := tenant.NewManager(tenant.NewStorageAdapter(storageManager.GetTenantStore()), nil)
+	for _, tr := range []*tenant.TenantRequest{
+		{ID: "root"},
+		{ID: "msp-a", ParentID: "root"},
+		{ID: "client-1", ParentID: "msp-a"},
+		{ID: "msp-b", ParentID: "root"},
+		{ID: "msp-ab", ParentID: "root"},
+	} {
+		_, err := m.CreateTenant(context.Background(), tr)
+		require.NoError(t, err)
+	}
+	return m.IsTenantAncestor
+}
+
+// TestTenantWithinSubtree is the [REQUIRED TEST] for Issue #4656: the subtree
+// decision resolves through the injected ancestry lookup, allowing a real
+// descendant and denying a sibling and a shared-prefix sibling, and fails closed
+// on an erroring or nil lookup.
+func TestTenantWithinSubtree(t *testing.T) {
+	ancestry := newTestTenantAncestry(t)
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+	failing := func(context.Context, string, string) (bool, error) {
+		return false, errors.New("tenant store unavailable")
+	}
+
+	assert.True(t, tenantWithinSubtree(ctx, ancestry, logger, "msp-a", "msp-a"), "own tenant")
+	assert.True(t, tenantWithinSubtree(ctx, ancestry, logger, "client-1", "msp-a"), "real descendant")
+	assert.False(t, tenantWithinSubtree(ctx, ancestry, logger, "msp-b", "msp-a"), "sibling")
+	assert.False(t, tenantWithinSubtree(ctx, ancestry, logger, "msp-ab", "msp-a"), "shared-prefix sibling")
+	assert.False(t, tenantWithinSubtree(ctx, ancestry, logger, "msp-a", "client-1"), "ancestor is not a descendant")
+	assert.False(t, tenantWithinSubtree(ctx, ancestry, logger, "msp-b", ""), "empty caller")
+	assert.False(t, tenantWithinSubtree(ctx, failing, logger, "client-1", "msp-a"), "lookup error fails closed")
+	assert.False(t, tenantWithinSubtree(ctx, nil, logger, "client-1", "msp-a"), "nil lookup fails closed")
 }
 
 // newTestEGProvider creates a real SQLite-backed entity graph provider (ADR-022)
@@ -485,13 +533,19 @@ func TestGenerateReport_TenantScope(t *testing.T) {
 
 	t.Run("scoped caller may request a descendant tenant's device", func(t *testing.T) {
 		stack := newReportsStack(t)
-		stack.addDevice(t, "steward-child", "tenant-a/client-1")
+		stack.addDevice(t, "steward-child", "client-1")
 
 		rec := httptest.NewRecorder()
-		stack.handler.generateReport(rec, request("POST", "/reports/generate", "tenant-a",
+		stack.handler.generateReport(rec, request("POST", "/reports/generate", "msp-a",
 			generateBody(t, nil, []string{"steward-child"})))
 
 		require.Equal(t, http.StatusOK, rec.Code)
+
+		stack.addDevice(t, "steward-prefix", "msp-ab")
+		rec = httptest.NewRecorder()
+		stack.handler.generateReport(rec, request("POST", "/reports/generate", "msp-a",
+			generateBody(t, nil, []string{"steward-prefix"})))
+		require.Equal(t, http.StatusNotFound, rec.Code, "shared-prefix sibling must be denied")
 	})
 
 	t.Run("scoped caller cannot request an unknown device", func(t *testing.T) {

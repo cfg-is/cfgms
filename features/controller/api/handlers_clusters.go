@@ -60,8 +60,8 @@ type ClusterResourceStatus struct {
 // Access rules:
 //   - callerTenant == "" → admin mTLS principal; all tenants are in scope.
 //   - callerTenant == steward.TenantID → exact match; in scope.
-//   - strings.HasPrefix(steward.TenantID, callerTenant+"/") → caller is a hierarchical
-//     ancestor of the steward's tenant; in scope.
+//   - steward.TenantID is a descendant of callerTenant in the tenant manager's
+//     ParentID ancestry → in scope (a tenant ID is a single token, never a path).
 //
 // Intended behavior change (Issue #3495): stewards attached to peer nodes are now
 // visible here. Previously this was node-local; now it is cluster-wide.

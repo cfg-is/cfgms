@@ -733,6 +733,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	} else {
 		controllerService = service.NewControllerService(logger)
 	}
+	controllerService.SetTenantAncestry(tenantManager.IsTenantAncestor)
 	// Issue #3403: Wire the StewardStore before LoadFromStorage so the warm-load
 	// can enumerate enrolled-but-never-connected stewards from the fleet registry
 	// in addition to connected stewards tracked in DNA storage.
@@ -905,6 +906,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 		// Create certificate provisioning service
 		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
+		certProvisioningService.SetTenantAncestry(tenantManager.IsTenantAncestor)
 		if cfg.Certificate.ClientCertValidityDays > 0 {
 			certProvisioningService.SetCertificateDefaults(
 				cfg.Certificate.ClientCertValidityDays,
@@ -2049,7 +2051,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler, reportsDataProvider := initializeReportsHandler(egProvider, controllerService, storageManager.GetAlertStore(), logger)
+	reportsHandler, reportsDataProvider := initializeReportsHandler(egProvider, controllerService, tenantManager.IsTenantAncestor, storageManager.GetAlertStore(), logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		httpServer.SetDataProvider(reportsDataProvider)
@@ -2423,7 +2425,7 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 // alerts feed (Issue #3267); nil disables ack/silence annotation gracefully.
 // The DataProvider is returned alongside the Handler so callers can wire it into
 // the compliance endpoints for drift-based compliance derivation (Issue #3265).
-func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, controllerService *service.ControllerService, alertStore business.AlertStore, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
+func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, controllerService *service.ControllerService, tenantAncestry reportapi.TenantAncestryFunc, alertStore business.AlertStore, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
 	if egProvider == nil {
 		return nil, nil
 	}
@@ -2438,7 +2440,9 @@ func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, contr
 	logger.Info("Reports engine initialized")
 	// The steward registry is the device→tenant authority for the reports
 	// endpoints; a report device ID is a steward ID.
-	return reportapi.New(reportEngine, exporter, controllerService, alertStore, logger), dataProvider
+	reportsHandler := reportapi.New(reportEngine, exporter, controllerService, alertStore, logger)
+	reportsHandler.SetTenantAncestry(tenantAncestry)
+	return reportsHandler, dataProvider
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.

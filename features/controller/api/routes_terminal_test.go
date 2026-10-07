@@ -31,6 +31,32 @@ func newTerminalScopeTestServer(t *testing.T, stewards map[string]string) *Serve
 	return &Server{controllerService: cs, logger: logging.NewNoopLogger()}
 }
 
+// seedScopeTenants creates the real tenant tree the scope tests use, through the
+// server's tenant manager: msp-a with child client-1, a sibling msp-b, and msp-ab,
+// a sibling whose ID merely shares msp-a's prefix. It also wires the manager's
+// ancestry into the controller service so fleet listing resolves descendants.
+func seedScopeTenants(t *testing.T, server *Server) {
+	t.Helper()
+	createTestTenant(t, server, "msp-a", "")
+	createTestTenant(t, server, "client-1", "msp-a")
+	createTestTenant(t, server, "msp-b", "")
+	createTestTenant(t, server, "msp-ab", "")
+	server.controllerService.SetTenantAncestry(server.tenantManager.IsTenantAncestor)
+}
+
+// newTerminalScopeTenantServer builds a full test Server (real tenant manager and
+// ControllerService) with seedScopeTenants applied and the given stewards
+// (id → tenant) registered.
+func newTerminalScopeTenantServer(t *testing.T, stewards map[string]string) *Server {
+	t.Helper()
+	s := setupTestServer(t)
+	seedScopeTenants(t, s)
+	for id, tenantID := range stewards {
+		require.NoError(t, s.controllerService.RegisterSteward(id, tenantID, "addr", "active"))
+	}
+	return s
+}
+
 // serveTerminalScope drives a request through the wrapper with a sentinel
 // downstream handler and returns the recorder plus whether the downstream ran.
 func serveTerminalScope(s *Server, callerTenant, stewardID string) (*httptest.ResponseRecorder, *bool) {
@@ -51,8 +77,8 @@ func serveTerminalScope(s *Server, callerTenant, stewardID string) (*httptest.Re
 // TestTerminalScope_SameTenantAllowed verifies a caller reaches a steward owned
 // by its own tenant.
 func TestTerminalScope_SameTenantAllowed(t *testing.T) {
-	s := newTerminalScopeTestServer(t, map[string]string{"steward-a": "root/msp-a"})
-	rec, reached := serveTerminalScope(s, "root/msp-a", "steward-a")
+	s := newTerminalScopeTenantServer(t, map[string]string{"steward-a": "msp-a"})
+	rec, reached := serveTerminalScope(s, "msp-a", "steward-a")
 	assert.True(t, *reached, "same-tenant steward must reach the terminal handler")
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
@@ -60,8 +86,8 @@ func TestTerminalScope_SameTenantAllowed(t *testing.T) {
 // TestTerminalScope_DescendantTenantAllowed verifies a caller reaches a steward
 // in a descendant tenant subtree.
 func TestTerminalScope_DescendantTenantAllowed(t *testing.T) {
-	s := newTerminalScopeTestServer(t, map[string]string{"steward-child": "root/msp-a/client-1"})
-	rec, reached := serveTerminalScope(s, "root/msp-a", "steward-child")
+	s := newTerminalScopeTenantServer(t, map[string]string{"steward-child": "client-1"})
+	rec, reached := serveTerminalScope(s, "msp-a", "steward-child")
 	assert.True(t, *reached, "descendant-tenant steward must reach the terminal handler")
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
@@ -70,8 +96,8 @@ func TestTerminalScope_DescendantTenantAllowed(t *testing.T) {
 // scoped caller in tenant A cannot open a terminal to a steward owned by tenant B.
 // The response is 404 (not 403) so steward existence is not disclosed cross-tenant.
 func TestTerminalScope_CrossTenantRejected(t *testing.T) {
-	s := newTerminalScopeTestServer(t, map[string]string{"steward-b": "root/msp-b"})
-	rec, reached := serveTerminalScope(s, "root/msp-a", "steward-b")
+	s := newTerminalScopeTenantServer(t, map[string]string{"steward-b": "msp-b"})
+	rec, reached := serveTerminalScope(s, "msp-a", "steward-b")
 	assert.False(t, *reached, "cross-tenant steward must NOT reach the terminal handler")
 	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"cross-tenant terminal access must be rejected with 404")
@@ -80,16 +106,16 @@ func TestTerminalScope_CrossTenantRejected(t *testing.T) {
 // TestTerminalScope_UnknownStewardRejected verifies an unknown steward yields 404.
 func TestTerminalScope_UnknownStewardRejected(t *testing.T) {
 	s := newTerminalScopeTestServer(t, nil)
-	rec, reached := serveTerminalScope(s, "root/msp-a", "ghost")
+	rec, reached := serveTerminalScope(s, "msp-a", "ghost")
 	assert.False(t, *reached)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // TestTerminalScope_SiblingPrefixNotAncestor verifies that a tenant string which
-// merely shares a prefix (root/msp-a vs root/msp-ab) is not treated as ancestry.
+// merely shares a prefix (msp-a vs msp-ab) is not treated as ancestry.
 func TestTerminalScope_SiblingPrefixNotAncestor(t *testing.T) {
-	s := newTerminalScopeTestServer(t, map[string]string{"steward-ab": "root/msp-ab"})
-	rec, reached := serveTerminalScope(s, "root/msp-a", "steward-ab")
+	s := newTerminalScopeTenantServer(t, map[string]string{"steward-ab": "msp-ab"})
+	rec, reached := serveTerminalScope(s, "msp-a", "steward-ab")
 	assert.False(t, *reached, "prefix-sharing sibling tenant must not be treated as descendant")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
@@ -117,7 +143,7 @@ func serveTerminalScopeAsRootScoped(s *Server, principal *Principal, stewardID s
 // the wrapper fails closed with a tenant-crossing challenge rather than allowing
 // access, matching authorizeRootScopedTenantAccess's nil-store stance.
 func TestTerminalScope_RootScoped_NilTenantManager_Returns401Challenge(t *testing.T) {
-	s := newTerminalScopeTestServer(t, map[string]string{"steward-msp": "root/msp-a"})
+	s := newTerminalScopeTestServer(t, map[string]string{"steward-msp": "msp-a"})
 	// tenantManager is nil by default in the minimal test server.
 	principal := rootScopedPrincipal("root-op")
 	rec, reached := serveTerminalScopeAsRootScoped(s, principal, "steward-msp")
@@ -160,7 +186,7 @@ func TestTerminalScope_RootScoped_NoCrossing_Returns401Challenge(t *testing.T) {
 // explicit root-scope grant, so an ordinary caller cannot normally reach this shape —
 // but the wrapper must refuse it outright rather than rely on that invariant.
 func TestTerminalScope_EmptyTenantNoRootScope_Refused(t *testing.T) {
-	s := newTerminalScopeTestServer(t, map[string]string{"steward-msp": "root/msp-a"})
+	s := newTerminalScopeTestServer(t, map[string]string{"steward-msp": "msp-a"})
 	principal := &Principal{ID: "neither-scoped-1", TenantID: "", RootScoped: false, GlobalScope: false}
 	rec, reached := serveTerminalScopeAsRootScoped(s, principal, "steward-msp")
 

@@ -129,15 +129,16 @@ func TestHandleListClusters_TenantIsolation(t *testing.T) {
 }
 
 // TestHandleListClusters_AncestorTenantSeesDescendants verifies hierarchical ancestor
-// access: a caller at root/msp-a can see clusters from root/msp-a/client-1.
+// access: a caller at msp-a can see clusters from its child tenant client-1.
 func TestHandleListClusters_AncestorTenantSeesDescendants(t *testing.T) {
 	server := setupTestServer(t)
+	seedScopeTenants(t, server)
 
-	seedClusterSteward(t, server, "steward-child", "root/msp-a/client-1", nil,
+	seedClusterSteward(t, server, "steward-child", "client-1", nil,
 		clusterFragment(t, "cfg-lab", nil))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil)
-	req = withClusterTenant(req, "root/msp-a")
+	req = withClusterTenant(req, "msp-a")
 	rec := httptest.NewRecorder()
 	server.handleListClusters(rec, req)
 

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -183,9 +182,7 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		stewardTenant := stewardInfo.TenantID
-		sameTenant := stewardTenant == callerTenant
-		descendantTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
-		if !sameTenant && !descendantTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
 			http.Error(w, "steward not found", http.StatusNotFound)
 			return
 		}
@@ -277,9 +274,7 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 	callerTenantR := callerTenantFilter(r.Context())
 	if callerTenantR != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		stewardTenant := stewardInfo.TenantID
-		sameTenant := stewardTenant == callerTenantR
-		descendantTenant := strings.HasPrefix(stewardTenant, callerTenantR+"/")
-		if !sameTenant && !descendantTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenantR, stewardTenant) {
 			http.Error(w, "steward not found", http.StatusNotFound)
 			return
 		}
@@ -371,11 +366,13 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 
 	// Collect steward IDs while applying tenant scoping from the steward registry.
 	stewardsByTenant := make(map[string][]string) // tenantID → steward IDs
+	var callerSubtree tenantSubtreeSet            // resolved once, not per steward
+	if callerTenant != "" {                       //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		callerSubtree = s.tenantSubtreeIDs(r.Context(), callerTenant)
+	}
 	for _, st := range s.controllerService.ListFleetStewards(r.Context()) {
 		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
-			sameTenant := st.TenantID == callerTenant
-			descendantTenant := strings.HasPrefix(st.TenantID, callerTenant+"/")
-			if !sameTenant && !descendantTenant {
+			if !callerSubtree.Contains(st.TenantID) {
 				continue
 			}
 		} else if tenantFilter != "" && st.TenantID != tenantFilter {

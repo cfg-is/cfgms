@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/gorilla/mux"
 
@@ -69,9 +68,7 @@ func (s *Server) handleGetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	// Cross-tenant: a scoped caller may only read policy for their own tenant or descendants.
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
-		sameTenant := tenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenant, tenantID) {
 			http.Error(w, "tenant not found", http.StatusNotFound)
 			return
 		}
@@ -109,9 +106,7 @@ func (s *Server) handleSetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	// Cross-tenant: a scoped caller may only write policy for their own tenant or descendants.
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
-		sameTenant := tenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+		if !s.tenantSubtreeContains(r.Context(), callerTenant, tenantID) {
 			http.Error(w, "tenant not found", http.StatusNotFound)
 			return
 		}

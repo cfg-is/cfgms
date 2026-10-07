@@ -125,6 +125,29 @@ func TestHandleGetAssurancePolicy_CrossTenantReturns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestHandleGetAssurancePolicy_ScopedCallerReadsDescendantNotSibling is the
+// [REQUIRED TEST] for Issue #4656: with real tenants msp-a, client-1 (child of
+// msp-a), msp-b and msp-ab, a caller scoped to msp-a reads client-1's policy and
+// gets 404 for msp-b and for the shared-prefix sibling msp-ab.
+func TestHandleGetAssurancePolicy_ScopedCallerReadsDescendantNotSibling(t *testing.T) {
+	srv := newAssuranceTestServer(t, newTestAssurancePolicyStore(), nil)
+	seedScopeTenants(t, srv)
+	apiKey := NewEphemeralTestKey(t, srv, []string{"assurance-policy:get"}, "msp-a", 5*time.Minute)
+
+	get := func(tenantID string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tenantID+"/assurance-policy", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	assert.Equal(t, http.StatusOK, get("client-1"), "descendant tenant must be readable")
+	assert.Equal(t, http.StatusOK, get("msp-a"), "own tenant must be readable")
+	assert.Equal(t, http.StatusNotFound, get("msp-b"), "sibling tenant must be denied")
+	assert.Equal(t, http.StatusNotFound, get("msp-ab"), "shared-prefix sibling must be denied")
+}
+
 // ---- PUT /api/v1/tenants/{tenant_path}/assurance-policy ----
 
 func TestHandleSetAssurancePolicy_Unauthenticated(t *testing.T) {
@@ -250,15 +273,15 @@ func TestResolveAssurance_PresenceOverride_ChallengingInOverridingTenant(t *test
 
 	// "tenant-with-override" declares RequireUserPresence on certificate:provision.
 	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
-		TenantID: "root/tenant-with-override",
+		TenantID: "tenant-with-override",
 		Overrides: []business.AssurancePolicyOverride{
 			{PermissionID: "certificate:provision", RequireUserPresence: true},
 		},
 	}))
 
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
-		"root/tenant-with-override": {"root", "root/tenant-with-override"},
-		"root/sibling-no-override":  {"root", "root/sibling-no-override"},
+		"tenant-with-override": {"root", "tenant-with-override"},
+		"sibling-no-override":  {"root", "sibling-no-override"},
 	})
 
 	srv := setupTestServer(t)
@@ -270,13 +293,13 @@ func TestResolveAssurance_PresenceOverride_ChallengingInOverridingTenant(t *test
 	require.False(t, globalReq.RequireUserPresence, "precondition: global map must not have RequireUserPresence for certificate:provision")
 
 	// Resolve for the overriding tenant — must require presence.
-	reqA, foundA := srv.resolveAssuranceRequirement(context.Background(), "root/tenant-with-override", "certificate:provision")
+	reqA, foundA := srv.resolveAssuranceRequirement(context.Background(), "tenant-with-override", "certificate:provision")
 	require.True(t, foundA)
 	assert.True(t, reqA.RequireUserPresence, "overriding tenant must have RequireUserPresence=true")
 	assert.Equal(t, session.AssuranceStrong, reqA.Min)
 
 	// Resolve for the sibling tenant — no override, must NOT require presence.
-	reqB, foundB := srv.resolveAssuranceRequirement(context.Background(), "root/sibling-no-override", "certificate:provision")
+	reqB, foundB := srv.resolveAssuranceRequirement(context.Background(), "sibling-no-override", "certificate:provision")
 	require.True(t, foundB)
 	assert.False(t, reqB.RequireUserPresence, "sibling without override must not require presence")
 	assert.Equal(t, session.AssuranceStrong, reqB.Min)
@@ -303,15 +326,15 @@ func TestResolveAssurance_PresenceOverride_ChallengingInOverridingTenant(t *test
 func TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
-		TenantID: "root/tenant-with-override",
+		TenantID: "tenant-with-override",
 		Overrides: []business.AssurancePolicyOverride{
 			{PermissionID: "certificate:provision", RequireUserPresence: true},
 		},
 	}))
 
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
-		"root/tenant-with-override": {"root", "root/tenant-with-override"},
-		"root/sibling-no-override":  {"root", "root/sibling-no-override"},
+		"tenant-with-override": {"root", "tenant-with-override"},
+		"sibling-no-override":  {"root", "sibling-no-override"},
 	})
 
 	srv := setupTestServer(t)
@@ -360,7 +383,7 @@ func TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission(t *
 	}
 
 	t.Run("overriding tenant is challenged", func(t *testing.T) {
-		rec := call("root/tenant-with-override")
+		rec := call("tenant-with-override")
 
 		require.Equal(t, http.StatusUnauthorized, rec.Code,
 			"tenant override RequireUserPresence=true must produce a 401 step-up challenge")
@@ -375,7 +398,7 @@ func TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission(t *
 	})
 
 	t.Run("sibling tenant without the override is admitted", func(t *testing.T) {
-		rec := call("root/sibling-no-override")
+		rec := call("sibling-no-override")
 
 		assert.Equal(t, http.StatusOK, rec.Code,
 			"a sibling tenant without the override must not be challenged")
@@ -409,7 +432,7 @@ func TestHandleSetAssurancePolicy_ChildInheritsParentAndCanTighten(t *testing.T)
 	}))
 
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
-		"root/child": {"root", "root/child"},
+		"child": {"root", "child"},
 	})
 	srv := setupTestServer(t)
 	srv.SetAssurancePolicyStore(apStore)
@@ -422,14 +445,14 @@ func TestHandleSetAssurancePolicy_ChildInheritsParentAndCanTighten(t *testing.T)
 			{PermissionID: testPerm, MinOverride: &strong, RequireUserPresence: true},
 		},
 	})
-	req1 := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/root/child/assurance-policy", bytes.NewReader(body1))
+	req1 := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/child/assurance-policy", bytes.NewReader(body1))
 	req1.Header.Set("Content-Type", "application/json")
 	rec1 := httptest.NewRecorder()
 	srv.router.ServeHTTP(rec1, req1)
 	require.Equal(t, http.StatusOK, rec1.Code, "child tightening must succeed: %s", rec1.Body.String())
 
 	// Verify both parent's Min and child's RequireUserPresence are in effect.
-	reqChild, foundChild := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
+	reqChild, foundChild := srv.resolveAssuranceRequirement(context.Background(), "child", testPerm)
 	require.True(t, foundChild)
 	assert.Equal(t, session.AssuranceStrong, reqChild.Min, "parent Min must carry through to child")
 	assert.True(t, reqChild.RequireUserPresence, "child RequireUserPresence must apply on top of parent")
@@ -441,7 +464,7 @@ func TestHandleSetAssurancePolicy_ChildInheritsParentAndCanTighten(t *testing.T)
 			{PermissionID: testPerm, MinOverride: &basic},
 		},
 	})
-	req2 := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/root/child/assurance-policy", bytes.NewReader(body2))
+	req2 := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/child/assurance-policy", bytes.NewReader(body2))
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
 	srv.router.ServeHTTP(rec2, req2)

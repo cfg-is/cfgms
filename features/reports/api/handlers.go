@@ -12,7 +12,6 @@ import (
 	"html"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -52,6 +51,20 @@ type Handler struct {
 	alertStore    business.AlertStore
 	logger        logging.Logger
 	requirePermFn func(resourceType, action string) func(http.Handler) http.Handler
+	// tenantAncestry decides whether a device's tenant is a descendant of the
+	// caller's tenant through the tenant store's ParentID ancestry. Nil denies
+	// every non-identical tenant (fail closed).
+	tenantAncestry TenantAncestryFunc
+}
+
+// TenantAncestryFunc reports whether descendant is a descendant of ancestor in
+// the tenant store's ParentID ancestry (ADR-025 Amendment 1: a tenant ID is a
+// single token, so containment is never a string-prefix test).
+type TenantAncestryFunc func(ctx context.Context, ancestor, descendant string) (bool, error)
+
+// SetTenantAncestry wires the ancestry lookup behind the device tenant boundary.
+func (h *Handler) SetTenantAncestry(fn TenantAncestryFunc) {
+	h.tenantAncestry = fn
 }
 
 // New creates a new reports API handler. devices resolves device ownership for
@@ -692,7 +705,7 @@ func (h *Handler) enforceDeviceTenant(ctx context.Context, deviceIDs []string) (
 
 	for _, deviceID := range deviceIDs {
 		owner, known := h.devices.TenantForDevice(deviceID)
-		if !known || !tenantWithinSubtree(owner, callerTenant) {
+		if !known || !tenantWithinSubtree(ctx, h.tenantAncestry, h.logger, owner, callerTenant) {
 			return nil, errDeviceOutsideTenant
 		}
 	}
@@ -701,9 +714,27 @@ func (h *Handler) enforceDeviceTenant(ctx context.Context, deviceIDs []string) (
 }
 
 // tenantWithinSubtree reports whether deviceTenant is callerTenant or one of
-// its descendants in the path-based tenant hierarchy (root/msp-a/client-1).
-func tenantWithinSubtree(deviceTenant, callerTenant string) bool {
-	return deviceTenant == callerTenant || strings.HasPrefix(deviceTenant, callerTenant+"/")
+// its descendants, resolved through the injected ancestry lookup. It fails
+// closed: an empty ID, a nil lookup or a lookup error all deny.
+func tenantWithinSubtree(ctx context.Context, ancestry TenantAncestryFunc, logger logging.Logger, deviceTenant, callerTenant string) bool {
+	if deviceTenant == "" || callerTenant == "" {
+		return false
+	}
+	if deviceTenant == callerTenant {
+		return true
+	}
+	if ancestry == nil {
+		return false
+	}
+	ok, err := ancestry(ctx, callerTenant, deviceTenant)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("Tenant ancestry lookup failed; denying",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return false
+	}
+	return ok
 }
 
 // writeDeviceScopeError renders a device-scope failure. An unknown or

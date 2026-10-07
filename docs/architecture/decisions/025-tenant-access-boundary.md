@@ -370,6 +370,17 @@ identity. A realm that is not a single DNS label — `root/msp-a`, `Cell1`, `../
 therefore never produce a qualified ID, closing the path by which `realm_id: "root/msp-a"`
 would otherwise yield the ambiguous `root/msp-a/client-1` shape A1.1 eliminated.
 
+**Enforcement across the controller API, service and reports packages (Issue #4656).** Every
+subtree check in `features/controller/api`, `features/controller/service` and
+`features/reports/api` resolves "is this tenant a descendant of the caller's tenant" through
+the tenant store's ParentID ancestry, never a `strings.HasPrefix(x, y+"/")` test. The API
+package uses `tenantSubtreeContains` and `tenantSubtreeIDs`; the service and reports packages
+cannot import the API package, so they take an injected ancestry function at construction
+(`certTenantScopeContains`, `clusterTenantInScope`, `tenantWithinSubtree`) and deny when it is
+nil or errors. `TestNoPathPrefixTenantScopeCheck` (`features/controller/api`, run by
+`make check-architecture`) fails on the prefix shape in those three packages; a comparison of
+non-tenant slash-separated paths carries `//architecture:allow-path-prefix -- <reason>`.
+
 To make "assigned before the first production tenant is created" an enforced fact rather than
 an optional field nobody sets, `tenant.EnforceRealmGuard` fails closed at controller startup:
 a `CFGMS_TELEMETRY_ENVIRONMENT=production` controller with `ha.mode: cluster` (the existing

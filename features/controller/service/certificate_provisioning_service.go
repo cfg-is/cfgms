@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -76,6 +75,10 @@ type CertificateProvisioningService struct {
 	// service-layer check is defense-in-depth alongside the REST handler's own
 	// containment check (Issue #4334), not a replacement for it.
 	tenantResolver StewardTenantResolver
+
+	// tenantAncestry decides whether a steward's tenant is a descendant of the
+	// caller's tenant. Nil denies every non-identical tenant (fail closed).
+	tenantAncestry TenantAncestryFunc
 }
 
 // NewCertificateProvisioningService creates a new certificate provisioning service
@@ -102,6 +105,12 @@ func (s *CertificateProvisioningService) SetCertificateDefaults(validityDays int
 // ProvisionCertificate's cross-tenant containment check (Issue #4346).
 func (s *CertificateProvisioningService) SetTenantResolver(resolver StewardTenantResolver) {
 	s.tenantResolver = resolver
+}
+
+// SetTenantAncestry wires the ParentID-ancestry lookup used by
+// ProvisionCertificate's cross-tenant containment check.
+func (s *CertificateProvisioningService) SetTenantAncestry(fn TenantAncestryFunc) {
+	s.tenantAncestry = fn
 }
 
 // ProvisionCertificate provisions a new certificate for a steward.
@@ -142,7 +151,7 @@ func (s *CertificateProvisioningService) ProvisionCertificate(ctx context.Contex
 	if s.tenantResolver != nil {
 		if scope, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope); ok && scope.IsTenant() {
 			if ownerTenant, known := s.tenantResolver.TenantForDevice(req.StewardID); known {
-				if !certTenantScopeContains(scope.Path(), ownerTenant) {
+				if !certTenantScopeContains(ctx, s.tenantAncestry, s.logger, scope.Path(), ownerTenant) {
 					s.logger.Warn("Denied cross-tenant certificate provisioning",
 						"steward_id", logging.SanitizeLogValue(req.StewardID),
 						"steward_tenant", logging.SanitizeLogValue(ownerTenant),
@@ -257,19 +266,15 @@ func (s *CertificateProvisioningService) ListCertificatesBySteward(stewardID str
 }
 
 // certTenantScopeContains reports whether resourceTenant falls within the
-// subtree rooted at callerTenant. Mirrors isWithinTenantScope in the api
-// package (features/controller/api/middleware.go), duplicated here to avoid a
-// service→api import cycle — the same reasoning already documented on
-// storedRoleConfig in config_service_v2.go. Unlike that api-package sibling,
+// subtree rooted at callerTenant, resolved through the injected ancestry lookup.
+// The api package has its own copy of this decision (tenantSubtreeContains in
+// features/controller/api/middleware.go); this one exists to avoid a
+// service→api import cycle. Unlike that api-package sibling,
 // an empty callerTenant is never treated as unrestricted here: the caller in
 // ProvisionCertificate only reaches this function when scope.IsTenant() is
 // true, so an empty path is a tenant scope built without one (ctxkeys'
 // documented "indistinguishable from no restriction" case) and must fail
-// closed, not open.
-func certTenantScopeContains(callerTenant, resourceTenant string) bool {
-	if callerTenant == "" {
-		return false
-	}
-	return resourceTenant == callerTenant ||
-		strings.HasPrefix(resourceTenant, callerTenant+"/")
+// closed, not open. A nil or failing lookup also denies.
+func certTenantScopeContains(ctx context.Context, ancestry TenantAncestryFunc, logger logging.Logger, callerTenant, resourceTenant string) bool {
+	return tenantSubtreeContains(ctx, ancestry, logger, callerTenant, resourceTenant)
 }
