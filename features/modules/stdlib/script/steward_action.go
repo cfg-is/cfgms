@@ -48,3 +48,15 @@ type ExpiredActionJob struct {
 	Detail      string
 	At          time.Time
 }
+
+// NormalizeActionResultCode maps a steward-reported result code to the recorded
+// set: the codes a steward reports are kept; anything else (including empty) is
+// "failed", so a steward cannot write arbitrary text into the run record or the
+// audit log.
+func NormalizeActionResultCode(code string) string {
+	switch code {
+	case "ok", "self_protect", "process_changed", "unsupported", "failed", "not_found", "permission_denied":
+		return code
+	}
+	return "failed"
+}

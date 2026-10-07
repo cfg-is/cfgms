@@ -22,6 +22,8 @@ var knownPermissions = map[string]bool{
 	"steward:read-modules":    true,
 	"steward:delete-config":   true,
 	"steward:move":            true,
+	"steward:service-control": true, // Issue #4628
+	"steward:process-control": true, // Issue #4628
 	"steward:decommission":    true,
 	"steward:visibility":      true, // Issue #2918: hide/unhide steward from default fleet view
 	// Config management

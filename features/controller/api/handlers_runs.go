@@ -702,6 +702,15 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, run)
 }
 
+// runJobView is a job as GET /runs/{run_id}/jobs returns it: the stored record plus
+// result_detail, the text for an outcome the controller itself assigned ("expired, not
+// run" for an action that was never delivered). The steward's own error text is never
+// carried — a result is a code only.
+type runJobView struct {
+	*controllerrun.JobRecord
+	ResultDetail string `json:"result_detail,omitempty"`
+}
+
 // handleGetRunJobs handles GET /api/v1/runs/{run_id}/jobs.
 func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 	if s.runManager == nil {
@@ -747,10 +756,11 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if jobs == nil {
-		jobs = []*controllerrun.JobRecord{}
+	views := make([]runJobView, 0, len(jobs))
+	for _, job := range jobs {
+		views = append(views, runJobView{JobRecord: job, ResultDetail: controllerrun.ResultCodeDetail(job.ResultCode)})
 	}
-	s.writeSuccessResponse(w, jobs)
+	s.writeSuccessResponse(w, views)
 }
 
 // handleDeleteRun handles DELETE /api/v1/runs/{run_id}.

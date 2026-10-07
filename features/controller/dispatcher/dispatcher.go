@@ -146,6 +146,9 @@ type ExpiredActionJob = script.ExpiredActionJob
 // "no_result" (sent, never reported) so neither outcome disappears (Issue #4625).
 type ActionAuditSink interface {
 	RecordActionExpired(ctx context.Context, job ExpiredActionJob)
+	// RecordActionCompleted records a steward action that reported a result. The
+	// job carries the result code the run store recorded (Issue #4628).
+	RecordActionCompleted(ctx context.Context, job ExpiredActionJob)
 }
 
 // GrantManager creates and consumes per-execution relay grants (Issue #1675).
@@ -838,6 +841,7 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	// job_id, and idempotent flag through QueuedExecution.Metadata (Issue #1673,
 	// Issue #1674).
 	var runID, jobID string
+	var actionTenantID, actionCreatedBy string
 	var isIdempotent, isAction bool
 	var retryCount int
 	var origQE *script.QueuedExecution
@@ -848,6 +852,8 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
 			retryCount = metaInt(qe.Metadata["retry_count"])
 			isAction = script.IsStewardAction(qe.Kind)
+			actionTenantID, _ = qe.Metadata["tenant_id"].(string)
+			actionCreatedBy, _ = qe.Metadata["created_by"].(string)
 			origQE = qe
 			break
 		}
@@ -928,6 +934,12 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 				"execution_id", logging.SanitizeLogValue(executionID),
 				"run_id", logging.SanitizeLogValue(runID),
 				"error", logging.SanitizeLogValue(err.Error()))
+		} else if d.actionAudit != nil && origQE != nil && origQE.Action != nil {
+			d.actionAudit.RecordActionCompleted(ctx, ExpiredActionJob{
+				RunID: runID, JobID: jobID, DeviceID: deviceID, ExecutionID: executionID,
+				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Action: *origQE.Action,
+				ResultCode: script.NormalizeActionResultCode(actionResultCode), At: time.Now().UTC(),
+			})
 		}
 	} else if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
 		var output, stderr string

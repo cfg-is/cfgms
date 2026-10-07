@@ -1007,12 +1007,19 @@ func (m *Manager) RecordActionResult(ctx context.Context, runID, jobID, executio
 // NormalizeResultCode maps a steward-reported result code to the recorded set.
 // The codes a steward reports are kept; anything else (including empty) is failed.
 func NormalizeResultCode(code string) string {
+	return scriptmodule.NormalizeActionResultCode(code)
+}
+
+// ResultCodeDetail is the operator-facing text for a result code the controller
+// itself assigns when no steward result arrives; empty for every other code.
+func ResultCodeDetail(code string) string {
 	switch code {
-	case ResultCodeOK, ResultCodeSelfProtect, ResultCodeProcessChanged, ResultCodeUnsupported,
-		ResultCodeFailed, "not_found", "permission_denied":
-		return code
+	case ResultCodeExpired:
+		return "expired, not run"
+	case ResultCodeNoResult:
+		return "sent, no result reported"
 	}
-	return ResultCodeFailed
+	return ""
 }
 
 // ExpireActionJobs closes steward-action jobs that will never report. A job
@@ -1041,10 +1048,11 @@ func (m *Manager) ExpireActionJobs(ctx context.Context, now time.Time) ([]script
 			errs = append(errs, ctx.Err())
 			break
 		}
-		code, detail := ResultCodeExpired, "expired, not run"
+		code := ResultCodeExpired
 		if job.Status == JobStatusDispatched {
-			code, detail = ResultCodeNoResult, "sent, no result reported"
+			code = ResultCodeNoResult
 		}
+		detail := ResultCodeDetail(code)
 		changed, err := m.store.ExpireJobIfStatus(job.JobID, job.Status, code, now)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("expire action job %s: %w", job.JobID, err))

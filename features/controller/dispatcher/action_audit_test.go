@@ -122,3 +122,42 @@ func TestDispatcher_PollLoopSweepsStaleActionIntoAuditLog(t *testing.T) {
 	assert.Equal(t, "steward-poll", e.Details["device_id"])
 	assert.Equal(t, "expired, not run", e.Details["detail"])
 }
+
+// TestAuditManagerSink_CompletionIsAuditedAttributedToOperator writes a reported
+// steward action result through the production sink: an ok result is a success, any
+// other code a failure, and both carry the issuing operator, run and result code.
+func TestAuditManagerSink_CompletionIsAuditedAttributedToOperator(t *testing.T) {
+	auditMgr, auditStore := newFlatfileAuditManager(t)
+	sink := NewAuditManagerSink(auditMgr, logging.NewNoopLogger())
+
+	for _, tc := range []struct {
+		code string
+		want business.AuditResult
+	}{{"ok", business.AuditResultSuccess}, {"self_protect", business.AuditResultFailure}} {
+		sink.RecordActionCompleted(context.Background(), ExpiredActionJob{
+			RunID: "run-" + tc.code, JobID: "job-" + tc.code, DeviceID: "steward-1", ExecutionID: "exec-" + tc.code,
+			TenantID: "tenant-a", CreatedBy: "admin", ResultCode: tc.code, At: time.Now().UTC(),
+			Action: script.StewardActionSpec{Verb: "service.stop", TargetKind: "service", TargetName: "spooler"},
+		})
+	}
+	require.NoError(t, auditMgr.Flush(context.Background()))
+
+	entries, err := auditStore.GetAuditsByAction(context.Background(), "steward_action_completed", nil)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	byExec := map[string]*business.AuditEntry{}
+	for _, e := range entries {
+		byExec[e.ResourceID] = e
+	}
+	require.Contains(t, byExec, "exec-ok")
+	require.Contains(t, byExec, "exec-self_protect")
+	assert.Equal(t, business.AuditResultSuccess, byExec["exec-ok"].Result)
+	assert.Equal(t, business.AuditResultFailure, byExec["exec-self_protect"].Result)
+	for _, e := range byExec {
+		assert.Equal(t, "tenant-a", e.TenantID)
+		assert.Equal(t, "admin", e.UserID)
+		assert.Equal(t, "service.stop", e.Details["verb"])
+		assert.Equal(t, "steward-1", e.Details["device_id"])
+	}
+	assert.Equal(t, "self_protect", byExec["exec-self_protect"].Details["result_code"])
+}
