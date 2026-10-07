@@ -549,8 +549,12 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*AccessToken, e
 		TokenType: tokenResp.TokenType,
 		ExpiresIn: tokenResp.ExpiresIn,
 		ExpiresAt: time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-		Scope:     tokenResp.Scope,
-		TenantID:  c.partnerTenantID,
+		// The scope is what was requested, not what the response echoes: the
+		// identity platform's client-credentials responses normally omit it, and
+		// storedTokenUsable relies on this marker to keep a Partner Center token
+		// out of the Graph token slot.
+		Scope:    partnerCenterScope,
+		TenantID: c.partnerTenantID,
 	}
 	if token.TokenType == "" {
 		token.TokenType = "Bearer"

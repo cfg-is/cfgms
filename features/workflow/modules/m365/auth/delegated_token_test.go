@@ -459,3 +459,31 @@ func TestGDAPRoleRequirementsKeyedByModuleContract(t *testing.T) {
 	assert.Equal(t, []string{"Global Administrator"}, r.GetGDAPRoleRequirements("m365-entra-group", "list"),
 		"the retired CRUD verbs are not part of the module contract")
 }
+
+// A client-credentials response that omits "scope" (the normal case) must still
+// leave the persisted Partner Center token marked with the Partner Center scope,
+// or storedTokenUsable cannot recognise it.
+func TestPartnerCenterTokenCarriesRequestedScopeWhenResponseOmitsIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "pc-no-scope", "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer srv.Close()
+
+	store := newKeyedCredentialStore()
+	client := NewGDAPClient(srv.Client(), testPartnerTenant)
+	client.tokenBaseURL = srv.URL
+	client.SetCredentialStore(store)
+	client.SetClientCredentials("partner-app", "partner-secret")
+	client.SetTokenKeyID("cfgms-a")
+
+	tok, err := client.getPartnerCenterToken(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, partnerCenterScope, tok.Scope)
+
+	persisted, err := store.GetToken(partnerCenterTokenKey("cfgms-a"))
+	require.NoError(t, err)
+	assert.False(t, storedTokenUsable(&OAuth2Config{}, persisted),
+		"a persisted Partner Center token must never be usable as a Graph token")
+}
