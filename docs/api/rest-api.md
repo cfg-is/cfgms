@@ -1643,6 +1643,34 @@ Fleet-wide compliance summary across all stewards.
 
 - `503 Service Unavailable`: DNA data provider not yet wired.
 
+#### GET /api/v1/compliance/tenants/{id}/devices
+
+Per-device compliance list for one tenant — the drill-down behind a By-tenant row on the Compliance summary.
+
+**Authentication:** Required  
+**Required permission:** `compliance:read-summary`
+
+**Parameters:**
+
+- `id` (path): Tenant ID (a tenant path such as `root/msp-a/client-1` is accepted)
+- `limit` (query, optional): Page size, 1–500, default 50
+- `offset` (query, optional): Page offset, default 0
+
+**Response fields:**
+
+- `devices`: array of `{steward_id, hostname, status}` sorted by steward ID. `status` is `compliant`, `warning` or `critical`, derived from the drift signal exactly as in the summary.
+- `total`, `limit`, `offset`: pagination envelope; `total` is the tenant's full device count.
+
+Per-device policy deadlines and outstanding patches are on the steward's Compliance tab, not here.
+
+**Tenant scope:** The tenant must be within the caller's scope. A tenant outside it returns `404` without disclosing whether it exists; a root caller subject to the ADR-025 crossing boundary receives the crossing challenge for a client tenant.
+
+**Error responses:**
+
+- `400 Bad Request`: invalid `limit` or `offset`.
+- `404 Not Found`: tenant outside the caller's scope.
+- `503 Service Unavailable`: DNA data provider not yet wired.
+
 ### Tenants
 
 #### POST /api/v1/tenants/{id}/config-source/test

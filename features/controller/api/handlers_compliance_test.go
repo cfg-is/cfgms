@@ -649,3 +649,78 @@ func TestHandleGetComplianceSummary_TenantIsolation(t *testing.T) {
 		assert.False(t, tenantIDs["tenant-b"], "tenant-b must not appear")
 	})
 }
+
+func TestHandleGetTenantComplianceDevices(t *testing.T) {
+	get := func(server *Server, key, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-API-Key", key)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
+	}
+	perms := []string{"compliance:read-summary"}
+
+	t.Run("503 when data provider unavailable", func(t *testing.T) {
+		server := setupTestServer(t)
+		key := NewEphemeralTestKey(t, server, perms, "tenant-a", 5*time.Minute)
+		assert.Equal(t, http.StatusServiceUnavailable, get(server, key, "/api/v1/compliance/tenants/tenant-a/devices").Code)
+	})
+
+	t.Run("lists the tenant's devices with status", func(t *testing.T) {
+		server, sm := setupComplianceTestServer(t)
+		require.NoError(t, server.controllerService.RegisterSteward("s-clean", "tenant-a", "addr-1", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s-drift", "tenant-a", "addr-2", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s-other", "tenant-b", "addr-3", "online"))
+		storeDNAPair(t, sm, "s-drift", "security:firewall_rules", "on", "off")
+		key := NewEphemeralTestKey(t, server, perms, "tenant-a", 5*time.Minute)
+
+		rec := get(server, key, "/api/v1/compliance/tenants/tenant-a/devices")
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp TenantComplianceDevicesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, 2, resp.Total)
+		assert.Equal(t, tenantDevicesDefaultLimit, resp.Limit)
+		require.Len(t, resp.Devices, 2)
+		assert.Equal(t, "s-clean", resp.Devices[0].StewardID)
+		assert.Equal(t, "compliant", resp.Devices[0].Status)
+		assert.Equal(t, "s-drift", resp.Devices[1].StewardID)
+		assert.NotEqual(t, "compliant", resp.Devices[1].Status)
+	})
+
+	t.Run("paginates", func(t *testing.T) {
+		server, _ := setupComplianceTestServer(t)
+		for _, id := range []string{"s1", "s2", "s3"} {
+			require.NoError(t, server.controllerService.RegisterSteward(id, "tenant-a", "addr-"+id, "online"))
+		}
+		key := NewEphemeralTestKey(t, server, perms, "tenant-a", 5*time.Minute)
+
+		rec := get(server, key, "/api/v1/compliance/tenants/tenant-a/devices?limit=2&offset=2")
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp TenantComplianceDevicesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, 3, resp.Total)
+		require.Len(t, resp.Devices, 1)
+		assert.Equal(t, "s3", resp.Devices[0].StewardID)
+
+		assert.Equal(t, http.StatusBadRequest, get(server, key, "/api/v1/compliance/tenants/tenant-a/devices?limit=0").Code)
+	})
+
+	t.Run("empty tenant returns an empty list", func(t *testing.T) {
+		server, _ := setupComplianceTestServer(t)
+		key := NewEphemeralTestKey(t, server, perms, "tenant-a", 5*time.Minute)
+		rec := get(server, key, "/api/v1/compliance/tenants/tenant-a/devices")
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Body.String(), `"devices":[]`)
+	})
+
+	// [REQUIRED TEST]: a caller scoped to tenant A cannot list tenant B's devices.
+	t.Run("tenant-A caller cannot list tenant-B devices", func(t *testing.T) {
+		server, _ := setupComplianceTestServer(t)
+		require.NoError(t, server.controllerService.RegisterSteward("s-b", "tenant-b", "addr-b", "online"))
+		key := NewEphemeralTestKey(t, server, perms, "tenant-a", 5*time.Minute)
+
+		rec := get(server, key, "/api/v1/compliance/tenants/tenant-b/devices")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.NotContains(t, rec.Body.String(), "s-b")
+	})
+}

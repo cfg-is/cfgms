@@ -771,6 +771,73 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /compliance/tenants/{tenantId}/devices:
+    get:
+      summary: List a tenant's devices with compliance status
+      description: |
+        Returns a page of one tenant's devices with their drift-based compliance
+        status (the same buckets as the compliance summary). Devices are sorted by
+        steward ID. A tenant outside the caller's scope returns 404 without
+        disclosing whether it exists. Requires `compliance:read-summary`.
+      operationId: getTenantComplianceDevices
+      tags:
+        - Compliance
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Page of the tenant's devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:
+                    type: string
+                  devices:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        steward_id:
+                          type: string
+                        hostname:
+                          type: string
+                        status:
+                          type: string
+                          enum: [compliant, warning, critical]
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '400':
+          description: Invalid limit or offset
+        '404':
+          description: Tenant not found or outside the caller's scope
+        '503':
+          description: Compliance data provider unavailable
+
 components:
   securitySchemes:
     ApiKeyAuth:
