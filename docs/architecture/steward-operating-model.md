@@ -567,6 +567,10 @@ A legitimate controller-cluster rebuild restarts the fencing-token source from i
 
 Whether a given steward is capable of enforcing the fence at all is determinable from the controller via the existing `GET /api/v1/stewards` `StewardInfo.Version` field — no separate capability flag was introduced. A steward at a fence-capable version that has not yet seen a stamped command is in the accept-unstamped bootstrap state, not actively rejecting anything; that is expected for a freshly enrolled or freshly upgraded steward, not itself a sign of compromise.
 
+### Operator-Signed Envelope (Issue #4622)
+
+Privileged steward commands carry an operator-signed envelope in addition to the controller's command signature. The operator signs `operatorpayload.CanonicalBytes` of an envelope holding the SHA-256 of the content, the shell, the resolved target steward IDs, a single-use nonce and an expiry. For an ad-hoc `execute_script` the content is the script and the shell is its interpreter. For a steward action the content is `operatorpayload.ActionContent` (the verb, target kind, target name and sorted parameters as canonical JSON) and the shell is `operatorpayload.ActionShell` (`steward-action`), which is not a script shell. The shell is part of the signed bytes, so a signature for an action never authorizes a script or the reverse, and the controller cannot alter the verb, target or parameters in transit. One routine, `verifyOperatorEnvelope`, verifies the X.509 or WebAuthn credential and then enforces that this steward is in the signed targets, that the envelope has not expired, and that its nonce has not been used before. `preflightScriptSignature` additionally rejects `shell = steward-action` outright.
+
 ## Entry Paths
 
 The steward binary supports four entry paths:

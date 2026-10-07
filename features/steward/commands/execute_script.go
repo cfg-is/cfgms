@@ -365,6 +365,13 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 	shellStr, _ := cmd.Params["shell"].(string)
 	scriptContentB64, _ := cmd.Params["script_content"].(string)
 
+	// A steward action envelope is signed with Shell = ActionShell. That value is not
+	// a script shell: refuse it here, before any verification or execution, so a
+	// captured action envelope re-sent as EXECUTE_SCRIPT is never run as a script.
+	if shellStr == operatorpayload.ActionShell {
+		return fmt.Errorf("%w: shell %q is reserved for steward actions", ErrUnauthenticatedCommand, shellStr)
+	}
+
 	isLibraryScript := scriptID != ""
 
 	// Decode base64 content. Fail closed for library scripts and for inline commands
@@ -407,74 +414,9 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 	}
 
 	// Inline ad-hoc command: operator-envelope verification is mandatory, over either
-	// credential type (Issue #3697 adds the WebAuthn branch alongside X.509).
-	webauthnAuthDataB64, _ := cmd.Params["webauthn_authenticator_data"].(string)
-	webauthnClientDataB64, _ := cmd.Params["webauthn_client_data_json"].(string)
-	webauthnSigB64, _ := cmd.Params["webauthn_signature"].(string)
-	webauthnCredIDB64, _ := cmd.Params["webauthn_credential_id"].(string)
-	webauthnManifestJSON, _ := cmd.Params["webauthn_manifest"].(string)
-	hasWebAuthn := webauthnAuthDataB64 != "" && webauthnClientDataB64 != "" && webauthnSigB64 != "" && webauthnCredIDB64 != ""
-
-	if !hasSig && !hasWebAuthn {
-		return ErrUnauthenticatedCommand
-	}
-
-	targets := extractStringSlice(cmd.Params["targets"])
-	nonce, _ := cmd.Params["nonce"].(string)
-	expiresAtStr, _ := cmd.Params["expires_at"].(string)
-	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
-	if err != nil {
-		return fmt.Errorf("%w: missing or invalid operator envelope expiry", ErrUnauthenticatedCommand)
-	}
-
-	envelope := operatorpayload.Envelope{
-		Content:   contentBytes,
-		Shell:     shellStr,
-		Targets:   targets,
-		Nonce:     nonce,
-		ExpiresAt: expiresAt,
-	}
-
-	if hasSig {
-		if err := h.verifyX509OperatorSignature(envelope, shellStr, sigAlgorithm, sigValue, sigPublicKey); err != nil {
-			return err
-		}
-	} else {
-		if err := h.verifyWebAuthnOperatorSignature(envelope,
-			webauthnAuthDataB64, webauthnClientDataB64, webauthnSigB64, webauthnCredIDB64, webauthnManifestJSON); err != nil {
-			return err
-		}
-	}
-
-	// Target-set binding (Issue #3694): this steward's own ID must be among the
-	// resolved, signed target list — a legitimately-signed envelope re-addressed to a
-	// different target set in transit does not authorize execution here.
-	targeted := false
-	for _, target := range targets {
-		if target == h.stewardID {
-			targeted = true
-			break
-		}
-	}
-	if !targeted {
-		return fmt.Errorf("%w: steward is not in the signed target list", ErrUnauthenticatedCommand)
-	}
-
-	// Expiry (Issue #3694): reject an envelope past its bound validity window.
-	if time.Now().After(expiresAt) {
-		return fmt.Errorf("%w: operator envelope has expired", ErrUnauthenticatedCommand)
-	}
-
-	// Nonce replay (Issue #3694): single-use, independent of the outer SignedCommand's
-	// own replay window (handler.go's replayCache, keyed by cmd.ID) — a captured
-	// operator-signed envelope re-wrapped in a fresh outer command (new ID, new
-	// timestamp) is still caught here because the nonce is bound into what the
-	// operator actually signed.
-	if !h.envelopeNonceCache.Add(nonce) {
-		return fmt.Errorf("%w: operator envelope nonce already used", ErrUnauthenticatedCommand)
-	}
-
-	return nil
+	// credential type (Issue #3697 adds the WebAuthn branch alongside X.509). The
+	// shared routine owns the credential check, target binding, expiry and nonce.
+	return h.verifyOperatorEnvelope(cmd, contentBytes, shellStr)
 }
 
 // verifyX509OperatorSignature performs the mTLS/CSR-credential inline verification
