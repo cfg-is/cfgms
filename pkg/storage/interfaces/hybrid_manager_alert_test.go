@@ -83,4 +83,10 @@ func TestHybridStorageManager_GetAlertStore(t *testing.T) {
 	assert.True(t, st.Silenced)
 	assert.Equal(t, "bob", st.SilencedBy)
 	assert.WithinDuration(t, until, st.SilencedUntil, time.Second)
+
+	require.NoError(t, store.UnsilenceAlert(ctx, tenantID, alertID, "carol", time.Now()))
+	st, err = store.GetAlertState(ctx, tenantID, alertID)
+	require.NoError(t, err)
+	require.NotNil(t, st)
+	assert.False(t, st.Silenced)
 }

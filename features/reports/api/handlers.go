@@ -344,9 +344,11 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 // Query parameters:
 //   - severity: comma-separated severity filter (critical, warning, info).
 //     Defaults to "warning,critical" when absent.
+//   - include_silenced: "true" includes actively silenced alerts (silenced: true).
 //
-// Each alert row is annotated with acknowledged/silenced booleans sourced from
-// AlertStore. Alerts whose silence window has not yet expired are excluded.
+// Each alert row is annotated with acknowledged/silenced booleans and, when known,
+// acknowledged_by/silenced_by sourced from AlertStore. Alerts whose silence window
+// has not yet expired are excluded unless include_silenced=true.
 // When AlertStore is nil, annotation is skipped and all matching alerts are
 // returned without ack/silence data.
 func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +416,7 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 		return ""
 	}
 
+	includeSilenced := r.URL.Query().Get("include_silenced") == "true"
 	now := time.Now()
 	alerts := make([]map[string]interface{}, 0)
 
@@ -451,11 +454,17 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 							}
 							if state != nil {
 								activelySilenced := state.Silenced && state.SilencedUntil.After(now)
-								if activelySilenced {
+								if activelySilenced && !includeSilenced {
 									continue // exclude actively silenced alerts
 								}
 								alert["acknowledged"] = state.Acknowledged
-								alert["silenced"] = false // silence window expired
+								alert["silenced"] = activelySilenced
+								if state.AcknowledgedBy != "" {
+									alert["acknowledged_by"] = state.AcknowledgedBy
+								}
+								if state.SilencedBy != "" {
+									alert["silenced_by"] = state.SilencedBy
+								}
 							}
 						}
 

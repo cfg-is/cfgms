@@ -1777,7 +1777,7 @@ Dashboard trend data.
 
 #### GET /api/v1/reports/dashboard/alerts
 
-Dashboard alert summary. Returns drift-derived alerts with per-alert acknowledgement and silence state from `AlertStore`. Actively silenced alerts (silence window still open) are excluded from the response.
+Dashboard alert summary. Returns drift-derived alerts with per-alert acknowledgement and silence state from `AlertStore`. Actively silenced alerts (silence window still open) are excluded from the response unless `include_silenced=true` is passed.
 
 **Authentication:** Required
 
@@ -1788,6 +1788,7 @@ Dashboard alert summary. Returns drift-derived alerts with per-alert acknowledge
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `severity` | string | `warning,critical` | Comma-separated severity filter. Valid values: `critical`, `warning`, `info`. Defaults to `warning,critical` when absent, returning both warning and critical alerts. |
+| `include_silenced` | boolean | `false` | When `true`, alerts whose silence window is still open are included, with `silenced: true`. Absent or any other value keeps the default (actively silenced alerts excluded). |
 
 **Alert identity:** Each alert row is identified by a stable `alertID` derived as `hex(SHA-256(deviceID + "|" + description))`. This ID is stable across report regenerations for the same logical alert and matches the `alertID` used by `POST /api/v1/alerts/{alertID}/acknowledge` and `POST /api/v1/alerts/{alertID}/silence`.
 
@@ -1800,7 +1801,9 @@ Dashboard alert summary. Returns drift-derived alerts with per-alert acknowledge
 | `severity` | string | `critical`, `warning`, or `info` |
 | `description` | string | Human-readable description of the drift event |
 | `acknowledged` | boolean | Whether the alert has been acknowledged |
-| `silenced` | boolean | Always `false` in the response (silenced alerts are excluded) |
+| `silenced` | boolean | `true` only for an actively silenced alert returned because `include_silenced=true`; otherwise `false` |
+| `acknowledged_by` | string | Principal that acknowledged the alert. Present only when known |
+| `silenced_by` | string | Principal that silenced the alert. Present only when known |
 
 #### GET /api/v1/reports/compliance/status
 
@@ -3325,8 +3328,8 @@ Returns `404 ACCOUNT_NOT_FOUND` if the account does not exist.
 
 Server-side durable state for alert acknowledgement and silencing. Alert records are created on first write (upsert semantics) — a pre-existing alert-manager record is not required.
 
-**Required permission:** `alert:acknowledge` (acknowledge) or `alert:silence` (silence)  
-**Assurance:** Any for acknowledge; Strong for silence.
+**Required permission:** `alert:acknowledge` (acknowledge), `alert:silence` (silence) or `alert:unsilence` (unsilence)  
+**Assurance:** Any for acknowledge; Strong for silence and unsilence.
 
 #### POST /api/v1/alerts/{id}/acknowledge
 
@@ -3377,6 +3380,34 @@ Silence an alert until a specified time. The calling principal and expiry are re
 **Response (204 No Content):** Alert state recorded. Body is empty.
 
 Returns `400 Bad Request` when `until` is missing or zero. Returns `503 Service Unavailable` when the alert store is not configured.
+
+#### POST /api/v1/alerts/{id}/unsilence
+
+Reverse a silence. Clears the silence flag, its expiry and the silencing principal; the acknowledgement is unaffected. The alert reappears in the default alerts feed.
+
+**Authentication:** Required  
+**Required permission:** `alert:unsilence`  
+**Assurance:** Strong session required (same gate as silence)
+
+**Parameters:**
+
+- `id` (path): Alert identifier
+
+**Request body:** none.
+
+**Response (200 OK):** The updated alert state.
+
+```json
+{
+  "alert_id": "9f2c...",
+  "acknowledged": true,
+  "acknowledged_by": "alice",
+  "acknowledged_at": "2026-08-17T09:00:00Z",
+  "silenced": false
+}
+```
+
+Idempotent: unsilencing an alert that is not silenced returns `200` with its current state. Returns `404 Not Found` when the caller's tenant holds no state for the alert (other tenants' alerts are not disclosed). Returns `503 Service Unavailable` when the alert store is not configured.
 
 ## Configuration
 

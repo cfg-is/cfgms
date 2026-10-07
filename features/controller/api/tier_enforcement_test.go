@@ -117,6 +117,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Alert silence (Issue #3266) — silencing requires AssuranceStrong so a compromised
 	// API key cannot suppress alerts fleet-wide. Acknowledge is Machine-level and absent here.
 	{"POST", "/api/v1/alerts/test-alert-id/silence", "alert:silence"},
+	{"POST", "/api/v1/alerts/test-alert-id/unsilence", "alert:unsilence"},
 	// mTLS admin certificate binding (Issue #3578, #3579) — credential-mutation surface.
 	// cert-binding:list is permission-only (reads are outside the elevated surface) and absent here.
 	{"POST", "/api/v1/accounts/test-user/certs/bind", "cert-binding:bind"},

@@ -203,6 +203,7 @@ var knownPermissions = map[string]bool{
 	// does not and is intentionally absent from that map.
 	"alert:acknowledge": true,
 	"alert:silence":     true,
+	"alert:unsilence":   true,
 	// Report access (Issue #3282): read gates all GET endpoints under /api/v1/reports;
 	// generate gates POST /reports/generate (write-shaped — may produce and persist a report).
 	// Kept separate so a read-only principal can list templates without being able to trigger
