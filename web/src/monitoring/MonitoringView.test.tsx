@@ -221,13 +221,6 @@ describe('error states', () => {
     await screen.findByTestId('monitoring-health')
     expect(screen.queryByTestId('health-error')).not.toBeInTheDocument()
   })
-
-  it('renders component-detail section as designed error state (503 posture)', async () => {
-    mockAll()
-    renderView()
-    await screen.findByTestId('monitoring-health')
-    expect(screen.getByTestId('component-detail-unavailable')).toBeInTheDocument()
-  })
 })
 
 // ── Health section — ready state ───────────────────────────────────────────
@@ -349,15 +342,91 @@ describe('config section — ready state', () => {
   })
 })
 
-// ── Component-detail section (designed error state) ───────────────────────
+// ── Component-detail section ───────────────────────────────────────────────
+
+const COMPONENT_BODY = {
+  status: 'healthy',
+  message: 'gRPC server accepting connections',
+  last_checked: '2026-08-18T12:04:09Z',
+}
+
+function mockComponent(status: number, body: unknown = COMPONENT_BODY) {
+  const base = fetchMock.getMockImplementation()!
+  fetchMock.mockImplementation((input, init) => {
+    if (String(input).includes('/monitoring/components/')) {
+      return Promise.resolve(new Response(JSON.stringify(body), { status }))
+    }
+    return base(input, init)
+  })
+}
 
 describe('component-detail section', () => {
-  it('always renders the component-detail unavailable notice (503 posture)', async () => {
+  it('shows an empty prompt until a component is selected, without fetching', async () => {
     mockAll()
     renderView()
     await screen.findByTestId('monitoring-health')
-    const notice = screen.getByTestId('component-detail-unavailable')
-    expect(notice).toBeInTheDocument()
-    expect(notice.textContent).toMatch(/unavailable|not initialised|platform monitor/i)
+    expect(screen.getByTestId('component-detail-empty')).toBeInTheDocument()
+    expect(screen.queryByText('soon')).not.toBeInTheDocument()
+    expect(
+      fetchMock.mock.calls.some(([u]) => String(u).includes('/monitoring/components/')),
+    ).toBe(false)
+  })
+
+  it('loads and shows detail when a component is clicked', async () => {
+    mockAll()
+    mockComponent(200)
+    renderView()
+    await screen.findByTestId('monitoring-health')
+    fireEvent.click(screen.getByTestId('component-select-grpc_server'))
+    await screen.findByTestId('component-detail')
+    expect(screen.getByTestId('component-detail-status').textContent).toMatch(/healthy/i)
+    expect(screen.getByTestId('component-detail-message').textContent).toContain(
+      'accepting connections',
+    )
+    expect(
+      fetchMock.mock.calls.some(([u]) =>
+        String(u).endsWith('/monitoring/components/grpc_server/health'),
+      ),
+    ).toBe(true)
+  })
+
+  it('shows a loading state while the detail request is pending', async () => {
+    mockAll()
+    const base = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input, init) =>
+      String(input).includes('/monitoring/components/')
+        ? new Promise<Response>(() => {})
+        : base(input, init),
+    )
+    renderView()
+    await screen.findByTestId('monitoring-health')
+    fireEvent.click(screen.getByTestId('component-select-storage'))
+    expect(screen.getByTestId('component-detail-loading')).toBeInTheDocument()
+  })
+
+  it('renders the Error state for a 404 without clearing the health summary', async () => {
+    mockAll()
+    mockComponent(404, { error: 'not found' })
+    renderView()
+    await screen.findByTestId('monitoring-health')
+    fireEvent.click(screen.getByTestId('component-select-transport'))
+    await screen.findByTestId('component-detail-error')
+    expect(screen.getByTestId('monitoring-health')).toBeInTheDocument()
+    expect(screen.getByTestId('component-grpc_server')).toBeInTheDocument()
+    expect(screen.queryByTestId('health-error')).not.toBeInTheDocument()
+  })
+
+  it('renders the Error state for a 5xx and recovers on retry', async () => {
+    mockAll()
+    mockComponent(500, {})
+    renderView()
+    await screen.findByTestId('monitoring-health')
+    fireEvent.click(screen.getByTestId('component-select-storage'))
+    await screen.findByTestId('component-detail-error')
+
+    mockComponent(200)
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+    await screen.findByTestId('component-detail')
+    expect(screen.queryByTestId('component-detail-error')).not.toBeInTheDocument()
   })
 })

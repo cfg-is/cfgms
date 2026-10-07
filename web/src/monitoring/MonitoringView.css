@@ -204,18 +204,34 @@
   color: var(--text-faint);
 }
 
-/* ── "soon" badge ─────────────────────────────────────────────────────── */
+/* ── Selectable component rows + detail ─────────────────────────────── */
 
-.mv-soon {
-  font-size: 9.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--text-faint);
-  border: 1px solid var(--border);
+.mv-csel {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.mv-csel:hover {
+  text-decoration: underline;
+}
+
+.mv-csel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
   border-radius: var(--radius-sm);
-  padding: 1px 5px;
-  margin-left: 6px;
-  vertical-align: middle;
+}
+
+.mv-ccard.selected {
+  border-color: var(--accent);
+}
+
+.mv-detail-msg {
+  margin: var(--space-3) 0 0;
+  color: var(--text-secondary);
 }
 
 /* ── Mono ─────────────────────────────────────────────────────────────── */
