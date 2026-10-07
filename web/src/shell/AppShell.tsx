@@ -37,6 +37,7 @@ const NAV_ITEMS = [
   { label: 'Registration', to: '/registration', soon: false },
   { label: 'Refresh Requests', to: '/refresh', soon: false },
   { label: 'Reports', to: '/reports', soon: false },
+  { label: 'Billing', to: '/billing', soon: false },
   { label: 'Audit', to: '/audit', soon: false },
   { label: 'Accounts', to: '/accounts', soon: false },
   { label: 'Certificates', to: '/certificates', soon: false },
