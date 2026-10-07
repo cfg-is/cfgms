@@ -1727,3 +1727,46 @@ func TestRefreshRoutes_RateLimitedPerSource(t *testing.T) {
 	}
 	assert.True(t, limited, "one source exceeding the per-minute budget is refused with 429")
 }
+
+func TestHandleListPendingRefreshes_ResolvesHostnameTenantScoped(t *testing.T) {
+	pubA, _ := newTestEd25519KeyPair(t)
+	pubOther, _ := newTestEd25519KeyPair(t)
+
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-a", DeviceID: testDeviceID, TenantID: testTenantID, Hostname: "host-a",
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pubA),
+	})
+	// Same device_id in another tenant must never leak its hostname.
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-b", DeviceID: "cccccccccccccccc", TenantID: "other-tenant", Hostname: "host-b-secret",
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pubOther),
+	})
+	now := time.Now().UTC()
+	for _, e := range []*business.PendingRefreshEntry{
+		{PendingID: "r-known", DeviceID: testDeviceID, TenantID: testTenantID},
+		{PendingID: "r-unknown", DeviceID: "dddddddddddddddd", TenantID: testTenantID},
+		{PendingID: "r-crosstenant", DeviceID: "cccccccccccccccc", TenantID: testTenantID},
+	} {
+		e.Status = business.PendingRefreshStatusPending
+		e.CreatedAt = now
+		e.ExpiresAt = now.Add(7 * 24 * time.Hour)
+		f.addPending(t, e)
+	}
+
+	apiKey := NewTestKey(t, f.server, []string{"refresh:list-pending"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/refresh/pending", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	f.server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []APIPendingRefreshEntry
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	got := map[string]string{}
+	for _, e := range entries {
+		got[e.PendingID] = e.Hostname
+	}
+	assert.Equal(t, map[string]string{"r-known": "host-a", "r-unknown": "", "r-crosstenant": ""}, got)
+	assert.NotContains(t, rec.Body.String(), "host-b-secret")
+}

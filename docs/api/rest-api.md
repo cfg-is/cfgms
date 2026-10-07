@@ -172,6 +172,8 @@ Collects the outcome of a queued request, with a fresh challenge's proof. The ap
 
 Operators approve or reject queued requests with `cfg steward refresh list|approve|reject` (`/api/v1/stewards/refresh/pending`, `/api/v1/stewards/refresh/{pending_id}/approve|reject`).
 
+Each item in the `GET /api/v1/stewards/refresh/pending` array carries `hostname`, the steward-reported hostname for `device_id` resolved within the entry's own tenant. It is an empty string when the device is unknown, and is untrusted text.
+
 ### Steward Management
 
 All steward management endpoints require an API key. The `cfg steward list/status` CLI (Epic #1501) wraps these endpoints.

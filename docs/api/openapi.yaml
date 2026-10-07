@@ -174,6 +174,59 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /stewards/refresh/pending:
+    get:
+      summary: List pending steward credential refresh requests
+      description: >
+        Returns a bare array. `hostname` is the steward-reported hostname for the
+        device within the entry's own tenant; it is an empty string when the
+        device is unknown. It is untrusted and must be rendered as text.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: Filter by tenant (honoured for unscoped callers only)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pending refresh entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    pending_id:
+                      type: string
+                    device_id:
+                      type: string
+                      description: Ed25519 key fingerprint of the device
+                    hostname:
+                      type: string
+                      description: Steward-reported hostname, empty when unknown
+                    tenant_id:
+                      type: string
+                    source_ip:
+                      type: string
+                    provenance_matched_fields:
+                      type: integer
+                    provenance_total_fields:
+                      type: integer
+                    status:
+                      type: string
+                    created_at:
+                      type: string
+                      format: date-time
+                    expires_at:
+                      type: string
+                      format: date-time
+        '503':
+          description: Pending refresh store unavailable
+
   /stewards/{stewardId}:
     get:
       summary: Get steward details

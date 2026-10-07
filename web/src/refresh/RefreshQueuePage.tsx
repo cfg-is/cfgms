@@ -27,6 +27,7 @@ import ErrorCard from '../shell/ErrorCard.tsx'
 interface PendingRefreshEntry {
   pending_id: string
   device_id: string
+  hostname: string
   tenant_id: string
   source_ip: string
   provenance_matched_fields: number
@@ -59,6 +60,7 @@ export function parsePendingRefreshEntry(value: unknown): PendingRefreshEntry | 
   return {
     pending_id,
     device_id: str(r.device_id),
+    hostname: str(r.hostname),
     tenant_id: str(r.tenant_id),
     source_ip: str(r.source_ip),
     provenance_matched_fields: num(r.provenance_matched_fields),
@@ -76,6 +78,10 @@ export function parsePendingRefreshList(data: unknown): PendingRefreshEntry[] {
     if (entry !== null) list.push(entry)
   }
   return list
+}
+
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 12)}…` : id
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -260,7 +266,7 @@ export default function RefreshQueuePage() {
               <thead>
                 <tr>
                   <th>Pending ID</th>
-                  <th>Device ID</th>
+                  <th>Device</th>
                   <th>Tenant</th>
                   <th>Source IP</th>
                   <th>Provenance</th>
@@ -276,7 +282,17 @@ export default function RefreshQueuePage() {
                         <span className="mono2">{entry.pending_id}</span>
                       </td>
                       <td>
-                        <span className="mono2">{entry.device_id}</span>
+                        {entry.hostname ? (
+                          <>
+                            <span data-testid="refresh-hostname">{entry.hostname}</span>
+                            <br />
+                            <span className="mono2" title={entry.device_id}>
+                              {shortId(entry.device_id)}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="mono2">{entry.device_id}</span>
+                        )}
                       </td>
                       <td>
                         <span className="mono2">{entry.tenant_id}</span>

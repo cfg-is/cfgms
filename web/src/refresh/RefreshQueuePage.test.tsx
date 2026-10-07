@@ -89,6 +89,7 @@ describe('parsePendingRefreshEntry', () => {
     expect(entry).toEqual({
       pending_id: 'ref-abc123',
       device_id: 'dev-xyz789',
+      hostname: '',
       tenant_id: 'root/msp-a/prod',
       source_ip: '10.2.4.19',
       provenance_matched_fields: 7,
@@ -112,6 +113,7 @@ describe('parsePendingRefreshEntry', () => {
     expect(entry).toEqual({
       pending_id: 'ref-1',
       device_id: '',
+      hostname: '',
       tenant_id: '',
       source_ip: '',
       provenance_matched_fields: 0,
@@ -176,6 +178,29 @@ describe('RefreshQueuePage — list rendering', () => {
     expect(screen.getByText('root/msp-a/prod')).toBeInTheDocument()
     expect(screen.getByText('10.2.4.19')).toBeInTheDocument()
     expect(screen.getByText('2026-07-25T10:00:00Z')).toBeInTheDocument()
+  })
+
+  it('shows hostname with a short device id, and the id alone when hostname is missing', async () => {
+    fetchMock.mockResolvedValue(
+      makeRefreshResponse([
+        makeEntry({ hostname: 'web-01', device_id: 'abcdef0123456789abcdef' }),
+        makeEntry({ pending_id: 'ref-def456', device_id: 'dev-uvw321' }),
+      ]),
+    )
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
+    expect(screen.getByText('web-01')).toBeInTheDocument()
+    expect(screen.getByText('abcdef012345…')).toBeInTheDocument()
+    expect(screen.getAllByTestId('refresh-hostname')).toHaveLength(1)
+    expect(screen.getByText('dev-uvw321')).toBeInTheDocument()
+  })
+
+  it('renders a hostname containing markup as text', async () => {
+    fetchMock.mockResolvedValue(makeRefreshResponse([makeEntry({ hostname: '<b>x</b>' })]))
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
+    expect(screen.getByTestId('refresh-hostname')).toHaveTextContent('<b>x</b>')
+    expect(screen.getByTestId('refresh-hostname').querySelector('b')).toBeNull()
   })
 
   it('shows a full-match provenance badge (7 / 7) with ok styling', async () => {
