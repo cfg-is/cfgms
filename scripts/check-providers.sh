@@ -47,8 +47,15 @@ is_allowed() {
     # long-running server. Listed as one exact path, not a
     # features/workflow/modules/m365/*/cmd/main.go glob: a glob would
     # pre-authorize every future m365 module binary without review, and the
-    # other existing one (entra_user/cmd/main.go) does not need it.
+    # other existing one (entra_user/cmd/main.go) does not need it. The four
+    # modules wired by Issue #4421 are the same shape — each module binary
+    # blank-imports flatfile for the same sops secrets provider — and are
+    # likewise listed one exact path each.
     [[ "$file" == features/workflow/modules/m365/entra_group/cmd/main.go ]] && return 0
+    [[ "$file" == features/workflow/modules/m365/conditional_access/cmd/main.go ]] && return 0
+    [[ "$file" == features/workflow/modules/m365/entra_admin_unit/cmd/main.go ]] && return 0
+    [[ "$file" == features/workflow/modules/m365/entra_application/cmd/main.go ]] && return 0
+    [[ "$file" == features/workflow/modules/m365/intune_policy/cmd/main.go ]] && return 0
     [[ "$file" == */providers_test.go ]] && return 0
     return 1
 }
@@ -93,6 +100,10 @@ else
     echo "  features/controller/server/server.go                        (registry bootstrap)"
     echo "  features/modules/hyperv/provision.go                        (hyperv durable store constructor, Issue #2371)"
     echo "  features/workflow/modules/m365/entra_group/cmd/main.go      (entra_group module binary registry bootstrap, Issue #4420)"
+    echo "  features/workflow/modules/m365/conditional_access/cmd/main.go (module binary registry bootstrap, Issue #4421)"
+    echo "  features/workflow/modules/m365/entra_admin_unit/cmd/main.go (module binary registry bootstrap, Issue #4421)"
+    echo "  features/workflow/modules/m365/entra_application/cmd/main.go (module binary registry bootstrap, Issue #4421)"
+    echo "  features/workflow/modules/m365/intune_policy/cmd/main.go (module binary registry bootstrap, Issue #4421)"
     echo "  */providers_test.go                                         (per-package test provider registration)"
     exit 1
 fi

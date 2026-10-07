@@ -16,6 +16,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
@@ -92,7 +93,7 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, os.Getenv("M365_TENANT_ID")) // Issue #4421: requireExecutionTenant needs the CFGMS execution tenant; the real auth provider's default config resolves any CFGMS tenant to M365_TENANT_ID
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test configuration for a basic application
@@ -206,7 +207,7 @@ func TestEntraApplication_Integration_ConfigValidation(t *testing.T) {
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, os.Getenv("M365_TENANT_ID")) // Issue #4421: requireExecutionTenant needs the CFGMS execution tenant; the real auth provider's default config resolves any CFGMS tenant to M365_TENANT_ID
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test with invalid configuration (missing required fields)
@@ -235,7 +236,7 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, os.Getenv("M365_TENANT_ID")) // Issue #4421: requireExecutionTenant needs the CFGMS execution tenant; the real auth provider's default config resolves any CFGMS tenant to M365_TENANT_ID
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test complex configuration with multiple features
@@ -389,7 +390,7 @@ func TestEntraApplication_Integration_AuthenticationFlow(t *testing.T) {
 	// Create real auth provider
 	authProvider := createRealAuthProvider(t)
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, os.Getenv("M365_TENANT_ID")) // Issue #4421: requireExecutionTenant needs the CFGMS execution tenant; the real auth provider's default config resolves any CFGMS tenant to M365_TENANT_ID
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test token acquisition
@@ -488,7 +489,7 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, os.Getenv("M365_TENANT_ID")) // Issue #4421: requireExecutionTenant needs the CFGMS execution tenant; the real auth provider's default config resolves any CFGMS tenant to M365_TENANT_ID
 	tenantID := os.Getenv("M365_TENANT_ID")
 	timestamp := time.Now().Format("20060102-150405")
 

@@ -202,7 +202,11 @@ build-stdlib-modules: check-stdlib-payload-boundary
 # features/workflow/modules/, e.g. "m365/entra_user".
 WORKFLOW_MODULES := \
 	m365/entra_user \
-	m365/entra_group
+	m365/entra_group \
+	m365/conditional_access \
+	m365/entra_admin_unit \
+	m365/entra_application \
+	m365/intune_policy
 
 .PHONY: build-workflow-modules
 build-workflow-modules:
@@ -1500,6 +1504,8 @@ test-m365-integration:
 	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_application/... -run "Integration"
 	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_admin_unit/... -run "Integration"
 	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_group/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/conditional_access/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/intune_policy/... -run "Integration"
 
 # M365 integration tests - PERMISSIVE mode (skips without credentials)
 # Use this for development when you don't have M365 credentials
@@ -1511,6 +1517,8 @@ test-m365-integration-dev:
 	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_application/... -run "Integration"
 	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_admin_unit/... -run "Integration"
 	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_group/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/conditional_access/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/intune_policy/... -run "Integration"
 
 # M365 unit tests (mocked dependencies, no credentials needed)
 test-m365-unit:
