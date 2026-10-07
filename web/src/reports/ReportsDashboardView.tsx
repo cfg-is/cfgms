@@ -422,7 +422,7 @@ export default function ReportsDashboardView() {
     <div className="rdb-content" data-testid="reports-ready">
       <div className="rdb-header">
         <div><h1>{PAGE_TITLE}</h1></div>
-          {windowSelector}
+        {windowSelector}
       </div>
 
       <TabBar active={activeTab} onSwitch={switchTab} />
