@@ -777,6 +777,77 @@ strips it. For a WebAuthn proof it also attaches `webauthn_manifest`, a CA-signe
 the credentials authorized for that steward's tenant, so the steward can verify the
 assertion independently. Nonce single-use is enforced by the steward.
 
+### Steward Service and Process Actions
+
+An operator can start, stop or restart a service, or end, suspend or resume a process, on
+one steward. Each request is step-up gated (`steward:service-control` or
+`steward:process-control`, both at strong assurance), operator-signed per action (see
+[Signed Action Envelope](#signed-action-envelope)), requires a justification, and is audited.
+The API checks permission, tenant scope and the ADR-025 crossing boundary, creates an action
+run, queues it through the shared queue and returns `202` with the run id. It never waits for
+the steward: completion arrives only on the node holding the steward session, so the caller
+polls `GET /api/v1/runs/{run_id}`, which every node serves from the shared run store.
+
+#### POST /api/v1/stewards/{id}/actions/prepare
+
+Returns only the canonical action content and the envelope shell, so a client never
+re-implements canonicalization. The nonce, expiry and targets come from
+`POST /api/v1/operator-payload/sign/begin` with selector `id:<steward id>`, never from here.
+
+**Required permission:** `steward:service-control` for `target_kind` `service`,
+`steward:process-control` for `process`
+
+```json
+{ "target_kind": "process", "target_name": "4242", "action": "end", "image": "notepad.exe" }
+```
+
+Response: `{"data": {"content": "<base64 canonical action content>", "shell": "steward-action"}}`
+
+#### POST /api/v1/stewards/{id}/services/{name}/actions
+#### POST /api/v1/stewards/{id}/processes/{pid}/actions
+
+**Required permission:** `steward:service-control` (service), `steward:process-control` (process)
+
+Body fields: `action` (`start|stop|restart` for a service; `end|suspend|resume` for a process),
+`justification` (required, at most 1024 characters), `image` (process only: the image name the
+operator saw), and `nonce`, `expires_at` and `targets` copied from the `sign/begin` envelope.
+The proof is exactly one of `signature` (`algorithm`, `value`, `public_key`) or `webauthn`
+(`authenticator_data`, `client_data_json`, `signature`, `credential_id`), the field names
+`sign/finish` returns. The server rebuilds the action content from the parsed body and verifies
+the envelope before anything is queued. `targets` must be exactly the steward in the path.
+
+Response `202`: `{"data": {"run_id": "..."}}`
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `ENVELOPE_EXPIRED` | `expires_at` is already past |
+| 400 | `ENVELOPE_TTL_EXCEEDED` | `expires_at` is more than 5 minutes ahead |
+| 400 | `INVALID_TARGETS` | `targets` is not exactly the path steward |
+| 400 | `MISSING_JUSTIFICATION`, `INVALID_ACTION` | Malformed request |
+| 401 | | Below strong assurance (step-up challenge) or tenant-crossing challenge |
+| 403 | `OPERATOR_SIGNATURE_REQUIRED`, `INVALID_SIGNATURE` | No proof, or the proof does not verify for this action and steward |
+| 404 | `STEWARD_NOT_FOUND` | Steward unknown or outside the caller's tenant |
+| 429 | `ACTION_BUDGET_EXCEEDED` | Accepted actions by this principal in the one minute window exceeded the tenant's maximum targets setting |
+
+The action budget is counted per principal in the cluster-visible rate counter store (a
+node-local counter when none is wired) and only for requests that pass verification; a refused
+request queues nothing. A queued action that is not delivered within 2 minutes ends `expired`.
+
+#### Run fields for actions
+
+`GET /api/v1/runs/{run_id}` returns `kind` (`script` or `steward_action`). `GET
+/api/v1/runs/{run_id}/jobs` returns each job's `status` and, for an action, `result_code`:
+`ok`, `self_protect`, `process_changed`, `unsupported`, `not_found`, `permission_denied`,
+`failed`, `expired` or `no_result`. `result_detail` carries the controller's text for an outcome
+it assigned itself: `expired, not run` or `sent, no result reported`. The steward's raw error
+text is never returned. A `self_protect` refusal is visible only as the job `result_code`;
+there is no synchronous 409.
+
+Audit: each request (accepted or refused) writes `steward_action.request` with the verb,
+target, justification and signing credential id (`signer_id`); the steward's result, or the
+controller closing the action as expired, writes `steward_action_completed` or
+`steward_action_expired`. Audit resource ids are the steward id.
+
 ### Certificate Management
 
 #### GET /api/v1/certificates

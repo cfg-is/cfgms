@@ -178,6 +178,7 @@ type Server struct {
 	webAuthnElevateThrottle         sync.Map                                 // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	operatorPayloadSignSessions     sync.Map                                 // Issue #3695: pending operator-payload sign ceremonies; key=sessionID, value=*operatorPayloadSignSession
 	operatorPayloadSignThrottle     sync.Map                                 // Issue #3695: per-session/per-IP failed sign-ceremony throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	stewardActionBudget             sync.Map                                 // Issue #4628: node-local fallback for the per-principal steward-action budget; key=principal id, value=*stewardActionBudgetRecord
 	passkeyLoginSessions            sync.Map                                 // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle            sync.Map                                 // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyEnrollSessions           sync.Map                                 // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession

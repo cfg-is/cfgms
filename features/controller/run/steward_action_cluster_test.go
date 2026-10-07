@@ -259,3 +259,7 @@ func TestStewardAction_ConcurrentSweepsAcrossNodesAuditOnce(t *testing.T) {
 	assert.Equal(t, run.JobStatusExpired, jobs[0].Status)
 	assert.Equal(t, run.ResultCodeExpired, jobs[0].ResultCode)
 }
+
+// RecordActionCompleted satisfies ActionAuditSink; these tests only assert on
+// closed (expired / no_result) jobs, so completions are not kept.
+func (a *auditLog) RecordActionCompleted(_ context.Context, _ dispatcher.ExpiredActionJob) {}

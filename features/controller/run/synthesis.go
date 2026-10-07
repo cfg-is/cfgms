@@ -384,6 +384,7 @@ func SynthesizeActionRunForDevices(
 			"workflow_run_id": runID,
 			"job_id":          jobID,
 			"tenant_id":       tenantID,
+			"created_by":      createdBy, // read back to attribute the completion audit event
 			"targets":         targets,
 			"nonce":           nonce,
 			"expires_at":      expiresAt.UTC().Format(time.RFC3339),

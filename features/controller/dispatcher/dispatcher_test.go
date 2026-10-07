@@ -1710,8 +1710,9 @@ func TestDispatcherWithoutTermSourceSendsZero(t *testing.T) {
 
 // recordingActionAudit is a real ActionAuditSink that keeps what it is given.
 type recordingActionAudit struct {
-	mu   sync.Mutex
-	jobs []ExpiredActionJob
+	mu        sync.Mutex
+	jobs      []ExpiredActionJob
+	completed []ExpiredActionJob
 }
 
 func (a *recordingActionAudit) RecordActionExpired(_ context.Context, job ExpiredActionJob) {
@@ -1866,7 +1867,7 @@ func TestDispatcher_StewardAction_SendsSignedStewardActionWithEnvelopeIntact(t *
 			// The stored envelope equals the params the steward receives.
 			for key, want := range stored.Metadata {
 				switch key {
-				case "workflow_run_id", "job_id", "tenant_id":
+				case "workflow_run_id", "job_id", "tenant_id", "created_by":
 					assert.NotContains(t, p, key, "run linkage is not forwarded to the steward")
 				case "targets":
 					assert.Equal(t, []string{device, "steward-other"}, p["targets"])
@@ -2174,4 +2175,37 @@ func TestDispatcher_ScriptEntriesAreUntouchedByActionSweep(t *testing.T) {
 	jobs, err := h.manager.ListRunJobs(context.Background(), "run-script-old")
 	require.NoError(t, err)
 	assert.Equal(t, run.JobStatusPending, jobs[0].Status)
+}
+
+// RecordActionCompleted keeps what it is given.
+func (a *recordingActionAudit) RecordActionCompleted(_ context.Context, job ExpiredActionJob) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.completed = append(a.completed, job)
+}
+
+func (a *recordingActionAudit) completions() []ExpiredActionJob {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]ExpiredActionJob(nil), a.completed...)
+}
+
+func TestDispatcher_StewardAction_CompletionIsAuditedWithOperatorAndBoundedCode(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-audit-complete"
+	runID, job := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+
+	h.completeAction(t, device, job.ExecutionID, map[string]interface{}{"result_code": "<script>x</script>", "exit_code": float64(1)})
+
+	got := h.audit.completions()
+	require.Len(t, got, 1)
+	assert.Equal(t, runID, got[0].RunID)
+	assert.Equal(t, job.JobID, got[0].JobID)
+	assert.Equal(t, device, got[0].DeviceID)
+	assert.Equal(t, "tenant-a", got[0].TenantID)
+	assert.Equal(t, "admin", got[0].CreatedBy, "the operator who issued the action is the audited actor")
+	assert.Equal(t, "service.stop", got[0].Action.Verb)
+	assert.Equal(t, "failed", got[0].ResultCode, "a steward cannot write arbitrary text into the audit log")
+	assert.Empty(t, h.audit.recorded(), "a reported result is not an expiry")
 }

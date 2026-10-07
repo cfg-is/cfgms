@@ -113,6 +113,11 @@ var permissionAssurance = map[string]Requirement{
 	// The steward leg authenticates via mTLS independently of this check.
 	"terminal:create": {Min: session.AssuranceStrong}, // GET /terminal/ws/{steward_id}
 
+	// Steward service and process actions (Issue #4628): start, stop, restart a service or
+	// end, suspend, resume a process on one steward. Each request is also operator-signed.
+	"steward:service-control": {Min: session.AssuranceStrong}, // POST /stewards/{id}/services/{name}/actions
+	"steward:process-control": {Min: session.AssuranceStrong}, // POST /stewards/{id}/processes/{pid}/actions
+
 	// Catastrophic permissions (no live REST routes yet — issue #2728/#2732 adds the routes).
 	// RequireUserPresence: true is ENFORCED as of Issue #2784: requirePermission now validates
 	// the X-Presence-Token header (minted by POST /api/v1/webauthn/presence/finish) and rejects

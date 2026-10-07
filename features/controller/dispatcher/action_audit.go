@@ -31,10 +31,33 @@ func NewAuditManagerSink(manager *audit.Manager, logger logging.Logger) ActionAu
 	return &AuditManagerSink{manager: manager, logger: logger}
 }
 
+// RecordActionCompleted records one action that reported a result. The audited
+// actor is the operator who issued it, so the outcome stays attributable to them.
+// A result other than "ok" is recorded as a failure.
+func (s *AuditManagerSink) RecordActionCompleted(ctx context.Context, job ExpiredActionJob) {
+	result, severity := business.AuditResultSuccess, business.AuditSeverityHigh
+	if job.ResultCode != "ok" {
+		result, severity = business.AuditResultFailure, business.AuditSeverityMedium
+	}
+	s.record(ctx, job, auditResourceStewardAction+"_completed", result, severity, map[string]interface{}{
+		"completed_at": job.At,
+	})
+}
+
 // RecordActionExpired records one closed action. The operator who issued the
 // action is the audited actor, so the outcome stays attributable to them; the
 // controller closed it, which is recorded in the details.
 func (s *AuditManagerSink) RecordActionExpired(ctx context.Context, job ExpiredActionJob) {
+	s.record(ctx, job, auditResourceStewardAction+"_"+job.ResultCode, business.AuditResultFailure, business.AuditSeverityMedium, map[string]interface{}{
+		"detail":    job.Detail,
+		"closed_by": "controller",
+		"closed_at": job.At,
+	})
+}
+
+// record writes one steward-action outcome event. The resource id is the
+// execution id (cfg-declared by the controller, never a live host name).
+func (s *AuditManagerSink) record(ctx context.Context, job ExpiredActionJob, action string, result business.AuditResult, severity business.AuditSeverity, extra map[string]interface{}) {
 	tenantID := job.TenantID
 	if tenantID == "" {
 		tenantID = audit.SystemTenantID
@@ -48,29 +71,31 @@ func (s *AuditManagerSink) RecordActionExpired(ctx context.Context, job ExpiredA
 		resourceID = job.JobID
 	}
 
+	details := map[string]interface{}{
+		"run_id":      job.RunID,
+		"job_id":      job.JobID,
+		"device_id":   job.DeviceID,
+		"verb":        job.Action.Verb,
+		"target_kind": job.Action.TargetKind,
+		"target_name": job.Action.TargetName,
+		"result_code": job.ResultCode,
+	}
+	for k, v := range extra {
+		details[k] = v
+	}
+
 	event := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
-		Action(auditResourceStewardAction+"_"+job.ResultCode).
+		Action(action).
 		User(userID, userType).
 		Resource(auditResourceStewardAction, resourceID, job.Action.Verb).
-		Result(business.AuditResultFailure).
-		Severity(business.AuditSeverityMedium).
-		Details(map[string]interface{}{
-			"run_id":      job.RunID,
-			"job_id":      job.JobID,
-			"device_id":   job.DeviceID,
-			"verb":        job.Action.Verb,
-			"target_kind": job.Action.TargetKind,
-			"target_name": job.Action.TargetName,
-			"result_code": job.ResultCode,
-			"detail":      job.Detail,
-			"closed_by":   "controller",
-			"closed_at":   job.At,
-		})
+		Result(result).
+		Severity(severity).
+		Details(details)
 
 	if err := s.manager.RecordEvent(ctx, event); err != nil && s.logger != nil {
-		s.logger.Error("Failed to audit steward action closed without a result",
+		s.logger.Error("Failed to audit steward action outcome",
 			"run_id", logging.SanitizeLogValue(job.RunID),
 			"execution_id", logging.SanitizeLogValue(job.ExecutionID),
 			"error", logging.SanitizeLogValue(err.Error()))
