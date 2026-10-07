@@ -44,6 +44,8 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("tenant", "crossing-grant")(http.HandlerFunc(s.handleCreateTenantCrossingGrant))).Methods("POST")
 	tenants.Handle("/{id}/access-grants",
 		s.requirePermission("tenant", "crossing-list")(http.HandlerFunc(s.handleListTenantCrossings))).Methods("GET")
+	tenants.Handle("/{id}/access-grants/{crossing_id}",
+		s.requirePermission("tenant", "crossing-end")(http.HandlerFunc(s.handleEndTenantCrossing))).Methods("DELETE")
 	tenants.Handle("/{id}/break-glass",
 		s.requirePermission("tenant", "crossing-break-glass")(http.HandlerFunc(s.handleTenantBreakGlass))).Methods("POST")
 

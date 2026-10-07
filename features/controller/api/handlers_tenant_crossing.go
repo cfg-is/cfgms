@@ -330,3 +330,110 @@ func (s *Server) recordTenantCrossingAudit(r *http.Request, tenantID, actorID st
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
+
+// handleEndTenantCrossing implements DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}.
+// It ends an active grant or break-glass crossing early; the crossing stops granting
+// access at once because HasActiveTenantCrossing excludes revoked records. A grant is
+// ended by the MSP administrator of the granting tenant — a root-scoped caller never
+// ends one (mirroring ROOT_SCOPED_CANNOT_GRANT on create). A break-glass crossing is
+// ended by the root principal that invoked it or by an administrator of the owning
+// tenant. A crossing that does not belong to {id} is a 404 with no disclosure, and
+// ending an already revoked or expired crossing is an idempotent 200.
+func (s *Server) handleEndTenantCrossing(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	crossingID := vars["crossing_id"]
+	if tenantID == "" || crossingID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id and crossing id are required", "MISSING_PARAMETER")
+		return
+	}
+	if s.tenantCrossingStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "tenant crossing store not available", "TENANT_CROSSING_UNAVAILABLE")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	callerTenant := callerTenantFilter(r.Context())
+
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, existing.ID) {
+	case tenantAuthAllowed:
+		// proceed
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, existing.ID)
+		return
+	default:
+		s.logger.Info("Cross-tenant crossing end refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	crossing, err := s.tenantCrossingStore.GetTenantCrossing(r.Context(), crossingID)
+	if err != nil && !errors.Is(err, business.ErrTenantCrossingNotFound) {
+		s.logger.Error("Failed to get tenant crossing",
+			"tenant_id", logging.SanitizeLogValue(existing.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get crossing", "GET_FAILED")
+		return
+	}
+	if err != nil || crossing == nil || crossing.TenantID != existing.ID {
+		s.writeErrorResponse(w, http.StatusNotFound, "crossing not found", "CROSSING_NOT_FOUND")
+		return
+	}
+
+	var callerID string
+	if principal != nil {
+		callerID = principal.ID
+	}
+	rootScoped := subjectToTenantCrossingBoundary(principal)
+	switch crossing.Kind {
+	case business.TenantCrossingKindGrant:
+		if rootScoped {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"root-scoped callers cannot end access grants", "ROOT_SCOPED_CANNOT_END_GRANT")
+			return
+		}
+	default:
+		// Break-glass: the invoker, or a caller not subject to the boundary (the owning
+		// MSP's administrator, already authorized for this tenant above).
+		if rootScoped && (callerID == "" || crossing.GrantedBy != callerID) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"only the invoker or an administrator of the owning tenant can end a break-glass crossing", "NOT_CROSSING_OWNER")
+			return
+		}
+	}
+
+	if crossing.RevokedAt != nil || !crossing.ExpiresAt.After(time.Now()) {
+		s.writeResponse(w, http.StatusOK, crossing)
+		return
+	}
+
+	if err := s.tenantCrossingStore.RevokeTenantCrossing(r.Context(), crossing.ID); err != nil {
+		s.logger.Error("Failed to revoke tenant crossing",
+			"tenant_id", logging.SanitizeLogValue(existing.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to end crossing", "END_FAILED")
+		return
+	}
+	if updated, gerr := s.tenantCrossingStore.GetTenantCrossing(r.Context(), crossing.ID); gerr == nil && updated != nil {
+		crossing = updated
+	}
+
+	severity, action := business.AuditSeverityHigh, "tenant.crossing_grant_ended"
+	if crossing.Kind == business.TenantCrossingKindBreakGlass {
+		severity, action = business.AuditSeverityCritical, "tenant.crossing_break_glass_ended"
+	}
+	s.recordTenantCrossingAudit(r, existing.ID, callerID, crossing, severity, action, "ended early")
+
+	s.writeResponse(w, http.StatusOK, crossing)
+}

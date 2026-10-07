@@ -739,3 +739,138 @@ func TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused(t *testin
 	require.NoError(t, err)
 	assert.False(t, active, "a root-scoped caller must not consent on the MSP's behalf")
 }
+
+// seedCrossing stores an unrevoked crossing on tenantID for the end-crossing tests.
+func seedCrossing(t *testing.T, server *Server, id, tenantID, principalID, grantedBy string, kind business.TenantCrossingKind) {
+	t.Helper()
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+		ID: id, TenantID: tenantID, PrincipalID: principalID, Kind: kind, GrantedBy: grantedBy,
+		CreatedAt: now, ExpiresAt: now.Add(30 * time.Minute),
+	}))
+}
+
+// endCrossingRequest builds a DELETE request carrying both mux vars.
+func endCrossingRequest(t *testing.T, pathTenant, crossingID string, principal *Principal) *http.Request {
+	t.Helper()
+	req := requestAsPrincipal(t, http.MethodDelete, "/api/v1/tenants/"+pathTenant+"/access-grants/"+crossingID, pathTenant, principal, nil)
+	return mux.SetURLVars(req, map[string]string{"id": pathTenant, "crossing_id": crossingID})
+}
+
+func setupEndCrossingServer(t *testing.T) *Server {
+	t.Helper()
+	server := seedRootTenant(t, setupCrossingTestServer(t))
+	ctx := context.Background()
+	for _, id := range []string{"msp-a", "msp-b"} {
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, ParentID: testRootTenantID})
+		require.NoError(t, err)
+	}
+	return server
+}
+
+func TestHandleEndTenantCrossing_GrantRevoked(t *testing.T) {
+	server := setupEndCrossingServer(t)
+	seedCrossing(t, server, "grant-1", "msp-a", "root-operator-1", "msp-a-admin", business.TenantCrossingKindGrant)
+
+	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+	rec := httptest.NewRecorder()
+	server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "grant-1", mspAdmin))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(context.Background(), "root-operator-1", "msp-a")
+	require.NoError(t, err)
+	assert.False(t, active)
+
+	// Idempotent on an already revoked crossing.
+	rec = httptest.NewRecorder()
+	server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "grant-1", mspAdmin))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestHandleEndTenantCrossing_WrongTenantPath404(t *testing.T) {
+	server := setupEndCrossingServer(t)
+	seedCrossing(t, server, "grant-1", "msp-a", "root-operator-1", "msp-a-admin", business.TenantCrossingKindGrant)
+
+	mspBAdmin := &Principal{ID: "msp-b-admin", TenantID: "msp-b", Assurance: session.AssuranceStrong}
+	rec := httptest.NewRecorder()
+	server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-b", "grant-1", mspBAdmin))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(context.Background(), "root-operator-1", "msp-a")
+	require.NoError(t, err)
+	assert.True(t, active, "a mismatched path must not revoke")
+}
+
+func TestHandleEndTenantCrossing_RootScopedCannotEndGrant(t *testing.T) {
+	server := setupEndCrossingServer(t)
+	seedCrossing(t, server, "grant-1", "msp-a", "root-operator-1", "msp-a-admin", business.TenantCrossingKindGrant)
+
+	// root-operator-1 holds the grant, so it passes the boundary; it still may not end it.
+	caller := rootScopedPrincipal("root-operator-1")
+	rec := httptest.NewRecorder()
+	server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "grant-1", caller))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(context.Background(), "root-operator-1", "msp-a")
+	require.NoError(t, err)
+	assert.True(t, active)
+}
+
+func TestHandleEndTenantCrossing_BreakGlassWho(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("non-invoking root principal refused", func(t *testing.T) {
+		server := setupEndCrossingServer(t)
+		seedCrossing(t, server, "bg-1", "msp-a", "root-operator-1", "root-operator-1", business.TenantCrossingKindBreakGlass)
+		// root-operator-2 has its own crossing so it passes the boundary.
+		seedCrossing(t, server, "bg-2", "msp-a", "root-operator-2", "root-operator-2", business.TenantCrossingKindBreakGlass)
+
+		rec := httptest.NewRecorder()
+		server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "bg-1", rootScopedPrincipal("root-operator-2")))
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-1", "msp-a")
+		require.NoError(t, err)
+		assert.True(t, active)
+	})
+
+	t.Run("invoker can end", func(t *testing.T) {
+		server := setupEndCrossingServer(t)
+		seedCrossing(t, server, "bg-1", "msp-a", "root-operator-1", "root-operator-1", business.TenantCrossingKindBreakGlass)
+		rec := httptest.NewRecorder()
+		server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "bg-1", rootScopedPrincipal("root-operator-1")))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-1", "msp-a")
+		require.NoError(t, err)
+		assert.False(t, active)
+	})
+
+	t.Run("owning MSP admin can end", func(t *testing.T) {
+		server := setupEndCrossingServer(t)
+		seedCrossing(t, server, "bg-1", "msp-a", "root-operator-1", "root-operator-1", business.TenantCrossingKindBreakGlass)
+		mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+		rec := httptest.NewRecorder()
+		server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "bg-1", mspAdmin))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-1", "msp-a")
+		require.NoError(t, err)
+		assert.False(t, active)
+	})
+}
+
+func TestHandleEndTenantCrossing_BoundaryRejectsAfterEnd(t *testing.T) {
+	server := setupEndCrossingServer(t)
+	caller := rootScopedPrincipal("root-operator-1")
+	seedCrossing(t, server, "bg-1", "msp-a", "root-operator-1", "root-operator-1", business.TenantCrossingKindBreakGlass)
+
+	getRec := httptest.NewRecorder()
+	server.handleGetTenant(getRec, requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil))
+	require.Equal(t, http.StatusOK, getRec.Code, "crossing grants access before it is ended")
+
+	rec := httptest.NewRecorder()
+	server.handleEndTenantCrossing(rec, endCrossingRequest(t, "msp-a", "bg-1", caller))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	getRec = httptest.NewRecorder()
+	server.handleGetTenant(getRec, requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil))
+	assert.Equal(t, http.StatusUnauthorized, getRec.Code, "the boundary must challenge once the crossing is ended")
+}
