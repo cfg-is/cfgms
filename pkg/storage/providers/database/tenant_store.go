@@ -99,9 +99,19 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
+	// A caller that supplied no label (direct store writes) still gets a random
+	// one so the unique index never sees two empty values.
+	if tenant.BillingLabel == "" {
+		label, err := business.NewBillingLabel()
+		if err != nil {
+			return fmt.Errorf("failed to generate tenant billing label: %w", err)
+		}
+		tenant.BillingLabel = label
+	}
+
 	query := `
-		INSERT INTO cfgms_tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO cfgms_tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -113,6 +123,7 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business
 		string(tenant.Status),
 		tenant.DirectlySuspended,
 		nullStringOrEmpty(dbStringPtrVal(tenant.CascadeSuspendedFrom)),
+		tenant.BillingLabel,
 		tenant.CreatedAt,
 		tenant.UpdatedAt,
 	)
@@ -137,13 +148,13 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at
+		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at
 		FROM cfgms_tenants
 		WHERE id = $1
 	`
 
 	var tenant business.TenantData
-	var parentID, cascadeFrom sql.NullString
+	var parentID, cascadeFrom, billingLabel sql.NullString
 	var metadataJSON []byte
 
 	err := s.db.QueryRowContext(ctx, query, tenantID).Scan(
@@ -155,6 +166,7 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 		&tenant.Status,
 		&tenant.DirectlySuspended,
 		&cascadeFrom,
+		&billingLabel,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
 	)
@@ -167,6 +179,7 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 	}
 
 	tenant.ParentID = parentID.String
+	tenant.BillingLabel = billingLabel.String
 	if cascadeFrom.Valid && cascadeFrom.String != "" {
 		s := cascadeFrom.String
 		tenant.CascadeSuspendedFrom = &s
@@ -266,7 +279,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at
+		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at
 		FROM cfgms_tenants
 		WHERE 1=1
 	`
@@ -305,7 +318,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 	var tenants []*business.TenantData
 	for rows.Next() {
 		var tenant business.TenantData
-		var parentID, cascadeFrom sql.NullString
+		var parentID, cascadeFrom, billingLabel sql.NullString
 		var metadataJSON []byte
 
 		err := rows.Scan(
@@ -317,6 +330,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 			&tenant.Status,
 			&tenant.DirectlySuspended,
 			&cascadeFrom,
+			&billingLabel,
 			&tenant.CreatedAt,
 			&tenant.UpdatedAt,
 		)
@@ -325,6 +339,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 		}
 
 		tenant.ParentID = parentID.String
+		tenant.BillingLabel = billingLabel.String
 		if cascadeFrom.Valid && cascadeFrom.String != "" {
 			s := cascadeFrom.String
 			tenant.CascadeSuspendedFrom = &s

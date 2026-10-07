@@ -161,17 +161,24 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		}
 	}
 
+	// Generated once here, never derived from the name or ID (ADR-025 A6.2).
+	billingLabel, err := GenerateBillingLabel()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create tenant object
 	now := time.Now()
 	td := &business.TenantData{
-		ID:          tenantID,
-		Name:        req.Name,
-		Description: req.Description,
-		ParentID:    req.ParentID,
-		Metadata:    req.Metadata,
-		Status:      business.TenantStatusActive,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		BillingLabel: billingLabel,
+		ID:           tenantID,
+		Name:         req.Name,
+		Description:  req.Description,
+		ParentID:     req.ParentID,
+		Metadata:     req.Metadata,
+		Status:       business.TenantStatusActive,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	// Create the tenant in storage. A tenant with no parent is the deployment
@@ -185,7 +192,7 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 			return nil, err
 		}
 	}
-	if err := m.store.CreateTenant(ctx, td); err != nil {
+	if err := m.createTenantWithUniqueLabel(ctx, td); err != nil {
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
 	}
 	if td.ParentID == "" {
@@ -222,6 +229,33 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 // GetTenant retrieves a tenant by ID
 func (m *Manager) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
 	return m.store.GetTenant(ctx, tenantID)
+}
+
+// maxBillingLabelAttempts bounds the regenerate-and-retry loop on a billing
+// label unique-index collision.
+const maxBillingLabelAttempts = 5
+
+// createTenantWithUniqueLabel stores td. When the store reports the tenant as
+// already existing but no tenant with td.ID is there, the collision was on the
+// billing label's unique index: a fresh random label is generated and the create
+// retried, a bounded number of times. A label is never derived as a fallback.
+func (m *Manager) createTenantWithUniqueLabel(ctx context.Context, td *business.TenantData) error {
+	var err error
+	for attempt := 0; attempt < maxBillingLabelAttempts; attempt++ {
+		err = m.store.CreateTenant(ctx, td)
+		if err == nil || !errors.Is(err, business.ErrTenantAlreadyExists) {
+			return err
+		}
+		if _, getErr := m.store.GetTenant(ctx, td.ID); getErr == nil || !errors.Is(getErr, business.ErrTenantDoesNotExist) {
+			return err // the ID itself is taken (or the probe failed)
+		}
+		label, genErr := GenerateBillingLabel()
+		if genErr != nil {
+			return genErr
+		}
+		td.BillingLabel = label
+	}
+	return err
 }
 
 // UpdateTenant updates an existing tenant

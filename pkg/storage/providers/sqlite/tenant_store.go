@@ -53,9 +53,19 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.T
 		return fmt.Errorf("failed to marshal tenant metadata: %w", err)
 	}
 
+	// A caller that supplied no label (direct store writes) still gets a random
+	// one so the unique index never sees two empty values.
+	if tenant.BillingLabel == "" {
+		label, err := business.NewBillingLabel()
+		if err != nil {
+			return fmt.Errorf("failed to generate tenant billing label: %w", err)
+		}
+		tenant.BillingLabel = label
+	}
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tenant.ID,
 		tenant.Name,
 		tenant.Description,
@@ -64,6 +74,7 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.T
 		string(tenant.Status),
 		boolToInt(tenant.DirectlySuspended),
 		nullString(stringPtrVal(tenant.CascadeSuspendedFrom)),
+		tenant.BillingLabel,
 		formatTime(tenant.CreatedAt),
 		formatTime(tenant.UpdatedAt),
 	)
@@ -83,7 +94,7 @@ func (s *SQLiteTenantStore) GetTenant(ctx context.Context, tenantID string) (*bu
 	}
 
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at
+		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at
 		FROM tenants WHERE id = ?`, tenantID)
 
 	return scanTenant(row)
@@ -148,7 +159,7 @@ func (s *SQLiteTenantStore) DeleteTenant(ctx context.Context, tenantID string) e
 
 // ListTenants returns tenants matching the optional filter.
 func (s *SQLiteTenantStore) ListTenants(ctx context.Context, filter *business.TenantFilter) ([]*business.TenantData, error) {
-	query := `SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at FROM tenants WHERE 1=1`
+	query := `SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at FROM tenants WHERE 1=1`
 	args := []interface{}{}
 
 	if filter != nil {
@@ -262,14 +273,14 @@ func (s *SQLiteTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, de
 // scanTenant scans a single Row (QueryRow) into a TenantData.
 func scanTenant(row *sql.Row) (*business.TenantData, error) {
 	var t business.TenantData
-	var parentID, cascadeFrom sql.NullString
+	var parentID, cascadeFrom, billingLabel sql.NullString
 	var metaStr, statusStr, createdStr, updatedStr string
 	var directlySuspended int
 
 	err := row.Scan(
 		&t.ID, &t.Name, &t.Description,
 		&parentID, &metaStr, &statusStr,
-		&directlySuspended, &cascadeFrom,
+		&directlySuspended, &cascadeFrom, &billingLabel,
 		&createdStr, &updatedStr,
 	)
 	if err == sql.ErrNoRows {
@@ -279,34 +290,35 @@ func scanTenant(row *sql.Row) (*business.TenantData, error) {
 		return nil, fmt.Errorf("failed to scan tenant: %w", err)
 	}
 
-	return populateTenant(&t, parentID, cascadeFrom, directlySuspended, metaStr, statusStr, createdStr, updatedStr)
+	return populateTenant(&t, parentID, cascadeFrom, billingLabel, directlySuspended, metaStr, statusStr, createdStr, updatedStr)
 }
 
 // scanTenantRow scans a Rows (Query) into a TenantData.
 func scanTenantRow(rows *sql.Rows) (*business.TenantData, error) {
 	var t business.TenantData
-	var parentID, cascadeFrom sql.NullString
+	var parentID, cascadeFrom, billingLabel sql.NullString
 	var metaStr, statusStr, createdStr, updatedStr string
 	var directlySuspended int
 
 	if err := rows.Scan(
 		&t.ID, &t.Name, &t.Description,
 		&parentID, &metaStr, &statusStr,
-		&directlySuspended, &cascadeFrom,
+		&directlySuspended, &cascadeFrom, &billingLabel,
 		&createdStr, &updatedStr,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan tenant row: %w", err)
 	}
 
-	return populateTenant(&t, parentID, cascadeFrom, directlySuspended, metaStr, statusStr, createdStr, updatedStr)
+	return populateTenant(&t, parentID, cascadeFrom, billingLabel, directlySuspended, metaStr, statusStr, createdStr, updatedStr)
 }
 
-func populateTenant(t *business.TenantData, parentID, cascadeFrom sql.NullString, directlySuspended int, metaStr, statusStr, createdStr, updatedStr string) (*business.TenantData, error) {
+func populateTenant(t *business.TenantData, parentID, cascadeFrom, billingLabel sql.NullString, directlySuspended int, metaStr, statusStr, createdStr, updatedStr string) (*business.TenantData, error) {
 	if parentID.Valid {
 		t.ParentID = parentID.String
 	}
 	t.Status = business.TenantStatus(statusStr)
 	t.DirectlySuspended = directlySuspended != 0
+	t.BillingLabel = billingLabel.String
 	if cascadeFrom.Valid && cascadeFrom.String != "" {
 		s := cascadeFrom.String
 		t.CascadeSuspendedFrom = &s

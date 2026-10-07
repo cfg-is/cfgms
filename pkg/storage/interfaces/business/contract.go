@@ -113,6 +113,78 @@ func TenantStoreLifecycleContract(t *testing.T, store TenantStore) {
 	})
 }
 
+// TenantStoreBillingLabelContract verifies the opaque billing label (ADR-025
+// Amendment 6 A6.2): a label supplied at create round-trips through GetTenant,
+// ListTenants and GetChildTenants, survives UpdateTenant (including an update
+// that carries no label), and is unique across tenants. Call from each
+// TenantStore provider's tests. The store must be initialized and empty.
+func TenantStoreBillingLabelContract(t *testing.T, store TenantStore) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	parent := &TenantData{ID: "bl-parent", Name: "BLParent", Status: TenantStatusActive, BillingLabel: "bl-contractlabelaaaa1", CreatedAt: now, UpdatedAt: now}
+	child := &TenantData{ID: "bl-child", Name: "BLChild", ParentID: "bl-parent", Status: TenantStatusActive, BillingLabel: "bl-contractlabelbbbb2", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, store.CreateTenant(ctx, parent))
+	require.NoError(t, store.CreateTenant(ctx, child))
+
+	t.Run("label round-trips on get, list and child list", func(t *testing.T) {
+		got, err := store.GetTenant(ctx, "bl-parent")
+		require.NoError(t, err)
+		assert.Equal(t, "bl-contractlabelaaaa1", got.BillingLabel)
+
+		all, err := store.ListTenants(ctx, nil)
+		require.NoError(t, err)
+		byID := map[string]string{}
+		for _, td := range all {
+			byID[td.ID] = td.BillingLabel
+		}
+		assert.Equal(t, "bl-contractlabelaaaa1", byID["bl-parent"])
+		assert.Equal(t, "bl-contractlabelbbbb2", byID["bl-child"])
+
+		kids, err := store.GetChildTenants(ctx, "bl-parent")
+		require.NoError(t, err)
+		require.Len(t, kids, 1)
+		assert.Equal(t, "bl-contractlabelbbbb2", kids[0].BillingLabel)
+	})
+
+	t.Run("label survives UpdateTenant", func(t *testing.T) {
+		upd := &TenantData{ID: "bl-parent", Name: "BLParentRenamed", Status: TenantStatusSuspended, DirectlySuspended: true, BillingLabel: "bl-attemptedoverwrite", UpdatedAt: now}
+		require.NoError(t, store.UpdateTenant(ctx, upd))
+		got, err := store.GetTenant(ctx, "bl-parent")
+		require.NoError(t, err)
+		assert.Equal(t, "BLParentRenamed", got.Name)
+		assert.Equal(t, "bl-contractlabelaaaa1", got.BillingLabel, "update must not overwrite the label")
+
+		upd = &TenantData{ID: "bl-parent", Name: "BLParentRenamed", Status: TenantStatusActive, UpdatedAt: now}
+		require.NoError(t, store.UpdateTenant(ctx, upd))
+		got, err = store.GetTenant(ctx, "bl-parent")
+		require.NoError(t, err)
+		assert.Equal(t, "bl-contractlabelaaaa1", got.BillingLabel, "update with an empty label must not clear it")
+	})
+
+	t.Run("label is unique across tenants", func(t *testing.T) {
+		dup := &TenantData{ID: "bl-dup", Name: "BLDup", Status: TenantStatusActive, BillingLabel: "bl-contractlabelaaaa1", CreatedAt: now, UpdatedAt: now}
+		assert.Error(t, store.CreateTenant(ctx, dup), "a second tenant with the same label must be rejected")
+		_, err := store.GetTenant(ctx, "bl-dup")
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist)
+	})
+
+	t.Run("unlabelled create is assigned a distinct label", func(t *testing.T) {
+		a := &TenantData{ID: "bl-auto-a", Name: "Auto", Status: TenantStatusActive, CreatedAt: now, UpdatedAt: now}
+		b := &TenantData{ID: "bl-auto-b", Name: "Auto", Status: TenantStatusActive, CreatedAt: now, UpdatedAt: now}
+		require.NoError(t, store.CreateTenant(ctx, a))
+		require.NoError(t, store.CreateTenant(ctx, b))
+		ga, err := store.GetTenant(ctx, "bl-auto-a")
+		require.NoError(t, err)
+		gb, err := store.GetTenant(ctx, "bl-auto-b")
+		require.NoError(t, err)
+		assert.NotEmpty(t, ga.BillingLabel)
+		assert.NotEmpty(t, gb.BillingLabel)
+		assert.NotEqual(t, ga.BillingLabel, gb.BillingLabel)
+	})
+}
+
 // TenantStoreMissingTenantContract asserts that store signals "this tenant has no
 // row" with the ErrTenantDoesNotExist sentinel from every operation that addresses a
 // tenant by ID. Call it from each TenantStore provider's tests:

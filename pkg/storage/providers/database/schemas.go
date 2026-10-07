@@ -479,6 +479,28 @@ func (s DatabaseSchemas) BackfillTenantLifecycle(ctx context.Context, db *sql.DB
 	return nil
 }
 
+// BackfillTenantBillingLabel adds the opaque billing_label column to a
+// pre-existing cfgms_tenants table (migration 012), fills rows that have none
+// with random values (never derived from any tenant field), and adds the unique
+// index. Idempotent: labels that already exist are never changed.
+func (s DatabaseSchemas) BackfillTenantBillingLabel(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE cfgms_tenants ADD COLUMN IF NOT EXISTS billing_label VARCHAR(64)`,
+		`UPDATE cfgms_tenants
+		 SET billing_label = 'bl-' ||
+		     substr(replace(gen_random_uuid()::text, '-', ''), 1, 12) ||
+		     substr(replace(gen_random_uuid()::text, '-', ''), 25, 8)
+		 WHERE billing_label IS NULL OR billing_label = ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_cfgms_tenants_billing_label ON cfgms_tenants(billing_label)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to backfill cfgms_tenants billing label: %w", err)
+		}
+	}
+	return nil
+}
+
 // CreatePendingDeletionsTable creates cfgms_tenant_pending_deletions for ADR-027
 // Decisions 3-4 (Issue #3182). Idempotent via CREATE TABLE IF NOT EXISTS.
 func (s DatabaseSchemas) CreatePendingDeletionsTable(ctx context.Context, db *sql.DB) error {
@@ -513,6 +535,7 @@ func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) err
 			status VARCHAR(50) NOT NULL DEFAULT 'active',
 			directly_suspended BOOLEAN DEFAULT false,
 			cascade_suspended_from VARCHAR(255),
+			billing_label VARCHAR(64),
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			FOREIGN KEY (parent_id) REFERENCES cfgms_tenants(id) ON DELETE RESTRICT
@@ -525,6 +548,11 @@ func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) err
 
 	// Migration for deployments created before ADR-027 (Issue #3158).
 	if err := s.BackfillTenantLifecycle(ctx, db); err != nil {
+		return err
+	}
+
+	// Opaque billing label column, fill and unique index (Issue #4645).
+	if err := s.BackfillTenantBillingLabel(ctx, db); err != nil {
 		return err
 	}
 
