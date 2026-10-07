@@ -553,60 +553,44 @@ type tenantListItem struct {
 	DeviceCount int `json:"device_count"`
 }
 
-// stewardCountsTowardDeviceCount reports whether a steward in the given status is
-// counted: registered, active and lost (and hidden stewards, which are not filtered
-// on) count; terminal states do not. The terminal set matches
-// terminalStewardManifestStatuses and EnsureSteward's no-promote set.
-func stewardCountsTowardDeviceCount(status business.StewardStatus) bool {
-	_, terminal := terminalStewardManifestStatuses[string(status)]
-	return !terminal
-}
-
-// subtreeDeviceCounts returns, for each tenant in visible, the number of countable
-// stewards in its subtree. It reads the steward registry once, groups by tenant, then
-// rolls each visible tenant's own count up its ParentID chain (built from all, in memory)
-// — never one query per row. Only stewards whose own tenant is visible to the caller
-// contribute, so an ancestor's count never includes a tenant the caller cannot see
-// (e.g. a root-scoped caller without a crossing).
+// subtreeDeviceCounts returns, for each tenant in visible, the number of billable
+// endpoints in its subtree that the caller may see. The counts are a projection of the
+// whole-tree billing roll-up (rollupTenants, Issue #4646) — the single endpoint
+// definition shared with every billing surface — scoped here at the edge: endpoints
+// owned by a tenant the caller cannot see are subtracted from each visible ancestor, so
+// an ancestor's count never includes a tenant the caller cannot see (e.g. a root-scoped
+// caller without a crossing).
 func (s *Server) subtreeDeviceCounts(ctx context.Context, all, visible []*business.TenantData) (map[string]int, error) {
-	counts := make(map[string]int, len(visible))
-	s.mu.RLock()
-	store := s.stewardStore
-	s.mu.RUnlock()
-	if store == nil {
-		return counts, nil
-	}
-	records, err := store.ListStewards(ctx)
+	rollup, err := s.rollupTenants(ctx, all)
 	if err != nil {
 		return nil, err
 	}
-	own := make(map[string]int)
-	for _, rec := range records {
-		if stewardCountsTowardDeviceCount(rec.Status) {
-			own[rec.TenantID]++
-		}
-	}
-	parent := make(map[string]string, len(all))
-	for _, td := range all {
-		parent[td.ID] = td.ParentID
-	}
+	counts := make(map[string]int, len(visible))
 	visibleSet := make(map[string]struct{}, len(visible))
 	for _, td := range visible {
 		visibleSet[td.ID] = struct{}{}
-		counts[td.ID] = 0
+		counts[td.ID] = rollup[td.ID].SubtreeEndpoints
 	}
-	for _, td := range visible {
-		n := own[td.ID]
-		if n == 0 {
+	for id, tr := range rollup {
+		if _, ok := visibleSet[id]; ok || tr.OwnEndpoints == 0 {
 			continue
 		}
-		// Walk to the root; the hop bound guards against a ParentID cycle.
-		cur := td.ID
-		for hops := 0; hops <= len(parent) && cur != ""; hops++ {
-			if _, ok := visibleSet[cur]; ok {
-				counts[cur] += n
+		// Walk the hidden tenant's ancestors; the visited set mirrors rollupTenants'
+		// ParentID-cycle guard so each ancestor is subtracted from at most once.
+		visited := map[string]struct{}{id: {}}
+		for cur := tr.ParentID; cur != ""; {
+			if _, seen := visited[cur]; seen {
+				break
 			}
-			cur = parent[cur]
+			visited[cur] = struct{}{}
+			if _, ok := visibleSet[cur]; ok {
+				counts[cur] -= tr.OwnEndpoints
+			}
+			anc, ok := rollup[cur]
+			if !ok {
+				break
+			}
+			cur = anc.ParentID
 		}
 	}
 	return counts, nil

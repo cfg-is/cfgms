@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/providers/database"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
+	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 	"github.com/cfgis/cfgms/pkg/testutil"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
@@ -43,6 +44,21 @@ func newTestStewardDurableStore(t *testing.T) (business.StewardStore, string) {
 	st, err := flatfile.NewFlatFileStewardStore(root)
 	require.NoError(t, err, "creating flat-file steward store")
 	return st, root
+}
+
+// newTestSQLiteStewardStore returns a real SQLite StewardStore backed by a file under
+// t.TempDir(). The concrete sqlite import is confined to this allowlisted
+// */providers_test.go path.
+func newTestSQLiteStewardStore(t *testing.T) business.StewardStore {
+	t.Helper()
+	st, err := sqliteprovider.NewSQLiteProvider("").CreateStewardStore(map[string]interface{}{
+		"path": filepath.Join(t.TempDir(), "stewards.db"),
+	})
+	require.NoError(t, err, "creating sqlite steward store")
+	// Registered after t.TempDir(), so it runs first (LIFO) and releases the
+	// file handle before the directory is removed (required on Windows).
+	t.Cleanup(func() { _ = st.Close() })
+	return st
 }
 
 // controlCharAuditStore wraps a real flat-file AuditStore, overriding only
