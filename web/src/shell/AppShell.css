@@ -500,3 +500,42 @@ nav a.soon .tag {
 .alert-viewall:hover {
   background: var(--bg-elevated);
 }
+
+.ctrlchip-root {
+  position: relative;
+}
+.ctrlchip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.ctrlchip-txt {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  line-height: 1.2;
+}
+.ctrlchip .cn {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.ctrlchip small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.ctrlchip-row {
+  justify-content: space-between;
+  cursor: default;
+}
+@media (max-width: 1023px) {
+  .ctrlchip-txt .cn {
+    display: none;
+  }
+}

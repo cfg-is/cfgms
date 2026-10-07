@@ -17,6 +17,7 @@ import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
 import AlertCenter from './AlertCenter.tsx'
 import UserMenu from './UserMenu.tsx'
+import ControllerChip from './ControllerChip.tsx'
 import { useAuth } from '../auth/AuthContext.tsx'
 import './AppShell.css'
 
@@ -137,6 +138,7 @@ export default function AppShell() {
             <TenantSwitcher />
             <GlobalSearch value={search} onChange={setSearch} />
             <div className="abspacer" />
+            <ControllerChip />
             <AlertCenter />
             <UserMenu />
           </div>
