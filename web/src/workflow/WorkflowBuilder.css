@@ -231,3 +231,45 @@
 .bld-node.has-issue {
   border-color: var(--state-crit);
 }
+
+/* ── Schedule & inputs drawer and builder Run form (Issue #4617) ── */
+.bld-runform {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: var(--bg-sunk);
+  border-bottom: 1px solid var(--border);
+}
+.wf-schedule-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--bg-sunk);
+  border-bottom: 1px solid var(--border);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.wf-decl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.wf-run-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.wf-run-input {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wf-required {
+  color: var(--state-crit, #c0392b);
+}

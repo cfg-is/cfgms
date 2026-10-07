@@ -85,12 +85,25 @@ export interface SemanticVersion {
   build_meta: string
 }
 
+export type InputType = 'string' | 'enum' | 'bool'
+
+/* One declared workflow input (features/workflow/inputs.go InputSpec). */
+export interface InputSpec {
+  name: string
+  type: InputType
+  required?: boolean
+  default?: string | boolean
+  options?: string[]
+  description?: string
+}
+
 export interface VersionedWorkflow {
   name: string
   description: string
   version: string
   steps: WorkflowStep[]
   variables?: Record<string, unknown>
+  inputs?: InputSpec[]
   timeout?: number
   on_failure?: string
   semantic_version: SemanticVersion
@@ -203,6 +216,22 @@ function parseSemanticVersion(value: unknown): SemanticVersion {
   }
 }
 
+function parseInputSpec(value: unknown): InputSpec | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const name = str(r.name)
+  if (!name) return null
+  const type: InputType = r.type === 'enum' || r.type === 'bool' ? r.type : 'string'
+  const spec: InputSpec = { name, type }
+  if (r.required === true) spec.required = true
+  if (typeof r.default === 'string' || typeof r.default === 'boolean') spec.default = r.default
+  if (Array.isArray(r.options)) {
+    spec.options = r.options.filter((o): o is string => typeof o === 'string')
+  }
+  if (r.description !== undefined) spec.description = str(r.description)
+  return spec
+}
+
 export function parseVersionedWorkflow(value: unknown): VersionedWorkflow | null {
   if (typeof value !== 'object' || value === null) return null
   const r = value as Record<string, unknown>
@@ -222,6 +251,12 @@ export function parseVersionedWorkflow(value: unknown): VersionedWorkflow | null
       typeof r.variables === 'object' && r.variables !== null
         ? (r.variables as Record<string, unknown>)
         : undefined,
+    inputs: Array.isArray(r.inputs)
+      ? r.inputs.flatMap((i) => {
+          const p = parseInputSpec(i)
+          return p ? [p] : []
+        })
+      : undefined,
     timeout: typeof r.timeout === 'number' ? r.timeout : undefined,
     on_failure: r.on_failure !== undefined ? str(r.on_failure) : undefined,
     semantic_version: parseSemanticVersion(r.semantic_version),
