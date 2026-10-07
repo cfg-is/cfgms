@@ -10,7 +10,7 @@
  * "Remember Username" persists the optional username prefill to localStorage
  * (cfgms.login.username — a display preference, not auth data per A7.2).
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useAuth } from '../auth/AuthContext.tsx'
 import './Login.css'
 
@@ -21,6 +21,7 @@ export default function Login() {
   )
   const [rememberUsername, setRememberUsername] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
 
   const showExpired = status === 'expired' && !submitting
   const showInvalid = status === 'invalid' && !submitting
@@ -32,12 +33,21 @@ export default function Login() {
     } else {
       localStorage.removeItem('cfgms.login.username')
     }
+    // Fresh controller per attempt so a prior cancel never poisons a retry.
+    const controller = new AbortController()
+    abortRef.current = controller
     setSubmitting(true)
     try {
-      await login(username || undefined)
+      await login(username || undefined, controller.signal)
     } finally {
+      if (abortRef.current === controller) abortRef.current = null
       setSubmitting(false)
     }
+  }
+
+  function handleCancel() {
+    abortRef.current?.abort()
+    setSubmitting(false)
   }
 
   // Waiting state: ceremony is in progress (navigator.credentials.get pending).
@@ -78,7 +88,7 @@ export default function Login() {
               <button
                 type="button"
                 className="login-waiting-cancel"
-                onClick={() => setSubmitting(false)}
+                onClick={handleCancel}
               >
                 Cancel
               </button>

@@ -132,6 +132,38 @@ describe('Login screen states (mockup: docs/design/mockups/login.html)', () => {
     )
   })
 
+  it('waiting: cancel aborts the credential request signal, shows no error, and a second attempt works', async () => {
+    const signals: AbortSignal[] = []
+    const get = vi.fn((opts: CredentialRequestOptions) => {
+      const signal = opts.signal as AbortSignal
+      signals.push(signal)
+      if (signals.length === 2) return Promise.resolve(makePublicKeyCredential())
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        )
+      })
+    })
+    vi.stubGlobal('navigator', { credentials: { get } })
+    mockPasskeyEndpoints(401)
+    renderLogin()
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() => screen.getByRole('button', { name: /cancel/i }))
+    expect(signals[0]!.aborted).toBe(false)
+    act(() => screen.getByRole('button', { name: /cancel/i }).click())
+    expect(signals[0]!.aborted).toBe(true)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in with a passkey/i })).toBeInTheDocument(),
+    )
+    await act(async () => {})
+    expect(screen.queryByText(/no passkey matched/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() => expect(signals).toHaveLength(2))
+    expect(signals[1]).not.toBe(signals[0])
+    expect(signals[1]!.aborted).toBe(false)
+  })
+
   it('invalid: shows the no-passkey error copy when credentials.get() throws', async () => {
     vi.stubGlobal('navigator', {
       credentials: {

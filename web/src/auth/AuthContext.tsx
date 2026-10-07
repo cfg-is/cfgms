@@ -126,7 +126,7 @@ export interface AuthValue {
    * finish. An optional username scopes to a specific account; omitting it
    * starts a usernameless (discoverable) ceremony. Resolves true on success.
    */
-  login: (username?: string) => Promise<boolean>
+  login: (username?: string, signal?: AbortSignal) => Promise<boolean>
   logout: () => Promise<void>
 }
 
@@ -184,7 +184,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const login = useCallback(async (username?: string) => {
+  const login = useCallback(async (username?: string, signal?: AbortSignal) => {
     // Explicit login commits us out of the probe phase regardless of outcome.
     probingRef.current = false
     setProbing(false)
@@ -197,13 +197,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return false
     }
 
+    // A cancel during the begin round-trip must not open the passkey prompt.
+    if (signal?.aborted) {
+      setPrincipal(null)
+      setStatus('signedOut')
+      return false
+    }
+
     // Step 2: invoke the browser's WebAuthn assertion ceremony.
     let rawCred: Credential | null = null
     try {
       rawCred = await navigator.credentials.get({
         publicKey: toBrowserOptions(beginResult.options),
+        signal,
       })
     } catch {
+      // User cancel (signal aborted → AbortError/NotAllowedError): back to
+      // the signed-out state, not the "invalid" banner.
+      if (signal?.aborted) {
+        setPrincipal(null)
+        setStatus('signedOut')
+        return false
+      }
       // NotAllowedError (user cancelled) or any other authenticator error.
       setPrincipal(null)
       setStatus('invalid')
