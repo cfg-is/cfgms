@@ -261,3 +261,41 @@ describe('tenant scope pass-through', () => {
     expect(calls.some((u) => u.includes('tenant_id=root%2Fmsp-a'))).toBe(true)
   })
 })
+
+describe('tenant row drill-down (Story #4586)', () => {
+  function mockSummaryAndDevices(devicesBody: unknown) {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      const body = url.includes('/compliance/tenants/') ? devicesBody : SUMMARY_BODY
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    })
+  }
+
+  it('clicking a tenant row fetches and renders its devices', async () => {
+    mockSummaryAndDevices({
+      devices: [{ steward_id: 's-1', hostname: 'host-1', status: 'warning' }],
+      total: 1,
+    })
+    renderView()
+    const rows = await screen.findAllByTestId('tenant-row')
+    fireEvent.click(rows[0]!)
+    expect(await screen.findByRole('link', { name: 'host-1' })).toHaveAttribute('href', '/stewards/s-1')
+    expect(
+      fetchMock.mock.calls.some(([u]) => String(u).includes('/compliance/tenants/root%2Fmsp-a%2Facme-corp/devices')),
+    ).toBe(true)
+  })
+
+  it('Enter on a focused tenant row opens the panel; empty tenant shows Empty', async () => {
+    mockSummaryAndDevices({ devices: [], total: 0 })
+    renderView()
+    const rows = await screen.findAllByTestId('tenant-row')
+    expect(rows[0]).toHaveAttribute('tabindex', '0')
+    fireEvent.keyDown(rows[0]!, { key: 'Enter' })
+    expect(await screen.findByTestId('tenant-devices-empty')).toBeInTheDocument()
+  })
+})

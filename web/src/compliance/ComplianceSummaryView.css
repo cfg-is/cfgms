@@ -371,3 +371,28 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ── Tenant row drill-down ────────────────────────────────────────────── */
+
+.cs-row-link {
+  cursor: pointer;
+}
+
+.cs-row-link:hover td,
+.cs-row-link:focus-visible td,
+.cs-row-link[aria-expanded='true'] td {
+  background: var(--bg-elevated);
+}
+
+.cs-row-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.cs-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}

@@ -5,11 +5,13 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/service"
 	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -96,6 +98,26 @@ type TenantComplianceStatus struct {
 	CriticalDevices  int    `json:"critical_devices"`
 	BreachedDevices  int    `json:"breached_devices"`
 }
+
+// TenantComplianceDevice is one device row of a tenant's compliance drill-down.
+// Status uses the same drift-based buckets as the summary.
+type TenantComplianceDevice struct {
+	StewardID string `json:"steward_id"`
+	Hostname  string `json:"hostname"`
+	Status    string `json:"status"` // "compliant", "warning", "critical"
+}
+
+// TenantComplianceDevicesResponse is a page of a tenant's devices.
+type TenantComplianceDevicesResponse struct {
+	TenantID string                   `json:"tenant_id"`
+	Devices  []TenantComplianceDevice `json:"devices"`
+	Total    int                      `json:"total"`
+	Limit    int                      `json:"limit"`
+	Offset   int                      `json:"offset"`
+}
+
+// tenantDevicesDefaultLimit is the page size when ?limit is absent.
+const tenantDevicesDefaultLimit = 50
 
 // complianceDashboardWindow is the default look-back window for compliance
 // queries. Matches the reports engine dashboard default.
@@ -454,5 +476,103 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 		s.logger.Error("Failed to encode compliance summary response", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
+	}
+}
+
+// handleGetTenantComplianceDevices returns a page of one tenant's devices with
+// their drift-based compliance status.
+//
+// GET /api/v1/compliance/tenants/{id}/devices?limit=&offset=
+//
+// The tenant must be within the caller's scope (ADR-025); a tenant outside it
+// returns 404 without disclosing whether it exists, and a root caller subject to
+// the crossing boundary receives the crossing challenge. Devices are sorted by
+// steward ID so pages are stable. Returns 503 when the data provider is
+// unavailable.
+func (s *Server) handleGetTenantComplianceDevices(w http.ResponseWriter, r *http.Request) {
+	if s.dataProvider == nil {
+		http.Error(w, "compliance data unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	tenantID := mux.Vars(r)["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	limit, offset, paginated, err := parseStewardPagination(r.URL.Query())
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PAGINATION")
+		return
+	}
+	if !paginated {
+		limit = tenantDevicesDefaultLimit
+	}
+
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenantID, "compliance/tenants/devices"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		}
+		return
+	}
+
+	type deviceRef struct{ id, hostname string }
+	var refs []deviceRef
+	for _, st := range s.controllerService.ListFleetStewards(r.Context()) {
+		if st.TenantID != tenantID {
+			continue
+		}
+		hostname := ""
+		if st.DNA != nil {
+			hostname = service.FlattenDNAFragments(st.DNA.Fragments)["hostname"]
+		}
+		refs = append(refs, deviceRef{id: st.ID, hostname: hostname})
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].id < refs[j].id })
+
+	total := len(refs)
+	start := min(offset, total)
+	end := min(start+limit, total)
+	page := refs[start:end]
+
+	devices := make([]TenantComplianceDevice, 0, len(page))
+	if len(page) > 0 {
+		ids := make([]string, len(page))
+		for i, ref := range page {
+			ids[i] = ref.id
+		}
+		now := time.Now().UTC()
+		statsMap, err := s.dataProvider.GetDeviceStats(r.Context(), ids, reportinterfaces.TimeRange{
+			Start: now.Add(-complianceDashboardWindow),
+			End:   now.Add(complianceTimeBuffer),
+		})
+		if err != nil {
+			s.logger.Error("Failed to get device stats for tenant compliance devices",
+				"error", logging.SanitizeLogValue(err.Error()))
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		for _, ref := range page {
+			stats, ok := statsMap[ref.id]
+			if !ok {
+				// Same rule as the summary: a missing result is a failed
+				// calculation, never a "critical" device.
+				s.logger.Error("Incomplete device stats for tenant compliance devices",
+					"steward_id", logging.SanitizeLogValue(ref.id))
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			status, _ := riskLevelToCompliance(stats.RiskLevel)
+			devices = append(devices, TenantComplianceDevice{StewardID: ref.id, Hostname: ref.hostname, Status: status})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(TenantComplianceDevicesResponse{
+		TenantID: tenantID, Devices: devices, Total: total, Limit: limit, Offset: offset,
+	}); err != nil {
+		s.logger.Error("Failed to encode tenant compliance devices response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }

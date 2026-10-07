@@ -19,6 +19,7 @@
 import { useState } from 'react'
 import { useComplianceSummary } from './useComplianceSummary.ts'
 import type { TenantComplianceStatus } from './useComplianceSummary.ts'
+import TenantDevicesPanel from './TenantDevicesPanel.tsx'
 import './ComplianceSummaryView.css'
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -137,6 +138,7 @@ function PageHeader() {
 export default function ComplianceSummaryView() {
   const { data, loading, error, retry } = useComplianceSummary()
   const [sort, setSort] = useState<SortState>({ key: 'total_devices', direction: -1 })
+  const [selectedTenant, setSelectedTenant] = useState<string | null>(null)
 
   function handleSort(key: SortKey) {
     setSort((prev) =>
@@ -360,7 +362,20 @@ export default function ComplianceSummaryView() {
             </thead>
             <tbody>
               {sorted.map((tenant) => (
-                <tr key={tenant.tenant_id} data-testid="tenant-row">
+                <tr
+                  key={tenant.tenant_id}
+                  data-testid="tenant-row"
+                  className="cs-row-link"
+                  tabIndex={0}
+                  aria-expanded={selectedTenant === tenant.tenant_id}
+                  onClick={() => setSelectedTenant(tenant.tenant_id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      setSelectedTenant(tenant.tenant_id)
+                    }
+                  }}
+                >
                   <td className="cs-td-tenant">{tenant.tenant_id}</td>
                   <td className="cs-td-num">{tenant.total_devices}</td>
                   <td className="cs-td-num">{tenant.compliant_devices}</td>
@@ -373,6 +388,14 @@ export default function ComplianceSummaryView() {
           </table>
         )}
       </div>
+
+      {selectedTenant !== null && (
+        <TenantDevicesPanel
+          key={selectedTenant}
+          tenantId={selectedTenant}
+          onClose={() => setSelectedTenant(null)}
+        />
+      )}
     </div>
   )
 }
