@@ -32,12 +32,14 @@
  * values — never dangerouslySetInnerHTML.
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router'
 import { apiFetch } from '../api/client.ts'
 import type { VersionedWorkflow, WorkflowExecution, WorkflowStep } from './useWorkflows.ts'
 import { useWorkflowExecutions } from './useWorkflows.ts'
 import WorkflowExecutionView from './WorkflowExecutionView.tsx'
 import TriggerPanel from './TriggerPanel.tsx'
 import WorkflowGraph from './WorkflowGraph.tsx'
+import { unsaveableFields } from './builderModel.ts'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 
 type DrawerTab = 'run' | 'schedule' | 'preview' | 'steps'
@@ -97,33 +99,6 @@ function retainTypeAgnostic(source: Record<string, unknown>): Record<string, unk
   return Object.fromEntries(
     Object.entries(source).filter(([k]) => TYPE_AGNOSTIC_STEP_KEYS.has(k)),
   )
-}
-
-/*
- * Workflow-level fields that a save cannot carry: CreateWorkflowRequest
- * (features/controller/api/handlers_workflows.go) decodes only name,
- * description, version, steps, variables and timeout, so anything else stored
- * on the workflow is dropped by PUT no matter what the body contains. Rather
- * than silently deleting them, the Steps tab refuses to save such a workflow.
- */
-const UNSAVEABLE_WORKFLOW_KEYS = [
-  'on_failure', 'error_workflows', 'version_tags', 'deprecated',
-  'deprecation_note', 'changelog',
-] as const
-
-function hasMeaningfulValue(value: unknown): boolean {
-  if (value === undefined || value === null || value === false || value === '') return false
-  if (Array.isArray(value)) return value.length > 0
-  return true
-}
-
-function unsaveableFields(source: Record<string, unknown> | undefined): string[] {
-  if (!source) return []
-  // Map.get(), not a computed `source[k]` index, so a key drawn from the
-  // fixed UNSAVEABLE_WORKFLOW_KEYS list can't trip detect-object-injection —
-  // and it keeps the declared key order instead of source's arbitrary one.
-  const values = new Map(Object.entries(source))
-  return UNSAVEABLE_WORKFLOW_KEYS.filter((k) => hasMeaningfulValue(values.get(k)))
 }
 
 // ── Variable editor types ─────────────────────────────────────────────────────
@@ -590,6 +565,7 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
   // request's scoped tenant (workflowStoreForRequest), so the current scope
   // is the correct tenant path for any workflow in this list.
   const tenantPath = scope || 'root'
+  const navigate = useNavigate()
   const { executions } = useWorkflowExecutions(workflow.name)
   const lastRun = mostRecentExecution(executions)
 
@@ -607,6 +583,9 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
               type="button"
               className="wf-btn-sm"
               data-testid="drawer-open-builder"
+              onClick={() =>
+                navigate(`/workflows/${encodeURIComponent(workflow.name)}/builder`)
+              }
             >
               ⤢ Open builder
             </button>
