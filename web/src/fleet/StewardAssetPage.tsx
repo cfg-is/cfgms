@@ -33,12 +33,16 @@ interface TabSpec {
   key: TabKey
   label: string
   soon: boolean
-  Panel?: ComponentType
+  Panel?: ComponentType<PanelProps & { stewardId?: string }>
 }
 
-function LiveActivityPanel() {
+interface PanelProps {
+  onSelectTab?: (key: TabKey) => void
+}
+
+function LiveActivityPanel({ onSelectTab }: PanelProps) {
   const { id: stewardId = '' } = useParams<{ id: string }>()
-  return <LiveActivityTab stewardId={stewardId} />
+  return <LiveActivityTab stewardId={stewardId} onViewDna={() => onSelectTab?.('dna')} />
 }
 
 function ShellPanel() {
@@ -65,9 +69,9 @@ function SoonPanel({ label }: { label: string }) {
   )
 }
 
-export function PanelContent({ spec }: { spec: TabSpec }) {
+export function PanelContent({ spec, onSelectTab }: { spec: TabSpec } & PanelProps) {
   const Panel = spec.Panel
-  return Panel ? <Panel /> : <SoonPanel label={spec.label} />
+  return Panel ? <Panel onSelectTab={onSelectTab} /> : <SoonPanel label={spec.label} />
 }
 
 export default function StewardAssetPage() {
@@ -140,7 +144,7 @@ export default function StewardAssetPage() {
         role="tabpanel"
         aria-labelledby={`asset-tab-${activeTab}`}
       >
-        <PanelContent spec={activeSpec} />
+        <PanelContent spec={activeSpec} onSelectTab={activateTab} />
       </div>
     </div>
   )

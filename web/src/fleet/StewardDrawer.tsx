@@ -45,13 +45,15 @@ function DrawerTabPanel({
   tabKey,
   stewardId,
   dnaState,
+  onViewDna,
 }: {
   tabKey: DrawerTabKey
   stewardId: string
   dnaState: StewardDnaState
+  onViewDna: () => void
 }) {
   if (tabKey === 'dna') return <DnaDrawer stewardId={stewardId} state={dnaState} />
-  if (tabKey === 'live') return <LiveActivityTab stewardId={stewardId} />
+  if (tabKey === 'live') return <LiveActivityTab stewardId={stewardId} onViewDna={onViewDna} />
   if (tabKey === 'config') return <SoonPanel label="Config" />
   // Mounted only while the Shell tab is active, so no WebSocket opens earlier.
   return <ShellTab stewardId={stewardId} />
@@ -236,7 +238,12 @@ export default function StewardDrawer({
           className="db"
           style={{ flex: 1, overflow: 'auto' }}
         >
-          <DrawerTabPanel tabKey={activeTab} stewardId={stewardId} dnaState={dnaState} />
+          <DrawerTabPanel
+            tabKey={activeTab}
+            stewardId={stewardId}
+            dnaState={dnaState}
+            onViewDna={() => setActiveTab('dna')}
+          />
         </div>
       </aside>
     </>
