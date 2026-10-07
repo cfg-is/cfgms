@@ -283,11 +283,12 @@ func TestHandleGetStewardCompliance_TenantIsolation(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
-	t.Run("tenant-A caller can see descendant-tenant steward", func(t *testing.T) {
+	t.Run("msp-a caller can see descendant-tenant steward", func(t *testing.T) {
 		server, _ := setupComplianceTestServer(t)
-		apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-compliance"}, "tenant-a", 5*time.Minute)
+		seedScopeTenants(t, server)
+		apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-compliance"}, "msp-a", 5*time.Minute)
 
-		require.NoError(t, server.controllerService.RegisterSteward("steward-child", "tenant-a/child", "addr-c", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("steward-child", "client-1", "addr-c", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-child/compliance", nil)
 		req.Header.Set("X-API-Key", apiKey)
@@ -620,15 +621,17 @@ func TestHandleGetComplianceSummary_TenantIsolation(t *testing.T) {
 		assert.Equal(t, "tenant-a", resp.ByTenant[0].TenantID)
 	})
 
-	t.Run("tenant-A caller sees descendant tenant stewards", func(t *testing.T) {
+	t.Run("msp-a caller sees descendant tenant stewards", func(t *testing.T) {
 		server, _ := setupComplianceTestServer(t)
+		seedScopeTenants(t, server)
 
-		require.NoError(t, server.controllerService.RegisterSteward("s-a", "tenant-a", "addr-a", "online"))
-		require.NoError(t, server.controllerService.RegisterSteward("s-child", "tenant-a/child", "addr-c", "online"))
-		require.NoError(t, server.controllerService.RegisterSteward("s-b", "tenant-b", "addr-b", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s-a", "msp-a", "addr-a", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s-child", "client-1", "addr-c", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s-b", "msp-b", "addr-b", "online"))
+		require.NoError(t, server.controllerService.RegisterSteward("s-ab", "msp-ab", "addr-ab", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a"))
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 
@@ -637,16 +640,17 @@ func TestHandleGetComplianceSummary_TenantIsolation(t *testing.T) {
 		var resp ComplianceSummaryResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-		// tenant-a and tenant-a/child are visible; tenant-b is not.
+		// msp-a and its child client-1 are visible; msp-b is not.
 		assert.Equal(t, 2, resp.TotalDevices)
 		assert.Len(t, resp.ByTenant, 2)
 		tenantIDs := make(map[string]bool)
 		for _, bt := range resp.ByTenant {
 			tenantIDs[bt.TenantID] = true
 		}
-		assert.True(t, tenantIDs["tenant-a"], "tenant-a should be in by_tenant")
-		assert.True(t, tenantIDs["tenant-a/child"], "tenant-a/child should be in by_tenant")
-		assert.False(t, tenantIDs["tenant-b"], "tenant-b must not appear")
+		assert.True(t, tenantIDs["msp-a"], "msp-a should be in by_tenant")
+		assert.True(t, tenantIDs["client-1"], "client-1 should be in by_tenant")
+		assert.False(t, tenantIDs["msp-ab"], "shared-prefix sibling msp-ab must not appear")
+		assert.False(t, tenantIDs["msp-b"], "msp-b must not appear")
 	})
 }
 

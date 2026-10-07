@@ -4,7 +4,6 @@ package api
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/gorilla/mux"
 
@@ -80,9 +79,7 @@ func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 			if exists {
 				stewardTenant = info.TenantID
 			}
-			sameTenant := stewardTenant == callerTenant
-			ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
-			if !exists || (!sameTenant && !ancestorTenant) {
+			if !exists || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
 				// 404 instead of 403 to avoid disclosing steward existence across tenants.
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 				return

@@ -44,6 +44,11 @@ type ControllerService struct {
 	// provide one (e.g. in-memory-only test setups).
 	stewardStore business.StewardStore
 
+	// tenantAncestry resolves tenant subtree containment for ListFleetStewards'
+	// tenant scoping. Wired via SetTenantAncestry; nil denies every non-identical
+	// tenant (fail closed).
+	tenantAncestry TenantAncestryFunc
+
 	ringMu     sync.RWMutex
 	ringConfig controllerconfig.DeploymentRingConfig
 
@@ -1305,6 +1310,12 @@ func (s *ControllerService) SetStewardStore(store business.StewardStore) {
 	s.stewardStore = store
 }
 
+// SetTenantAncestry wires the ParentID-ancestry lookup used to decide whether a
+// steward's tenant is within a tenant-scoped caller's subtree.
+func (s *ControllerService) SetTenantAncestry(fn TenantAncestryFunc) {
+	s.tenantAncestry = fn
+}
+
 // SetTagStore wires the durable controller-side tag store into the service.
 // Follows the same late-wiring idiom as SetPostDNASyncHook — the store is
 // constructed during server startup and injected here so that the selector
@@ -1419,16 +1430,15 @@ func (s *ControllerService) extractTenantID(ctx context.Context) string {
 }
 
 // clusterTenantInScope reports whether resourceTenant falls within the subtree
-// rooted at callerTenant. An empty callerTenant means no restriction — callers
-// pass "" only for a context ctxkeys.TenantRestriction reports unrestricted.
-// Mirrors the isWithinTenantScope logic in the api package but kept here to
-// avoid a circular import.
-func clusterTenantInScope(callerTenant, resourceTenant string) bool {
+// rooted at callerTenant, resolved through the injected ancestry lookup. An empty
+// callerTenant means no restriction — callers pass "" only for a context
+// ctxkeys.TenantRestriction reports unrestricted. A nil or failing lookup denies
+// every tenant other than callerTenant itself.
+func clusterTenantInScope(ctx context.Context, ancestry TenantAncestryFunc, logger logging.Logger, callerTenant, resourceTenant string) bool {
 	if callerTenant == "" {
 		return true
 	}
-	return resourceTenant == callerTenant ||
-		strings.HasPrefix(resourceTenant, callerTenant+"/")
+	return tenantSubtreeContains(ctx, ancestry, logger, callerTenant, resourceTenant)
 }
 
 // ListFleetStewards returns the cluster-safe-by-construction fleet source
@@ -1545,7 +1555,7 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 	for deviceID := range allDevices {
 		// Live entry wins unconditionally — augment with tags and move on.
 		if live, ok := liveSnap[deviceID]; ok {
-			if !clusterTenantInScope(callerTenant, live.TenantID) {
+			if !clusterTenantInScope(ctx, s.tenantAncestry, s.logger, callerTenant, live.TenantID) {
 				continue
 			}
 			entry := *live
@@ -1619,7 +1629,7 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 				"device_id", logging.SanitizeLogValue(deviceID))
 			continue
 		}
-		if !clusterTenantInScope(callerTenant, tenantID) {
+		if !clusterTenantInScope(ctx, s.tenantAncestry, s.logger, callerTenant, tenantID) {
 			continue
 		}
 

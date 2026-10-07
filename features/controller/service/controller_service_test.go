@@ -1678,9 +1678,10 @@ func TestListFleetStewards_TenantScoping(t *testing.T) {
 	ctx := context.Background()
 
 	for _, pair := range []struct{ id, tenant string }{
-		{"dev-root", "root"},
-		{"dev-child", "root/child-a"},
-		{"dev-other", "other-tenant"},
+		{"dev-root", "msp-a"},
+		{"dev-child", "client-1"},
+		{"dev-other", "msp-b"},
+		{"dev-prefix", "msp-ab"},
 	} {
 		dna := makeTestDNA(pair.id, map[string]string{"os": "linux", "hostname": pair.id})
 		require.NoError(t, storage.Store(ctx, pair.id, dna,
@@ -1689,16 +1690,17 @@ func TestListFleetStewards_TenantScoping(t *testing.T) {
 	}
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	svc.SetTenantAncestry(newTestTenantAncestry(t))
 
-	// A system-internal context sees all three stewards; a context with no caller
+	// A system-internal context sees all four stewards; a context with no caller
 	// and no system mark sees none (Issue #4665).
 	all := svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
-	assert.Len(t, all, 3, "a system-internal read must see the whole fleet")
+	assert.Len(t, all, 4, "a system-internal read must see the whole fleet")
 	assert.Empty(t, svc.ListFleetStewards(context.Background()),
 		"a context with no caller must not be read as fleet-wide")
 
-	// root-tenant caller sees root + child, not other-tenant.
-	rootCtx := context.WithValue(ctx, ctxkeys.TenantID, "root")
+	// msp-a caller sees msp-a + its child client-1, not msp-b or msp-ab.
+	rootCtx := context.WithValue(ctx, ctxkeys.TenantID, "msp-a")
 	rootResult := svc.ListFleetStewards(rootCtx)
 	rootIDs := make(map[string]bool)
 	for _, s := range rootResult {
@@ -1706,7 +1708,8 @@ func TestListFleetStewards_TenantScoping(t *testing.T) {
 	}
 	assert.True(t, rootIDs["dev-root"], "root tenant must see dev-root")
 	assert.True(t, rootIDs["dev-child"], "root tenant must see its child subtree")
-	assert.False(t, rootIDs["dev-other"], "root tenant must not see other-tenant stewards")
+	assert.False(t, rootIDs["dev-other"], "msp-a must not see msp-b stewards")
+	assert.False(t, rootIDs["dev-prefix"], "msp-a must not see shared-prefix sibling msp-ab stewards")
 }
 
 // TestListFleetStewards_IncludesTags verifies that controller-assigned tags
