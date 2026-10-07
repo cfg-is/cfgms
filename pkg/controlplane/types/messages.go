@@ -54,6 +54,13 @@ const (
 	// Params: session_id (string), shell (string), cols (int32), rows (int32).
 	CommandOpenTerminal CommandType = "open_terminal"
 
+	// CommandStewardAction instructs the steward to perform one verb from a closed
+	// allowlist (service.start, service.stop, service.restart) against a typed target,
+	// authorized by an operator-signed envelope. (Issue #4623)
+	// Params: execution_id, verb, target_kind, target_name, parameters (string map),
+	// plus the operator envelope keys (targets, nonce, expires_at, signature fields).
+	CommandStewardAction CommandType = "steward_action"
+
 	// CommandObserveModules pushes the controller's resolved observe-module set to the steward
 	// in response to an EventObserveSweepRequest. (Issue #3104, ADR-024 Amendment 1 §3)
 	// Params: "modules" (JSON array of ObserveModuleSpec: {name, kind}).

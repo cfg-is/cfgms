@@ -778,6 +778,24 @@ marker verification, not the only check standing between an attacker and executi
 
 The controller can establish an interactive terminal session through the steward for live troubleshooting. The steward provides a secure, authenticated shell session back to the administrator.
 
+### Steward Actions (`steward_action`, Issue #4623)
+
+`steward_action` is a structured command with no script text: its params are `execution_id`, `verb`, `target` (`{kind, name}`) and `parameters`, plus the operator envelope proof (see [Operator-Signed Envelope](#operator-signed-envelope-issue-4622)). The handler (`features/steward/commands/steward_action.go`) rebuilds the signed content with `operatorpayload.ActionContent` and verifies it with exactly `operatorpayload.ActionShell` before anything else, rejects an envelope valid for longer than `operatorpayload.ActionEnvelopeMaxTTL`, then decodes the params strictly. An unknown verb, a target name outside `^[A-Za-z0-9_.@:-]{1,256}$`, a wrong target kind or any unexpected param key rejects the whole command before any OS call.
+
+Verb allowlist (closed):
+
+| Verb | Target kind | Effect |
+|------|-------------|--------|
+| `service.start` | `service` | Start the service |
+| `service.stop` | `service` | Stop the service |
+| `service.restart` | `service` | Stop, then start the service |
+
+Service control uses in-process OS APIs only: systemd D-Bus (`StartUnit`, `StopUnit`, `RestartUnit`) on Linux and the Service Control Manager (`svc/mgr`) on Windows. macOS returns the typed `unsupported` result. Nothing shells out.
+
+**Self-protect:** stop and restart of the steward's own service are refused with result code `self_protect`, and nothing is changed. On Linux a unit is the steward's own when its `MainPID` is the steward's PID or the steward's cgroup names it; on Windows when the service is `CFGMSSteward` or its `ServiceStatusProcess.ProcessId` is the steward or its launcher parent. If the steward cannot determine this, the action fails closed (`failed`).
+
+**Result:** the outcome is reported through the existing `EventScriptCompleted` event, with `Details` of `execution_id`, `exit_code` (0 for `ok`, 1 otherwise) and `result_code`: `ok`, `self_protect`, `unsupported`, `not_found` or `failed`.
+
 ### Live Telemetry Stream
 
 The controller can subscribe to a live feed of the steward's process and service

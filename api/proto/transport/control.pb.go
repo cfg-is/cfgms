@@ -43,6 +43,7 @@ const (
 	CommandType_COMMAND_TYPE_RELAY_RESPONSE      CommandType = 11 // Issue #1994: controller sends relay response back to steward relay goroutine
 	CommandType_COMMAND_TYPE_OPEN_TERMINAL       CommandType = 12 // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY
 	CommandType_COMMAND_TYPE_OBSERVE_MODULES     CommandType = 13 // Issue #3104: controller pushes resolved observe-module set to steward
+	CommandType_COMMAND_TYPE_STEWARD_ACTION      CommandType = 14 // Issue #4623: structured operator-signed steward action (service verbs)
 )
 
 // Enum value maps for CommandType.
@@ -62,6 +63,7 @@ var (
 		11: "COMMAND_TYPE_RELAY_RESPONSE",
 		12: "COMMAND_TYPE_OPEN_TERMINAL",
 		13: "COMMAND_TYPE_OBSERVE_MODULES",
+		14: "COMMAND_TYPE_STEWARD_ACTION",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED":         0,
@@ -78,6 +80,7 @@ var (
 		"COMMAND_TYPE_RELAY_RESPONSE":      11,
 		"COMMAND_TYPE_OPEN_TERMINAL":       12,
 		"COMMAND_TYPE_OBSERVE_MODULES":     13,
+		"COMMAND_TYPE_STEWARD_ACTION":      14,
 	}
 )
 
@@ -124,13 +127,13 @@ const (
 	EventType_EVENT_TYPE_SCRIPT_COMPLETED  EventType = 9 // Issue #1997: execute_script finished (drives ad-hoc run completion)
 	// Issue #1997: the following events are also published steward->controller over the
 	// wire and were silently collapsing to UNSPECIFIED without an enum value.
-	EventType_EVENT_TYPE_DNA_CHANGED         EventType = 10 // steward DNA attributes changed (controller routes to handleDNAEvent)
-	EventType_EVENT_TYPE_RELAY_REQUEST       EventType = 11 // steward relays a script's REST call to the controller
-	EventType_EVENT_TYPE_UPGRADE_DOWNLOADED  EventType = 12 // steward.upgrade.downloaded
-	EventType_EVENT_TYPE_UPGRADE_SWAPPED     EventType = 13 // steward.upgrade.swapped
-	EventType_EVENT_TYPE_UPGRADE_COMMITTED   EventType = 14 // steward.upgrade.committed
-	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK    EventType = 15 // steward.upgrade.rolled_back
-	EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST  EventType = 16 // Issue #3104: steward initiates Tier-2 observe sweep
+	EventType_EVENT_TYPE_DNA_CHANGED           EventType = 10 // steward DNA attributes changed (controller routes to handleDNAEvent)
+	EventType_EVENT_TYPE_RELAY_REQUEST         EventType = 11 // steward relays a script's REST call to the controller
+	EventType_EVENT_TYPE_UPGRADE_DOWNLOADED    EventType = 12 // steward.upgrade.downloaded
+	EventType_EVENT_TYPE_UPGRADE_SWAPPED       EventType = 13 // steward.upgrade.swapped
+	EventType_EVENT_TYPE_UPGRADE_COMMITTED     EventType = 14 // steward.upgrade.committed
+	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK   EventType = 15 // steward.upgrade.rolled_back
+	EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST EventType = 16 // Issue #3104: steward initiates Tier-2 observe sweep
 )
 
 // Enum value maps for EventType.
@@ -155,23 +158,23 @@ var (
 		16: "EVENT_TYPE_OBSERVE_SWEEP_REQUEST",
 	}
 	EventType_value = map[string]int32{
-		"EVENT_TYPE_UNSPECIFIED":         0,
-		"EVENT_TYPE_CONFIG_APPLIED":      1,
-		"EVENT_TYPE_DNA_SYNCED":          2,
-		"EVENT_TYPE_TASK_COMPLETED":      3,
-		"EVENT_TYPE_TASK_FAILED":         4,
-		"EVENT_TYPE_ERROR":               5,
-		"EVENT_TYPE_COMMAND_RECEIVED":    6,
-		"EVENT_TYPE_COMMAND_COMPLETED":   7,
-		"EVENT_TYPE_COMMAND_FAILED":      8,
-		"EVENT_TYPE_SCRIPT_COMPLETED":    9,
-		"EVENT_TYPE_DNA_CHANGED":         10,
-		"EVENT_TYPE_RELAY_REQUEST":       11,
-		"EVENT_TYPE_UPGRADE_DOWNLOADED":  12,
-		"EVENT_TYPE_UPGRADE_SWAPPED":     13,
-		"EVENT_TYPE_UPGRADE_COMMITTED":   14,
-		"EVENT_TYPE_UPGRADE_ROLLED_BACK":    15,
-		"EVENT_TYPE_OBSERVE_SWEEP_REQUEST":  16,
+		"EVENT_TYPE_UNSPECIFIED":           0,
+		"EVENT_TYPE_CONFIG_APPLIED":        1,
+		"EVENT_TYPE_DNA_SYNCED":            2,
+		"EVENT_TYPE_TASK_COMPLETED":        3,
+		"EVENT_TYPE_TASK_FAILED":           4,
+		"EVENT_TYPE_ERROR":                 5,
+		"EVENT_TYPE_COMMAND_RECEIVED":      6,
+		"EVENT_TYPE_COMMAND_COMPLETED":     7,
+		"EVENT_TYPE_COMMAND_FAILED":        8,
+		"EVENT_TYPE_SCRIPT_COMPLETED":      9,
+		"EVENT_TYPE_DNA_CHANGED":           10,
+		"EVENT_TYPE_RELAY_REQUEST":         11,
+		"EVENT_TYPE_UPGRADE_DOWNLOADED":    12,
+		"EVENT_TYPE_UPGRADE_SWAPPED":       13,
+		"EVENT_TYPE_UPGRADE_COMMITTED":     14,
+		"EVENT_TYPE_UPGRADE_ROLLED_BACK":   15,
+		"EVENT_TYPE_OBSERVE_SWEEP_REQUEST": 16,
 	}
 )
 
@@ -888,7 +891,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\adetails\x18\x06 \x03(\v2&.cfgms.transport.Response.DetailsEntryR\adetails\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xac\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xef\x03\n" +
 	"\vCommandType\x12\x1c\n" +
 	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18COMMAND_TYPE_SYNC_CONFIG\x10\x01\x12\x19\n" +
@@ -903,7 +906,9 @@ const file_transport_control_proto_rawDesc = "" +
 	" COMMAND_TYPE_PUSH_STEWARD_BINARY\x10\n" +
 	"\x12\x1f\n" +
 	"\x1bCOMMAND_TYPE_RELAY_RESPONSE\x10\v\x12\x1e\n" +
-	"\x1aCOMMAND_TYPE_OPEN_TERMINAL\x10\f*\xf8\x03\n" +
+	"\x1aCOMMAND_TYPE_OPEN_TERMINAL\x10\f\x12 \n" +
+	"\x1cCOMMAND_TYPE_OBSERVE_MODULES\x10\r\x12\x1f\n" +
+	"\x1bCOMMAND_TYPE_STEWARD_ACTION\x10\x0e*\xf8\x03\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +
