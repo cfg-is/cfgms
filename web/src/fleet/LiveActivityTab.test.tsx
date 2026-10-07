@@ -71,6 +71,7 @@ class FakeWebSocket {
 function makeSnapshot(overrides?: Partial<{
   processes: unknown[]
   services: unknown[]
+  host: unknown
 }>) {
   return {
     type: 'snapshot',
@@ -86,6 +87,7 @@ function makeSnapshot(overrides?: Partial<{
       { name: 'cron', state: 'stopped' },
     ],
     timestamp: '2026-07-20T10:00:00Z',
+    ...(overrides?.host ? { host: overrides.host } : {}),
   }
 }
 
@@ -168,7 +170,7 @@ describe('process table', () => {
     return ws
   }
 
-  it('renders a process table with CPU, memory, disk, and network columns', () => {
+  it('renders a process table with CPU, memory, disk and status columns and no per-process network columns', () => {
     setup()
     expect(screen.getByRole('table', { name: /processes/i })).toBeInTheDocument()
     const headers = screen.getAllByRole('columnheader')
@@ -176,7 +178,8 @@ describe('process table', () => {
     expect(headerText.some((t) => t.includes('cpu'))).toBe(true)
     expect(headerText.some((t) => t.includes('mem'))).toBe(true)
     expect(headerText.some((t) => t.includes('disk'))).toBe(true)
-    expect(headerText.some((t) => t.includes('net'))).toBe(true)
+    expect(headerText.some((t) => t.includes('status'))).toBe(true)
+    expect(headerText.some((t) => t.includes('net'))).toBe(false)
   })
 
   it('renders process names in the table', () => {
@@ -536,5 +539,99 @@ describe('row action menus', () => {
     expect(screen.getByText(/blocked\./)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Actions for PID 42' }))
     expect((screen.getByRole('menuitem', { name: 'End task (blocked)' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story #4630: KPI strip, service columns, managed marker and drift
+// ---------------------------------------------------------------------------
+
+describe('host KPI strip and managed services', () => {
+  const HOST = {
+    cpu_percent: 37.5, memory_used_bytes: 4 * 1024 ** 3, memory_total_bytes: 8 * 1024 ** 3,
+    disk_read_bytes_per_sec: 0, disk_write_bytes_per_sec: 0, disk_used_bytes: 10, disk_total_bytes: 100,
+    net_rx_bytes_per_sec: 1024, net_tx_bytes_per_sec: 1024,
+  }
+  const SERVICES = [
+    { name: 'nginx', state: 'stopped', display_name: 'Nginx Web', start_type: 'auto', pid: 0 },
+    { name: 'sshd', state: 'running', display_name: 'OpenSSH', start_type: 'manual', pid: 812 },
+  ]
+
+  function stubEffective(res: Response | Error) {
+    const fetchStub = vi.fn(async () => {
+      if (res instanceof Error) throw res
+      return res
+    })
+    vi.stubGlobal('fetch', fetchStub)
+    return fetchStub
+  }
+  const effectiveOK = () =>
+    new Response(JSON.stringify({
+      data: {
+        steward_id: 'stw-1', tenant_id: 'acme',
+        config: { resources: [{ name: 'nginx', module: 'service', config: { state: 'running' } }] },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+
+  function mount(snap: unknown) {
+    render(<LiveActivityTab stewardId="stw-1" />)
+    act(() => {
+      FakeWebSocket.instances[0]!.open()
+      FakeWebSocket.instances[0]!.deliver(snap)
+    })
+  }
+
+  it('updates strip tiles with each snapshot', async () => {
+    stubEffective(new Response('{}', { status: 404 }))
+    mount(makeSnapshot({ host: HOST }))
+    expect(screen.getByTestId('kpi-cpu')).toHaveTextContent('37.5%')
+    act(() => {
+      FakeWebSocket.instances[0]!.deliver(makeSnapshot({ host: { ...HOST, cpu_percent: 80 } }))
+    })
+    expect(screen.getByTestId('kpi-cpu')).toHaveTextContent('80.0%')
+    await act(async () => {})
+  })
+
+  it('renders the strip empty state for an old snapshot without host', async () => {
+    stubEffective(new Response('{}', { status: 404 }))
+    mount(makeSnapshot())
+    expect(screen.getByTestId('kpi-empty')).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('NaN')
+    await act(async () => {})
+  })
+
+  it('shows startup, PID and display name columns', async () => {
+    stubEffective(new Response('{}', { status: 404 }))
+    mount(makeSnapshot({ services: SERVICES }))
+    expect(screen.getByText('Nginx Web')).toBeInTheDocument()
+    expect(screen.getByText('manual')).toBeInTheDocument()
+    expect(screen.getByText('812')).toBeInTheDocument()
+    await act(async () => {})
+  })
+
+  it.each([403, 404])('degrades to managed unknown on a %i without an error banner', async (code) => {
+    stubEffective(new Response('{}', { status: code }))
+    mount(makeSnapshot({ services: SERVICES }))
+    await act(async () => {})
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByTitle('Managed by cfg')).toBeNull()
+    expect(screen.queryByText('Drift')).toBeNull()
+    expect(screen.getByText('Nginx Web')).toBeInTheDocument()
+  })
+
+  it('degrades to managed unknown when the request fails', async () => {
+    stubEffective(new Error('network down'))
+    mount(makeSnapshot({ services: SERVICES }))
+    await act(async () => {})
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText('Drift')).toBeNull()
+  })
+
+  it('flags drift on a managed service desired running but observed stopped; unmanaged show none', async () => {
+    stubEffective(effectiveOK())
+    mount(makeSnapshot({ services: SERVICES }))
+    expect(await screen.findByText('Drift')).toBeInTheDocument()
+    expect(screen.getAllByTitle('Managed by cfg')).toHaveLength(1)
+    expect(screen.getAllByText('Drift')).toHaveLength(1)
   })
 })

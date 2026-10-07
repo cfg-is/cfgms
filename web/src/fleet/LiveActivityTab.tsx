@@ -10,9 +10,14 @@
  * fan-out chain (steward → controller → browser) actually collect-only-while-
  * watched in practice.
  *
- * Network column caveat: NetRxBytes/NetTxBytes are structurally present in
- * the wire format but the collector never populates them (usermode-only;
- * reserved for a future kernel-assisted story). They are always 0 today.
+ * Network: per-process network counters are never populated by the collector,
+ * so there is no per-process network column; the host Network tile in the KPI
+ * strip (snapshot `host` totals) carries the real figure.
+ *
+ * Managed services (Story #4630): desired service state comes from the
+ * steward's effective config. Any failure (403/404/other non-200, network
+ * error, unscoped tenant) degrades silently to "managed unknown" — no marker,
+ * no drift flag, no banner over the live data.
  *
  * Sort convention: reuses the SortState shape from FleetTable.tsx
  * ({ key, direction: 1|-1 }) and the click-header-to-sort interaction with
@@ -25,6 +30,9 @@ import { memo, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { SortState } from './FleetTable.tsx'
 import ProcessActionMenu from './ProcessActionMenu.tsx'
 import ServiceActionMenu from './ServiceActionMenu.tsx'
+import HostKpiStrip, { pushHostHistory, type HostTotals } from './HostKpiStrip.tsx'
+import { deriveDesiredServices, isDrifted, type DesiredServices } from './serviceDesiredState.ts'
+import { apiFetch } from '../api/client.ts'
 import { useStewardControl, type StewardControl } from './useStewardControl.ts'
 import './LiveActivityTab.css'
 
@@ -39,8 +47,6 @@ interface ProcessSnapshot {
   memory_bytes: number
   disk_read_bytes: number
   disk_write_bytes: number
-  net_rx_bytes: number
-  net_tx_bytes: number
   // "running" or "suspended"; absent from older stewards.
   status?: string
 }
@@ -48,6 +54,10 @@ interface ProcessSnapshot {
 interface ServiceSnapshot {
   name: string
   state: string
+  // Absent from older stewards.
+  display_name?: string
+  start_type?: string
+  pid?: number
 }
 
 interface TelemetrySnapshotMessage {
@@ -56,6 +66,8 @@ interface TelemetrySnapshotMessage {
   processes: ProcessSnapshot[]
   services: ServiceSnapshot[]
   timestamp?: string
+  // Absent from older stewards.
+  host?: HostTotals
 }
 
 interface DisconnectMessage {
@@ -82,6 +94,7 @@ const TIMEOUT_CHECK_MS = 5_000
 interface Pending {
   processes: ProcessSnapshot[]
   services: ServiceSnapshot[]
+  host?: HostTotals
 }
 
 interface TabState {
@@ -89,6 +102,8 @@ interface TabState {
   error: { kind: ErrorKind; detail?: string } | null
   processes: ProcessSnapshot[]
   services: ServiceSnapshot[]
+  // Ring buffer of recent host totals feeding the KPI sparklines.
+  hostHistory: HostTotals[]
   sort: SortState
   paused: boolean
   // Latest snapshot received while paused; applied instantly on Resume.
@@ -96,7 +111,7 @@ interface TabState {
 }
 
 type TabAction =
-  | { type: 'snapshot'; processes: ProcessSnapshot[]; services: ServiceSnapshot[] }
+  | { type: 'snapshot'; processes: ProcessSnapshot[]; services: ServiceSnapshot[]; host?: HostTotals }
   | { type: 'disconnect' }
   | { type: 'denied'; detail?: string }
   | { type: 'interrupted' }
@@ -110,6 +125,7 @@ const initialState: TabState = {
   error: null,
   processes: [],
   services: [],
+  hostHistory: [],
   paused: false,
   pending: null,
   // Initial sort on 'name' so the first click on any numeric column defaults to descending.
@@ -120,14 +136,28 @@ function reducer(state: TabState, action: TabAction): TabState {
   switch (action.type) {
     case 'snapshot':
       if (state.paused) {
-        return { ...state, loading: false, pending: { processes: action.processes, services: action.services } }
+        return { ...state, loading: false, pending: { processes: action.processes, services: action.services, host: action.host } }
       }
-      return { ...state, loading: false, error: null, processes: action.processes, services: action.services }
+      return {
+        ...state,
+        loading: false,
+        error: null,
+        processes: action.processes,
+        services: action.services,
+        hostHistory: action.host ? pushHostHistory(state.hostHistory, action.host) : state.hostHistory,
+      }
     case 'pause':
       return { ...state, paused: true }
     case 'resume':
       return state.pending
-        ? { ...state, paused: false, pending: null, processes: state.pending.processes, services: state.pending.services }
+        ? {
+            ...state,
+            paused: false,
+            pending: null,
+            processes: state.pending.processes,
+            services: state.pending.services,
+            hostHistory: state.pending.host ? pushHostHistory(state.hostHistory, state.pending.host) : state.hostHistory,
+          }
         : { ...state, paused: false }
     case 'reset':
       return { ...initialState, sort: state.sort }
@@ -162,8 +192,7 @@ function readSortValue(proc: ProcessSnapshot, key: string): number | string {
     case 'memory_bytes': return proc.memory_bytes
     case 'disk_read_bytes': return proc.disk_read_bytes
     case 'disk_write_bytes': return proc.disk_write_bytes
-    case 'net_rx_bytes': return proc.net_rx_bytes
-    case 'net_tx_bytes': return proc.net_tx_bytes
+    case 'status': return proc.status ?? ''
     default: return 0
   }
 }
@@ -234,8 +263,7 @@ const ProcessTable = memo(function ProcessTable({ stewardId, control, onViewDna,
     { key: 'memory_bytes', label: 'Mem', fmt: (p) => fmtBytes(p.memory_bytes) },
     { key: 'disk_read_bytes', label: 'Disk R', fmt: (p) => fmtBytes(p.disk_read_bytes) },
     { key: 'disk_write_bytes', label: 'Disk W', fmt: (p) => fmtBytes(p.disk_write_bytes) },
-    { key: 'net_rx_bytes', label: 'Net RX', fmt: (p) => fmtBytes(p.net_rx_bytes) },
-    { key: 'net_tx_bytes', label: 'Net TX', fmt: (p) => fmtBytes(p.net_tx_bytes) },
+    { key: 'status', label: 'Status', fmt: (p) => p.status || '—' },
   ]
 
   return (
@@ -311,33 +339,57 @@ interface ServiceListProps {
   stewardId: string
   control: StewardControl
   services: ServiceSnapshot[]
+  // null = managed state unknown (effective config unavailable).
+  desired: DesiredServices | null
 }
 
-const ServiceList = memo(function ServiceList({ stewardId, control, services }: ServiceListProps) {
+const ServiceList = memo(function ServiceList({ stewardId, control, services, desired }: ServiceListProps) {
   return (
     <table className="tbl" aria-label="Services">
       <thead>
         <tr>
           <th>Service</th>
+          <th>Display name</th>
+          <th>Startup</th>
+          <th>PID</th>
           <th>State</th>
+          <th>Managed</th>
           <th className="c-act" aria-label="Actions" />
         </tr>
       </thead>
       <tbody>
-        {services.map((svc) => (
+        {services.map((svc) => {
+          const want = desired?.get(svc.name.toLowerCase())
+          return (
           <tr key={svc.name}>
             <td><span className="nm">{svc.name}</span></td>
+            <td>{svc.display_name || '—'}</td>
+            <td><span className="mono2">{svc.start_type || '—'}</span></td>
+            <td><span className="mono2">{svc.pid ? svc.pid : '—'}</span></td>
             <td>
               <span className={`pill ${stateClass(svc.state)}`}>
                 <span className="dot" />
                 {svc.state}
               </span>
             </td>
+            <td>
+              {want !== undefined && (
+                <>
+                  <span className="pill neutral" title="Managed by cfg">cfg</span>
+                  {isDrifted(want, svc.state) && (
+                    <span className="pill crit" title={`Desired ${want}, observed ${svc.state}`}>
+                      Drift
+                    </span>
+                  )}
+                </>
+              )}
+            </td>
             <td className="c-act">
               <ServiceActionMenu stewardId={stewardId} name={svc.name} control={control} />
             </td>
           </tr>
-        ))}
+          )
+        })}
       </tbody>
     </table>
   )
@@ -377,6 +429,9 @@ interface LiveActivityTabProps {
 export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTabProps) {
   const [state, dispatch] = useReducer(reducer, initialState)
   const [filter, setFilter] = useState('')
+  const [desiredFor, setDesiredFor] = useState<{ stewardId: string; map: DesiredServices | null } | null>(null)
+  // Ignore a result fetched for a previous steward.
+  const desired = desiredFor?.stewardId === stewardId ? desiredFor.map : null
   const [reconnectKey, setReconnectKey] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
   const pausedRef = useRef(false)
@@ -402,7 +457,7 @@ export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTa
       if (msg.type === 'snapshot') {
         lastReceivedRef.current = Date.now()
         if (!pausedRef.current) lastAppliedRef.current = Date.now()
-        dispatch({ type: 'snapshot', processes: msg.processes, services: msg.services })
+        dispatch({ type: 'snapshot', processes: msg.processes, services: msg.services, host: msg.host })
       } else if (msg.type === 'disconnect') {
         dispatch({ type: 'disconnect' })
       }
@@ -430,6 +485,25 @@ export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTa
       ws.close()
     }
   }, [stewardId, reconnectKey])
+
+  // Desired service state from the effective config. Best effort: every
+  // failure leaves `desired` null ("managed unknown") without surfacing an error.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await apiFetch(`/api/v1/stewards/${encodeURIComponent(stewardId)}/config/effective`)
+        if (res.status !== 200) return
+        const next = deriveDesiredServices(await res.json())
+        if (!cancelled) setDesiredFor({ stewardId, map: next })
+      } catch {
+        // managed unknown
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [stewardId])
 
   function onReconnect() {
     pausedRef.current = false
@@ -522,6 +596,7 @@ export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTa
           {state.paused ? 'Resume' : 'Pause'}
         </button>
       </div>
+      <HostKpiStrip history={state.hostHistory} />
       {q && processes.length === 0 && services.length === 0 ? (
         <div className="notice empty">
           <h3>No matches</h3>
@@ -545,7 +620,7 @@ export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTa
           </section>
           <section>
             <h2>Services</h2>
-            <ServiceList stewardId={stewardId} control={control} services={services} />
+            <ServiceList stewardId={stewardId} control={control} services={services} desired={desired} />
           </section>
         </>
       )}
