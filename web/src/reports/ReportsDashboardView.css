@@ -365,5 +365,5 @@
 .rdb-chip.active {
   border-color: var(--accent);
   color: var(--accent);
-  background: var(--accent-soft, transparent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
