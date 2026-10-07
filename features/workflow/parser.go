@@ -5,7 +5,9 @@ package workflow
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -230,143 +232,181 @@ func (p *Parser) convertCondition(condDef conditionDefinition) (Condition, error
 	return condition, nil
 }
 
-// ValidateWorkflow validates a workflow definition
+// ValidationIssue is one defect found in a workflow definition.
+type ValidationIssue struct {
+	// Path locates the defect, e.g. "steps[2].config" or "name".
+	Path string `json:"path"`
+	// StepName is the name of the step the defect belongs to, when there is one.
+	StepName string `json:"step_name,omitempty"`
+	// Message describes the defect. Step names, types and failure actions it
+	// echoes are truncated to maxIssueValueLen bytes; input-declaration and
+	// condition messages are not, but the response only goes back to the caller.
+	Message string `json:"message"`
+
+	// err is the full wrapped error ValidateWorkflow has always returned.
+	err error
+}
+
+// maxIssueValueLen caps how much of a caller-supplied value an issue message echoes.
+const maxIssueValueLen = 64
+
+func truncateIssueValue(v string) string {
+	if len(v) <= maxIssueValueLen {
+		return v
+	}
+	cut := maxIssueValueLen
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut] + "..."
+}
+
+// ValidateWorkflow validates a workflow definition and returns the first issue.
 func (p *Parser) ValidateWorkflow(workflow Workflow) error {
-	// Validate workflow name
+	issues := p.ValidateWorkflowDetailed(workflow)
+	if len(issues) == 0 {
+		return nil
+	}
+	return issues[0].err
+}
+
+// ValidateWorkflowDetailed validates a workflow definition and returns every
+// issue found, in the order ValidateWorkflow would have reported them.
+func (p *Parser) ValidateWorkflowDetailed(workflow Workflow) []ValidationIssue {
+	var issues []ValidationIssue
+	add := func(path, stepName string, err error) {
+		issues = append(issues, ValidationIssue{Path: path, StepName: stepName, Message: err.Error(), err: err})
+	}
+
 	if workflow.Name == "" {
-		return fmt.Errorf("workflow name is required")
+		add("name", "", fmt.Errorf("workflow name is required"))
 	}
-
-	// Validate steps
 	if len(workflow.Steps) == 0 {
-		return fmt.Errorf("workflow must have at least one step")
+		add("steps", "", fmt.Errorf("workflow must have at least one step"))
 	}
-
 	if err := ValidateInputSpecs(workflow.Inputs); err != nil {
-		return err
+		add("inputs", "", err)
 	}
 
-	// Validate each step
 	stepNames := make(map[string]bool)
-	for _, step := range workflow.Steps {
+	for i, step := range workflow.Steps {
+		path := fmt.Sprintf("steps[%d]", i)
 		// Approval gates are resumed by replaying the top-level step list, so a
 		// gate inside any other block is rejected rather than silently accepted.
 		// Checked first so it is reported whatever the enclosing step's type.
-		if nested := findNestedApproval(step); nested != "" {
-			return fmt.Errorf("step validation failed: %w", &nestedApprovalError{step: nested})
-		}
-		if err := p.validateStep(step, stepNames); err != nil {
-			return fmt.Errorf("step validation failed: %w", err)
-		}
+		collectNestedApprovals(step, path, func(nestedPath, name string) {
+			err := &nestedApprovalError{step: truncateIssueValue(name)}
+			issues = append(issues, ValidationIssue{
+				Path: nestedPath, StepName: truncateIssueValue(name), Message: err.Error(),
+				err: fmt.Errorf("step validation failed: %w", err),
+			})
+		})
+		p.collectStepIssues(step, path, 0, stepNames, &issues)
 	}
 
-	// Validate timeout
 	if workflow.Timeout < 0 {
-		return fmt.Errorf("workflow timeout cannot be negative")
+		add("timeout", "", fmt.Errorf("workflow timeout cannot be negative"))
+	}
+	if workflow.OnFailure != "" && !isValidFailureAction(workflow.OnFailure) {
+		add("on_failure", "", fmt.Errorf("invalid failure action: %s", truncateIssueValue(string(workflow.OnFailure))))
 	}
 
-	// Validate failure action
-	if workflow.OnFailure != "" {
-		if !isValidFailureAction(workflow.OnFailure) {
-			return fmt.Errorf("invalid failure action: %s", workflow.OnFailure)
-		}
-	}
-
-	return nil
+	return issues
 }
 
-// validateStep validates a single step
-func (p *Parser) validateStep(step Step, stepNames map[string]bool) error {
-	// Validate step name
-	if step.Name == "" {
-		return fmt.Errorf("step name is required")
+// collectStepIssues appends every defect of step (and its child steps) to issues.
+// depth is the child nesting level, which only shapes the legacy error wrapping.
+func (p *Parser) collectStepIssues(step Step, path string, depth int, stepNames map[string]bool, issues *[]ValidationIssue) {
+	prefix := "step validation failed: " + strings.Repeat("child step validation failed: ", depth)
+	name := truncateIssueValue(step.Name)
+	add := func(field string, format string, args ...interface{}) {
+		err := fmt.Errorf(format, args...)
+		fieldPath := path
+		if field != "" {
+			fieldPath = path + "." + field
+		}
+		*issues = append(*issues, ValidationIssue{
+			Path: fieldPath, StepName: name, Message: err.Error(),
+			err: fmt.Errorf("%s%w", prefix, err),
+		})
 	}
 
-	// Check for duplicate step names
-	if stepNames[step.Name] {
-		return fmt.Errorf("duplicate step name: %s", step.Name)
+	if step.Name == "" {
+		add("name", "step name is required")
+	} else if stepNames[step.Name] {
+		add("name", "duplicate step name: %s", name)
 	}
 	stepNames[step.Name] = true
 
-	// Validate step type
 	if !isValidStepType(step.Type) {
-		return fmt.Errorf("invalid step type: %s", step.Type)
+		add("type", "invalid step type: %s", truncateIssueValue(string(step.Type)))
 	}
 
-	// Type-specific validation
 	switch step.Type {
 	case StepTypeTask:
 		if step.Module == "" {
-			return fmt.Errorf("module is required for task steps")
+			add("module", "module is required for task steps")
 		}
 		if step.Config == nil {
-			return fmt.Errorf("config is required for task steps")
+			add("config", "config is required for task steps")
 		}
 	case StepTypeSequential, StepTypeParallel:
 		if len(step.Steps) == 0 {
-			return fmt.Errorf("%s steps must have child steps", step.Type)
+			add("steps", "%s steps must have child steps", step.Type)
 		}
 	case StepTypeApproval:
-		if step.Approval == nil {
-			return fmt.Errorf("approval configuration is required for approval steps")
-		}
-		if step.Approval.Message == "" {
-			return fmt.Errorf("message is required for approval steps")
-		}
-		if step.Approval.Timeout <= 0 {
-			return fmt.Errorf("timeout must be positive for approval steps")
+		switch {
+		case step.Approval == nil:
+			add("approval", "approval configuration is required for approval steps")
+		case step.Approval.Message == "":
+			add("approval.message", "message is required for approval steps")
+		case step.Approval.Timeout <= 0:
+			add("approval.timeout", "timeout must be positive for approval steps")
 		}
 	case StepTypeNotify:
-		if step.Notify == nil {
-			return fmt.Errorf("notify configuration is required for notify steps")
-		}
-		if step.Notify.URL == "" {
-			return fmt.Errorf("url is required for notify steps")
-		}
-		if step.Notify.Title == "" {
-			return fmt.Errorf("title is required for notify steps")
-		}
-		switch step.Notify.Severity {
-		case "", NotifySeverityInfo, NotifySeverityWarning, NotifySeverityCritical:
+		switch {
+		case step.Notify == nil:
+			add("notify", "notify configuration is required for notify steps")
+		case step.Notify.URL == "":
+			add("notify.url", "url is required for notify steps")
+		case step.Notify.Title == "":
+			add("notify.title", "title is required for notify steps")
 		default:
-			return fmt.Errorf("invalid severity %q for notify steps: must be info, warning or critical", step.Notify.Severity)
+			switch step.Notify.Severity {
+			case "", NotifySeverityInfo, NotifySeverityWarning, NotifySeverityCritical:
+			default:
+				add("notify.severity", "invalid severity %q for notify steps: must be info, warning or critical", truncateIssueValue(step.Notify.Severity))
+			}
 		}
 	case StepTypeConditional:
 		if step.Condition == nil {
-			return fmt.Errorf("condition is required for conditional steps")
+			add("condition", "condition is required for conditional steps")
 		}
 		if len(step.Steps) == 0 {
-			return fmt.Errorf("conditional steps must have child steps")
+			add("steps", "conditional steps must have child steps")
 		}
 	}
 
-	// Validate child steps recursively
-	for _, childStep := range step.Steps {
-		if err := p.validateStep(childStep, stepNames); err != nil {
-			return fmt.Errorf("child step validation failed: %w", err)
-		}
+	for i, child := range step.Steps {
+		p.collectStepIssues(child, fmt.Sprintf("%s.steps[%d]", path, i), depth+1, stepNames, issues)
 	}
 
-	// Validate condition
 	if step.Condition != nil {
 		if err := p.validateCondition(*step.Condition); err != nil {
-			return fmt.Errorf("condition validation failed: %w", err)
+			*issues = append(*issues, ValidationIssue{
+				Path: path + ".condition", StepName: name, Message: err.Error(),
+				err: fmt.Errorf("%scondition validation failed: %w", prefix, err),
+			})
 		}
 	}
 
-	// Validate timeout
 	if step.Timeout < 0 {
-		return fmt.Errorf("step timeout cannot be negative")
+		add("timeout", "step timeout cannot be negative")
 	}
 
-	// Validate failure action
-	if step.OnFailure != "" {
-		if !isValidFailureAction(step.OnFailure) {
-			return fmt.Errorf("invalid failure action for step %s: %s", step.Name, step.OnFailure)
-		}
+	if step.OnFailure != "" && !isValidFailureAction(step.OnFailure) {
+		add("on_failure", "invalid failure action for step %s: %s", name, truncateIssueValue(string(step.OnFailure)))
 	}
-
-	return nil
 }
 
 // validateCondition validates a condition
@@ -442,39 +482,38 @@ func (e *nestedApprovalError) Error() string {
 	return fmt.Sprintf("approval steps must be top-level (step %q is nested)", e.step)
 }
 
-// findNestedApproval returns the name of the first approval step found inside a
-// child block of step (parallel, loop, try, conditional, switch, fallback), or "".
-func findNestedApproval(step Step) string {
-	return nestedApprovalIn(step)
-}
-
-func nestedApprovalIn(step Step) string {
-	var blocks [][]Step
-	blocks = append(blocks, step.Steps)
+// collectNestedApprovals reports every approval step found inside a child block of
+// step (parallel, loop, try, conditional, switch, fallback), with its path.
+func collectNestedApprovals(step Step, path string, report func(path, name string)) {
+	walk := func(block []Step, blockPath string) {
+		for i, child := range block {
+			childPath := fmt.Sprintf("%s[%d]", blockPath, i)
+			if child.Type == StepTypeApproval {
+				report(childPath, child.Name)
+			}
+			collectNestedApprovals(child, childPath, report)
+		}
+	}
+	walk(step.Steps, path+".steps")
 	if step.Try != nil {
-		blocks = append(blocks, step.Try.Try, step.Try.Finally)
-		for _, c := range step.Try.Catch {
-			blocks = append(blocks, c.Steps)
+		walk(step.Try.Try, path+".try.try")
+		walk(step.Try.Finally, path+".try.finally")
+		for i, c := range step.Try.Catch {
+			walk(c.Steps, fmt.Sprintf("%s.try.catch[%d].steps", path, i))
 		}
 	}
 	if step.Switch != nil {
-		blocks = append(blocks, step.Switch.Default)
-		for _, c := range step.Switch.Cases {
-			blocks = append(blocks, c.Steps)
+		walk(step.Switch.Default, path+".switch.default")
+		for i, c := range step.Switch.Cases {
+			walk(c.Steps, fmt.Sprintf("%s.switch.cases[%d].steps", path, i))
 		}
 	}
 	if step.ErrorHandling != nil && step.ErrorHandling.FallbackStep != nil {
-		blocks = append(blocks, []Step{*step.ErrorHandling.FallbackStep})
-	}
-	for _, block := range blocks {
-		for _, child := range block {
-			if child.Type == StepTypeApproval {
-				return child.Name
-			}
-			if n := nestedApprovalIn(child); n != "" {
-				return n
-			}
+		fb := step.ErrorHandling.FallbackStep
+		fbPath := path + ".error_handling.fallback_step"
+		if fb.Type == StepTypeApproval {
+			report(fbPath, fb.Name)
 		}
+		collectNestedApprovals(*fb, fbPath, report)
 	}
-	return ""
 }

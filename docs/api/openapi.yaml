@@ -552,6 +552,53 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /workflows/validate:
+    post:
+      summary: Validate a workflow definition (dry run)
+      description: >
+        Validates a workflow definition and returns every issue found, without
+        saving or running anything. Always returns 200 for a well-formed JSON
+        body; a definition with defects returns valid=false and a list of
+        issues. Requires the workflow:read permission.
+      operationId: validateWorkflow
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Same shape as the workflow create request
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, issues]
+                properties:
+                  valid:
+                    type: boolean
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, message]
+                      properties:
+                        path:
+                          type: string
+                          description: Location of the defect, e.g. steps[2].config
+                        step_name:
+                          type: string
+                        message:
+                          type: string
+        '400':
+          description: Body is not valid JSON
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /workflows/approvals:
     get:
       summary: List pending workflow approvals
