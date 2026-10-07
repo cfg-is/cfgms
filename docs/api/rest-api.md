@@ -3387,6 +3387,33 @@ independent of the tenant check.
 **Response (200 OK):** the updated `AccountInfo`, plus `enrollment_magic_link` when
 `reset_credentials: true` minted a fresh one.
 
+#### GET /api/v1/accounts/{username}/webauthn/credentials
+
+Lists the account's passkeys (public metadata only; permission `webauthn:list`). Each entry carries:
+
+| Field | Meaning |
+|-------|---------|
+| `id` | base64url credential ID |
+| `label` | display label (may be empty) |
+| `transport` | stored authenticator transport hints |
+| `registered_at`, `last_used_at` | timestamps (`last_used_at` omitted until first use) |
+| `device_type` | transport heuristic: `platform` (transports include `internal`), `security_key` (`usb`/`nfc`/`ble`), `phone_or_other` (`hybrid`), or `unknown` (empty or unrecognised) |
+| `synced` | the stored W3C backup-state (BS) flag |
+| `sync_capable` | the stored W3C backup-eligible (BE) flag |
+| `current` | `true` for the credential that last proved the caller's web session (passkey login, overwritten by each later step-up). Always `false` for Bearer, API-key and mTLS callers, and for sessions with no recorded credential |
+
+`device_type` is a heuristic: attachment and AAGUID are not stored, and `platform` does not imply the key is non-synced. Sync state comes only from `synced` / `sync_capable`.
+
+#### PATCH /api/v1/accounts/{username}/webauthn/credentials/{credential_id}
+
+Renames a passkey. Requires permission `webauthn:rename` and Strong assurance (a Basic caller receives `401` with `WWW-Authenticate: CFGMS-StepUp`). Account scoping matches revoke: cookie-auth principals can rename only their own credentials; admin callers are tenant-contained.
+
+```json
+{ "label": "Work laptop" }
+```
+
+The label is trimmed, control characters are removed and it is truncated to 64 characters; an empty label is `400 INVALID_LABEL`. Returns `204` on success, `404 CREDENTIAL_NOT_FOUND` for an unknown credential, `409 ACCOUNT_MODIFIED` on a concurrent write. The audit event `account.passkey_renamed` records the old and new label.
+
 #### POST /api/v1/accounts/{username}/certs/bind
 
 Bind an mTLS admin certificate to the account by serial number. The serial is the binding and lookup key — it matches what `extractAdminPrincipal` already checks via `certManager.IsRevoked(serial)` on every mTLS admin request.

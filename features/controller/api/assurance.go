@@ -80,6 +80,7 @@ var permissionAssurance = map[string]Requirement{
 	// and is intentionally absent from this map (reads are outside the elevated surface).
 	"webauthn:register": {Min: session.AssuranceStrong}, // POST /accounts/{username}/webauthn/register/begin|finish (Issue #3574)
 	"webauthn:revoke":   {Min: session.AssuranceStrong}, // POST /accounts/{username}/webauthn/revoke/{credential_id} (Issue #3574)
+	"webauthn:rename":   {Min: session.AssuranceStrong}, // PATCH /accounts/{username}/webauthn/credentials/{credential_id} (Issue #4626)
 
 	// mTLS admin certificate binding management (Issue #3578, #3579).
 	// bind and revoke are credential-mutation surfaces gated at AssuranceStrong, mirroring

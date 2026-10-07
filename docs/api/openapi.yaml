@@ -1308,6 +1308,67 @@ paths:
         '401':
           description: Assertion rejected
 
+  /accounts/{username}/webauthn/credentials:
+    get:
+      summary: List an account's passkeys
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Passkey metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username:
+                    type: string
+                  credentials:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebAuthnCredentialInfo'
+  /accounts/{username}/webauthn/credentials/{credential_id}:
+    patch:
+      summary: Rename a passkey (requires Strong assurance)
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: credential_id
+          in: path
+          required: true
+          description: base64url credential ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label:
+                  type: string
+                  maxLength: 64
+      responses:
+        '204':
+          description: Renamed
+        '400':
+          description: Invalid credential ID or label
+        '401':
+          description: Step-up required (Strong assurance)
+        '404':
+          description: Account or credential not found
+        '409':
+          description: Account concurrently modified
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -1326,6 +1387,36 @@ components:
         type: string
 
   schemas:
+    WebAuthnCredentialInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        transport:
+          type: array
+          items:
+            type: string
+        registered_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        device_type:
+          type: string
+          enum: [platform, security_key, phone_or_other, unknown]
+          description: Transport heuristic; attachment and AAGUID are not stored.
+        synced:
+          type: boolean
+          description: Stored backup-state (BS) flag.
+        sync_capable:
+          type: boolean
+          description: Stored backup-eligible (BE) flag.
+        current:
+          type: boolean
+          description: True for the credential that last proved the caller's web session; false for non-web callers.
     WorkflowApproval:
       type: object
       properties:

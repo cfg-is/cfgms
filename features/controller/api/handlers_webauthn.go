@@ -23,6 +23,9 @@
 //		     Lists registered credentials for the account (public metadata only).
 //		     Cookie-auth principals are self-scoped to their own account.
 //
+//		PATCH /api/v1/accounts/{username}/webauthn/credentials/{credential_id}
+//		     Renames a credential (webauthn:rename, AssuranceStrong; Issue #4626).
+//
 //		POST /api/v1/accounts/{username}/webauthn/revoke/{credential_id}
 //		     Removes a specific credential. credential_id is base64url-encoded.
 //		     Cookie-auth principals are self-scoped and cannot remove their last credential.
@@ -52,10 +55,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -736,9 +741,15 @@ func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	currentCred := s.currentSessionCredentialID(r)
+
 	infos := make([]WebAuthnCredentialInfo, 0, len(acct.Credentials))
 	for _, c := range acct.Credentials {
 		infos = append(infos, WebAuthnCredentialInfo{
+			DeviceType:   passkeyDeviceType(c.Transport),
+			Synced:       c.BackupState,
+			SyncCapable:  c.BackupEligible,
+			Current:      len(currentCred) > 0 && bytes.Equal(currentCred, c.ID),
 			ID:           base64.RawURLEncoding.EncodeToString(c.ID),
 			Label:        c.Label,
 			Transport:    c.Transport,
@@ -751,6 +762,186 @@ func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Re
 		Username:    acct.Username,
 		Credentials: infos,
 	})
+}
+
+// passkeyDeviceType derives a coarse device type from stored transport hints.
+// Attachment and AAGUID are not stored, so this is a heuristic: it says nothing
+// about whether the credential is synced (that comes only from BackupState).
+func passkeyDeviceType(transports []string) string {
+	var platform, security, hybrid bool
+	for _, t := range transports {
+		switch t {
+		case "internal":
+			platform = true
+		case "usb", "nfc", "ble":
+			security = true
+		case "hybrid":
+			hybrid = true
+		}
+	}
+	switch {
+	case platform:
+		return passkeyDevicePlatform
+	case security:
+		return passkeyDeviceSecurityKey
+	case hybrid:
+		return passkeyDevicePhoneOther
+	default:
+		return passkeyDeviceUnknown
+	}
+}
+
+// currentSessionCredentialID returns the credential ID that last proved the
+// caller's cookie web session, or nil when the caller has no web session
+// (Bearer, API-key, mTLS) or the session recorded no credential.
+func (s *Server) currentSessionCredentialID(r *http.Request) []byte {
+	sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
+	if sessID == "" || s.webSessionManager == nil {
+		return nil
+	}
+	sess, err := s.webSessionManager.GetByID(r.Context(), sessID)
+	if err != nil || sess == nil {
+		return nil
+	}
+	return sess.CredentialID
+}
+
+// sanitizePasskeyLabel trims, strips control characters and caps the label at
+// maxPasskeyLabelLen runes. The label is display text only.
+func sanitizePasskeyLabel(label string) string {
+	label = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, label)
+	label = strings.TrimSpace(label)
+	if rs := []rune(label); len(rs) > maxPasskeyLabelLen {
+		label = string(rs[:maxPasskeyLabelLen])
+	}
+	return label
+}
+
+// handleWebAuthnRenameCredential handles
+// PATCH /api/v1/accounts/{username}/webauthn/credentials/{credential_id}.
+//
+// Updates the display label of one credential (Issue #4626). Account scoping is
+// identical to revoke: cookie-auth principals are self-scoped, admin callers are
+// tenant-contained by resolveAccountForCredentials. Persisted via compare-and-swap.
+func (s *Server) handleWebAuthnRenameCredential(w http.ResponseWriter, r *http.Request) {
+	acct, principal, ok := s.resolveAccountForCredentials(w, r)
+	if !ok {
+		return
+	}
+
+	credIDBytes, err := base64.RawURLEncoding.DecodeString(mux.Vars(r)["credential_id"])
+	if err != nil || len(credIDBytes) == 0 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "credential_id must be base64url encoded", "INVALID_CREDENTIAL_ID")
+		return
+	}
+
+	var req WebAuthnRenameRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_REQUEST")
+		return
+	}
+	newLabel := sanitizePasskeyLabel(req.Label)
+	if newLabel == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "label is required", "INVALID_LABEL")
+		return
+	}
+
+	actingPrincipalID := ""
+	if principal != nil {
+		actingPrincipalID = principal.ID
+	}
+
+	freshAcct, err := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
+	if err != nil {
+		s.logger.Error("Failed to reload account for credential rename",
+			"username", logging.SanitizeLogValue(acct.Username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to reload account state", "STORE_ERROR")
+		return
+	}
+	if freshAcct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	updatedAcct := *freshAcct
+	updatedAcct.Credentials = make([]WebAuthnCredential, len(freshAcct.Credentials))
+	copy(updatedAcct.Credentials, freshAcct.Credentials)
+	found := false
+	oldLabel := ""
+	for i := range updatedAcct.Credentials {
+		if bytes.Equal(updatedAcct.Credentials[i].ID, credIDBytes) {
+			found = true
+			oldLabel = updatedAcct.Credentials[i].Label
+			updatedAcct.Credentials[i].Label = newLabel
+			break
+		}
+	}
+	if !found {
+		s.writeErrorResponse(w, http.StatusNotFound, "Credential not found on this account", "CREDENTIAL_NOT_FOUND")
+		return
+	}
+
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, actingPrincipalID)
+	if persistErr != nil {
+		s.logger.Error("Failed to persist credential rename",
+			"username", logging.SanitizeLogValue(freshAcct.Username),
+			"error", logging.SanitizeLogValue(persistErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist credential rename", "STORE_ERROR")
+		return
+	}
+	if !swapped {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the rename", "ACCOUNT_MODIFIED")
+		return
+	}
+	updatedAcct.Version = newVersion
+	s.cacheAccount(&updatedAcct)
+
+	s.logger.Info("WebAuthn credential renamed",
+		"username", logging.SanitizeLogValue(freshAcct.Username),
+		"acting_principal", logging.SanitizeLogValue(actingPrincipalID))
+	s.emitPasskeyRenamedAudit(r.Context(), &updatedAcct, base64.RawURLEncoding.EncodeToString(credIDBytes), oldLabel, newLabel, actingPrincipalID)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// emitPasskeyRenamedAudit records a passkey-renamed audit event with the old and new label.
+func (s *Server) emitPasskeyRenamedAudit(ctx context.Context, acct *account, credentialID, oldLabel, newLabel, actingPrincipalID string) {
+	if s.auditManager == nil {
+		return
+	}
+	tenantID := acct.TenantID
+	if tenantID == "" {
+		tenantID = audit.SystemTenantID
+	}
+	details := map[string]interface{}{
+		"credential_id": logging.SanitizeLogValue(credentialID),
+		"old_label":     logging.SanitizeLogValue(oldLabel),
+		"new_label":     logging.SanitizeLogValue(newLabel),
+	}
+	if actingPrincipalID != acct.ID {
+		details["acting_principal"] = logging.SanitizeLogValue(actingPrincipalID)
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventSystemAccess).
+		Action("account.passkey_renamed").
+		User(acct.ID, business.AuditUserTypeHuman).
+		Resource("account", logging.SanitizeLogValue(acct.Username), "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityLow).
+		Details(details)
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit passkey_renamed audit event",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // enrollmentTokenHeader is the HTTP request header that carries the single-use

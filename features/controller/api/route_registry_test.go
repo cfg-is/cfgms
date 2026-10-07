@@ -233,6 +233,7 @@ var goldenRouteTable = []string{
 	"OPTIONS /api/v1/stewards/{device_id}/refresh/challenge",
 	"OPTIONS /api/v1/stewards/{device_id}/refresh/claim",
 	"OPTIONS /api/v1/stewards/{device_id}/refresh/complete",
+	"PATCH /api/v1/accounts/{username}/webauthn/credentials/{credential_id}",
 	"PATCH /api/v1/stewards/{id}/visibility",
 	"POST /api/v1/accounts",
 	"POST /api/v1/accounts/{username}/certs/bind",

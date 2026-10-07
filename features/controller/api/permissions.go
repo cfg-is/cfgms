@@ -159,6 +159,7 @@ var knownPermissions = map[string]bool{
 	"webauthn:register": true,
 	"webauthn:list":     true,
 	"webauthn:revoke":   true,
+	"webauthn:rename":   true,
 	// mTLS admin certificate binding management (Issue #3578, #3579)
 	"cert-binding:bind":   true,
 	"cert-binding:list":   true,

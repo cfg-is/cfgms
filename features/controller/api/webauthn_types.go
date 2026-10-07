@@ -56,6 +56,34 @@ type WebAuthnCredentialInfo struct {
 	Transport    []string   `json:"transport,omitempty"`
 	RegisteredAt time.Time  `json:"registered_at"`
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"` // nil = never used after registration
+
+	// DeviceType is a Transport heuristic (attachment and AAGUID are not stored):
+	// "platform" (transports include internal), "security_key" (usb/nfc/ble),
+	// "phone_or_other" (hybrid), or "unknown" (empty or unrecognised).
+	DeviceType string `json:"device_type"`
+	// Synced is the stored W3C BS (backup state) flag.
+	Synced bool `json:"synced"`
+	// SyncCapable is the stored W3C BE (backup eligible) flag.
+	SyncCapable bool `json:"sync_capable"`
+	// Current is true for the credential that last proved the caller's web session.
+	// Always false for Bearer, API-key and mTLS callers (no web session).
+	Current bool `json:"current"`
+}
+
+// Passkey device types reported by the credential list.
+const (
+	passkeyDevicePlatform    = "platform"
+	passkeyDeviceSecurityKey = "security_key"
+	passkeyDevicePhoneOther  = "phone_or_other"
+	passkeyDeviceUnknown     = "unknown"
+)
+
+// maxPasskeyLabelLen is the maximum rune length of a passkey label.
+const maxPasskeyLabelLen = 64
+
+// WebAuthnRenameRequest is the body of PATCH /api/v1/accounts/{username}/webauthn/credentials/{credential_id}.
+type WebAuthnRenameRequest struct {
+	Label string `json:"label"`
 }
 
 // WebAuthnListResponse is returned by GET /api/v1/accounts/{username}/webauthn/credentials.
