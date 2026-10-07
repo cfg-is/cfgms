@@ -21,7 +21,7 @@ export interface HarnessOptions {
   /** Sequence of job views returned by successive polls; the last repeats. */
   jobs?: Array<Record<string, unknown>>
   pollStatus?: number
-  /** Overrides what prepare returns for `content` (to simulate a mismatch). */
+  /** Overrides what prepare returns for `content` (to force a mismatch). */
   prepareContent?: string
   /** Overrides the targets the begin envelope carries. */
   beginTargets?: string[]
