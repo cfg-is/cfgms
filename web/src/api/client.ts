@@ -187,6 +187,7 @@ export interface LoginResult {
   username: string  // authenticated principal from the server (Issue #2993)
   tenantId: string  // Issue #2919: empty string means root scope
   rootScope: boolean // Issue #2919: true when tenantId is "" by explicit grant
+  expiresAt: number | null // session absolute expiry, epoch ms; null when the server did not report one (Issue #4597)
 }
 
 /**
@@ -276,11 +277,12 @@ export async function passkeyLoginFinishRequest(assertion: AssertionJSON): Promi
     body: JSON.stringify(assertion),
   })
   if (!response.ok) {
-    return { ok: false, status: response.status, username: '', tenantId: '', rootScope: false }
+    return { ok: false, status: response.status, username: '', tenantId: '', rootScope: false, expiresAt: null }
   }
   let username = ''
   let tenantId = ''
   let rootScope = false
+  let expiresAt: number | null = null
   try {
     const body = (await response.json()) as Record<string, unknown>
     const data = body.data as Record<string, unknown> | undefined
@@ -288,11 +290,15 @@ export async function passkeyLoginFinishRequest(assertion: AssertionJSON): Promi
       if (typeof data.username === 'string') username = data.username
       if (typeof data.tenant_id === 'string') tenantId = data.tenant_id
       if (typeof data.root_scope === 'boolean') rootScope = data.root_scope
+      if (typeof data.expires_at === 'string') {
+        const ms = Date.parse(data.expires_at)
+        if (!Number.isNaN(ms)) expiresAt = ms
+      }
     }
   } catch {
     // Body parse is best-effort; tenant scoping falls back to root (safest for UI).
   }
-  return { ok: true, status: response.status, username, tenantId, rootScope }
+  return { ok: true, status: response.status, username, tenantId, rootScope, expiresAt }
 }
 
 /**

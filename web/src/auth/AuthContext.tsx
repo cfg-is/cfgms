@@ -6,9 +6,12 @@
  *
  * The signed-in principal lives in React context ONLY — never in web
  * storage (enforced by a source-scan test), never in a cookie readable by
- * JS. Session presence is inferred from API responses; a page reload starts
- * signedOut and the first authenticated screen's data call re-establishes
- * or expires the session naturally.
+ * JS. The one exception is the session's absolute expiry timestamp
+ * (Story #4597): non-secret, informational, kept in sessionStorage so the
+ * user menu can still show the time left after a reload. Session presence
+ * is inferred from API responses; a page reload starts signedOut and the
+ * first authenticated screen's data call re-establishes or expires the
+ * session naturally.
  *
  * Step-up (Story #2786, ADR-021 Decision 6): when apiFetch receives a 401 +
  * WWW-Authenticate: CFGMS-StepUp, the onStepUpRequired listener fires and
@@ -97,6 +100,32 @@ export interface Principal {
   username: string
   tenantId: string // Issue #2919: empty string means root scope; populated on login
   rootScope: boolean // Issue #3131: true only for principals explicitly marked root-scoped (ADR-025 A2.1)
+  expiresAt: number | null // session absolute expiry, epoch ms; null when unknown (Story #4597)
+}
+
+/** Reads the persisted session expiry; a missing, malformed or past value is unknown (null). */
+function loadStoredExpiry(): number | null {
+  try {
+    const raw = sessionStorage.getItem('cfgms.session.expiresAt')
+    if (raw === null) return null
+    const ms = Number(raw)
+    if (!Number.isFinite(ms) || ms <= Date.now()) {
+      sessionStorage.removeItem('cfgms.session.expiresAt')
+      return null
+    }
+    return ms
+  } catch {
+    return null
+  }
+}
+
+function storeExpiry(ms: number | null): void {
+  try {
+    if (ms === null) sessionStorage.removeItem('cfgms.session.expiresAt')
+    else sessionStorage.setItem('cfgms.session.expiresAt', String(ms))
+  } catch {
+    // Storage unavailable: the line is simply omitted after a reload.
+  }
 }
 
 /**
@@ -113,6 +142,11 @@ export type AuthStatus = 'signedOut' | 'invalid' | 'expired' | 'signedIn'
 export interface AuthValue {
   status: AuthStatus
   principal: Principal | null
+  /**
+   * Session absolute expiry (epoch ms), or null when unknown. Unlike
+   * principal it survives a page reload via sessionStorage (Story #4597).
+   */
+  expiresAt: number | null
   /**
    * True from initial mount until the first apiFetch response resolves
    * (success or 401). RequireAuth uses this to render children optimistically
@@ -140,6 +174,7 @@ interface StepUpState {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('signedOut')
   const [principal, setPrincipal] = useState<Principal | null>(null)
+  const [expiresAt, setExpiresAt] = useState<number | null>(loadStoredExpiry)
   const [stepUpState, setStepUpState] = useState<StepUpState | null>(null)
   // probingRef gates onSessionConfirmed (resolve the initial probe once).
   // sessionEstablishedRef tracks whether a real session has been confirmed
@@ -153,6 +188,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     onSessionExpired(() => {
       setPrincipal(null)
+      setExpiresAt(null)
+      storeExpiry(null)
       // A 401 only means a mid-session drop if a session was actually
       // established (login or probe confirmed). Probe-phase 401s — including
       // concurrent ones — leave status as signedOut (ADR-018 §4).
@@ -238,7 +275,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await passkeyLoginFinishRequest(toAssertionJSON(rawCred as PublicKeyCredential))
     if (result.ok) {
       sessionEstablishedRef.current = true
-      setPrincipal({ username: result.username, tenantId: result.tenantId, rootScope: result.rootScope })
+      setPrincipal({
+        username: result.username,
+        tenantId: result.tenantId,
+        rootScope: result.rootScope,
+        expiresAt: result.expiresAt,
+      })
+      setExpiresAt(result.expiresAt)
+      storeExpiry(result.expiresAt)
       setStatus('signedIn')
       return true
     }
@@ -250,6 +294,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await logoutRequest()
     setPrincipal(null)
+    setExpiresAt(null)
+    storeExpiry(null)
     setStatus('signedOut')
     // After an explicit logout the probe phase is over and the session is gone:
     // show the login screen immediately rather than rendering protected content.
@@ -259,8 +305,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo(
-    () => ({ status, principal, probing, login, logout }),
-    [status, principal, probing, login, logout],
+    () => ({ status, principal, expiresAt, probing, login, logout }),
+    [status, principal, expiresAt, probing, login, logout],
   )
 
   function handleStepUpSuccess(response: Response) {

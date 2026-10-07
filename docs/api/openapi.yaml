@@ -1099,6 +1099,44 @@ paths:
         '503':
           description: Compliance data provider unavailable
 
+  /web/passkey/login/finish:
+    post:
+      summary: Finish passkey web login
+      description: |
+        Completes the WebAuthn discoverable-credential ceremony and issues the
+        web session (HttpOnly session cookie plus CSRF cookie). The response
+        body never carries a token; `expires_at` is the only way the browser
+        learns the session's remaining lifetime, because it cannot read the
+        HttpOnly cookie. Expiry is informational; enforcement is server-side.
+      operationId: finishPasskeyLogin
+      tags:
+        - Web Login
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ok:
+                        type: boolean
+                      username:
+                        type: string
+                      tenant_id:
+                        type: string
+                      root_scope:
+                        type: boolean
+                      expires_at:
+                        type: string
+                        format: date-time
+                        description: The issued session's absolute expiry (RFC 3339).
+        '401':
+          description: Assertion rejected
+
 components:
   securitySchemes:
     ApiKeyAuth:

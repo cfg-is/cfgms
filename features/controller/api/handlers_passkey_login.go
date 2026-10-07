@@ -353,7 +353,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, newToken, elevateErr := mgr.Elevate(r.Context(), issuedSess.ID, credential.ID, sourceIP)
+	elevatedSess, newToken, elevateErr := mgr.Elevate(r.Context(), issuedSess.ID, credential.ID, sourceIP)
 	if elevateErr != nil {
 		s.logger.Error("Passkey login finish: failed to elevate session",
 			"username", logging.SanitizeLogValue(acct.Username),
@@ -430,6 +430,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		Username:  acct.Username,
 		TenantID:  s.accountPrincipalTenant(r.Context(), acct),
 		RootScope: acct.RootScope,
+		ExpiresAt: elevatedSess.AbsoluteExpiresAt,
 	})
 }
 
