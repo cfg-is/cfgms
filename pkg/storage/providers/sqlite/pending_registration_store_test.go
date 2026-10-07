@@ -447,3 +447,36 @@ func TestPendingRegistrationStore_PersistAcrossInit(t *testing.T) {
 	assert.Equal(t, "tenant-durable", got.TenantID)
 	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
 }
+
+func TestPendingRegistrationStore_HostnameAndKeyFingerprintRoundTrip(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	entry := testPendingEntry("pr-fpr", "tenant-1")
+	entry.Hostname = "ws-042.corp.example"
+	entry.KeyFingerprint = "ab12cd34"
+	require.NoError(t, store.AddPending(ctx, entry))
+	legacy := testPendingEntry("pr-legacy", "tenant-1")
+	require.NoError(t, store.AddPending(ctx, legacy))
+
+	byID, err := store.GetPendingByID(ctx, "pr-fpr")
+	require.NoError(t, err)
+	assert.Equal(t, "ws-042.corp.example", byID.Hostname)
+	assert.Equal(t, "ab12cd34", byID.KeyFingerprint)
+
+	byToken, err := store.GetPendingByToken(ctx, "cfgms_reg_tok_pr-fpr")
+	require.NoError(t, err)
+	assert.Equal(t, "ab12cd34", byToken.KeyFingerprint)
+
+	pending, err := store.ListPending(ctx, "tenant-1")
+	require.NoError(t, err)
+	require.Len(t, pending, 2)
+	assert.Equal(t, "ab12cd34", pending[0].KeyFingerprint)
+	assert.Empty(t, pending[1].KeyFingerprint, "entries without a fingerprint read back empty")
+
+	all, err := store.ListAll(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	assert.Equal(t, "ws-042.corp.example", all[0].Hostname)
+	assert.Equal(t, "ab12cd34", all[0].KeyFingerprint)
+}

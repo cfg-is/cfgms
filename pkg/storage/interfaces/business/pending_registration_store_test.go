@@ -377,3 +377,18 @@ func TestPendingRegistrationStore_ListAll_TenantFilter(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"p-t1-pend", "p-t1-appr"}, ids)
 }
+
+func TestPendingRegistrationStore_HostnameAndKeyFingerprint(t *testing.T) {
+	store := newInMemPendingStore()
+	ctx := context.Background()
+
+	entry := newTestEntry("p-fpr", "tenant-1", "tok-fpr")
+	entry.Hostname = "ws-042.corp.example"
+	entry.KeyFingerprint = "ab12cd34"
+	require.NoError(t, store.AddPending(ctx, entry))
+
+	got, err := store.GetPendingByID(ctx, "p-fpr")
+	require.NoError(t, err)
+	assert.Equal(t, "ws-042.corp.example", got.Hostname)
+	assert.Equal(t, "ab12cd34", got.KeyFingerprint)
+}

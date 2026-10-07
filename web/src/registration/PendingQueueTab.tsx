@@ -33,6 +33,9 @@ import ErrorCard from '../shell/ErrorCard.tsx'
 interface PendingEntry {
   pending_id: string
   steward_id: string
+  tenant_id: string
+  hostname: string
+  key_fingerprint: string
   source_ip: string
   registered_at: string
 }
@@ -72,6 +75,9 @@ export function parsePendingEntry(value: unknown): PendingEntry | null {
   return {
     pending_id,
     steward_id: str(r.steward_id),
+    tenant_id: str(r.tenant_id),
+    hostname: str(r.hostname),
+    key_fingerprint: str(r.key_fingerprint),
     source_ip: str(r.source_ip),
     registered_at: str(r.registered_at),
   }
@@ -87,6 +93,12 @@ export function parsePendingRegistrations(data: unknown): PendingEntry[] {
   return list
 }
 
+// Shortens a hex fingerprint to the mockup's `9c4a…e1` form; the full value stays
+// available via the cell's title attribute.
+function shortFingerprint(fp: string): string {
+  return fp.length > 10 ? `${fp.slice(0, 4)}…${fp.slice(-2)}` : fp
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function LoadingRows() {
@@ -98,6 +110,7 @@ function LoadingRows() {
           <span className="skel" style={{ width: '25%' }} />
           <span className="skel" style={{ width: '15%' }} />
           <span className="skel" style={{ width: '20%' }} />
+          <span className="skel" style={{ width: '15%' }} />
         </div>
       ))}
     </div>
@@ -368,6 +381,10 @@ export default function PendingQueueTab() {
               <tr>
                 <th>Pending ID</th>
                 <th>Steward ID</th>
+                <th title="Reported by the device itself; verify using the key fingerprint">
+                  Hostname (self-reported)
+                </th>
+                <th>Tenant</th>
                 <th>Source IP</th>
                 <th>Registered</th>
                 <th>Actions</th>
@@ -382,6 +399,27 @@ export default function PendingQueueTab() {
                     </td>
                     <td>
                       <span className="mono2">{entry.steward_id}</span>
+                    </td>
+                    <td data-testid="pending-hostname">
+                      {entry.hostname || entry.key_fingerprint ? (
+                        <>
+                          <div className="nm">{entry.hostname || '—'}</div>
+                          <div
+                            className="sub2 mono"
+                            data-testid="pending-fingerprint"
+                            title={entry.key_fingerprint ? `sha256:${entry.key_fingerprint}` : undefined}
+                          >
+                            {entry.key_fingerprint
+                              ? `fpr sha256:${shortFingerprint(entry.key_fingerprint)}`
+                              : '—'}
+                          </div>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td data-testid="pending-tenant">
+                      <span className="mono2">{entry.tenant_id || '—'}</span>
                     </td>
                     <td>
                       <span className="mono2">{entry.source_ip}</span>
@@ -410,7 +448,7 @@ export default function PendingQueueTab() {
                   </tr>
                   {approveErrors.has(entry.pending_id) && (
                     <tr>
-                      <td colSpan={5}>
+                      <td colSpan={7}>
                         <span
                           className="wf-form-error"
                           data-testid={`approve-error-${entry.pending_id}`}
@@ -423,7 +461,7 @@ export default function PendingQueueTab() {
                   )}
                   {denyErrors.has(entry.pending_id) && (
                     <tr>
-                      <td colSpan={5}>
+                      <td colSpan={7}>
                         <span
                           className="wf-form-error"
                           data-testid={`deny-error-${entry.pending_id}`}

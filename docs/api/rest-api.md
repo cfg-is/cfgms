@@ -1400,6 +1400,33 @@ Root/unscoped callers may rotate tokens for any tenant.
 - `tenant_id` (path): Tenant to rotate tokens for
 - `group` (body, optional): Restrict rotation to tokens in this group
 
+#### GET /api/v1/registration/pending
+
+List devices quarantined at registration and awaiting approval. Approved, denied, claimed and expired entries are not returned. The response is a bare JSON array.
+
+**Authentication:** Required  
+**Required permission:** `registration:list-pending`
+
+**Tenant scope:** a tenant-scoped caller sees only its own tenant's entries; an unscoped caller sees all tenants.
+
+Each item:
+
+```json
+{
+  "pending_id": "pending-1730000000000000000",
+  "steward_id": "stwd-abc123",
+  "tenant_id": "acme-corp",
+  "source_ip": "10.0.0.5",
+  "hostname": "web-07.acme.lan",
+  "key_fingerprint": "9c4a1f0e77b2d3a85c6e4f1029ab38d7e5c1f6a0b49d82e3c7f15a60d4b2e1ff",
+  "registered_at": "2026-07-25T10:00:00Z"
+}
+```
+
+- `hostname` — reported by the device itself and not authenticated. It is sanitised on write (control characters and `<>&"'` and backtick removed, capped at 253 characters). Treat it as a hint and render it as text.
+- `key_fingerprint` — lowercase hex SHA-256 of the public key in the device's certificate signing request (DER SubjectPublicKeyInfo), computed by the controller. This is the value to verify against the device.
+- Both fields are omitted for entries created before they were recorded.
+
 ### Monitoring
 
 CFGMS provides monitoring capabilities through dedicated endpoints.

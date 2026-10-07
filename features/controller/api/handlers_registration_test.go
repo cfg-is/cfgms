@@ -10,10 +10,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -3653,4 +3655,76 @@ func TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice(t *testi
 		}
 	}
 	assert.Equal(t, 1, count, "exactly one steward record must exist for the shared ID")
+}
+
+// registerAndListPending quarantines one device carrying the given hostname and
+// returns the list item the operator would see (Issue #4598).
+func registerAndListPending(t *testing.T, hostname string) PendingRegistration {
+	t.Helper()
+	server, ts, _ := newRegistrationApprovalServer(t)
+	defer ts.Close()
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_pending_identity",
+		TenantID:      "default",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, server.registrationTokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          tok.Token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+		Hostname:       hostname,
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/api/v1/registration/pending", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer reg-approval-key")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var pending []PendingRegistration
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+	require.Len(t, pending, 1)
+	return pending[0]
+}
+
+func TestHandleRegister_StoresHostnameAndCSRKeyFingerprint(t *testing.T) {
+	block, _ := pem.Decode([]byte(testValidCSRPEM))
+	require.NotNil(t, block)
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	require.NoError(t, err)
+	sum := sha256.Sum256(csr.RawSubjectPublicKeyInfo)
+	want := hex.EncodeToString(sum[:])
+
+	item := registerAndListPending(t, "ws-042.corp.example")
+
+	assert.Equal(t, "ws-042.corp.example", item.Hostname)
+	assert.Equal(t, want, item.KeyFingerprint, "fingerprint must be SHA-256 of the CSR SubjectPublicKeyInfo")
+	assert.Equal(t, "default", item.TenantID)
+}
+
+func TestHandleRegister_HostnameIsSanitisedOnWrite(t *testing.T) {
+	item := registerAndListPending(t, "<img src=x onerror=alert(1)>ws\x00-\n01\x1b[31m")
+
+	assert.NotContains(t, item.Hostname, "<")
+	assert.NotContains(t, item.Hostname, ">")
+	for _, r := range item.Hostname {
+		assert.GreaterOrEqual(t, r, rune(0x20), "control characters must be stripped")
+	}
+	assert.NotEmpty(t, item.Hostname)
+}
+
+func TestSanitizeHostnameHint(t *testing.T) {
+	assert.Equal(t, "", sanitizeHostnameHint(""))
+	assert.Equal(t, "host-1.example", sanitizeHostnameHint("  host-1.example "))
+	long := strings.Repeat("a", 500)
+	assert.Len(t, sanitizeHostnameHint(long), maxHostnameHintLen)
+	assert.Equal(t, "", sanitizeHostnameHint("<>\x00\n"))
 }

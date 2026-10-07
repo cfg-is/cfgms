@@ -63,6 +63,7 @@ func testDBPendingEntry(pendingID, tenantID string) *business.PendingRegistratio
 		CSRPEM:             "-----BEGIN CERTIFICATE REQUEST-----\n" + pendingID + "\n-----END CERTIFICATE REQUEST-----",
 		Hostname:           "host-" + pendingID,
 		Platform:           "linux",
+		KeyFingerprint:     "fpr-" + pendingID,
 	}
 }
 
@@ -79,6 +80,7 @@ func assertDBDeviceIdentity(t *testing.T, pendingID string, got *business.Pendin
 	assert.Equal(t, "-----BEGIN CERTIFICATE REQUEST-----\n"+pendingID+"\n-----END CERTIFICATE REQUEST-----", got.CSRPEM, "csr_pem must round-trip")
 	assert.Equal(t, "host-"+pendingID, got.Hostname, "hostname must round-trip")
 	assert.Equal(t, "linux", got.Platform, "platform must round-trip")
+	assert.Equal(t, "fpr-"+pendingID, got.KeyFingerprint, "key_fingerprint must round-trip")
 }
 
 // TestDatabasePendingRegistrationStore_AddAndGetByID verifies round-trip persistence

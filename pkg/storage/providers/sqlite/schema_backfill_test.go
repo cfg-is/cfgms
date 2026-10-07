@@ -679,7 +679,7 @@ const legacyCfgmsPendingRegistrationsSchema = `CREATE TABLE IF NOT EXISTS cfgms_
 // cfgmsPendingDeviceIdentityColumns are the five columns added by Issue #3403,
 // plus csr_pem added by Issue #3780.
 var cfgmsPendingDeviceIdentityColumns = []string{
-	"device_id", "identity_key_pub", "key_protection_level", "csr_pem", "hostname", "platform",
+	"device_id", "identity_key_pub", "key_protection_level", "csr_pem", "hostname", "platform", "key_fingerprint",
 }
 
 // TestBackfillCfgmsPendingRegistrationColumns_LegacyTable verifies that
@@ -722,6 +722,7 @@ func TestBackfillCfgmsPendingRegistrationColumns_LegacyTable(t *testing.T) {
 		CSRPEM:             "-----BEGIN CERTIFICATE REQUEST-----\nlegacy\n-----END CERTIFICATE REQUEST-----",
 		Hostname:           "host-legacy",
 		Platform:           "linux",
+		KeyFingerprint:     "fpr-legacy",
 	}
 	require.NoError(t, store.AddPending(ctx, entry), "back-filled table must accept a full entry")
 
@@ -733,6 +734,7 @@ func TestBackfillCfgmsPendingRegistrationColumns_LegacyTable(t *testing.T) {
 	assert.Equal(t, entry.CSRPEM, got.CSRPEM)
 	assert.Equal(t, "host-legacy", got.Hostname)
 	assert.Equal(t, "linux", got.Platform)
+	assert.Equal(t, "fpr-legacy", got.KeyFingerprint)
 }
 
 // TestBackfillCfgmsPendingRegistrationColumns_Idempotent verifies that a second

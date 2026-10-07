@@ -84,6 +84,12 @@ type PendingRegistrationEntry struct {
 
 	// Platform is the best-effort OS hint seeded from registration (e.g. "linux").
 	Platform string
+
+	// KeyFingerprint is the lowercase hex SHA-256 of the CSR's public key
+	// (DER SubjectPublicKeyInfo). Unlike Hostname it is derived by the controller
+	// from the submitted CSR, so it is the verifiable value an operator can check
+	// out of band. Empty for entries created before this field existed.
+	KeyFingerprint string
 }
 
 // PendingRegistrationStore defines the storage interface for durable persistence of

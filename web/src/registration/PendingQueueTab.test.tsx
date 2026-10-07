@@ -39,6 +39,9 @@ function makeEntry(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     pending_id: 'pend-abc123',
     steward_id: 'stwd-xyz789',
+    tenant_id: 'acme-corp',
+    hostname: 'web-07.acme.lan',
+    key_fingerprint: '9c4a1f0e77b2d3a85c6e4f1029ab38d7e5c1f6a0b49d82e3c7f15a60d4b2e1ff',
     source_ip: '10.0.0.1',
     registered_at: '2026-07-25T10:00:00Z',
     ...overrides,
@@ -81,6 +84,9 @@ describe('parsePendingEntry', () => {
     expect(entry).toEqual({
       pending_id: 'pend-abc123',
       steward_id: 'stwd-xyz789',
+      tenant_id: 'acme-corp',
+      hostname: 'web-07.acme.lan',
+      key_fingerprint: '9c4a1f0e77b2d3a85c6e4f1029ab38d7e5c1f6a0b49d82e3c7f15a60d4b2e1ff',
       source_ip: '10.0.0.1',
       registered_at: '2026-07-25T10:00:00Z',
     })
@@ -96,6 +102,9 @@ describe('parsePendingEntry', () => {
     expect(entry).toEqual({
       pending_id: 'pend-1',
       steward_id: '',
+      tenant_id: '',
+      hostname: '',
+      key_fingerprint: '',
       source_ip: '',
       registered_at: '',
     })
@@ -537,5 +546,46 @@ describe('PendingQueueTab — approve by CIDR', () => {
     expect(screen.getByTestId('cidr-approve-error')).toHaveTextContent('401')
     // Modal stays open so the operator can retry.
     expect(screen.getByTestId('cidr-modal')).toBeInTheDocument()
+  })
+})
+
+// ── Hostname, fingerprint and tenant (Issue #4598) ────────────────────────────
+
+describe('PendingQueueTab identity columns', () => {
+  it('parses hostname, key_fingerprint and tenant_id', () => {
+    const entry = parsePendingEntry(makeEntry())
+    expect(entry?.hostname).toBe('web-07.acme.lan')
+    expect(entry?.tenant_id).toBe('acme-corp')
+    expect(entry?.key_fingerprint).toMatch(/^9c4a/)
+  })
+
+  it('shows hostname, shortened fingerprint and tenant', async () => {
+    fetchMock.mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+    renderTab()
+    const row = await screen.findByTestId('pending-row')
+    expect(row.textContent).toContain('web-07.acme.lan')
+    expect(screen.getByTestId('pending-fingerprint').textContent).toBe('fpr sha256:9c4a…ff')
+    expect(screen.getByTestId('pending-fingerprint').getAttribute('title')).toContain('9c4a1f0e')
+    expect(screen.getByTestId('pending-tenant').textContent).toBe('acme-corp')
+    expect(screen.getByText('Hostname (self-reported)')).toBeTruthy()
+  })
+
+  it('shows an em dash for entries without hostname or fingerprint', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makePendingResponse([makeEntry({ hostname: undefined, key_fingerprint: undefined })]),
+    )
+    renderTab()
+    await screen.findByTestId('pending-row')
+    expect(screen.getByTestId('pending-hostname').textContent).toBe('—')
+  })
+
+  it('renders a hostname containing markup as text, not elements', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makePendingResponse([makeEntry({ hostname: '<img src=x onerror=alert(1)>' })]),
+    )
+    renderTab()
+    const cell = await screen.findByTestId('pending-hostname')
+    expect(cell.textContent).toContain('<img src=x onerror=alert(1)>')
+    expect(cell.querySelector('img')).toBeNull()
   })
 })
