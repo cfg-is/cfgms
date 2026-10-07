@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.5] - 2026-10-02
+## [0.10.5] - 2026-10-07
 
 Stable snapshot promoted to `main`, covering the v0.10.0–v0.10.5 roadmap milestones. Bundles the
 controller-served web console, passkey-first operator identity with step-up and operator-signed
