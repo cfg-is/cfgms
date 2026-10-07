@@ -2546,3 +2546,88 @@ func TestCertificateHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code,
 		"signing rotation must succeed on an authoritative node; body: %s", rec.Body.String())
 }
+
+// TestHandleListCertificates_TenantAndIssuedAt_BothBranches verifies that list
+// items carry the owning steward's tenant and the certificate's creation time as
+// issued_at, on both the unfiltered and ?steward_id= branches, and that a cert
+// whose steward has no record omits tenant_id.
+func TestHandleListCertificates_TenantAndIssuedAt_BothBranches(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-client1", TenantID: "client-1", Hostname: "host1", Platform: "linux", Arch: "amd64",
+	}))
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-client2", TenantID: "client-2", Hostname: "host2", Platform: "linux", Arch: "amd64",
+	}))
+	for _, id := range []string{"steward-client1", "steward-client2", "steward-unmapped"} {
+		_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName: id, Organization: "Test CFGMS", ClientID: id, ValidityDays: 365,
+		})
+		require.NoError(t, err)
+	}
+
+	created := map[string]time.Time{}
+	infos, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	for _, ci := range infos {
+		created[ci.SerialNumber] = ci.CreatedAt
+	}
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "operator-admin", Organization: "CFGMS", ValidityDays: 1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	adminX509, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	get := func(t *testing.T, url, key string) []CertificateInfo {
+		req := httptest.NewRequest("GET", url, nil)
+		if key == "" {
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminX509}}
+		} else {
+			req.Header.Set("X-API-Key", key)
+		}
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Data []CertificateInfo `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp.Data
+	}
+
+	wantTenant := map[string]string{"steward-client1": "client-1", "steward-client2": "client-2", "steward-unmapped": ""}
+
+	check := func(t *testing.T, items []CertificateInfo) {
+		for _, c := range items {
+			want, ok := wantTenant[c.StewardID]
+			if !ok {
+				continue
+			}
+			assert.Equal(t, want, c.TenantID, "tenant for %s", c.StewardID)
+			assert.True(t, created[c.SerialNumber].Equal(c.IssuedAt), "issued_at for %s", c.StewardID)
+			assert.False(t, c.IssuedAt.IsZero())
+		}
+	}
+
+	all := get(t, "/api/v1/certificates", "")
+	check(t, all)
+	assert.GreaterOrEqual(t, len(all), 3)
+
+	filtered := get(t, "/api/v1/certificates?steward_id=steward-client1", "")
+	require.Len(t, filtered, 1)
+	check(t, filtered)
+	assert.Equal(t, "client-1", filtered[0].TenantID)
+
+	// Scoped caller sees only their tenant's rows, each carrying that tenant.
+	scopedKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	for _, c := range get(t, "/api/v1/certificates", scopedKey) {
+		assert.NotEqual(t, "steward-client2", c.StewardID)
+		if c.StewardID == "steward-client1" {
+			assert.Equal(t, "client-1", c.TenantID)
+		}
+	}
+}

@@ -187,6 +187,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 				CommonName:          certInfo.CommonName,
 				StewardID:           ownerStewardID,
 				IsValid:             certInfo.IsValid,
+				IssuedAt:            certInfo.CreatedAt,
 				ExpiresAt:           certInfo.ExpiresAt,
 				DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration), // Safe conversion with bounds validation
 				NeedsRenewal:        certInfo.NeedsRenewal,
@@ -205,12 +206,15 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 				CommonName:          certInfo.CommonName,
 				StewardID:           certInfo.ClientID,
 				IsValid:             certInfo.IsValid,
+				IssuedAt:            certInfo.CreatedAt,
 				ExpiresAt:           certInfo.ExpiresAt,
 				DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration),
 				NeedsRenewal:        certInfo.NeedsRenewal,
 			})
 		}
 	}
+
+	s.attachCertTenants(r.Context(), certificates)
 
 	// Apply tenant-scope filter: scoped callers only see certs for stewards
 	// within their own tenant subtree. Only an unscoped admin (callerTenant == "")
@@ -241,6 +245,34 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.writeSuccessResponse(w, certificates)
+}
+
+// attachCertTenants sets TenantID on each certificate from its owning steward's
+// record. Rows with no steward, no durable record, or a failed lookup keep an
+// empty tenant (omitted from the response); the scope filter, not this
+// enrichment, decides visibility.
+func (s *Server) attachCertTenants(ctx context.Context, certs []CertificateInfo) {
+	if s.stewardStore == nil {
+		return
+	}
+	tenants := make(map[string]string)
+	for i := range certs {
+		id := certs[i].StewardID
+		if id == "" {
+			continue
+		}
+		tenant, cached := tenants[id]
+		if !cached {
+			if record, err := s.stewardStore.GetSteward(ctx, id); err == nil {
+				tenant = record.TenantID
+			} else if !errors.Is(err, business.ErrStewardNotFound) {
+				s.logger.Warn("Tenant lookup for certificate failed",
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+			tenants[id] = tenant
+		}
+		certs[i].TenantID = tenant
+	}
 }
 
 // filterCertsByTenantScope keeps only the certificates a caller scoped to

@@ -1409,6 +1409,13 @@ components:
           format: date-time
         revoked:
           type: boolean
+        tenant_id:
+          type: string
+          description: Tenant of the owning steward; omitted when the certificate has no owning steward record.
+        issued_at:
+          type: string
+          format: date-time
+          description: Time the certificate was issued.
 
     CertificateRequest:
       type: object
