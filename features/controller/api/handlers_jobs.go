@@ -288,7 +288,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isWithinTenantScope(tenantID, job.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.isWithinTenantScope(r.Context(), tenantID, job.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing job existence across tenants
 		// (Issue #4091) — mirrors the genuine not-found response above so a caller
 		// cannot distinguish "absent" from "exists in another tenant".

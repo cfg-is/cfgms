@@ -537,23 +537,24 @@ func TestAccounts_RootScope_AppearsInList(t *testing.T) {
 // a caller scoped to client-1 must never see an account belonging to sibling tenant client-2.
 func TestAccounts_TenantScope_SiblingExclusion(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 	admin := testAdminPrincipal()
 
 	rec := postAccount(t, server, admin, AccountRequest{
 		Username: "client2-user",
-		TenantID: "root/msp-a/client-2",
+		TenantID: "client-2",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	rec = postAccount(t, server, admin, AccountRequest{
 		Username: "client1-user",
-		TenantID: "root/msp-a/client-1",
+		TenantID: "client-1",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	client1Principal := &Principal{
 		ID:        "client1-admin",
-		TenantID:  "root/msp-a/client-1",
+		TenantID:  "client-1",
 		Assurance: session.AssuranceBasic,
 	}
 	_, accounts := listAccounts(t, server, client1Principal)
@@ -567,27 +568,28 @@ func TestAccounts_TenantScope_SiblingExclusion(t *testing.T) {
 }
 
 // TestAccounts_TenantScope_SubtreeInclusion is the [REQUIRED TEST] from Issue #3137:
-// a caller scoped to root/msp-a DOES see an account belonging to root/msp-a/client-1
+// a caller scoped to root/msp-a DOES see an account belonging to client-1
 // (subtree inclusion, not exact-match-only).
 func TestAccounts_TenantScope_SubtreeInclusion(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 	admin := testAdminPrincipal()
 
 	rec := postAccount(t, server, admin, AccountRequest{
 		Username: "parent-user",
-		TenantID: "root/msp-a",
+		TenantID: "msp-a",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	rec = postAccount(t, server, admin, AccountRequest{
 		Username: "child-user",
-		TenantID: "root/msp-a/client-1",
+		TenantID: "client-1",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	mspaAdmin := &Principal{
 		ID:        "msp-a-admin",
-		TenantID:  "root/msp-a",
+		TenantID:  "msp-a",
 		Assurance: session.AssuranceBasic,
 	}
 	_, accounts := listAccounts(t, server, mspaAdmin)
@@ -604,11 +606,12 @@ func TestAccounts_TenantScope_SubtreeInclusion(t *testing.T) {
 // (callerTenant == "") still sees all accounts including those in multiple tenants.
 func TestAccounts_TenantScope_UnscopedAdminSeesAll(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 	admin := testAdminPrincipal()
 
 	for _, req := range []AccountRequest{
-		{Username: "scope-all-a", TenantID: "root/msp-a/client-1"},
-		{Username: "scope-all-b", TenantID: "root/msp-a/client-2"},
+		{Username: "scope-all-a", TenantID: "client-1"},
+		{Username: "scope-all-b", TenantID: "client-2"},
 		{Username: "scope-all-root", RootScope: true},
 	} {
 		rec := postAccount(t, server, admin, req)
@@ -660,16 +663,17 @@ func TestAccounts_RootScope_DeleteWorks(t *testing.T) {
 // the account) before the fix and be refused after.
 func TestAccounts_Delete_CrossTenantForbidden(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username: "client2-delete-target",
-		TenantID: "root/msp-a/client-2",
+		TenantID: "client-2",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in client-2")
 
 	client1Admin := &Principal{
 		ID:        "client1-delete-admin",
-		TenantID:  "root/msp-a/client-1",
+		TenantID:  "client-1",
 		Assurance: session.AssuranceStrong,
 	}
 	delRec := deleteAccount(t, server, client1Admin, "client2-delete-target")
@@ -686,16 +690,17 @@ func TestAccounts_Delete_CrossTenantForbidden(t *testing.T) {
 // delete an account belonging to its own tenant.
 func TestAccounts_Delete_OwnTenantSucceeds(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username: "client1-delete-target",
-		TenantID: "root/msp-a/client-1",
+		TenantID: "client-1",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in client-1")
 
 	client1Admin := &Principal{
 		ID:        "client1-delete-admin",
-		TenantID:  "root/msp-a/client-1",
+		TenantID:  "client-1",
 		Assurance: session.AssuranceStrong,
 	}
 	delRec := deleteAccount(t, server, client1Admin, "client1-delete-target")
@@ -708,10 +713,11 @@ func TestAccounts_Delete_OwnTenantSucceeds(t *testing.T) {
 // refused, never treated as unrestricted root access.
 func TestAccounts_Delete_UnsetScope_Returns404(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username: "unset-scope-delete-target",
-		TenantID: "root/msp-a/client-1",
+		TenantID: "client-1",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account")
 
@@ -728,16 +734,17 @@ func TestAccounts_Delete_UnsetScope_Returns404(t *testing.T) {
 // an account carrying certificate:rotate — a permission it does not itself hold.
 func TestAccounts_CreateEscalation_CannotGrantPermissionCallerDoesNotHold(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	limitedCaller := &Principal{
 		ID:          "limited-account-caller",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Assurance:   session.AssuranceStrong,
 		Permissions: []string{"account:create"},
 	}
 	rec := postAccount(t, server, limitedCaller, AccountRequest{
 		Username:    "escalation-target",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Permissions: []string{"certificate:rotate"},
 	})
 
@@ -760,10 +767,11 @@ func TestAccounts_CreateEscalation_CannotGrantPermissionCallerDoesNotHold(t *tes
 // refused and neither the passkeys nor the link state change.
 func TestAccounts_CreateEscalation_ResetCannotRetainPermissionsCallerDoesNotHold(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username:    "privileged-admin",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Permissions: []string{"certificate:rotate"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create privileged account")
@@ -785,7 +793,7 @@ func TestAccounts_CreateEscalation_ResetCannotRetainPermissionsCallerDoesNotHold
 
 	limitedCaller := &Principal{
 		ID:          "limited-reset-caller",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Assurance:   session.AssuranceStrong,
 		Permissions: []string{"account:create"},
 	}
@@ -814,17 +822,18 @@ func TestAccounts_CreateEscalation_ResetCannotRetainPermissionsCallerDoesNotHold
 // reset — a caller that holds everything the target holds may still reset it.
 func TestAccounts_CreateEscalation_ResetOfEquallyPrivilegedAccountSucceeds(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username:    "peer-admin",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Permissions: []string{"certificate:rotate"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account")
 
 	peerCaller := &Principal{
 		ID:          "peer-reset-caller",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Assurance:   session.AssuranceStrong,
 		Permissions: []string{"account:create", "certificate:rotate"},
 	}
@@ -847,16 +856,17 @@ func TestAccounts_CreateEscalation_ResetOfEquallyPrivilegedAccountSucceeds(t *te
 // equivalent of TestAccounts_CreateEscalation_CannotGrantPermissionCallerDoesNotHold.
 func TestAccounts_UpdateEscalation_CannotGrantPermissionCallerDoesNotHold(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username: "update-escalation-target",
-		TenantID: "root/msp-a/client-1",
+		TenantID: "client-1",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account")
 
 	limitedCaller := &Principal{
 		ID:          "limited-update-caller",
-		TenantID:    "root/msp-a/client-1",
+		TenantID:    "client-1",
 		Assurance:   session.AssuranceStrong,
 		Permissions: []string{"account:update"},
 	}
@@ -1197,19 +1207,20 @@ func TestAccounts_EnrollmentLinkAuditRevoke(t *testing.T) {
 // regardless of whether a link is outstanding (prevents cross-tenant oracle).
 func TestAccounts_RevokeEnrollmentLink_CrossTenantForbidden(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 	admin := testAdminPrincipal()
 
 	// Create the target account in client-2.
 	rec := postAccount(t, server, admin, AccountRequest{
 		Username: "client2-target",
-		TenantID: "root/msp-a/client-2",
+		TenantID: "client-2",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in client-2")
 
 	// Caller is a client-1 scoped admin — out-of-subtree for client-2.
 	client1Admin := &Principal{
 		ID:        "client1-admin",
-		TenantID:  "root/msp-a/client-1",
+		TenantID:  "client-1",
 		Assurance: session.AssuranceStrong,
 	}
 	revokeRec := revokeEnrollmentLink(t, server, client1Admin, "client2-target")
@@ -1393,11 +1404,12 @@ func TestAccounts_ResetCredentialsMintsFreshLink(t *testing.T) {
 // root-scoped account, or pull an out-of-subtree account into its own tenant.
 func TestAccounts_CreateEnforcesTenantScope(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 
 	// An out-of-subtree account provisioned by an unscoped mTLS admin.
 	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username: "sibling-tenant-user",
-		TenantID: "root/msp-a/client-2",
+		TenantID: "client-2",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in client-2")
 	siblingToken := parseCreateResponse(t, rec).EnrollmentMagicLink
@@ -1409,14 +1421,14 @@ func TestAccounts_CreateEnforcesTenantScope(t *testing.T) {
 
 	client1Admin := &Principal{
 		ID:        "client1-admin",
-		TenantID:  "root/msp-a/client-1",
+		TenantID:  "client-1",
 		Assurance: session.AssuranceStrong,
 	}
 
 	t.Run("cross-tenant create is forbidden", func(t *testing.T) {
 		rec := postAccount(t, server, client1Admin, AccountRequest{
 			Username: "cross-tenant-user",
-			TenantID: "root/msp-a/client-2",
+			TenantID: "client-2",
 		})
 		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 
@@ -1436,7 +1448,7 @@ func TestAccounts_CreateEnforcesTenantScope(t *testing.T) {
 	t.Run("reset of an out-of-subtree account is forbidden", func(t *testing.T) {
 		rec := postAccount(t, server, client1Admin, AccountRequest{
 			Username: "sibling-tenant-user",
-			TenantID: "root/msp-a/client-1",
+			TenantID: "client-1",
 		})
 		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 
@@ -1451,7 +1463,7 @@ func TestAccounts_CreateEnforcesTenantScope(t *testing.T) {
 		acct, err := server.getAccount(context.Background(), "sibling-tenant-user")
 		require.NoError(t, err)
 		require.NotNil(t, acct)
-		assert.Equal(t, "root/msp-a/client-2", acct.TenantID, "the record must stay in client-2")
+		assert.Equal(t, "client-2", acct.TenantID, "the record must stay in client-2")
 		assert.Equal(t, siblingHash, acct.EnrollmentLinkHash, "the stored link must be untouched")
 		assert.False(t, acct.EnrollmentLinkRevoked, "the stored link must be untouched")
 	})
@@ -1459,7 +1471,7 @@ func TestAccounts_CreateEnforcesTenantScope(t *testing.T) {
 	t.Run("create inside the caller subtree succeeds", func(t *testing.T) {
 		rec := postAccount(t, server, client1Admin, AccountRequest{
 			Username: "in-subtree-user",
-			TenantID: "root/msp-a/client-1/servers",
+			TenantID: "client-1-servers",
 		})
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 		cr := parseCreateResponse(t, rec)
@@ -1580,17 +1592,18 @@ func TestAccounts_Get_NotFound(t *testing.T) {
 // not 403 — the account's existence in another tenant must not be disclosed.
 func TestAccounts_Get_CrossTenantGets404(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 	admin := testAdminPrincipal()
 
 	rec := postAccount(t, server, admin, AccountRequest{
 		Username: "client2-get-user",
-		TenantID: "root/msp-a/client-2",
+		TenantID: "client-2",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	client1Admin := &Principal{
 		ID:        "client1-admin",
-		TenantID:  "root/msp-a/client-1",
+		TenantID:  "client-1",
 		Assurance: session.AssuranceStrong,
 	}
 	rec = getAccountHandler(t, server, client1Admin, "client2-get-user")
@@ -2801,6 +2814,7 @@ func (c *listSecretsCapture) snapshot() []listSecretsCall {
 // The backend honours filter.TenantID per #3438, so a scoped call = bounded decrypt.
 func TestGetAccountByID_DecryptScopedToTenant(t *testing.T) {
 	server := setupTestServer(t)
+	seedAccountTenants(t, server)
 	admin := testAdminPrincipal()
 
 	const tenantA = "msp-a"
@@ -3197,4 +3211,52 @@ func TestAccounts_Offboarding_SessionRevocationFailureLeavesDisabledAndUndeleted
 	require.NotNil(t, surviving, "account must still exist in the store (not deleted)")
 	assert.True(t, surviving.Disabled,
 		"account must be disabled — the cascade disables before attempting revocations")
+}
+
+// seedAccountTenants creates, through the server's real tenant manager, the
+// hierarchy these tests rely on: root > msp-a > {client-1 > client-1-servers,
+// client-2}, plus msp-b and the shared-prefix sibling msp-ab under root.
+func seedAccountTenants(t *testing.T, server *Server) {
+	t.Helper()
+	seedTenantTree(t, server)
+	ctx := context.Background()
+	for _, req := range []*tenant.TenantRequest{
+		{ID: "client-2", ParentID: "msp-a"},
+		{ID: "client-1-servers", ParentID: "client-1"},
+	} {
+		if _, err := server.tenantManager.CreateTenant(ctx, req); err != nil && !errors.Is(err, tenant.ErrTenantExists) {
+			require.NoError(t, err)
+		}
+	}
+}
+
+// TestAccounts_ListTenantScope_ParentSeesChildNotSibling: a caller scoped to
+// msp-a sees client-1's accounts through ParentID ancestry, and none of
+// msp-b's or the shared-prefix sibling msp-ab's.
+func TestAccounts_ListTenantScope_ParentSeesChildNotSibling(t *testing.T) {
+	server := setupTestServer(t)
+	seedAccountTenants(t, server)
+	admin := testAdminPrincipal()
+
+	for _, req := range []AccountRequest{
+		{Username: "lt-msp-a-user", TenantID: "msp-a"},
+		{Username: "lt-client1-user", TenantID: "client-1"},
+		{Username: "lt-msp-b-user", TenantID: "msp-b"},
+		{Username: "lt-msp-ab-user", TenantID: "msp-ab"},
+	} {
+		rec := postAccount(t, server, admin, req)
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	}
+
+	mspaAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceBasic}
+	_, accounts := listAccounts(t, server, mspaAdmin)
+
+	usernames := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		usernames = append(usernames, a.Username)
+	}
+	assert.Contains(t, usernames, "lt-msp-a-user")
+	assert.Contains(t, usernames, "lt-client1-user", "descendant tenant's accounts must be listed")
+	assert.NotContains(t, usernames, "lt-msp-b-user", "sibling tenant's accounts must not be listed")
+	assert.NotContains(t, usernames, "lt-msp-ab-user", "shared-prefix sibling's accounts must not be listed")
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -1114,7 +1115,8 @@ func requestWithTargetTenant(method, path, targetTenant, apiKey string) *http.Re
 
 func TestTenantIsolation_SubtreeBoundaryEnforcedWithoutIsolationEngine(t *testing.T) {
 	server := setupTestServer(t) // isolation engine is deliberately not wired
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:list"}, "msp-a/client-1", 5*time.Minute)
+	seedTenantTree(t, server)
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:list"}, "msp-a", 5*time.Minute)
 	handler := server.authenticationMiddleware(
 		server.requirePermission("steward", "list")(
 			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1126,11 +1128,12 @@ func TestTenantIsolation_SubtreeBoundaryEnforcedWithoutIsolationEngine(t *testin
 		targetTenant string
 		wantStatus   int
 	}{
-		{name: "same tenant", targetTenant: "msp-a/client-1", wantStatus: http.StatusOK},
-		{name: "child tenant", targetTenant: "msp-a/client-1/group-a", wantStatus: http.StatusOK},
-		{name: "sibling tenant", targetTenant: "msp-a/client-2", wantStatus: http.StatusForbidden},
-		{name: "parent tenant", targetTenant: "msp-a", wantStatus: http.StatusForbidden},
-		{name: "prefix collision", targetTenant: "msp-a/client-10", wantStatus: http.StatusForbidden},
+		{name: "same tenant", targetTenant: "msp-a", wantStatus: http.StatusOK},
+		{name: "child tenant", targetTenant: "client-1", wantStatus: http.StatusOK},
+		{name: "sibling tenant", targetTenant: "msp-b", wantStatus: http.StatusForbidden},
+		{name: "parent tenant", targetTenant: testRootTenantID, wantStatus: http.StatusForbidden},
+		{name: "prefix collision", targetTenant: "msp-ab", wantStatus: http.StatusForbidden},
+		{name: "unknown tenant fails closed", targetTenant: "no-such-tenant", wantStatus: http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := requestWithTargetTenant(http.MethodGet, "/api/v1/stewards", tc.targetTenant, apiKey)
@@ -3272,8 +3275,11 @@ func TestExtractAdminPrincipal_CNReuse_ResolvesToDistinctAccountIDs(t *testing.T
 		"two certs with the same CN but different serials must never share the same Principal.ID")
 }
 
-// TestIsWithinTenantScope verifies the helper introduced by Issue #3147.
+// TestIsWithinTenantScope verifies the helper introduced by Issue #3147: an empty
+// caller is unrestricted; otherwise containment resolves through ParentID ancestry.
 func TestIsWithinTenantScope(t *testing.T) {
+	srv := setupTestServer(t)
+	seedTenantTree(t, srv)
 	tests := []struct {
 		callerTenant   string
 		resourceTenant string
@@ -3283,68 +3289,139 @@ func TestIsWithinTenantScope(t *testing.T) {
 		{"", "any-tenant", true, "unscoped admin (empty caller) always allowed"},
 		{"", "", true, "unscoped admin with empty resource tenant"},
 		{"msp-a", "msp-a", true, "same-tenant match"},
-		{"msp-a", "msp-a/client-1", true, "direct descendant allowed"},
-		{"msp-a", "msp-a/client-1/server", true, "deep descendant allowed"},
+		{"msp-a", "client-1", true, "ParentID descendant allowed"},
 		{"msp-a", "msp-b", false, "sibling tenant denied"},
-		{"msp-a", "msp-alpha", false, "sibling with shared prefix denied (no slash separator)"},
-		{"msp-a", "root/msp-a", false, "ancestor not in subtree denied"},
-		{"root/msp-a", "root/msp-a", true, "hierarchical path same-tenant"},
-		{"root/msp-a", "root/msp-a/client-1", true, "hierarchical path descendant"},
-		{"root/msp-a", "root/msp-alpha", false, "hierarchical sibling-prefix denied"},
-		{"root/msp-a", "root/msp-b", false, "hierarchical sibling denied"},
-		{"client-1", "client-2", false, "flat sibling denied (required AC)"},
-		{"client-1", "client-10", false, "flat sibling-prefix denied"},
-		{"client-1", "client-1", true, "flat same-tenant"},
+		{"msp-a", "msp-ab", false, "sibling with shared prefix denied"},
+		{"client-1", "msp-a", false, "ancestor not in subtree denied"},
+		{"msp-a", "no-such-tenant", false, "unknown tenant denied"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got := isWithinTenantScope(tc.callerTenant, tc.resourceTenant)
+			got := srv.isWithinTenantScope(context.Background(), tc.callerTenant, tc.resourceTenant)
 			assert.Equal(t, tc.want, got,
 				"isWithinTenantScope(%q, %q)", tc.callerTenant, tc.resourceTenant)
 		})
 	}
 }
 
+// TestTenantSubtreeContains_FailsClosed covers every input that must deny: no
+// tenant manager, an empty ID, an unknown tenant, and a dangling ParentID.
+func TestTenantSubtreeContains_FailsClosed(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil_tenant_manager", func(t *testing.T) {
+		srv := &Server{logger: logging.NewNoopLogger()}
+		assert.False(t, srv.tenantSubtreeContains(ctx, "msp-a", "client-1"))
+		assert.True(t, srv.tenantSubtreeContains(ctx, "msp-a", "msp-a"), "own tenant needs no lookup")
+	})
+
+	srv := setupTestServer(t)
+	seedTenantTree(t, srv)
+
+	t.Run("empty_ids", func(t *testing.T) {
+		assert.False(t, srv.tenantSubtreeContains(ctx, "", "client-1"))
+		assert.False(t, srv.tenantSubtreeContains(ctx, "msp-a", ""))
+		assert.False(t, srv.tenantSubtreeContains(ctx, "", ""))
+	})
+
+	t.Run("unknown_resource_tenant", func(t *testing.T) {
+		assert.False(t, srv.tenantSubtreeContains(ctx, "msp-a", "no-such-tenant"))
+	})
+
+	t.Run("dangling_parent_id", func(t *testing.T) {
+		v, ok := testTenantStores.Load(srv.tenantManager)
+		require.True(t, ok)
+		now := time.Now()
+		require.NoError(t, v.(tenant.Store).CreateTenant(ctx, &business.TenantData{
+			ID: "orphan", Name: "orphan", ParentID: "vanished-parent",
+			Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now,
+		}))
+		assert.False(t, srv.tenantSubtreeContains(ctx, "msp-a", "orphan"))
+		assert.False(t, srv.tenantSubtreeContains(ctx, testRootTenantID, "orphan"))
+	})
+
+	t.Run("real_descendant_allowed", func(t *testing.T) {
+		assert.True(t, srv.tenantSubtreeContains(ctx, "msp-a", "client-1"))
+		assert.True(t, srv.tenantSubtreeContains(ctx, testRootTenantID, "client-1"))
+	})
+}
+
+// TestTenantSubtreeIDs resolves a caller's descendant set in one walk.
+func TestTenantSubtreeIDs(t *testing.T) {
+	srv := setupTestServer(t)
+	seedTenantTree(t, srv)
+	ctx := context.Background()
+
+	set := srv.tenantSubtreeIDs(ctx, "msp-a")
+	assert.True(t, set.Contains("msp-a"))
+	assert.True(t, set.Contains("client-1"))
+	assert.False(t, set.Contains("msp-b"))
+	assert.False(t, set.Contains("msp-ab"))
+	assert.False(t, set.Contains(""))
+
+	assert.Empty(t, srv.tenantSubtreeIDs(ctx, ""))
+
+	noMgr := &Server{logger: logging.NewNoopLogger()}
+	only := noMgr.tenantSubtreeIDs(ctx, "msp-a")
+	assert.True(t, only.Contains("msp-a"))
+	assert.False(t, only.Contains("client-1"), "no tenant manager: descendants are not granted")
+}
+
+// TestSelectorPathWithinCaller pins the pure selector-path comparison, which is
+// string-based by design and not a tenant-ID check.
+func TestSelectorPathWithinCaller(t *testing.T) {
+	assert.True(t, selectorPathWithinCaller("msp-a", "msp-a"))
+	assert.True(t, selectorPathWithinCaller("msp-a", "msp-a/client-1"))
+	assert.False(t, selectorPathWithinCaller("msp-a", "msp-ab"))
+	assert.False(t, selectorPathWithinCaller("msp-a", "msp-b/client-1"))
+}
+
 // TestIsAuthorizedForTenant verifies the fail-closed ctxkeys.TenantScope helper
-// introduced by Issue #4316: unset denies, root allows unconditionally, a tenant
-// scope allows its own subtree, and a tenant scope is refused a sibling subtree —
-// the four required states from the story's acceptance criteria.
+// (Issue #4316) over real tenants: unset denies, root allows, a tenant scope allows
+// itself and its ParentID descendants and is refused siblings, shared-prefix
+// siblings and ancestors. tenantScopeDecision (the RollbackHandler form) is held
+// to the same table.
 func TestIsAuthorizedForTenant(t *testing.T) {
-	srv := &Server{logger: logging.NewNoopLogger()}
+	srv := setupTestServer(t)
+	seedTenantTree(t, srv)
+	ctx := context.Background()
+	const route = "GET /api/v1/stewards/{id}"
 
-	t.Run("unset_scope_denies", func(t *testing.T) {
-		var unset ctxkeys.TenantScope
-		assert.False(t, srv.isAuthorizedForTenant(context.Background(), unset, "root/msp-a", "GET /api/v1/stewards/{id}"))
-	})
+	var unset ctxkeys.TenantScope
+	root := ctxkeys.NewRootScope()
+	msp := ctxkeys.NewTenantScope("msp-a")
+	degenerate := ctxkeys.NewTenantScope("")
 
-	t.Run("root_scope_allows", func(t *testing.T) {
-		root := ctxkeys.NewRootScope()
-		assert.True(t, srv.isAuthorizedForTenant(context.Background(), root, "root/msp-a", "GET /api/v1/stewards/{id}"))
-		assert.True(t, srv.isAuthorizedForTenant(context.Background(), root, "", "GET /api/v1/stewards/{id}"))
-	})
+	tests := []struct {
+		name     string
+		scope    ctxkeys.TenantScope
+		resource string
+		want     bool
+	}{
+		{"unset scope denies", unset, "msp-a", false},
+		{"root scope allows", root, "msp-a", true},
+		{"root scope allows empty tenant", root, "", true},
+		{"tenant scope allows itself", msp, "msp-a", true},
+		{"tenant scope allows descendant", msp, "client-1", true},
+		{"tenant scope denies sibling", msp, "msp-b", false},
+		{"tenant scope denies shared-prefix sibling", msp, "msp-ab", false},
+		{"tenant scope denies ancestor", msp, testRootTenantID, false},
+		{"tenant scope denies unknown tenant", msp, "no-such-tenant", false},
+		{"empty-path tenant scope denies rather than acting as root", degenerate, "msp-a", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, srv.isAuthorizedForTenant(ctx, tc.scope, tc.resource, route))
+			// tenantScopeDecision with no injected server decision falls back to the
+			// injected subtree function; root there needs no crossing check.
+			got := tenantScopeDecision(ctx, nil, srv.tenantSubtreeContains, tc.scope, tc.resource, route) == tenantAuthAllowed
+			assert.Equal(t, tc.want, got)
+		})
+	}
 
-	t.Run("tenant_scope_allows_own_subtree", func(t *testing.T) {
-		scope := ctxkeys.NewTenantScope("root/msp-a")
-		assert.True(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-a", "GET /api/v1/stewards/{id}"))
-		assert.True(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-a/client-1", "GET /api/v1/stewards/{id}"))
-	})
-
-	t.Run("tenant_scope_refused_sibling_subtree", func(t *testing.T) {
-		scope := ctxkeys.NewTenantScope("root/msp-a")
-		assert.False(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-b", "GET /api/v1/stewards/{id}"))
-		assert.False(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-ab", "GET /api/v1/stewards/{id}"),
-			"trailing-separator guard: msp-a must not match msp-ab")
-	})
-
-	t.Run("tenant_scope_with_empty_path_denies_rather_than_acting_as_root", func(t *testing.T) {
-		// NewTenantScope("") must never behave like NewRootScope() — see
-		// NewTenantScope's doc comment. This is the exact ambiguity the type
-		// exists to remove: an empty tenant string historically meant "root,
-		// allow everything" (isWithinTenantScope's own semantics, kept
-		// unchanged for its existing callers), but a TenantScope must fail
-		// closed instead of reintroducing that ambiguity through Path().
-		degenerate := ctxkeys.NewTenantScope("")
-		assert.False(t, srv.isAuthorizedForTenant(context.Background(), degenerate, "root/msp-a", "GET /api/v1/stewards/{id}"))
+	t.Run("tenantScopeDecision without a subtree function denies descendants", func(t *testing.T) {
+		assert.Equal(t, tenantAuthDenied, tenantScopeDecision(ctx, nil, nil, msp, "client-1", route))
+		assert.Equal(t, tenantAuthAllowed, tenantScopeDecision(ctx, nil, nil, msp, "msp-a", route))
 	})
 }
 
@@ -4114,4 +4191,23 @@ func TestWebSessionCookie_RootScopedAccount_ConfinedByCatchAllBoundaryGate(t *te
 	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`,
 		"the catch-all boundary gate, not a bare 403/404, must respond")
+}
+
+// seedTenantTree creates the real tenant hierarchy used by the subtree-scope tests
+// through the server's tenant manager: root > {msp-a > client-1, msp-b, msp-ab}.
+// "msp-ab" shares a string prefix with "msp-a" but is not its descendant. Idempotent.
+func seedTenantTree(t *testing.T, server *Server) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, ensureTestRootTenant(ctx, server.tenantManager))
+	for _, req := range []*tenant.TenantRequest{
+		{ID: "msp-a", ParentID: testRootTenantID},
+		{ID: "client-1", ParentID: "msp-a"},
+		{ID: "msp-b", ParentID: testRootTenantID},
+		{ID: "msp-ab", ParentID: testRootTenantID},
+	} {
+		if _, err := server.tenantManager.CreateTenant(ctx, req); err != nil && !errors.Is(err, tenant.ErrTenantExists) {
+			require.NoError(t, err)
+		}
+	}
 }

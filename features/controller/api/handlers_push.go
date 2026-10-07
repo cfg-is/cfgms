@@ -109,7 +109,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Scope to cfg.TenantID subtree. An explicit selector prefix must be within
 	// that subtree; absent prefix defaults to cfg.TenantID and all descendants.
 	if parsedTenantPath != "" {
-		if parsedTenantPath != cfg.TenantID && !strings.HasPrefix(parsedTenantPath, cfg.TenantID+"/") {
+		if !selectorPathWithinCaller(cfg.TenantID, parsedTenantPath) {
 			s.logger.Info("Selector tenant outside config tenant subtree",
 				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
 				"config_tenant", logging.SanitizeLogValue(cfg.TenantID))
@@ -377,7 +377,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	if !isWithinTenantScope(tenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.isWithinTenantScope(r.Context(), tenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.respondError(w, http.StatusNotFound, "push not found")
 		return
 	}

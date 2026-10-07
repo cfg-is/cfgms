@@ -52,6 +52,9 @@ type rollbackStack struct {
 	// manager's TargetTenantResolver exactly as server.go wires it. It is the
 	// authority for which tenant owns a rollback target (Issue #4340).
 	registry *service.ControllerService
+	// subtree is the production ancestry predicate (Server.tenantSubtreeContains)
+	// over a real tenant manager holding the seedTenantTree hierarchy.
+	subtree tenantSubtreeFunc
 }
 
 // fsGitProvider hosts configuration repositories as real go-git repositories on the local
@@ -255,7 +258,11 @@ func newRollbackStack(t *testing.T) *rollbackStack {
 
 	registry := service.NewControllerService(logger)
 
+	tenantServer := setupTestServer(t)
+	seedTenantTree(t, tenantServer)
+
 	return &rollbackStack{
+		subtree:    tenantServer.tenantSubtreeContains,
 		manager:    rollback.NewRollbackManager(gitManager, validator, store, rollback.NewDefaultRollbackNotifier(logger), registry),
 		store:      store,
 		gitManager: gitManager,
@@ -408,6 +415,19 @@ func (s *rollbackStack) requireGuardAdmitted(t *testing.T, rec *httptest.Respons
 	require.Len(t, ops, 1, "a rejected concurrent rollback must not create a second operation")
 }
 
+// requireHandlerGuardPassed asserts the handler's own cross-tenant guard (the
+// injected ancestry function) did not reject the request. It deliberately does not
+// assert the final status: the rollback manager applies its own tenant check
+// (features/config/rollback authorizeTenant) after the handler guard.
+func requireHandlerGuardPassed(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	assert.NotEqual(t, "CROSS_TENANT_ROLLBACK", resp["code"],
+		"the handler guard must admit a ParentID descendant; body: %s", rec.Body.String())
+}
+
 // scopedPrincipalExtractor returns an extractor that yields a principal with the given TenantID.
 func scopedPrincipalExtractor(tenantID string) func(*http.Request) *Principal {
 	return func(_ *http.Request) *Principal {
@@ -473,72 +493,72 @@ func withRootScope(req *http.Request) *http.Request {
 }
 
 func TestConfigRollback_RejectsCrossTenantVersion(t *testing.T) {
-	// Principal scoped to "root/msp-a" must not reach stewards in "root/msp-b".
+	// Principal scoped to "msp-a" must not reach stewards in "msp-b".
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-msp-b", "root/msp-b")
+	stack.ownSteward(t, "steward-msp-b", "msp-b")
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-msp-b")
-	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
-	body := `{"target_type":"steward","target_id":"steward-msp-b","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"root/msp-b"}`
+	body := `{"target_type":"steward","target_id":"steward-msp-b","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"msp-b"}`
 	rec := httptest.NewRecorder()
 
-	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 	stack.requireGuardRejected(t, rec, rollback.TargetTypeSteward, "steward-msp-b")
 }
 
 func TestConfigRollback_BlocksSiblingTenant(t *testing.T) {
-	// "root/msp-ab" is a sibling, not a child of "root/msp-a" — prefix matching
+	// "msp-ab" is a sibling, not a child of "msp-a" — prefix matching
 	// without a segment boundary would incorrectly allow this.
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-msp-ab", "root/msp-ab")
+	stack.ownSteward(t, "steward-msp-ab", "msp-ab")
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-msp-ab")
-	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
-	body := `{"target_type":"steward","target_id":"steward-msp-ab","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"root/msp-ab"}`
+	body := `{"target_type":"steward","target_id":"steward-msp-ab","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"msp-ab"}`
 	rec := httptest.NewRecorder()
 
-	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 	stack.requireGuardRejected(t, rec, rollback.TargetTypeSteward, "steward-msp-ab")
 }
 
 func TestConfigRollback_AllowsSameTenant(t *testing.T) {
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-x", "root/msp-a")
+	stack.ownSteward(t, "steward-x", "msp-a")
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-x")
-	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
-	body := `{"target_type":"steward","target_id":"steward-x","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"root/msp-a"}`
+	body := `{"target_type":"steward","target_id":"steward-x","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"msp-a"}`
 	rec := httptest.NewRecorder()
 
-	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 	stack.requireGuardAdmitted(t, rec, rollback.TargetTypeSteward, "steward-x")
 }
 
 func TestConfigRollback_AllowsChildTenant(t *testing.T) {
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-client-1", "root/msp-a/client-1")
+	stack.ownSteward(t, "steward-client-1", "client-1")
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-client-1")
-	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
-	// "root/msp-a/client-1" is a child of "root/msp-a" — must be allowed.
-	body := `{"target_type":"steward","target_id":"steward-client-1","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"root/msp-a/client-1"}`
+	// "client-1" is a child of "msp-a" — must be allowed.
+	body := `{"target_type":"steward","target_id":"steward-client-1","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"client-1"}`
 	rec := httptest.NewRecorder()
 
-	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
-	stack.requireGuardAdmitted(t, rec, rollback.TargetTypeSteward, "steward-client-1")
+	requireHandlerGuardPassed(t, rec)
 }
 
 func TestConfigRollback_AdminPrincipalSkipsTenantCheck(t *testing.T) {
 	// Full admin (Assurance >= AssuranceBasic, TenantID="") can access any tenant.
 	stack := newRollbackStack(t)
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-any")
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
-	body := `{"target_type":"steward","target_id":"steward-any","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"root/any-tenant"}`
+	body := `{"target_type":"steward","target_id":"steward-any","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"any-tenant"}`
 	rec := httptest.NewRecorder()
 
 	handler.ExecuteRollback(rec, newRollbackRequest(body, "admin-cert-cn"))
@@ -551,14 +571,14 @@ func TestConfigRollback_NoTenantPathSkipsCheck(t *testing.T) {
 	// The rollback manager remains the authoritative access check, and it admits the
 	// request because the registry owns this steward in the caller's own tenant.
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-xyz", "root/msp-a")
+	stack.ownSteward(t, "steward-xyz", "msp-a")
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-xyz")
-	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
 	body := `{"target_type":"steward","target_id":"steward-xyz","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false}`
 	rec := httptest.NewRecorder()
 
-	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 	stack.requireGuardAdmitted(t, rec, rollback.TargetTypeSteward, "steward-xyz")
 }
@@ -567,7 +587,7 @@ func TestConfigRollback_UnauthenticatedRequestIsRejectedByManager(t *testing.T) 
 	// No user identity in the request context: the production manager refuses to execute
 	// (DefaultRollbackManager.getCurrentUser) and nothing is recorded for the target.
 	stack := newRollbackStack(t)
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	body := `{"target_type":"steward","target_id":"steward-noauth","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config"}`
 	req := httptest.NewRequest("POST", "/api/v1/rollback/execute", strings.NewReader(body))
@@ -587,7 +607,7 @@ func TestConfigRollback_ApprovalRequired(t *testing.T) {
 	// the handler translates that refusal to 412.
 	stack := newRollbackStack(t)
 	baseline := stack.seedRepository(t, rollback.TargetTypeClient, "7")
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	body := fmt.Sprintf(
 		`{"target_type":"client","target_id":"7","rollback_type":"full","rollback_to":%q,"reason":"revert bad config"}`,
@@ -605,7 +625,7 @@ func TestConfigRollback_ValidationFailed(t *testing.T) {
 	// (DefaultRollbackValidator.validateRollbackType), so the handler answers 422.
 	stack := newRollbackStack(t)
 	baseline := stack.seedRepository(t, rollback.TargetTypeDevice, "9")
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	body := fmt.Sprintf(
 		`{"target_type":"device","target_id":"9","rollback_type":"partial","rollback_to":%q,"reason":"revert bad config"}`,
@@ -624,7 +644,7 @@ func TestConfigRollback_PermissionDenied(t *testing.T) {
 	// the rollback is denied and the handler answers 403 rather than the generic 422.
 	stack := newRollbackStack(t)
 	baseline := stack.seedRepository(t, rollback.TargetTypeDevice, "11")
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	body := fmt.Sprintf(
 		`{"target_type":"device","target_id":"11","rollback_type":"emergency","rollback_to":%q,"reason":"service outage","emergency":true}`,
@@ -639,7 +659,7 @@ func TestConfigRollback_PermissionDenied(t *testing.T) {
 
 func TestConfigRollback_InvalidBody(t *testing.T) {
 	stack := newRollbackStack(t)
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	rec := httptest.NewRecorder()
 	handler.ExecuteRollback(rec, newRollbackRequest("not json", "admin-cert-cn"))
@@ -654,31 +674,31 @@ func TestConfigRollback_ServerSideTenantLookup(t *testing.T) {
 	// matches the correct tenant — the server-side check is authoritative.
 	t.Run("rejects cross-tenant steward via server-side lookup", func(t *testing.T) {
 		stack := newRollbackStack(t)
-		stack.ownSteward(t, "steward-msp-b", "root/msp-b")
+		stack.ownSteward(t, "steward-msp-b", "msp-b")
 		stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-msp-b")
-		lookup := func(_ string) string { return "root/msp-b" }
-		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), lookup, nil)
+		lookup := func(_ string) string { return "msp-b" }
+		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), lookup, nil, stack.subtree)
 
 		// No steward_tenant_path in body — server-side lookup must catch this anyway.
 		body := `{"target_type":"steward","target_id":"steward-msp-b","rollback_type":"full","rollback_to":"abc123","reason":"revert bad config"}`
 		rec := httptest.NewRecorder()
 
-		handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+		handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 		stack.requireGuardRejected(t, rec, rollback.TargetTypeSteward, "steward-msp-b")
 	})
 
 	t.Run("allows same-tenant steward via server-side lookup", func(t *testing.T) {
 		stack := newRollbackStack(t)
-		stack.ownSteward(t, "steward-msp-a", "root/msp-a")
+		stack.ownSteward(t, "steward-msp-a", "msp-a")
 		stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-msp-a")
-		lookup := func(_ string) string { return "root/msp-a" }
-		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), lookup, nil)
+		lookup := func(_ string) string { return "msp-a" }
+		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), lookup, nil, stack.subtree)
 
 		body := `{"target_type":"steward","target_id":"steward-msp-a","rollback_type":"full","rollback_to":"abc123","reason":"revert bad config"}`
 		rec := httptest.NewRecorder()
 
-		handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+		handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 		stack.requireGuardAdmitted(t, rec, rollback.TargetTypeSteward, "steward-msp-a")
 	})
@@ -692,12 +712,12 @@ func TestConfigRollback_ServerSideTenantLookup(t *testing.T) {
 		stack := newRollbackStack(t)
 		stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-unknown")
 		lookup := func(_ string) string { return "" }
-		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), lookup, nil)
+		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), lookup, nil, stack.subtree)
 
 		body := `{"target_type":"steward","target_id":"steward-unknown","rollback_type":"full","rollback_to":"abc123","reason":"revert bad config"}`
 		rec := httptest.NewRecorder()
 
-		handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "root/msp-a"))
+		handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "admin-api-key", "msp-a"))
 
 		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 
@@ -715,8 +735,8 @@ func TestConfigRollback_ServerSideTenantLookup(t *testing.T) {
 		stack := newRollbackStack(t)
 		stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-any")
 		// lookup would return a cross-tenant result but admin bypasses the check
-		lookup := func(_ string) string { return "root/msp-z" }
-		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+		lookup := func(_ string) string { return "msp-z" }
+		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
 
 		body := `{"target_type":"steward","target_id":"steward-any","rollback_type":"full","rollback_to":"abc123","reason":"revert bad config"}`
 		rec := httptest.NewRecorder()
@@ -735,23 +755,23 @@ func TestConfigRollback_ServerSideTenantLookup(t *testing.T) {
 // the cross-tenant check.
 func TestConfigRollback_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-msp-b", "root/msp-b")
+	stack.ownSteward(t, "steward-msp-b", "msp-b")
 	stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-msp-b")
-	// Session principal scoped to "root/msp-a" with GlobalScope=true (the bug).
-	handler := NewRollbackHandler(stack.manager, sessionPrincipalExtractor("root/msp-a"), nil, nil)
+	// Session principal scoped to "msp-a" with GlobalScope=true (the bug).
+	handler := NewRollbackHandler(stack.manager, sessionPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
-	// Target steward belongs to "root/msp-b" — a sibling tenant, not a child.
-	body := `{"target_type":"steward","target_id":"steward-msp-b","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"root/msp-b"}`
+	// Target steward belongs to "msp-b" — a sibling tenant, not a child.
+	body := `{"target_type":"steward","target_id":"steward-msp-b","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config","dry_run":false,"steward_tenant_path":"msp-b"}`
 	rec := httptest.NewRecorder()
 
-	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "web-session-root/msp-a", "root/msp-a"))
+	handler.ExecuteRollback(rec, newScopedRollbackRequest(body, "web-session-msp-a", "msp-a"))
 
 	stack.requireGuardRejected(t, rec, rollback.TargetTypeSteward, "steward-msp-b")
 }
 
 func TestConfigRollback_ListRollbackPointsRequiresTarget(t *testing.T) {
 	stack := newRollbackStack(t)
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	req := withRootScope(httptest.NewRequest("GET", "/api/v1/rollback/points?target_type=steward", nil))
 	rec := httptest.NewRecorder()
@@ -762,7 +782,7 @@ func TestConfigRollback_ListRollbackPointsRequiresTarget(t *testing.T) {
 
 func TestConfigRollback_GetRollbackStatus(t *testing.T) {
 	stack := newRollbackStack(t)
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	t.Run("unknown rollback id returns 404", func(t *testing.T) {
 		req := mux.SetURLVars(withRootScope(httptest.NewRequest("GET", "/api/v1/rollback/missing/status", nil)),
@@ -795,7 +815,7 @@ func TestConfigRollback_GetRollbackStatus(t *testing.T) {
 func TestConfigRollback_CancelRollback(t *testing.T) {
 	t.Run("cancellable operation is cancelled in the store", func(t *testing.T) {
 		stack := newRollbackStack(t)
-		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 		id := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-cancel", rollback.RollbackStatusPending)
 
 		req := httptest.NewRequest("POST", "/api/v1/rollback/"+id+"/cancel", strings.NewReader(`{"reason":"superseded"}`))
@@ -816,7 +836,7 @@ func TestConfigRollback_CancelRollback(t *testing.T) {
 
 	t.Run("in-progress operation cannot be cancelled", func(t *testing.T) {
 		stack := newRollbackStack(t)
-		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 		id := stack.seedLiveOperation(t, rollback.TargetTypeSteward, "steward-live")
 
 		req := httptest.NewRequest("POST", "/api/v1/rollback/"+id+"/cancel", strings.NewReader(`{"reason":"stop it"}`))
@@ -836,7 +856,7 @@ func TestConfigRollback_CancelRollback(t *testing.T) {
 
 	t.Run("unknown rollback id returns 404", func(t *testing.T) {
 		stack := newRollbackStack(t)
-		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 		req := httptest.NewRequest("POST", "/api/v1/rollback/missing/cancel", strings.NewReader(`{"reason":"n/a"}`))
 		req = withRootScope(req.WithContext(context.WithValue(req.Context(), ctxkeys.UserIDKey, "admin-cert-cn")))
@@ -855,7 +875,7 @@ func TestConfigRollback_CancelRollback(t *testing.T) {
 func TestConfigRollback_CancelRollback_CrossTenant_NotFound(t *testing.T) {
 	stack := newRollbackStack(t)
 	lookup := func(_ string) string { return "tenant-b" }
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
 	id := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-tenant-b", rollback.RollbackStatusPending)
 
 	req := httptest.NewRequest("POST", "/api/v1/rollback/"+id+"/cancel", strings.NewReader(`{"reason":"cross-tenant attempt"}`))
@@ -904,7 +924,7 @@ func TestConfigRollback_ListRollbackPoints_CrossTenant_EmptyList(t *testing.T) {
 	// is target-type independent.
 	stack.seedRepository(t, rollback.TargetTypeDevice, "device-tenant-b")
 	lookup := func(_ string) string { return "tenant-b" }
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
 
 	const url = "/api/v1/rollback/points?target_type=device&target_id=device-tenant-b"
 	decodePoints := func(t *testing.T, rec *httptest.ResponseRecorder) []rollback.RollbackPoint {
@@ -946,7 +966,7 @@ func TestConfigRollback_PreviewRollback_CrossTenant_Rejected(t *testing.T) {
 	// Device target, for the same getRepositoryID reason as the rollback-points test above.
 	baseline := stack.seedRepository(t, rollback.TargetTypeDevice, "device-tenant-b")
 	lookup := func(_ string) string { return "tenant-b" }
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
 
 	body := fmt.Sprintf(
 		`{"target_type":"device","target_id":"device-tenant-b","rollback_type":"full","rollback_to":%q,"reason":"revert bad config"}`,
@@ -980,6 +1000,47 @@ func TestConfigRollback_PreviewRollback_CrossTenant_Rejected(t *testing.T) {
 	}
 }
 
+// TestConfigRollback_SubtreeGuard_ThroughInjectedAncestry covers preview and execute
+// for a caller scoped to msp-a over real tenants: a steward in client-1 (a ParentID
+// child) passes the handler guard, and one in msp-b or the shared-prefix sibling
+// msp-ab is refused with CROSS_TENANT_ROLLBACK.
+func TestConfigRollback_SubtreeGuard_ThroughInjectedAncestry(t *testing.T) {
+	scope := ctxkeys.NewTenantScope("msp-a")
+	for _, tc := range []struct {
+		tenant   string
+		admitted bool
+	}{
+		{"client-1", true},
+		{"msp-b", false},
+		{"msp-ab", false},
+	} {
+		t.Run(tc.tenant, func(t *testing.T) {
+			stack := newRollbackStack(t)
+			lookup := func(_ string) string { return tc.tenant }
+			handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), lookup, nil, stack.subtree)
+			body := `{"target_type":"steward","target_id":"steward-x","rollback_type":"full","rollback_to":"abc1234567890","reason":"revert bad config"}`
+
+			for name, call := range map[string]func(http.ResponseWriter, *http.Request){
+				"preview": handler.PreviewRollback,
+				"execute": handler.ExecuteRollback,
+			} {
+				t.Run(name, func(t *testing.T) {
+					rec := httptest.NewRecorder()
+					call(rec, scopedRollbackRequest("POST", "/api/v1/rollback/"+name, body, scope, nil))
+					if tc.admitted {
+						requireHandlerGuardPassed(t, rec)
+						return
+					}
+					require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+					var resp map[string]interface{}
+					require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+					assert.Equal(t, "CROSS_TENANT_ROLLBACK", resp["code"])
+				})
+			}
+		})
+	}
+}
+
 // TestConfigRollback_GetRollbackStatus_CrossTenant_NotFound is a [REQUIRED TEST] for
 // Issue #4335: reading the status of a rollback whose target steward belongs to another
 // tenant returns the same 404 as an unknown rollback ID. The root-scoped control proves
@@ -987,7 +1048,7 @@ func TestConfigRollback_PreviewRollback_CrossTenant_Rejected(t *testing.T) {
 func TestConfigRollback_GetRollbackStatus_CrossTenant_NotFound(t *testing.T) {
 	stack := newRollbackStack(t)
 	lookup := func(_ string) string { return "tenant-b" }
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
 	id := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-tenant-b", rollback.RollbackStatusPending)
 
 	url := "/api/v1/rollback/" + id + "/status"
@@ -1026,7 +1087,7 @@ func TestConfigRollback_GetRollbackStatus_CrossTenant_NotFound(t *testing.T) {
 func TestConfigRollback_ListRollbackHistory_CrossTenant_EmptyList(t *testing.T) {
 	stack := newRollbackStack(t)
 	lookup := func(_ string) string { return "tenant-b" }
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
 	wanted := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-tenant-b", rollback.RollbackStatusCompleted)
 
 	const url = "/api/v1/rollback/history?target_type=steward&target_id=steward-tenant-b"
@@ -1062,7 +1123,7 @@ func TestConfigRollback_ListRollbackHistory_CrossTenant_EmptyList(t *testing.T) 
 
 func TestConfigRollback_ListRollbackHistory(t *testing.T) {
 	stack := newRollbackStack(t)
-	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 	wanted := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-history", rollback.RollbackStatusCompleted)
 	stack.seedOperation(t, rollback.TargetTypeSteward, "steward-other", rollback.RollbackStatusCompleted)
@@ -1099,11 +1160,11 @@ func TestConfigRollback_ListRollbackPoints_TenantBoundary(t *testing.T) {
 	t.Run("scoped caller cannot enumerate another tenant's rollback points", func(t *testing.T) {
 		stack := newRollbackStack(t)
 		stack.seedRepository(t, rollback.TargetTypeDevice, "device-msp-b")
-		stack.ownSteward(t, "device-msp-b", "root/msp-b")
-		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+		stack.ownSteward(t, "device-msp-b", "msp-b")
+		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
 		req := httptest.NewRequest("GET", "/api/v1/rollback/points?target_type=device&target_id=device-msp-b", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a")))
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("msp-a")))
 		rec := httptest.NewRecorder()
 		handler.ListRollbackPoints(rec, req)
 
@@ -1119,11 +1180,11 @@ func TestConfigRollback_ListRollbackPoints_TenantBoundary(t *testing.T) {
 	t.Run("scoped caller receives its own tenant's rollback points", func(t *testing.T) {
 		stack := newRollbackStack(t)
 		stack.seedRepository(t, rollback.TargetTypeDevice, "device-msp-a")
-		stack.ownSteward(t, "device-msp-a", "root/msp-a/client-1")
-		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+		stack.ownSteward(t, "device-msp-a", "msp-a")
+		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
 		req := httptest.NewRequest("GET", "/api/v1/rollback/points?target_type=device&target_id=device-msp-a", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a")))
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("msp-a")))
 		rec := httptest.NewRecorder()
 		handler.ListRollbackPoints(rec, req)
 
@@ -1143,10 +1204,10 @@ func TestConfigRollback_ListRollbackPoints_TenantBoundary(t *testing.T) {
 		// not established, so the target is outside every tenant.
 		stack := newRollbackStack(t)
 		stack.seedRepository(t, rollback.TargetTypeDevice, "device-unowned")
-		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+		handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
 		req := httptest.NewRequest("GET", "/api/v1/rollback/points?target_type=device&target_id=device-unowned", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a")))
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("msp-a")))
 		rec := httptest.NewRecorder()
 		handler.ListRollbackPoints(rec, req)
 
@@ -1156,8 +1217,8 @@ func TestConfigRollback_ListRollbackPoints_TenantBoundary(t *testing.T) {
 	t.Run("root-scoped admin still enumerates every target", func(t *testing.T) {
 		stack := newRollbackStack(t)
 		stack.seedRepository(t, rollback.TargetTypeDevice, "device-msp-b")
-		stack.ownSteward(t, "device-msp-b", "root/msp-b")
-		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+		stack.ownSteward(t, "device-msp-b", "msp-b")
+		handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil, stack.subtree)
 
 		req := withRootScope(httptest.NewRequest("GET", "/api/v1/rollback/points?target_type=device&target_id=device-msp-b", nil))
 		rec := httptest.NewRecorder()
@@ -1174,17 +1235,17 @@ func TestConfigRollback_ListRollbackPoints_TenantBoundary(t *testing.T) {
 }
 
 func TestConfigRollback_StatusCancelAndHistory_TenantBoundary(t *testing.T) {
-	// One rollback operation belonging to root/msp-b, reached by a caller scoped to
-	// root/msp-a through each of the three endpoints that take a rollback or target
+	// One rollback operation belonging to msp-b, reached by a caller scoped to
+	// msp-a through each of the three endpoints that take a rollback or target
 	// ID: status, cancel and history.
 	stack := newRollbackStack(t)
-	stack.ownSteward(t, "steward-msp-b", "root/msp-b")
-	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("root/msp-a"), nil, nil)
+	stack.ownSteward(t, "steward-msp-b", "msp-b")
+	handler := NewRollbackHandler(stack.manager, scopedPrincipalExtractor("msp-a"), nil, nil, stack.subtree)
 
 	id := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-msp-b", rollback.RollbackStatusPending)
 	scoped := func(req *http.Request) *http.Request {
 		ctx := context.WithValue(req.Context(), ctxkeys.UserIDKey, "admin-api-key")
-		return req.WithContext(context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a")))
+		return req.WithContext(context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("msp-a")))
 	}
 
 	t.Run("status of another tenant's rollback is refused", func(t *testing.T) {

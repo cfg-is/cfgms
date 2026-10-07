@@ -719,21 +719,103 @@ func (s *Server) accountPrincipalTenant(ctx context.Context, acct *account) stri
 	return acct.TenantID
 }
 
+// tenantSubtreeContains reports whether resourceTenant is callerTenant itself or
+// one of its descendants in the tenant manager's ParentID ancestry (ADR-025
+// Amendment 1: a tenant ID is a single DNS-label token, so containment is never a
+// string-prefix test). It fails closed: a nil tenant manager, an empty ID, an
+// unknown tenant, a dangling ParentID or any lookup error all deny.
+func (s *Server) tenantSubtreeContains(ctx context.Context, callerTenant, resourceTenant string) bool {
+	if callerTenant == "" || resourceTenant == "" {
+		return false
+	}
+	if resourceTenant == callerTenant {
+		return true
+	}
+	if s.tenantManager == nil {
+		return false
+	}
+	ok, err := s.tenantManager.IsTenantAncestor(ctx, callerTenant, resourceTenant)
+	if err != nil {
+		s.logger.Warn("Tenant ancestry lookup failed; denying",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return ok
+}
+
+// tenantSubtreeSet is the set of tenant IDs in a caller's subtree (the caller
+// itself plus every ParentID descendant), resolved once so a list handler can
+// filter N records without N ancestry lookups.
+type tenantSubtreeSet map[string]struct{}
+
+// Contains reports whether tenantID is in the set. An empty ID is never contained.
+func (t tenantSubtreeSet) Contains(tenantID string) bool {
+	if tenantID == "" {
+		return false
+	}
+	_, ok := t[tenantID]
+	return ok
+}
+
+// tenantSubtreeIDs resolves callerTenant's subtree by walking GetChildTenants from
+// callerTenant. The set always contains callerTenant itself; an empty callerTenant
+// yields an empty set. A nil tenant manager or a failed walk yields only the
+// callerTenant (fail closed: descendants are not granted on error).
+func (s *Server) tenantSubtreeIDs(ctx context.Context, callerTenant string) tenantSubtreeSet {
+	set := tenantSubtreeSet{}
+	if callerTenant == "" {
+		return set
+	}
+	set[callerTenant] = struct{}{}
+	if s.tenantManager == nil {
+		return set
+	}
+	queue := []string{callerTenant}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		children, err := s.tenantManager.GetChildTenants(ctx, parent)
+		if err != nil {
+			s.logger.Warn("Tenant subtree walk failed; descendants not granted",
+				"error", logging.SanitizeLogValue(err.Error()))
+			return tenantSubtreeSet{callerTenant: {}}
+		}
+		for _, c := range children {
+			if c == nil || c.ID == "" {
+				continue
+			}
+			if _, seen := set[c.ID]; seen {
+				continue
+			}
+			set[c.ID] = struct{}{}
+			queue = append(queue, c.ID)
+		}
+	}
+	return set
+}
+
 // isWithinTenantScope reports whether resourceTenant is within callerTenant's
 // authorized subtree. An empty callerTenant (mTLS admin with no tenant scope)
-// has unrestricted access and always returns true.
-func isWithinTenantScope(callerTenant, resourceTenant string) bool {
+// has unrestricted access and always returns true; otherwise it defers to
+// tenantSubtreeContains.
+func (s *Server) isWithinTenantScope(ctx context.Context, callerTenant, resourceTenant string) bool {
 	if callerTenant == "" {
 		return true
 	}
-	return resourceTenant == callerTenant ||
-		strings.HasPrefix(resourceTenant, callerTenant+"/")
+	return s.tenantSubtreeContains(ctx, callerTenant, resourceTenant)
+}
+
+// selectorPathWithinCaller reports whether selectorPath is callerPath or beneath
+// it. It compares slash-separated fleet selector paths (pkg/fleet/selector Parse),
+// NOT tenant IDs; tenant containment goes through tenantSubtreeContains.
+func selectorPathWithinCaller(callerPath, selectorPath string) bool {
+	return selectorPath == callerPath || strings.HasPrefix(selectorPath, callerPath+"/") //architecture:allow-path-prefix -- selector path, not a tenant ID
 }
 
 // tenantAccessForScope answers "may this caller act on resourceTenant" for the
 // explicit three-state ctxkeys.TenantScope (Issue #4316). It is the fail-closed
 // replacement for comparing an empty tenant string by hand: unlike
-// isWithinTenantScope(""), the unset state here is never treated as unrestricted.
+// Server.isWithinTenantScope(""), the unset state here is never treated as unrestricted.
 //
 // route identifies the HTTP route for the denial log (pass the route template or
 // r.URL.Path, never a resource ID) so a denial is traceable to the endpoint that
@@ -753,8 +835,8 @@ func isWithinTenantScope(callerTenant, resourceTenant string) bool {
 //     run) carry no tenant in the request, so requirePermission's boundary gate cannot
 //     see the record's tenant; this is the one place every such route passes through
 //     (Issue #4665).
-//   - Tenant scope defers to isWithinTenantScope, preserving its existing subtree
-//     semantics (including the trailing-separator guard) — see that function's tests.
+//   - Tenant scope defers to tenantSubtreeContains: the caller's own tenant or a
+//     ParentID descendant, resolved through the tenant manager and failing closed.
 //
 // A caller that can respond to the request writes the crossing challenge for
 // tenantAuthNeedsCrossing (writeTenantCrossingIfNeeded) and its own not-found or
@@ -788,7 +870,7 @@ func (s *Server) tenantAccessForScope(ctx context.Context, scope ctxkeys.TenantS
 		}
 		return decision
 	case scope.IsTenant() && scope.Path() != "":
-		if isWithinTenantScope(scope.Path(), resourceTenant) {
+		if s.tenantSubtreeContains(ctx, scope.Path(), resourceTenant) {
 			return tenantAuthAllowed
 		}
 		s.logger.Warn("Tenant scope authorization denied",
@@ -1837,17 +1919,16 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			if !principal.GlobalScope && principal.TenantID != "" {
 				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
 				// Real tenant IDs are flat, ParentID-linked tokens, never hierarchical
-				// paths — string-prefix matching against them is dead code (the same
-				// defect isCallerAuthorizedForTenant's doc comment describes for
-				// isWithinTenantScope). Every other resource type still uses the
-				// path-shaped prefix check, which is unaffected here.
+				// paths, so subtree containment resolves through the tenant manager's
+				// ancestry. The tenant resource type additionally honours the ADR-025
+				// crossing boundary via isCallerAuthorizedForTenant.
 				var inTargetScope bool
 				if targetTenant == "" || targetTenant == principal.TenantID {
 					inTargetScope = true
 				} else if resourceType == "tenant" {
 					inTargetScope = s.isCallerAuthorizedForTenant(r.Context(), principal, targetTenant)
 				} else {
-					inTargetScope = strings.HasPrefix(targetTenant, principal.TenantID+"/")
+					inTargetScope = s.tenantSubtreeContains(r.Context(), principal.TenantID, targetTenant)
 				}
 				if !inTargetScope {
 					isoDecision := &AuthorizationDecision{

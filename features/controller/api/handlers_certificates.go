@@ -267,6 +267,8 @@ func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []Certifica
 		return certs, nil
 	}
 
+	subtree := s.tenantSubtreeIDs(ctx, callerTenant)
+
 	// scopeCache maps StewardID → whether that steward is within the caller's subtree.
 	scopeCache := make(map[string]bool)
 
@@ -299,7 +301,7 @@ func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []Certifica
 			return nil, fmt.Errorf("steward lookup for tenant scope failed: %w", err)
 		}
 
-		inScope := isWithinTenantScope(callerTenant, record.TenantID) //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		inScope := subtree.Contains(record.TenantID)
 		scopeCache[c.StewardID] = inScope
 		if inScope {
 			filtered = append(filtered, c)
@@ -370,7 +372,7 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 			}
 			// ErrStewardNotFound: no durable record — unattributable, visible fleet-wide
 			// (same rule as filterCertsByTenantScope for the list endpoint).
-		} else if !isWithinTenantScope(callerTenant, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+		} else if !s.isWithinTenantScope(r.Context(), callerTenant, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 			// Out-of-scope: return 404 to avoid leaking cross-tenant serial existence.
 			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
 			return

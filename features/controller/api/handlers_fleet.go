@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -94,7 +93,7 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 	}
 
 	if parsedTenantPath != "" {
-		if tid != "" && parsedTenantPath != tid && !strings.HasPrefix(parsedTenantPath, tid+"/") {
+		if tid != "" && !selectorPathWithinCaller(tid, parsedTenantPath) {
 			s.logger.Info("Selector tenant outside caller subtree",
 				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
 				"caller_tenant", logging.SanitizeLogValue(tid))

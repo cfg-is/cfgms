@@ -53,10 +53,10 @@ func seedCase(t *testing.T, cs business.CaseStore, tenantID string) *business.Ca
 	c := &business.Case{
 		// A random suffix, not a timestamp: tests that seed several cases into one
 		// tenant do so within the same second, and a second-resolution ID collides.
-		// The tenant path is flattened: a nested tenant ("msp/client-a") would put a
-		// '/' in the case ID, and the router would then fail to match
-		// /api/v1/cases/{id}/pins at all — a 404 from mux that reads exactly like the
-		// tenant-denial 404 the nested-tenant tests assert.
+		// Defensive flattening: real tenant IDs are single tokens, but a '/' in the
+		// tenant would put a '/' in the case ID, and the router would then fail to
+		// match /api/v1/cases/{id}/pins at all — a 404 from mux that reads exactly
+		// like a tenant-denial 404.
 		ID:       "seed-case-" + strings.ReplaceAll(tenantID, "/", "-") + "-" + uuid.NewString(),
 		TenantID: tenantID,
 		Status:   business.CaseStatusOpen,
@@ -358,15 +358,17 @@ func TestHandleCases_CrossTenantDenial(t *testing.T) {
 // still excluded.
 func TestHandleListCases_IncludesDescendantTenant(t *testing.T) {
 	srv := setupCasesTestServer(t)
+	seedTenantTree(t, srv)
 	cs := srv.CasesStore()
 
-	caseParent := seedCase(t, cs, "tenant-parent")
-	caseChild := seedCase(t, cs, "tenant-parent/client-1")
-	caseSibling := seedCase(t, cs, "tenant-parent-sibling")
+	caseParent := seedCase(t, cs, "msp-a")
+	caseChild := seedCase(t, cs, "client-1")
+	caseSibling := seedCase(t, cs, "msp-b")
+	casePrefixSibling := seedCase(t, cs, "msp-ab")
 
 	keyParent := NewEphemeralTestKey(t, srv,
 		[]string{"case:create", "case:list", "case:read", "case:update"},
-		"tenant-parent", 5*time.Minute)
+		"msp-a", 5*time.Minute)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cases", nil)
 	req.Header.Set("X-API-Key", keyParent)
@@ -390,6 +392,51 @@ func TestHandleListCases_IncludesDescendantTenant(t *testing.T) {
 	assert.Contains(t, seenIDs, caseParent.ID, "parent tenant's own case must be listed")
 	assert.Contains(t, seenIDs, caseChild.ID, "descendant tenant's case must be listed under subtree filtering")
 	assert.NotContains(t, seenIDs, caseSibling.ID, "sibling tenant's case must not be listed")
+	assert.NotContains(t, seenIDs, casePrefixSibling.ID, "shared-string-prefix sibling's case must not be listed")
+}
+
+// TestHandleCases_CallerSubtree_RealTenants is the [REQUIRED TEST] for case access
+// through caseInCallerSubtree with real tenants (root > {msp-a > client-1, msp-b,
+// msp-ab}): a caller scoped to msp-a reads client-1's case by ID, and gets 404 for
+// msp-b's and msp-ab's cases; msp-b's and msp-ab's cases never appear in the list.
+func TestHandleCases_CallerSubtree_RealTenants(t *testing.T) {
+	srv := setupCasesTestServer(t)
+	seedTenantTree(t, srv)
+	cs := srv.CasesStore()
+	apiKey := newCasesTestKey(t, srv, "msp-a")
+
+	caseChild := seedCase(t, cs, "client-1")
+	caseMspB := seedCase(t, cs, "msp-b")
+	caseMspAB := seedCase(t, cs, "msp-ab")
+
+	get := func(id string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cases/"+id, nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	assert.Equal(t, http.StatusOK, get(caseChild.ID), "descendant tenant's case must be readable")
+	assert.Equal(t, http.StatusNotFound, get(caseMspB.ID), "sibling tenant's case must be 404")
+	assert.Equal(t, http.StatusNotFound, get(caseMspAB.ID), "shared-prefix sibling's case must be 404")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cases", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	var ids []string
+	for _, c := range resp.Data {
+		ids = append(ids, c.ID)
+	}
+	assert.NotContains(t, ids, caseMspB.ID)
+	assert.NotContains(t, ids, caseMspAB.ID)
 }
 
 // ── GET BY ID ───────────────────────────────────────────────────────────────
@@ -1007,22 +1054,23 @@ func TestHandleAddPin_CrossTenantEIDDenied(t *testing.T) {
 // broader access than the case's own tenant, pins are verified against the case's
 // (narrower) tenant ceiling, not the caller's ambient tenant.
 //
-// Case is in "msp-tenant/client-a". Caller is scoped to "msp-tenant" (broader).
-// The entity is in "msp-tenant" — visible to the caller but outside the case's
+// Case is in "client-1" (child of msp-a). Caller is scoped to "msp-a" (broader).
+// The entity is in "msp-a" — visible to the caller but outside the case's
 // own subtree. The pin must be rejected.
 func TestHandleAddPin_CaseTenantIsEIDCeiling(t *testing.T) {
 	srv, egp := setupCasesWithEGTestServer(t)
+	seedTenantTree(t, srv)
 	cs := srv.CasesStore()
 
 	// Case is anchored to the client sub-tenant.
-	caseClient := seedCase(t, cs, "msp-tenant/client-a")
+	caseClient := seedCase(t, cs, "client-1")
 
 	// Entity is in the parent MSP tenant — visible to an MSP-scoped caller,
 	// but outside the case's own tenant subtree.
-	reportEntity(t, egp, "host:msp-server", "msp-tenant", "host")
+	reportEntity(t, egp, "host:msp-server", "msp-a", "host")
 
-	// Caller is scoped to the parent "msp-tenant" — broader than the case's tenant.
-	apiKey := newCasesTestKey(t, srv, "msp-tenant")
+	// Caller is scoped to the parent "msp-a" — broader than the case's tenant.
+	apiKey := newCasesTestKey(t, srv, "msp-a")
 
 	body := map[string]interface{}{
 		"kind": "eid",
@@ -1687,10 +1735,11 @@ func TestHandleAddPin_NoProviderForSubjectTimeRangeKindReturns503(t *testing.T) 
 // entity, but the case cannot.
 func TestHandleAddPin_SubjectTimeRangeCrossTenantSubjectDenied(t *testing.T) {
 	srv, egp := setupCasesWithEGTestServer(t)
+	seedTenantTree(t, srv)
 	cs := srv.CasesStore()
-	c := seedCase(t, cs, "msp-tenant/client-a")
-	reportEntity(t, egp, "host:msp-server", "msp-tenant", "host")
-	apiKey := newCasesTestKey(t, srv, "msp-tenant")
+	c := seedCase(t, cs, "client-1")
+	reportEntity(t, egp, "host:msp-server", "msp-a", "host")
+	apiKey := newCasesTestKey(t, srv, "msp-a")
 
 	rec := postPin(t, srv, apiKey, c.ID, map[string]interface{}{
 		"kind":             "subject-time-range",

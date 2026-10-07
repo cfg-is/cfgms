@@ -484,14 +484,16 @@ func TestAPIKey_CreatedOnPeer_AuthenticatesAfterIndexRefresh(t *testing.T) {
 }
 
 // TestAPIKey_NestedTenant_DeleteRevokesOnPeer is the nested-tenant case: a key minted
-// for a child tenant ("tenant-a/child") is deleted by a caller scoped to the parent,
+// for a child tenant ("tenant-a-child", a child of tenant-a) is deleted by a caller scoped to the parent,
 // its durable record is gone, and a second node rejects it.
 func TestAPIKey_NestedTenant_DeleteRevokesOnPeer(t *testing.T) {
 	serverA, serverB := setupPeerServers(t)
 	clockB := &steppingClock{now: time.Now()}
 	serverB.apiKeyClock = clockB.Now
 
-	const tenant = "tenant-a/child"
+	createTestTenant(t, serverA, "tenant-a", "")
+	createTestTenant(t, serverA, "tenant-a-child", "tenant-a")
+	const tenant = "tenant-a-child"
 	apiKey, keyID := mintStoreAPIKey(t, serverA, []string{"steward:list"}, tenant)
 
 	clockB.Advance(apiKeyIndexMissRefreshFloor)

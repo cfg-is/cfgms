@@ -20,8 +20,11 @@ import (
 
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // --- Test-only in-memory RolloutStore ---
@@ -146,6 +149,26 @@ func newMinimalServerForRollout(t *testing.T) *Server {
 		}
 	})
 	return s
+}
+
+// withRealTenantManager wires a real tenant manager (storage-backed, with an RBAC
+// manager) onto a minimal rollout server so tenant-subtree checks resolve through
+// real ParentID ancestry. The minimal server carries none by default.
+func withRealTenantManager(t *testing.T, server *Server) {
+	t.Helper()
+	storageManager := pkgtesting.SetupTestStorage(t)
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+	server.tenantManager = tenant.NewManager(tenant.NewStorageAdapter(storageManager.GetTenantStore()), rbacManager)
 }
 
 // setupRolloutServer creates a server wired with a rollout store, upgrade store,
@@ -903,16 +926,18 @@ func TestRollout_Start_SessionPrincipal_CrossTenantRejected(t *testing.T) {
 }
 
 // TestRollout_Start_SessionPrincipal_OwnSubtreeAllowed verifies the fix does not
-// over-restrict: a session principal scoped to tenant-a may start a rollout for a
+// over-restrict: a session principal scoped to msp-a may start a rollout for a
 // descendant tenant, which is inside its authorized subtree.
 func TestRollout_Start_SessionPrincipal_OwnSubtreeAllowed(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "msp-a", nil)
+	withRealTenantManager(t, server)
+	seedTenantTree(t, server)
 
-	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-a/child-1"}
+	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "client-1"}
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
-	req = withSessionPrincipal(req, "tenant-a")
+	req = withSessionPrincipal(req, "msp-a")
 	rec := httptest.NewRecorder()
 
 	server.handleStartRollout(rec, req)
@@ -924,7 +949,7 @@ func TestRollout_Start_SessionPrincipal_OwnSubtreeAllowed(t *testing.T) {
 	require.NotEmpty(t, rolloutID)
 
 	finalRecord := waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
-	assert.Equal(t, "tenant-a/child-1", finalRecord.TenantID,
+	assert.Equal(t, "client-1", finalRecord.TenantID,
 		"the rollout must be attributed to the requested descendant tenant")
 }
 

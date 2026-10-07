@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gorilla/mux"
 
@@ -21,6 +20,10 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// tenantSubtreeFunc is the signature of Server.tenantSubtreeContains, injected
+// into handlers that are not *Server.
+type tenantSubtreeFunc func(ctx context.Context, callerTenant, resourceTenant string) bool
+
 // tenantScopeDecision is the tenant decision for handlers that are not *Server
 // (RollbackHandler): it delegates to access — the server's tenantAccessForScope,
 // injected at construction — so the decision, ADR-025 crossing included, is the
@@ -29,7 +32,7 @@ import (
 // boundary, since no crossing can be evaluated; a tenant scope is checked by
 // subtree containment and an unset scope is refused, exactly as
 // tenantAccessForScope does.
-func tenantScopeDecision(ctx context.Context, access tenantAccessFunc, scope ctxkeys.TenantScope, resourceTenant, route string) tenantAuthDecision {
+func tenantScopeDecision(ctx context.Context, access tenantAccessFunc, subtree tenantSubtreeFunc, scope ctxkeys.TenantScope, resourceTenant, route string) tenantAuthDecision {
 	if access != nil {
 		return access(ctx, scope, resourceTenant, route)
 	}
@@ -40,7 +43,7 @@ func tenantScopeDecision(ctx context.Context, access tenantAccessFunc, scope ctx
 		}
 		return tenantAuthAllowed
 	case scope.IsTenant() && scope.Path() != "":
-		if isWithinTenantScope(scope.Path(), resourceTenant) { //architecture:allow-root-scope -- tenant-scope subtree check, mirroring tenantAccessForScope
+		if scope.Path() == resourceTenant || (subtree != nil && subtree(ctx, scope.Path(), resourceTenant)) { //architecture:allow-root-scope -- tenant-scope subtree check, mirroring tenantAccessForScope
 			return tenantAuthAllowed
 		}
 		return tenantAuthDenied
@@ -76,7 +79,7 @@ func (h *RollbackHandler) targetTenantAccess(r *http.Request, targetID, route st
 		}
 		return tenantAuthAllowed, ""
 	}
-	return tenantScopeDecision(r.Context(), h.tenantAccess, callerTenantScope(r), resolvedTenant, route), resolvedTenant
+	return tenantScopeDecision(r.Context(), h.tenantAccess, h.tenantSubtree, callerTenantScope(r), resolvedTenant, route), resolvedTenant
 }
 
 // refuseTarget answers a refused targetTenantAccess decision: the ADR-025 crossing
@@ -103,8 +106,12 @@ type RollbackHandler struct {
 	// tenantAccess is the server's tenant decision (Server.tenantAccessForScope),
 	// set by the server when it wires the handler (Issue #4665).
 	tenantAccess tenantAccessFunc
-	auditManager *audit.Manager
-	logger       logging.Logger
+	// tenantSubtree resolves "is resourceTenant the caller's tenant or a ParentID
+	// descendant" (Server.tenantSubtreeContains), injected at construction. Nil
+	// fails closed: only the caller's own tenant is then in scope.
+	tenantSubtree tenantSubtreeFunc
+	auditManager  *audit.Manager
+	logger        logging.Logger
 }
 
 // executeRollbackRequest extends RollbackRequest with handler-local cross-tenant check fields.
@@ -126,17 +133,22 @@ type executeRollbackRequest struct {
 // body (used by tests; not a secure substitute for server-side resolution in production).
 //
 // auditManager may be nil — audit writes are skipped when nil.
+//
+// tenantSubtree answers whether a resource tenant is the caller's tenant or a
+// ParentID descendant of it; production passes Server.tenantSubtreeContains.
 func NewRollbackHandler(
 	rollbackManager rollback.RollbackManager,
 	principalExtractor func(*http.Request) *Principal,
 	stewardTenantLookup func(stewardID string) string,
 	auditManager *audit.Manager,
+	tenantSubtree tenantSubtreeFunc,
 ) *RollbackHandler {
 	return &RollbackHandler{
 		rollbackManager:     rollbackManager,
 		PrincipalExtractor:  principalExtractor,
 		stewardTenantLookup: stewardTenantLookup,
 		auditManager:        auditManager,
+		tenantSubtree:       tenantSubtree,
 		logger:              logging.ForComponent("rollback-handler"),
 	}
 }
@@ -293,9 +305,8 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 			resolvedTenant = req.StewardTenantPath
 		}
 		if resolvedTenant != "" {
-			scope := strings.TrimRight(scopeTenant, "/")
-			sameOrChild := resolvedTenant == scope ||
-				strings.HasPrefix(resolvedTenant, scope+"/")
+			sameOrChild := resolvedTenant == scopeTenant ||
+				(h.tenantSubtree != nil && h.tenantSubtree(ctx, scopeTenant, resolvedTenant))
 			if !sameOrChild {
 				h.sendJSON(w, http.StatusBadRequest, map[string]interface{}{
 					"code":    "CROSS_TENANT_ROLLBACK",

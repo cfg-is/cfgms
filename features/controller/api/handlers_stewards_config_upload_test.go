@@ -466,22 +466,23 @@ func TestHandleUpdateStewardConfig_CrossTenant_Returns404(t *testing.T) {
 
 // TestHandleUpdateStewardConfig_SameTenantSubtree_Returns200 is the [REQUIRED TEST]
 // for Issue #3792: a caller scoped to "tenant-a" can still push config to a steward
-// registered in its own tenant subtree "tenant-a/child" (not just an exact match).
+// registered in a descendant tenant (client-1 under msp-a), not just an exact match.
 func TestHandleUpdateStewardConfig_SameTenantSubtree_Returns200(t *testing.T) {
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
 	const stewardID = "subtree-steward"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "tenant-a/child", "addr", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "addr", "active"))
 
 	body := validCfgUploadBody(stewardID)
 	req := httptest.NewRequest("PUT", "/api/v1/stewards/"+stewardID+"/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
-	req = withPrincipal(req, &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "tenant-a", Permissions: []string{"steward:write-config"}})
+	req = withPrincipal(req, &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", Permissions: []string{"steward:write-config"}})
 	req = withVars(req, map[string]string{"id": stewardID})
 	rec := httptest.NewRecorder()
 	server.handleUpdateStewardConfig(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code,
-		"a caller scoped to tenant-a must reach a steward in tenant-a/child; body: %s", rec.Body.String())
+		"a caller scoped to msp-a must reach a steward in client-1; body: %s", rec.Body.String())
 }
 
 // TestHandleUpdateStewardConfig_APIKeyRefusedInsufficientAssurance is the

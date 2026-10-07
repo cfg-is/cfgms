@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
@@ -235,10 +237,12 @@ func TestHandleGetRole_SameTenantAllowed(t *testing.T) {
 }
 
 // TestHandleGetRole_SubtenantAllowed verifies that a caller scoped to client-1 can
-// GET a role belonging to a child tenant (client-1/sub) within their subtree.
+// GET a role belonging to a child tenant (client-1-sub, a child of client-1) within their subtree.
 func TestHandleGetRole_SubtenantAllowed(t *testing.T) {
 	server := setupTestServer(t)
-	createRoleForTenant(t, server, "client-1/sub", "client-1.sub.role", "Sub Role")
+	seedTenantTree(t, server)
+	createTestTenant(t, server, "client-1-sub", "client-1")
+	createRoleForTenant(t, server, "client-1-sub", "client-1.sub.role", "Sub Role")
 
 	rec := callHandleGetRole(server, "client-1", "client-1.sub.role")
 
@@ -380,8 +384,10 @@ func TestHandleCreateRole_SameTenantAllowed(t *testing.T) {
 // a child tenant within their subtree.
 func TestHandleCreateRole_SubtenantAllowed(t *testing.T) {
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
+	createTestTenant(t, server, "client-1-sub", "client-1")
 
-	body, err := json.Marshal(RoleInfo{ID: "client-1.sub.role", Name: "Sub Role", TenantID: "client-1/sub"})
+	body, err := json.Marshal(RoleInfo{ID: "client-1.sub.role", Name: "Sub Role", TenantID: "client-1-sub"})
 	require.NoError(t, err)
 	rec := callHandleCreateRole(server, "client-1", body)
 
@@ -1370,4 +1376,20 @@ func TestHandleGetRole_CleanErrorPassesThrough(t *testing.T) {
 	require.True(t, ok, "error must be logged as a string")
 	assert.Contains(t, errVal, "no-such-role",
 		"a clean error message must survive sanitization intact")
+}
+
+// createTestTenant creates a tenant through the server's real tenant manager
+// under the given parent ("" parents it under the test root). An already
+// existing tenant is not an error.
+func createTestTenant(t *testing.T, server *Server, id, parentID string) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, ensureTestRootTenant(ctx, server.tenantManager))
+	if parentID == "" {
+		parentID = testRootTenantID
+	}
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, ParentID: parentID})
+	if err != nil && !errors.Is(err, tenant.ErrTenantExists) {
+		require.NoError(t, err)
+	}
 }

@@ -3,10 +3,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,11 +41,12 @@ func (s *Server) CasesStore() business.CaseStore {
 // tenant subtree, for reading cases. An empty callerTenant means the caller has
 // global scope and all cases are visible. Writes go through tenantAccessForScope
 // instead (Issue #4665).
-func caseInCallerSubtree(caseTenantID, callerTenant string) bool {
+// Containment resolves through the tenant manager's ParentID ancestry.
+func (s *Server) caseInCallerSubtree(ctx context.Context, caseTenantID, callerTenant string) bool {
 	if callerTenant == "" { //architecture:allow-root-scope -- read breadth for cases, used only by read paths
 		return true
 	}
-	return caseTenantID == callerTenant || strings.HasPrefix(caseTenantID, callerTenant+"/")
+	return s.tenantSubtreeContains(ctx, callerTenant, caseTenantID)
 }
 
 // createCaseRequest is the JSON body for POST /api/v1/cases.
@@ -219,16 +222,35 @@ func (s *Server) handleListCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cases, err := s.casesStore.ListCases(r.Context(), callerTenant)
-	if err != nil {
-		s.logger.Error("handleListCases: store failed",
-			"tenant_id", logging.SanitizeLogValue(callerTenant),
-			"error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to list cases", http.StatusInternalServerError)
-		return
+	// The store lists one tenant at a time (its own descendant match is a string
+	// prefix that never matches a real tenant ID), so list the caller's tenant and
+	// every ParentID descendant, resolved once, and merge by case ID.
+	tenantIDs := make([]string, 0, 8)
+	tenantIDs = append(tenantIDs, callerTenant)
+	for id := range s.tenantSubtreeIDs(r.Context(), callerTenant) {
+		if id != callerTenant {
+			tenantIDs = append(tenantIDs, id)
+		}
 	}
-	if cases == nil {
-		cases = []*business.Case{}
+	sort.Strings(tenantIDs[1:])
+	cases := []*business.Case{}
+	seen := make(map[string]struct{})
+	for _, tid := range tenantIDs {
+		tenantCases, err := s.casesStore.ListCases(r.Context(), tid)
+		if err != nil {
+			s.logger.Error("handleListCases: store failed",
+				"tenant_id", logging.SanitizeLogValue(tid),
+				"error", logging.SanitizeLogValue(err.Error()))
+			http.Error(w, "failed to list cases", http.StatusInternalServerError)
+			return
+		}
+		for _, c := range tenantCases {
+			if _, dup := seen[c.ID]; dup {
+				continue
+			}
+			seen[c.ID] = struct{}{}
+			cases = append(cases, c)
+		}
 	}
 
 	resp := make([]caseResponse, 0, len(cases))
@@ -269,7 +291,7 @@ func (s *Server) handleGetCase(w http.ResponseWriter, r *http.Request) {
 
 	// Cross-tenant check: same 404 as not-found (existence-oracle prevention).
 	callerTenant := callerTenantSubtree(r)
-	if !caseInCallerSubtree(c.TenantID, callerTenant) {
+	if !s.caseInCallerSubtree(r.Context(), c.TenantID, callerTenant) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -384,7 +406,7 @@ func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id, rout
 		}
 		return c
 	}
-	if !caseInCallerSubtree(c.TenantID, callerTenantSubtree(r)) {
+	if !s.caseInCallerSubtree(r.Context(), c.TenantID, callerTenantSubtree(r)) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return nil
 	}

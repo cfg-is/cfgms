@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,8 +71,8 @@ func isControlRune(r rune) bool {
 // the visibility ListRoles applies (own-subtree roles plus system roles), extended
 // with subtree scope and the unscoped ("") admin mTLS path, so a role can never be
 // fetched by ID that the same caller cannot see in the list.
-func roleReadableByTenant(role *common.Role, callerTenant string) bool {
-	return role != nil && (role.IsSystemRole || callerTenant == "" || isWithinTenantScope(callerTenant, role.TenantId)) //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+func (s *Server) roleReadableByTenant(ctx context.Context, role *common.Role, callerTenant string) bool {
+	return role != nil && (role.IsSystemRole || callerTenant == "" || s.isWithinTenantScope(ctx, callerTenant, role.TenantId)) //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 }
 
 // loadRoleForWrite loads roleID and confirms callerTenant may act on it, writing the
@@ -367,7 +368,7 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	// unless it is a system role (visible to every tenant, matching ListRoles).
 	// Reported as 404 so the response does not confirm that the role exists.
 	callerTenant := callerTenantFilter(r.Context())
-	if !roleReadableByTenant(resp.Role, callerTenant) {
+	if !s.roleReadableByTenant(r.Context(), resp.Role, callerTenant) {
 		s.logger.Warn("Blocked cross-tenant role read",
 			"role_id", logging.SanitizeLogValue(roleID),
 			"caller_tenant", logging.SanitizeLogValue(callerTenant))

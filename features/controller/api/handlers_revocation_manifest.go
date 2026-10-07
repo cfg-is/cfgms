@@ -448,7 +448,7 @@ func (s *Server) stewardTenantFromPeerCertificate(r *http.Request) (tenantID str
 // before Issue #4665 (handleCreateAccount then accepted root_scope:false with no
 // tenant_id; it now assigns the caller's own tenant), and treating that
 // unset tenant as "unrestricted" — which is what the general-purpose
-// isWithinTenantScope("") does for an *mTLS admin caller* — would disclose that entry's
+// Server.isWithinTenantScope("") does for an *mTLS admin caller* — would disclose that entry's
 // credential ID, public key and existence to every steward in the fleet. The unset
 // state here is a roster entry with no declared authority, not an unrestricted caller,
 // so it authorizes nothing. This is the same fail-closed direction isAuthorizedForTenant
@@ -457,13 +457,13 @@ func (s *Server) stewardTenantFromPeerCertificate(r *http.Request) (tenantID str
 // RevokedSerials is deliberately never filtered this way — see
 // handleGetStewardRevocationManifest's doc comment for why a narrower WebAuthn roster
 // is safe where a narrower revocation list would not be.
-func filterWebAuthnCredentialsForSteward(creds []AuthorizedWebAuthnCredential, stewardTenant string) []AuthorizedWebAuthnCredential {
+func (s *Server) filterWebAuthnCredentialsForSteward(ctx context.Context, creds []AuthorizedWebAuthnCredential, stewardTenant string) []AuthorizedWebAuthnCredential {
 	if len(creds) == 0 {
 		return creds
 	}
 	filtered := make([]AuthorizedWebAuthnCredential, 0, len(creds))
 	for _, credential := range creds {
-		if webauthnCredentialAuthorizedForSteward(credential, stewardTenant) {
+		if s.webauthnCredentialAuthorizedForSteward(ctx, credential, stewardTenant) {
 			filtered = append(filtered, credential)
 		}
 	}
@@ -481,14 +481,14 @@ func filterWebAuthnCredentialsForSteward(creds []AuthorizedWebAuthnCredential, s
 // (features/steward/commands/webauthn_credential_verifier.go): the steward re-checks
 // this after verifying the manifest signature, and a server filter that admitted more
 // than the steward accepts would be a disclosure with no corresponding capability.
-func webauthnCredentialAuthorizedForSteward(credential AuthorizedWebAuthnCredential, stewardTenant string) bool {
+func (s *Server) webauthnCredentialAuthorizedForSteward(ctx context.Context, credential AuthorizedWebAuthnCredential, stewardTenant string) bool {
 	if credential.RootScope {
 		return credential.TenantID == ""
 	}
 	if credential.TenantID == "" || stewardTenant == "" {
 		return false
 	}
-	return isWithinTenantScope(credential.TenantID, stewardTenant) //architecture:allow-root-scope -- compares a roster entry with a steward, not a caller
+	return s.isWithinTenantScope(ctx, credential.TenantID, stewardTenant) //architecture:allow-root-scope -- compares a roster entry with a steward, not a caller
 }
 
 // handleGetStewardRevocationManifest handles GET /api/v1/public/steward-revocation-manifest
@@ -543,7 +543,7 @@ func (s *Server) handleGetStewardRevocationManifest(w http.ResponseWriter, r *ht
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build revocation manifest", "INTERNAL_ERROR")
 		return
 	}
-	manifest.AuthorizedWebAuthnCredentials = filterWebAuthnCredentialsForSteward(webauthnCreds, stewardTenant)
+	manifest.AuthorizedWebAuthnCredentials = s.filterWebAuthnCredentialsForSteward(r.Context(), webauthnCreds, stewardTenant)
 	manifest.WebAuthnRelyingParty = s.webAuthnRelyingPartyBinding()
 
 	sig, err := signRevocationManifest(s.certManager, manifest)

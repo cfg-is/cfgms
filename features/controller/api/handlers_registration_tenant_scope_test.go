@@ -299,8 +299,10 @@ func TestF2_RegistrationTokenTenantScope(t *testing.T) {
 	})
 
 	t.Run("tenant-a can create a token within its own subtree", func(t *testing.T) {
+		createTestTenant(t, server, "tenant-a", "")
+		createTestTenant(t, server, "tenant-a-child", "tenant-a")
 		body, _ := json.Marshal(registration.TokenCreateRequest{
-			TenantID:      "tenant-a/child",
+			TenantID:      "tenant-a-child",
 			ControllerURL: "grpc://controller.example.com:7443",
 		})
 		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
