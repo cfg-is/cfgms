@@ -29,7 +29,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import './ShellTab.css'
@@ -65,6 +65,25 @@ function decodeBase64(b64: string): Uint8Array {
 function sendResize(ws: WebSocket, cols: number, rows: number): void {
   const json = JSON.stringify({ cols, rows })
   ws.send(JSON.stringify({ type: 'resize', data: encodeBase64(json) }))
+}
+
+// ---------------------------------------------------------------------------
+// Theme — xterm cannot read CSS variables itself, so resolve the design
+// tokens to concrete colours (docs/design/web-ui-design-tokens.css).
+// ---------------------------------------------------------------------------
+
+export function readTerminalTheme(): ITheme {
+  const style = getComputedStyle(document.documentElement)
+  const token = (name: string) => style.getPropertyValue(name).trim()
+  const accent = token('--accent')
+  return {
+    background: token('--bg-sunk'),
+    foreground: token('--text-primary'),
+    cursor: accent,
+    cursorAccent: token('--bg-sunk'),
+    // 30% alpha over the terminal ground (#rrggbb + 4d).
+    selectionBackground: /^#[0-9a-f]{6}$/i.test(accent) ? `${accent}4d` : accent,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,14 +135,7 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
       fontSize: 13,
       lineHeight: 1.45,
       cursorBlink: true,
-      // Warm-terminal palette from docs/design/mockups/asset-shell.html.
-      // Light-mode values; dark-mode xterm theming is an open item.
-      theme: {
-        background: '#f4efe7',
-        foreground: '#5a4a3a',
-        cursor: '#4a6b7c',
-        selectionBackground: 'rgba(74, 107, 124, 0.3)',
-      },
+      theme: readTerminalTheme(),
     })
     terminalRef.current = terminal
 
@@ -139,6 +151,16 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
     const url = `${proto}//${location.host}/api/v1/terminal/ws/${encodeURIComponent(stewardId)}`
     const ws = new WebSocket(url)
     wsRef.current = ws
+
+    // Re-theme when the app toggles data-theme or the OS scheme flips (auto mode).
+    const applyTheme = () => { terminal.options.theme = readTerminalTheme() }
+    const themeObserver = new MutationObserver(applyTheme)
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    })
+    const scheme = window.matchMedia?.('(prefers-color-scheme: dark)')
+    scheme?.addEventListener?.('change', applyTheme)
 
     let wasConnected = false
 
@@ -202,6 +224,8 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
       wsRef.current = null
       terminalRef.current = null
       ro.disconnect()
+      themeObserver.disconnect()
+      scheme?.removeEventListener?.('change', applyTheme)
       dataListener.dispose()
       resizeListener.dispose()
       ws.close()

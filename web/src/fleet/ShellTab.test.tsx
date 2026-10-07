@@ -11,15 +11,18 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ShellTab from './ShellTab.tsx'
 
 // ---------------------------------------------------------------------------
 // Module mocks — hoisted by vitest to the top of the module graph
 // ---------------------------------------------------------------------------
 
+const terminals = vi.hoisted(() => [] as Array<{ options: { theme?: Record<string, string> } }>)
+
 vi.mock('@xterm/xterm', () => {
-  function Terminal(this: Record<string, unknown>) {
+  function Terminal(this: Record<string, unknown>, opts: Record<string, unknown>) {
+    terminals.push(this as never)
     this.open = vi.fn()
     this.write = vi.fn()
     this.clear = vi.fn()
@@ -28,6 +31,7 @@ vi.mock('@xterm/xterm', () => {
     this.loadAddon = vi.fn()
     this.onData = vi.fn().mockReturnValue({ dispose: vi.fn() })
     this.onResize = vi.fn().mockReturnValue({ dispose: vi.fn() })
+    this.options = { theme: opts?.theme }
     this.cols = 80
     this.rows = 24
   }
@@ -332,5 +336,30 @@ describe('component structure', () => {
   it('renders with the shell-tab testid', () => {
     render(<ShellTab stewardId="stw-001" />)
     expect(screen.getByTestId('shell-tab')).toBeInTheDocument()
+  })
+})
+
+describe('terminal theme', () => {
+  afterEach(() => {
+    document.documentElement.removeAttribute('data-theme')
+    document.documentElement.removeAttribute('style')
+    terminals.length = 0
+  })
+
+  it('derives colours from the design tokens and follows a theme toggle', async () => {
+    const root = document.documentElement
+    root.style.setProperty('--bg-sunk', '#ececea')
+    root.style.setProperty('--text-primary', '#5f5e58')
+    root.style.setProperty('--accent', '#4a6b7c')
+    render(<ShellTab stewardId="stw-001" />)
+    const term = terminals[terminals.length - 1]!
+    expect(term.options.theme).toMatchObject({ background: '#ececea', foreground: '#5f5e58', cursor: '#4a6b7c' })
+
+    root.style.setProperty('--bg-sunk', '#101010')
+    root.style.setProperty('--text-primary', '#bcbbb5')
+    root.style.setProperty('--accent', '#7b9fb0')
+    root.setAttribute('data-theme', 'dark')
+    await waitFor(() => expect(term.options.theme?.background).toBe('#101010'))
+    expect(term.options.theme).toMatchObject({ foreground: '#bcbbb5', cursor: '#7b9fb0' })
   })
 })
