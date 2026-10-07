@@ -930,8 +930,18 @@ func (h *WorkflowHandler) handleDecideApproval(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A decision is attributed to a named principal, and a lapsed gate stays lapsed
+	// even before ExpireDue has swept it.
 	principalID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
-	if principalID != "" && principalID == rec.RequestedBy {
+	if principalID == "" {
+		h.sendError(w, http.StatusForbidden, "decision requires an identified principal")
+		return
+	}
+	if !rec.ExpiresAt.IsZero() && !time.Now().Before(rec.ExpiresAt) {
+		h.sendError(w, http.StatusConflict, "approval has expired")
+		return
+	}
+	if principalID == rec.RequestedBy {
 		h.sendJSON(w, http.StatusForbidden, map[string]interface{}{
 			"error": "the principal that started a run cannot approve it",
 			"code":  "SELF_APPROVAL",

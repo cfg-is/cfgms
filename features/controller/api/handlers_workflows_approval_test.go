@@ -276,3 +276,29 @@ func TestWorkflowApproval_PermissionRegistered(t *testing.T) {
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 	assert.True(t, knownPermissions["workflow:approve"])
 }
+
+func TestWorkflowApproval_UnidentifiedPrincipalRefused(t *testing.T) {
+	f := newApprovalFixture(t)
+	_, rec := f.startGatedRun("")
+	resp := f.decide(approvalTenant, "", rec.ApprovalID, "approve")
+	assert.Equal(t, http.StatusForbidden, resp.Code)
+	got, err := f.store.GetApproval(context.Background(), approvalTenant, rec.ApprovalID)
+	require.NoError(t, err)
+	assert.Equal(t, business.ApprovalStatusPending, got.Status)
+}
+
+func TestWorkflowApproval_LapsedApprovalCannotBeDecided(t *testing.T) {
+	f := newApprovalFixture(t)
+	lapsed := &business.WorkflowApproval{
+		ApprovalID: "appr-lapsed", TenantID: approvalTenant, WorkflowName: "gated", ExecutionID: "exec-lapsed",
+		StepID: "gate", Status: business.ApprovalStatusPending, RequestedBy: approvalStarter,
+		RequestedAt: time.Now().Add(-2 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour),
+	}
+	require.NoError(t, f.store.CreateApproval(context.Background(), lapsed))
+
+	resp := f.decide(approvalTenant, approvalDecider, lapsed.ApprovalID, "approve")
+	assert.Equal(t, http.StatusConflict, resp.Code)
+	got, err := f.store.GetApproval(context.Background(), approvalTenant, lapsed.ApprovalID)
+	require.NoError(t, err)
+	assert.Equal(t, business.ApprovalStatusPending, got.Status, "lapsed approval must not be decided")
+}
