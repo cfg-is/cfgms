@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -34,6 +36,11 @@ type linuxCollector struct {
 	clkTck   float64        // kernel clock ticks per second (AT_CLKTCK)
 	prev     map[int]uint64 // pid -> cumulative CPU ticks at the previous Snapshot
 	prevWall time.Time      // wall clock at the previous Snapshot
+
+	procRoot     string       // procfs mount (overridden in tests with a fixture tree)
+	sysBlockRoot string       // sysfs block directory, used to tell whole disks from partitions
+	hostPrev     hostCounters // host counters at the previous Snapshot
+	hostPrevWall time.Time    // wall clock of hostPrev; zero before the first Snapshot
 }
 
 // NewCollector returns a Linux telemetry collector.
@@ -41,6 +48,9 @@ func NewCollector() Collector {
 	return &linuxCollector{
 		clkTck: float64(readClockTicks()),
 		prev:   make(map[int]uint64),
+
+		procRoot:     "/proc",
+		sysBlockRoot: "/sys/block",
 	}
 }
 
@@ -60,7 +70,229 @@ func (c *linuxCollector) Snapshot(ctx context.Context) (Telemetry, error) {
 	// Services are best-effort: absence of systemd/D-Bus must not fail the whole
 	// snapshot (the required process telemetry already succeeded).
 	svcs := collectSystemdServices(ctx)
-	return Telemetry{Processes: procs, Services: svcs}, nil
+	return Telemetry{Processes: procs, Services: svcs, Host: c.collectHost()}, nil
+}
+
+// collectHost reads the host-level totals. Each source is best-effort: an
+// unreadable file leaves its fields at zero rather than failing the snapshot
+// (the process table is the required facet). Rates are 0 on the first call.
+func (c *linuxCollector) collectHost() *HostTotals {
+	now := time.Now()
+	cur := hostCounters{}
+	h := &HostTotals{}
+
+	if data, err := os.ReadFile(c.procRoot + "/stat"); err == nil {
+		cur.cpuBusy, cur.cpuTotal = parseProcStatCPU(string(data))
+	}
+	if data, err := os.ReadFile(c.procRoot + "/meminfo"); err == nil {
+		h.MemoryUsedBytes, h.MemoryTotalBytes = parseMeminfo(string(data))
+	}
+	if data, err := os.ReadFile(c.procRoot + "/diskstats"); err == nil {
+		cur.diskRead, cur.diskWrite = parseDiskstats(string(data), c.isWholeDisk)
+	}
+	if data, err := os.ReadFile(c.procRoot + "/net/dev"); err == nil {
+		cur.netRx, cur.netTx = parseNetDev(string(data))
+	}
+	h.DiskUsedBytes, h.DiskTotalBytes = c.readFilesystemUsage()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hostPrevWall.IsZero() {
+		applyRates(h, c.hostPrev, cur, now.Sub(c.hostPrevWall).Seconds())
+	}
+	c.hostPrev = cur
+	c.hostPrevWall = now
+	return h
+}
+
+// parseProcStatCPU returns (busy, total) jiffies from the aggregate "cpu" line
+// of /proc/stat. idle and iowait count as idle; guest time is already included
+// in user/nice so it is not added again.
+func parseProcStatCPU(data string) (busy, total uint64) {
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+		var v [8]uint64 // user nice system idle iowait irq softirq steal
+		for i := 0; i < len(v) && i+1 < len(fields); i++ {
+			v[i], _ = strconv.ParseUint(fields[i+1], 10, 64)
+		}
+		for _, x := range v {
+			total += x
+		}
+		idle := v[3] + v[4]
+		if idle > total {
+			return 0, total
+		}
+		return total - idle, total
+	}
+	return 0, 0
+}
+
+// parseMeminfo returns (used, total) physical memory in bytes. Used is
+// MemTotal-MemAvailable (what Task Manager style views show); when the kernel
+// predates MemAvailable it falls back to free+buffers+cached.
+func parseMeminfo(data string) (used, total uint64) {
+	vals := map[string]uint64{}
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		v, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		vals[strings.TrimSuffix(fields[0], ":")] = v * 1024 // values are in kB
+	}
+	total = vals["MemTotal"]
+	avail, ok := vals["MemAvailable"]
+	if !ok {
+		avail = vals["MemFree"] + vals["Buffers"] + vals["Cached"]
+	}
+	if avail > total {
+		avail = total
+	}
+	return total - avail, total
+}
+
+// diskstatsSectorBytes is the fixed unit /proc/diskstats reports sectors in,
+// regardless of the device's physical sector size.
+const diskstatsSectorBytes = 512
+
+// parseDiskstats sums cumulative bytes read and written across the devices for
+// which include returns true.
+func parseDiskstats(data string, include func(name string) bool) (readBytes, writeBytes uint64) {
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		// major minor name reads merged sectors-read ms writes merged sectors-written ...
+		if len(fields) < 10 || !include(fields[2]) {
+			continue
+		}
+		rs, err1 := strconv.ParseUint(fields[5], 10, 64)
+		ws, err2 := strconv.ParseUint(fields[9], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		readBytes += rs * diskstatsSectorBytes
+		writeBytes += ws * diskstatsSectorBytes
+	}
+	return readBytes, writeBytes
+}
+
+// virtualDiskPrefixes are block devices that either have no storage behind them
+// or sit on top of other listed devices, so counting them would double count.
+var virtualDiskPrefixes = []string{"loop", "ram", "zram", "dm-", "md", "sr", "fd", "nbd"}
+
+// isWholeDisk reports whether name is a physical, top-level block device: it has
+// an entry in sysfs's block directory (partitions do not) and is not virtual.
+func (c *linuxCollector) isWholeDisk(name string) bool {
+	// name comes from /proc/diskstats. A kernel device name is a single path
+	// component; anything else cannot name a sysfs block entry and must never be
+	// joined into a path, so it is rejected rather than cleaned.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return false
+	}
+	for _, p := range virtualDiskPrefixes {
+		if strings.HasPrefix(name, p) {
+			return false
+		}
+	}
+	// #nosec G703 -- name is validated above to be a single path component (no
+	// separators, NUL, "." or ".."), so the path cannot leave sysBlockRoot; the
+	// call is an existence check only and reads no file contents.
+	_, err := os.Stat(filepath.Join(c.sysBlockRoot, name))
+	return err == nil
+}
+
+// parseNetDev sums received and transmitted bytes across every interface except
+// loopback.
+func parseNetDev(data string) (rx, tx uint64) {
+	for _, line := range strings.Split(data, "\n") {
+		name, rest, found := strings.Cut(line, ":")
+		if !found {
+			continue // header lines
+		}
+		if strings.TrimSpace(name) == "lo" {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) < 9 {
+			continue
+		}
+		r, err1 := strconv.ParseUint(fields[0], 10, 64)
+		t, err2 := strconv.ParseUint(fields[8], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		rx += r
+		tx += t
+	}
+	return rx, tx
+}
+
+// readFilesystemUsage sums used/total bytes over the distinct block-device
+// backed filesystems in /proc/mounts. Bind mounts of one device count once. If
+// the host exposes none (e.g. a container with an overlay root) it falls back to
+// the root filesystem.
+func (c *linuxCollector) readFilesystemUsage() (used, total uint64) {
+	seen := map[string]bool{}
+	if data, err := os.ReadFile(c.procRoot + "/mounts"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 || !strings.HasPrefix(fields[0], "/dev/") || seen[fields[0]] {
+				continue
+			}
+			u, t, ok := statfsUsage(unescapeMountPath(fields[1]))
+			if !ok {
+				continue
+			}
+			seen[fields[0]] = true
+			used += u
+			total += t
+		}
+	}
+	if len(seen) == 0 {
+		if u, t, ok := statfsUsage("/"); ok {
+			return u, t
+		}
+	}
+	return used, total
+}
+
+// unescapeMountPath decodes the octal escapes (\040 for space, etc.) that
+// /proc/mounts applies to the mount point field.
+func unescapeMountPath(p string) string {
+	if !strings.Contains(p, "\\") {
+		return p
+	}
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if p[i] == '\\' && i+3 < len(p) {
+			if n, err := strconv.ParseUint(p[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(n))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
+}
+
+func statfsUsage(path string) (used, total uint64, ok bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0, false
+	}
+	bs := uint64(st.Bsize) // #nosec G115 -- block size is a small positive value
+	total = st.Blocks * bs
+	free := st.Bfree * bs
+	if free > total {
+		return 0, total, true
+	}
+	return total - free, total, true
 }
 
 // collectProcesses walks /proc and builds one ProcessSnapshot per live PID,

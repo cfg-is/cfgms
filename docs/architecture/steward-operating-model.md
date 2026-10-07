@@ -855,6 +855,17 @@ Per-process **network** byte accounting is structurally present in the wire form
 but not populated by this usermode collector — it requires kernel-assisted tracing
 (eBPF / the Windows Kernel-Network ETW provider), reserved for a future story.
 
+Each snapshot also carries **host-level totals** (`host`, proto `HostTotals`):
+whole-host CPU percent, memory used/total, disk read/write bytes per second,
+disk used/total, and network rx/tx bytes per second (non-loopback interfaces).
+Rates are deltas between consecutive snapshots — 0 on the first snapshot and 0
+(never negative or NaN) when a counter wraps or resets. Linux reads
+`/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`; Windows uses
+`GetSystemTimes`, `GlobalMemoryStatusEx`, `NtQuerySystemInformation`
+(`SystemPerformanceInformation`) and `GetIfTable2Ex`. Host totals are telemetry,
+not DNA, and are not persisted. An older steward sends no `host`; the controller
+WebSocket JSON then omits it.
+
 #### TelemetryStream RPC (#2764)
 
 The steward exposes live telemetry over the data-plane `TelemetryStream` bidi RPC

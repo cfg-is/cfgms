@@ -7,8 +7,10 @@ package telemetry
 
 import (
 	"context"
+	"math"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,4 +133,31 @@ func TestWindowsCollector_CPUBudget(t *testing.T) {
 	t.Logf("per-snapshot %.2f ms CPU → %.3f%% single-core at %.0f Hz sustained (%d iterations)",
 		perSnapshotSec*1000, sustainedPct, cadenceHz, iterations)
 	assert.Less(t, sustainedPct, 1.0, "sustained %.0f Hz snapshot polling must stay within the 1%% single-core budget", cadenceHz)
+}
+
+// TestWindowsSnapshot_HostTotals asserts real host totals: memory and disk
+// capacity are populated, the first snapshot's rates are zero, the second's are
+// finite and non-negative, and the cumulative network octets (non-loopback) are
+// non-zero on a host that has carried any traffic.
+func TestWindowsSnapshot_HostTotals(t *testing.T) {
+	c := NewCollector()
+	first, err := c.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, first.Host)
+	assert.NotZero(t, first.Host.MemoryTotalBytes)
+	assert.LessOrEqual(t, first.Host.MemoryUsedBytes, first.Host.MemoryTotalBytes)
+	assert.NotZero(t, first.Host.DiskTotalBytes)
+	assert.Zero(t, first.Host.NetRxBytesPerSec)
+	assert.Zero(t, first.Host.CPUPercent)
+
+	rx, tx := readNetworkOctets()
+	assert.NotZero(t, rx+tx, "non-loopback interface octets must be read from GetIfTable2Ex")
+
+	time.Sleep(50 * time.Millisecond)
+	second, err := c.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, second.Host)
+	for _, v := range []float64{second.Host.CPUPercent, second.Host.DiskReadBytesPerSec, second.Host.DiskWriteBytesPerSec, second.Host.NetRxBytesPerSec, second.Host.NetTxBytesPerSec} {
+		assert.False(t, math.IsNaN(v) || math.IsInf(v, 0) || v < 0)
+	}
 }

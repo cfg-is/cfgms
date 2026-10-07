@@ -148,6 +148,9 @@ message TelemetrySnapshot {
   repeated ProcessSnapshot processes = 2;
   repeated ServiceSnapshot services = 3;
   google.protobuf.Timestamp timestamp = 4;
+  // host carries host-level totals (CPU, memory, disk, network). Absent when the
+  // steward predates the field; consumers must treat absence as "not reported".
+  HostTotals host = 5;
 }
 
 // === Osquery Ad-hoc Query (Issue #3566, Epic #2855) ===
@@ -187,4 +190,19 @@ message OsqueryQueryResponse {
 // Column names and values are strings, matching osquery's JSON-array output.
 message OsqueryRow {
   map<string, string> columns = 1;
+}
+
+// HostTotals is the host-level resource view carried by a TelemetrySnapshot.
+// Rates are per-second deltas between consecutive snapshots (0 on the first
+// snapshot and across counter wrap/reset). Network counters exclude loopback.
+message HostTotals {
+  double cpu_percent = 1;            // whole-host CPU busy, 0-100
+  uint64 memory_used_bytes = 2;
+  uint64 memory_total_bytes = 3;
+  double disk_read_bytes_per_sec = 4;
+  double disk_write_bytes_per_sec = 5;
+  uint64 disk_used_bytes = 6;
+  uint64 disk_total_bytes = 7;
+  double net_rx_bytes_per_sec = 8;
+  double net_tx_bytes_per_sec = 9;
 }

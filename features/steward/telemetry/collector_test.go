@@ -53,3 +53,20 @@ func TestSnapshotHonorsCanceledContext(t *testing.T) {
 	_, err := NewCollector().Snapshot(ctx)
 	require.Error(t, err, "a canceled-context Snapshot must return an error, not a partial result")
 }
+
+// TestCounterRate_NeverNegativeOrNaN is the REQUIRED wrap/reset test for the
+// shared rate math used by every platform collector.
+func TestCounterRate_NeverNegativeOrNaN(t *testing.T) {
+	assert.Equal(t, 50.0, counterRate(100, 200, 2))
+	assert.Equal(t, 0.0, counterRate(200, 100, 1), "counter reset")
+	assert.Equal(t, 0.0, counterRate(^uint64(0), 5, 1), "counter wrap")
+	assert.Equal(t, 0.0, counterRate(1, 2, 0), "zero interval is not Inf")
+	assert.Equal(t, 0.0, counterRate(1, 2, -1), "negative interval")
+}
+
+func TestCPUPercent_Bounds(t *testing.T) {
+	assert.InDelta(t, 25.0, cpuPercent(hostCounters{cpuBusy: 10, cpuTotal: 100}, hostCounters{cpuBusy: 35, cpuTotal: 200}), 1e-9)
+	assert.Equal(t, 0.0, cpuPercent(hostCounters{cpuBusy: 10, cpuTotal: 100}, hostCounters{cpuBusy: 10, cpuTotal: 100}), "empty interval")
+	assert.Equal(t, 0.0, cpuPercent(hostCounters{cpuBusy: 50, cpuTotal: 100}, hostCounters{cpuBusy: 5, cpuTotal: 200}), "reset")
+	assert.Equal(t, 100.0, cpuPercent(hostCounters{}, hostCounters{cpuBusy: 300, cpuTotal: 100}), "clamped")
+}

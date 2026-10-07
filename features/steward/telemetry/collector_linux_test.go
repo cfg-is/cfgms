@@ -7,6 +7,8 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -131,4 +133,115 @@ func TestLinuxCollector_CPUBudget(t *testing.T) {
 	t.Logf("per-snapshot %.2f ms CPU → %.3f%% single-core at %.0f Hz sustained (%d iterations)",
 		perSnapshotSec*1000, sustainedPct, cadenceHz, iterations)
 	assert.Less(t, sustainedPct, 1.0, "sustained %.0f Hz snapshot polling must stay within the 1%% single-core budget", cadenceHz)
+}
+
+// writeHostFixture builds a procfs/sysfs fixture tree for the host-total readers.
+func writeHostFixture(t *testing.T, root string, cpuBusy, cpuIdle, rdSectors, wrSectors, rx, tx uint64) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(root+"/proc/net", 0o750))
+	require.NoError(t, os.MkdirAll(root+"/sys/block/sda", 0o750))
+	write := func(name, content string) {
+		require.NoError(t, os.WriteFile(root+"/proc/"+name, []byte(content), 0o600))
+	}
+	write("stat", fmt.Sprintf("cpu  %d 0 0 %d 0 0 0 0 0 0\ncpu0 1 2 3 4 5 6 7 8 9 10\n", cpuBusy, cpuIdle))
+	write("meminfo", "MemTotal:       8000000 kB\nMemFree: 1000000 kB\nMemAvailable:   2000000 kB\n")
+	write("diskstats", fmt.Sprintf("   8  0 sda 1 0 %d 0 1 0 %d 0 0 0 0\n   8  1 sda1 1 0 999999 0 1 0 999999 0 0 0 0\n   7  0 loop0 1 0 999999 0 1 0 999999 0 0 0 0\n", rdSectors, wrSectors))
+	write("net/dev", fmt.Sprintf("Inter-|   Receive |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 5000 1 0 0 0 0 0 0 5000 1 0 0 0 0 0 0\n  eth0: %d 1 0 0 0 0 0 0 %d 1 0 0 0 0 0 0\n", rx, tx))
+	write("mounts", "")
+}
+
+func newFixtureCollector(root string) *linuxCollector {
+	return &linuxCollector{
+		clkTck:       100,
+		prev:         map[int]uint64{},
+		procRoot:     root + "/proc",
+		sysBlockRoot: root + "/sys/block",
+	}
+}
+
+// TestIsWholeDisk_RejectsNonComponentNames proves a device name that is not a
+// single path component never resolves to a sysfs entry, even when the joined
+// path would exist on disk.
+func TestIsWholeDisk_RejectsNonComponentNames(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(root+"/sys/block/sda", 0o750))
+	require.NoError(t, os.MkdirAll(root+"/sys/escape", 0o750))
+	c := newFixtureCollector(root)
+
+	assert.True(t, c.isWholeDisk("sda"))
+	for _, name := range []string{"", ".", "..", "../escape", "sda/..", `..\escape`, "sda\x00"} {
+		assert.False(t, c.isWholeDisk(name), "name %q must be rejected", name)
+	}
+}
+
+// TestLinuxHostTotals_RatesFromDeltas is the REQUIRED test: the first snapshot's
+// rates are zero, the second's come from the delta between the two readings.
+func TestLinuxHostTotals_RatesFromDeltas(t *testing.T) {
+	root := t.TempDir()
+	c := newFixtureCollector(root)
+
+	writeHostFixture(t, root, 100, 900, 1000, 2000, 10_000, 20_000)
+	first := c.collectHost()
+	assert.Equal(t, uint64(8000000*1024), first.MemoryTotalBytes)
+	assert.Equal(t, uint64(6000000*1024), first.MemoryUsedBytes)
+	assert.Zero(t, first.CPUPercent)
+	assert.Zero(t, first.NetRxBytesPerSec)
+	assert.Zero(t, first.NetTxBytesPerSec)
+	assert.Zero(t, first.DiskReadBytesPerSec)
+	assert.Zero(t, first.DiskWriteBytesPerSec)
+
+	time.Sleep(20 * time.Millisecond)
+	// +100 busy of +200 total ticks => 50%; loopback and partition/loop devices ignored.
+	writeHostFixture(t, root, 200, 1000, 3000, 6000, 110_000, 220_000)
+	second := c.collectHost()
+	assert.InDelta(t, 50.0, second.CPUPercent, 0.001)
+	assert.Greater(t, second.NetRxBytesPerSec, 0.0)
+	assert.Greater(t, second.NetTxBytesPerSec, 0.0)
+	assert.InDelta(t, 2.0, second.NetTxBytesPerSec/second.NetRxBytesPerSec, 0.001, "tx delta is 200000 vs rx 100000")
+	assert.InDelta(t, 2.0, second.DiskWriteBytesPerSec/second.DiskReadBytesPerSec, 0.001, "write delta 4000 sectors vs read 2000")
+}
+
+// TestLinuxHostTotals_CounterResetYieldsZero is the REQUIRED wrap/reset test.
+func TestLinuxHostTotals_CounterResetYieldsZero(t *testing.T) {
+	root := t.TempDir()
+	c := newFixtureCollector(root)
+	writeHostFixture(t, root, 500, 500, 5000, 5000, 1_000_000, 1_000_000)
+	c.collectHost()
+	time.Sleep(10 * time.Millisecond)
+	writeHostFixture(t, root, 1, 1, 1, 1, 1, 1) // every counter went backwards
+	h := c.collectHost()
+	for name, v := range map[string]float64{
+		"cpu": h.CPUPercent, "diskRead": h.DiskReadBytesPerSec, "diskWrite": h.DiskWriteBytesPerSec,
+		"netRx": h.NetRxBytesPerSec, "netTx": h.NetTxBytesPerSec,
+	} {
+		assert.Equal(t, 0.0, v, name)
+		assert.False(t, math.IsNaN(v) || math.IsInf(v, 0), name)
+	}
+}
+
+// TestLinuxSnapshot_HostNetworkTotalsReal asserts the live collector reports a
+// non-zero network total on a host that has any non-loopback traffic counters.
+func TestLinuxSnapshot_HostNetworkTotalsReal(t *testing.T) {
+	data, err := os.ReadFile("/proc/net/dev")
+	require.NoError(t, err)
+	rx, tx := parseNetDev(string(data))
+	c := NewCollector()
+	snap, err := c.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, snap.Host)
+	if rx+tx > 0 {
+		// Cumulative counters are non-zero, so a delta over real traffic is
+		// observable; the rate itself needs sustained traffic, which a test host
+		// cannot guarantee, so assert the raw totals reach the collector instead.
+		cur := c.(*linuxCollector).hostPrev
+		assert.NotZero(t, cur.netRx+cur.netTx, "non-loopback totals must be read from /proc/net/dev")
+	}
+	assert.NotZero(t, snap.Host.MemoryTotalBytes)
+	assert.NotZero(t, snap.Host.DiskTotalBytes)
+	assert.LessOrEqual(t, snap.Host.MemoryUsedBytes, snap.Host.MemoryTotalBytes)
+}
+
+func TestUnescapeMountPath(t *testing.T) {
+	assert.Equal(t, "/mnt/my disk", unescapeMountPath(`/mnt/my\040disk`))
+	assert.Equal(t, "/plain", unescapeMountPath("/plain"))
 }
