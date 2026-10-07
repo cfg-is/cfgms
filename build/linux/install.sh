@@ -141,27 +141,61 @@ else
     exit 1
 fi
 
-# ── Install stdlib module binaries ────────────────────────────────────────────
+# ── Install stdlib module bundle installation roots ───────────────────────────
 
+# Each stdlib module ships as a signed bundle installation root — a directory
+# holding the publisher's module.yaml, the bundle.yaml sidecar (content hash and
+# publisher signature) and the module binary — assembled at build time by
+# scripts/sign-module-bundle and laid out in the release archive as
+# modules/<name>/. They are installed as modules/<name>/ under MODULES_INSTALL_DIR,
+# the location the steward's bundle discovery reads. Entries are bare module
+# names (root directories), never flat cfgms-module-<name> binaries;
+# scripts/check-stdlib-payload-boundary.sh enforces both.
 STDLIB_MODULES=(
-    cfgms-module-cert_trust
-    cfgms-module-file
-    cfgms-module-firewall
-    cfgms-module-hostname
-    cfgms-module-package
-    cfgms-module-patch
-    cfgms-module-script
-    cfgms-module-service
-    cfgms-module-time
-    cfgms-module-user
+    cert_trust
+    file
+    firewall
+    hostname
+    package
+    patch
+    script
+    service
+    time
+    user
 )
 MODULES_INSTALL_DIR="${INSTALL_PREFIX}/usr/local/lib/cfgms/modules"
 
-install -d "$MODULES_INSTALL_DIR"
-for module_bin in "${STDLIB_MODULES[@]}"; do
-    src="$SCRIPT_DIR/$module_bin"
-    if [[ -x "$src" ]]; then
-        install -m 755 "$src" "$MODULES_INSTALL_DIR/$module_bin"
+install -d -m 755 "$MODULES_INSTALL_DIR"
+for module in "${STDLIB_MODULES[@]}"; do
+    src="$SCRIPT_DIR/modules/$module"
+    dest="$MODULES_INSTALL_DIR/$module"
+    if [[ -f "$src/module.yaml" ]]; then
+        # Replace a previous root wholesale so a stale binary or sidecar from an
+        # older version can never sit beside a new manifest.
+        rm -rf "$dest"
+        install -d -m 755 "$dest"
+        # Stage each file with install(1) rather than cp -p: the files are
+        # created by this (root) process, so they are root-owned regardless of
+        # who extracted the archive — a root steward must never execute a
+        # binary an unprivileged user can rewrite. Only the permission bits the
+        # assembler set (binary 755, manifest 644, sidecar 600) are carried
+        # over; setuid/setgid/sticky bits are masked off. The bytes are copied
+        # verbatim, so the installed content is exactly the signed content.
+        while IFS= read -r -d '' entry; do
+            rel="${entry#"$src"/}"
+            if [[ -d "$entry" ]]; then
+                install -d -m 755 "$dest/$rel"
+            elif [[ -f "$entry" && ! -L "$entry" ]]; then
+                mode="$(stat -c '%a' "$entry")"
+                mode="$(printf '%o' $(( 8#$mode & 8#0777 )))"
+                install -m "$mode" "$entry" "$dest/$rel"
+            else
+                echo "Error: unexpected non-regular entry in module bundle root: $entry" >&2
+                exit 1
+            fi
+        done < <(find "$src" -mindepth 1 -print0)
+    else
+        echo "Warning: stdlib module bundle root not found: $src (skipping $module)" >&2
     fi
 done
 

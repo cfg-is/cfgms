@@ -66,13 +66,18 @@ type fixtureOpts struct {
 	stdlibDirs []string
 	// makefileModules is the space-separated STDLIB_MODULES value
 	makefileModules []string
-	// wxsModules are the module names (without cfgms-module- prefix or .exe suffix)
-	// that appear as <File … Name="cfgms-module-X.exe" …/> inside MODULESDIR
+	// wxsModules are the module names that appear as per-module root directories
+	// (<Directory Id="MODULEDIR_X" Name="x">) inside MODULESDIR
 	wxsModules []string
-	// installShModules are the cfgms-module-X names in install.sh STDLIB_MODULES
+	// installShModules are the names in install.sh STDLIB_MODULES
 	installShModules []string
-	// buildPkgModules are the cfgms-module-X names in build-pkg.sh STDLIB_MODULES
+	// buildPkgModules are the names in build-pkg.sh STDLIB_MODULES
 	buildPkgModules []string
+	// wxsFlat additionally declares each wxsModules entry as a flat
+	// cfgms-module-X.exe directly under MODULESDIR (the pre-#4431 shape)
+	wxsFlat bool
+	// wxsOmitSidecar drops bundle.yaml from every wxs module root
+	wxsOmitSidecar bool
 }
 
 func buildFixture(t *testing.T, opts fixtureOpts) string {
@@ -103,10 +108,25 @@ func buildFixture(t *testing.T, opts fixtureOpts) string {
 	wxsComponents := ""
 	for _, m := range opts.wxsModules {
 		capitalized := strings.ToUpper(m[:1]) + m[1:]
-		wxsComponents += fmt.Sprintf(`          <Component Id="Module%s" Guid="*">
+		if opts.wxsFlat {
+			wxsComponents += fmt.Sprintf(`          <Component Id="Module%s" Guid="*">
             <File Id="Module%sExe" Source="$(var.ModulesDir)\cfgms-module-%s.exe" Name="cfgms-module-%s.exe" KeyPath="yes" />
           </Component>
 `, capitalized, capitalized, m, m)
+			continue
+		}
+		sidecar := fmt.Sprintf(`
+              <File Id="Module%sSidecar" Source="$(var.ModulesDir)\%s\bundle.yaml" Name="bundle.yaml" />`, capitalized, m)
+		if opts.wxsOmitSidecar {
+			sidecar = ""
+		}
+		wxsComponents += fmt.Sprintf(`          <Directory Id="MODULEDIR_%s" Name="%s">
+            <Component Id="Module%s" Guid="*">
+              <File Id="Module%sExe" Source="$(var.ModulesDir)\%s\cfgms-module-%s.exe" Name="cfgms-module-%s.exe" KeyPath="yes" />
+              <File Id="Module%sManifest" Source="$(var.ModulesDir)\%s\module.yaml" Name="module.yaml" />%s
+            </Component>
+          </Directory>
+`, strings.ToUpper(m), m, capitalized, capitalized, m, m, m, capitalized, m, sidecar)
 	}
 	wxsContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -145,6 +165,8 @@ func buildFixture(t *testing.T, opts fixtureOpts) string {
 
 var sixModules = []string{"file", "firewall", "package", "patch", "script", "service"}
 
+// sixModulesWithPrefix is the pre-#4431 flat-binary declaration shape. The
+// installers must now declare bare module names (root directories).
 func sixModulesWithPrefix() []string {
 	result := make([]string, len(sixModules))
 	for i, m := range sixModules {
@@ -160,8 +182,8 @@ func TestFixtureBaseline(t *testing.T) {
 		stdlibDirs:       sixModules,
 		makefileModules:  sixModules,
 		wxsModules:       sixModules,
-		installShModules: sixModulesWithPrefix(),
-		buildPkgModules:  sixModulesWithPrefix(),
+		installShModules: sixModules,
+		buildPkgModules:  sixModules,
 	})
 	code, out := runScript(t, root)
 	assert.Equal(t, 0, code, "consistent fixture should pass\nOutput:\n%s", out)
@@ -175,8 +197,8 @@ func TestStrayStdlibDirectory(t *testing.T) {
 		stdlibDirs:       dirs,
 		makefileModules:  sixModules,
 		wxsModules:       sixModules,
-		installShModules: sixModulesWithPrefix(),
-		buildPkgModules:  sixModulesWithPrefix(),
+		installShModules: sixModules,
+		buildPkgModules:  sixModules,
 	})
 	code, out := runScript(t, root)
 	assert.NotEqual(t, 0, code, "stray stdlib dir should cause failure\nOutput:\n%s", out)
@@ -188,13 +210,13 @@ func TestStrayStdlibDirectory(t *testing.T) {
 func TestMakefileEntryMissingFromWXS(t *testing.T) {
 	// extramodule appears in Makefile, stdlib dir, install.sh, build-pkg.sh but NOT wxs
 	extraMods := append(sixModules, "extramodule")
-	extraModsWithPrefix := append(sixModulesWithPrefix(), "cfgms-module-extramodule")
+
 	root := buildFixture(t, fixtureOpts{
 		stdlibDirs:       extraMods,
 		makefileModules:  extraMods,
 		wxsModules:       sixModules, // missing extramodule
-		installShModules: extraModsWithPrefix,
-		buildPkgModules:  extraModsWithPrefix,
+		installShModules: extraMods,
+		buildPkgModules:  extraMods,
 	})
 	code, out := runScript(t, root)
 	assert.NotEqual(t, 0, code, "Makefile entry missing from wxs should fail\nOutput:\n%s", out)
@@ -206,13 +228,13 @@ func TestMakefileEntryMissingFromWXS(t *testing.T) {
 func TestWXSEntryMissingFromInstallSh(t *testing.T) {
 	// extramodule appears in wxs (and Makefile, stdlib, build-pkg.sh) but NOT install.sh
 	extraMods := append(sixModules, "extramodule")
-	extraModsWithPrefix := append(sixModulesWithPrefix(), "cfgms-module-extramodule")
+
 	root := buildFixture(t, fixtureOpts{
 		stdlibDirs:       extraMods,
 		makefileModules:  extraMods,
 		wxsModules:       extraMods,
-		installShModules: sixModulesWithPrefix(), // missing extramodule
-		buildPkgModules:  extraModsWithPrefix,
+		installShModules: sixModules, // missing extramodule
+		buildPkgModules:  extraMods,
 	})
 	code, out := runScript(t, root)
 	assert.NotEqual(t, 0, code, "wxs entry missing from install.sh should fail\nOutput:\n%s", out)
@@ -224,13 +246,13 @@ func TestWXSEntryMissingFromInstallSh(t *testing.T) {
 func TestInstallShEntryMissingFromBuildPkg(t *testing.T) {
 	// extramodule appears in install.sh (and Makefile, stdlib, wxs) but NOT build-pkg.sh
 	extraMods := append(sixModules, "extramodule")
-	extraModsWithPrefix := append(sixModulesWithPrefix(), "cfgms-module-extramodule")
+
 	root := buildFixture(t, fixtureOpts{
 		stdlibDirs:       extraMods,
 		makefileModules:  extraMods,
 		wxsModules:       extraMods,
-		installShModules: extraModsWithPrefix,
-		buildPkgModules:  sixModulesWithPrefix(), // missing extramodule
+		installShModules: extraMods,
+		buildPkgModules:  sixModules, // missing extramodule
 	})
 	code, out := runScript(t, root)
 	assert.NotEqual(t, 0, code, "install.sh entry missing from build-pkg.sh should fail\nOutput:\n%s", out)
@@ -242,15 +264,59 @@ func TestInstallShEntryMissingFromBuildPkg(t *testing.T) {
 func TestEntryInListButNotStdlibDir(t *testing.T) {
 	// "ghost" appears in all four lists but has no stdlib directory
 	extraMods := append(sixModules, "ghost")
-	extraModsWithPrefix := append(sixModulesWithPrefix(), "cfgms-module-ghost")
+
 	root := buildFixture(t, fixtureOpts{
 		stdlibDirs:       sixModules, // missing ghost directory
 		makefileModules:  extraMods,
 		wxsModules:       extraMods,
-		installShModules: extraModsWithPrefix,
-		buildPkgModules:  extraModsWithPrefix,
+		installShModules: extraMods,
+		buildPkgModules:  extraMods,
 	})
 	code, out := runScript(t, root)
 	assert.NotEqual(t, 0, code, "list entry without stdlib dir should fail\nOutput:\n%s", out)
 	assert.Contains(t, out, "ghost", "diagnostic should mention the missing module name")
+}
+
+// TestFlatBinaryDeclarationsAreRejected verifies that each payload declaration must
+// name a per-module root directory: a flat cfgms-module-<name> binary in either
+// shell installer or in the WiX file fails the gate even though the module-name sets
+// still agree (Issue #4431).
+func TestFlatBinaryDeclarationsAreRejected(t *testing.T) {
+	base := func() fixtureOpts {
+		return fixtureOpts{
+			stdlibDirs:       sixModules,
+			makefileModules:  sixModules,
+			wxsModules:       sixModules,
+			installShModules: sixModules,
+			buildPkgModules:  sixModules,
+		}
+	}
+
+	t.Run("install.sh flat binary", func(t *testing.T) {
+		o := base()
+		o.installShModules = sixModulesWithPrefix()
+		code, out := runScript(t, buildFixture(t, o))
+		assert.NotEqual(t, 0, code, "Output:\n%s", out)
+		assert.Contains(t, out, "install.sh declares a flat binary")
+	})
+	t.Run("build-pkg.sh flat binary", func(t *testing.T) {
+		o := base()
+		o.buildPkgModules = sixModulesWithPrefix()
+		code, out := runScript(t, buildFixture(t, o))
+		assert.NotEqual(t, 0, code, "Output:\n%s", out)
+		assert.Contains(t, out, "build-pkg.sh declares a flat binary")
+	})
+	t.Run("wxs flat binary", func(t *testing.T) {
+		o := base()
+		o.wxsFlat = true
+		code, out := runScript(t, buildFixture(t, o))
+		assert.NotEqual(t, 0, code, "Output:\n%s", out)
+	})
+	t.Run("wxs root without sidecar", func(t *testing.T) {
+		o := base()
+		o.wxsOmitSidecar = true
+		code, out := runScript(t, buildFixture(t, o))
+		assert.NotEqual(t, 0, code, "Output:\n%s", out)
+		assert.Contains(t, out, "bundle.yaml")
+	})
 }

@@ -252,6 +252,62 @@ fi
 
 rm -rf "$VERSION_BIN_DIR"
 
+# ── Test 10: stdlib modules are staged as bundle installation roots ──────────
+# install.sh used to skip a missing source silently, so a staging change that
+# installs nothing passed every other test. Assemble real roots with the signer
+# (module.yaml + bundle.yaml sidecar + binary) and assert what lands on disk.
+
+T10="$(mktemp -d)"
+T10_PREFIX="$(mktemp -d)"
+make_install_dir "$T10"
+SIGNER_BIN="$T10/sign-module-bundle"
+if ! (cd "$REPO_ROOT" && go build -o "$SIGNER_BIN" ./scripts/sign-module-bundle); then
+    fail "test10: could not build scripts/sign-module-bundle"
+else
+    printf '#!/bin/sh\nexit 0\n' > "$T10/stub-module-bin"
+    T10_MODULES=()
+    for mdir in "$REPO_ROOT"/features/modules/stdlib/*/; do
+        T10_MODULES+=("$(basename "$mdir")")
+    done
+    T10_ASSEMBLED=1
+    for m in "${T10_MODULES[@]}"; do
+        "$SIGNER_BIN" assemble \
+            --manifest "$REPO_ROOT/features/modules/stdlib/$m/module.yaml" \
+            --binary "$T10/stub-module-bin" \
+            --os linux --arch amd64 \
+            --out "$T10/modules/$m" >/dev/null 2>&1 || T10_ASSEMBLED=0
+    done
+    run_install "$T10" "$T10_PREFIX" --regtoken "tok-test"
+    T10_OK=1
+    T10_UID="$(id -u)"
+    T10_ROOT="$T10_PREFIX/usr/local/lib/cfgms/modules"
+    for m in "${T10_MODULES[@]}"; do
+        [[ -f "$T10_ROOT/$m/module.yaml" ]] || T10_OK=0
+        [[ -f "$T10_ROOT/$m/bundle.yaml" ]] || T10_OK=0
+        [[ -x "$T10_ROOT/$m/cfgms-module-$m" ]] || T10_OK=0
+        # Byte-for-byte manifest: the content hash covers it.
+        cmp -s "$REPO_ROOT/features/modules/stdlib/$m/module.yaml" "$T10_ROOT/$m/module.yaml" || T10_OK=0
+        # No flat binary left beside the roots.
+        [[ ! -e "$T10_ROOT/cfgms-module-$m" ]] || T10_OK=0
+        # Ownership: every installed entry belongs to the installing user (root
+        # under sudo), never inherited from the extracted source tree.
+        while IFS= read -r -d '' f; do
+            [[ "$(stat -c '%u' "$f")" == "$T10_UID" ]] || T10_OK=0
+        done < <(find "$T10_ROOT/$m" -print0)
+        # Modes: exactly what the assembler set, no group/other write bits.
+        [[ "$(stat -c '%a' "$T10_ROOT/$m")" == "755" ]] || T10_OK=0
+        [[ "$(stat -c '%a' "$T10_ROOT/$m/cfgms-module-$m")" == "755" ]] || T10_OK=0
+        [[ "$(stat -c '%a' "$T10_ROOT/$m/module.yaml")" == "644" ]] || T10_OK=0
+        [[ "$(stat -c '%a' "$T10_ROOT/$m/bundle.yaml")" == "600" ]] || T10_OK=0
+    done
+    if [[ $T10_ASSEMBLED -eq 1 && ${#T10_MODULES[@]} -gt 0 && $LAST_EXIT -eq 0 && $T10_OK -eq 1 ]]; then
+        pass "test10: stdlib bundle roots staged (module.yaml, bundle.yaml, binary) for ${#T10_MODULES[@]} modules"
+    else
+        fail "test10: bundle roots not staged correctly (assembled=$T10_ASSEMBLED exit=$LAST_EXIT ok=$T10_OK modules=${#T10_MODULES[@]})"
+    fi
+fi
+rm -rf "$T10" "$T10_PREFIX"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

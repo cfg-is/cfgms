@@ -81,37 +81,86 @@
                 Name="cfgms-steward-launcher.exe"
                 KeyPath="yes" />
         </Component>
+        <!--
+          Stdlib modules ship as signed bundle installation roots (Issue #4431): one
+          subdirectory per module under modules\, each holding the publisher's
+          module.yaml, the bundle.yaml sidecar (content hash + signature) and the
+          module binary. $(var.ModulesDir) is the assembled per-module tree produced
+          by build-msi.ps1 via scripts/sign-module-bundle, after Authenticode signing.
+          The directory Id convention MODULEDIR_<NAME> is parsed by
+          scripts/check-stdlib-payload-boundary.sh.
+        -->
         <Directory Id="MODULESDIR" Name="modules">
-          <Component Id="ModuleCertTrust" Guid="*">
-            <File Id="ModuleCertTrustExe" Source="$(var.ModulesDir)\cfgms-module-cert_trust.exe" Name="cfgms-module-cert_trust.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleFile" Guid="*">
-            <File Id="ModuleFileExe" Source="$(var.ModulesDir)\cfgms-module-file.exe" Name="cfgms-module-file.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleService" Guid="*">
-            <File Id="ModuleServiceExe" Source="$(var.ModulesDir)\cfgms-module-service.exe" Name="cfgms-module-service.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModulePackage" Guid="*">
-            <File Id="ModulePackageExe" Source="$(var.ModulesDir)\cfgms-module-package.exe" Name="cfgms-module-package.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleScript" Guid="*">
-            <File Id="ModuleScriptExe" Source="$(var.ModulesDir)\cfgms-module-script.exe" Name="cfgms-module-script.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleFirewall" Guid="*">
-            <File Id="ModuleFirewallExe" Source="$(var.ModulesDir)\cfgms-module-firewall.exe" Name="cfgms-module-firewall.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleHostname" Guid="*">
-            <File Id="ModuleHostnameExe" Source="$(var.ModulesDir)\cfgms-module-hostname.exe" Name="cfgms-module-hostname.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModulePatch" Guid="*">
-            <File Id="ModulePatchExe" Source="$(var.ModulesDir)\cfgms-module-patch.exe" Name="cfgms-module-patch.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleTime" Guid="*">
-            <File Id="ModuleTimeExe" Source="$(var.ModulesDir)\cfgms-module-time.exe" Name="cfgms-module-time.exe" KeyPath="yes" />
-          </Component>
-          <Component Id="ModuleUser" Guid="*">
-            <File Id="ModuleUserExe" Source="$(var.ModulesDir)\cfgms-module-user.exe" Name="cfgms-module-user.exe" KeyPath="yes" />
-          </Component>
+          <Directory Id="MODULEDIR_CERT_TRUST" Name="cert_trust">
+            <Component Id="ModuleCertTrust" Guid="*">
+              <File Id="ModuleCertTrustExe" Source="$(var.ModulesDir)\cert_trust\cfgms-module-cert_trust.exe" Name="cfgms-module-cert_trust.exe" KeyPath="yes" />
+              <File Id="ModuleCertTrustManifest" Source="$(var.ModulesDir)\cert_trust\module.yaml" Name="module.yaml" />
+              <File Id="ModuleCertTrustSidecar" Source="$(var.ModulesDir)\cert_trust\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_FILE" Name="file">
+            <Component Id="ModuleFile" Guid="*">
+              <File Id="ModuleFileExe" Source="$(var.ModulesDir)\file\cfgms-module-file.exe" Name="cfgms-module-file.exe" KeyPath="yes" />
+              <File Id="ModuleFileManifest" Source="$(var.ModulesDir)\file\module.yaml" Name="module.yaml" />
+              <File Id="ModuleFileSidecar" Source="$(var.ModulesDir)\file\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_SERVICE" Name="service">
+            <Component Id="ModuleService" Guid="*">
+              <File Id="ModuleServiceExe" Source="$(var.ModulesDir)\service\cfgms-module-service.exe" Name="cfgms-module-service.exe" KeyPath="yes" />
+              <File Id="ModuleServiceManifest" Source="$(var.ModulesDir)\service\module.yaml" Name="module.yaml" />
+              <File Id="ModuleServiceSidecar" Source="$(var.ModulesDir)\service\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_PACKAGE" Name="package">
+            <Component Id="ModulePackage" Guid="*">
+              <File Id="ModulePackageExe" Source="$(var.ModulesDir)\package\cfgms-module-package.exe" Name="cfgms-module-package.exe" KeyPath="yes" />
+              <File Id="ModulePackageManifest" Source="$(var.ModulesDir)\package\module.yaml" Name="module.yaml" />
+              <File Id="ModulePackageSidecar" Source="$(var.ModulesDir)\package\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_SCRIPT" Name="script">
+            <Component Id="ModuleScript" Guid="*">
+              <File Id="ModuleScriptExe" Source="$(var.ModulesDir)\script\cfgms-module-script.exe" Name="cfgms-module-script.exe" KeyPath="yes" />
+              <File Id="ModuleScriptManifest" Source="$(var.ModulesDir)\script\module.yaml" Name="module.yaml" />
+              <File Id="ModuleScriptSidecar" Source="$(var.ModulesDir)\script\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_FIREWALL" Name="firewall">
+            <Component Id="ModuleFirewall" Guid="*">
+              <File Id="ModuleFirewallExe" Source="$(var.ModulesDir)\firewall\cfgms-module-firewall.exe" Name="cfgms-module-firewall.exe" KeyPath="yes" />
+              <File Id="ModuleFirewallManifest" Source="$(var.ModulesDir)\firewall\module.yaml" Name="module.yaml" />
+              <File Id="ModuleFirewallSidecar" Source="$(var.ModulesDir)\firewall\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_HOSTNAME" Name="hostname">
+            <Component Id="ModuleHostname" Guid="*">
+              <File Id="ModuleHostnameExe" Source="$(var.ModulesDir)\hostname\cfgms-module-hostname.exe" Name="cfgms-module-hostname.exe" KeyPath="yes" />
+              <File Id="ModuleHostnameManifest" Source="$(var.ModulesDir)\hostname\module.yaml" Name="module.yaml" />
+              <File Id="ModuleHostnameSidecar" Source="$(var.ModulesDir)\hostname\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_PATCH" Name="patch">
+            <Component Id="ModulePatch" Guid="*">
+              <File Id="ModulePatchExe" Source="$(var.ModulesDir)\patch\cfgms-module-patch.exe" Name="cfgms-module-patch.exe" KeyPath="yes" />
+              <File Id="ModulePatchManifest" Source="$(var.ModulesDir)\patch\module.yaml" Name="module.yaml" />
+              <File Id="ModulePatchSidecar" Source="$(var.ModulesDir)\patch\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_TIME" Name="time">
+            <Component Id="ModuleTime" Guid="*">
+              <File Id="ModuleTimeExe" Source="$(var.ModulesDir)\time\cfgms-module-time.exe" Name="cfgms-module-time.exe" KeyPath="yes" />
+              <File Id="ModuleTimeManifest" Source="$(var.ModulesDir)\time\module.yaml" Name="module.yaml" />
+              <File Id="ModuleTimeSidecar" Source="$(var.ModulesDir)\time\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
+          <Directory Id="MODULEDIR_USER" Name="user">
+            <Component Id="ModuleUser" Guid="*">
+              <File Id="ModuleUserExe" Source="$(var.ModulesDir)\user\cfgms-module-user.exe" Name="cfgms-module-user.exe" KeyPath="yes" />
+              <File Id="ModuleUserManifest" Source="$(var.ModulesDir)\user\module.yaml" Name="module.yaml" />
+              <File Id="ModuleUserSidecar" Source="$(var.ModulesDir)\user\bundle.yaml" Name="bundle.yaml" />
+            </Component>
+          </Directory>
         </Directory>
       </Directory>
     </StandardDirectory>

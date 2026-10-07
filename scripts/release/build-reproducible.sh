@@ -5,6 +5,13 @@
 # Build deterministic, cross-platform release archives and prove that a second
 # independent build produces the same bytes. Signing and attestations happen in
 # the release workflow after all platform artifacts have been assembled.
+#
+# Stdlib modules ship in each archive as signed bundle installation roots under
+# modules/<name>/ (module.yaml, bundle.yaml sidecar, binary), assembled and signed
+# by scripts/sign-module-bundle. The signing seed comes from CFGMS_PUBLISHER_SEED;
+# it must be set, must not be the zero-seed dev key, and its public half must equal
+# --publisher-key (the key baked into cfgms-steward), otherwise the script aborts
+# before building anything.
 
 set -euo pipefail
 
@@ -123,6 +130,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Fail closed on the module-signing seed before assembling anything. The signer is
+# built for the host (not the release target) and run from WORK_DIR.
+SIGNER="$WORK_DIR/sign-module-bundle"
+go build -mod=readonly -o "$SIGNER" ./scripts/sign-module-bundle
+if [[ -z "${CFGMS_PUBLISHER_SEED:-}" ]]; then
+    echo "Error: CFGMS_PUBLISHER_SEED is not set; release module bundles must be signed with the publisher seed, never the dev key" >&2
+    exit 1
+fi
+if ! "$SIGNER" check-key --expect-public-key "$PUBLISHER_KEY"; then
+    echo "Error: the module-signing seed is unusable for this release (see above); aborting before assembly" >&2
+    exit 1
+fi
+
 BUILD_DATE="$(date -u -d "@$SOURCE_DATE_EPOCH_VALUE" '+%Y-%m-%dT%H:%M:%SZ')"
 VERSION_PACKAGE="github.com/cfgis/cfgms/pkg/version"
 TRUST_PACKAGE="github.com/cfgis/cfgms/pkg/modules/trust"
@@ -131,7 +151,7 @@ STDLIB_MODULES=(cert_trust file firewall hostname package patch script service t
 
 build_tree() {
     local pass="$1"
-    local platform os arch ext root bin module
+    local platform os arch ext root bin module module_bin
     for platform in "${PLATFORMS[@]}"; do
         os="${platform%/*}"
         arch="${platform#*/}"
@@ -154,9 +174,15 @@ build_tree() {
             -o "$bin/cfgms-steward$ext" ./cmd/steward
 
         for module in "${STDLIB_MODULES[@]}"; do
+            module_bin="$WORK_DIR/modulebin-$pass-$os-$arch-$module$ext"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -mod=readonly -trimpath -buildvcs=false \
-                -ldflags "$COMMON_LDFLAGS" -o "$bin/cfgms-module-$module$ext" \
+                -ldflags "$COMMON_LDFLAGS" -o "$module_bin" \
                 "./features/modules/stdlib/$module/cmd"
+            "$SIGNER" assemble --release \
+                --manifest "features/modules/stdlib/$module/module.yaml" \
+                --binary "$module_bin" \
+                --os "$os" --arch "$arch" \
+                --out "$bin/modules/$module"
         done
 
         cp LICENSE README.md "$root/"

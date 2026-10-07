@@ -8,7 +8,12 @@
 #   4. build/linux/install.sh STDLIB_MODULES  — Linux install-script payload
 #   5. build/darwin/build-pkg.sh STDLIB_MODULES — macOS .pkg payload
 #
-# Exit code: 0 = all five agree, 1 = any disagreement detected.
+# Each installer payload declaration (3-5) must name a per-module installation
+# ROOT DIRECTORY (module.yaml + bundle.yaml sidecar + binary), not a flat
+# cfgms-module-<name> binary (Issue #4431). That is asserted in addition to the
+# five-way name agreement.
+#
+# Exit code: 0 = all five agree and all payloads are per-module roots, 1 = otherwise.
 # Usage: ./scripts/check-stdlib-payload-boundary.sh
 #
 # The REPO_ROOT environment variable can override the detected root (used by tests).
@@ -67,22 +72,22 @@ extract_makefile() {
 }
 
 # Extract module names from the WiX .wxs file.
-# Pattern: Name="cfgms-module-<name>.exe" inside the MODULESDIR block.
+# Pattern: <Directory Id="MODULEDIR_<NAME>" Name="<name>"> — one installation-root
+# directory per module under MODULESDIR.
 # Uses grep+sed — no xmllint dependency required.
 extract_wxs() {
     if [[ ! -f "$WXS_FILE" ]]; then
         echo "ERROR: WiX file not found: $WXS_FILE" >&2
         exit 1
     fi
-    grep -o 'Name="cfgms-module-[^.]*\.exe"' "$WXS_FILE" \
-        | sed 's/Name="cfgms-module-//;s/\.exe"//' \
+    grep -o '<Directory[[:space:]]\{1,\}Id="MODULEDIR_[A-Za-z0-9_]*"[[:space:]]\{1,\}Name="[^"]*"' "$WXS_FILE" \
+        | sed 's/.*Name="//;s/"$//' \
         | normalize
 }
 
-# Extract module names from a bash STDLIB_MODULES=(…) array in the given file.
-# Handles both single-line and multi-line (one-name-per-line) forms.
-# Strips the cfgms-module- prefix so the result is bare module names.
-extract_bash_array() {
+# Extract the names in a bash STDLIB_MODULES=(…) array in the given file, exactly as
+# written. Handles both single-line and multi-line (one-name-per-line) forms.
+extract_bash_array_raw() {
     local file="$1"
     if [[ ! -f "$file" ]]; then
         echo "ERROR: file not found: $file" >&2
@@ -97,9 +102,15 @@ extract_bash_array() {
             n = split($0, words)
             for (i=1; i<=n; i++) { if (words[i] != "") print words[i] }
         }
-    ' "$file" \
-        | sed 's/^cfgms-module-//' \
-        | normalize
+    ' "$file"
+}
+
+# Bare module names from a STDLIB_MODULES array. A legacy cfgms-module- prefix is
+# stripped so a flat-binary declaration still takes part in the name comparison and
+# is then reported by the per-module-root assertion below instead of as a bogus
+# "module missing".
+extract_bash_array() {
+    extract_bash_array_raw "$1" | sed 's/^cfgms-module-//' | normalize
 }
 
 # ── Collect the five sets ─────────────────────────────────────────────────────
@@ -145,6 +156,44 @@ compare_pair() {
     fi
 }
 
+# ── Per-module installation-root assertions (Issue #4431) ─────────────────────
+
+# assert_array_names_roots <label> <file>: every array entry is a bare module name
+# (a root directory under modules/), never a flat cfgms-module-<name> binary.
+assert_array_names_roots() {
+    local label="$1" file="$2" entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == cfgms-module-* ]]; then
+            FAILED=1
+            DIAGNOSTICS+="  ❌ $label declares a flat binary '$entry', not a per-module root directory\n"
+        fi
+    done < <(extract_bash_array_raw "$file")
+}
+
+# assert_wxs_names_roots: no flat cfgms-module-<name>.exe file directly under
+# MODULESDIR, and every module root carries the manifest, the sidecar and the binary
+# from its own subdirectory of $(var.ModulesDir).
+assert_wxs_names_roots() {
+    local module
+    local flat
+    flat=$(grep -o 'Source="\$(var\.ModulesDir)\\cfgms-module-[^"]*"' "$WXS_FILE" || true)
+    if [[ -n "$flat" ]]; then
+        FAILED=1
+        DIAGNOSTICS+="  ❌ WiX .wxs declares flat binaries (not per-module roots): $flat\n"
+    fi
+    while IFS= read -r module; do
+        [[ -z "$module" ]] && continue
+        local f
+        for f in "module.yaml" "bundle.yaml" "cfgms-module-$module.exe"; do
+            if ! grep -qF "Source=\"\$(var.ModulesDir)\\$module\\$f\"" "$WXS_FILE"; then
+                FAILED=1
+                DIAGNOSTICS+="  ❌ WiX .wxs root for '$module' does not stage $f from \$(var.ModulesDir)\\$module\\\n"
+            fi
+        done
+    done <<< "$WXS_MODULES"
+}
+
 echo "🔍 Checking stdlib payload boundary (ADR-016 clause 3)..."
 echo ""
 
@@ -156,8 +205,12 @@ compare_pair "install.sh"   "$INSTALL_SH_MODULES" "build-pkg.sh" "$BUILD_PKG_MOD
 # Also check build-pkg.sh vs dir (catches a module only in build-pkg.sh)
 compare_pair "build-pkg.sh" "$BUILD_PKG_MODULES" "stdlib/ dir"  "$DIR_MODULES"
 
+assert_wxs_names_roots
+assert_array_names_roots "install.sh" "$INSTALL_SH"
+assert_array_names_roots "build-pkg.sh" "$BUILD_PKG_SH"
+
 if [[ "$FAILED" -eq 0 ]]; then
-    echo "✅ All five stdlib payload sources agree:"
+    echo "✅ All five stdlib payload sources agree and name per-module root directories:"
     while IFS= read -r m; do
         [[ -z "$m" ]] && continue
         echo "   - $m"
@@ -173,9 +226,9 @@ echo "The following sources disagree on the stdlib module set."
 echo "Every stdlib module requires an entry in all five places:"
 echo "  1. features/modules/stdlib/<name>/ directory"
 echo "  2. Makefile STDLIB_MODULES variable"
-echo "  3. build/windows/cfgms-steward.wxs (cfgms-module-<name>.exe Component)"
-echo "  4. build/linux/install.sh STDLIB_MODULES array (cfgms-module-<name>)"
-echo "  5. build/darwin/build-pkg.sh STDLIB_MODULES array (cfgms-module-<name>)"
+echo "  3. build/windows/cfgms-steward.wxs (MODULEDIR_<NAME> root Directory)"
+echo "  4. build/linux/install.sh STDLIB_MODULES array (bare <name>)"
+echo "  5. build/darwin/build-pkg.sh STDLIB_MODULES array (bare <name>)"
 echo ""
 echo "Disagreements found:"
 printf "%b" "$DIAGNOSTICS"
