@@ -415,7 +415,8 @@ describe('WorkflowBuilder — validate and run (Issue #4616)', () => {
       await vi.advanceTimersByTimeAsync(3100)
       await waitFor(() => expect(screen.getByTestId('run-bar-status')).toHaveTextContent('completed'))
       expect(screen.getByTestId('run-bar-progress')).toHaveTextContent('step 2/2')
-      expect(screen.getByTestId('node-n1')).toHaveClass('done')
+      // React Flow propagates node data through its own store a render after the bar updates.
+      await waitFor(() => expect(screen.getByTestId('node-n1')).toHaveClass('done'))
       expect(screen.queryByTestId('run-bar-cancel')).toBeNull()
     } finally {
       vi.useRealTimers()
