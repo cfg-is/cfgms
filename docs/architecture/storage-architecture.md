@@ -231,6 +231,17 @@ partial migration converges: already-imported records are upserted without dupli
 
 **Not yet covered:** `AlertStore` (tenant-scoped alert acknowledgement and silence records, Issue #3266) has no entry in this table because `pkg/migrate/storage/migrate.go` does not define a kind constant or export/import case for it yet — a `cfg migrate --provider storage` run does not transfer alert acknowledge/silence state in either direction. Wire it into the migrator (kind constant, export/import case, kind-availability map entry) before relying on migration to carry this state.
 
+**`ApprovalStore` (Issue #4607).** Pending workflow approvals live in a provider-backed
+store — `flatfile` (`approvals/workflow_approvals.json`), `sqlite` (`workflow_approvals`)
+and `database` (`cfgms_workflow_approvals`) — so they survive a controller restart and, on
+the `database` provider, are visible to every node. Records are keyed by tenant and approval
+id; `ListPending` and `GetApproval` never cross tenants. `DecideApproval` (from `pending`)
+and `ClaimResume` (from decided-and-not-resumed, re-claimable once the claim is older than its
+lease) are compare-and-set, so concurrent callers have exactly one winner. The workflow
+checkpoint can carry step outputs and credentials, so it is written through the secrets
+provider (SOPS-encrypted at rest); the approval record holds only `CheckpointRef`. Like
+`AlertStore`, it is not yet carried by `cfg migrate --provider storage`.
+
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
 ```yaml

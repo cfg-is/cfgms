@@ -43,6 +43,7 @@ const (
 	StoreNamePendingRegistration StoreName = "PendingRegistrationStore"
 	StoreNameIPTrust             StoreName = "IPTrustStore"
 	StoreNameAlert               StoreName = "AlertStore"
+	StoreNameApproval            StoreName = "ApprovalStore"
 	StoreNamePendingRefresh      StoreName = "PendingRefreshStore"
 	StoreNameRefreshPolicy       StoreName = "RefreshPolicyStore"
 	StoreNameAssurancePolicy     StoreName = "AssurancePolicyStore"
@@ -132,6 +133,8 @@ func (sm *StorageManager) HasStore(name StoreName) bool {
 		return sm.ipTrustStore != nil
 	case StoreNameAlert:
 		return sm.alertStore != nil
+	case StoreNameApproval:
+		return sm.approvalStore != nil
 	case StoreNamePendingRefresh:
 		return sm.pendingRefreshStore != nil
 	case StoreNameRefreshPolicy:

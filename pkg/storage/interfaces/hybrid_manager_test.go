@@ -412,6 +412,10 @@ func (p *mockProvider) CreateAlertStore(_ map[string]interface{}) (business.Aler
 	return nil, business.ErrNotSupported
 }
 
+func (p *mockProvider) CreateApprovalStore(_ map[string]interface{}) (business.ApprovalStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,

@@ -1022,6 +1022,34 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_nonces_expires_at ON refresh_nonces(expires_at)`,
 
+		// Durable workflow approvals (Issue #4607). Timestamps are UNIX nanoseconds
+		// (0 = unset) so expiry and lease comparisons order numerically. Only the
+		// checkpoint reference is stored, never checkpoint contents.
+		`CREATE TABLE IF NOT EXISTS workflow_approvals (
+			approval_id         TEXT NOT NULL,
+			tenant_id           TEXT NOT NULL,
+			workflow_name       TEXT NOT NULL DEFAULT '',
+			execution_id        TEXT NOT NULL DEFAULT '',
+			step_id             TEXT NOT NULL DEFAULT '',
+			step_name           TEXT NOT NULL DEFAULT '',
+			message             TEXT NOT NULL DEFAULT '',
+			approver_permission TEXT NOT NULL DEFAULT '',
+			requested_by        TEXT NOT NULL DEFAULT '',
+			status              TEXT NOT NULL DEFAULT 'pending',
+			requested_at        INTEGER NOT NULL DEFAULT 0,
+			expires_at          INTEGER NOT NULL DEFAULT 0,
+			decided_by          TEXT NOT NULL DEFAULT '',
+			decided_at          INTEGER NOT NULL DEFAULT 0,
+			justification       TEXT NOT NULL DEFAULT '',
+			checkpoint_ref      TEXT NOT NULL DEFAULT '',
+			resume_claimed_by   TEXT NOT NULL DEFAULT '',
+			resume_claimed_at   INTEGER NOT NULL DEFAULT 0,
+			resumed_at          INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (tenant_id, approval_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_approvals_pending ON workflow_approvals(tenant_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_approvals_expiry ON workflow_approvals(status, expires_at)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,
