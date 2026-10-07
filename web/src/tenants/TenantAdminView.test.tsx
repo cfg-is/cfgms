@@ -14,7 +14,7 @@
  * AuthContext.test.tsx does — a browser API, not a CFGMS component).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import TenantAdminView from './TenantAdminView.tsx'
@@ -342,6 +342,35 @@ describe('TenantAdminView — tree rendering', () => {
 })
 
 // ── Suspension status and provenance (ADR-027 Decision 2) ─────────────────────
+
+describe('TenantAdminView — Devices column', () => {
+  it('renders the Devices header between Tenant and Status', async () => {
+    fetchMock.mockResolvedValue(makeTenantsResponse([makeTenant()]))
+    renderView()
+    await waitFor(() => screen.getByTestId('tenant-row'))
+    const headers = screen.getAllByRole('columnheader').map((h) => h.textContent)
+    expect(headers.slice(0, 3)).toEqual(['Tenant', 'Devices', 'Status'])
+  })
+
+  it('shows the subtree device count, a dash for an empty parent, and 0 for an empty leaf', async () => {
+    fetchMock.mockResolvedValue(
+      makeTenantsResponse([
+        makeTenant({ id: 'msp-a', name: 'msp-a', device_count: 1214 }),
+        makeTenant({ id: 'client-1', name: 'client-1', parent_id: 'msp-a', device_count: 0 }),
+        makeTenant({ id: 'msp-b', name: 'msp-b', device_count: 0 }),
+        makeTenant({ id: 'msp-c', name: 'msp-c', parent_id: 'msp-b' }),
+      ]),
+    )
+    renderView()
+    await waitFor(() => screen.getAllByTestId('tenant-row'))
+    const cell = (id: string) =>
+      within(document.querySelector(`[data-tenant-id="${id}"]`) as HTMLElement).getByTestId('tenant-devices')
+    expect(cell('msp-a')).toHaveTextContent(`${(1214).toLocaleString()} devices`)
+    expect(cell('client-1')).toHaveTextContent('0 devices')
+    expect(cell('msp-b')).toHaveTextContent('—')
+    expect(cell('msp-c')).toHaveTextContent('0 devices')
+  })
+})
 
 describe('TenantAdminView — suspension status', () => {
   it('shows Active badge for active tenants', async () => {

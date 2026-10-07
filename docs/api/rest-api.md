@@ -1700,6 +1700,24 @@ Per-device policy deadlines and outstanding patches are on the steward's Complia
 
 ### Tenants
 
+#### GET /api/v1/tenants
+
+List the tenants visible to the caller.
+
+**Authentication:** Required  
+**Required permission:** `tenant:list`
+
+Each item is the tenant record plus an additive `device_count` field: the number of
+stewards in the tenant's subtree (the tenant itself and every descendant tenant visible
+to the caller). Registered, active and lost stewards count, as do hidden stewards;
+stewards in a terminal state (deregistered, revoked, archived, dormant) do not. Stewards
+in tenants the caller cannot see are never included, so a scoped caller never counts a
+sibling's stewards.
+
+```json
+{"success": true, "data": [{"id": "msp-a", "name": "msp-a", "status": "active", "device_count": 214}]}
+```
+
 #### POST /api/v1/tenants/{id}/config-source/test
 
 Test connectivity to a tenant's config source (e.g., validate git repository access credentials before saving them).

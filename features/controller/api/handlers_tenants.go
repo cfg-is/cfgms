@@ -523,11 +523,93 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	counts, err := s.subtreeDeviceCounts(r.Context(), all, result)
+	if err != nil {
+		s.logger.Error("Tenant device count failed",
+			"caller_tenant", logging.SanitizeLogValue(callerTenant),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to list tenants", "LIST_FAILED")
+		return
+	}
+
+	items := make([]tenantListItem, 0, len(result))
+	for _, td := range result {
+		items = append(items, tenantListItem{TenantData: td, DeviceCount: counts[td.ID]})
+	}
+
 	s.logger.Debug("Listed tenants",
 		"caller_tenant", logging.SanitizeLogValue(callerTenant),
 		"count", len(result))
 
-	s.writeSuccessResponse(w, result)
+	s.writeSuccessResponse(w, items)
+}
+
+// tenantListItem is a GET /api/v1/tenants item: the tenant record plus the additive
+// device_count (Issue #4590).
+type tenantListItem struct {
+	*business.TenantData
+	// DeviceCount is the number of stewards in the tenant's subtree that the caller
+	// may see. Same counting rule as the billing roll-up (ADR-025 Amendment 6).
+	DeviceCount int `json:"device_count"`
+}
+
+// stewardCountsTowardDeviceCount reports whether a steward in the given status is
+// counted: registered, active and lost (and hidden stewards, which are not filtered
+// on) count; terminal states do not. The terminal set matches
+// terminalStewardManifestStatuses and EnsureSteward's no-promote set.
+func stewardCountsTowardDeviceCount(status business.StewardStatus) bool {
+	_, terminal := terminalStewardManifestStatuses[string(status)]
+	return !terminal
+}
+
+// subtreeDeviceCounts returns, for each tenant in visible, the number of countable
+// stewards in its subtree. It reads the steward registry once, groups by tenant, then
+// rolls each visible tenant's own count up its ParentID chain (built from all, in memory)
+// — never one query per row. Only stewards whose own tenant is visible to the caller
+// contribute, so an ancestor's count never includes a tenant the caller cannot see
+// (e.g. a root-scoped caller without a crossing).
+func (s *Server) subtreeDeviceCounts(ctx context.Context, all, visible []*business.TenantData) (map[string]int, error) {
+	counts := make(map[string]int, len(visible))
+	s.mu.RLock()
+	store := s.stewardStore
+	s.mu.RUnlock()
+	if store == nil {
+		return counts, nil
+	}
+	records, err := store.ListStewards(ctx)
+	if err != nil {
+		return nil, err
+	}
+	own := make(map[string]int)
+	for _, rec := range records {
+		if stewardCountsTowardDeviceCount(rec.Status) {
+			own[rec.TenantID]++
+		}
+	}
+	parent := make(map[string]string, len(all))
+	for _, td := range all {
+		parent[td.ID] = td.ParentID
+	}
+	visibleSet := make(map[string]struct{}, len(visible))
+	for _, td := range visible {
+		visibleSet[td.ID] = struct{}{}
+		counts[td.ID] = 0
+	}
+	for _, td := range visible {
+		n := own[td.ID]
+		if n == 0 {
+			continue
+		}
+		// Walk to the root; the hop bound guards against a ParentID cycle.
+		cur := td.ID
+		for hops := 0; hops <= len(parent) && cur != ""; hops++ {
+			if _, ok := visibleSet[cur]; ok {
+				counts[cur] += n
+			}
+			cur = parent[cur]
+		}
+	}
+	return counts, nil
 }
 
 // tenantInputRejectionPrefixes enumerates the error classes tenant.Manager produces

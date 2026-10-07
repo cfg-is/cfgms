@@ -66,6 +66,8 @@ export interface TenantInfo {
   cascade_suspended_from: string | null
   created_at: string
   updated_at: string
+  /** Subtree steward count within the caller's visible scope (GET /api/v1/tenants device_count). */
+  deviceCount: number
   pending_deletion?: PendingDeletionInfo | null
 }
 
@@ -108,6 +110,7 @@ export function parseTenantInfo(value: unknown): TenantInfo | null {
     cascade_suspended_from: strOrNull(r.cascade_suspended_from),
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+    deviceCount: typeof r.device_count === 'number' && r.device_count >= 0 ? Math.floor(r.device_count) : 0,
   }
 }
 
