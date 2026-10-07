@@ -201,6 +201,20 @@ table.tbl {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+.tags {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.tag {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 20px;
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
 .seen {
   color: var(--text-faint);
   font-size: 12px;

@@ -192,6 +192,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			}
 			stewardList = append(stewardList, info)
 		}
+		s.attachStewardTags(r.Context(), stewardList)
 		if paginated {
 			page := paginateStewards(stewardList, limit, offset)
 			s.logger.Info("Listed stewards (selector, paginated)",
@@ -255,6 +256,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			}
 			stewardList = append(stewardList, info)
 		}
+		s.attachStewardTags(r.Context(), stewardList)
 		if paginated {
 			page := paginateStewards(stewardList, limit, offset)
 			s.logger.Info("Listed stewards (filtered, paginated)", "count", len(page.Stewards), "total", page.Total)
@@ -359,6 +361,8 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.attachStewardTags(r.Context(), stewardList)
+
 	if paginated {
 		page := paginateStewards(stewardList, limit, offset)
 		s.logger.Info("Listed stewards (paginated)", "count", len(page.Stewards), "total", page.Total)
@@ -368,6 +372,31 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
+}
+
+// attachStewardTags populates Tags on each already-tenant-scoped list row with a
+// single batch read of the tag store, avoiding one request per row (Issue #4595).
+// Tags are looked up only for rows in the list, so a scoped caller never sees tags
+// for stewards outside its visible set. A missing or failing store leaves Tags
+// empty rather than failing the list.
+func (s *Server) attachStewardTags(ctx context.Context, list []StewardInfo) {
+	s.mu.RLock()
+	ts := s.tagStore
+	s.mu.RUnlock()
+	if ts == nil || len(list) == 0 {
+		return
+	}
+	all, err := ts.GetAll(ctx)
+	if err != nil {
+		s.logger.Warn("Failed to read steward tags for list",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	for i := range list {
+		if tags := all[list[i].ID]; len(tags) > 0 {
+			list[i].Tags = tags
+		}
+	}
 }
 
 // buildFleetFilter constructs a fleet.Filter from HTTP query parameters.

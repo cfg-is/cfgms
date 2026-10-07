@@ -50,6 +50,7 @@ interface StewardSpec {
   lastSeenMsAgo?: number | null
   attributes?: Record<string, string>
   version?: string
+  tags?: string[]
 }
 
 function makeSteward(spec: StewardSpec): Steward {
@@ -62,6 +63,7 @@ function makeSteward(spec: StewardSpec): Steward {
     status: spec.status ?? 'active',
     last_seen: lastSeen,
     version: spec.version ?? 'v0.42',
+    ...(spec.tags ? { tags: spec.tags } : {}),
     dna: {
       hostname: spec.hostname ?? spec.id,
       os: 'linux',
@@ -428,6 +430,23 @@ describe('columns', () => {
     expect(screen.queryByRole('columnheader', { name: /company/i })).not.toBeInTheDocument()
 
     expect(screen.getByRole('checkbox', { name: 'Name' })).toBeDisabled()
+  })
+
+  it('Tags column is off by default and renders chips with +N overflow via the picker (Issue #4595)', async () => {
+    mockFleet([
+      { ...makeSteward({ id: 's1', hostname: 'host-a' }), tags: ['prod', 'web', 'db', 'edge', 'kiosk'] },
+      makeSteward({ id: 's2', hostname: 'host-b' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+    expect(screen.queryByRole('columnheader', { name: 'Tags' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /columns/i }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Tags' }))
+    expect(screen.getByRole('columnheader', { name: 'Tags' })).toBeInTheDocument()
+    expect(screen.getByText('prod')).toBeInTheDocument()
+    expect(screen.getByText('+2')).toBeInTheDocument()
+    expect(screen.queryByText('edge')).not.toBeInTheDocument()
   })
 
   it('persists the selection across a reload under the allowlisted key', async () => {

@@ -71,6 +71,8 @@ All API responses follow a standard format:
 }
 ```
 
+Each item carries the steward's operator-assigned `tags` (omitted when the steward has none), read in one batch from the tag store for the rows returned, so the list needs no per-steward `/tags` request. Tags follow the same tenant scope as the rows themselves.
+
 ### Error Response
 
 ```json
@@ -210,6 +212,7 @@ By default, **operator-hidden** and **quarantined** stewards are excluded from t
       "last_seen": "2025-01-12T10:29:30Z",
       "version": "0.2.0",
       "hidden": false,
+      "tags": ["prod", "web"],
       "metrics": {
         "cpu_usage": "45%",
         "memory_usage": "512MB"
