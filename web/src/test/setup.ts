@@ -50,3 +50,14 @@ if (typeof window !== 'undefined' && window.localStorage === undefined) {
     value: new MemoryStorage(),
   })
 }
+
+// jsdom implements no ResizeObserver, which React Flow needs to mount. jsdom
+// never lays elements out, so no observation ever fires; the constructor and
+// observe/unobserve/disconnect surface are all React Flow requires.
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class implements ResizeObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+}
