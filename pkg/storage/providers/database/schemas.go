@@ -1169,7 +1169,8 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 			key_protection_level TEXT NOT NULL DEFAULT '',
 			csr_pem              TEXT NOT NULL DEFAULT '',
 			hostname             TEXT NOT NULL DEFAULT '',
-			platform             TEXT NOT NULL DEFAULT ''
+			platform             TEXT NOT NULL DEFAULT '',
+			key_fingerprint      TEXT NOT NULL DEFAULT ''
 		);
 	`
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
@@ -1184,6 +1185,7 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS csr_pem              TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS hostname             TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS platform             TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS key_fingerprint      TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, alt := range alterations {
 		if _, err := db.ExecContext(ctx, alt); err != nil {

@@ -26,6 +26,43 @@ security:
   - ApiKeyAuth: []
 
 paths:
+  /registration/pending:
+    get:
+      summary: List pending registrations
+      description: |
+        Devices quarantined at registration and awaiting approval. Tenant-scoped
+        callers see only their own tenant; unscoped callers see all tenants.
+        Requires the `registration:list-pending` permission.
+      operationId: listPendingRegistrations
+      tags:
+        - Registration
+      responses:
+        '200':
+          description: Pending registrations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    pending_id:
+                      type: string
+                    steward_id:
+                      type: string
+                    tenant_id:
+                      type: string
+                    source_ip:
+                      type: string
+                    hostname:
+                      type: string
+                      description: Self-reported by the device, unauthenticated; sanitised on write. Omitted for older entries.
+                    key_fingerprint:
+                      type: string
+                      description: Lowercase hex SHA-256 of the CSR public key (DER SubjectPublicKeyInfo), computed by the controller. Omitted for older entries.
+                    registered_at:
+                      type: string
+                      format: date-time
   /health:
     get:
       summary: Health check endpoint

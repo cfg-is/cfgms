@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 
@@ -91,11 +94,47 @@ type RegistrationPendingResponse struct {
 
 // PendingRegistration represents a quarantined steward awaiting admin approval in list responses.
 type PendingRegistration struct {
-	PendingID    string    `json:"pending_id"`
-	StewardID    string    `json:"steward_id"`
-	TenantID     string    `json:"tenant_id"`
-	SourceIP     string    `json:"source_ip"`
-	RegisteredAt time.Time `json:"registered_at"`
+	PendingID string `json:"pending_id"`
+	StewardID string `json:"steward_id"`
+	TenantID  string `json:"tenant_id"`
+	SourceIP  string `json:"source_ip"`
+	// Hostname is self-reported by the steward and unauthenticated; display only.
+	Hostname string `json:"hostname,omitempty"`
+	// KeyFingerprint is the hex SHA-256 of the CSR public key, computed by the
+	// controller. Empty for entries created before the field existed.
+	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
+	RegisteredAt   time.Time `json:"registered_at"`
+}
+
+// maxHostnameHintLen caps the stored steward-supplied hostname (RFC 1035 limit).
+const maxHostnameHintLen = 253
+
+// sanitizeHostnameHint cleans the steward-supplied hostname hint: drops
+// non-printable runes and markup-significant characters, trims whitespace and
+// caps the length. Real hostnames never contain these characters.
+func sanitizeHostnameHint(h string) string {
+	var b strings.Builder
+	for _, r := range h {
+		if !unicode.IsPrint(r) || strings.ContainsRune("<>&\"'`", r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	if len(out) > maxHostnameHintLen {
+		out = out[:maxHostnameHintLen]
+		for !utf8.ValidString(out) {
+			out = out[:len(out)-1]
+		}
+	}
+	return out
+}
+
+// csrKeyFingerprint returns the lowercase hex SHA-256 of the CSR's public key
+// (DER SubjectPublicKeyInfo). Never derived from private key material.
+func csrKeyFingerprint(csr *x509.CertificateRequest) string {
+	sum := sha256.Sum256(csr.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(sum[:])
 }
 
 // RegistrationStatusResponse is returned by GET /api/v1/registration/status/{pending_id}.
@@ -142,11 +181,13 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 	pending := make([]PendingRegistration, 0, len(entries))
 	for _, e := range entries {
 		pending = append(pending, PendingRegistration{
-			PendingID:    e.PendingID,
-			StewardID:    e.StewardID,
-			TenantID:     e.TenantID,
-			SourceIP:     e.SourceIP,
-			RegisteredAt: e.RegisteredAt,
+			PendingID:      e.PendingID,
+			StewardID:      e.StewardID,
+			TenantID:       e.TenantID,
+			SourceIP:       e.SourceIP,
+			Hostname:       e.Hostname,
+			KeyFingerprint: e.KeyFingerprint,
+			RegisteredAt:   e.RegisteredAt,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -847,6 +888,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The hostname is a steward-supplied, unauthenticated hint (Issue #4598):
+	// sanitise once here so the DNA attributes and the pending entry both carry
+	// the cleaned value.
+	req.Hostname = sanitizeHostnameHint(req.Hostname)
+
 	// Validate token format
 	if req.Token == "" {
 		http.Error(w, "Registration token is required", http.StatusBadRequest)
@@ -1061,6 +1107,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				CSRPEM:             req.CSRPEM,
 				Hostname:           req.Hostname,
 				Platform:           req.OS,
+				KeyFingerprint:     csrKeyFingerprint(csr),
 			}
 			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
 				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
