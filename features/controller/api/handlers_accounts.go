@@ -1043,6 +1043,20 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// listAccountSecrets returns the metadata of every account record in the durable
+// secret store, across all tenants. It is the single account listing shared by
+// handleListAccounts (which scopes the result to the caller) and the billing
+// roll-up (which needs every account and scopes afterward). Reading the durable
+// store rather than s.accounts matters: that cache is populated lazily by login
+// and lookup, so it is not warm at startup.
+func (s *Server) listAccountSecrets(ctx context.Context) ([]*secretsif.SecretMetadata, error) {
+	return s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: accountSecretType,
+		},
+	})
+}
+
 // handleListAccounts handles GET /api/v1/accounts (requirePermission only,
 // no Tier-3 wrapper — reads are categorically outside the Tier-3 surface; see
 // Implementation Notes in Issue #2733). The response uses AccountInfo: no
@@ -1062,11 +1076,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 
 	callerTenant := callerTenantFilter(r.Context())
 
-	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
-		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: accountSecretType,
-		},
-	})
+	metas, err := s.listAccountSecrets(r.Context())
 	if err != nil {
 		s.logger.Error("Failed to list accounts", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list accounts", "STORE_ERROR")
