@@ -1944,9 +1944,14 @@ Trigger immediate execution of a workflow.
 
 ```json
 {
-  "variables": { "target_group": "staging" }
+  "variables": { "target_group": "staging" },
+  "inputs": { "environment": "prod" }
 }
 ```
+
+`inputs` supplies values for the workflow's declared `inputs` (see
+[Workflow Engine](../architecture/workflow-engine.md)); they are merged with
+`variables`, and an input wins on a name clash.
 
 **Response:** `202 Accepted`
 
@@ -1956,6 +1961,20 @@ Trigger immediate execution of a workflow.
   "workflow_name": "patch-linux-fleet",
   "status": "running",
   "start_time": "2026-07-07T12:00:00Z"
+}
+```
+
+**Response:** `400 Bad Request` when the supplied inputs violate the workflow's
+declared inputs. No execution is started. Each entry in `fields` names the
+input and the rule it broke; the supplied value is never echoed.
+
+```json
+{
+  "error": "invalid workflow inputs",
+  "fields": [
+    { "field": "host", "message": "is required" },
+    { "field": "environment", "message": "must be one of the declared options" }
+  ]
 }
 ```
 

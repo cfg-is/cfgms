@@ -263,6 +263,7 @@ type CreateWorkflowRequest struct {
 	Version     string                 `json:"version,omitempty"`
 	Steps       []workflow.Step        `json:"steps"`
 	Variables   map[string]interface{} `json:"variables,omitempty"`
+	Inputs      []workflow.InputSpec   `json:"inputs,omitempty"`
 	Timeout     time.Duration          `json:"timeout,omitempty"`
 	// OnFailure and ErrorWorkflows are the workflow-level failure policy
 	// (Issue #4577): dropping them stored a workflow that behaved differently
@@ -303,6 +304,11 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if err := workflow.ValidateInputSpecs(req.Inputs); err != nil {
+		h.sendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	vw := &workflow.VersionedWorkflow{
 		Workflow: workflow.Workflow{
 			Name:           req.Name,
@@ -310,6 +316,7 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 			Version:        version,
 			Steps:          req.Steps,
 			Variables:      req.Variables,
+			Inputs:         req.Inputs,
 			Timeout:        req.Timeout,
 			OnFailure:      req.OnFailure,
 			ErrorWorkflows: req.ErrorWorkflows,
@@ -397,6 +404,11 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if err := workflow.ValidateInputSpecs(req.Inputs); err != nil {
+		h.sendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	vw := &workflow.VersionedWorkflow{
 		Workflow: workflow.Workflow{
 			Name:           name,
@@ -404,6 +416,7 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 			Version:        version,
 			Steps:          req.Steps,
 			Variables:      req.Variables,
+			Inputs:         req.Inputs,
 			Timeout:        req.Timeout,
 			OnFailure:      req.OnFailure,
 			ErrorWorkflows: req.ErrorWorkflows,
@@ -477,6 +490,9 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 // ExecuteWorkflowRequest is the request body for manually triggering a workflow.
 type ExecuteWorkflowRequest struct {
 	Variables map[string]interface{} `json:"variables,omitempty"`
+	// Inputs are values for the workflow's declared inputs. They are merged
+	// with Variables (an input wins on a name clash) and validated by the engine.
+	Inputs map[string]interface{} `json:"inputs,omitempty"`
 }
 
 // handleExecuteWorkflow handles POST /api/v1/workflows/{id}/execute
@@ -495,7 +511,7 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	var req ExecuteWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Body is optional; continue with empty variables
-		req.Variables = nil
+		req = ExecuteWorkflowRequest{}
 	}
 
 	store, ok := h.workflowStoreForRequest(w, r)
@@ -522,8 +538,22 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	execCtx := context.WithValue(context.WithoutCancel(r.Context()), ctxkeys.TenantID, store.TenantID())
 
 	nameForLog := logging.SanitizeLogValue(name)
-	execution, err := h.engine.ExecuteWorkflow(execCtx, vw.Workflow, req.Variables)
+	supplied := make(map[string]interface{}, len(req.Variables)+len(req.Inputs))
+	for k, v := range req.Variables {
+		supplied[k] = v
+	}
+	for k, v := range req.Inputs {
+		supplied[k] = v
+	}
+	execution, err := h.engine.ExecuteWorkflow(execCtx, vw.Workflow, supplied)
 	if err != nil {
+		if inputErr, ok := workflow.AsInputsError(err); ok {
+			h.sendJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":  "invalid workflow inputs",
+				"fields": inputErr.Fields,
+			})
+			return
+		}
 		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to start workflow execution")
 		return
