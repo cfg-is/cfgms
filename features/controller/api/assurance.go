@@ -49,6 +49,7 @@ var permissionAssurance = map[string]Requirement{
 	"tenant:update":                  {Min: session.AssuranceStrong},                            // PUT  /tenants/{id}
 	"tenant:manage":                  {Min: session.AssuranceStrong},                            // POST /tenants/{id}/suspend, POST /tenants/{id}/config-source/test
 	"tenant:crossing-grant":          {Min: session.AssuranceStrong},                            // POST /tenants/{id}/access-grants
+	"tenant:crossing-end":            {Min: session.AssuranceStrong},                            // DELETE /tenants/{id}/access-grants/{crossing_id}
 	"tenant:crossing-break-glass":    {Min: session.AssuranceStrong},                            // POST /tenants/{id}/break-glass
 	"refresh:approve":                {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/approve
 	"refresh:set-policy":             {Min: session.AssuranceStrong},                            // PUT /tenants/{tenant_path}/refresh-policy

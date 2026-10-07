@@ -1656,6 +1656,31 @@ Test connectivity to a tenant's config source (e.g., validate git repository acc
 
 - `id` (path): Tenant ID
 
+#### DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}
+
+End an active tenant crossing (a client-granted access grant or a break-glass elevation) early. The crossing stops granting access immediately.
+
+**Authentication:** Required  
+**Required permission:** `tenant:crossing-end` (Strong assurance; step-up challenge otherwise)
+
+**Parameters:**
+
+- `id` (path): Tenant that owns the crossing
+- `crossing_id` (path): Crossing ID
+
+**Who may end what:**
+
+- A grant: an administrator of the granting tenant. A root-scoped caller never ends a grant (`403`, `ROOT_SCOPED_CANNOT_END_GRANT`).
+- A break-glass crossing: the root principal that invoked it, or an administrator of the owning tenant. Any other root-scoped caller gets `403` (`NOT_CROSSING_OWNER`).
+
+**Responses:**
+
+- `200 OK`: the crossing after the call. Ending an already revoked or expired crossing is idempotent and returns its current state.
+- `403 Forbidden`: the caller may not end this crossing.
+- `404 Not Found`: unknown tenant, or the crossing does not belong to `{id}` (no disclosure which).
+
+An audit event is recorded with the actor, crossing ID and kind (High severity for a grant, Critical for break-glass).
+
 ### Webhooks
 
 #### POST /api/v1/webhooks/git-push

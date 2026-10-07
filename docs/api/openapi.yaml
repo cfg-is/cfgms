@@ -710,6 +710,43 @@ paths:
         '503':
           description: Alert store not configured
 
+  /tenants/{id}/access-grants/{crossingId}:
+    delete:
+      summary: End an active tenant crossing
+      description: |
+        Revokes an active grant or break-glass crossing so it stops granting access
+        immediately. Requires `tenant:crossing-end` at Strong assurance. A grant is ended
+        by an administrator of the granting tenant (root-scoped callers get `403`); a
+        break-glass crossing is ended by the root principal that invoked it or by an
+        administrator of the owning tenant. A crossing that does not belong to `{id}` is
+        `404`. Idempotent: an already revoked or expired crossing returns its current state.
+      operationId: endTenantCrossing
+      tags:
+        - Tenants
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant that owns the crossing
+          schema:
+            type: string
+        - name: crossingId
+          in: path
+          required: true
+          description: Crossing identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Crossing state after the call
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller may not end this crossing
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Tenant crossing store not configured
   /reports/dashboard/alerts:
     get:
       summary: Dashboard alert feed
