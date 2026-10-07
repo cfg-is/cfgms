@@ -50,6 +50,10 @@ interface CredentialInfo {
   transport: string[] | null
   registered_at: string
   last_used_at: string | null
+  device_type?: string
+  synced?: boolean
+  sync_capable?: boolean
+  current?: boolean
 }
 
 interface ListResponse {
@@ -129,27 +133,57 @@ function formatDate(iso: string | null): string {
 const MAX_LABEL_LENGTH = 64
 const LAST_KEY_NOTE = 'You can’t remove your only passkey — you’d be locked out.'
 
+const DEVICE_TYPE_TEXT = new Map<string, string>([
+  ['platform', 'Platform passkey'],
+  ['security_key', 'Security key'],
+  ['phone_or_other', 'Phone or other device'],
+  ['unknown', 'Unknown device'],
+])
+
+// Sync wording comes only from the stored BE/BS flags, never from transport.
+function syncText(cred: CredentialInfo): string | null {
+  if (cred.synced) return 'Synced'
+  if (cred.sync_capable) return 'Not synced (can sync)'
+  if (cred.synced === false && cred.sync_capable === false) return 'Device-bound'
+  return null
+}
+
 function CredentialRow({
   cred,
   onRevoke,
+  onRename,
   revoking,
   locked,
 }: {
   cred: CredentialInfo
   onRevoke: (id: string) => void
+  onRename: (id: string) => void
   revoking: boolean
   locked: boolean
 }) {
   const label = cred.label || cred.id.slice(0, 12) + '…'
-  const transports = cred.transport?.join(', ') || '—'
+  const subline = [DEVICE_TYPE_TEXT.get(cred.device_type ?? 'unknown') ?? 'Unknown device', syncText(cred)]
+    .filter(Boolean)
+    .join(' · ')
 
   return (
     <tr data-testid="passkey-row">
       <td>
-        <span className="nm">{label}</span>
-      </td>
-      <td>
-        <span className="mut">{transports}</span>
+        <span className="nm">
+          {label}
+          {cred.current && (
+            <span
+              className="chip"
+              title="This is the passkey that last proved this session."
+              data-testid="this-device-chip"
+            >
+              <span aria-hidden="true">✓ </span>This device
+            </span>
+          )}
+        </span>
+        <div className="mut dev" data-testid="passkey-subline">
+          {subline}
+        </div>
       </td>
       <td>
         <span className="mono2">{formatDate(cred.registered_at)}</span>
@@ -158,6 +192,15 @@ function CredentialRow({
         <span className="mono2">{formatDate(cred.last_used_at)}</span>
       </td>
       <td>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => onRename(cred.id)}
+          aria-label={`Rename passkey ${label}`}
+          data-testid="rename-btn"
+        >
+          Rename
+        </button>
         <button
           type="button"
           className="btn danger"
@@ -202,6 +245,11 @@ export default function PasskeysView() {
   const [lastCredAlert, setLastCredAlert] = useState(false)
 
   const [confirmId, setConfirmId] = useState<string | null>(null)
+
+  const [renameId, setRenameId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
 
   const loadCredentials = useCallback(async () => {
     if (!username) return
@@ -360,6 +408,39 @@ export default function PasskeysView() {
     }
   }
 
+  // Step-up challenges are handled inside apiFetch (StepUpModal); a cancelled or
+  // failed ceremony comes back as a non-ok response, leaving the old label.
+  async function handleRename() {
+    if (!username || renameId === null) return
+    const label = renameValue.trim().slice(0, MAX_LABEL_LENGTH)
+    if (!label) return
+    setRenameBusy(true)
+    setRenameError(null)
+    try {
+      const resp = await apiFetch(
+        `/api/v1/accounts/${encodeURIComponent(username)}/webauthn/credentials/${encodeURIComponent(renameId)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label }),
+        },
+      )
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}))
+        setRenameError((body as { error?: { message?: string } })?.error?.message ?? `HTTP ${resp.status}`)
+        setRenameId(null)
+        return
+      }
+      setRenameId(null)
+      await loadCredentials()
+    } catch (e) {
+      setRenameError(e instanceof Error ? e.message : 'Unknown error')
+      setRenameId(null)
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
   const credList = credentials ?? []
   const lastKey = credList.length === 1
 
@@ -397,6 +478,17 @@ export default function PasskeysView() {
           <h3>Removal failed</h3>
           <p>{revokeError}</p>
           <button type="button" className="btn" onClick={() => setRevokeError(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {renameError && (
+        <div className="notice err" role="alert" data-testid="rename-error">
+          <div className="ic">!</div>
+          <h3>Rename failed</h3>
+          <p>{renameError}</p>
+          <button type="button" className="btn" onClick={() => setRenameError(null)}>
             Dismiss
           </button>
         </div>
@@ -463,7 +555,6 @@ export default function PasskeysView() {
           {Array.from({ length: 2 }, (_, i) => (
             <div className="skrow" key={i}>
               <span className="skel" style={{ width: '30%' }} />
-              <span className="skel" style={{ width: '15%' }} />
               <span className="skel" style={{ width: '25%' }} />
               <span className="skel" style={{ width: '25%' }} />
             </div>
@@ -480,7 +571,6 @@ export default function PasskeysView() {
           <thead>
             <tr>
               <th>Label</th>
-              <th>Transport</th>
               <th>Registered</th>
               <th>Last used</th>
               <th />
@@ -488,10 +578,48 @@ export default function PasskeysView() {
           </thead>
           <tbody>
             {credList.map((cred) => {
+              if (renameId === cred.id) {
+                return (
+                  <tr key={cred.id} data-testid="passkey-rename-row">
+                    <td colSpan={3}>
+                      <input
+                        type="text"
+                        className="input"
+                        value={renameValue}
+                        maxLength={MAX_LABEL_LENGTH}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        disabled={renameBusy}
+                        aria-label="New passkey label"
+                        data-testid="rename-input"
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={renameBusy || !renameValue.trim()}
+                        onClick={() => void handleRename()}
+                        data-testid="rename-save-btn"
+                      >
+                        {renameBusy ? 'Saving…' : 'Save'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={renameBusy}
+                        onClick={() => setRenameId(null)}
+                        style={{ marginLeft: 8 }}
+                      >
+                        Cancel
+                      </button>
+                    </td>
+                  </tr>
+                )
+              }
               if (confirmId === cred.id) {
                 return (
                   <tr key={cred.id} data-testid="passkey-confirm-row">
-                    <td colSpan={4}>
+                    <td colSpan={3}>
                       <span className="mut">
                         Remove <strong>{cred.label || cred.id.slice(0, 12) + '…'}</strong>? This
                         cannot be undone.
@@ -524,6 +652,11 @@ export default function PasskeysView() {
                   key={cred.id}
                   cred={cred}
                   onRevoke={() => setConfirmId(cred.id)}
+                  onRename={() => {
+                    setRenameError(null)
+                    setRenameValue(cred.label)
+                    setRenameId(cred.id)
+                  }}
                   revoking={revokingId === cred.id}
                   locked={lastKey}
                 />

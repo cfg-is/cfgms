@@ -25,7 +25,7 @@
 // (handlers_webauthn_test.go).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useEffect } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import PasskeysView from './PasskeysView.tsx'
@@ -73,6 +73,7 @@ function makeQueue(name: string) {
 
 const listQueue = makeQueue('credential-list')
 const revokeQueue = makeQueue('revoke')
+const renameQueue = makeQueue('rename')
 const registerBeginQueue = makeQueue('register-begin')
 const registerFinishQueue = makeQueue('register-finish')
 
@@ -110,7 +111,9 @@ function makeAssertionCredential(): PublicKeyCredential {
   } as unknown as PublicKeyCredential
 }
 
-function route(input: RequestInfo | URL): Response {
+const renameCalls: Array<RequestInit | undefined> = []
+
+function route(input: RequestInfo | URL, init?: RequestInit): Response {
   const url = String(input)
   // Real AuthProvider login ceremony.
   if (url.endsWith('/api/v1/web/csrf')) {
@@ -135,6 +138,10 @@ function route(input: RequestInfo | URL): Response {
   if (url.split('?')[0]?.endsWith('/webauthn/register/finish')) {
     return registerFinishQueue.next()
   }
+  if (url.includes('/webauthn/credentials/')) {
+    renameCalls.push(init)
+    return renameQueue.next()
+  }
   if (url.includes('/webauthn/revoke/')) {
     return revokeQueue.next()
   }
@@ -143,7 +150,7 @@ function route(input: RequestInfo | URL): Response {
 
 beforeEach(() => {
   fetchMock.mockReset()
-  fetchMock.mockImplementation((input) => Promise.resolve(route(input)))
+  fetchMock.mockImplementation((input, init) => Promise.resolve(route(input, init)))
   credentialsGet.mockReset()
   credentialsGet.mockImplementation(() => Promise.resolve(makeAssertionCredential()))
   credentialsCreate.mockReset()
@@ -152,6 +159,8 @@ beforeEach(() => {
   )
   listQueue.reset()
   revokeQueue.reset()
+  renameQueue.reset()
+  renameCalls.length = 0
   registerBeginQueue.reset()
   registerFinishQueue.reset()
   vi.stubGlobal('fetch', fetchMock)
@@ -250,7 +259,7 @@ describe('PasskeysView', () => {
 
     // Click "Remove" on the first credential to open the confirm dialog.
     // Use getByRole to avoid noUncheckedIndexedAccess on the result array.
-    fireEvent.click(screen.getByRole('button', { name: /MacBook Touch ID/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Remove passkey MacBook Touch ID/i }))
 
     // Confirm dialog appears — click "Confirm remove".
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
@@ -274,7 +283,7 @@ describe('PasskeysView', () => {
     await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
-    fireEvent.click(screen.getByRole('button', { name: /MacBook Touch ID/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Remove passkey MacBook Touch ID/i }))
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
 
     revokeQueue.push(() => makeErrorResp(409, 'LAST_CREDENTIAL', 'Cannot remove the last passkey'))
@@ -404,7 +413,7 @@ describe('PasskeysView', () => {
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
     // Use getByRole to avoid noUncheckedIndexedAccess issue with getAllByTestId()[0].
-    fireEvent.click(screen.getByRole('button', { name: /MacBook Touch ID/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Remove passkey MacBook Touch ID/i }))
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
 
     revokeQueue.push(() => makeErrorResp(500, 'STORE_ERROR', 'store write failed'))
@@ -459,5 +468,87 @@ describe('PasskeysView', () => {
     fireEvent.click(screen.getByTestId('add-passkey-btn'))
 
     await waitFor(() => expect(screen.getByTestId('add-error')).toBeInTheDocument())
+  })
+
+  describe('sub-line, chip and rename', () => {
+    const base = { registered_at: '2026-01-10T12:00:00Z', last_used_at: null, transport: ['internal'] }
+
+    it('shows the three sync wordings and never a sync claim from transport alone', async () => {
+      listQueue.push(() =>
+        makeListResp([
+          { ...base, id: 'a', label: 'Bound', device_type: 'security_key', synced: false, sync_capable: false, current: false },
+          { ...base, id: 'b', label: 'Capable', device_type: 'platform', synced: false, sync_capable: true, current: false },
+          { ...base, id: 'c', label: 'Syncing', device_type: 'phone_or_other', synced: true, sync_capable: true, current: false },
+          { ...base, id: 'd', label: 'Nothing', device_type: 'unknown' },
+        ]),
+      )
+      await renderView()
+      const rows = await screen.findAllByTestId('passkey-row')
+      const sub = (i: number) => within(rows.at(i)!).getByTestId('passkey-subline').textContent
+      expect(sub(0)).toContain('Device-bound')
+      expect(sub(1)).toContain('Not synced (can sync)')
+      expect(sub(1)).not.toContain('Device-bound')
+      expect(sub(2)).toContain('Synced')
+      expect(sub(2)).toContain('Phone or other device')
+      expect(sub(3)).toContain('Unknown device')
+      // transport "internal" alone must not yield a sync claim
+      expect(sub(3)).not.toMatch(/Synced|Not synced/)
+    })
+
+    it('has no Transport column', async () => {
+      listQueue.push(() => makeListResp([CRED_A]))
+      await renderView()
+      await screen.findByTestId('passkeys-table')
+      expect(screen.queryByRole('columnheader', { name: 'Transport' })).toBeNull()
+    })
+
+    it('marks only the current credential with the chip', async () => {
+      listQueue.push(() =>
+        makeListResp([
+          { ...CRED_A, device_type: 'platform', current: true },
+          { ...CRED_B, device_type: 'security_key', current: false },
+        ]),
+      )
+      await renderView()
+      const rows = await screen.findAllByTestId('passkey-row')
+      expect(rows[0]!.querySelector('[data-testid="this-device-chip"]')).not.toBeNull()
+      expect(rows[1]!.querySelector('[data-testid="this-device-chip"]')).toBeNull()
+      expect(screen.getAllByTestId('this-device-chip')).toHaveLength(1)
+    })
+
+    async function startRename() {
+      listQueue.push(() => makeListResp([{ ...CRED_A, device_type: 'platform' }]))
+      await renderView()
+      fireEvent.click(await screen.findByRole('button', { name: /Rename passkey MacBook Touch ID/i }))
+      const input = await screen.findByTestId('rename-input')
+      fireEvent.change(input, { target: { value: 'Work laptop' } })
+    }
+
+    it('persists a rename and refreshes the list', async () => {
+      await startRename()
+      renameQueue.push(() => jsonResponse(200, { data: {} }))
+      listQueue.push(() => makeListResp([{ ...CRED_A, label: 'Work laptop', device_type: 'platform' }]))
+      fireEvent.click(screen.getByTestId('rename-save-btn'))
+      await screen.findByText('Work laptop')
+      expect(renameCalls).toHaveLength(1)
+      expect(renameCalls[0]?.method).toBe('PATCH')
+      expect(JSON.parse(String(renameCalls[0]?.body))).toEqual({ label: 'Work laptop' })
+    })
+
+    it('keeps the old label when step-up is cancelled', async () => {
+      await startRename()
+      renameQueue.push(() =>
+        new Response(JSON.stringify({ error: { code: 'STEP_UP_REQUIRED', message: 'step-up required' } }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json', 'WWW-Authenticate': 'CFGMS-StepUp' },
+        }),
+      )
+      fireEvent.click(screen.getByTestId('rename-save-btn'))
+      fireEvent.click(await screen.findByTestId('step-up-cancel-btn'))
+      await screen.findByTestId('rename-error')
+      expect(screen.queryByTestId('rename-input')).toBeNull()
+      expect(screen.getByText('MacBook Touch ID')).toBeInTheDocument()
+      expect(screen.queryByText('Work laptop')).toBeNull()
+    })
   })
 })
