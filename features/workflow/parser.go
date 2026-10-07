@@ -3,6 +3,8 @@
 package workflow
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -49,6 +51,123 @@ func (p *Parser) ParseYAML(data []byte) (Workflow, error) {
 	}
 
 	return workflow, nil
+}
+
+// ParseYAMLUnvalidated decodes a workflow from YAML data without validating it.
+// Syntax and duration errors still fail; semantic defects are left for
+// ValidateWorkflowDetailed so a caller can report every one of them.
+func (p *Parser) ParseYAMLUnvalidated(data []byte) (Workflow, error) {
+	var workflowDef workflowDefinition
+	if err := yaml.Unmarshal(data, &workflowDef); err != nil {
+		return Workflow{}, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	workflow, err := p.convertDefinition(workflowDef)
+	if err != nil {
+		return Workflow{}, fmt.Errorf("failed to convert workflow definition: %w", err)
+	}
+	return workflow, nil
+}
+
+// RenderYAML renders a workflow as canonical YAML in the shape ParseYAML reads.
+// It fails when the workflow uses a field the YAML definition cannot express,
+// rather than silently dropping it.
+func (p *Parser) RenderYAML(workflow Workflow) ([]byte, error) {
+	def := workflowDefinition{Workflow: workflowMeta{
+		Name:        workflow.Name,
+		Description: workflow.Description,
+		Version:     workflow.Version,
+		Variables:   workflow.Variables,
+		Inputs:      workflow.Inputs,
+		Steps:       renderSteps(workflow.Steps),
+		Timeout:     renderDuration(workflow.Timeout),
+		OnFailure:   string(workflow.OnFailure),
+	}}
+
+	back, err := p.convertDefinition(def)
+	if err != nil {
+		return nil, fmt.Errorf("workflow cannot be rendered as YAML: %w", err)
+	}
+	want := workflow
+	want.Steps = stripStepIDs(workflow.Steps)
+	if !jsonEqual(want, back) {
+		return nil, fmt.Errorf("workflow uses fields that cannot be expressed in YAML")
+	}
+
+	out, err := yaml.Marshal(def)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render YAML: %w", err)
+	}
+	return out, nil
+}
+
+func renderDuration(d time.Duration) string {
+	if d == 0 {
+		return ""
+	}
+	return d.String()
+}
+
+func renderSteps(steps []Step) []stepDefinition {
+	if len(steps) == 0 {
+		return nil
+	}
+	defs := make([]stepDefinition, len(steps))
+	for i, s := range steps {
+		d := stepDefinition{
+			Name:      s.Name,
+			Type:      string(s.Type),
+			Module:    s.Module,
+			Config:    s.Config,
+			Steps:     renderSteps(s.Steps),
+			Notify:    s.Notify,
+			Timeout:   renderDuration(s.Timeout),
+			OnFailure: string(s.OnFailure),
+			Variables: s.Variables,
+		}
+		if c := s.Condition; c != nil {
+			d.Condition = &conditionDefinition{
+				Type:       string(c.Type),
+				Variable:   c.Variable,
+				Operator:   string(c.Operator),
+				Value:      c.Value,
+				Expression: c.Expression,
+			}
+		}
+		if s.Delay != nil {
+			d.Delay = &delayDefinition{Duration: s.Delay.Duration.String(), Message: s.Delay.Message}
+		}
+		if s.Approval != nil {
+			d.Approval = &approvalDefinition{
+				Message:            s.Approval.Message,
+				ApproverPermission: s.Approval.ApproverPermission,
+				Timeout:            renderDuration(s.Approval.Timeout),
+			}
+		}
+		defs[i] = d
+	}
+	return defs
+}
+
+// stripStepIDs returns a copy of steps with the computed Step.ID cleared, since
+// the YAML definition does not carry it.
+func stripStepIDs(steps []Step) []Step {
+	if steps == nil {
+		return nil
+	}
+	out := make([]Step, len(steps))
+	for i, s := range steps {
+		s.ID = ""
+		s.Steps = stripStepIDs(s.Steps)
+		out[i] = s
+	}
+	return out
+}
+
+func jsonEqual(a, b interface{}) bool {
+	ab, errA := json.Marshal(a)
+	bb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ab, bb)
 }
 
 // workflowDefinition is the YAML representation of a workflow

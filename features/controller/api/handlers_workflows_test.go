@@ -1084,7 +1084,7 @@ func TestWorkflowHandler_RegisterWorkflowRoutes_NilGate_ReturnsError(t *testing.
 	gated := mux.NewRouter()
 	gatedSub := gated.PathPrefix("/workflows").Subrouter()
 	require.NoError(t, h.RegisterWorkflowRoutes(gatedSub))
-	assert.Len(t, walkRoutes(t, gatedSub), 12,
+	assert.Len(t, walkRoutes(t, gatedSub), 14,
 		"a wired gate must register every workflow route")
 }
 
@@ -1635,4 +1635,159 @@ func TestWorkflowPermission_Validate_GatedOnRead(t *testing.T) {
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+const parseYAMLDoc = `workflow:
+  name: onboard
+  version: 1.0.0
+  inputs:
+    - name: region
+      type: string
+      required: true
+  steps:
+    - name: prep
+      type: task
+      module: file
+      config:
+        path: /tmp/x
+    - name: gate
+      type: approval
+      approval:
+        message: ship it?
+        timeout: 1h
+    - name: tell
+      type: notify
+      notify:
+        url: https://notify.example.com/hook
+        title: done
+`
+
+func postRaw(router *mux.Router, path string, body []byte) *httptest.ResponseRecorder {
+	req := withTenantContext(httptest.NewRequest("POST", path, bytes.NewReader(body)), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestWorkflowHandler_ParseRenderParse_RoundTrip(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	rec := postRaw(router, "/workflows/parse-yaml", []byte(parseYAMLDoc))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var first ParseYAMLResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &first))
+	assert.True(t, first.Valid)
+	assert.Empty(t, first.Issues)
+	require.Len(t, first.Workflow.Steps, 3)
+	require.Len(t, first.Workflow.Inputs, 1)
+
+	rec = postRaw(router, "/workflows/render-yaml", mustMarshal(first.Workflow))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "application/yaml", rec.Header().Get("Content-Type"))
+
+	rec = postRaw(router, "/workflows/parse-yaml", rec.Body.Bytes())
+	require.Equal(t, http.StatusOK, rec.Code)
+	var second ParseYAMLResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &second))
+	assert.Equal(t, first.Workflow, second.Workflow)
+}
+
+func TestWorkflowHandler_ParseYAML_ReportsIssues(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	rec := postRaw(router, "/workflows/parse-yaml", []byte("workflow:\n  name: bad\n  steps:\n    - name: a\n      type: task\n"))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ParseYAMLResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.False(t, resp.Valid)
+	assert.NotEmpty(t, resp.Issues)
+}
+
+func TestWorkflowHandler_ParseYAML_MalformedReturns400WithoutEcho(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	for _, doc := range []string{
+		"workflow: [unclosed SECRETVALUE",
+		"workflow:\n  name: x\n  timeout: SECRETVALUE\n  steps: []\n",
+		"workflow:\n  name: [SECRETVALUE]\n",
+	} {
+		rec := postRaw(router, "/workflows/parse-yaml", []byte(doc))
+		assert.Equal(t, http.StatusBadRequest, rec.Code, doc)
+		assert.NotContains(t, rec.Body.String(), "SECRETVALUE")
+		assert.NotContains(t, rec.Body.String(), "goroutine")
+		assert.NotContains(t, rec.Body.String(), ".go:")
+	}
+}
+
+func TestWorkflowHandler_ParseYAML_OversizeBodyReturns413(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	big := bytes.Repeat([]byte("a"), int(maxStructuredRequestBodyBytes)+1)
+	// Through the global limit middleware the parser handler is never reached.
+	reached := false
+	guarded := (&Server{}).requestBodyLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		router.ServeHTTP(w, r)
+	}))
+	req := withTenantContext(httptest.NewRequest("POST", "/workflows/parse-yaml", bytes.NewReader(big)), "test-tenant")
+	rec := httptest.NewRecorder()
+	guarded.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.False(t, reached)
+
+	// The handler also bounds its own read.
+	rec = postRaw(router, "/workflows/parse-yaml", big)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	rec = postRaw(router, "/workflows/render-yaml", big)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}
+
+func TestWorkflowHandler_RenderYAML_BadInput(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	assert.Equal(t, http.StatusBadRequest, postRaw(router, "/workflows/render-yaml", []byte("not-json")).Code)
+
+	unrepresentable := []byte(`{"name":"w","steps":[{"name":"a","type":"http","http":{"url":"https://x.example.com"}}]}`)
+	assert.Equal(t, http.StatusBadRequest, postRaw(router, "/workflows/render-yaml", unrepresentable).Code)
+}
+
+func TestWorkflowHandler_YAMLEndpoints_WriteNothing(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	require.Equal(t, http.StatusOK, postRaw(router, "/workflows/parse-yaml", []byte(parseYAMLDoc)).Code)
+	require.Equal(t, http.StatusOK, postRaw(router, "/workflows/render-yaml", mustMarshal(CreateWorkflowRequest{Name: "w", Steps: []workflow.Step{validTaskStep("a")}})).Code)
+
+	listReq := withTenantContext(httptest.NewRequest("GET", "/workflows", nil), "test-tenant")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	var list map[string]interface{}
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
+	assert.EqualValues(t, 0, list["count"])
+	execs, err := h.engine.ListExecutions()
+	require.NoError(t, err)
+	assert.Empty(t, execs)
+}
+
+func TestWorkflowPermission_YAMLEndpoints_GatedOnRead(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+	bodies := map[string][]byte{
+		"/workflows/parse-yaml":  []byte(parseYAMLDoc),
+		"/workflows/render-yaml": mustMarshal(CreateWorkflowRequest{Name: "w", Steps: []workflow.Step{validTaskStep("a")}}),
+	}
+
+	for path, body := range bodies {
+		for perm, want := range map[string]int{"workflow:execute": http.StatusForbidden, "workflow:read": http.StatusOK} {
+			req := withTenantContext(withPermissions(httptest.NewRequest("POST", path, bytes.NewReader(body)), perm), "test-tenant")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			assert.Equal(t, want, rec.Code, "%s with %s", path, perm)
+		}
+	}
 }
