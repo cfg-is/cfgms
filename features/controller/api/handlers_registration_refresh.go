@@ -838,8 +838,11 @@ type AdminRefreshPolicyResponse struct {
 
 // APIPendingRefreshEntry is the wire representation of a pending refresh entry.
 type APIPendingRefreshEntry struct {
-	PendingID               string    `json:"pending_id"`
-	DeviceID                string    `json:"device_id"`
+	PendingID string `json:"pending_id"`
+	DeviceID  string `json:"device_id"`
+	// Hostname is the steward-reported hostname for DeviceID within TenantID;
+	// empty when the device is unknown. Untrusted — render as text only.
+	Hostname                string    `json:"hostname"`
 	TenantID                string    `json:"tenant_id"`
 	SourceIP                string    `json:"source_ip"`
 	ProvenanceMatchedFields int       `json:"provenance_matched_fields"`
@@ -847,6 +850,21 @@ type APIPendingRefreshEntry struct {
 	Status                  string    `json:"status"`
 	CreatedAt               time.Time `json:"created_at"`
 	ExpiresAt               time.Time `json:"expires_at"`
+}
+
+// pendingRefreshHostname resolves the steward hostname for a pending refresh
+// entry. The lookup is scoped to the entry's own tenant, so a device_id shared
+// with another tenant's steward never leaks that tenant's hostname. Returns ""
+// when the store is unavailable or the device is unknown.
+func (s *Server) pendingRefreshHostname(ctx context.Context, e *business.PendingRefreshEntry) string {
+	if s.stewardStore == nil {
+		return ""
+	}
+	record, err := s.stewardStore.GetStewardByDeviceIDForTenant(ctx, e.DeviceID, e.TenantID)
+	if err != nil || record == nil {
+		return ""
+	}
+	return record.Hostname
 }
 
 // ---- Admin handlers ----------------------------------------------------------
@@ -879,6 +897,7 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 		out = append(out, APIPendingRefreshEntry{
 			PendingID:               e.PendingID,
 			DeviceID:                e.DeviceID,
+			Hostname:                s.pendingRefreshHostname(r.Context(), e),
 			TenantID:                e.TenantID,
 			SourceIP:                e.SourceIP,
 			ProvenanceMatchedFields: e.ProvenanceMatchedFields,
