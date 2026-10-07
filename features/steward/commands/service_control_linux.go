@@ -56,6 +56,21 @@ func isNoSuchUnit(err error) bool {
 	return false
 }
 
+// isAccessDenied reports whether systemd/polkit refused the caller. An unprivileged
+// caller is authorized before the unit is even looked up, so this can precede NoSuchUnit.
+func isAccessDenied(err error) bool {
+	var dbusErr dbus.Error
+	if errors.As(err, &dbusErr) {
+		switch dbusErr.Name {
+		case "org.freedesktop.DBus.Error.AccessDenied",
+			"org.freedesktop.DBus.Error.InteractiveAuthorizationRequired",
+			systemdDest + ".AccessDenied":
+			return true
+		}
+	}
+	return false
+}
+
 func (systemdServiceController) Control(ctx context.Context, op ServiceOp, name string) error {
 	method := ""
 	switch op {
@@ -92,6 +107,9 @@ func (systemdServiceController) Control(ctx context.Context, op ServiceOp, name 
 	if call.Err != nil {
 		if isNoSuchUnit(call.Err) {
 			return ErrServiceNotFound
+		}
+		if isAccessDenied(call.Err) {
+			return fmt.Errorf("%w: %s: %v", ErrServicePermissionDenied, op, call.Err)
 		}
 		return fmt.Errorf("%s: %w", op, call.Err)
 	}

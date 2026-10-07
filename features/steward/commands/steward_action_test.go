@@ -370,8 +370,11 @@ func TestPlatformServiceController_UnknownServiceNotFoundOrUnsupported(t *testin
 		assert.ErrorIs(t, err, ErrServiceUnsupported)
 		return
 	}
-	// Elsewhere: not found when the manager is reachable, unsupported when it is not.
-	assert.True(t, errors.Is(err, ErrServiceNotFound) || errors.Is(err, ErrServiceUnsupported), "got %v", err)
+	// Elsewhere: not found when the manager is reachable and the caller is authorized,
+	// permission denied when the manager refuses an unprivileged caller (systemd
+	// authorizes before it resolves the unit), unsupported when it is unreachable.
+	assert.True(t, errors.Is(err, ErrServiceNotFound) || errors.Is(err, ErrServiceUnsupported) ||
+		errors.Is(err, ErrServicePermissionDenied), "got %v", err)
 }
 
 // The new files must not shell out.

@@ -24,6 +24,10 @@ var (
 
 	// ErrServiceNotFound is returned when the named service does not exist.
 	ErrServiceNotFound = errors.New("service not found")
+
+	// ErrServicePermissionDenied is returned when the service manager refuses the
+	// caller (for example an unprivileged steward that polkit will not authorize).
+	ErrServicePermissionDenied = errors.New("service control permission denied")
 )
 
 // ServiceController controls OS services through in-process OS APIs only (systemd

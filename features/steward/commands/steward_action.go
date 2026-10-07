@@ -22,6 +22,7 @@ const (
 	ActionResultSelfProtect = "self_protect"
 	ActionResultUnsupported = "unsupported"
 	ActionResultNotFound    = "not_found"
+	ActionResultDenied      = "permission_denied"
 	ActionResultFailed      = "failed"
 )
 
@@ -157,6 +158,8 @@ func (h *Handler) handleStewardAction(ctx context.Context, cmd *cpTypes.Command,
 			code = ActionResultUnsupported
 		case errors.Is(err, ErrServiceNotFound):
 			code = ActionResultNotFound
+		case errors.Is(err, ErrServicePermissionDenied):
+			code = ActionResultDenied
 		default:
 			code = ActionResultFailed
 		}
