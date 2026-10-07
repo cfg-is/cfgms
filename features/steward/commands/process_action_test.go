@@ -61,6 +61,21 @@ func (c *testChild) exited(d time.Duration) bool {
 	}
 }
 
+// procState returns the single-character scheduler state of pid from /proc/<pid>/stat.
+// It returns 0 when the state cannot be read, so callers polling for a state keep waiting.
+func procState(pid string) byte {
+	b, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return 0
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return 0
+	}
+	return s[i+2]
+}
+
 func processParams(image string) map[string]string { return map[string]string{"image": image} }
 
 func TestProcessAction_EndSuspendResumeChild(t *testing.T) {
@@ -71,19 +86,18 @@ func TestProcessAction_EndSuspendResumeChild(t *testing.T) {
 	require.NoError(t, f.run(f.signedAction(t, "process.suspend", "process", name, processParams(child.image))))
 	assert.Equal(t, "ok", f.lastEvent(t).Details["result_code"])
 	if runtime.GOOS == "linux" {
-		b, err := os.ReadFile("/proc/" + name + "/stat")
-		require.NoError(t, err)
-		s := string(b)
-		assert.Equal(t, byte('T'), s[strings.LastIndexByte(s, ')')+2], "child must be stopped")
+		// kill(2) only queues SIGSTOP; the kernel stops the child once it is next
+		// scheduled, so /proc reports 'T' asynchronously after the verb returns.
+		assert.Eventually(t, func() bool { return procState(name) == 'T' },
+			5*time.Second, 10*time.Millisecond, "child must be stopped")
 	}
 
 	require.NoError(t, f.run(f.signedAction(t, "process.resume", "process", name, processParams(child.image))))
 	assert.Equal(t, "ok", f.lastEvent(t).Details["result_code"])
 	if runtime.GOOS == "linux" {
-		b, err := os.ReadFile("/proc/" + name + "/stat")
-		require.NoError(t, err)
-		s := string(b)
-		assert.NotEqual(t, byte('T'), s[strings.LastIndexByte(s, ')')+2], "child must be running")
+		// SIGCONT likewise takes effect asynchronously.
+		assert.Eventually(t, func() bool { s := procState(name); return s != 0 && s != 'T' },
+			5*time.Second, 10*time.Millisecond, "child must be running")
 	}
 	assert.False(t, child.exited(100*time.Millisecond))
 
