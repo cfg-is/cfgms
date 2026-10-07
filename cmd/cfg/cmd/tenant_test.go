@@ -352,3 +352,15 @@ func TestTenantGet_TextAndJSON(t *testing.T) {
 	out = captureStdout(t, func() { require.NoError(t, runTenantGet(tenantGetCmd, []string{"c1"})) })
 	assert.Equal(t, `{"id":"c1","name":"c1","parent_id":"root","status":"active"}`+"\n", out)
 }
+
+func TestTenantList_BoundaryRowsMarked(t *testing.T) {
+	server := newTenantListServer(t, `[{"id":"root","name":"root","status":"active","boundary":false},`+
+		`{"id":"msp-a","name":"msp-a","parent_id":"root","status":"active","boundary":true,"accessible":false,"tech_count":4,"device_count":214,"client_count":12}]`)
+	defer server.Close()
+	withTenantClient(t, server)
+
+	out := captureStdout(t, func() { require.NoError(t, runTenantList(tenantListCmd, nil)) })
+	assert.Regexp(t, `msp-a\s+root\s+msp-a\s+active \[not accessible: 4 techs, 214 devices, 12 clients\]`, out)
+	assert.NotContains(t, out, "msp-z")
+	assert.Equal(t, 1, strings.Count(out, "not accessible"))
+}
