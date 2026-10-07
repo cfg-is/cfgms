@@ -21,13 +21,16 @@ import {
 } from './useTenantCrossings.ts'
 
 export default function BreakGlassDialog({
+  tenantId: initialTenantId = '',
   onInvoked,
   onClose,
 }: {
+  /** Pre-fills the target (a boundary row's MSP); the field stays editable. */
+  tenantId?: string
   onInvoked: (crossing: Crossing) => void
   onClose: () => void
 }) {
-  const [tenantId, setTenantId] = useState('')
+  const [tenantId, setTenantId] = useState(initialTenantId)
   const [justification, setJustification] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)

@@ -75,7 +75,8 @@ function buildTree(tenants: TenantInfo[]): TreeNode[] {
   const roots: TenantInfo[] = []
 
   for (const t of tenants) {
-    if (!t.parent_id || !byId.has(t.parent_id)) {
+    // A boundary row is never a parent: nothing beneath it is reachable (ADR-025 A6.4).
+    if (!t.parent_id || !byId.has(t.parent_id) || byId.get(t.parent_id)?.boundary) {
       roots.push(t)
     } else {
       const siblings = childrenMap.get(t.parent_id) ?? []
@@ -495,6 +496,60 @@ function EditTenantPanel({
   )
 }
 
+// ── Boundary row (ADR-025 Amendment 6, A6.4) ──────────────────────────────────
+
+function BoundaryRow({
+  tenant,
+  onRequestBreakGlass,
+}: {
+  tenant: TenantInfo
+  onRequestBreakGlass: (id: string) => void
+}) {
+  const clients = `${tenant.clientTenantCount.toLocaleString()} client tenant${tenant.clientTenantCount !== 1 ? 's' : ''}`
+  const techs = `${tenant.techCount.toLocaleString()} tech${tenant.techCount !== 1 ? 's' : ''}`
+  const devices = `${tenant.deviceCount.toLocaleString()} device${tenant.deviceCount !== 1 ? 's' : ''}`
+  return (
+    <tr data-testid="boundary-row" data-tenant-id={tenant.id}>
+      <td>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span aria-hidden="true">🔒</span>
+          <div>
+            <span className="nm" data-testid="tenant-name">{tenant.name}</span>
+            {tenant.id !== tenant.name && (
+              <span className="mono2" style={{ marginLeft: 6, fontSize: '0.75rem', color: 'var(--color-muted)' }}>
+                {tenant.id}
+              </span>
+            )}
+            <span style={{ marginLeft: 6, fontSize: '0.75rem', color: 'var(--color-muted)' }}>
+              — access boundary
+            </span>
+          </div>
+        </div>
+      </td>
+      <td data-testid="boundary-devices">
+        <span className="devcount" style={{ color: 'var(--color-muted)', fontSize: '0.75rem', fontVariantNumeric: 'tabular-nums' }}>
+          {devices}
+        </span>
+      </td>
+      <td data-testid="boundary-counts">
+        <span style={{ color: 'var(--color-muted)', fontSize: '0.75rem' }}>
+          {techs} · {clients}
+        </span>
+      </td>
+      <td>
+        <button
+          type="button"
+          className="wf-btn-danger"
+          onClick={() => onRequestBreakGlass(tenant.id)}
+          data-testid="boundary-break-glass-btn"
+        >
+          Request break-glass
+        </button>
+      </td>
+    </tr>
+  )
+}
+
 // ── Tenant row ─────────────────────────────────────────────────────────────────
 
 function TenantRow({
@@ -737,6 +792,7 @@ export default function TenantAdminView() {
   )
   const banner = useCrossingBanner()
   const [showBreakGlass, setShowBreakGlass] = useState(false)
+  const [breakGlassTarget, setBreakGlassTarget] = useState('')
   const [supportTenant, setSupportTenant] = useState<TenantInfo | null>(null)
   const [listTenantId, setListTenantId] = useState<string | null>(null)
   const [listVersion, setListVersion] = useState(0)
@@ -751,7 +807,7 @@ export default function TenantAdminView() {
   // The API silently omits tenants the root-scoped caller lacks a crossing for,
   // so a list containing only the root (or nothing) signals the boundary.
   const isRootScoped = principal?.rootScope === true
-  const hasAccessibleChildren = tenants.some((t) => t.parent_id !== '')
+  const hasAccessibleChildren = tenants.some((t) => t.boundary || t.parent_id !== '')
   const showBoundaryState = isRootScoped && !hasAccessibleChildren && !loading && error === null
 
   function lockDualControl(id: string) {
@@ -855,6 +911,11 @@ export default function TenantAdminView() {
     retry()
   }
 
+  function openBreakGlass(tenantId: string) {
+    setBreakGlassTarget(tenantId)
+    setShowBreakGlass(true)
+  }
+
   function handleBreakGlassInvoked(crossing: Crossing) {
     banner.adopt(crossing)
     setShowBreakGlass(false)
@@ -954,7 +1015,7 @@ export default function TenantAdminView() {
         ) : error !== null ? (
           <ErrorNotice detail={error} onRetry={retry} />
         ) : showBoundaryState ? (
-          <BoundaryEmptyState onRequestBreakGlass={() => setShowBreakGlass(true)} />
+          <BoundaryEmptyState onRequestBreakGlass={() => openBreakGlass('')} />
         ) : tenants.length === 0 ? (
           <div className="notice empty" data-testid="tenants-empty">
             <div className="ic">◍</div>
@@ -972,7 +1033,13 @@ export default function TenantAdminView() {
               </tr>
             </thead>
             <tbody>
-              {flatNodes.map((node) => (
+              {flatNodes.map((node) => node.tenant.boundary ? (
+                <BoundaryRow
+                  key={node.tenant.id}
+                  tenant={node.tenant}
+                  onRequestBreakGlass={openBreakGlass}
+                />
+              ) : (
                 <TenantRow
                   key={node.tenant.id}
                   node={node}
@@ -993,7 +1060,7 @@ export default function TenantAdminView() {
       </section>
 
       {showBreakGlass && (
-        <BreakGlassDialog onInvoked={handleBreakGlassInvoked} onClose={() => setShowBreakGlass(false)} />
+        <BreakGlassDialog tenantId={breakGlassTarget} onInvoked={handleBreakGlassInvoked} onClose={() => setShowBreakGlass(false)} />
       )}
       {supportTenant !== null && (
         <SupportAccessDialog

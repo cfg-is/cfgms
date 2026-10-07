@@ -33,6 +33,10 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+function count(value: unknown): number {
+  return typeof value === 'number' && value >= 0 ? Math.floor(value) : 0
+}
+
 function strOrNull(value: unknown): string | null {
   return typeof value === 'string' ? value : null
 }
@@ -68,6 +72,14 @@ export interface TenantInfo {
   updated_at: string
   /** Subtree steward count within the caller's visible scope (GET /api/v1/tenants device_count). */
   deviceCount: number
+  /** ADR-025 A6.4: a walled-off MSP the caller holds no crossing for; only counts are known. */
+  boundary: boolean
+  /** False for a boundary row, true for a row the caller can open. */
+  accessible: boolean
+  /** Technician count, reported on boundary rows only (0 otherwise). */
+  techCount: number
+  /** Client-tenant count below a boundary row; a count only, the clients are never listed. */
+  clientTenantCount: number
   pending_deletion?: PendingDeletionInfo | null
 }
 
@@ -100,6 +112,7 @@ export function parseTenantInfo(value: unknown): TenantInfo | null {
     rawStatus === 'suspended' ? 'suspended' :
     rawStatus === 'deleted' ? 'deleted' :
     'active'
+  const boundary = r.boundary === true
   return {
     id,
     name: str(r.name),
@@ -110,7 +123,11 @@ export function parseTenantInfo(value: unknown): TenantInfo | null {
     cascade_suspended_from: strOrNull(r.cascade_suspended_from),
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
-    deviceCount: typeof r.device_count === 'number' && r.device_count >= 0 ? Math.floor(r.device_count) : 0,
+    deviceCount: count(r.device_count),
+    boundary,
+    accessible: boundary ? false : r.accessible !== false,
+    techCount: count(r.tech_count),
+    clientTenantCount: count(r.client_count),
   }
 }
 
