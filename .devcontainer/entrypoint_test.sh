@@ -1064,13 +1064,13 @@ test_24d_non_wip_or_non_draft_not_promoted() {
     printf '%s\n' '{"isDraft":true,"title":"ci: a normal title (Issue #9999)","headRefName":"feature/story-9999-agent"}' \
         > "$PROMO_DIR/pr_view.json"
     local rc=0
-    ac_promote_salvaged_pr 42 9999 2>/dev/null || rc=$?
+    (cd "$PROMO_REPO" && ac_promote_salvaged_pr 42 9999) 2>/dev/null || rc=$?
     assert_equals "$rc" "1" "non-WIP title: helper refuses"
 
     printf '%s\n' '{"isDraft":false,"title":"WIP: feature/story-9999-agent (agent produced no PR)","headRefName":"feature/story-9999-agent"}' \
         > "$PROMO_DIR/pr_view.json"
     rc=0
-    ac_promote_salvaged_pr 42 9999 2>/dev/null || rc=$?
+    (cd "$PROMO_REPO" && ac_promote_salvaged_pr 42 9999) 2>/dev/null || rc=$?
     assert_equals "$rc" "1" "non-draft PR: helper refuses"
 
     local out
@@ -1088,7 +1088,7 @@ test_24e_failed_gh_step_falls_back() {
     for step in issue-view patch ready push; do
         echo "$step" > "$PROMO_DIR/fail_step"
         rc=0
-        ac_promote_salvaged_pr 42 9999 >/dev/null 2>&1 || rc=$?
+        (cd "$PROMO_REPO" && ac_promote_salvaged_pr 42 9999) >/dev/null 2>&1 || rc=$?
         assert_equals "$rc" "1" "helper returns non-zero when '$step' fails"
     done
 
