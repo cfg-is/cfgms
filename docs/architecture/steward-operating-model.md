@@ -789,12 +789,17 @@ Verb allowlist (closed):
 | `service.start` | `service` | Start the service |
 | `service.stop` | `service` | Stop the service |
 | `service.restart` | `service` | Stop, then start the service |
+| `process.end` | `process` | End the process: SIGTERM, then SIGKILL after a bounded wait (Linux); `TerminateProcess` (Windows) |
+| `process.suspend` | `process` | Suspend the process: SIGSTOP (Linux); `NtSuspendProcess` (Windows) |
+| `process.resume` | `process` | Resume a suspended process: SIGCONT (Linux); `NtResumeProcess` (Windows) |
 
 Service control uses in-process OS APIs only: systemd D-Bus (`StartUnit`, `StopUnit`, `RestartUnit`) on Linux and the Service Control Manager (`svc/mgr`) on Windows. macOS returns the typed `unsupported` result. Nothing shells out.
 
 **Self-protect:** stop and restart of the steward's own service are refused with result code `self_protect`, and nothing is changed. On Linux a unit is the steward's own when its `MainPID` is the steward's PID or the steward's cgroup names it; on Windows when the service is `CFGMSSteward` or its `ServiceStatusProcess.ProcessId` is the steward or its launcher parent. If the steward cannot determine this, the action fails closed (`failed`).
 
-**Result:** the outcome is reported through the existing `EventScriptCompleted` event, with `Details` of `execution_id`, `exit_code` (0 for `ok`, 1 otherwise) and `result_code`: `ok`, `self_protect`, `unsupported`, `not_found` or `failed`.
+**Process verbs (Issue #4624):** the target name is the decimal PID and the single parameter `image` is the process image name the operator saw (restart is deliberately absent: it would need the original command line; a service's main process restarts through `service.restart`). Process control uses `syscall.Kill` signals on Linux and `OpenProcess`/`TerminateProcess`/`NtSuspendProcess`/`NtResumeProcess` on Windows; macOS returns `unsupported`. Nothing shells out (no `taskkill`, no `kill`). The steward refuses the PID of itself, of its parent (service host or supervisor), PID 0, PID 4 on Windows and PID 1 on Linux with `self_protect`. PID-reuse guard: the live image name of the PID (executable base name, or the kernel comm name on Linux; case-insensitive on Windows) must equal `image`, otherwise nothing is touched and the result is `process_changed`. On Windows the check and the action use one process handle; on Linux `end` re-verifies the image before escalating to SIGKILL.
+
+**Result:** the outcome is reported through the existing `EventScriptCompleted` event, with `Details` of `execution_id`, `exit_code` (0 for `ok`, 1 otherwise) and `result_code`: `ok`, `self_protect`, `unsupported`, `not_found`, `permission_denied`, `process_changed` (process verbs) or `failed`.
 
 ### Live Telemetry Stream
 
