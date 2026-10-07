@@ -552,6 +552,105 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /workflows/approvals:
+    get:
+      summary: List pending workflow approvals
+      description: >
+        Returns the caller's tenant's pending approval gates, oldest first. A
+        root-scoped caller selects a tenant with the tenant query parameter.
+        Requires the workflow:read permission.
+      operationId: listWorkflowApprovals
+      tags:
+        - Workflows
+      parameters:
+        - name: tenant
+          in: query
+          required: false
+          description: Tenant to list, for root-scoped callers only
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pending approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvals:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkflowApproval'
+                  total:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /workflows/approvals/{approvalId}/decision:
+    post:
+      summary: Approve or reject a workflow approval
+      description: >
+        Records a decision on a pending approval gate and resumes the suspended
+        run (approve) or fails it (reject). Requires the workflow:approve
+        permission at strong assurance; a caller below strong assurance receives
+        a 401 CFGMS-StepUp challenge. When the gate names an approver_permission,
+        the caller must also hold it. The principal that started the run cannot
+        decide its approval (403, code SELF_APPROVAL). An approval in another
+        tenant is a 404. Each decision is audited.
+      operationId: decideWorkflowApproval
+      tags:
+        - Workflows
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          description: Approval ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - decision
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, reject]
+                justification:
+                  type: string
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approval_id:
+                    type: string
+                  decision:
+                    type: string
+                  execution_id:
+                    type: string
+                  resumed:
+                    type: boolean
+                    description: false when the decision is recorded but the resume is left to engine recovery
+                  execution_status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Missing approver permission, or the caller started the run (SELF_APPROVAL)
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Approval already decided or expired
+
   /rbac/permissions:
     get:
       summary: List permissions
@@ -1208,6 +1307,42 @@ components:
         type: string
 
   schemas:
+    WorkflowApproval:
+      type: object
+      properties:
+        approval_id:
+          type: string
+        workflow_name:
+          type: string
+        execution_id:
+          type: string
+        step_id:
+          type: string
+        step_name:
+          type: string
+        message:
+          type: string
+        approver_permission:
+          type: string
+        requested_by:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected, expired]
+        requested_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        decided_by:
+          type: string
+        decided_at:
+          type: string
+          format: date-time
+        justification:
+          type: string
+
     RegistrationToken:
       type: object
       properties:

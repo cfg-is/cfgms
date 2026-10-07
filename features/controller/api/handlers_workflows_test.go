@@ -1084,7 +1084,7 @@ func TestWorkflowHandler_RegisterWorkflowRoutes_NilGate_ReturnsError(t *testing.
 	gated := mux.NewRouter()
 	gatedSub := gated.PathPrefix("/workflows").Subrouter()
 	require.NoError(t, h.RegisterWorkflowRoutes(gatedSub))
-	assert.Len(t, walkRoutes(t, gatedSub), 9,
+	assert.Len(t, walkRoutes(t, gatedSub), 11,
 		"a wired gate must register every workflow route")
 }
 

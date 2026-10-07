@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -49,6 +50,7 @@ type strongAssuranceRouteEntry struct {
 var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Former TierMTLSOnly set — all migrated to permissionAssurance with Min: AssuranceStrong.
 	{"POST", "/api/v1/certificates/provision", "certificate:provision"},
+	{"POST", "/api/v1/workflows/approvals/appr-1/decision", "workflow:approve"}, // Issue #4610
 	{"POST", "/api/v1/certificates/signing/rotate", "certificate:rotate"},
 	{"POST", "/api/v1/certificates/testserial/revoke", "certificate:revoke"}, // Issue #3129: revoke gated at AssuranceStrong (cross-tenant revoke = sabotage)
 	{"POST", "/api/v1/rbac/roles", "rbac:create-role"},
@@ -225,6 +227,8 @@ func allStrongAssurancePermissions() []string {
 //	    verifying the assurance gate does not over-block legitimate mTLS admins.
 func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	server := setupTestServer(t)
+	// The workflow routes only exist once a workflow handler is wired (Issue #4610).
+	server.SetWorkflowHandler(NewWorkflowHandler(nil, nil, nil, logging.NewNoopLogger()))
 
 	// Part (a): verify each table entry has a permissionAssurance entry with Min > Machine.
 	for _, entry := range strongAssuranceRouteTable {
