@@ -8,9 +8,10 @@
  * storage (enforced by a source-scan test), never in a cookie readable by
  * JS. The one exception is the session's absolute expiry timestamp
  * (Story #4597): non-secret, informational, kept in sessionStorage so the
- * user menu can still show the time left after a reload. Session presence is inferred from API responses; a page reload starts
- * signedOut and the first authenticated screen's data call re-establishes
- * or expires the session naturally.
+ * user menu can still show the time left after a reload. Session presence
+ * is inferred from API responses; a page reload starts signedOut and the
+ * first authenticated screen's data call re-establishes or expires the
+ * session naturally.
  *
  * Step-up (Story #2786, ADR-021 Decision 6): when apiFetch receives a 401 +
  * WWW-Authenticate: CFGMS-StepUp, the onStepUpRequired listener fires and
@@ -102,15 +103,6 @@ export interface Principal {
   expiresAt: number | null // session absolute expiry, epoch ms; null when unknown (Story #4597)
 }
 
-/**
- * signedOut — fresh visit (mockup "signin" state)
- * invalid   — last login attempt was rejected (mockup "invalid"/"no passkey" state)
- * expired   — a plain 401 dropped the session (mockup "expired" state)
- * signedIn  — authenticated
- *
- * Step-up is NOT a new AuthStatus value: the operator remains 'signedIn'
- * while the step-up modal is visible, because their existing session is intact.
- */
 /** Reads the persisted session expiry; a missing, malformed or past value is unknown (null). */
 function loadStoredExpiry(): number | null {
   try {
@@ -136,6 +128,15 @@ function storeExpiry(ms: number | null): void {
   }
 }
 
+/**
+ * signedOut — fresh visit (mockup "signin" state)
+ * invalid   — last login attempt was rejected (mockup "invalid"/"no passkey" state)
+ * expired   — a plain 401 dropped the session (mockup "expired" state)
+ * signedIn  — authenticated
+ *
+ * Step-up is NOT a new AuthStatus value: the operator remains 'signedIn'
+ * while the step-up modal is visible, because their existing session is intact.
+ */
 export type AuthStatus = 'signedOut' | 'invalid' | 'expired' | 'signedIn'
 
 export interface AuthValue {
