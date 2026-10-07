@@ -405,3 +405,90 @@ describe('WorkflowListView — new workflow', () => {
     expect(screen.getByTestId('new-wf-name')).toBeInTheDocument()
   })
 })
+
+// ── Triggers / Last run / Enabled columns (Story #4618) ───────────────────────
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+describe('WorkflowListView — summary columns', () => {
+  it('renders trigger count, last run chip and enabled state from list data only', async () => {
+    fetchMock.mockResolvedValue(
+      makeWorkflowListResponse([
+        makeWorkflow({
+          name: 'wf-a',
+          trigger_count: 3,
+          enabled_trigger_count: 2,
+          last_execution: { id: 'e1', status: 'failed', start_time: '2026-01-02T03:04:05Z' },
+        }),
+        makeWorkflow({ name: 'wf-b' }),
+      ]),
+    )
+    renderWorkflowListView()
+    await waitFor(() => expect(screen.getByTestId('workflow-table')).toBeInTheDocument())
+
+    const rows = screen.getAllByTestId('workflow-row')
+    expect(rows[0]).toHaveTextContent('3')
+    expect(rows[0]?.querySelector('.pill.crit') ?? null).toHaveTextContent('failed')
+    expect(screen.getAllByTestId('workflow-enabled-toggle')[0]).toBeChecked()
+    expect(rows[1]).toHaveTextContent('manual')
+    expect(rows[1]).toHaveTextContent('Never run')
+    expect(screen.getAllByTestId('workflow-enabled-toggle')[1]).toBeDisabled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('toggling Enabled confirms, calls disable for each trigger and refreshes the list', async () => {
+    const wf = makeWorkflow({ name: 'wf-a', trigger_count: 2, enabled_trigger_count: 2 })
+    const calls: string[] = []
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      const method = init?.method ?? 'GET'
+      calls.push(`${method} ${url}`)
+      if (url.endsWith('/api/v1/workflows')) return makeWorkflowListResponse([wf])
+      if (url.endsWith('/api/v1/triggers'))
+        return jsonResponse({
+          triggers: [
+            { id: 't1', name: 'a', type: 'schedule', status: 'active', workflow_name: 'wf-a' },
+            { id: 't2', name: 'b', type: 'webhook', status: 'active', workflow_name: 'wf-a' },
+            { id: 't3', name: 'c', type: 'webhook', status: 'active', workflow_name: 'other' },
+          ],
+        })
+      return jsonResponse({})
+    })
+    renderWorkflowListView()
+    await waitFor(() => expect(screen.getByTestId('workflow-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('workflow-enabled-toggle'))
+    expect(calls.filter((c) => c.includes('/disable'))).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('toggle-confirm-btn'))
+
+    await waitFor(() =>
+      expect(calls.filter((c) => c === 'GET /api/v1/workflows')).toHaveLength(2),
+    )
+    expect(calls).toContain('POST /api/v1/triggers/t1/disable')
+    expect(calls).toContain('POST /api/v1/triggers/t2/disable')
+    expect(calls.some((c) => c.includes('t3'))).toBe(false)
+  })
+
+  it('shows an error and still refreshes when a trigger update fails', async () => {
+    const wf = makeWorkflow({ name: 'wf-a', trigger_count: 1, enabled_trigger_count: 0 })
+    fetchMock.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/api/v1/workflows')) return makeWorkflowListResponse([wf])
+      if (url.endsWith('/api/v1/triggers'))
+        return jsonResponse({
+          triggers: [{ id: 't1', name: 'a', type: 'schedule', status: 'inactive', workflow_name: 'wf-a' }],
+        })
+      return jsonResponse({ error: 'boom' }, 500)
+    })
+    renderWorkflowListView()
+    await waitFor(() => expect(screen.getByTestId('workflow-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('workflow-enabled-toggle'))
+    fireEvent.click(screen.getByTestId('toggle-confirm-btn'))
+    await waitFor(() => expect(screen.getByTestId('toggle-error')).toHaveTextContent('boom'))
+  })
+})

@@ -17,6 +17,7 @@
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import {
+  parseTriggerList,
   useWorkflowList,
   type VersionedWorkflow,
 } from './useWorkflows.ts'
@@ -60,6 +61,27 @@ function WorkflowEmpty({ onCreate }: { onCreate: () => void }) {
   )
 }
 
+function lastRunTone(status: string): { tone: string; icon: string } {
+  switch (status) {
+    case 'completed':
+      return { tone: 'ok', icon: '✓' }
+    case 'failed':
+    case 'cancelled':
+      return { tone: 'crit', icon: '✕' }
+    case 'running':
+    case 'pending':
+    case 'paused':
+      return { tone: 'warn', icon: '◔' }
+    default:
+      return { tone: 'neutral', icon: '–' }
+  }
+}
+
+function formatRunTime(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+}
+
 // ── Workflow table row ────────────────────────────────────────────────────────
 
 function WorkflowRow({
@@ -67,12 +89,20 @@ function WorkflowRow({
   selected,
   onClick,
   onDelete,
+  onToggle,
+  toggling,
 }: {
   workflow: VersionedWorkflow
   selected: boolean
   onClick: () => void
   onDelete: () => void
+  onToggle: () => void
+  toggling: boolean
 }) {
+  const last = workflow.last_execution
+  const lastTone = last ? lastRunTone(last.status) : null
+  const noTriggers = workflow.trigger_count === 0
+  const enabled = workflow.enabled_trigger_count > 0
   return (
     <tr
       className={selected ? 'selected' : ''}
@@ -90,6 +120,40 @@ function WorkflowRow({
       </td>
       <td>
         <span className="mut">{workflow.description || '—'}</span>
+      </td>
+      <td data-testid="workflow-triggers">
+        {noTriggers ? (
+          <span className="mut">manual</span>
+        ) : (
+          <span className="mono2">{workflow.trigger_count}</span>
+        )}
+      </td>
+      <td data-testid="workflow-last-run">
+        {last && lastTone ? (
+          <>
+            <span className={`pill ${lastTone.tone}`}>
+              <span aria-hidden="true">{lastTone.icon}</span>
+              {last.status}
+            </span>{' '}
+            <span className="mut">{formatRunTime(last.start_time)}</span>
+          </>
+        ) : (
+          <span className="mut">Never run</span>
+        )}
+      </td>
+      <td onClick={(e) => e.stopPropagation()}>
+        <label style={{ whiteSpace: 'nowrap' }}>
+          <input
+            type="checkbox"
+            role="switch"
+            checked={enabled}
+            disabled={noTriggers || toggling}
+            onChange={onToggle}
+            aria-label={`Enabled: ${workflow.name}`}
+            data-testid="workflow-enabled-toggle"
+          />{' '}
+          {noTriggers ? '—' : enabled ? 'Enabled' : 'Disabled'}
+        </label>
       </td>
       <td
         onClick={(e) => e.stopPropagation()}
@@ -118,6 +182,9 @@ export default function WorkflowListView() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [togglingWorkflow, setTogglingWorkflow] = useState<VersionedWorkflow | null>(null)
+  const [toggleBusy, setToggleBusy] = useState(false)
+  const [toggleError, setToggleError] = useState<string | null>(null)
 
   const selectedWorkflow = workflows.find((w) => w.name === selectedName) ?? null
 
@@ -156,6 +223,47 @@ export default function WorkflowListView() {
     }
   }
 
+  // Enable/disable every trigger of the workflow, then refresh the list.
+  async function handleConfirmToggle() {
+    if (!togglingWorkflow) return
+    const wf = togglingWorkflow
+    const action = wf.enabled_trigger_count > 0 ? 'disable' : 'enable'
+    setToggleBusy(true)
+    setToggleError(null)
+    setTogglingWorkflow(null)
+    try {
+      const listResp = await apiFetch('/api/v1/triggers')
+      if (!listResp.ok) throw new Error(`Failed to load triggers — ${listResp.status}`)
+      const body = (await listResp.json()) as Record<string, unknown> | null
+      const ids = parseTriggerList(body?.triggers)
+        .filter((t) => t.workflow_name === wf.name)
+        .map((t) => t.id)
+      for (const id of ids) {
+        const response = await apiFetch(
+          `/api/v1/triggers/${encodeURIComponent(id)}/${action}`,
+          { method: 'POST' },
+        )
+        if (!response.ok) {
+          const errBody = (await response.json().catch(() => ({}))) as Record<
+            string,
+            unknown
+          >
+          throw new Error(
+            (errBody?.error as string) ||
+              `${action === 'enable' ? 'Enable' : 'Disable'} failed — ${response.status}`,
+          )
+        }
+      }
+    } catch (cause: unknown) {
+      setToggleError(
+        cause instanceof Error && cause.message ? cause.message : 'Update failed',
+      )
+    } finally {
+      setToggleBusy(false)
+      retry()
+    }
+  }
+
   return (
     <>
       <div className="htitle">
@@ -188,6 +296,12 @@ export default function WorkflowListView() {
             </div>
           )}
 
+          {toggleError && (
+            <div className="wf-form-error" style={{ padding: '8px 14px' }} data-testid="toggle-error">
+              {toggleError}
+            </div>
+          )}
+
           {loading ? (
             <LoadingRows />
           ) : error !== null ? (
@@ -202,6 +316,9 @@ export default function WorkflowListView() {
                   <th>Version</th>
                   <th>Steps</th>
                   <th>Description</th>
+                  <th>Triggers</th>
+                  <th>Last run</th>
+                  <th>Enabled</th>
                   <th>Actions</th>
                   <th className="c-spacer" aria-hidden="true" />
                 </tr>
@@ -213,6 +330,11 @@ export default function WorkflowListView() {
                     workflow={wf}
                     selected={selectedName === wf.name}
                     onClick={() => handleRowClick(wf.name)}
+                    toggling={toggleBusy}
+                    onToggle={() => {
+                      setToggleError(null)
+                      setTogglingWorkflow(wf)
+                    }}
                     onDelete={() => {
                       setDeleteError(null)
                       setDeletingWorkflow(wf)
@@ -241,6 +363,44 @@ export default function WorkflowListView() {
             retry()
           }}
         />
+      )}
+
+      {togglingWorkflow !== null && (
+        <div
+          className="wf-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="toggle-confirm-title"
+        >
+          <div className="wf-modal">
+            <h3 id="toggle-confirm-title">
+              {togglingWorkflow.enabled_trigger_count > 0 ? 'Disable' : 'Enable'} triggers?
+            </h3>
+            <p>
+              This will {togglingWorkflow.enabled_trigger_count > 0 ? 'disable' : 'enable'} all{' '}
+              {togglingWorkflow.trigger_count} trigger
+              {togglingWorkflow.trigger_count !== 1 ? 's' : ''} of{' '}
+              <b>{togglingWorkflow.name}</b>.
+            </p>
+            <div className="wf-modal-actions">
+              <button
+                type="button"
+                className="wf-btn-secondary"
+                onClick={() => setTogglingWorkflow(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="wf-btn"
+                onClick={handleConfirmToggle}
+                data-testid="toggle-confirm-btn"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {deletingWorkflow !== null && (

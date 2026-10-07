@@ -860,6 +860,9 @@ const BLANK_WORKFLOW: VersionedWorkflow = {
   version: '',
   steps: [],
   semantic_version: { major: 0, minor: 0, patch: 0, pre_release: '', build_meta: '' },
+  trigger_count: 0,
+  enabled_trigger_count: 0,
+  last_execution: null,
 }
 
 export default function WorkflowBuilder() {
