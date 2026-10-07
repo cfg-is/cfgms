@@ -41,3 +41,68 @@
 .live-btn:hover {
   border-color: var(--accent);
 }
+
+/* Row action menus (Story #4629). Kebab/popover base styles come from
+ * FleetOverview.css (.rowkebab, .ram-pop) and AppShell.css (.pop). Every state is
+ * carried by text, never colour alone. */
+.tbl tbody tr:focus-within .rowkebab {
+  opacity: 1;
+}
+.act-wrap {
+  gap: 6px;
+}
+.act-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-align: left;
+}
+.act-link {
+  padding: 1px 6px;
+}
+.act-pop {
+  min-width: 280px;
+}
+.act-confirm {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.act-confirm-hd {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.act-confirm-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.act-confirm-kv dt {
+  color: var(--text-faint);
+}
+.act-confirm-kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.act-confirm-lbl,
+.act-confirm-note {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+.act-just {
+  max-width: none;
+  width: 100%;
+}
+.act-confirm-btns {
+  display: flex;
+  gap: 8px;
+}
