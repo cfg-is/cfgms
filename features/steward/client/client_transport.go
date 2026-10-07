@@ -1570,6 +1570,10 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// wiring exercisable with an in-process control plane.
 	handler.RegisterOpenTerminalHandler(&terminalDialer{c: c})
 
+	// Register steward_action handler — structured, operator-signed actions from a
+	// closed verb allowlist (service start/stop/restart) via in-process OS APIs. (Issue #4623)
+	handler.RegisterStewardActionHandler()
+
 	// Register push_signing_cert handler — controller pushes current signing cert on connect
 	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
 	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {

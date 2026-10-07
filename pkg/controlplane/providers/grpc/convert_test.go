@@ -102,6 +102,7 @@ var allCommandTypes = []types.CommandType{
 	types.CommandPushStewardBinary,
 	types.CommandOpenTerminal,   // Issue #2760
 	types.CommandObserveModules, // Issue #3104
+	types.CommandStewardAction,  // Issue #4623
 }
 
 func TestCommandTypeRoundTrip(t *testing.T) {
@@ -155,6 +156,8 @@ func TestCommandTypeProtoDescriptorComplete(t *testing.T) {
 		transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
 		transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE:      "COMMAND_TYPE_RELAY_RESPONSE",
 		transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL:       "COMMAND_TYPE_OPEN_TERMINAL", // Issue #2760
+		transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES:     "COMMAND_TYPE_OBSERVE_MODULES",
+		transportpb.CommandType_COMMAND_TYPE_STEWARD_ACTION:      "COMMAND_TYPE_STEWARD_ACTION", // Issue #4623
 	}
 	for ct, name := range cases {
 		t.Run(name, func(t *testing.T) {

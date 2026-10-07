@@ -29,6 +29,12 @@ enum CommandType {
   // set back to the steward after receiving EventObserveSweepRequest.
   // Command.params keys: "modules" (JSON array of ObserveModuleSpec objects).
   COMMAND_TYPE_OBSERVE_MODULES = 13;
+  // Issue #4623: structured, operator-signed steward action (closed verb allowlist).
+  // Command.params keys: execution_id (string), verb (string, e.g. "service.start"),
+  // target_kind (string), target_name (string), parameters (map of string to string),
+  // plus the operator envelope keys: targets, nonce, expires_at and the X.509 or
+  // WebAuthn signature fields. No script text is carried.
+  COMMAND_TYPE_STEWARD_ACTION = 14;
 }
 
 // EventType enumerates the types of events a steward emits to a controller.
