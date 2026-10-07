@@ -61,6 +61,13 @@ describe('parseTenantInfo', () => {
     expect(result?.cascade_suspended_from).toBeNull()
   })
 
+  it('parses device_count into deviceCount, defaulting to 0', () => {
+    expect(parseTenantInfo({ id: 'a', device_count: 7 })?.deviceCount).toBe(7)
+    expect(parseTenantInfo({ id: 'a' })?.deviceCount).toBe(0)
+    expect(parseTenantInfo({ id: 'a', device_count: -3 })?.deviceCount).toBe(0)
+    expect(parseTenantInfo({ id: 'a', device_count: '9' })?.deviceCount).toBe(0)
+  })
+
   it('parses a directly-suspended tenant', () => {
     const raw = {
       id: 'client-1',

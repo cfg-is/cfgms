@@ -560,6 +560,13 @@ function TenantRow({
             </div>
           </div>
         </td>
+        <td data-testid="tenant-devices">
+          <span className="devcount" style={{ color: 'var(--color-muted)', fontSize: '0.75rem', fontVariantNumeric: 'tabular-nums' }}>
+            {tenant.deviceCount > 0
+              ? `${tenant.deviceCount.toLocaleString()} devices`
+              : children.length > 0 ? '—' : '0 devices'}
+          </span>
+        </td>
         <td>
           {hasPending && del ? (
             <>
@@ -677,7 +684,7 @@ function TenantRow({
       {/* Sub-row: hold countdown or eligible detail */}
       {hasPending && del && (
         <tr data-testid="delete-pipeline-subrow" className={isLastRow ? 'lastrow' : ''}>
-          <td colSpan={3} style={{ paddingTop: 0 }}>
+          <td colSpan={4} style={{ paddingTop: 0 }}>
             <div style={{ padding: '6px 10px 10px', background: 'var(--color-sunk, var(--bg-sunk))', borderRadius: 8, margin: '0 0 4px' }}>
               {del.state === 'hold' && (
                 <div data-testid="hold-card" style={{ fontSize: '0.8rem', color: 'var(--color-warn, var(--state-warn))' }}>
@@ -959,6 +966,7 @@ export default function TenantAdminView() {
             <thead>
               <tr>
                 <th>Tenant</th>
+                <th>Devices</th>
                 <th>Status</th>
                 <th></th>
               </tr>

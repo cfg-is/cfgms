@@ -2087,3 +2087,124 @@ func TestTenantResponses_OmitBillingLabel(t *testing.T) {
 		assert.NotContains(t, body, created.BillingLabel, path)
 	}
 }
+
+// --- device_count (subtree steward count, Issue #4590) ---
+
+// deviceCountsFromListResponse maps tenant ID to the device_count of each list item.
+func deviceCountsFromListResponse(t *testing.T, body []byte) map[string]float64 {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	items, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	counts := make(map[string]float64, len(items))
+	for _, it := range items {
+		m := it.(map[string]interface{})
+		dc, present := m["device_count"]
+		require.True(t, present, "every item must carry device_count")
+		counts[m["id"].(string)] = dc.(float64)
+	}
+	return counts
+}
+
+func seedDeviceCountTenants(t *testing.T, server *Server) business.StewardStore {
+	t.Helper()
+	ctx := context.Background()
+	for _, tr := range []*tenant.TenantRequest{
+		{ID: "dc-msp-a", ParentID: testRootTenantID},
+		{ID: "dc-client-1", ParentID: "dc-msp-a"},
+		{ID: "dc-msp-b", ParentID: testRootTenantID},
+	} {
+		_, err := server.tenantManager.CreateTenant(ctx, tr)
+		require.NoError(t, err)
+	}
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+	return st
+}
+
+func TestHandleListTenants_DeviceCount_CountingRule(t *testing.T) {
+	server := setupTestServer(t)
+	st := seedDeviceCountTenants(t, server)
+
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-reg", TenantID: "dc-client-1", Status: business.StewardStatusRegistered})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-act", TenantID: "dc-client-1", Status: business.StewardStatusActive})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-lost", TenantID: "dc-client-1", Status: business.StewardStatusLost})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-hidden", TenantID: "dc-client-1", Status: business.StewardStatusActive, Hidden: true})
+	for _, s := range []business.StewardStatus{
+		business.StewardStatusDeregistered, business.StewardStatusRevoked,
+		business.StewardStatusArchived, business.StewardStatusDormant,
+	} {
+		seedSteward(t, st, &business.StewardRecord{ID: "dc-term-" + string(s), TenantID: "dc-client-1", Status: s})
+	}
+
+	req := makeAdminRequest(t, http.MethodGet, "/api/v1/tenants", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	counts := deviceCountsFromListResponse(t, rec.Body.Bytes())
+	assert.Equal(t, float64(4), counts["dc-client-1"], "registered+active+lost+hidden counted, terminal excluded")
+	assert.Equal(t, float64(4), counts["dc-msp-a"], "parent rolls up descendants")
+	assert.Equal(t, float64(0), counts["dc-msp-b"])
+}
+
+func TestHandleListTenants_DeviceCount_ParentIsOwnPlusDescendants_SiblingExcluded(t *testing.T) {
+	server := setupTestServer(t)
+	st := seedDeviceCountTenants(t, server)
+
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-own", TenantID: "dc-msp-a", Status: business.StewardStatusActive})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-child1", TenantID: "dc-client-1", Status: business.StewardStatusActive})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-child2", TenantID: "dc-client-1", Status: business.StewardStatusLost})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-sib1", TenantID: "dc-msp-b", Status: business.StewardStatusActive})
+	seedSteward(t, st, &business.StewardRecord{ID: "dc-sib2", TenantID: "dc-msp-b", Status: business.StewardStatusActive})
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:list"}, "dc-msp-a", 5*time.Minute)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	counts := deviceCountsFromListResponse(t, rec.Body.Bytes())
+	assert.Equal(t, float64(3), counts["dc-msp-a"], "own (1) + descendants (2); sibling MSP's stewards never included")
+	assert.Equal(t, float64(2), counts["dc-client-1"])
+	assert.NotContains(t, counts, "dc-msp-b")
+}
+
+func TestHandleListTenants_DeviceCount_NoStewardStore_Zero(t *testing.T) {
+	server := setupTestServer(t)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "dc-nostore", ParentID: testRootTenantID})
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, http.MethodGet, "/api/v1/tenants", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, float64(0), deviceCountsFromListResponse(t, rec.Body.Bytes())["dc-nostore"])
+}
+
+// failingListStewardStore wraps a real flat-file steward store, overriding only
+// ListStewards to force a deterministic failure (same shape as controlCharAuditStore).
+type failingListStewardStore struct {
+	business.StewardStore
+}
+
+func (failingListStewardStore) ListStewards(context.Context) ([]*business.StewardRecord, error) {
+	return nil, errors.New("backend dial tcp 10.0.0.5:5432: connection refused")
+}
+
+func TestHandleListTenants_DeviceCount_StewardStoreFailure_Returns500NoLeak(t *testing.T) {
+	server := setupTestServer(t)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "dc-fail", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(failingListStewardStore{st})
+
+	req := makeAdminRequest(t, http.MethodGet, "/api/v1/tenants", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "10.0.0.5", "backend error text must not reach the client")
+}

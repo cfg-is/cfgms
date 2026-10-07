@@ -773,14 +773,28 @@ func TestManager_GetTerm_ExceedsPreLeaseRaftTerms(t *testing.T) {
 
 	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond)
 
-	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), state.Token, "a freshly created lease starts at token 1")
-
 	// 21 is the Raft term the lab cluster had reached before upgrading; no Raft
 	// term ever approached 2^32.
 	const preUpgradeRaftTerm uint64 = 21
-	term := manager.GetTerm()
+
+	// The lockout precondition: the fresh lease's raw fencing token sits below the
+	// steward's persisted Raft term, so an un-floored token would be rejected. The
+	// token is not pinned to exactly 1: FastElectionConfig's 200ms lease TTL can
+	// lapse between 40ms renewals under -race/parallel load, and the store then
+	// treats the next AcquireOrRenew as a genuine re-acquisition with token+1.
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, state.Token, uint64(1), "a lease token starts at 1")
+	require.Less(t, state.Token, preUpgradeRaftTerm,
+		"a freshly created lease's raw token must sit below the pre-upgrade Raft term for this scenario to reproduce the lockout")
+
+	// GetTerm reports 0 in any instant the cached authority has lapsed, so read it
+	// while authority is held rather than at one arbitrary moment.
+	var term uint64
+	require.Eventually(t, func() bool {
+		term = manager.GetTerm()
+		return term != 0
+	}, 5*time.Second, 5*time.Millisecond, "GetTerm must report a lease-derived term while leadership is held")
 	assert.Greater(t, term, preUpgradeRaftTerm)
 	assert.Greater(t, term, uint64(math.MaxUint32), "lease-derived terms must lie above the whole Raft term domain")
 }

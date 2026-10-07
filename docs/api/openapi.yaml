@@ -811,6 +811,45 @@ paths:
         '503':
           description: Alert store not configured
 
+  /tenants:
+    get:
+      summary: List tenants visible to the caller
+      description: |
+        Returns the tenants in the caller's visible scope. Each item carries the tenant
+        record plus `device_count`, the number of stewards in the tenant's subtree
+        within the caller's visible scope. Registered, active, lost and hidden stewards
+        count; terminal-state stewards (deregistered, revoked, archived, dormant) do not.
+      operationId: listTenants
+      tags:
+        - Tenants
+      responses:
+        '200':
+          description: Tenants with subtree steward counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        parent_id:
+                          type: string
+                        status:
+                          type: string
+                        device_count:
+                          type: integer
+                          minimum: 0
+                          description: Subtree steward count within the caller's visible scope.
+
   /tenants/{id}/access-grants/{crossingId}:
     delete:
       summary: End an active tenant crossing
