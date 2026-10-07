@@ -179,13 +179,19 @@ function parseTrends(body: unknown): TrendsData {
   }
 }
 
+export const REPORT_WINDOWS = [7, 14, 30] as const
+export type ReportWindow = (typeof REPORT_WINDOWS)[number]
+export const DEFAULT_REPORT_WINDOW: ReportWindow = 7
+
 interface FetchState {
-  key: number
+  key: string
   data?: ReportsDashboardData
   error?: string
 }
 
-export function useReportsDashboard(): UseReportsDashboardResult {
+export function useReportsDashboard(
+  days: ReportWindow = DEFAULT_REPORT_WINDOW,
+): UseReportsDashboardResult {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<FetchState | null>(null)
 
@@ -193,14 +199,16 @@ export function useReportsDashboard(): UseReportsDashboardResult {
 
   useEffect(() => {
     let cancelled = false
+    const key = `${attempt}:${days}`
+    const query = `?days=${days}`
     Promise.all([
-      apiFetch('/api/v1/reports/dashboard/overview').then(async (r) => {
+      apiFetch(`/api/v1/reports/dashboard/overview${query}`).then(async (r) => {
         if (!r.ok) {
           throw new Error(`GET /api/v1/reports/dashboard/overview — ${r.status}`)
         }
         return parseOverview(await r.json() as unknown)
       }),
-      apiFetch('/api/v1/reports/dashboard/trends').then(async (r) => {
+      apiFetch(`/api/v1/reports/dashboard/trends${query}`).then(async (r) => {
         if (!r.ok) {
           throw new Error(`GET /api/v1/reports/dashboard/trends — ${r.status}`)
         }
@@ -209,12 +217,12 @@ export function useReportsDashboard(): UseReportsDashboardResult {
     ])
       .then(([overview, trends]) => {
         if (cancelled) return
-        setState({ key: attempt, data: { overview, trends } })
+        setState({ key, data: { overview, trends } })
       })
       .catch((cause: unknown) => {
         if (cancelled) return
         setState({
-          key: attempt,
+          key,
           error:
             cause instanceof Error && cause.message
               ? cause.message
@@ -224,9 +232,9 @@ export function useReportsDashboard(): UseReportsDashboardResult {
     return () => {
       cancelled = true
     }
-  }, [attempt])
+  }, [attempt, days])
 
-  const current = state?.key === attempt ? state : null
+  const current = state?.key === `${attempt}:${days}` ? state : null
   return {
     data: current?.data ?? null,
     loading: current === null,

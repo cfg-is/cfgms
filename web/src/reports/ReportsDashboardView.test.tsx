@@ -121,9 +121,9 @@ function mockError(status = 503) {
   )
 }
 
-function renderView() {
+function renderView(initialEntry = '/') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <AuthProvider>
         <ReportsDashboardView />
       </AuthProvider>
@@ -203,6 +203,84 @@ describe('empty state', () => {
     expect(screen.getByText(/No data in this window/i)).toBeInTheDocument()
     expect(screen.queryByTestId('kpi-tiles')).not.toBeInTheDocument()
     expect(screen.queryByTestId('reports-ready')).not.toBeInTheDocument()
+  })
+})
+
+describe('window selector', () => {
+  const emptyOverview = {
+    ...OVERVIEW_BODY,
+    summary: { ...OVERVIEW_BODY.summary, devices_analyzed: 0 },
+  }
+  const emptyTrends = { ...TRENDS_BODY, charts: [] }
+
+  function requestedUrls(): string[] {
+    return fetchMock.mock.calls.map((c) => String(c[0]))
+  }
+
+  it('requests 7 days by default and the URL-selected window on load', async () => {
+    mockDashboard()
+    renderView('/?days=14')
+    await screen.findByTestId('reports-ready')
+    expect(requestedUrls()).toContain('/api/v1/reports/dashboard/overview?days=14')
+    expect(requestedUrls()).toContain('/api/v1/reports/dashboard/trends?days=14')
+    expect(screen.getByRole('button', { name: '14 days' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+  })
+
+  it('falls back to 7 days for an invalid days parameter', async () => {
+    mockDashboard()
+    renderView('/?days=999')
+    await screen.findByTestId('reports-ready')
+    expect(requestedUrls()).toContain('/api/v1/reports/dashboard/overview?days=7')
+  })
+
+  it('selecting a window re-fetches overview and trends with that range', async () => {
+    mockDashboard()
+    renderView()
+    await screen.findByTestId('reports-ready')
+    fireEvent.click(screen.getByRole('button', { name: '30 days' }))
+    await waitFor(() =>
+      expect(requestedUrls()).toContain('/api/v1/reports/dashboard/overview?days=30'),
+    )
+    expect(requestedUrls()).toContain('/api/v1/reports/dashboard/trends?days=30')
+    await screen.findByTestId('reports-ready')
+    expect(screen.getByRole('button', { name: '30 days' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+  })
+
+  it('empty state offers Widen to 30 days, which switches window and re-fetches', async () => {
+    mockDashboard(emptyOverview, emptyTrends)
+    renderView()
+    await screen.findByTestId('reports-empty')
+    fireEvent.click(screen.getByRole('button', { name: 'Widen to 30 days' }))
+    await waitFor(() =>
+      expect(requestedUrls()).toContain('/api/v1/reports/dashboard/overview?days=30'),
+    )
+    expect(requestedUrls()).toContain('/api/v1/reports/dashboard/trends?days=30')
+    await screen.findByTestId('reports-empty')
+    expect(
+      screen.queryByRole('button', { name: 'Widen to 30 days' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('does not offer Widen when the window is already 30 days', async () => {
+    mockDashboard(emptyOverview, emptyTrends)
+    renderView('/?days=30')
+    await screen.findByTestId('reports-empty')
+    expect(
+      screen.queryByRole('button', { name: 'Widen to 30 days' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('keeps the selector available in the error state', async () => {
+    mockError()
+    renderView()
+    await screen.findByRole('alert')
+    expect(screen.getByRole('button', { name: '14 days' })).toBeInTheDocument()
   })
 })
 
