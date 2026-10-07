@@ -322,7 +322,7 @@ func (c *linuxCollector) collectProcesses() ([]ProcessSnapshot, error) {
 		if convErr != nil {
 			continue
 		}
-		name, ticks, ok := readProcStat(pid)
+		name, state, ticks, ok := readProcStat(pid)
 		if !ok {
 			continue // process exited between ReadDir and read; skip cleanly
 		}
@@ -347,6 +347,7 @@ func (c *linuxCollector) collectProcesses() ([]ProcessSnapshot, error) {
 			MemoryBytes:    readProcRSSBytes(pid),
 			DiskReadBytes:  rd,
 			DiskWriteBytes: wr,
+			Status:         procStatusFromState(state),
 			// NetRxBytes/NetTxBytes reserved — see ProcessSnapshot doc.
 		})
 	}
@@ -357,31 +358,41 @@ func (c *linuxCollector) collectProcesses() ([]ProcessSnapshot, error) {
 }
 
 // readProcStat returns the comm name and cumulative CPU ticks (utime+stime) for
-// pid from /proc/[pid]/stat. comm is the field between the first '(' and the
+// pid from /proc/[pid]/stat, plus the one-letter process state. comm is the field between the first '(' and the
 // LAST ')', because a process name may itself contain parentheses/spaces.
-func readProcStat(pid int) (name string, ticks uint64, ok bool) {
+func readProcStat(pid int) (name string, state byte, ticks uint64, ok bool) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		return "", 0, false
+		return "", 0, 0, false
 	}
 	open := bytes.IndexByte(data, '(')
 	closeIdx := bytes.LastIndexByte(data, ')')
 	if open < 0 || closeIdx < 0 || closeIdx <= open || closeIdx+2 >= len(data) {
-		return "", 0, false
+		return "", 0, 0, false
 	}
 	name = string(data[open+1 : closeIdx])
 	// Fields after the closing ')': state ppid pgrp session tty tpgid flags
 	// minflt cminflt majflt cmajflt utime(idx 11) stime(idx 12) …
 	fields := strings.Fields(string(data[closeIdx+2:]))
-	if len(fields) < 13 {
-		return "", 0, false
+	if len(fields) < 13 || fields[0] == "" {
+		return "", 0, 0, false
 	}
 	utime, err1 := strconv.ParseUint(fields[11], 10, 64)
 	stime, err2 := strconv.ParseUint(fields[12], 10, 64)
 	if err1 != nil || err2 != nil {
-		return "", 0, false
+		return "", 0, 0, false
 	}
-	return name, utime + stime, true
+	return name, fields[0][0], utime + stime, true
+}
+
+// procStatusFromState maps the /proc/[pid]/stat state letter onto the wire
+// vocabulary: stopped (T, by signal) and tracing-stop (t) are "suspended";
+// every other state (running, sleeping, disk-wait, zombie, idle) is "running".
+func procStatusFromState(state byte) string {
+	if state == 'T' || state == 't' {
+		return "suspended"
+	}
+	return "running"
 }
 
 // pageSize is the system page size, resolved once, used to convert the
@@ -471,20 +482,98 @@ func collectSystemdServices(ctx context.Context) []ServiceSnapshot {
 		return nil
 	}
 
+	fileStates := systemdUnitFileStates(ctx, obj)
+
 	out := make([]ServiceSnapshot, 0, len(units))
 	for _, u := range units {
 		if !strings.HasSuffix(u.Name, ".service") {
 			continue
 		}
-		out = append(out, ServiceSnapshot{
-			Name: u.Name,
-			// Trim the systemd ".service" suffix so the entity id matches how the
-			// `service` stdlib module / osquery address the same daemon (service:sshd).
-			State:      systemdState(u.SubState, u.ActiveState),
-			FragmentID: serviceFragmentID(strings.TrimSuffix(u.Name, ".service")),
-		})
+		pid := uint32(0)
+		// MainPID is only meaningful (and only worth a D-Bus round trip) for a
+		// unit that has a process: active, activating or deactivating.
+		if u.ActiveState != "inactive" && u.ActiveState != "failed" {
+			pid = systemdMainPID(ctx, conn, u.UnitPath)
+		}
+		out = append(out, newSystemdService(u, fileStates[u.Name], pid))
 	}
 	return out
+}
+
+// newSystemdService builds one ServiceSnapshot from a ListUnits row, the
+// unit's UnitFileState and its MainPID (0 for a unit with no process).
+func newSystemdService(u systemdUnit, unitFileState string, mainPID uint32) ServiceSnapshot {
+	return ServiceSnapshot{
+		Name: u.Name,
+		// Trim the systemd ".service" suffix so the entity id matches how the
+		// `service` stdlib module / osquery address the same daemon (service:sshd).
+		State:       systemdState(u.SubState, u.ActiveState),
+		DisplayName: u.Description,
+		StartType:   systemdStartType(unitFileState),
+		PID:         int(mainPID), // #nosec G115 -- a PID fits in int32 on Linux (pid_max <= 2^22)
+		FragmentID:  serviceFragmentID(strings.TrimSuffix(u.Name, ".service")),
+	}
+}
+
+// systemdStartType maps a systemd UnitFileState onto the cross-platform start
+// type vocabulary: "enabled"/"enabled-runtime"/"alias"/"linked" units start
+// automatically ("auto"); "disabled" stays "disabled"; "masked" units cannot
+// start ("disabled"); "static"/"indirect"/"generated"/"transient" units are only
+// started on demand ("manual"). Empty or unrecognised input yields "".
+func systemdStartType(unitFileState string) string {
+	switch unitFileState {
+	case "enabled", "enabled-runtime":
+		return "auto"
+	case "disabled", "masked", "masked-runtime", "bad":
+		return "disabled"
+	case "static", "indirect", "generated", "transient", "linked", "linked-runtime", "alias":
+		return "manual"
+	default:
+		return ""
+	}
+}
+
+// systemdUnitFile mirrors one row of Manager.ListUnitFiles.
+type systemdUnitFile struct {
+	Path  string
+	State string
+}
+
+// systemdUnitFileStates returns unit name -> UnitFileState for every installed
+// unit file, in one D-Bus call. Best-effort: nil on failure.
+func systemdUnitFileStates(ctx context.Context, obj dbus.BusObject) map[string]string {
+	call := obj.CallWithContext(ctx, "org.freedesktop.systemd1.Manager.ListUnitFiles", 0)
+	if call.Err != nil {
+		return nil
+	}
+	var files []systemdUnitFile
+	if err := call.Store(&files); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(files))
+	for _, f := range files {
+		out[filepath.Base(f.Path)] = f.State
+	}
+	return out
+}
+
+// systemdMainPID reads the Service.MainPID property of one unit; 0 on failure.
+func systemdMainPID(ctx context.Context, conn *dbus.Conn, path dbus.ObjectPath) uint32 {
+	var pid uint32
+	obj := conn.Object("org.freedesktop.systemd1", path)
+	call := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0,
+		"org.freedesktop.systemd1.Service", "MainPID")
+	if call.Err != nil {
+		return 0
+	}
+	var v dbus.Variant
+	if err := call.Store(&v); err != nil {
+		return 0
+	}
+	if p, ok := v.Value().(uint32); ok {
+		pid = p
+	}
+	return pid
 }
 
 // systemdState prefers the fine-grained sub-state ("running", "dead", "exited",

@@ -85,6 +85,16 @@ const (
 	spiReadTransferCnt  = 232 // LARGE_INTEGER, bytes (IO_COUNTERS.ReadTransferCount)
 	spiWriteTransferCnt = 240 // LARGE_INTEGER, bytes (IO_COUNTERS.WriteTransferCount)
 	spiMinSize          = 256 // the fixed struct spans through the IO_COUNTERS block
+	spiNumberOfThreads  = 4   // ULONG; the SYSTEM_THREAD_INFORMATION array starts at spiMinSize
+
+	// SYSTEM_THREAD_INFORMATION (64-bit layout, 80 bytes per thread).
+	stiSize        = 80
+	stiThreadState = 68 // ULONG
+	stiWaitReason  = 72 // ULONG
+
+	threadStateWait      = 5  // KTHREAD_STATE Waiting
+	threadWaitSuspended  = 5  // KWAIT_REASON Suspended
+	threadWaitSuspendedW = 14 // KWAIT_REASON WrSuspended
 )
 
 // collectProcesses parses the SystemProcessInformation buffer into one
@@ -136,6 +146,7 @@ func (c *windowsCollector) collectProcesses() ([]ProcessSnapshot, error) {
 			MemoryBytes:    binary.LittleEndian.Uint64(entry[spiWorkingSetSize:]),
 			DiskReadBytes:  binary.LittleEndian.Uint64(entry[spiReadTransferCnt:]),
 			DiskWriteBytes: binary.LittleEndian.Uint64(entry[spiWriteTransferCnt:]),
+			Status:         processStatus(entry, pid),
 			// NetRxBytes/NetTxBytes reserved — see ProcessSnapshot doc.
 		})
 
@@ -149,6 +160,29 @@ func (c *windowsCollector) collectProcesses() ([]ProcessSnapshot, error) {
 	c.prev = next
 	c.prevWall = now
 	return out, nil
+}
+
+// processStatus reports "suspended" when the process has at least one thread
+// and every thread is in the Waiting state with a Suspended wait reason (what
+// SuspendThread / a frozen UWP process produces), else "running". Idle and
+// System (pid 0 / 4) are never suspended. The thread array is bounds-checked.
+func processStatus(entry []byte, pid int) string {
+	if pid == 0 || pid == 4 {
+		return "running"
+	}
+	n := int(binary.LittleEndian.Uint32(entry[spiNumberOfThreads:]))
+	if n == 0 || spiMinSize+n*stiSize > len(entry) {
+		return "running"
+	}
+	for i := 0; i < n; i++ {
+		th := entry[spiMinSize+i*stiSize:]
+		reason := binary.LittleEndian.Uint32(th[stiWaitReason:])
+		if binary.LittleEndian.Uint32(th[stiThreadState:]) != threadStateWait ||
+			(reason != threadWaitSuspended && reason != threadWaitSuspendedW) {
+			return "running"
+		}
+	}
+	return "suspended"
 }
 
 // readImageName decodes the UNICODE_STRING image name for one entry. The kernel
@@ -228,36 +262,62 @@ func collectSCMServices() []ServiceSnapshot {
 
 	out := make([]ServiceSnapshot, 0, len(names))
 	for _, name := range names {
-		out = append(out, ServiceSnapshot{
-			Name:       name,
-			State:      queryServiceState(handle, name),
-			FragmentID: serviceFragmentID(name),
-		})
+		snap := ServiceSnapshot{Name: name, State: "unknown", FragmentID: serviceFragmentID(name)}
+		queryServiceDetail(handle, &snap)
+		out = append(out, snap)
 	}
 	return out
 }
 
-// queryServiceState opens one service with query-only rights and returns its
-// current run state as a lower-case string ("running", "stopped", …), or
-// "unknown" when it cannot be queried (e.g. a service that deleted itself
-// between enumeration and open).
-func queryServiceState(scm windows.Handle, name string) string {
-	namePtr, err := windows.UTF16PtrFromString(name)
+// queryServiceDetail opens one service with query-only rights and fills in its
+// run state ("running", "stopped", …), display name, start type and PID. State
+// stays "unknown" when the service cannot be queried (e.g. it deleted itself
+// between enumeration and open); a config read failure leaves DisplayName and
+// StartType empty without discarding the status fields.
+func queryServiceDetail(scm windows.Handle, snap *ServiceSnapshot) {
+	namePtr, err := windows.UTF16PtrFromString(snap.Name)
 	if err != nil {
-		return "unknown"
+		return
 	}
-	h, err := windows.OpenService(scm, namePtr, windows.SERVICE_QUERY_STATUS)
+	h, err := windows.OpenService(scm, namePtr, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
 	if err != nil {
-		return "unknown"
+		return
 	}
-	s := &mgr.Service{Name: name, Handle: h}
+	s := &mgr.Service{Name: snap.Name, Handle: h}
 	defer func() { _ = s.Close() }()
 
-	status, err := s.Query()
-	if err != nil {
-		return "unknown"
+	if status, err := s.Query(); err == nil {
+		snap.State = svcStateString(status.State)
+		snap.PID = int(status.ProcessId) // #nosec G115 -- Windows PIDs are 32-bit
+		if status.State == svc.Stopped {
+			snap.PID = 0
+		}
 	}
-	return svcStateString(status.State)
+	if cfg, err := s.Config(); err == nil {
+		snap.DisplayName = cfg.DisplayName
+		snap.StartType = winStartType(cfg.StartType, cfg.DelayedAutoStart)
+	}
+}
+
+// winStartType maps an SCM start type onto the cross-platform vocabulary.
+func winStartType(startType uint32, delayed bool) string {
+	switch startType {
+	case mgr.StartAutomatic:
+		if delayed {
+			return "auto-delayed"
+		}
+		return "auto"
+	case mgr.StartManual:
+		return "manual"
+	case mgr.StartDisabled:
+		return "disabled"
+	case windows.SERVICE_BOOT_START:
+		return "boot"
+	case windows.SERVICE_SYSTEM_START:
+		return "system"
+	default:
+		return ""
+	}
 }
 
 // svcStateString maps a Windows service-state code to a stable label aligned

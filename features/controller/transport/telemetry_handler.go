@@ -510,12 +510,17 @@ type processSnapshotJSON struct {
 	DiskWriteBytes uint64  `json:"disk_write_bytes"`
 	NetRxBytes     uint64  `json:"net_rx_bytes"`
 	NetTxBytes     uint64  `json:"net_tx_bytes"`
+	Status         string  `json:"status"`
+	Description    string  `json:"description"`
 }
 
 type serviceSnapshotJSON struct {
-	FragmentID string `json:"fragment_id,omitempty"`
-	Name       string `json:"name"`
-	State      string `json:"state"`
+	FragmentID  string `json:"fragment_id,omitempty"`
+	Name        string `json:"name"`
+	State       string `json:"state"`
+	DisplayName string `json:"display_name"`
+	StartType   string `json:"start_type"`
+	PID         int32  `json:"pid"`
 }
 
 func marshalSnapshot(snap *transportpb.TelemetrySnapshot) ([]byte, error) {
@@ -531,14 +536,19 @@ func marshalSnapshot(snap *transportpb.TelemetrySnapshot) ([]byte, error) {
 			DiskWriteBytes: p.GetDiskWriteBytes(),
 			NetRxBytes:     p.GetNetRxBytes(),
 			NetTxBytes:     p.GetNetTxBytes(),
+			Status:         p.GetStatus(),
+			Description:    p.GetDescription(),
 		}
 	}
 	svcs := make([]serviceSnapshotJSON, len(snap.GetServices()))
 	for i, s := range snap.GetServices() {
 		svcs[i] = serviceSnapshotJSON{
-			FragmentID: s.GetFragmentId(),
-			Name:       s.GetName(),
-			State:      s.GetState(),
+			FragmentID:  s.GetFragmentId(),
+			Name:        s.GetName(),
+			State:       s.GetState(),
+			DisplayName: s.GetDisplayName(),
+			StartType:   s.GetStartType(),
+			PID:         s.GetPid(),
 		}
 	}
 	ts := ""

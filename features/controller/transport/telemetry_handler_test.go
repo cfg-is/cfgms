@@ -522,6 +522,34 @@ func TestMarshalSnapshot(t *testing.T) {
 		assert.Equal(t, "2026-01-01T00:00:00Z", out["timestamp"])
 	})
 
+	t.Run("service-and-process-detail-included", func(t *testing.T) {
+		snap := &transportpb.TelemetrySnapshot{
+			StewardId: "steward-d",
+			Processes: []*transportpb.ProcessSnapshot{
+				{Pid: 7, Name: "frozen", Status: "suspended", Description: "A frozen app"},
+			},
+			Services: []*transportpb.ServiceSnapshot{
+				{Name: "sshd.service", State: "running", DisplayName: "OpenSSH server", StartType: "auto", Pid: 1234},
+				{Name: "cups.service", State: "dead", DisplayName: "CUPS", StartType: "disabled"},
+			},
+		}
+		data, err := marshalSnapshot(snap)
+		require.NoError(t, err)
+		var out struct {
+			Processes []map[string]interface{} `json:"processes"`
+			Services  []map[string]interface{} `json:"services"`
+		}
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, "suspended", out.Processes[0]["status"])
+		assert.Equal(t, "A frozen app", out.Processes[0]["description"])
+		assert.Equal(t, "OpenSSH server", out.Services[0]["display_name"])
+		assert.Equal(t, "auto", out.Services[0]["start_type"])
+		assert.EqualValues(t, 1234, out.Services[0]["pid"])
+		// A stopped service carries PID 0 and its start type.
+		assert.EqualValues(t, 0, out.Services[1]["pid"])
+		assert.Equal(t, "disabled", out.Services[1]["start_type"])
+	})
+
 	t.Run("host-totals-included", func(t *testing.T) {
 		snap := &transportpb.TelemetrySnapshot{
 			StewardId: "steward-h",

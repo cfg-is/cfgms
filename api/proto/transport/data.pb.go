@@ -878,6 +878,8 @@ type ProcessSnapshot struct {
 	DiskWriteBytes uint64                 `protobuf:"varint,7,opt,name=disk_write_bytes,json=diskWriteBytes,proto3" json:"disk_write_bytes,omitempty"`
 	NetRxBytes     uint64                 `protobuf:"varint,8,opt,name=net_rx_bytes,json=netRxBytes,proto3" json:"net_rx_bytes,omitempty"` // reserved; always 0 (usermode-only collector)
 	NetTxBytes     uint64                 `protobuf:"varint,9,opt,name=net_tx_bytes,json=netTxBytes,proto3" json:"net_tx_bytes,omitempty"` // reserved; always 0 (usermode-only collector)
+	Status         string                 `protobuf:"bytes,10,opt,name=status,proto3" json:"status,omitempty"`                             // "running" or "suspended"
+	Description    string                 `protobuf:"bytes,11,opt,name=description,proto3" json:"description,omitempty"`                   // OS-provided process description, when available
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -975,6 +977,20 @@ func (x *ProcessSnapshot) GetNetTxBytes() uint64 {
 	return 0
 }
 
+func (x *ProcessSnapshot) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ProcessSnapshot) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
 // ServiceSnapshot is a point-in-time view of one installed service / systemd unit,
 // mirroring features/steward/telemetry.ServiceSnapshot.
 type ServiceSnapshot struct {
@@ -984,6 +1000,9 @@ type ServiceSnapshot struct {
 	State         string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
+	DisplayName   string `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	StartType     string `protobuf:"bytes,5,opt,name=start_type,json=startType,proto3" json:"start_type,omitempty"` // "auto", "manual", "disabled", ...
+	Pid           int32  `protobuf:"varint,6,opt,name=pid,proto3" json:"pid,omitempty"`                             // main PID; 0 when not running
 }
 
 func (x *ServiceSnapshot) Reset() {
@@ -1035,6 +1054,27 @@ func (x *ServiceSnapshot) GetState() string {
 		return x.State
 	}
 	return ""
+}
+
+func (x *ServiceSnapshot) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *ServiceSnapshot) GetStartType() string {
+	if x != nil {
+		return x.StartType
+	}
+	return ""
+}
+
+func (x *ServiceSnapshot) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
 }
 
 // TelemetrySnapshot is sent by the steward (client) to the controller (server).
@@ -1487,7 +1527,7 @@ const file_transport_data_proto_rawDesc = "" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1c\n" +
 	"\tsubscribe\x18\x02 \x01(\bR\tsubscribe\x12\x1f\n" +
 	"\vinterval_ms\x18\x03 \x01(\x05R\n" +
-	"intervalMs\"\xb2\x02\n" +
+	"intervalMs\"\xec\x02\n" +
 	"\x0fProcessSnapshot\x12\x1f\n" +
 	"\vfragment_id\x18\x01 \x01(\tR\n" +
 	"fragmentId\x12\x10\n" +
@@ -1501,12 +1541,19 @@ const file_transport_data_proto_rawDesc = "" +
 	"\fnet_rx_bytes\x18\b \x01(\x04R\n" +
 	"netRxBytes\x12 \n" +
 	"\fnet_tx_bytes\x18\t \x01(\x04R\n" +
-	"netTxBytes\"\\\n" +
+	"netTxBytes\x12\x16\n" +
+	"\x06status\x18\n" +
+	" \x01(\tR\x06status\x12 \n" +
+	"\vdescription\x18\v \x01(\tR\vdescription\"\xb0\x01\n" +
 	"\x0fServiceSnapshot\x12\x1f\n" +
 	"\vfragment_id\x18\x01 \x01(\tR\n" +
 	"fragmentId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
-	"\x05state\x18\x03 \x01(\tR\x05state\"\x9b\x02\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12!\n" +
+	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\x12\x1d\n" +
+	"\n" +
+	"start_type\x18\x05 \x01(\tR\tstartType\x12\x10\n" +
+	"\x03pid\x18\x06 \x01(\x05R\x03pid\"\x9b\x02\n" +
 	"\x11TelemetrySnapshot\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12>\n" +

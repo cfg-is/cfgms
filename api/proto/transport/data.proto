@@ -130,6 +130,8 @@ message ProcessSnapshot {
   uint64 disk_write_bytes = 7;
   uint64 net_rx_bytes = 8;  // reserved; always 0 (usermode-only collector)
   uint64 net_tx_bytes = 9;  // reserved; always 0 (usermode-only collector)
+  string status = 10;       // "running" or "suspended"
+  string description = 11;  // OS-provided process description, when available
 }
 
 // ServiceSnapshot is a point-in-time view of one installed service / systemd unit,
@@ -138,6 +140,9 @@ message ServiceSnapshot {
   string fragment_id = 1;   // ADR-017 typed entity id: "service:<name>"
   string name = 2;
   string state = 3;
+  string display_name = 4;
+  string start_type = 5;    // "auto", "manual", "disabled", ...
+  int32 pid = 6;            // main PID; 0 when not running
 }
 
 // TelemetrySnapshot is sent by the steward (client) to the controller (server).

@@ -7,6 +7,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/binary"
 	"math"
 	"os"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 // findPIDWin returns the snapshot for pid, or nil if absent.
@@ -160,4 +162,61 @@ func TestWindowsSnapshot_HostTotals(t *testing.T) {
 	for _, v := range []float64{second.Host.CPUPercent, second.Host.DiskReadBytesPerSec, second.Host.DiskWriteBytesPerSec, second.Host.NetRxBytesPerSec, second.Host.NetTxBytesPerSec} {
 		assert.False(t, math.IsNaN(v) || math.IsInf(v, 0) || v < 0)
 	}
+}
+
+func TestWinStartType(t *testing.T) {
+	assert.Equal(t, "auto", winStartType(mgr.StartAutomatic, false))
+	assert.Equal(t, "auto-delayed", winStartType(mgr.StartAutomatic, true))
+	assert.Equal(t, "manual", winStartType(mgr.StartManual, false))
+	assert.Equal(t, "disabled", winStartType(mgr.StartDisabled, false))
+	assert.Equal(t, "boot", winStartType(windows.SERVICE_BOOT_START, false))
+	assert.Equal(t, "system", winStartType(windows.SERVICE_SYSTEM_START, false))
+	assert.Equal(t, "", winStartType(99, false))
+}
+
+// threadEntry builds a SYSTEM_PROCESS_INFORMATION entry with the given threads
+// as (state, waitReason) pairs.
+func threadEntry(threads ...[2]uint32) []byte {
+	buf := make([]byte, spiMinSize+len(threads)*stiSize)
+	binary.LittleEndian.PutUint32(buf[spiNumberOfThreads:], uint32(len(threads)))
+	for i, th := range threads {
+		off := spiMinSize + i*stiSize
+		binary.LittleEndian.PutUint32(buf[off+stiThreadState:], th[0])
+		binary.LittleEndian.PutUint32(buf[off+stiWaitReason:], th[1])
+	}
+	return buf
+}
+
+func TestProcessStatus(t *testing.T) {
+	assert.Equal(t, "suspended", processStatus(threadEntry([2]uint32{5, 5}, [2]uint32{5, 14}), 100))
+	assert.Equal(t, "running", processStatus(threadEntry([2]uint32{5, 5}, [2]uint32{2, 0}), 100))
+	assert.Equal(t, "running", processStatus(threadEntry([2]uint32{5, 6}), 100))
+	assert.Equal(t, "running", processStatus(threadEntry(), 100))
+	assert.Equal(t, "running", processStatus(threadEntry([2]uint32{5, 5}), 4))
+	// A thread count that overruns the buffer must not read out of bounds.
+	bad := threadEntry([2]uint32{5, 5})
+	binary.LittleEndian.PutUint32(bad[spiNumberOfThreads:], 1000)
+	assert.Equal(t, "running", processStatus(bad, 100))
+}
+
+func TestWindowsSnapshot_ServiceDetail(t *testing.T) {
+	snap, err := NewCollector().Snapshot(context.Background())
+	require.NoError(t, err)
+	var sawStopped, sawRunning bool
+	for _, s := range snap.Services {
+		if s.State == "stopped" {
+			assert.Equal(t, 0, s.PID, "stopped service %s must report PID 0", s.Name)
+			if s.StartType != "" {
+				sawStopped = true
+			}
+		}
+		if s.State == "running" && s.PID > 0 && s.DisplayName != "" && s.StartType != "" {
+			sawRunning = true
+		}
+	}
+	assert.True(t, sawStopped, "expect a stopped service with a start type")
+	assert.True(t, sawRunning, "expect a running service with PID, display name and start type")
+	self := findPIDWin(snap.Processes, os.Getpid())
+	require.NotNil(t, self)
+	assert.Equal(t, "running", self.Status)
 }

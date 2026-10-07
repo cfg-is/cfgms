@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,7 +47,7 @@ func busyLoop(d time.Duration) {
 // seconds, read from /proc/self/stat via the production helpers.
 func selfCPUSeconds(t *testing.T) float64 {
 	t.Helper()
-	_, ticks, ok := readProcStat(os.Getpid())
+	_, _, ticks, ok := readProcStat(os.Getpid())
 	require.True(t, ok, "must read own /proc/self CPU ticks")
 	return float64(ticks) / float64(readClockTicks())
 }
@@ -244,4 +246,65 @@ func TestLinuxSnapshot_HostNetworkTotalsReal(t *testing.T) {
 func TestUnescapeMountPath(t *testing.T) {
 	assert.Equal(t, "/mnt/my disk", unescapeMountPath(`/mnt/my\040disk`))
 	assert.Equal(t, "/plain", unescapeMountPath("/plain"))
+}
+
+func TestProcStatusFromState(t *testing.T) {
+	for state, want := range map[byte]string{
+		'R': "running", 'S': "running", 'D': "running", 'Z': "running", 'I': "running",
+		'T': "suspended", 't': "suspended",
+	} {
+		assert.Equal(t, want, procStatusFromState(state), "state %c", state)
+	}
+}
+
+func TestLinuxSnapshot_ProcessStatus(t *testing.T) {
+	snap, err := NewCollector().Snapshot(context.Background())
+	require.NoError(t, err)
+	self := findPID(snap.Processes, os.Getpid())
+	require.NotNil(t, self)
+	assert.Equal(t, "running", self.Status)
+}
+
+func TestLinuxSnapshot_SuspendedProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	require.NoError(t, cmd.Start())
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+	require.NoError(t, syscall.Kill(cmd.Process.Pid, syscall.SIGSTOP))
+
+	require.Eventually(t, func() bool {
+		snap, err := NewCollector().Snapshot(context.Background())
+		if err != nil {
+			return false
+		}
+		p := findPID(snap.Processes, cmd.Process.Pid)
+		return p != nil && p.Status == "suspended"
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+func TestNewSystemdService_RunningAndStopped(t *testing.T) {
+	running := newSystemdService(systemdUnit{
+		Name: "sshd.service", Description: "OpenSSH server", ActiveState: "active", SubState: "running",
+	}, "enabled", 1234)
+	assert.Equal(t, "OpenSSH server", running.DisplayName)
+	assert.Equal(t, "auto", running.StartType)
+	assert.Equal(t, 1234, running.PID)
+	assert.Equal(t, "running", running.State)
+	assert.Equal(t, "service:sshd", running.FragmentID)
+
+	// REQUIRED: a stopped service reports PID 0 and its start type.
+	stopped := newSystemdService(systemdUnit{
+		Name: "cups.service", Description: "CUPS Scheduler", ActiveState: "inactive", SubState: "dead",
+	}, "disabled", 0)
+	assert.Equal(t, 0, stopped.PID)
+	assert.Equal(t, "disabled", stopped.StartType)
+	assert.Equal(t, "dead", stopped.State)
+}
+
+func TestSystemdStartType(t *testing.T) {
+	for in, want := range map[string]string{
+		"enabled": "auto", "enabled-runtime": "auto", "disabled": "disabled", "masked": "disabled",
+		"static": "manual", "indirect": "manual", "": "", "weird": "",
+	} {
+		assert.Equal(t, want, systemdStartType(in), in)
+	}
 }
