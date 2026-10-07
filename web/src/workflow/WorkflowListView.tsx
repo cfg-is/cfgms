@@ -21,6 +21,7 @@ import {
   type VersionedWorkflow,
 } from './useWorkflows.ts'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
+import NewWorkflowDialog from './NewWorkflowDialog.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
 import './Workflow.css'
 
@@ -41,12 +42,20 @@ function LoadingRows() {
   )
 }
 
-function WorkflowEmpty() {
+function WorkflowEmpty({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="notice empty" data-testid="workflow-empty">
       <div className="ic">◍</div>
       <h3>No workflows found</h3>
       <p>No workflows have been created yet.</p>
+      <button
+        type="button"
+        className="wf-btn"
+        onClick={onCreate}
+        data-testid="workflow-empty-create-btn"
+      >
+        + New workflow
+      </button>
     </div>
   )
 }
@@ -108,6 +117,7 @@ export default function WorkflowListView() {
   const [deletingWorkflow, setDeletingWorkflow] = useState<VersionedWorkflow | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [creating, setCreating] = useState(false)
 
   const selectedWorkflow = workflows.find((w) => w.name === selectedName) ?? null
 
@@ -161,6 +171,15 @@ export default function WorkflowListView() {
                 {workflows.length} workflow{workflows.length !== 1 ? 's' : ''}
               </span>
             )}
+            <button
+              type="button"
+              className="wf-btn"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setCreating(true)}
+              data-testid="new-workflow-btn"
+            >
+              + New workflow
+            </button>
           </div>
 
           {deleteError && (
@@ -174,7 +193,7 @@ export default function WorkflowListView() {
           ) : error !== null ? (
             <ErrorCard heading="Couldn&apos;t load workflows" detail={error} onRetry={retry} />
           ) : workflows.length === 0 ? (
-            <WorkflowEmpty />
+            <WorkflowEmpty onCreate={() => setCreating(true)} />
           ) : (
             <table className="tbl" data-testid="workflow-table">
               <thead>
@@ -212,6 +231,17 @@ export default function WorkflowListView() {
           />
         )}
       </div>
+
+      {creating && (
+        <NewWorkflowDialog
+          onClose={() => setCreating(false)}
+          onCreated={(name) => {
+            setCreating(false)
+            setSelectedName(name)
+            retry()
+          }}
+        />
+      )}
 
       {deletingWorkflow !== null && (
         <div
