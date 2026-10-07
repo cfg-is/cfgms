@@ -274,14 +274,73 @@ from being discovered. Two installation roots declaring the same module name are
 hard error naming both roots; the second root's bundle does not overwrite the first in
 the returned map.
 
-**Nothing produces this layout on a real steward yet.** The current Windows and macOS
-installers place module binaries flat and bare into a shared `modules/` directory, with
-no `module.yaml`, no `bundle.yaml`, and no per-module installation root — see the
-installer gap note on Issue #4425. This section defines and implements the format that
-a future installer change and a future steward-wiring story (the remainder of Issue
-#4410's split) will produce and consume; this story's own writer
-(`WriteInstalledSidecar`) is currently the only producer of a `bundle.yaml` that
-matches it.
+### Installer payload: signed bundle installation roots
+
+Every stdlib module ships in the steward installer as one signed bundle installation
+root — the layout `ReadInstalled` and `DiscoverInstalled` read. A root holds:
+
+| File | Content |
+|------|---------|
+| `module.yaml` | the publisher's manifest, copied byte-for-byte from `features/modules/stdlib/<name>/module.yaml` (never rewritten: the content hash covers its bytes) |
+| `cfgms-module-<name>[.exe]` | the module binary, at the manifest-relative path recorded in `Binaries` |
+| `bundle.yaml` | the sidecar: `binaries`, `content_hash` and `signatures` |
+
+**Installed locations.** One subdirectory per module, in the directory each installer
+already used for the earlier flat binaries:
+
+- Windows: `C:\Program Files\CFGMS\modules\<name>\`
+- Linux and macOS: `/usr/local/lib/cfgms/modules/<name>/`
+
+Bundle discovery for the steward must read exactly those paths. This is a different
+registry from `features/steward/discovery`, which loads `ModuleInfo` from `module.yaml`
+and searches `/opt/cfgms/modules` on Unix; that search path is unchanged and is not where
+either Unix installer stages.
+
+**One platform per root.** Each root's `Binaries` map holds exactly one entry,
+`<os>-<arch>`, for the platform the root ships to (for example
+`{"linux-amd64": "cfgms-module-file"}`). `ComputeInstalledContentHash` reads every entry
+in `Binaries` from disk and errors on a missing one, so a root listing all platforms would
+fail `VerifyInstalledContent` on every machine it is installed on.
+
+**Build-time signing.** `scripts/sign-module-bundle assemble` builds a root: it copies the
+manifest, places the binary, computes `ContentHash` with `bundle.ComputeContentHash` over
+the binary and manifest bytes, signs exactly `[]byte(ContentHash)` — the bytes
+`trust.VerifyBundleSignature` verifies — as publisher `cfgms` (the only name
+`CFGMSPublisherIdentity()` answers to), and writes the sidecar through
+`bundle.WriteInstalledSidecar`. Assembly is reproducible (explicit file modes, no
+timestamps, deterministic Ed25519), which `scripts/release/build-reproducible.sh`
+requires because it builds every tree twice and compares them. On Windows the binary is
+Authenticode-signed before assembly, because the Authenticode signature is part of the
+bytes that are hashed.
+
+- `make build-stdlib-bundles` assembles `bin/modules/<os>-<arch>/<name>/` for every
+  platform in `PLATFORMS`.
+- `build/windows/build-msi.ps1` and `build/darwin/build-pkg.sh` assemble their payload
+  roots; the release archives carry `modules/<name>/`, which `build/linux/install.sh`
+  installs.
+- `scripts/check-stdlib-payload-boundary.sh` requires each of the Windows, Linux and
+  macOS payload declarations to name a per-module root directory, not a flat binary.
+
+**Seed and dev key.** The seed is the standard-base64 32-byte Ed25519 seed in
+`CFGMS_PUBLISHER_SEED`; it is never written to disk or echoed. With no seed, roots are
+signed with the well-known zero-seed dev key (public half
+`O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=`), still with a non-empty `Signatures`
+list, and the tool prints the build invocation that makes them loadable. A steward built
+with the default `STEWARD_PUBLISHER_KEY` carries the all-zero placeholder public key, and
+`VerifyBundleSignature` refuses every bundle against it with `ErrUntrustedPublisherKey`.
+The dev loop therefore needs:
+
+```bash
+make build-steward STEWARD_PUBLISHER_KEY=O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=
+```
+
+`scripts/release/build-reproducible.sh` (`make release-artifacts`) never signs with the
+dev key. It aborts before assembling anything unless `CFGMS_PUBLISHER_SEED` is set, is
+not the dev seed, and derives the same public key as `--publisher-key` — the key it bakes
+into `cfgms-steward`.
+
+A steward still carries its compiled-in built-ins alongside these installed bundles;
+converting the built-ins to bundles is separate work under ADR-016.
 
 ---
 

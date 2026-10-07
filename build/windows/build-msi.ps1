@@ -195,10 +195,13 @@ $StdlibModules = @(
     "time",
     "user"
 )
+# Raw built binaries (Authenticode-signed in place below), and the assembled
+# per-module bundle installation roots the MSI actually stages.
+$ModuleBinDir = Join-Path $RepoRoot "bin" "modules-windows-$Arch-bin"
 $ModulesDir = Join-Path $RepoRoot "bin" "modules-windows-$Arch"
 
-if (-not (Test-Path $ModulesDir)) {
-    New-Item -ItemType Directory -Path $ModulesDir | Out-Null
+if (-not (Test-Path $ModuleBinDir)) {
+    New-Item -ItemType Directory -Path $ModuleBinDir | Out-Null
 }
 
 $env:GOOS        = "windows"
@@ -208,7 +211,7 @@ $env:CGO_ENABLED = "0"
 Push-Location $RepoRoot
 try {
     foreach ($module in $StdlibModules) {
-        $moduleBinPath = Join-Path $ModulesDir "cfgms-module-$module.exe"
+        $moduleBinPath = Join-Path $ModuleBinDir "cfgms-module-$module.exe"
         $moduleArgs = @(
             "build",
             "-trimpath",
@@ -304,10 +307,53 @@ if ($SigningCertThumbprint -ne "") {
     Sign-AndVerify $BinaryPath "CFGMS Steward"
     Sign-AndVerify $LauncherPath "CFGMS Steward Launcher"
     foreach ($module in $StdlibModules) {
-        Sign-AndVerify (Join-Path $ModulesDir "cfgms-module-$module.exe") "CFGMS Module $module"
+        Sign-AndVerify (Join-Path $ModuleBinDir "cfgms-module-$module.exe") "CFGMS Module $module"
     }
 } elseif ($ReleaseBuild) {
     Write-Error "Release executable payloads cannot be unsigned."
+}
+
+# ── Step 1d: Assemble signed bundle installation roots ───────────────────────
+# One root per stdlib module: the publisher's module.yaml (byte-for-byte), the
+# module binary, and the bundle.yaml sidecar carrying the content hash and the
+# publisher signature (scripts/sign-module-bundle). This MUST run after the
+# Authenticode signing above: the Authenticode signature is part of the binary's
+# bytes, so signing after the content hash was computed would invalidate the
+# bundle signature on Windows only.
+# A release build must sign with the real CFGMS_PUBLISHER_SEED; without a seed the
+# roots are signed with the zero-seed dev key (the tool prints the matching
+# STEWARD_PUBLISHER_KEY build invocation).
+
+Write-Host ""
+Write-Host "Assembling stdlib bundle installation roots for windows/$Arch..." -ForegroundColor Yellow
+
+if (Test-Path $ModulesDir) {
+    Remove-Item -Recurse -Force $ModulesDir
+}
+New-Item -ItemType Directory -Path $ModulesDir | Out-Null
+
+Push-Location $RepoRoot
+try {
+    foreach ($module in $StdlibModules) {
+        $assembleArgs = @(
+            "run", "./scripts/sign-module-bundle", "assemble",
+            "--manifest", (Join-Path $RepoRoot "features" "modules" "stdlib" $module "module.yaml"),
+            "--binary", (Join-Path $ModuleBinDir "cfgms-module-$module.exe"),
+            "--os", "windows",
+            "--arch", $Arch,
+            "--out", (Join-Path $ModulesDir $module)
+        )
+        if ($ReleaseBuild) {
+            $assembleArgs += "--release"
+        }
+        & go @assembleArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "bundle assembly failed for module $module (exit $LASTEXITCODE)"
+        }
+        Write-Host "  Bundle root: $(Join-Path $ModulesDir $module)" -ForegroundColor Green
+    }
+} finally {
+    Pop-Location
 }
 
 # ── Step 2: Ensure WiX 4 toolset is installed ────────────────────────────────

@@ -193,6 +193,37 @@ build-stdlib-modules: check-stdlib-payload-boundary
 		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/stdlib/$$module/cmd || exit 1; \
 	done
 
+# Stdlib module bundle installation roots (Issue #4431): one root per module per
+# target platform at bin/modules/<os>-<arch>/<name>/ holding module.yaml (verbatim),
+# the binary and the bundle.yaml sidecar (content hash + publisher signature), signed
+# by scripts/sign-module-bundle. Set CFGMS_PUBLISHER_SEED (base64 32-byte Ed25519
+# seed) to sign with the real publisher key. Without it the roots are signed with the
+# zero-seed dev key, and a steward loads them only when built with
+#   make build-steward STEWARD_PUBLISHER_KEY=O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=
+# (the default all-zero placeholder key refuses every bundle).
+.PHONY: build-stdlib-bundles
+build-stdlib-bundles: check-stdlib-payload-boundary
+	@echo "Assembling stdlib bundle installation roots..."
+	@go build -o bin/sign-module-bundle ./scripts/sign-module-bundle
+	@rm -rf bin/modules bin/modules-build
+	@for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; ext=""; \
+		[ "$$os" = "windows" ] && ext=".exe"; \
+		for module in $(STDLIB_MODULES); do \
+			echo "  $$os/$$arch $$module"; \
+			mkdir -p bin/modules-build/$$os-$$arch; \
+			GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build ${GO_BUILD_FLAGS} \
+				-o bin/modules-build/$$os-$$arch/cfgms-module-$$module$$ext \
+				./features/modules/stdlib/$$module/cmd || exit 1; \
+			./bin/sign-module-bundle assemble \
+				--manifest features/modules/stdlib/$$module/module.yaml \
+				--binary bin/modules-build/$$os-$$arch/cfgms-module-$$module$$ext \
+				--os $$os --arch $$arch \
+				--out bin/modules/$$os-$$arch/$$module || exit 1; \
+		done; \
+	done
+	@rm -rf bin/modules-build
+
 # Workflow-kind module binaries (controller-executed, out-of-process gRPC
 # binaries published to the controller module cache — see ADR-006 and
 # features/workflow/module_loader.go). Deliberately separate from
@@ -371,9 +402,12 @@ build-pkg-darwin:
 # Build deterministic release archives. Official invocations must supply the
 # annotated-tag version, exact commit timestamp, and non-placeholder publisher
 # public key; the script independently rebuilds and compares every file.
+# CFGMS_PUBLISHER_SEED (environment) must hold the seed whose public half is
+# PUBLISHER_KEY: the stdlib module bundles are signed with it, and the script
+# refuses an absent seed, the dev seed, or a seed/key mismatch.
 release-artifacts:
 	@if [ -z "$(VERSION)" ] || [ -z "$(COMMIT)" ] || [ -z "$(SOURCE_DATE_EPOCH)" ] || [ -z "$(PUBLISHER_KEY)" ]; then \
-		echo "Usage: make release-artifacts VERSION=vX.Y.Z COMMIT=<full-sha> SOURCE_DATE_EPOCH=<epoch> PUBLISHER_KEY=<base64-public-key> [OUTPUT_DIR=dist]"; \
+		echo "Usage: make release-artifacts VERSION=vX.Y.Z COMMIT=<full-sha> SOURCE_DATE_EPOCH=<epoch> PUBLISHER_KEY=<base64-public-key> [OUTPUT_DIR=dist] (CFGMS_PUBLISHER_SEED must be set in the environment)"; \
 		exit 1; \
 	fi
 	@bash scripts/release/build-reproducible.sh \

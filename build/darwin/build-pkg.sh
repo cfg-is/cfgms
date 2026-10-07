@@ -189,24 +189,37 @@ cp "$LAUNCHER_BUILD_PATH" "$PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 chmod 755 "$PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 echo "  Launcher payload: $PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 
-# Install stdlib module binaries into the payload tree.
+# Install stdlib modules into the payload tree as signed bundle installation
+# roots: one directory per module holding the publisher's module.yaml, the
+# bundle.yaml sidecar (content hash + publisher signature) and the module binary,
+# assembled by scripts/sign-module-bundle. Entries are bare module names (root
+# directories), never flat cfgms-module-<name> binaries;
+# scripts/check-stdlib-payload-boundary.sh enforces both.
+# Release builds must sign with the real CFGMS_PUBLISHER_SEED; without a seed the
+# roots are signed with the zero-seed dev key and the tool prints the matching
+# STEWARD_PUBLISHER_KEY build invocation.
 STDLIB_MODULES=(
-    cfgms-module-cert_trust
-    cfgms-module-file
-    cfgms-module-firewall
-    cfgms-module-hostname
-    cfgms-module-package
-    cfgms-module-patch
-    cfgms-module-script
-    cfgms-module-service
-    cfgms-module-time
-    cfgms-module-user
+    cert_trust
+    file
+    firewall
+    hostname
+    package
+    patch
+    script
+    service
+    time
+    user
 )
 MODULES_PAYLOAD_DIR="$PAYLOAD_DIR/usr/local/lib/cfgms/modules"
 mkdir -p "$MODULES_PAYLOAD_DIR"
-for module_bin in "${STDLIB_MODULES[@]}"; do
-    src="$REPO_ROOT/bin/$module_bin-darwin-$ARCH"
-    module_name="${module_bin#cfgms-module-}"
+SIGNER_BIN="$WORK_DIR/sign-module-bundle"
+(cd "$REPO_ROOT" && go build -o "$SIGNER_BIN" ./scripts/sign-module-bundle)
+ASSEMBLE_FLAGS=()
+if [[ "$RELEASE_BUILD" == 1 ]]; then
+    ASSEMBLE_FLAGS+=(--release)
+fi
+for module_name in "${STDLIB_MODULES[@]}"; do
+    src="$REPO_ROOT/bin/cfgms-module-$module_name-darwin-$ARCH"
     if [[ ! -f "$src" ]]; then
         GOOS=darwin GOARCH="$ARCH" CGO_ENABLED=0 go build \
             -trimpath \
@@ -214,16 +227,26 @@ for module_bin in "${STDLIB_MODULES[@]}"; do
             -o "$src" \
             "$REPO_ROOT/features/modules/stdlib/$module_name/cmd"
     fi
-    if [[ -f "$src" ]]; then
-        cp "$src" "$MODULES_PAYLOAD_DIR/$module_bin"
-        chmod 755 "$MODULES_PAYLOAD_DIR/$module_bin"
-        echo "  Module: $MODULES_PAYLOAD_DIR/$module_bin"
-    elif [[ "$RELEASE_BUILD" == 1 ]]; then
-        echo "ERROR: release module binary not found after build: $src" >&2
+    if [[ ! -f "$src" ]]; then
+        echo "ERROR: module binary not found after build: $src" >&2
         exit 1
-    else
-        echo "  Warning: stdlib module binary not found: $src (skipping)" >&2
     fi
+    # codesign rewrites the binary, and the content hash covers its bytes, so the
+    # module binary is codesigned BEFORE assembly (hash + bundle signature).
+    BUILD_BIN="$WORK_DIR/module-bin-$module_name"
+    cp "$src" "$BUILD_BIN"
+    chmod 755 "$BUILD_BIN"
+    if [[ -n "${APPLE_APPLICATION_SIGNING_IDENTITY:-}" ]]; then
+        codesign --force --options runtime --timestamp \
+            --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" "$BUILD_BIN"
+        codesign --verify --strict --verbose=2 "$BUILD_BIN"
+    fi
+    "$SIGNER_BIN" assemble ${ASSEMBLE_FLAGS[@]+"${ASSEMBLE_FLAGS[@]}"} \
+        --manifest "$REPO_ROOT/features/modules/stdlib/$module_name/module.yaml" \
+        --binary "$BUILD_BIN" \
+        --os darwin --arch "$ARCH" \
+        --out "$MODULES_PAYLOAD_DIR/$module_name"
+    echo "  Module bundle root: $MODULES_PAYLOAD_DIR/$module_name"
 done
 
 # The executable payload is signed before pkgbuild so Gatekeeper verifies the
@@ -235,7 +258,9 @@ if [[ -n "${APPLE_APPLICATION_SIGNING_IDENTITY:-}" ]]; then
         codesign --force --options runtime --timestamp \
             --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" "$executable"
         codesign --verify --strict --verbose=2 "$executable"
-    done < <(find "$PAYLOAD_DIR/usr/local" -type f -perm -0100 -print0)
+    # Module binaries inside the bundle installation roots were codesigned before
+    # assembly; re-signing them here would invalidate the bundle content hash.
+    done < <(find "$PAYLOAD_DIR/usr/local" -type f -perm -0100 -not -path "$MODULES_PAYLOAD_DIR/*" -print0)
 elif [[ "$RELEASE_BUILD" == 1 ]]; then
     echo "ERROR: release executable payloads cannot be unsigned." >&2
     exit 1
