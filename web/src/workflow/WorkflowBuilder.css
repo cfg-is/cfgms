@@ -273,3 +273,43 @@
 .wf-required {
   color: var(--state-crit, #c0392b);
 }
+
+/* YAML mirror pane (Issue #4619) */
+.bld-yaml {
+  width: 340px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+}
+.bld-yaml-head { padding: 8px 14px; font-size: 12px; }
+.bld-yaml-note { padding: 12px 14px; font-size: 12px; }
+.bld-yaml-code {
+  flex: 1;
+  margin: 0;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.bld-yaml-line { display: flex; white-space: pre; }
+.bld-yaml-ln {
+  flex: none;
+  width: 36px;
+  padding-right: 8px;
+  text-align: right;
+  opacity: 0.5;
+  user-select: none;
+}
+.bld-yaml-text {
+  background-image: repeating-linear-gradient(
+    to right,
+    rgba(127, 127, 127, 0.25) 0,
+    rgba(127, 127, 127, 0.25) 1px,
+    transparent 1px,
+    transparent 2ch
+  );
+  background-size: calc(var(--depth, 0) * 2ch) 100%;
+  background-repeat: no-repeat;
+}
