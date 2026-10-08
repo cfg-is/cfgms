@@ -23,6 +23,7 @@ import {
 } from './useWorkflows.ts'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
 import NewWorkflowDialog from './NewWorkflowDialog.tsx'
+import ImportYamlDialog from './ImportYamlDialog.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
 import './Workflow.css'
 
@@ -182,6 +183,7 @@ export default function WorkflowListView() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [togglingWorkflow, setTogglingWorkflow] = useState<VersionedWorkflow | null>(null)
   const [toggleBusy, setToggleBusy] = useState(false)
   const [toggleError, setToggleError] = useState<string | null>(null)
@@ -281,8 +283,16 @@ export default function WorkflowListView() {
             )}
             <button
               type="button"
-              className="wf-btn"
+              className="wf-btn-secondary"
               style={{ marginLeft: 'auto' }}
+              onClick={() => setImporting(true)}
+              data-testid="import-yaml-btn"
+            >
+              Import YAML
+            </button>
+            <button
+              type="button"
+              className="wf-btn"
               onClick={() => setCreating(true)}
               data-testid="new-workflow-btn"
             >
@@ -359,6 +369,17 @@ export default function WorkflowListView() {
           onClose={() => setCreating(false)}
           onCreated={(name) => {
             setCreating(false)
+            setSelectedName(name)
+            retry()
+          }}
+        />
+      )}
+
+      {importing && (
+        <ImportYamlDialog
+          onClose={() => setImporting(false)}
+          onCreated={(name) => {
+            setImporting(false)
             setSelectedName(name)
             retry()
           }}

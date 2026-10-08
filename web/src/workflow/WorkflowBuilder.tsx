@@ -51,6 +51,7 @@ import {
 import RunBar from './RunBar.tsx'
 import RunInputsForm from './RunInputsForm.tsx'
 import SchedulePanel from './SchedulePanel.tsx'
+import YamlPane from './YamlPane.tsx'
 import {
   RunError,
   buildPayload,
@@ -847,6 +848,7 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
             onRefuse={setNotice}
           />
         )}
+        <YamlPane body={requestBody(runName, graphToSteps(graph))} />
       </div>
     </div>
   )

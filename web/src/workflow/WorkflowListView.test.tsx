@@ -406,6 +406,35 @@ describe('WorkflowListView — new workflow', () => {
   })
 })
 
+// ── Import YAML (Issue #4619) ─────────────────────────────────────────────────
+
+describe('WorkflowListView — import YAML', () => {
+  it('importing a valid document creates the workflow and refreshes the list', async () => {
+    let created = false
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/parse-yaml')) {
+        return new Response(
+          JSON.stringify({ workflow: { name: 'imported', steps: [{ name: 's', type: 'task' }] }, valid: true, issues: [] }),
+        )
+      }
+      if (init?.method === 'POST') {
+        created = true
+        return new Response('{}', { status: 201 })
+      }
+      return makeWorkflowListResponse(
+        created ? [makeWorkflow(), makeWorkflow({ name: 'imported' })] : [makeWorkflow()],
+      )
+    })
+    renderWorkflowListView()
+    await screen.findByTestId('workflow-table')
+    fireEvent.click(screen.getByTestId('import-yaml-btn'))
+    fireEvent.change(screen.getByTestId('import-yaml-text'), { target: { value: 'name: imported' } })
+    fireEvent.click(screen.getByTestId('import-yaml-submit'))
+    await waitFor(() => expect(screen.getAllByTestId('workflow-row')).toHaveLength(2))
+    expect(screen.queryByTestId('import-yaml-text')).toBeNull()
+  })
+})
+
 // ── Triggers / Last run / Enabled columns (Story #4618) ───────────────────────
 
 function jsonResponse(body: unknown, status = 200) {
