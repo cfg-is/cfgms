@@ -4,16 +4,19 @@ package server
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-git/go-billy/v5/memfs"
+	"github.com/go-git/go-billy/v5/osfs"
 	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
 	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
-	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -145,22 +148,22 @@ func installInMemoryGitTransport(t *testing.T, loader gitserver.MapLoader) {
 	})
 }
 
-// newSeededBareRepo creates an in-memory bare repository containing one commit
-// and returns its storer (to register with gitserver.MapLoader) together with
-// the in-process *gogit.Repository handle so the test can push further commits
-// directly — the "remote" push in these tests needs no network round trip
-// because the server loader and this handle share the same storer.
-func newSeededBareRepo(t *testing.T, path string, content []byte) (*memory.Storage, *gogit.Repository) {
+// newSeededBareRepo creates an on-disk repository (under t.TempDir) containing
+// one commit and returns a storer to register with gitserver.MapLoader together
+// with a separate *gogit.Repository handle the test uses to push further
+// commits. The two handles share no in-process state — only the files on disk —
+// so a test write and the system-under-test's read of the remote cannot be
+// paired by the race detector (go-git's memory.Storage has no locking).
+func newSeededBareRepo(t *testing.T, path string, content []byte) (storage.Storer, *gogit.Repository) {
 	t.Helper()
-	storer := memory.NewStorage()
-	fs := memfs.New()
-	repo, err := gogit.Init(storer, fs)
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
 	require.NoError(t, err)
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 
-	f, err := fs.Create(path)
+	f, err := wt.Filesystem.Create(path)
 	require.NoError(t, err)
 	_, err = f.Write(content)
 	require.NoError(t, err)
@@ -173,12 +176,14 @@ func newSeededBareRepo(t *testing.T, path string, content []byte) (*memory.Stora
 	})
 	require.NoError(t, err)
 
-	return storer, repo
+	// Independent storer over the same .git directory for the server side.
+	serverStorer := filesystem.NewStorage(osfs.New(filepath.Join(dir, ".git")), cache.NewObjectLRUDefault())
+	return serverStorer, repo
 }
 
-// pushCommit adds a second commit directly to repo's worktree — equivalent to a
-// remote receiving a push, since repo shares its storer with the gitserver.MapLoader
-// entry the system-under-test clones/pulls from.
+// pushCommit adds a second commit to repo's worktree — equivalent to a
+// remote receiving a push, since repo and the gitserver.MapLoader entry the
+// system-under-test clones/pulls from are backed by the same on-disk directory.
 func pushCommit(t *testing.T, repo *gogit.Repository, path string, content []byte) {
 	t.Helper()
 	wt, err := repo.Worktree()
