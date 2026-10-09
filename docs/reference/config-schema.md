@@ -145,8 +145,8 @@ The controller decoder does not reject unknown keys: a misspelled key is silentl
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
 | `common_name` | string | `"cfgms-controller"` | optional | CN embedded in the generated server certificate |
-| `dns_names` | list[string] | `["localhost","cfgms-controller","controller-standalone"]` | optional | Subject Alternative Name DNS entries |
-| `ip_addresses` | list[string] | `["127.0.0.1"]` | optional | Subject Alternative Name IP entries |
+| `dns_names` | list[string] | `["localhost","cfgms-controller","controller-standalone"]` | optional | Subject Alternative Name DNS entries. A changed list takes effect at the next controller start: the API certificate is reissued when it lacks a configured name (ignored when `certificate.enable_cert_management` is false) |
+| `ip_addresses` | list[string] | `["127.0.0.1"]` | optional | Subject Alternative Name IP entries. A changed list takes effect at the next controller start: the API certificate is reissued when it lacks a configured address (ignored when `certificate.enable_cert_management` is false) |
 | `organization` | string | `"CFGMS"` | optional | Organization name embedded in the certificate |
 
 #### `certificate.public_api`
