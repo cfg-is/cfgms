@@ -1637,6 +1637,19 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		Limit:     tail,
 	}
 
+	// Issue #4857: the manager batches and writes asynchronously, so entries the
+	// log-stream handler has accepted may still be buffered. Flush before reading
+	// so every accepted entry is visible to this query; a flush failure is
+	// reported like a query failure rather than serving a silently stale result.
+	if flushErr := mgr.Flush(r.Context()); flushErr != nil {
+		s.logger.Error("Failed to flush steward event log before query",
+			"steward_id", stewardIDForLog,
+			"error", logging.SanitizeLogValue(flushErr.Error()),
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
+		return
+	}
+
 	entries, err := mgr.QueryTimeRange(r.Context(), query)
 	if err != nil {
 		s.logger.Error("Failed to query steward event log",

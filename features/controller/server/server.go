@@ -1705,6 +1705,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Issue #4857: one dedicated steward-event LoggingManager shared by the
+	// log-stream handler (writer, built in Start) and the REST API (reader). It
+	// must exist before Start builds the handler; failure aborts startup rather
+	// than leaving a nil manager that silently discards steward logs.
+	stewardEventManager, err := newStewardEventManager(cfg, routerSecretStore)
+	if err != nil {
+		return nil, err
+	}
+	openedStores = append(openedStores, stewardEventManager.Close)
+	httpServer.SetStewardEventLoggingManager(stewardEventManager)
+
 	// Issue #3409: Wire absent optional capabilities so GET /api/v1/ha/status
 	// reports them. Computed once above at composition; never recomputed per request.
 	if len(absentCaps) > 0 {
@@ -1965,6 +1976,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	srv := &Server{
 		cfg:                     cfg,
+		stewardEventManager:     stewardEventManager,
 		logger:                  logger,
 		controllerService:       controllerService,
 		configService:           configService,
@@ -2697,12 +2709,7 @@ func (s *Server) Start() error {
 		}
 
 		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
-		logStreamHandler := controllerTransport.NewLogStreamHandler(
-			s.stewardEventManager,
-			s.controllerService,
-			s.logger,
-			controllerTransport.DefaultLogStreamConfig(),
-		)
+		logStreamHandler := s.newLogStreamHandler()
 		s.logStreamHandler = logStreamHandler
 		telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil)
 		composite := newCompositeTransportServer(cpHandler, s.logger)
@@ -3251,6 +3258,14 @@ func (s *Server) Stop() error {
 	if s.certManager != nil {
 		if err := s.certManager.Close(); err != nil {
 			s.logger.Warn("Failed to close certificate manager secret store", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+
+	// Flush and close the steward-event manager (Issue #4857) so buffered steward
+	// log entries are persisted. Runs after the transport/API stopped writing.
+	if s.stewardEventManager != nil {
+		if err := closeStewardEventManager(s.stewardEventManager); err != nil {
+			s.logger.Warn("Failed to flush and close steward event manager", "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 
@@ -4337,6 +4352,18 @@ func (s *Server) handleObserveSweepRequest(ctx context.Context, event *controlpl
 		"module_count", len(specs))
 
 	return nil
+}
+
+// newLogStreamHandler builds the LogStream ingestion handler on the dedicated
+// steward-event manager that New constructed (Issue #4857). The manager is never
+// nil here: New fails if it cannot be built.
+func (s *Server) newLogStreamHandler() *controllerTransport.LogStreamHandler {
+	return controllerTransport.NewLogStreamHandler(
+		s.stewardEventManager,
+		s.controllerService,
+		s.logger,
+		controllerTransport.DefaultLogStreamConfig(),
+	)
 }
 
 // SetStewardEventManager injects the dedicated steward-event LoggingManager.

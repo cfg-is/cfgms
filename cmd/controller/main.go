@@ -3,8 +3,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -694,56 +692,10 @@ func buildLoggingConfig(cfg *config.Config, store secretsif.SecretStore, compone
 }
 
 // getLogProvider determines the logging provider from configuration.
-func getLogProvider(cfg *config.Config) string {
-	if cfg.Logging != nil && cfg.Logging.Provider != "" {
-		return cfg.Logging.Provider
-	}
-	return "file"
-}
+func getLogProvider(cfg *config.Config) string { return server.LogProvider(cfg) }
 
-// getLogProviderConfig creates provider-specific configuration.
-// For the timescale provider all 6 connection fields are read exclusively from
-// the SecretStore under the "controller/logging/timescale/<field>" keys.
-// A missing secret is a hard startup error — there is no env var fallback.
+// getLogProviderConfig creates provider-specific configuration. See
+// server.LogProviderConfig.
 func getLogProviderConfig(cfg *config.Config, store secretsif.SecretStore) (map[string]interface{}, error) {
-	if cfg.Logging != nil && cfg.Logging.Config != nil && len(cfg.Logging.Config) > 0 {
-		return cfg.Logging.Config, nil
-	}
-
-	provider := getLogProvider(cfg)
-
-	switch provider {
-	case "timescale":
-		if store == nil {
-			return nil, fmt.Errorf("controller logging: SecretStore is required for TimescaleDB credentials")
-		}
-		ctx := context.Background()
-		// field → leaf key under "controller/" tenant
-		// key format: controller/logging-timescale-<field>
-		// (SOPS store requires tenant/leaf where leaf must not contain '/')
-		fields := []string{"password", "host", "port", "database", "username", "ssl_mode"}
-		result := make(map[string]interface{}, len(fields))
-		for _, field := range fields {
-			leaf := "logging-timescale-" + strings.ReplaceAll(field, "_", "-")
-			key := "controller/" + leaf
-			secret, err := store.GetSecret(ctx, key)
-			if err != nil {
-				if errors.Is(err, secretsif.ErrSecretNotFound) {
-					return nil, fmt.Errorf("timescale %s: secret '%s' not found in store; "+
-						"pre-store via the secrets CLI before starting the controller", field, key)
-				}
-				return nil, fmt.Errorf("timescale %s: failed to retrieve secret '%s': %w", field, key, err)
-			}
-			result[field] = secret.Value
-		}
-		return result, nil
-
-	default:
-		return map[string]interface{}{
-			"directory":        "/var/log/cfgms",
-			"max_file_size":    int64(100 * 1024 * 1024),
-			"max_files":        10,
-			"compress_rotated": true,
-		}, nil
-	}
+	return server.LogProviderConfig(cfg, store)
 }

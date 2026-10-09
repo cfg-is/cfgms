@@ -2091,6 +2091,14 @@ func (s *Server) SetBatchJobExecutor(exec jobExecutor) {
 	s.batchJobExecutor = exec
 }
 
+// GetStewardEventLoggingManager returns the steward-event LoggingManager used
+// by handleGetStewardLogs, or nil when none is wired.
+func (s *Server) GetStewardEventLoggingManager() *logging.LoggingManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.stewardEventLoggingManager
+}
+
 // SetStewardEventLoggingManager injects the dedicated steward-event
 // LoggingManager. Call after New() and before Start(). The manager is used by
 // handleGetStewardLogs (S6) to serve per-steward event queries.
