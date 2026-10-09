@@ -690,3 +690,31 @@ func TestClusterNodeDecommission_RoutingStoreErrorWaitsForTimeout(t *testing.T) 
 	assert.Equal(t, cluster.StateDecommissioned, got.State,
 		"forced decommission after the timeout is by design")
 }
+
+// TestHandleClusterNodeDrain_IPv4NodeID_ThroughRouter drains a node whose ID is an IPv4
+// address through the full router so validationMiddleware runs. Regression for Issue #4518
+// where `{id}` was validated as alphanumeric_dash and rejected dotted node IDs with 400.
+func TestHandleClusterNodeDrain_IPv4NodeID_ThroughRouter(t *testing.T) {
+	srv, store := setupClusterTestServer(t)
+	const nodeID = "192.168.234.106"
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           nodeID,
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+	apiKey := NewTestKey(t, srv, []string{"cluster:drain-node"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/nodes/"+nodeID+"/drain", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+
+	// A traversal-style ID is still rejected by the same middleware.
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/cluster/nodes/a..b/drain", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec = httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
