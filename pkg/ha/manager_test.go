@@ -1455,24 +1455,36 @@ func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
 	managerA := newLeaseBackedClusterManager(t, "cmdterm-change-a", store)
 	managerB := newLeaseBackedClusterManager(t, "cmdterm-change-b", store)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Acquisition and takeover latency depends on the runner (on Windows the
+	// flatfile store's atomic rename retries while the manager's own loops hold the
+	// lease file open), so the waits are bounded by the configured lease timing
+	// scaled by a wide margin rather than by fixed wall-clock constants. Eventually
+	// returns as soon as the condition holds, so the margin costs nothing on a
+	// healthy runner.
+	electionTimeout := FastElectionConfig().ElectionTimeout
+	leaseWait := 150 * electionTimeout // 30s at 200ms: >100x the lease TTL
+	ctx, cancel := context.WithTimeout(context.Background(), 4*leaseWait)
 	defer cancel()
+
 	require.NoError(t, managerA.Start(ctx))
-	require.Eventually(t, managerA.HasLeadership, 5*time.Second, 5*time.Millisecond, "A takes the lease first")
+	t.Cleanup(func() { assert.NoError(t, managerA.Stop(context.Background())) })
+	require.Eventually(t, managerA.HasLeadership, leaseWait, 5*time.Millisecond, "A takes the lease first")
 	oldTerm := managerA.GetTerm()
 	require.NotZero(t, oldTerm)
 
-	// A stops renewing; B starts and takes the lease once it expires.
+	// A stops renewing; B starts and takes the lease once it expires. Stop is
+	// idempotent for the cleanup registered above.
 	require.NoError(t, managerA.Stop(context.Background()))
 	require.NoError(t, managerB.Start(ctx))
 	t.Cleanup(func() { assert.NoError(t, managerB.Stop(context.Background())) })
-	require.Eventually(t, managerB.HasLeadership, 10*time.Second, 10*time.Millisecond, "B takes over the lease")
+	require.Eventually(t, managerB.HasLeadership, leaseWait, 10*time.Millisecond, "B takes over the lease")
 	newTerm := managerB.GetTerm()
 	require.Greater(t, newTerm, oldTerm, "a new holder gets a strictly higher token")
 
 	assert.Zero(t, managerA.GetTerm(), "the former holder no longer has local authority")
 	assert.Eventually(t, func() bool { return managerA.CommandTerm() == newTerm },
-		5*time.Second, 50*time.Millisecond, "the former holder stamps the new token once its cache refreshes")
+		leaseWait, 50*time.Millisecond, "the former holder stamps the new token once its cache refreshes")
+	assert.Equal(t, newTerm, managerA.CommandTerm(), "the former holder must not keep stamping its old term")
 }
 
 // erroringLeaseStore is a real business.LeaseStore whose reads fail on demand, for
