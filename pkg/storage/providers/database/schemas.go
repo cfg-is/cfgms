@@ -1104,6 +1104,23 @@ func (s DatabaseSchemas) CreateSigningCursorTable(ctx context.Context, db *sql.D
 	return nil
 }
 
+// CreateSigningTrustAckTable creates the cfgms_signing_trust_acks table backing
+// the cluster-visible SigningTrustAckStore (Issue #4691). One row per
+// (steward, signing-certificate serial) records that the steward confirmed it.
+func (s DatabaseSchemas) CreateSigningTrustAckTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_signing_trust_acks (
+			steward_id      TEXT NOT NULL,
+			serial          TEXT NOT NULL,
+			acknowledged_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			PRIMARY KEY (steward_id, serial)
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_signing_trust_acks table: %w", err)
+	}
+	return nil
+}
+
 // CreateModuleApprovalsTable creates the cfgms_module_approvals table backing the
 // cluster-visible, CAS-protected ModuleApprovalStore (ADR-031 Decision 1, Issue
 // #3886). address is the opaque publisher/name/version/content-hash key
@@ -1949,6 +1966,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS refresh_nonces;",
 		"DROP TABLE IF EXISTS cfgms_cert_revocations;",
 		"DROP TABLE IF EXISTS cfgms_signing_cursor;",
+		"DROP TABLE IF EXISTS cfgms_signing_trust_acks;",
 		"DROP TABLE IF EXISTS cfgms_module_approvals;",
 		"DROP TABLE IF EXISTS cfgms_rate_counters;",
 		// Issue #4519: omitted here, so a second run against the same database

@@ -130,3 +130,90 @@ func TestSigningCursorStore_Contract(t *testing.T) {
 		})
 	}
 }
+
+// ackStoreCase names one SigningTrustAckStore implementation to run the shared
+// contract against (Issue #4691). newStore returns a fresh, isolated store or
+// a non-empty skip reason.
+type ackStoreCase struct {
+	name     string
+	newStore func(t *testing.T) (certinterfaces.SigningTrustAckStore, string /* skip reason */)
+}
+
+// registeredAckCases holds cases contributed by providers_test.go (database).
+var registeredAckCases []ackStoreCase
+
+func ackStoreCases() []ackStoreCase {
+	cases := []ackStoreCase{
+		{
+			name: "file",
+			newStore: func(t *testing.T) (certinterfaces.SigningTrustAckStore, string) {
+				s, err := cert.NewFileSigningTrustAckStore(t.TempDir())
+				require.NoError(t, err)
+				return s, ""
+			},
+		},
+	}
+	return append(cases, registeredAckCases...)
+}
+
+func TestSigningTrustAckStore_Contract(t *testing.T) {
+	for _, tc := range ackStoreCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			store, skip := tc.newStore(t)
+			if skip != "" {
+				t.Skip(skip)
+			}
+			ctx := context.Background()
+
+			got, err := store.GetAck(ctx, "steward-1", "serial-a")
+			require.NoError(t, err)
+			assert.Nil(t, got, "GetAck must be nil before RecordAck")
+
+			listed, err := store.ListAcked(ctx, "serial-a")
+			require.NoError(t, err)
+			assert.Empty(t, listed)
+
+			before := time.Now().Add(-time.Minute)
+			require.NoError(t, store.RecordAck(ctx, "steward-1", "serial-a"))
+			got, err = store.GetAck(ctx, "steward-1", "serial-a")
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, "steward-1", got.StewardID)
+			assert.Equal(t, "serial-a", got.Serial)
+			assert.True(t, got.AcknowledgedAt.After(before), "AcknowledgedAt must be set to roughly now")
+
+			// A second RecordAck keeps the first AcknowledgedAt.
+			time.Sleep(20 * time.Millisecond)
+			require.NoError(t, store.RecordAck(ctx, "steward-1", "serial-a"))
+			again, err := store.GetAck(ctx, "steward-1", "serial-a")
+			require.NoError(t, err)
+			require.NotNil(t, again)
+			assert.True(t, got.AcknowledgedAt.Equal(again.AcknowledgedAt), "first AcknowledgedAt must win")
+
+			// Different stewards and serials do not collide.
+			require.NoError(t, store.RecordAck(ctx, "steward-2", "serial-a"))
+			require.NoError(t, store.RecordAck(ctx, "steward-1", "serial-b"))
+			require.NoError(t, store.RecordAck(ctx, "steward-3", "serial-b"))
+
+			listed, err = store.ListAcked(ctx, "serial-a")
+			require.NoError(t, err)
+			require.Len(t, listed, 2)
+			assert.Equal(t, "steward-1", listed[0].StewardID)
+			assert.Equal(t, "steward-2", listed[1].StewardID)
+
+			listed, err = store.ListAcked(ctx, "serial-b")
+			require.NoError(t, err)
+			require.Len(t, listed, 2)
+			assert.Equal(t, "steward-1", listed[0].StewardID)
+			assert.Equal(t, "steward-3", listed[1].StewardID)
+
+			missing, err := store.GetAck(ctx, "steward-2", "serial-b")
+			require.NoError(t, err)
+			assert.Nil(t, missing)
+
+			// Empty identifiers are rejected.
+			assert.Error(t, store.RecordAck(ctx, "", "serial-a"))
+			assert.Error(t, store.RecordAck(ctx, "steward-1", ""))
+		})
+	}
+}

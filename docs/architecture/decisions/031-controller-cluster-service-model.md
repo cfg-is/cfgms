@@ -266,7 +266,9 @@ rotation cursor were node-local JSON files, so that premise did not hold for
 `handleRevokeCertificate`, `handleRevokeCertBinding`, `handleRotateCert`, the
 containment revoke paths, and `handleRotateSigningCert` — the three findings
 Issue #3761's fix agent escalated as storage-shape problems a gating fix could
-not resolve. `pkg/cert/interfaces.RevocationStore` / `SigningCursorStore` close
+not resolve. `pkg/cert/interfaces.RevocationStore` / `SigningCursorStore` (and, from
+Issue #4691, `SigningTrustAckStore`, which records per-steward confirmation of a
+signing-certificate serial so every node can read it) close
 that gap: a file-backed implementation preserves single-node behavior
 unchanged, and a Postgres-backed implementation
 (`pkg/storage/providers/database`) is selected via `pkg/ha.Config.IsClusterMode()`

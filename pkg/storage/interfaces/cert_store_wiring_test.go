@@ -55,6 +55,10 @@ func TestDatabaseProvider_SatisfiesCertStoreCreators(t *testing.T) {
 	_, curOK := provider.(interfaces.SigningCursorStoreCreator)
 	assert.True(t, curOK,
 		"the database provider must satisfy SigningCursorStoreCreator — CreateClusterStorageManager wires the cluster-visible signing cursor through exactly this assertion")
+
+	_, ackOK := provider.(interfaces.SigningTrustAckStoreCreator)
+	assert.True(t, ackOK,
+		"the database provider must satisfy SigningTrustAckStoreCreator — CreateClusterStorageManager wires the cluster-visible signing trust acknowledgements through exactly this assertion")
 }
 
 // TestOSSStorageManager_CertStoresUnwiredAndSettable covers the other side of the
@@ -73,6 +77,8 @@ func TestOSSStorageManager_CertStoresUnwiredAndSettable(t *testing.T) {
 		"the OSS tier's providers implement no CertRevocationStoreCreator, so the accessor must stay nil and callers must fall back to the file-backed store")
 	assert.Nil(t, sm.GetSigningCursorStore(),
 		"the OSS tier's providers implement no SigningCursorStoreCreator, so the accessor must stay nil and callers must fall back to the file-backed store")
+	assert.Nil(t, sm.GetSigningTrustAckStore(),
+		"the OSS tier's providers implement no SigningTrustAckStoreCreator, so the accessor must stay nil and callers must fall back to the file-backed store")
 
 	// Round-trip through the setters with real implementations (pkg/cert's own
 	// file-backed stores — no mock framework).
@@ -81,13 +87,19 @@ func TestOSSStorageManager_CertStoresUnwiredAndSettable(t *testing.T) {
 	cursorStore, err := cert.NewFileSigningCursorStore(t.TempDir())
 	require.NoError(t, err)
 
+	ackStore, err := cert.NewFileSigningTrustAckStore(t.TempDir())
+	require.NoError(t, err)
+
 	sm.SetCertRevocationStore(revStore)
+	sm.SetSigningTrustAckStore(ackStore)
 	sm.SetSigningCursorStore(cursorStore)
 
 	assert.Same(t, revStore, sm.GetCertRevocationStore(),
 		"GetCertRevocationStore must return the store SetCertRevocationStore was handed")
 	assert.Same(t, cursorStore, sm.GetSigningCursorStore(),
 		"GetSigningCursorStore must return the store SetSigningCursorStore was handed")
+	assert.Same(t, ackStore, sm.GetSigningTrustAckStore(),
+		"GetSigningTrustAckStore must return the store SetSigningTrustAckStore was handed")
 }
 
 // TestCreateClusterStorageManager_CertRevocationStore verifies the cluster tier — the
@@ -228,4 +240,48 @@ func truncateSigningCursor(t *testing.T, dsn string) {
 	defer func() { _ = db.Close() }()
 	_, err = db.Exec(`DELETE FROM cfgms_signing_cursor`)
 	require.NoError(t, err)
+}
+
+// TestCreateClusterStorageManager_SigningTrustAckStore verifies the cluster tier wires
+// a working, cluster-visible signing trust ack store: an acknowledgement recorded
+// through node A's wired store is read back through node B's. Skipped when PostgreSQL
+// is not reachable.
+func TestCreateClusterStorageManager_SigningTrustAckStore(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+
+	nodeA, err := interfaces.CreateClusterStorageManager(dsn, testSessionHMACKey(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nodeA.Close() })
+	storeA := nodeA.GetSigningTrustAckStore()
+	require.NotNil(t, storeA, "GetSigningTrustAckStore must be wired for the database provider")
+
+	nodeB, err := interfaces.CreateClusterStorageManager(dsn, testSessionHMACKey(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nodeB.Close() })
+	storeB := nodeB.GetSigningTrustAckStore()
+	require.NotNil(t, storeB)
+
+	const stewardID, serial = "wiring-ack-steward", "wiring-ack-serial"
+	t.Cleanup(func() { deleteSigningTrustAcks(t, dsn, serial) })
+	deleteSigningTrustAcks(t, dsn, serial)
+
+	ctx := context.Background()
+	require.NoError(t, storeA.RecordAck(ctx, stewardID, serial))
+	got, err := storeB.GetAck(ctx, stewardID, serial)
+	require.NoError(t, err)
+	require.NotNil(t, got, "an ack recorded through one node's wired store must be readable through another's")
+	assert.Equal(t, stewardID, got.StewardID)
+}
+
+func deleteSigningTrustAcks(t *testing.T, dsn, serial string) {
+	t.Helper()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Logf("cleanup: open postgres: %v", err)
+		return
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`DELETE FROM cfgms_signing_trust_acks WHERE serial = $1`, serial); err != nil {
+		t.Logf("cleanup: delete signing trust acks: %v", err)
+	}
 }
