@@ -17,6 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -1020,4 +1021,50 @@ func TestTerminateSession_RedactsSessionID(t *testing.T) {
 	redacted := logging.RedactedID(sessionID)
 	assert.True(t, capLogger.anyKVKeyHasValue("session_id", redacted),
 		"redacted session_id (%q) must appear in log kv values after TerminateSession", redacted)
+}
+
+// TestNewSessionManagerReusesStoredHMACKey builds two managers in sequence over
+// one real file-backed secrets store and checks a recording written by the first
+// verifies with the second (same key across a restart).
+func TestNewSessionManagerReusesStoredHMACKey(t *testing.T) {
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("0123456789abcdef0123456789abcdef"), 0o600))
+
+	newStore := func() *sops.SOPSSecretStore {
+		store, err := sops.NewSOPSSecretStore(&sops.SOPSSecretStoreConfig{
+			StorageProvider: "flatfile",
+			StorageConfig:   map[string]interface{}{"root": filepath.Join(root, "secrets")},
+			KeyFile:         keyPath,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		return store
+	}
+
+	cfg := DefaultConfig()
+	cfg.RecordSessions = true
+	cfg.RecordingStoragePath = filepath.Join(root, "recordings")
+	logger := testutil.NewMockLogger(true)
+
+	first, err := NewSessionManager(cfg, logger, WithSecretsStore(newStore()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = first.Stop(context.Background()) })
+
+	const sessionID = "restart-session"
+	rec1 := first.(*DefaultSessionManager).recorder.(*DefaultSessionRecorder)
+	for i := 0; i < 5; i++ {
+		require.NoError(t, rec1.RecordData(sessionID, []byte("data"), DataDirectionInput))
+	}
+	require.NoError(t, rec1.EndRecording(sessionID))
+
+	second, err := NewSessionManager(cfg, logger, WithSecretsStore(newStore()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = second.Stop(context.Background()) })
+
+	rec2 := second.(*DefaultSessionManager).recorder.(*DefaultSessionRecorder)
+	assert.Equal(t, rec1.hmacKey, rec2.hmacKey)
+	ok, err := rec2.VerifyRecording(sessionID)
+	require.NoError(t, err)
+	assert.True(t, ok, "recording from the first manager must verify with the second")
 }

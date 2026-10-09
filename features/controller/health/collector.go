@@ -12,6 +12,8 @@ import (
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/process"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MetricsCollector defines the interface for collecting controller metrics
@@ -285,6 +287,12 @@ type DefaultSystemCollector struct {
 	mu      sync.RWMutex
 	metrics *SystemMetrics
 	process *process.Process
+
+	// readCPU is the CPU sample source; a seam so tests can return an empty sample.
+	readCPU func(ctx context.Context) ([]float64, error)
+	// logger reports the one-time CPU-unavailable warning.
+	logger      logging.Logger
+	cpuWarnOnce sync.Once
 }
 
 // NewDefaultSystemCollector creates a new system metrics collector
@@ -298,6 +306,10 @@ func NewDefaultSystemCollector() (*DefaultSystemCollector, error) {
 	return &DefaultSystemCollector{
 		metrics: &SystemMetrics{},
 		process: proc,
+		readCPU: func(ctx context.Context) ([]float64, error) {
+			return cpu.PercentWithContext(ctx, 0, false)
+		},
+		logger: logging.ForModule("controller.health"),
 	}, nil
 }
 
@@ -306,13 +318,19 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) error {
 	timestamp := time.Now()
 
 	// CPU metrics
-	cpuPercent, err := cpu.PercentWithContext(ctx, 0, false)
+	cpuPercent, err := c.readCPU(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get CPU metrics: %w", err)
 	}
+	// A host whose /proc/stat yields no CPU line returns an empty sample with a
+	// nil error. Report CPU as 0 and keep memory/runtime metrics instead of
+	// failing the whole collection every tick.
 	cpuPercentValue, err := firstCPUPercent(cpuPercent)
 	if err != nil {
-		return err
+		cpuPercentValue = 0
+		c.cpuWarnOnce.Do(func() {
+			c.logger.Warn("CPU metric unavailable: host returned no CPU samples; reporting CPU percent as 0")
+		})
 	}
 
 	// Memory metrics

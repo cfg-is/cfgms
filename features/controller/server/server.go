@@ -2725,7 +2725,11 @@ func (s *Server) Start() error {
 		// permissions — never a shared, world-writable location such as /tmp.
 		terminalCfg := terminal.DefaultConfig()
 		terminalCfg.RecordingStoragePath = filepath.Join(resolveDNADataRoot(s.cfg), "terminal-recordings")
-		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, s.logger)
+		if s.httpServer == nil || s.httpServer.GetSecretStore() == nil {
+			return fmt.Errorf("failed to create terminal session manager: secrets store is required for the recording HMAC key")
+		}
+		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, s.logger,
+			terminal.WithSecretsStore(s.httpServer.GetSecretStore()))
 		if terminalMgrErr != nil {
 			return fmt.Errorf("failed to create terminal session manager: %w", terminalMgrErr)
 		}
