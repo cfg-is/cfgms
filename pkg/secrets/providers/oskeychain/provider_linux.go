@@ -7,12 +7,29 @@ package oskeychain
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
+	"github.com/godbus/dbus/v5"
 	"golang.org/x/sys/unix"
+)
+
+const (
+	// defaultProbeTimeout bounds the Secret Service availability probe.
+	defaultProbeTimeout = 3 * time.Second
+	// defaultToolTimeout bounds each secret-tool invocation. A locked keyring
+	// makes secret-tool wait forever on a prompt a terminal session cannot show.
+	defaultToolTimeout = 5 * time.Second
+)
+
+// Package variables so tests can shorten them.
+var (
+	probeTimeout = defaultProbeTimeout
+	toolTimeout  = defaultToolTimeout
 )
 
 // keyringType is the kernel keyring key type used for session tokens.
@@ -65,56 +82,133 @@ func newSecretServiceBackend() *secretServiceBackend {
 
 func (b *secretServiceBackend) name() string { return "linux-secret-service" }
 
-// available reports the Secret Service usable: the secret-tool binary is present
-// and a session bus exists for it to talk to. Headless hosts (no
-// DBUS_SESSION_BUS_ADDRESS) report false so selection falls through to the
-// kernel keyring.
+// available reports the Secret Service usable: the secret-tool binary is present,
+// a session bus answers, and the default collection is unlocked. A locked
+// collection needs a graphical prompt that would hang secret-tool, so it counts
+// as unavailable and selection falls through to the kernel keyring. Any dial
+// error, bus error or timeout also reports false.
 func (b *secretServiceBackend) available() bool {
-	return b.bin != "" && os.Getenv("DBUS_SESSION_BUS_ADDRESS") != ""
-}
-
-func (b *secretServiceBackend) set(key string, value []byte) error {
-	// secret-tool store reads the secret from stdin; attributes come from argv.
-	// #nosec G204 -- b.bin is resolved by LookPath for secret-tool, command
-	// structure is fixed, the key is a discrete attribute value, and no shell runs.
-	cmd := exec.Command(b.bin, "store", "--label=CFGMS session token",
-		"service", serviceName, "account", key)
-	cmd.Stdin = bytes.NewReader(value)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("secret-tool store: %w: %s", err, stderr.String())
+	if b.bin == "" || os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
+		return false
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	return defaultCollectionUnlocked(ctx)
 }
 
-func (b *secretServiceBackend) get(key string) ([]byte, error) {
+// defaultCollectionUnlocked reads the Locked property of the default collection
+// over D-Bus. Reading the property never triggers an unlock prompt.
+func defaultCollectionUnlocked(ctx context.Context) bool {
+	conn, err := dbus.SessionBusPrivate(dbus.WithContext(ctx))
+	if err != nil {
+		return false
+	}
+	// Closing the connection also unblocks the goroutine below if the bus is silent.
+	defer func() { _ = conn.Close() }()
+
+	result := make(chan bool, 1)
+	go func() {
+		if err := conn.Auth(nil); err != nil {
+			result <- false
+			return
+		}
+		if err := conn.Hello(); err != nil {
+			result <- false
+			return
+		}
+		var alias dbus.ObjectPath
+		svc := conn.Object("org.freedesktop.secrets", "/org/freedesktop/secrets")
+		if err := svc.CallWithContext(ctx, "org.freedesktop.Secret.Service.ReadAlias", 0, "default").Store(&alias); err != nil {
+			result <- false
+			return
+		}
+		if alias == "/" || alias == "" {
+			result <- false
+			return
+		}
+		prop, err := conn.Object("org.freedesktop.secrets", alias).
+			GetProperty("org.freedesktop.Secret.Collection.Locked")
+		if err != nil {
+			result <- false
+			return
+		}
+		locked, ok := prop.Value().(bool)
+		result <- ok && !locked
+	}()
+
+	select {
+	case ok := <-result:
+		return ok
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// runTool runs secret-tool under toolTimeout, killing the child on expiry. A
+// timeout returns an error wrapping context.DeadlineExceeded.
+func (b *secretServiceBackend) runTool(op string, stdin []byte, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), toolTimeout)
+	defer cancel()
 	// #nosec G204 -- b.bin is resolved by LookPath for secret-tool, command
 	// structure is fixed, the key is a discrete attribute value, and no shell runs.
-	cmd := exec.Command(b.bin, "lookup", "service", serviceName, "account", key)
+	cmd := exec.CommandContext(ctx, b.bin, args...)
+	cmd.WaitDelay = time.Second
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		// secret-tool exits non-zero with no output when the item is absent.
-		if stdout.Len() == 0 {
-			return nil, errSecretNotFound
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("secret-tool %s: timed out after %s: %w", op, toolTimeout, ctxErr)
 		}
-		return nil, fmt.Errorf("secret-tool lookup: %w: %s", err, stderr.String())
+		return stdout.Bytes(), &toolError{op: op, err: err, stderr: stderr.String()}
 	}
 	return stdout.Bytes(), nil
 }
 
-func (b *secretServiceBackend) del(key string) error {
-	// #nosec G204 -- b.bin is resolved by LookPath for secret-tool, command
-	// structure is fixed, the key is a discrete attribute value, and no shell runs.
-	cmd := exec.Command(b.bin, "clear", "service", serviceName, "account", key)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("secret-tool clear: %w: %s", err, stderr.String())
+// toolError is a secret-tool failure that is not a timeout.
+type toolError struct {
+	op     string
+	err    error
+	stderr string
+}
+
+func (e *toolError) Error() string {
+	return fmt.Sprintf("secret-tool %s: %v: %s", e.op, e.err, e.stderr)
+}
+func (e *toolError) Unwrap() error { return e.err }
+
+func (b *secretServiceBackend) set(key string, value []byte) error {
+	// secret-tool store reads the secret from stdin; attributes come from argv.
+	// Non-nil stdin even for an empty value so the child never inherits ours.
+	if value == nil {
+		value = []byte{}
 	}
-	return nil
+	_, err := b.runTool("store", value, "store", "--label=CFGMS session token",
+		"service", serviceName, "account", key)
+	return err
+}
+
+func (b *secretServiceBackend) get(key string) ([]byte, error) {
+	out, err := b.runTool("lookup", nil, "lookup", "service", serviceName, "account", key)
+	if err != nil {
+		// secret-tool exits non-zero with no output when the item is absent. Only
+		// that case is "not found"; a timeout or start failure is a real error.
+		var te *toolError
+		var ee *exec.ExitError
+		if errors.As(err, &te) && errors.As(err, &ee) && len(out) == 0 {
+			return nil, errSecretNotFound
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+func (b *secretServiceBackend) del(key string) error {
+	_, err := b.runTool("clear", nil, "clear", "service", serviceName, "account", key)
+	return err
 }
 
 // ---- Kernel session keyring (keyctl) ----
