@@ -188,3 +188,28 @@ func (f *fileSigningCursorStore) TransitionCursor(_ context.Context, newSerial s
 	}
 	return loadSigningCursor(f.basePath)
 }
+
+// MarkRetired implements certinterfaces.SigningCursorStore.MarkRetired. The
+// read-modify-write runs under the file store's write lock so concurrent
+// callers on this node retire the serial once.
+func (f *fileSigningCursorStore) MarkRetired(_ context.Context, rotatingSerial string, at time.Time) (*SigningCertCursor, error) {
+	if rotatingSerial == "" {
+		return nil, nil
+	}
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+
+	cursor, err := loadSigningCursor(f.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("load signing cursor to mark retired: %w", err)
+	}
+	if cursor == nil || cursor.RotatingSerial != rotatingSerial || cursor.RetiredAt != nil {
+		return nil, nil
+	}
+	retiredAt := at.UTC()
+	cursor.RetiredAt = &retiredAt
+	if err := saveSigningCursor(f.basePath, cursor); err != nil {
+		return nil, err
+	}
+	return cursor, nil
+}

@@ -319,6 +319,7 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 |------------|----------|
 | `certificate:provision` | `POST /api/v1/certificates/provision` |
 | `certificate:rotate` | `POST /api/v1/certificates/signing/rotate` |
+| `certificate:rotate` | `POST /api/v1/certificates/signing/revoke` |
 | `rbac:create-role` | `POST /api/v1/rbac/roles` |
 | `rbac:update-role` | `PUT /api/v1/rbac/roles/{id}` |
 | `rbac:delete-role` | `DELETE /api/v1/rbac/roles/{id}` |

@@ -1010,6 +1010,62 @@ then signs with the new certificate; no signing key is written to a node's local
 `node_id` (the controller node that performed it), `overlap_days` and
 `overlap_expires_at`. No certificate or key material is recorded.
 
+#### POST /api/v1/certificates/signing/revoke
+
+Withdraw one named signing certificate from the whole fleet immediately. The serial is
+recorded in the revocation store with a signing-certificate reason (visible to every
+controller node), retired from the rotation cursor when it is the rotating serial, and
+sent to every steward as `retire_serials` in a `push_signing_cert` command. A steward
+that is offline receives the same instruction in the push it already gets when it
+reconnects.
+
+**Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
+**Required permission:** `certificate:rotate`
+
+**Caller:** the same gates as rotation: a certificate-authenticated root principal. A
+tenant-scoped caller, a principal below `AssuranceStrong` and a session without an admin
+certificate serial are refused with `403 FORBIDDEN`.
+
+**Request Body:**
+
+```json
+{
+  "serial": "123456789",
+  "reason": "key exposed in a build log"
+}
+```
+
+`serial` is required and must be a certificate serial number (alphanumeric, with internal
+hyphens, at most 128 characters). `reason` is optional and at most 256 characters.
+
+**Response:**
+
+```json
+{
+  "data": {
+    "serial": "123456789",
+    "stewards_notified": 42,
+    "retired_from_cursor": true
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+**Errors:**
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `VALIDATION_ERROR` | Missing or malformed `serial`, or a `reason` over 256 characters. |
+| 409 | `CURRENT_SIGNING_CERT` | The serial is the current signing certificate. Rotate first (with `overlap_days: 0`), then revoke the superseded serial. |
+
+**Audit:** every successful revoke records a `signing_certificate_revoked` audit event
+(`security_event`, severity high) with `operator_serial`, `serial`, `reason`,
+`stewards_notified` and `retired_from_cursor`. No certificate or key material is recorded.
+
+When a rotation's overlap window ends, the leader controller sends the same
+`retire_serials` instruction for the rotating serial without an operator request and
+records a `signing_certificate_retired` audit event.
+
 ### Signing Credentials
 
 #### POST /api/v1/signing-credential/request

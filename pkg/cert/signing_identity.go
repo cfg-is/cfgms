@@ -496,7 +496,7 @@ func (m *Manager) allValidClusterSigningCertificates(ctx context.Context) ([]*Ce
 	}
 
 	allowed := []string{cursor.CurrentSerial}
-	if cursor.RotatingSerial != "" {
+	if cursor.RotatingSerial != "" && cursor.RetiredAt == nil {
 		overlap := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
 		if time.Since(cursor.RotatedAt) < overlap {
 			allowed = append(allowed, cursor.RotatingSerial)

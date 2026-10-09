@@ -16,6 +16,7 @@ func registerCertificateRoutes(s *Server, api *mux.Router) {
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
 	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
 	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
+	certs.Handle("/signing/revoke", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRevokeSigningCert))).Methods("POST")
 	// Registered before /{serial} so the wildcard route never swallows this static path.
 	// certificate:list is the permission gate; the handler additionally requires an
 	// unscoped principal, since the manifest is fleet-wide and cannot be tenant-filtered
