@@ -2418,14 +2418,35 @@ func (s *Server) setupLegacyTLS() (*tls.Config, error) {
 func (s *Server) getServerCertificate() (*cert.Certificate, error) {
 	apiCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeAPI)
 	if err == nil {
-		s.logger.Info("Using existing API certificate for HTTP server",
-			"serial", apiCert.SerialNumber,
-			"expires", apiCert.ExpiresAt.Format("2006-01-02"))
-		return apiCert, nil
-	}
+		missing, coverErr := s.missingServerCertSANs(apiCert)
+		if coverErr == nil && len(missing) == 0 {
+			s.logger.Info("Using existing API certificate for HTTP server",
+				"serial", apiCert.SerialNumber,
+				"expires", apiCert.ExpiresAt.Format("2006-01-02"))
+			return apiCert, nil
+		}
 
-	// No valid cert found — generate if cert management is enabled
-	if !s.cfg.Certificate.EnableCertManagement {
+		if !s.cfg.Certificate.EnableCertManagement {
+			if coverErr != nil {
+				return nil, fmt.Errorf("failed to inspect existing API certificate: %w", coverErr)
+			}
+			s.logger.Warn("Existing API certificate does not cover configured SANs and certificate lifecycle management is disabled; keeping it",
+				"serial", apiCert.SerialNumber,
+				"missing_sans", missing)
+			return apiCert, nil
+		}
+
+		if coverErr != nil {
+			s.logger.Info("Existing API certificate could not be inspected; reissuing",
+				"serial", apiCert.SerialNumber,
+				"error", logging.SanitizeLogValue(coverErr.Error()))
+		} else {
+			s.logger.Info("Existing API certificate lacks configured SANs; reissuing",
+				"serial", apiCert.SerialNumber,
+				"missing_sans", missing)
+		}
+	} else if !s.cfg.Certificate.EnableCertManagement {
+		// No valid cert found — generate only if cert management is enabled
 		return nil, fmt.Errorf("no valid API certificate found and certificate lifecycle management is disabled")
 	}
 
@@ -2450,6 +2471,46 @@ func (s *Server) getServerCertificate() (*cert.Certificate, error) {
 		"expires", serverCert.ExpiresAt.Format("2006-01-02"))
 
 	return serverCert, nil
+}
+
+// missingServerCertSANs returns the configured certificate.server DNS names and
+// IP addresses that the given certificate's SANs do not cover. Extra SANs on the
+// certificate are ignored. DNS names compare case-insensitively.
+func (s *Server) missingServerCertSANs(c *cert.Certificate) ([]string, error) {
+	parsed, err := cert.ParseCertificateFromPEM(c.CertificatePEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse API certificate: %w", err)
+	}
+
+	var missing []string
+	for _, want := range s.cfg.Certificate.Server.DNSNames {
+		found := false
+		for _, have := range parsed.DNSNames {
+			if strings.EqualFold(want, have) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, want)
+		}
+	}
+	for _, want := range s.cfg.Certificate.Server.IPAddresses {
+		wantIP := net.ParseIP(want)
+		found := false
+		if wantIP != nil {
+			for _, have := range parsed.IPAddresses {
+				if have.Equal(wantIP) {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			missing = append(missing, want)
+		}
+	}
+	return missing, nil
 }
 
 // GetListenAddr returns the HTTP server's listen address
