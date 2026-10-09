@@ -1764,7 +1764,7 @@ func TestHandleGetStewardModules_UntrustedAuthority(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
 
-	auths := []string{"", "  ", "bad\nname", strings.Repeat("x", 500)}
+	auths := []string{"", "  ", "bad\nname", "evil\u202Emod", strings.Repeat("x", 500)}
 	for i := 0; i < maxReportedModules+20; i++ {
 		auths = append(auths, fmt.Sprintf("mod%04d", i))
 	}
@@ -1775,6 +1775,7 @@ func TestHandleGetStewardModules_UntrustedAuthority(t *testing.T) {
 	for _, n := range names {
 		assert.NotEmpty(t, strings.TrimSpace(n))
 		assert.NotContains(t, n, "\n")
+		assert.NotContains(t, n, "\u202E")
 		assert.LessOrEqual(t, len(n), maxModuleNameLen)
 	}
 }

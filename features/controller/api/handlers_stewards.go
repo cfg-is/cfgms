@@ -1414,7 +1414,7 @@ var nonModuleAuthorities = map[string]bool{"gatherer": true, "osquery": true}
 // moduleNamesFromFragments returns the distinct, sorted authorities of the fragments
 // that are owned by a module. Authority is steward-supplied and the host may be
 // compromised, so each value is untrusted display data: blank values, values with
-// control characters, and over-long values are dropped, and the list is capped.
+// control or format characters, and over-long values are dropped, and the list is capped.
 func moduleNamesFromFragments(frags []*common.Fragment) []string {
 	seen := make(map[string]struct{})
 	for _, f := range frags {
@@ -1422,7 +1422,9 @@ func moduleNamesFromFragments(frags []*common.Fragment) []string {
 		if name == "" || len(name) > maxModuleNameLen || nonModuleAuthorities[name] {
 			continue
 		}
-		if strings.IndexFunc(name, unicode.IsControl) >= 0 || !utf8.ValidString(name) {
+		// Control and format characters (bidi overrides, zero-width) could make a name
+		// render as a different module in a terminal.
+		if strings.IndexFunc(name, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 || !utf8.ValidString(name) {
 			continue
 		}
 		seen[name] = struct{}{}
