@@ -310,11 +310,9 @@ func TestEndToEndDriftScenario(t *testing.T) {
 	})
 }
 
-// durationPercentile returns the p-th percentile (0..1) of durations. Used only
-// for AC1-style reporting (t.Logf) alongside the robust block-average
-// assertion below — see the comment on runLargeOrganizationSimulation for why
-// the assertion itself stays block-average-based rather than switching to a
-// percentile of individual write times.
+// durationPercentile returns the p-th percentile (0..1) of durations. The
+// scalability assertion compares the median (p=0.5) of each half; p95 is
+// reported via t.Logf only.
 func durationPercentile(durations []time.Duration, p float64) time.Duration {
 	if len(durations) == 0 {
 		return 0
@@ -406,9 +404,9 @@ func runLargeOrganizationSimulation(t *testing.T, scale int) {
 	// regardless of any single write's resolution, so the average per-write
 	// cost derived from it stays meaningful on any clock. Individual write
 	// durations are still collected per cohort — despite that same clock-tick
-	// collapse making many of them read as 0 on a coarse-clock runner — purely
-	// to report median/p95 for human inspection (Issue #4239 AC1); the pass/
-	// fail assertion never depends on them.
+	// collapse making many of them read as 0 on a coarse-clock runner — to
+	// report median/p95 and to drive the median growth assertion (Issues #4239,
+	// #4552); the block average is logged but not asserted.
 	half := len(allDNA) / 2
 	firstHalf := allDNA[:half]
 	secondHalf := allDNA[half:]
@@ -438,7 +436,7 @@ func runLargeOrganizationSimulation(t *testing.T, scale int) {
 	require.GreaterOrEqual(t, secondCount, 100,
 		"need enough successful writes in the late cohort to average")
 
-	// Compare the average per-write cost of each cohort. The bound is set at 8x:
+	// Compare the median per-write cost of each cohort. The bound is set at 8x:
 	// measured on this machine (16 cores, -race) with 24 CPU burners running for
 	// the whole subtest, load arriving mid-run produced an idle first half against
 	// a saturated second half at a ratio of 3.3x, so 8x leaves headroom over
@@ -454,9 +452,16 @@ func runLargeOrganizationSimulation(t *testing.T, scale int) {
 	t.Logf("[scale=%dx, n=%d] second-half per-write: block-avg=%v median=%v p95=%v (writes=%d)",
 		scale, len(allDNA), latePerWrite, durationPercentile(secondPerWrite, 0.5), durationPercentile(secondPerWrite, 0.95), secondCount)
 
-	assert.Less(t, latePerWrite, 8*earlyPerWrite,
-		"per-write cost grew with dataset size: first-half avg %v, second-half avg %v",
-		earlyPerWrite, latePerWrite)
+	// Assert on the median of each half, not the block average: a handful of
+	// outlier writes (disk stall, GC pause on a 2-vCPU runner) move the mean by
+	// 10x while the distribution does not grow (Issue #4552). A scan-per-write
+	// regression shifts every write, so it moves the median.
+	earlyMedian := durationPercentile(firstPerWrite, 0.5)
+	lateMedian := durationPercentile(secondPerWrite, 0.5)
+	require.Positive(t, earlyMedian, "no measurable median per-write cost to compare against")
+	assert.Less(t, lateMedian, 8*earlyMedian,
+		"per-write cost grew with dataset size: first-half median %v, second-half median %v",
+		earlyMedian, lateMedian)
 
 	// Test query performance
 	start = time.Now()
