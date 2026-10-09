@@ -145,7 +145,7 @@ func TestEngine_ExecuteWorkflow_MissingRequiredInputFailsAndRecords(t *testing.T
 	assert.Equal(t, "tenant-owner", execution.TenantID)
 	assert.Empty(t, execution.StepResults, "no step may run")
 
-	recorded, err := engine.GetExecution(execution.ID)
+	recorded, err := engine.GetExecution(context.Background(), "tenant-owner", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, recorded.Status)
 }

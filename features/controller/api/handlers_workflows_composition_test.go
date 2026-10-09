@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -102,7 +103,7 @@ func TestWorkflow_NestedByName_ResolvesFromExecutionTenantStore(t *testing.T) {
 		execID, _ := resp["execution_id"].(string)
 		var status workflow.ExecutionStatus
 		require.Eventually(t, func() bool {
-			execution, err := h.engine.GetExecution(execID)
+			execution, err := h.engine.GetExecution(context.Background(), tenant, execID)
 			require.NoError(t, err)
 			status = execution.Status
 			return status == workflow.StatusCompleted || status == workflow.StatusFailed

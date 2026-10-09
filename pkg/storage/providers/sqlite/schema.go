@@ -1089,6 +1089,22 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_workflow_approvals_pending ON workflow_approvals(tenant_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_workflow_approvals_expiry ON workflow_approvals(status, expires_at)`,
 
+		// Durable workflow execution history (Issue #4675). Timestamps are UNIX
+		// nanoseconds (0 = unset). tenant_id '' is the root tenant. payload is opaque
+		// engine-owned JSON (step results, error, trace); run variables are never stored.
+		`CREATE TABLE IF NOT EXISTS workflow_executions (
+			tenant_id     TEXT NOT NULL,
+			execution_id  TEXT NOT NULL,
+			workflow_name TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL DEFAULT '',
+			start_time    INTEGER NOT NULL DEFAULT 0,
+			end_time      INTEGER NOT NULL DEFAULT 0,
+			payload       BLOB NOT NULL,
+			PRIMARY KEY (tenant_id, execution_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_executions_tenant_start ON workflow_executions(tenant_id, start_time)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow ON workflow_executions(tenant_id, workflow_name, start_time)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

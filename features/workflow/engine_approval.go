@@ -128,6 +128,7 @@ func (e *Engine) suspendAtApprovalGate(execution *WorkflowExecution, workflow Wo
 		return
 	}
 	execution.SetStatus(StatusAwaitingApproval)
+	e.persistExecution(execution)
 	execution.Cancel() // releases the execution context; nothing runs until a decision
 	e.logger.WithTenant(execution.TenantID).Info("Workflow execution awaiting approval",
 		"execution_id", execution.ID,
@@ -219,6 +220,7 @@ func (e *Engine) failExecution(execution *WorkflowExecution, cause error) {
 	endTime := time.Now()
 	execution.SetEndTime(&endTime)
 	execution.SetStatus(StatusFailed)
+	e.persistExecution(execution)
 	e.logger.WithTenant(execution.TenantID).Warn("Workflow execution failed",
 		"execution_id", execution.ID,
 		"error", logging.SanitizeLogValue(cause.Error()))
@@ -346,6 +348,7 @@ func (e *Engine) ResumeFromApproval(ctx context.Context, tenantID, approvalID st
 	e.mutex.Lock()
 	e.executions[execution.ID] = execution
 	e.mutex.Unlock()
+	e.persistExecution(execution)
 
 	if failure != nil {
 		execution.SetStatus(StatusFailed)
@@ -447,6 +450,7 @@ func (e *Engine) failRunOfApproval(rec *business.WorkflowApproval, reason string
 		e.mutex.Lock()
 		e.executions[execution.ID] = execution
 		e.mutex.Unlock()
+		e.persistExecution(execution)
 	} else if execution.GetStatus() != StatusAwaitingApproval && execution.GetStatus() != StatusPending {
 		return
 	}

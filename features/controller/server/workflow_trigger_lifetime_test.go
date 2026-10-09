@@ -32,7 +32,7 @@ func waitTerminal(t *testing.T, engine *workflow.Engine, id string) workflow.Exe
 	t.Helper()
 	var status workflow.ExecutionStatus
 	require.Eventually(t, func() bool {
-		execution, err := engine.GetExecution(id)
+		execution, err := engine.GetExecution(context.Background(), "acme-corp", id)
 		require.NoError(t, err)
 		status = execution.GetStatus()
 		return status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled

@@ -53,7 +53,12 @@ func (de *DebugEngineImpl) StartDebugSession(ctx context.Context, executionID st
 	defer de.mutex.Unlock()
 
 	// Validate that the execution exists
-	execution, err := de.workflowEngine.GetExecution(executionID)
+	// The lookup is tenant-scoped, so the caller's tenant is resolved first.
+	callerTenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	if callerTenantID == "" {
+		return nil, fmt.Errorf("tenant context required to start a debug session")
+	}
+	execution, err := de.workflowEngine.GetExecution(ctx, callerTenantID, executionID)
 	if err != nil {
 		return nil, fmt.Errorf("execution not found: %w", err)
 	}
@@ -69,10 +74,6 @@ func (de *DebugEngineImpl) StartDebugSession(ctx context.Context, executionID st
 	// through context.WithTimeout/WithCancel, which preserve Value lookups), so it
 	// carries the ctxkeys.TenantID the execution's own caller was authenticated to —
 	// or the trigger's own tenant, for triggered (webhook/schedule/SIEM) executions.
-	callerTenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
-	if callerTenantID == "" {
-		return nil, fmt.Errorf("tenant context required to start a debug session")
-	}
 	var executionTenantID string
 	if execution.Context != nil {
 		executionTenantID, _ = execution.Context.Value(ctxkeys.TenantID).(string)

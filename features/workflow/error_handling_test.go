@@ -326,7 +326,7 @@ func TestErrorHandlingIntegration(t *testing.T) {
 
 		waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-		final, err := engine.GetExecution(execution.ID)
+		final, err := engine.GetExecution(context.Background(), "", execution.ID)
 		require.NoError(t, err)
 		assert.Equal(t, StatusFailed, final.GetStatus())
 		assert.NotEmpty(t, final.GetError())

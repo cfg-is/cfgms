@@ -99,7 +99,7 @@ func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Check final status
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 }
@@ -146,7 +146,7 @@ func TestEngine_ExecuteWorkflow_ResolvesAuthenticatedTenantFromContext(t *testin
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "tenant-owner", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "tenant-owner", finalExecution.TenantID,
 		"GetExecution must return the authenticated tenant in its copy")
@@ -201,7 +201,7 @@ func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
 	// Wait for execution to complete
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 }
@@ -239,7 +239,7 @@ func TestEngine_CancelExecution(t *testing.T) {
 	// CancelExecution synchronously sets status — no wait needed
 
 	// Check status
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCancelled, finalExecution.GetStatus())
 }
@@ -279,7 +279,7 @@ func TestEngine_ListExecutions(t *testing.T) {
 	require.NoError(t, err)
 
 	// List executions
-	executions, err := engine.ListExecutions()
+	executions, err := engine.ListExecutions(context.Background(), "")
 	require.NoError(t, err)
 	// Note: On fast systems, workflows may complete and be cleaned up before listing.
 	// We verify that executions were created successfully rather than exact count.
@@ -465,7 +465,7 @@ func TestExecuteStepTransformDispatches(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, final.GetStatus())
 
@@ -502,7 +502,7 @@ func TestContinueWithStepExecution(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, final.GetStatus())
 
@@ -537,7 +537,7 @@ func TestContinueWithStepNotFound(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, final.GetStatus())
 	assert.Contains(t, final.GetError(), "continue_with target step not found: nonexistent-step")
@@ -578,7 +578,7 @@ func TestFallbackStepExecution(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, final.GetStatus())
 
@@ -653,7 +653,7 @@ func TestRetryMaxAttempts(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, final.GetStatus(), "workflow should complete successfully after retries")
 
@@ -697,7 +697,7 @@ func TestRetryNilConfig(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when step has no retry config")
 
@@ -777,7 +777,7 @@ func TestRingHealthExecutor_NilReturnsError(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when ring health executor is nil")
 	assert.Contains(t, final.GetError(), "ring health executor not configured")
@@ -809,7 +809,7 @@ func TestRingHealthExecutor_Injected_IsCalled(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, final.GetStatus())
 	assert.True(t, exec.called, "ring health executor must have been invoked")
@@ -846,7 +846,7 @@ func TestSetHARoleExecutor_NilReturnsError(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when set_ha_role executor is nil")
 	assert.Contains(t, final.GetError(), "executor not configured")
@@ -871,7 +871,7 @@ func TestMoveResourceToClusterExecutor_NilReturnsError(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when move_resource_to_cluster executor is nil")
 	assert.Contains(t, final.GetError(), "executor not configured")
@@ -909,7 +909,7 @@ func TestEngine_StepResults_KeyedByStepID(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 3*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	require.Equal(t, StatusCompleted, final.GetStatus())
 
@@ -966,7 +966,7 @@ func TestEngine_LoopBody_StableID(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 3*time.Second)
 
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	require.Equal(t, StatusCompleted, final.GetStatus())
 

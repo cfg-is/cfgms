@@ -58,6 +58,7 @@ type BusinessStoreBundle struct {
 	Case                business.CaseStore              // ADR-022 §8: cockpit investigation cases
 	Lease               business.LeaseStore             // ADR-031 Decision 5: fenced singleton-claim leases
 	Approval            business.ApprovalStore          // Issue #4607: durable workflow approvals
+	WorkflowExecution   business.WorkflowExecutionStore // Issue #4675: durable workflow execution history
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -225,6 +226,7 @@ type StorageProvider interface {
 	CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error)
 	CreateAlertStore(config map[string]interface{}) (business.AlertStore, error)
 	CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error)
+	CreateWorkflowExecutionStore(config map[string]interface{}) (business.WorkflowExecutionStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
@@ -760,6 +762,12 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 	}
 	appendIfCloser(&openedStores, approvalStore)
 
+	workflowExecutionStore, err := provider.CreateWorkflowExecutionStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create workflow execution store: %w", err)
+	}
+	appendIfCloser(&openedStores, workflowExecutionStore)
+
 	// Nonce store (Issue #3755, ADR-031 amendment to ADR-011). Single-provider mode
 	// is a live deployment shape — features/controller/server routes
 	// storage.provider == "database" here — so skipping this leaves nonceStore nil
@@ -835,6 +843,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		approvalStore:          approvalStore,
+		workflowExecutionStore: workflowExecutionStore,
 		nonceStore:             nonceStore,
 		leaseStore:             leaseStore,
 		routingStore:           routingStore,
@@ -861,6 +870,7 @@ type StorageManager struct {
 	ipTrustStore             business.IPTrustStore
 	alertStore               business.AlertStore               // Issue #3266: alert acknowledge and silence
 	approvalStore            business.ApprovalStore            // Issue #4607: durable workflow approvals
+	workflowExecutionStore   business.WorkflowExecutionStore   // Issue #4675: durable workflow execution history
 	pendingRefreshStore      business.PendingRefreshStore      // Issue #2098: registration-refresh approval queue
 	refreshPolicyStore       business.RefreshPolicyStore       // Issue #2098: per-tenant refresh policy
 	assurancePolicyStore     business.AssurancePolicyStore     // Issue #2845: per-tenant assurance-policy overrides
@@ -997,6 +1007,17 @@ func (sm *StorageManager) GetApprovalStore() business.ApprovalStore {
 // SetApprovalStore wires the approval store after construction.
 func (sm *StorageManager) SetApprovalStore(s business.ApprovalStore) {
 	sm.approvalStore = s
+}
+
+// GetWorkflowExecutionStore returns the durable workflow execution store (Issue #4675).
+// Returns nil when the current storage provider does not support it.
+func (sm *StorageManager) GetWorkflowExecutionStore() business.WorkflowExecutionStore {
+	return sm.workflowExecutionStore
+}
+
+// SetWorkflowExecutionStore wires the workflow execution store after construction.
+func (sm *StorageManager) SetWorkflowExecutionStore(s business.WorkflowExecutionStore) {
+	sm.workflowExecutionStore = s
 }
 
 // GetPendingRefreshStore returns the pending-refresh approval queue (Issue #2098).
@@ -1245,6 +1266,7 @@ func (sm *StorageManager) Close() error {
 		sm.ipTrustStore,
 		sm.alertStore,
 		sm.approvalStore,
+		sm.workflowExecutionStore,
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
 		sm.assurancePolicyStore,
@@ -1476,6 +1498,11 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		return nil, fmt.Errorf("cluster storage: failed to create approval store: %w", err)
 	}
 	appendIfCloser(&openedStores, approvalStore)
+	workflowExecutionStore, err := provider.CreateWorkflowExecutionStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create workflow execution store: %w", err)
+	}
+	appendIfCloser(&openedStores, workflowExecutionStore)
 	pendingRegStore, err := provider.CreatePendingRegistrationStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create pending registration store: %w", err)
@@ -1499,6 +1526,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		approvalStore:          approvalStore,
+		workflowExecutionStore: workflowExecutionStore,
 	}
 	if pendingRegStore != nil {
 		sm.SetPendingRegistrationStore(pendingRegStore)
@@ -1821,6 +1849,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		if bundle.Approval != nil {
 			sm.SetApprovalStore(bundle.Approval)
 		}
+		if bundle.WorkflowExecution != nil {
+			sm.SetWorkflowExecutionStore(bundle.WorkflowExecution)
+		}
 		constructed = true
 		return sm, nil
 	}
@@ -1892,6 +1923,17 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if approvalStore != nil {
 		sm.SetApprovalStore(approvalStore)
 		appendIfCloser(&openedStores, approvalStore)
+	}
+	// Workflow execution store (Issue #4675): business data, so it comes from the
+	// SQLite provider. The bundle path above takes bundle.WorkflowExecution from the
+	// shared handle; this fallback opens its own.
+	workflowExecutionStore, err := sqProvider.CreateWorkflowExecutionStore(sqliteCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create workflow execution store (sqlite): %w", err)
+	}
+	if workflowExecutionStore != nil {
+		sm.SetWorkflowExecutionStore(workflowExecutionStore)
+		appendIfCloser(&openedStores, workflowExecutionStore)
 	}
 	// Wire lease store if the SQLite provider implements LeaseStoreCreator (ADR-031
 	// Decision 5). The bundle path above takes bundle.Lease from the shared handle;

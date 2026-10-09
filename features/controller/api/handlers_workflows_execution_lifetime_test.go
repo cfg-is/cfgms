@@ -52,7 +52,7 @@ func TestWorkflowExecute_OutlivesRequest(t *testing.T) {
 
 	var status workflow.ExecutionStatus
 	require.Eventually(t, func() bool {
-		execution, err := h.engine.GetExecution(execID)
+		execution, err := h.engine.GetExecution(context.Background(), "tenant-a", execID)
 		require.NoError(t, err)
 		status = execution.GetStatus()
 		return status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled

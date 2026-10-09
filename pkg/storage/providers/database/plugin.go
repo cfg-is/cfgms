@@ -555,6 +555,20 @@ func (p *DatabaseProvider) CreateApprovalStore(config map[string]interface{}) (b
 	return store, nil
 }
 
+// CreateWorkflowExecutionStore creates a PostgreSQL-backed WorkflowExecutionStore
+// shared by every controller node (Issue #4675).
+func (p *DatabaseProvider) CreateWorkflowExecutionStore(config map[string]interface{}) (business.WorkflowExecutionStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseWorkflowExecutionStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database workflow execution store: %w", err)
+	}
+	return store, nil
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get the provider's shared connection pool
 	db, err := p.sharedPool(config)

@@ -71,7 +71,7 @@ func TestHTTPStep_TemplateRendering(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus(), "workflow must complete successfully")
 
@@ -116,7 +116,7 @@ func TestHTTPStep_TemplateRendering_UndefinedVar(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, finalExec.GetStatus(), "workflow must fail on undefined variable")
 }
@@ -156,7 +156,7 @@ func TestHTTPStep_JSONResponseBinding(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus())
 
@@ -231,7 +231,7 @@ func TestHTTPStep_JSONResponse_DownstreamTemplate(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus(), "workflow must complete: %s", finalExec.GetError())
 
@@ -291,7 +291,7 @@ func TestWhileCondition_TemplateSupport(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	// Loop should have evaluated the condition (which is false immediately) and completed.
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus(), "workflow must complete: %s", finalExec.GetError())
@@ -340,7 +340,7 @@ func TestWhileCondition_TemplateSupport_UndefinedVar(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, finalExec.GetStatus(),
 		"workflow must fail when while condition expression references an undefined variable")
@@ -678,7 +678,7 @@ func TestAPIStep_TemplateRendering(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus(), "workflow must complete: %s", finalExec.GetError())
 
@@ -743,7 +743,7 @@ func TestWebhookStep_TemplateRendering(t *testing.T) {
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
-	finalExec, err := engine.GetExecution(execution.ID)
+	finalExec, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus(), "workflow must complete: %s", finalExec.GetError())
 

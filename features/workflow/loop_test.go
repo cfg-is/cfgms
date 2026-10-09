@@ -124,7 +124,7 @@ func TestWorkflowForLoop(t *testing.T) {
 				case <-timeout:
 					t.Fatal("Test timed out waiting for workflow completion")
 				default:
-					execution, _ = engine.GetExecution(execution.ID)
+					execution, _ = engine.GetExecution(context.Background(), "", execution.ID)
 					if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 						completed = true
 					} else {
@@ -200,7 +200,7 @@ func TestWorkflowWhileLoop(t *testing.T) {
 			case <-timeout:
 				t.Fatal("Test timed out waiting for workflow completion")
 			default:
-				execution, _ = engine.GetExecution(execution.ID)
+				execution, _ = engine.GetExecution(context.Background(), "", execution.ID)
 				if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 					completed = true
 				} else {
@@ -319,7 +319,7 @@ func TestWorkflowForeachLoop(t *testing.T) {
 				case <-timeout:
 					t.Fatal("Test timed out waiting for workflow completion")
 				default:
-					execution, _ = engine.GetExecution(execution.ID)
+					execution, _ = engine.GetExecution(context.Background(), "", execution.ID)
 					if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 						completed = true
 					} else {
@@ -495,7 +495,7 @@ func TestNestedLoops(t *testing.T) {
 		case <-timeout:
 			t.Fatal("Test timed out waiting for workflow completion")
 		default:
-			execution, _ = engine.GetExecution(execution.ID)
+			execution, _ = engine.GetExecution(context.Background(), "", execution.ID)
 			if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 				completed = true
 			} else {

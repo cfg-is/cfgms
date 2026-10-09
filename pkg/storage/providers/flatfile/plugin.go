@@ -302,6 +302,21 @@ func (p *FlatFileProvider) CreateApprovalStore(config map[string]interface{}) (b
 	return store, nil
 }
 
+// CreateWorkflowExecutionStore creates a flat-file-backed WorkflowExecutionStore
+// (Issue #4675). Config map must contain "root" (string): the root directory.
+// Executions are stored one file each under <root>/workflow_executions/<tenant>/.
+func (p *FlatFileProvider) CreateWorkflowExecutionStore(config map[string]interface{}) (business.WorkflowExecutionStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileWorkflowExecutionStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create workflow execution store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateNonceStore creates a flat-file-backed NonceStore (Issue #3755, ADR-031
 // amendment to ADR-011). Implements interfaces.NonceStoreCreator.
 // Config map must contain "root" (string): the root directory.

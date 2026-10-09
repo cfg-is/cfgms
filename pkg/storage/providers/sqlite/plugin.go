@@ -526,6 +526,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		Case:                &SQLiteCaseStore{db: db},
 		Lease:               &SQLiteLeaseStore{db: db},
 		Approval:            &SQLiteApprovalStore{db: db},
+		WorkflowExecution:   &SQLiteWorkflowExecutionStore{db: db},
 	}, nil
 }
 
@@ -566,6 +567,16 @@ func (p *SQLiteProvider) CreateApprovalStore(config map[string]interface{}) (bus
 		return nil, err
 	}
 	return &SQLiteApprovalStore{db: db}, nil
+}
+
+// CreateWorkflowExecutionStore returns a SQLite-backed WorkflowExecutionStore
+// (Issue #4675).
+func (p *SQLiteProvider) CreateWorkflowExecutionStore(config map[string]interface{}) (business.WorkflowExecutionStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteWorkflowExecutionStore{db: db}, nil
 }
 
 // CreateLeaseStore returns a SQLite-backed LeaseStore — the fenced singleton-claim

@@ -141,7 +141,7 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 	// Wait for execution to complete
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
@@ -209,7 +209,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 	// Wait for execution to complete
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
@@ -273,7 +273,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 	// Wait for execution to complete
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
@@ -315,7 +315,7 @@ func TestEngine_ExecuteDelayStep(t *testing.T) {
 	// Wait for execution to complete
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
@@ -425,7 +425,7 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	// Wait for execution to complete
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
-	finalExecution, err := engine.GetExecution(execution.ID)
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 

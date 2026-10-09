@@ -421,6 +421,10 @@ type WorkflowExecution struct {
 	// mutex protects concurrent access to Variables, StepResults, and ExecutionTrace
 	mutex sync.RWMutex `json:"-"`
 
+	// persistMu serializes snapshot-and-write to the durable execution store so an
+	// older snapshot cannot land after a newer one.
+	persistMu sync.Mutex `json:"-"`
+
 	// Done is closed when executeWorkflowAsync fully completes (including all logging).
 	// Tests wait on this channel instead of polling status to avoid race conditions
 	// where goroutines are still writing logs after status reaches a terminal state.
@@ -673,10 +677,10 @@ type WorkflowEngine interface {
 	ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error)
 
 	// GetExecution returns the status of a workflow execution
-	GetExecution(executionID string) (*WorkflowExecution, error)
+	GetExecution(ctx context.Context, tenantID, executionID string) (*WorkflowExecution, error)
 
 	// ListExecutions returns all workflow executions
-	ListExecutions() ([]*WorkflowExecution, error)
+	ListExecutions(ctx context.Context, tenantID string) ([]*WorkflowExecution, error)
 
 	// CancelExecution cancels a running workflow execution
 	CancelExecution(executionID string) error
