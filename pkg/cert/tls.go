@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -245,4 +246,54 @@ func (m *Manager) CreateOnDemandClientTLSConfig(caCertPEM []byte, minVersion uin
 		tlsConfig.RootCAs = pool
 	}
 	return tlsConfig, nil
+}
+
+// CreatePublicClientTLSConfig creates a client TLS config for connecting to a
+// publicly hosted server (e.g. a mail relay) that is authenticated by the system
+// trust store rather than the CFGMS CA. serverName is required and is verified
+// against the server certificate; certificate verification can never be
+// disabled through this helper.
+//
+// When extraRootsPEM is non-empty its certificates are added on top of the
+// system roots (falling back to an empty pool only when the platform exposes no
+// system pool), so an operator can trust a private relay CA without losing
+// public trust. extraRootsPEM that contains no parseable certificate is an error.
+func CreatePublicClientTLSConfig(serverName string, extraRootsPEM []byte, minVersion uint16) (*tls.Config, error) {
+	if serverName == "" {
+		return nil, fmt.Errorf("server name is required")
+	}
+	if minVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("minimum TLS version must be 1.2 or higher, got 0x%04x", minVersion)
+	}
+	cfg := &tls.Config{
+		ServerName: serverName,
+		MinVersion: minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above
+	}
+	if len(extraRootsPEM) > 0 {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(extraRootsPEM) {
+			return nil, fmt.Errorf("failed to parse CA certificate PEM")
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
+}
+
+// IsVerificationError reports whether err (or any error it wraps) is a server
+// certificate verification failure: unknown authority, hostname mismatch, or an
+// otherwise invalid certificate.
+func IsVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var (
+		ua  x509.UnknownAuthorityError
+		hn  x509.HostnameError
+		inv x509.CertificateInvalidError
+		tv  *tls.CertificateVerificationError
+	)
+	return errors.As(err, &ua) || errors.As(err, &hn) || errors.As(err, &inv) || errors.As(err, &tv)
 }

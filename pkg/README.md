@@ -40,7 +40,7 @@ pkg/{name}/             → Direct provider (single implementation)
 - Support multiple backends (git, database, timescale, etc.)
 - Use the auto-registration pattern (each provider registers itself with the interface registry in its `init()`; business logic selects a backend by name)
 - Business logic imports `pkg/{name}/interfaces` ONLY
-- Examples: `storage`, `logging`, `secrets`, `directory`, `controlplane`, `dataplane`
+- Examples: `storage`, `logging`, `secrets`, `directory`, `controlplane`, `dataplane`, `notification`
 
 **Direct Providers** (no `interfaces/` subdirectory):
 - Single implementation

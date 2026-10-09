@@ -426,6 +426,7 @@ Consult these before implementing steward or controller behavior changes:
 | `pkg/storage` | Data persistence (git, database) |
 | `pkg/logging` | Structured logging (file, timescale) |
 | `pkg/secrets` | Secret storage with encryption (SOPS) |
+| `pkg/notification` | Outbound notifications (SMTP, TLS mandatory) |
 | `pkg/directory` | Directory services (M365, AD) |
 | `pkg/controlplane` | Control plane communication (gRPC) |
 | `pkg/dataplane` | Data plane communication (gRPC) |
