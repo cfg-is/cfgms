@@ -165,7 +165,7 @@ Examples:
 }
 
 func init() {
-	registrationCmd.PersistentFlags().StringVar(&registrationAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	registrationCmd.PersistentFlags().StringVar(&registrationAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	registrationCmd.PersistentFlags().StringVar(&registrationTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	registrationCmd.PersistentFlags().BoolVar(&registrationTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	registrationCmd.PersistentFlags().StringVar(&registrationServerName, "server-name", "", "Override TLS server name for certificate verification")

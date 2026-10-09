@@ -923,7 +923,7 @@ func TestAccountCreateUsernameFlagReachesHandler(t *testing.T) {
 		"account", "create",
 		"--username", "flag-wired-user",
 		"--tenant-id", "acme-corp",
-		"--api-url", srv.URL)
+		"--url", srv.URL)
 	require.NoError(t, err, "cfg account create --username must parse and run")
 	assert.Equal(t, "flag-wired-user", accountUsername, "--username must bind to accountUsername")
 	assert.Contains(t, out, "flag-wired-user")
@@ -934,7 +934,7 @@ func TestAccountCreateWithoutUsernameFlagIsRejected(t *testing.T) {
 	srv, restore := setupAccountTest(t, accountServerConfig{})
 	defer restore()
 
-	_, err := executeAccountCommand(t, "", "account", "create", "--api-url", srv.URL)
+	_, err := executeAccountCommand(t, "", "account", "create", "--url", srv.URL)
 	require.Error(t, err, "cfg account create must fail when --username is omitted")
 	assert.Contains(t, err.Error(), "username")
 }
@@ -949,7 +949,7 @@ func TestAccountRotateCertFlagsReachHandler(t *testing.T) {
 		"--new-serial", "newserial789",
 		"--fingerprint", "aabbccdd",
 		"--force",
-		"--api-url", srv.URL)
+		"--url", srv.URL)
 	require.NoError(t, err)
 	assert.Contains(t, out, "newserial789")
 
@@ -972,7 +972,7 @@ func TestAccountRotateCertPromptsWithoutForce(t *testing.T) {
 	out, err := executeAccountCommand(t, "n\n",
 		"account", "rotate-cert", "alice", "oldserial123",
 		"--new-serial", "newserial789",
-		"--api-url", srv.URL)
+		"--url", srv.URL)
 	require.Error(t, err, "rotate-cert must prompt when --force is omitted")
 	assert.Contains(t, err.Error(), "aborted")
 	assert.Contains(t, out, "irreversible")

@@ -75,7 +75,7 @@ Examples:
 }
 
 func init() {
-	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialRequestSigningCertCmd.Flags().BoolVar(&credentialRequestSigningCertTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertServerName, "server-name", "", "Override TLS server name for certificate verification")
 	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertKeyOut, "key-out", "", "path for the cleartext private key PEM export; requires --export-plaintext-key (default: <user config dir>/cfgms/signing-key.pem)")

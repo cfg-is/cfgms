@@ -422,7 +422,7 @@ subcommand accepts a one-shot `--bundle` flag that bypasses the session entirely
 cfg config list --bundle /etc/cfgms/admin.bundle.yaml
 
 # Equivalently, via environment variable (e.g. in CI)
-CFGMS_ADMIN_BUNDLE=/etc/cfgms/admin.bundle.yaml cfg config list --api-url https://controller.acme-corp.example:9443
+CFGMS_ADMIN_BUNDLE=/etc/cfgms/admin.bundle.yaml cfg config list --url https://controller.acme-corp.example:9443
 ```
 
 `--bundle` / `CFGMS_ADMIN_BUNDLE` take precedence over any stored session token.

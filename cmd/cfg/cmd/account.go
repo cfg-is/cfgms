@@ -210,7 +210,7 @@ Examples:
 }
 
 func init() {
-	accountCmd.PersistentFlags().StringVar(&accountAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	accountCmd.PersistentFlags().StringVar(&accountAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 
 	// create flags
 	accountCreateCmd.Flags().StringVar(&accountUsername, "username", "", "Account username (required)")

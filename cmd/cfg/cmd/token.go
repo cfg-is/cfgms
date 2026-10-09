@@ -167,7 +167,7 @@ Examples:
 
 func init() {
 	// Global token command flags (for API connection)
-	tokenCmd.PersistentFlags().StringVar(&tokenAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	tokenCmd.PersistentFlags().StringVar(&tokenAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	tokenCmd.PersistentFlags().StringVar(&tokenTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	tokenCmd.PersistentFlags().BoolVar(&tokenTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	tokenCmd.PersistentFlags().StringVar(&tokenServerName, "server-name", "", "Override TLS server name for certificate verification")

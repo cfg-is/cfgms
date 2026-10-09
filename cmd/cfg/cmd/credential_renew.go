@@ -77,7 +77,7 @@ Examples:
 }
 
 func init() {
-	credentialRenewCmd.Flags().StringVar(&credentialRenewAPIURL, "api-url", "", "Controller REST API URL override (default: the bundle's stored controller_url)")
+	credentialRenewCmd.Flags().StringVar(&credentialRenewAPIURL, "url", "", "Controller REST API URL override (default: the bundle's stored controller_url)")
 	credentialRenewCmd.Flags().BoolVar(&credentialRenewTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	credentialRenewCmd.Flags().StringVar(&credentialRenewServerName, "server-name", "", "Override TLS server name for certificate verification")
 	credentialRenewCmd.Flags().BoolVar(&credentialRenewUnattended, "unattended", false,

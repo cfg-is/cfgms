@@ -151,7 +151,7 @@ Examples:
 func init() {
 	credentialEnrolmentTokenMintCmd.Flags().StringVar(&credentialEnrolmentTokenMintTenantID, "tenant-id", "", "Tenant to mint the token for (required)")
 
-	credentialEnrolmentTokenCmd.PersistentFlags().StringVar(&credentialEnrolmentTokenAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	credentialEnrolmentTokenCmd.PersistentFlags().StringVar(&credentialEnrolmentTokenAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialEnrolmentTokenCmd.PersistentFlags().BoolVar(&credentialEnrolmentTokenTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	credentialEnrolmentTokenCmd.PersistentFlags().StringVar(&credentialEnrolmentTokenServerName, "server-name", "", "Override TLS server name for certificate verification")
 

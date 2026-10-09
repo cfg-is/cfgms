@@ -99,7 +99,7 @@ Examples:
 func init() {
 	installerUploadCmd.Flags().StringVar(&installerPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
 	installerUploadCmd.Flags().StringVar(&installerArch, "arch", "", "Target architecture: amd64, arm64 (required)")
-	installerUploadCmd.Flags().StringVar(&installerAPIURL, "api-url", "", "Controller API URL (env: CFGMS_API_URL)")
+	installerUploadCmd.Flags().StringVar(&installerAPIURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
 	installerUploadCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerUploadCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	installerUploadCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -108,7 +108,7 @@ func init() {
 
 	installerDownloadURLCmd.Flags().StringVar(&installerPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
 	installerDownloadURLCmd.Flags().StringVar(&installerArch, "arch", "", "Target architecture: amd64, arm64 (required)")
-	installerDownloadURLCmd.Flags().StringVar(&installerAPIURL, "api-url", "", "Controller API URL (env: CFGMS_API_URL)")
+	installerDownloadURLCmd.Flags().StringVar(&installerAPIURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
 	_ = installerDownloadURLCmd.MarkFlagRequired("platform")
 	_ = installerDownloadURLCmd.MarkFlagRequired("arch")
 
@@ -119,7 +119,7 @@ func init() {
 	installerPublishCmd.Flags().StringVar(&publishBinary, "binary", "", "Path to the binary file to publish (required)")
 	installerPublishCmd.Flags().StringVar(&publishSignature, "signature", "", "Path to the Ed25519 signature file (required)")
 	installerPublishCmd.Flags().BoolVar(&publishForce, "force", false, "Overwrite an existing binary with the same version/platform/arch")
-	installerPublishCmd.Flags().StringVar(&installerAPIURL, "api-url", "", "Controller API URL (env: CFGMS_API_URL)")
+	installerPublishCmd.Flags().StringVar(&installerAPIURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
 	installerPublishCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerPublishCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	installerPublishCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")

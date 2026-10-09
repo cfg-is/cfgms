@@ -135,7 +135,7 @@ func resolveBundleClient(apiURL string, tlsInsecure bool, serverName string) (*A
 // Falls through to bundle auth unconditionally when:
 //   - bundlePath is set (--bundle flag)
 //   - noBundle is set (--no-bundle flag)
-//   - apiURL is non-empty (explicit --api-url flag or CFGMS_API_URL env var)
+//   - apiURL is non-empty (explicit --url flag or CFGMS_API_URL env var)
 //   - no session token is stored
 //   - the stored token has passed its absolute expiry
 //   - the OS secret store is unavailable (Available()==false)

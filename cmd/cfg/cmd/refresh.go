@@ -148,7 +148,7 @@ Examples:
 
 func init() {
 	// Persistent flags available on all refresh subcommands.
-	refreshCmd.PersistentFlags().StringVar(&refreshAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	refreshCmd.PersistentFlags().StringVar(&refreshAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	refreshCmd.PersistentFlags().StringVar(&refreshTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	refreshCmd.PersistentFlags().BoolVar(&refreshTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	refreshCmd.PersistentFlags().StringVar(&refreshServerName, "server-name", "", "Override TLS server name for certificate verification")

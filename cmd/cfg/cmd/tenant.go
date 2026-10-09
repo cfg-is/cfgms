@@ -98,7 +98,7 @@ Examples:
 }
 
 func init() {
-	tenantCmd.PersistentFlags().StringVar(&tenantAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	tenantCmd.PersistentFlags().StringVar(&tenantAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	tenantCmd.PersistentFlags().BoolVar(&tenantTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	tenantCmd.PersistentFlags().StringVar(&tenantServerName, "server-name", "", "Override TLS server name for certificate verification")
 

@@ -109,7 +109,7 @@ Examples:
 }
 
 func init() {
-	webAuthnCmd.PersistentFlags().StringVar(&webAuthnAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	webAuthnCmd.PersistentFlags().StringVar(&webAuthnAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	webAuthnCmd.PersistentFlags().StringVar(&webAuthnUsername, "username", "", "Web account username")
 
 	webAuthnRegisterCmd.Flags().StringVar(&webAuthnLabel, "label", "", "Human-readable label for the new credential")

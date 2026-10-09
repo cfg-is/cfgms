@@ -2,7 +2,7 @@
 
 Inspect tenants from the `cfg` CLI. `cfg tenant create` is covered in the command's `--help`; this page covers reading tenants and tenant crossings.
 
-Client resolution is the same for every `cfg tenant` verb: an active session or admin bundle, `--api-url` (or `CFGMS_API_URL`), and `--tls-insecure` for development only.
+Client resolution is the same for every `cfg tenant` verb: an active session or admin bundle, `--url` (or `CFGMS_API_URL`), and `--tls-insecure` for development only.
 
 ## List tenants
 
