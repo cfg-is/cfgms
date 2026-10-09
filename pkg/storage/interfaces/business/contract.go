@@ -201,19 +201,31 @@ func TenantStoreTopLevelContract(t *testing.T, newHandle func() TenantStore) {
 	setup := newHandle()
 	existing, err := setup.ListTenants(ctx, nil)
 	require.NoError(t, err)
+	children := map[string][]string{}
 	for _, tn := range existing {
-		if tn.ParentID == "" {
-			require.NoError(t, setup.DeleteTenant(ctx, tn.ID))
+		children[tn.ParentID] = append(children[tn.ParentID], tn.ID)
+	}
+	// Delete each parentless tenant's subtree children-first: the parent_id
+	// foreign key refuses to remove a tenant that still has children.
+	var deleteSubtree func(id string)
+	deleteSubtree = func(id string) {
+		for _, child := range children[id] {
+			deleteSubtree(child)
 		}
+		require.NoError(t, setup.DeleteTenant(ctx, id))
+	}
+	for _, id := range children[""] {
+		deleteSubtree(id)
 	}
 
 	// The backing database may be shared with other tests; leave nothing behind.
 	t.Cleanup(func() {
-		for i := 0; i < 8; i++ {
-			_ = setup.DeleteTenant(ctx, fmt.Sprintf("top-%d", i))
-		}
+		// Children first, for the same foreign-key reason as above.
 		for _, id := range []string{"top-under", "top-late", "top-child"} {
 			_ = setup.DeleteTenant(ctx, id)
+		}
+		for i := 0; i < 8; i++ {
+			_ = setup.DeleteTenant(ctx, fmt.Sprintf("top-%d", i))
 		}
 	})
 
