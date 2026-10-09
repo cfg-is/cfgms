@@ -550,17 +550,18 @@ func New(
 		// Issue #1709: installer key uses a separate block (not the EAST/CENTRAL/WEST loop)
 		// because it requires different permissions and must upload under the root
 		// tenant, whose artifacts the public download endpoint serves. The root tenant
-		// is resolved by position (Issue #4667), as the download resolves it; the
-		// literal "root" is kept only when no root tenant resolves yet.
+		// is resolved by position (Issue #4667), as the download resolves it. When
+		// none resolves the key is not seeded (Issue #4673).
 		if keyVal := os.Getenv("CFGMS_API_KEY_INSTALLER"); keyVal != "" {
 			installerTenant := server.rootTenantID(context.Background())
 			if installerTenant == "" {
-				installerTenant = legacyInstallerTenant
-			}
-			server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-				Key:         keyVal,
-				Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
-				TenantID:    installerTenant,
+				server.logger.Warn("CFGMS_API_KEY_INSTALLER not seeded: no root tenant resolved")
+			} else {
+				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+					Key:         keyVal,
+					Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
+					TenantID:    installerTenant,
+				}
 			}
 		}
 
