@@ -247,7 +247,10 @@ func TestDatabaseLeaseStore_ConcurrentAcquire_AfterExpiryTokensStrictlyIncrease(
 
 	const rounds = 5
 	const gorosPerRound = 8
-	ttl := 30 * time.Millisecond
+	// The in-round TTL is long enough that no lease can expire while a round's
+	// goroutines are still running, so "one winner per round" does not depend
+	// on scheduling. Expiry between rounds is driven explicitly via Release.
+	ttl := 2 * time.Second
 
 	var issuedTokens []uint64
 	for r := 0; r < rounds; r++ {
@@ -266,16 +269,19 @@ func TestDatabaseLeaseStore_ConcurrentAcquire_AfterExpiryTokensStrictlyIncrease(
 		wg.Wait()
 
 		var roundWinners []uint64
+		var winnerHolder string
 		for i := 0; i < gorosPerRound; i++ {
 			require.NoError(t, errs[i])
 			if results[i].Acquired {
 				roundWinners = append(roundWinners, results[i].Token)
+				winnerHolder = results[i].HolderID
 			}
 		}
-		require.Len(t, roundWinners, 1, "exactly one winner per round")
+		require.Len(t, roundWinners, 1, "exactly one winner per lease epoch")
 		issuedTokens = append(issuedTokens, roundWinners[0])
 
-		time.Sleep(ttl + 20*time.Millisecond) // let the round's winner expire before the next round
+		// Expire the round's winner explicitly so the next round starts a new epoch.
+		require.NoError(t, store.Release(ctx, "cyclic-singleton", winnerHolder, roundWinners[0]))
 	}
 
 	for i := 1; i < len(issuedTokens); i++ {
