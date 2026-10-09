@@ -882,10 +882,23 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 			// Stop the winner so its renewal loop stops (simulates a crashed leader), then
 			// poll both managers' HasLeadership() until the loser takes over. At every
 			// sampled instant at most one may report true.
+			stopStart := time.Now()
 			require.NoError(t, winner.Stop(context.Background()))
+			stopReturned := time.Now()
 
-			deadline := time.Now().Add(3 * time.Second)
+			// Stop does not release the lease, so the loser can only acquire once the
+			// winner's last renewal has expired (at most one TTL after it) and the loser's
+			// own acquisition loop next ticks (at most one renewal interval later). The
+			// deadline is derived from those configured timings, plus a scheduling margin
+			// for a slow runner (native Windows CI: coarse timers, slow file-backed lease
+			// store I/O) that is deliberately large relative to the design bound — this
+			// is a liveness check; the safety assertion below is what must never slip.
+			const takeoverSchedulingMargin = 2500 * time.Millisecond
+			takeoverBound := loser.leaseManager.LeaseTTL() + loser.leaseRenewalInterval + takeoverSchedulingMargin
+
+			deadline := stopReturned.Add(takeoverBound)
 			var loserEverAcquired bool
+			var loserAcquiredAt time.Time
 			for time.Now().Before(deadline) {
 				winnerHas := winner.HasLeadership()
 				loserHas := loser.HasLeadership()
@@ -893,11 +906,21 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 					"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
 				if loserHas {
 					loserEverAcquired = true
+					loserAcquiredAt = time.Now()
 					break
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
-			assert.True(t, loserEverAcquired, "the surviving manager must eventually take over the lease")
+			if loserEverAcquired {
+				t.Logf("takeover: stop=%s stopDuration=%s loserAcquiredAfterStop=%s bound=%s",
+					stopStart.Format("15:04:05.000"), stopReturned.Sub(stopStart),
+					loserAcquiredAt.Sub(stopReturned), takeoverBound)
+			} else {
+				t.Logf("no takeover: stop=%s stopDuration=%s bound=%s waited=%s",
+					stopStart.Format("15:04:05.000"), stopReturned.Sub(stopStart),
+					takeoverBound, time.Since(stopReturned))
+			}
+			assert.True(t, loserEverAcquired, "the surviving manager must take over the lease within lease TTL + renewal interval + scheduling margin")
 
 			require.NoError(t, loser.Stop(context.Background()))
 		})
