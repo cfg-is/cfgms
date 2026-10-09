@@ -26,9 +26,8 @@ import (
 )
 
 // testTenantID is the tenant every request in this file is authenticated as. This
-// test router carries no auth middleware — TriggerAPIMiddleware is defined but
-// intentionally never wired in (Issue #4326) — so withTestTenant injects the tenant
-// directly onto the request context to simulate what production middleware sets.
+// test router carries no auth middleware (Issue #4326), so withTestTenant injects the
+// tenant directly onto the request context to simulate what production middleware sets.
 const testTenantID = "test-tenant"
 
 // withTestTenant returns req with ctxkeys.TenantID set to testTenantID.

@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -110,7 +112,7 @@ func TestNewConfigurationServiceV2(t *testing.T) {
 }
 
 func TestSetConfiguration(t *testing.T) {
-	ctx := ctxkeys.WithSystem(context.Background())
+	ctx := tenantCtx("default")
 	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
@@ -147,7 +149,7 @@ func TestSetConfiguration(t *testing.T) {
 }
 
 func TestGetConfiguration(t *testing.T) {
-	ctx := ctxkeys.WithSystem(context.Background())
+	ctx := tenantCtx("default")
 	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
@@ -254,7 +256,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
+		resp, err := svc.ValidateConfig(tenantCtx("default"), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "valid")
@@ -267,7 +269,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
+		resp, err := svc.ValidateConfig(tenantCtx("default"), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "Invalid configuration format")
@@ -299,7 +301,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
+		resp, err := svc.ValidateConfig(tenantCtx("default"), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "critical errors")
@@ -425,7 +427,7 @@ func TestSetConfiguration_FanoutCallback_IsTenantScoped(t *testing.T) {
 }
 
 func TestConfigurationServiceV2Concurrency(t *testing.T) {
-	ctx := ctxkeys.WithSystem(context.Background())
+	ctx := tenantCtx("default")
 	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
@@ -758,4 +760,46 @@ func TestNewConfigurationServiceV2_NoControllerSvc_NoCascade(t *testing.T) {
 		assert.NotContains(t, r.Name, "cluster",
 			"no cluster resources expected when ControllerService is nil")
 	}
+}
+
+// tenantCtx returns a context carrying tenantID as the authenticated tenant.
+func tenantCtx(tenantID string) context.Context {
+	return context.WithValue(ctxkeys.WithSystem(context.Background()), ctxkeys.TenantID, tenantID)
+}
+
+// TestValidateConfig_TenantResolution verifies ValidateConfig validates under the
+// caller's tenant and refuses a request with no tenant instead of substituting one.
+func TestValidateConfig_TenantResolution(t *testing.T) {
+	svc := createTestServiceV2(t)
+	configData, err := json.Marshal(createTestStewardConfig("test-steward"))
+	require.NoError(t, err)
+	req := &controller.ConfigValidationRequest{Config: configData, Version: "v1"}
+
+	t.Run("no tenant is refused", func(t *testing.T) {
+		resp, err := svc.ValidateConfig(context.Background(), req)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
+	})
+
+	t.Run("system-only context is refused", func(t *testing.T) {
+		_, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
+	})
+
+	t.Run("validates under the context tenant", func(t *testing.T) {
+		resp, err := svc.ValidateConfig(tenantCtx("tenant-x"), req)
+		require.NoError(t, err)
+		assert.Equal(t, "tenant-x", resp.Metadata["tenant_id"])
+	})
+}
+
+// TestGetConfiguration_NoTenantNoSteward verifies GetConfiguration refuses rather
+// than resolving a substituted tenant when no tenant can be determined.
+func TestGetConfiguration_NoTenantNoSteward(t *testing.T) {
+	svc := createTestServiceV2(t)
+	resp, err := svc.GetConfiguration(context.Background(), &controller.ConfigRequest{StewardId: "ghost"})
+	require.NoError(t, err)
+	assert.Equal(t, common.Status_NOT_FOUND, resp.Status.Code)
 }

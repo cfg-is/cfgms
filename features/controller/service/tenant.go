@@ -8,10 +8,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
-// extractTenantID returns the tenant ID from ctx or "default" if absent.
-func extractTenantID(ctx context.Context) string {
-	if id, ok := ctx.Value(ctxkeys.TenantID).(string); ok && id != "" {
-		return id
+// extractTenantID returns the tenant ID carried by ctx and whether one was
+// present. It never substitutes a tenant: callers must refuse an operation
+// whose tenant cannot be resolved (ADR-025 Amendment 7).
+func extractTenantID(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(ctxkeys.TenantID).(string)
+	if !ok || id == "" {
+		return "", false
 	}
-	return "default"
+	return id, true
 }

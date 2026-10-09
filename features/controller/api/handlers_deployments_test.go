@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -118,11 +119,11 @@ func setupDeploymentServerWithPushStore(t *testing.T, wrap func(business.PushSto
 }
 
 // registerStewardForDeploymentTest registers and activates a steward for use
-// in deployment handler tests. Stewards registered without tenant context default
-// to the "default" tenant (see ControllerService.extractTenantID).
+// in deployment handler tests. Registration requires a tenant in the
+// context; these helpers register under "default".
 func registerStewardForDeploymentTest(t *testing.T, svc *service.ControllerService, dnaID string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
 	resp, err := svc.AcceptRegistration(ctx, &ctrlproto.RegisterRequest{
 		Version:    "1.0.0",
 		InitialDna: &common.DNA{Id: dnaID},
@@ -177,7 +178,7 @@ func TestHandleGetConfigDeployments_CompletedPush(t *testing.T) {
 	server, pushStore := setupDeploymentServer(t)
 	ctx := context.Background()
 
-	// Stewards registered without context default to "default" tenant.
+	// Stewards are registered under the "default" tenant by the helper.
 	stewardID := registerStewardForDeploymentTest(t, server.controllerService, "deploy-dna-1")
 
 	now := time.Now().UTC()

@@ -1041,7 +1041,8 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.authorizeStewardScopeLenient(w, r, stewardID, "POST /api/v1/stewards/{id}/config/validate") {
+	tenantID, ok := s.authorizeStewardTenantLenient(w, r, stewardID, "POST /api/v1/stewards/{id}/config/validate")
+	if !ok {
 		return
 	}
 
@@ -1066,7 +1067,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	validationResp, err := s.configService.ValidateConfig(r.Context(), req)
+	validationResp, err := s.configService.ValidateConfig(context.WithValue(r.Context(), ctxkeys.TenantID, tenantID), req)
 	if err != nil {
 		s.logger.Error("Failed to validate configuration", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to validate configuration", "INTERNAL_ERROR")

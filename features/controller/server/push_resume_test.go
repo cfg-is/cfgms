@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/push"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -126,7 +127,7 @@ func makeRecordingPublisher(t *testing.T, cp *recordingControlPlane) *commands.P
 // Returns the controller-assigned steward ID.
 func registerResumeSteward(t *testing.T, srv *Server, dnaID string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
 	resp, err := srv.controllerService.AcceptRegistration(ctx, &ctrlproto.RegisterRequest{
 		Version:    "1.0.0",
 		InitialDna: &common.DNA{Id: dnaID},

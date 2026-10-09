@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -439,7 +441,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	// lives under the steward's own tenant, so look the steward up first and
 	// use its tenant for retrieval — not the ctx tenant, which the
 	// mTLS-authenticated data-plane sync path does not set. (Issue #1572)
-	tenantID := extractTenantID(ctx)
+	tenantID, _ := extractTenantID(ctx)
 
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
@@ -470,6 +472,17 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			}, nil
 		}
 		tenantID = stewardInfo.TenantID
+	}
+
+	// No substituted tenant: with neither a known steward nor a context tenant
+	// there is nothing to resolve the configuration under.
+	if tenantID == "" {
+		return &controller.ConfigResponse{
+			Status: &common.Status{
+				Code:    common.Status_NOT_FOUND,
+				Message: "Steward not found",
+			},
+		}, nil
 	}
 
 	// Resolve full tenant-cascade-merged effective config via InheritanceResolver.
@@ -791,6 +804,12 @@ func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, con
 func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *controller.ConfigValidationRequest) (*controller.ConfigValidationResponse, error) {
 	s.logger.Debug("Configuration validation request received", "version", logging.SanitizeLogValue(req.Version))
 
+	// No substituted tenant: validation runs under the caller's tenant or not at all.
+	tenantID, ok := extractTenantID(ctx)
+	if !ok {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "tenant context required for configuration validation")
+	}
+
 	// Parse configuration
 	var stewardConfig stewardtypes.StewardConfig
 	if err := json.Unmarshal(req.Config, &stewardConfig); err != nil {
@@ -811,8 +830,6 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 		}, nil
 	}
 
-	// Extract tenant and steward ID from context (simplified)
-	tenantID := extractTenantID(ctx)
 	stewardID := "validation" // For validation-only requests
 
 	// Use comprehensive validation framework
@@ -874,6 +891,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 			"validation_timestamp": time.Now().Format(time.RFC3339),
 			"total_issues":         fmt.Sprintf("%d", len(validationResult.Errors)+len(validationResult.Warnings)),
 			"storage_provider":     s.storageManager.GetProviderName(),
+			"tenant_id":            tenantID,
 		},
 	}, nil
 }
