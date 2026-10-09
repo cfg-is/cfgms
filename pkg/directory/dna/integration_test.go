@@ -827,8 +827,12 @@ func TestComprehensiveWorkflow(t *testing.T) {
 	err = monitoring.Start(ctx)
 	require.NoError(t, err)
 
-	// Phase 3: Allow initial monitoring
-	time.Sleep(300 * time.Millisecond)
+	// Phase 3: Wait for the monitoring loop to complete its first collection
+	// cycle. The counters are driven by background tickers, so wait on the
+	// observable state rather than a fixed sleep that races scheduler load.
+	require.Eventually(t, func() bool {
+		return monitoring.GetMetrics().TotalCollections > 0
+	}, 10*time.Second, 10*time.Millisecond, "monitoring loop never completed a DNA collection cycle")
 
 	// Phase 4: Introduce changes
 	modifiedUser := *user
@@ -846,8 +850,11 @@ func TestComprehensiveWorkflow(t *testing.T) {
 	provider.users["workflow_user"] = &modifiedUser
 	provider.mutex.Unlock()
 
-	// Allow drift detection
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the monitoring loop to run a drift check cycle after the change.
+	driftChecksBefore := monitoring.GetMetrics().TotalDriftChecks
+	require.Eventually(t, func() bool {
+		return monitoring.GetMetrics().TotalDriftChecks > driftChecksBefore
+	}, 10*time.Second, 10*time.Millisecond, "monitoring loop never ran a drift check cycle")
 
 	// Phase 5: Verify system detected changes
 	currentDNA, err := collector.CollectUserDNA(ctx, "workflow_user")
