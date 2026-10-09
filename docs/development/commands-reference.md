@@ -124,6 +124,16 @@ suites into four named groups (Issue #4301):
 | `claude-tooling` | `.claude/scripts/` and `.claude/skills/` pipeline-dispatch suites |
 | `devinfra` | `.devcontainer/` and `.github/scripts/resource-sampler.*` suites |
 
+**Host packages for the `devinfra` group.** `dnsmasq-allowlist_test.sh` and
+`init-firewall_test.sh` drive a real, unprivileged `dnsmasq` with `dig`, so the
+host needs `bind9-dnsutils` and `dnsmasq` (`sudo apt-get install bind9-dnsutils dnsmasq`).
+`dnsmasq` is resolved from `PATH` with a fallback to `/usr/sbin/dnsmasq`, so it
+need not be on a non-root user's `PATH`. When a tool is missing the suite prints
+`SKIP: <tool> not installed` and exits 77; `run_devcontainer_suites` logs that
+as a skip, not a pass and not a failure. When `CI` is set to any non-empty
+value a missing tool exits 1 instead, because CI installs both packages and
+their absence there is a broken runner.
+
 ```bash
 # Run every group (default — identical to omitting the variable)
 make test-scripts

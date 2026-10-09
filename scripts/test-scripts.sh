@@ -4708,6 +4708,14 @@ run_devcontainer_suites() {
         rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo "")
         out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
 
+        # Exit 77 is the suite's explicit skip signal ("SKIP: <tool> not
+        # installed"). Handled here, before pipeline_suite_result_kind, which
+        # would class it as a failure. Any other non-zero status still fails.
+        if [[ "$rc" == "77" ]]; then
+            log_skip "${base}: $(grep -m1 '^SKIP:' <<<"$out" || echo 'suite exited 77 (skip)')"
+            continue
+        fi
+
         case "$(pipeline_suite_result_kind "$rc")" in
             pass)
                 log_pass "${base}"
@@ -4787,6 +4795,50 @@ FIXTURE
     fi
 
     log_pass "run_devcontainer_suites: discovers and runs .devcontainer/*_test.sh fixtures, and reports explicitly when none match"
+}
+
+# Issue #4702: a suite that exits 77 after printing "SKIP: <tool> not
+# installed" is logged with log_skip and is not a failure; any other non-zero
+# status (including 76 and 78) still fails.
+test_devcontainer_suite_skip_status() {
+    log_test "Testing .devcontainer suite runner: exit 77 skips, other non-zero fails..."
+
+    local skip_dir fail_dir
+    skip_dir=$(mktemp -d)
+    fail_dir=$(mktemp -d)
+    trap 'rm -rf "$skip_dir" "$fail_dir"; trap - RETURN' RETURN
+
+    printf '#!/usr/bin/env bash\necho "SKIP: dig not installed"\nexit 77\n' > "$skip_dir/needs-tool_test.sh"
+    printf '#!/usr/bin/env bash\necho "boom"\nexit 78\n' > "$fail_dir/other-fails_test.sh"
+
+    local pass_before=$PASS_COUNT fail_before=$FAIL_COUNT
+    local skip_out fail_out fail_delta
+
+    skip_out=$(run_devcontainer_suites "$skip_dir" 2>&1)
+    PASS_COUNT=$pass_before
+    FAIL_COUNT=$fail_before
+
+    fail_out=$(run_devcontainer_suites "$fail_dir" 2>&1)
+    PASS_COUNT=$pass_before
+    FAIL_COUNT=$fail_before
+    # $(...) runs in a subshell, so counters do not propagate; judge by output.
+    fail_delta=0
+    if grep -q "other-fails_test.sh: exit 78" <<<"$fail_out"; then fail_delta=1; fi
+
+    if ! grep -q "SKIP: dig not installed" <<<"$skip_out"; then
+        log_fail "exit 77 with 'SKIP: dig not installed' was not logged as a skip: ${skip_out}"
+        return
+    fi
+    if grep -q "needs-tool_test.sh: exit" <<<"$skip_out"; then
+        log_fail "exit 77 was reported as a failure: ${skip_out}"
+        return
+    fi
+    if [[ "$fail_delta" -ne 1 ]]; then
+        log_fail "a suite exiting 78 was not reported as a failure: ${fail_out}"
+        return
+    fi
+
+    log_pass "run_devcontainer_suites: exit 77 is a skip, other non-zero statuses still fail"
 }
 
 # Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
@@ -5762,6 +5814,7 @@ DISPATCH_TABLE=(
     "test_pipeline_suite_result_fails_closed:core"
     "test_claude_pipeline_suites:claude-tooling"
     "test_devcontainer_suite_discovery:devinfra"
+    "test_devcontainer_suite_skip_status:devinfra"
     "test_devcontainer_suites:devinfra"
     "test_no_tracked_file_mutation:core"
 )
