@@ -107,14 +107,17 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 }
 
 // UpdateHeartbeat records a heartbeat, updating last_heartbeat_at and last_seen.
-func (s *SQLiteStewardStore) UpdateHeartbeat(ctx context.Context, stewardID string) error {
+// An empty version leaves the stored version unchanged.
+func (s *SQLiteStewardStore) UpdateHeartbeat(ctx context.Context, stewardID, version string) error {
 	now := formatTime(nowUTC())
 	var res sql.Result
 	err := retryOnBusy(ctx, func() error {
 		var e error
 		res, e = s.db.ExecContext(ctx, `
-			UPDATE stewards SET last_heartbeat_at = ?, last_seen = ? WHERE id = ?`,
-			now, now, stewardID,
+			UPDATE stewards SET last_heartbeat_at = ?, last_seen = ?,
+				version = CASE WHEN ? = '' THEN version ELSE ? END
+			WHERE id = ?`,
+			now, now, version, version, stewardID,
 		)
 		return e
 	})

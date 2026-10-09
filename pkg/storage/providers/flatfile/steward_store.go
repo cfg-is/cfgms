@@ -134,7 +134,8 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *busine
 }
 
 // UpdateHeartbeat records a heartbeat for the steward, updating last_heartbeat_at and last_seen.
-func (s *FlatFileStewardStore) UpdateHeartbeat(_ context.Context, stewardID string) error {
+// An empty version leaves the stored version unchanged.
+func (s *FlatFileStewardStore) UpdateHeartbeat(_ context.Context, stewardID, version string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -145,6 +146,9 @@ func (s *FlatFileStewardStore) UpdateHeartbeat(_ context.Context, stewardID stri
 	now := time.Now().UTC()
 	record.LastHeartbeatAt = now
 	record.LastSeen = now
+	if version != "" {
+		record.Version = version
+	}
 	return s.writeSteward(record)
 }
 

@@ -75,7 +75,7 @@ func TestSQLiteStewardStore_UpdateHeartbeat(t *testing.T) {
 	require.NoError(t, store.RegisterSteward(ctx, testStewardRec("s-hb")))
 
 	before := time.Now().Add(-time.Second)
-	require.NoError(t, store.UpdateHeartbeat(ctx, "s-hb"))
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-hb", ""))
 
 	got, err := store.GetSteward(ctx, "s-hb")
 	require.NoError(t, err)
@@ -83,9 +83,25 @@ func TestSQLiteStewardStore_UpdateHeartbeat(t *testing.T) {
 	assert.True(t, got.LastSeen.After(before), "LastSeen should be updated")
 }
 
+func TestSQLiteStewardStore_UpdateHeartbeat_Version(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRec("s-ver")))
+
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-ver", "v1.2.3"))
+	got, err := store.GetSteward(ctx, "s-ver")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got.Version)
+
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-ver", ""))
+	got, err = store.GetSteward(ctx, "s-ver")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got.Version, "empty version must leave the stored version unchanged")
+}
+
 func TestSQLiteStewardStore_UpdateHeartbeat_NotFound(t *testing.T) {
 	store := newTestStewardStore(t)
-	err := store.UpdateHeartbeat(context.Background(), "ghost")
+	err := store.UpdateHeartbeat(context.Background(), "ghost", "")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
@@ -177,7 +193,7 @@ func TestSQLiteStewardStore_RestartPersistence(t *testing.T) {
 	store1 := &SQLiteStewardStore{db: db1}
 
 	require.NoError(t, store1.RegisterSteward(ctx, testStewardRec("s-persist")))
-	require.NoError(t, store1.UpdateHeartbeat(ctx, "s-persist"))
+	require.NoError(t, store1.UpdateHeartbeat(ctx, "s-persist", ""))
 	require.NoError(t, store1.UpdateStewardStatus(ctx, "s-persist", business.StewardStatusActive))
 	require.NoError(t, store1.Close())
 

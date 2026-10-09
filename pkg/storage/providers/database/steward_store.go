@@ -135,8 +135,9 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 	return tx.Commit()
 }
 
-// UpdateHeartbeat updates last_heartbeat_at and last_seen to now.
-func (s *DatabaseStewardStore) UpdateHeartbeat(ctx context.Context, stewardID string) error {
+// UpdateHeartbeat updates last_heartbeat_at and last_seen to now. An empty
+// version leaves the stored version unchanged.
+func (s *DatabaseStewardStore) UpdateHeartbeat(ctx context.Context, stewardID, version string) error {
 	now := time.Now().UTC()
 
 	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
@@ -155,8 +156,10 @@ func (s *DatabaseStewardStore) UpdateHeartbeat(ctx context.Context, stewardID st
 	}
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE steward_records SET last_heartbeat_at = $2, last_seen = $2 WHERE id = $1`,
-		stewardID, now)
+		UPDATE steward_records SET last_heartbeat_at = $2, last_seen = $2,
+			version = CASE WHEN $3::text = '' THEN version ELSE $3::text END
+		WHERE id = $1`,
+		stewardID, now, version)
 	if err != nil {
 		return fmt.Errorf("database: failed to update heartbeat for %s: %w", stewardID, err)
 	}

@@ -87,7 +87,7 @@ func (t *HealthTracker) RegisterSteward(ctx context.Context, record *business.St
 // UpdateHeartbeat records a steward heartbeat, updating durable timestamps.
 // Also marks the steward active if it was previously registered.
 func (t *HealthTracker) UpdateHeartbeat(ctx context.Context, stewardID string) error {
-	if err := t.store.UpdateHeartbeat(ctx, stewardID); err != nil {
+	if err := t.store.UpdateHeartbeat(ctx, stewardID, ""); err != nil {
 		return err
 	}
 	// Promote registered → active on first heartbeat

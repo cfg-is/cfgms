@@ -1006,7 +1006,7 @@ steward:
 
 **Version tracking in DNA and heartbeats:**
 - `steward.version` is injected into every DNA delta before publish. The controller stores it as a DNA attribute and exposes it in the fleet list API (`GET /api/v1/stewards`).
-- Every heartbeat now carries a `Version` field, which `RecordHeartbeat` uses to keep the in-memory fleet registry current.
+- Every heartbeat now carries a `Version` field, which `RecordHeartbeat` uses to keep the in-memory fleet registry current. `RecordHeartbeat` also persists last-seen and version to the shared steward store at a rate-limited interval (at most once per 30 seconds per steward, or immediately when the version changes), so every controller node reports the same values for every steward, not only the node holding the session. Connection state, active sessions and live metrics stay node-local.
 
 **Fleet visibility:** the steward API list response includes `version` (from `steward.version` DNA attribute) alongside `id`, `status`, and `last_seen`. Operators can filter and audit version skew across the fleet without a separate inventory tool.
 

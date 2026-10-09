@@ -320,11 +320,27 @@ func TestDatabaseStewardStore_UpdateHeartbeat(t *testing.T) {
 	rec := makeSampleSteward("sw-hb", "tenant-sw-hb")
 	require.NoError(t, store.RegisterSteward(ctx, rec))
 
-	require.NoError(t, store.UpdateHeartbeat(ctx, "sw-hb"))
+	require.NoError(t, store.UpdateHeartbeat(ctx, "sw-hb", ""))
 
 	got, err := store.GetSteward(ctx, "sw-hb")
 	require.NoError(t, err)
 	assert.False(t, got.LastHeartbeatAt.IsZero(), "last_heartbeat_at must be set after heartbeat")
+}
+
+func TestDatabaseStewardStore_UpdateHeartbeat_Version(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, makeSampleSteward("sw-ver", "tenant-sw-ver")))
+
+	require.NoError(t, store.UpdateHeartbeat(ctx, "sw-ver", "v1.2.3"))
+	got, err := store.GetSteward(ctx, "sw-ver")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got.Version)
+
+	require.NoError(t, store.UpdateHeartbeat(ctx, "sw-ver", ""))
+	got, err = store.GetSteward(ctx, "sw-ver")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got.Version, "empty version must leave the stored version unchanged")
 }
 
 func TestDatabaseStewardStore_GetByDeviceID(t *testing.T) {

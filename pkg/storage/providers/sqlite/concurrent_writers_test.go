@@ -156,7 +156,7 @@ func TestSQLite_IdentityContinuity_BlueWriteGreenRead(t *testing.T) {
 	assert.Equal(t, rec.Hostname, got.Hostname)
 
 	// Step 3: a heartbeat update from green is visible on blue.
-	require.NoError(t, greenStore.UpdateHeartbeat(ctx, "steward-continuity-001"))
+	require.NoError(t, greenStore.UpdateHeartbeat(ctx, "steward-continuity-001", ""))
 	gotAfter, err := blueStore.GetSteward(ctx, "steward-continuity-001")
 	require.NoError(t, err)
 	assert.True(t, gotAfter.LastSeen.After(got.LastSeen) || gotAfter.LastSeen.Equal(got.LastSeen),
