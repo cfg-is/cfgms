@@ -58,7 +58,7 @@ type DNAInfo struct {
 	ConfigHash   string             `json:"config_hash,omitempty"`
 	Attributes   map[string]string  `json:"attributes,omitempty"`
 	Fragments    []*common.Fragment `json:"fragments,omitempty"` // ADR-017 fragments (cluster:* and host:* fragment-shaped state)
-	CollectedAt  time.Time          `json:"collected_at"`
+	CollectedAt  *time.Time         `json:"collected_at,omitempty"`
 }
 
 // ConfigurationInfo represents configuration information
@@ -292,13 +292,21 @@ func DNAFromProto(dna *common.DNA) *DNAInfo {
 
 	attrs := service.FlattenDNAFragments(dna.Fragments)
 
+	// A missing LastUpdated is reported as absent, never as the Unix epoch.
+	var collectedAt *time.Time
+	if dna.LastUpdated != nil {
+		if t := dna.LastUpdated.AsTime(); t.Unix() != 0 || t.Nanosecond() != 0 {
+			collectedAt = &t
+		}
+	}
+
 	return &DNAInfo{
 		Hostname:     attrs["hostname"],
 		OS:           attrs["os"],
 		Architecture: attrs["architecture"],
 		ConfigHash:   dna.ConfigHash,
 		Attributes:   attrs,
-		CollectedAt:  dna.LastUpdated.AsTime(),
+		CollectedAt:  collectedAt,
 	}
 }
 
