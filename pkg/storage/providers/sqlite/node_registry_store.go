@@ -32,14 +32,21 @@ func (s *SQLiteNodeRegistryStore) RegisterNode(ctx context.Context, self busines
 		return fmt.Errorf("sqlite: node id cannot be empty")
 	}
 
+	startedAt := ""
+	if !self.StartedAt.IsZero() {
+		startedAt = formatTime(self.StartedAt)
+	}
+
 	const query = `
-		INSERT INTO cfgms_node_registry (node_id, address, updated_at)
-		VALUES (?, ?, ?)
+		INSERT INTO cfgms_node_registry (node_id, address, version, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(node_id) DO UPDATE SET
 			address = excluded.address,
+			version = excluded.version,
+			started_at = excluded.started_at,
 			updated_at = excluded.updated_at
 	`
-	if _, err := s.db.ExecContext(ctx, query, self.ID, self.Address, formatTime(nowUTC())); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, self.ID, self.Address, self.Version, startedAt, formatTime(nowUTC())); err != nil {
 		return fmt.Errorf("sqlite: failed to register cluster node %q: %w", self.ID, err)
 	}
 	return nil
@@ -51,7 +58,7 @@ func (s *SQLiteNodeRegistryStore) RegisterNode(ctx context.Context, self busines
 // business.NodeRegistryStaleAfter is omitted exactly like a
 // never-registered node.
 func (s *SQLiteNodeRegistryStore) ListNodes(ctx context.Context) ([]business.NodeRecord, error) {
-	const query = `SELECT node_id, address, updated_at FROM cfgms_node_registry`
+	const query = `SELECT node_id, address, version, started_at, updated_at FROM cfgms_node_registry`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to list cluster nodes: %w", err)
@@ -61,12 +68,17 @@ func (s *SQLiteNodeRegistryStore) ListNodes(ctx context.Context) ([]business.Nod
 	var records []business.NodeRecord
 	for rows.Next() {
 		var r business.NodeRecord
-		var updatedAtStr string
-		if err := rows.Scan(&r.ID, &r.Address, &updatedAtStr); err != nil {
+		var startedAtStr, updatedAtStr string
+		if err := rows.Scan(&r.ID, &r.Address, &r.Version, &startedAtStr, &updatedAtStr); err != nil {
 			return nil, fmt.Errorf("sqlite: failed to scan cluster node row: %w", err)
 		}
-		if nowUTC().Sub(parseTime(updatedAtStr)) > business.NodeRegistryStaleAfter {
+		lastSeen := parseTime(updatedAtStr)
+		if nowUTC().Sub(lastSeen) > business.NodeRegistryStaleAfter {
 			continue
+		}
+		r.LastSeen = lastSeen
+		if startedAtStr != "" {
+			r.StartedAt = parseTime(startedAtStr)
 		}
 		records = append(records, r)
 	}

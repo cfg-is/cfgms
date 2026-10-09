@@ -33,6 +33,8 @@ type FlatFileNodeRegistryStore struct {
 // nodeRegistryEntryJSON is the on-disk representation of a node registry row.
 type nodeRegistryEntryJSON struct {
 	Address   string    `json:"address"`
+	Version   string    `json:"version"`
+	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -97,7 +99,7 @@ func (s *FlatFileNodeRegistryStore) RegisterNode(_ context.Context, self busines
 	if err != nil {
 		return err
 	}
-	entries[self.ID] = nodeRegistryEntryJSON{Address: self.Address, UpdatedAt: time.Now()}
+	entries[self.ID] = nodeRegistryEntryJSON{Address: self.Address, Version: self.Version, StartedAt: self.StartedAt, UpdatedAt: time.Now()}
 	return s.save(entries)
 }
 
@@ -118,7 +120,13 @@ func (s *FlatFileNodeRegistryStore) ListNodes(_ context.Context) ([]business.Nod
 		if time.Since(entry.UpdatedAt) > business.NodeRegistryStaleAfter {
 			continue
 		}
-		records = append(records, business.NodeRecord{ID: id, Address: entry.Address})
+		records = append(records, business.NodeRecord{
+			ID:        id,
+			Address:   entry.Address,
+			Version:   entry.Version,
+			StartedAt: entry.StartedAt,
+			LastSeen:  entry.UpdatedAt,
+		})
 	}
 	return records, nil
 }

@@ -354,7 +354,12 @@ func (m *Manager) Start(ctx context.Context) error {
 	// (see usesLeaseAuthority), so this never runs for them.
 	if m.nodeRegistryStore != nil {
 		store := m.nodeRegistryStore
-		self := business.NodeRecord{ID: m.nodeInfo.ID, Address: m.nodeInfo.Address}
+		self := business.NodeRecord{
+			ID:        m.nodeInfo.ID,
+			Address:   m.nodeInfo.Address,
+			Version:   m.nodeInfo.Version,
+			StartedAt: m.nodeInfo.StartedAt,
+		}
 		m.bgWG.Add(1)
 		go m.runNodeRegistration(m.ctx, store, self)
 	}
@@ -480,7 +485,7 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 		}
 		nodes := make([]*NodeInfo, 0, len(records))
 		for _, r := range records {
-			nodes = append(nodes, &NodeInfo{ID: r.ID, Address: r.Address})
+			nodes = append(nodes, nodeInfoFromRecord(r))
 		}
 		return nodes, nil
 	}
@@ -895,6 +900,20 @@ func (m *Manager) runNodeRegistration(ctx context.Context, store business.NodeRe
 	}
 }
 
+// nodeInfoFromRecord maps a shared-registry record to a NodeInfo. ListNodes
+// omits stale records, so every record it returns is a live node and is
+// reported healthy; a stored state would go stale exactly when the node dies.
+func nodeInfoFromRecord(r business.NodeRecord) *NodeInfo {
+	return &NodeInfo{
+		ID:        r.ID,
+		Address:   r.Address,
+		State:     NodeStateHealthy,
+		Version:   r.Version,
+		StartedAt: r.StartedAt,
+		LastSeen:  r.LastSeen,
+	}
+}
+
 // GetLeader returns the current cluster leader node. In SingleServerMode the
 // local node is always the leader. In ClusterMode the leader is whichever node
 // currently holds the cluster leadership lease (ADR-031 Decision 5), resolved
@@ -934,7 +953,7 @@ func (m *Manager) GetLeader() (*NodeInfo, error) {
 		if records, err := nodeRegistryStore.ListNodes(context.Background()); err == nil {
 			for _, r := range records {
 				if r.ID == holderID {
-					return &NodeInfo{ID: r.ID, Address: r.Address}, nil
+					return nodeInfoFromRecord(r), nil
 				}
 			}
 		}

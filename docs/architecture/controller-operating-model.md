@@ -1571,13 +1571,19 @@ timer (Issue #3763, ADR-031 Decision 5, superseding the Raft-based design of
 ADR-028):
 
 - **Cluster membership** — every `ClusterMode` node periodically registers its
-  own ID and advertised address in the shared controller-node registry
+  own ID, advertised address, version and start time in the shared
+  controller-node registry
   (`pkg/storage/interfaces/business.NodeRegistryStore`,
   `business.NodeRegistryStaleAfter` = 90s). `GetClusterNodes()` reads the
   registry directly; a node that stops registering (crash, graceful shutdown)
   drops out once its record goes stale — there is no separate deregistration
   call and no persisted membership log to recover on restart. A restarting
-  node simply resumes registering itself on the next cycle.
+  node simply resumes registering itself on the next cycle. The record also
+  carries a last-seen time that the store sets from its own clock (never the
+  registering node's). `ListNodes` omits stale records, so a registry-listed node
+  is live: the failover monitor treats it as healthy, and `GetClusterNodes()` /
+  `GET /api/v1/ha/cluster` report its version, start time and last-seen from the
+  record rather than a published state.
 - **Leadership** — one cluster-wide lease (`pkg/lease`, row name
   `controller-cluster-leadership`) is the sole authority. Every node contends
   for it independently via `TryAcquire`; `HasLeadership()` reads a

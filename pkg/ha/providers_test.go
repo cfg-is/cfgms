@@ -38,7 +38,14 @@ func newTestLeaseStore(t *testing.T) business.LeaseStore {
 // its own in-process mutex.
 func newTestNodeRegistryStore(t *testing.T) business.NodeRegistryStore {
 	t.Helper()
-	store, err := flatfile.NewFlatFileNodeRegistryStore(t.TempDir())
+	return newTestNodeRegistryStoreAt(t, t.TempDir())
+}
+
+// newTestNodeRegistryStoreAt is newTestNodeRegistryStore rooted at root, so a
+// test can age a record by editing <root>/node_registry/node_registry.json.
+func newTestNodeRegistryStoreAt(t *testing.T, root string) business.NodeRegistryStore {
+	t.Helper()
+	store, err := flatfile.NewFlatFileNodeRegistryStore(root)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store
