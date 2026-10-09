@@ -252,29 +252,6 @@ func TestSigningIdentity_UnresolvableCursorDoesNotBootstrap(t *testing.T) {
 	assert.Empty(t, signingKeyFiles(t, dir))
 }
 
-func TestSigningIdentity_RotationRefusedWhenShared(t *testing.T) {
-	c := newSigningCluster(t)
-	m, _ := c.node(t, c.secrets, true)
-	require.NoError(t, m.EnsureSigningCertificate(fastSigningCfg))
-	before, err := c.cursor.LoadCursor(context.Background())
-	require.NoError(t, err)
-
-	for _, rotate := range []func(int) (*Certificate, error){m.RotateSigningCertificate, m.ForceRotateSigningCertificate} {
-		got, err := rotate(7)
-		require.Error(t, err)
-		assert.Nil(t, got)
-	}
-
-	after, err := c.cursor.LoadCursor(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, before, after)
-	ks, err := NewSecretStoreSigningKeyStore(c.secrets, testSigningTenant, "")
-	require.NoError(t, err)
-	serials, err := ks.ListSigningSerials(context.Background())
-	require.NoError(t, err)
-	assert.Len(t, serials, 1)
-}
-
 func TestSigningIdentity_ResolutionCacheIsBoundedAndObservesRotation(t *testing.T) {
 	assert.LessOrEqual(t, signingResolveCacheTTL, 5*time.Second)
 

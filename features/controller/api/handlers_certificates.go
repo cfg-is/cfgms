@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -130,12 +131,23 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 			s.writeErrorResponse(w, http.StatusConflict, "Signing rotation already in progress", "ROTATION_IN_PROGRESS")
 			return
 		}
+		// The cluster has not yet moved to the shared signing identity, so a
+		// rotation would strand nodes that still sign with their own keys.
+		if errors.Is(err, cert.ErrSigningMigrationPending) {
+			s.logger.Warn("Signing certificate rotation rejected: signing identity migration pending",
+				"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Signing rotation is unavailable until the cluster signing identity migration completes", "SIGNING_MIGRATION_PENDING")
+			return
+		}
 		s.logger.Error("Signing certificate rotation failed",
 			"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Rotation failed", "ROTATION_ERROR")
 		return
 	}
+
+	s.emitSigningRotationAudit(r.Context(), principal.CertSerial, result)
 
 	s.writeSuccessResponse(w, RotateSigningCertResponse{
 		OldSerial:        result.OldSerial,
@@ -144,6 +156,36 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		StewardsNotified: result.StewardsNotified,
 		OverlapExpiresAt: result.OverlapExpiresAt,
 	})
+}
+
+// emitSigningRotationAudit records a successful signing-certificate rotation with
+// the operator's certificate serial, the old and new signing serials and the node
+// that performed it. Only serials and identifiers are recorded; no PEM or key
+// material. No-op when auditManager is nil.
+func (s *Server) emitSigningRotationAudit(ctx context.Context, operatorSerial string, result *service.RotationResult) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action("signing_certificate_rotated").
+		User(logging.SanitizeLogValue(operatorSerial), business.AuditUserTypeHuman).
+		Resource("signing_certificate", logging.SanitizeLogValue(result.NewSerial), "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh).
+		Details(map[string]interface{}{
+			"operator_serial":    logging.SanitizeLogValue(operatorSerial),
+			"old_serial":         logging.SanitizeLogValue(result.OldSerial),
+			"new_serial":         logging.SanitizeLogValue(result.NewSerial),
+			"node_id":            logging.SanitizeLogValue(result.NodeID),
+			"overlap_days":       result.OverlapWindowDays,
+			"overlap_expires_at": result.OverlapExpiresAt,
+		})
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit signing rotation audit event",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // handleListCertificates handles GET /api/v1/certificates

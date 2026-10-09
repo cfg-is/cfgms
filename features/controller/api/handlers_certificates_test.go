@@ -873,6 +873,16 @@ func TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillLi
 func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.SigningRotationService) {
 	t.Helper()
 	setTestSecretsEnv(t)
+	certMgr := newTestCertManager(t)
+	ensureSharedSigningCertificate(t, certMgr)
+	server, rotationSvc, _ := setupRotationTestServerWith(t, certMgr)
+	return server, certMgr, rotationSvc
+}
+
+// setupRotationTestServerWith wires a server and rotation service around certMgr and
+// returns the server's audit manager so tests can assert on recorded entries.
+func setupRotationTestServerWith(t *testing.T, certMgr *cert.Manager) (*Server, *service.SigningRotationService, *audit.Manager) {
+	t.Helper()
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -902,11 +912,9 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
-	certMgr := newTestCertManager(t)
-	ensureSharedSigningCertificate(t, certMgr)
-
 	rotationSvc := service.NewSigningRotationService(certMgr, logger)
 	rotationSvc.SetControllerService(controllerService)
+	rotationSvc.SetNodeID("node-test-1")
 
 	server, err := New(
 		cfg, logger, controllerService, configService,
@@ -925,7 +933,7 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 		}
 	})
 
-	return server, certMgr, rotationSvc
+	return server, rotationSvc, auditMgr
 }
 
 // TestHandleRotateSigningCertRequiresAdminCert verifies that the rotate endpoint

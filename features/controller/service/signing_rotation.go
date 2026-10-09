@@ -27,6 +27,9 @@ type RotationResult struct {
 	// OverlapExpiresAt is the UTC RFC3339 deadline after which the old (rotating)
 	// signing cert is no longer accepted by stewards. Empty when overlapDays == 0.
 	OverlapExpiresAt string
+	// NodeID is the controller node that performed the rotation. Empty when the
+	// service was not given a node ID (single-node controllers).
+	NodeID string
 }
 
 // SigningRotationService delivers the controller's current signing certificate
@@ -38,6 +41,7 @@ type SigningRotationService struct {
 	publisher         *commands.Publisher
 	controllerService *ControllerService
 	logger            logging.Logger
+	nodeID            string
 }
 
 // NewSigningRotationService creates a new SigningRotationService. The publisher
@@ -65,6 +69,14 @@ func (s *SigningRotationService) SetControllerService(cs *ControllerService) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.controllerService = cs
+}
+
+// SetNodeID records the controller node's cluster ID, reported in RotationResult
+// and the rotation log line so a rotation can be attributed to the node that ran it.
+func (s *SigningRotationService) SetNodeID(nodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nodeID = nodeID
 }
 
 // Rotate generates a new ConfigSigning certificate, transitions the lifecycle
@@ -139,6 +151,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 	s.mu.RLock()
 	publisher := s.publisher
 	controllerSvc := s.controllerService
+	nodeID := s.nodeID
 	s.mu.RUnlock()
 
 	var stewardsNotified int
@@ -178,7 +191,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 			if pubErr != nil {
 				s.logger.Error("failed to push signing cert to steward",
 					"steward_id", logging.SanitizeLogValue(steward.ID),
-					"error", pubErr)
+					"error", logging.SanitizeLogValue(pubErr.Error()))
 			} else {
 				stewardsNotified++
 			}
@@ -198,6 +211,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		OverlapWindowDays: overlapDays,
 		StewardsNotified:  stewardsNotified,
 		OverlapExpiresAt:  apiOverlapExpiresAt,
+		NodeID:            nodeID,
 	}, nil
 }
 
@@ -282,7 +296,7 @@ func (s *SigningRotationService) buildRotatingSigner(serial string) signature.Si
 	if err != nil || len(keyPEM) == 0 {
 		s.logger.Warn("signing rotation: could not export rotating cert for push_signing_cert signing; falling back to dynamic signer",
 			"serial", logging.SanitizeLogValue(serial),
-			"error", err)
+			"error", logging.SanitizeLogValue(errText(err)))
 		return nil
 	}
 	signer, err := signature.NewSigner(&signature.SignerConfig{
@@ -292,7 +306,7 @@ func (s *SigningRotationService) buildRotatingSigner(serial string) signature.Si
 	if err != nil {
 		s.logger.Warn("signing rotation: could not create rotating cert signer; falling back to dynamic signer",
 			"serial", logging.SanitizeLogValue(serial),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		return nil
 	}
 	return signer
@@ -303,4 +317,13 @@ func (s *SigningRotationService) buildRotatingSigner(serial string) signature.Si
 // ControlChannel, before the receive loop begins (Issue #1817).
 func (s *SigningRotationService) OnConnect(ctx context.Context, stewardID string) error {
 	return s.EnsureStewardCurrent(ctx, stewardID)
+}
+
+// errText renders an error for a log value; a nil error (an export that
+// returned no key without failing) renders as an explanatory string.
+func errText(err error) string {
+	if err == nil {
+		return "no private key returned"
+	}
+	return err.Error()
 }

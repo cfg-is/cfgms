@@ -993,6 +993,23 @@ receives `403 FORBIDDEN` regardless of the permission grant.
 }
 ```
 
+**Clustered controllers:** a rotation through any node is one cluster-wide event. The
+node claims a cluster-wide rotation claim, generates the new certificate, stores its key
+in the shared secret store, moves the shared cursor and releases the claim. Every node
+then signs with the new certificate; no signing key is written to a node's local disk.
+
+**Errors:**
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 409 | `ROTATION_IN_PROGRESS` | The previous overlap window is still open (without `force`), or another node is rotating right now. Retry later; `force: true` bypasses the overlap guard but still waits for an in-flight rotation. |
+| 409 | `SIGNING_MIGRATION_PENDING` | The cluster still signs with per-node local keys and has not moved to the shared signing identity. Rotation is refused until the migration completes; nothing is changed. |
+
+**Audit:** every successful rotation records a `signing_certificate_rotated` audit event
+(`security_event`, severity high) with `operator_serial`, `old_serial`, `new_serial`,
+`node_id` (the controller node that performed it), `overlap_days` and
+`overlap_expires_at`. No certificate or key material is recorded.
+
 ### Signing Credentials
 
 #### POST /api/v1/signing-credential/request

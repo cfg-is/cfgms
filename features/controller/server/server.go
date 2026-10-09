@@ -1125,6 +1125,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		drainHook := service.NewPendingDeliveryDrainHook(storageManager.GetCommandStore(), stewardStore, nil, logger)
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
+			if haManager != nil {
+				signingRotationSvc.SetNodeID(haManager.GetLocalNode().ID)
+			}
 			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook, completionReconciler, routingHook, drainHook)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
