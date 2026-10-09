@@ -237,13 +237,12 @@ func TestRootScopedPrincipal_AllowedOnEveryTenantRouteWithActiveCrossing(t *test
 
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
-		ID:          "grant-boundary-1",
-		TenantID:    "msp-a",
-		PrincipalID: caller.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-boundary-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	for _, entry := range tenantBoundaryRouteTable {
@@ -295,13 +294,12 @@ func TestAccountBoundLowAssuranceCaller_CrossingGatesAndAudits(t *testing.T) {
 
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
-		ID:          "grant-audit-1",
-		TenantID:    "msp-a",
-		PrincipalID: caller.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-audit-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	entry := tenantBoundaryRouteTable[0] // GET /api/v1/tenants/{id}, tenant:read

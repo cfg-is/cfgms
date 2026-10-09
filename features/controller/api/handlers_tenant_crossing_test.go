@@ -170,13 +170,12 @@ func TestAuthorizeRootScopedCaller_AllowedWithActiveGrant(t *testing.T) {
 
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-1",
-		TenantID:    "msp-a",
-		PrincipalID: caller.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil)
@@ -233,13 +232,12 @@ func TestAuthorizeAccountBoundCaller_LowAssuranceAllowedWithActiveGrant(t *testi
 
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-low-assurance-1",
-		TenantID:    "msp-a",
-		PrincipalID: caller.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-low-assurance-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil)
@@ -301,7 +299,7 @@ func TestAuthorizeRootScopedCaller_ListSilentlyFilters(t *testing.T) {
 	caller := rootScopedPrincipal("root-operator-1")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID: "grant-msp-a", TenantID: "msp-a", PrincipalID: caller.ID,
+		ID: "grant-msp-a", TenantID: "msp-a",
 		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-a-admin",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}))
@@ -408,9 +406,16 @@ func TestHandleCreateTenantCrossingGrant_Success(t *testing.T) {
 
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
-	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-1", "msp-a")
+	// A grant names no principal: it admits any root principal on the tenant.
+	for _, p := range []string{"root-operator-1", "root-operator-2"} {
+		active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, p, "msp-a")
+		require.NoError(t, err)
+		assert.True(t, active, "grant must admit %s", p)
+	}
+	list, err := server.tenantCrossingStore.ListTenantCrossings(ctx, "msp-a")
 	require.NoError(t, err)
-	assert.True(t, active)
+	require.Len(t, list, 1)
+	assert.Empty(t, list[0].PrincipalID)
 }
 
 // TestHandleCreateTenantCrossingGrant_CrossTenantRefused verifies an MSP admin cannot
@@ -524,7 +529,7 @@ func TestCrossingOnRootDoesNotCoverDescendants(t *testing.T) {
 	caller := rootScopedPrincipal("root-operator-1")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID: "grant-on-root", TenantID: "root", PrincipalID: caller.ID,
+		ID: "grant-on-root", TenantID: "root",
 		Kind: business.TenantCrossingKindGrant, GrantedBy: caller.ID,
 		CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour),
 	}))
@@ -635,7 +640,7 @@ func TestHandleListTenantCrossings_ReturnsActivity(t *testing.T) {
 
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID: "grant-1", TenantID: "msp-a", PrincipalID: "root-operator-1",
+		ID: "grant-1", TenantID: "msp-a",
 		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-a-admin",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}))
@@ -748,6 +753,9 @@ func TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused(t *testin
 func seedCrossing(t *testing.T, server *Server, id, tenantID, principalID, grantedBy string, kind business.TenantCrossingKind) {
 	t.Helper()
 	now := time.Now().UTC()
+	if kind == business.TenantCrossingKindGrant {
+		principalID = "" // a grant names no principal
+	}
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
 		ID: id, TenantID: tenantID, PrincipalID: principalID, Kind: kind, GrantedBy: grantedBy,
 		CreatedAt: now, ExpiresAt: now.Add(30 * time.Minute),

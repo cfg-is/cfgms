@@ -47,17 +47,21 @@ func asRootOperator(req *http.Request, principal *Principal, vars map[string]str
 	return req.WithContext(ctx)
 }
 
+// grantCrossing gives exactly principalID an active crossing on tenantID. A grant names
+// no principal and would admit every root caller sharing the server, so a per-principal
+// crossing is a break-glass record.
 func grantCrossing(t *testing.T, server *Server, principalID, tenantID string) {
 	t.Helper()
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
-		ID:          "grant-" + principalID + "-" + tenantID,
-		TenantID:    tenantID,
-		PrincipalID: principalID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   tenantID + "-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:            "crossing-" + principalID + "-" + tenantID,
+		TenantID:      tenantID,
+		PrincipalID:   principalID,
+		Kind:          business.TenantCrossingKindBreakGlass,
+		GrantedBy:     principalID,
+		Justification: "per-principal crossing fixture",
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(time.Hour),
 	}))
 }
 

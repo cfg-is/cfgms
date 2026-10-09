@@ -146,13 +146,13 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 	}
 	now := time.Now().UTC()
 	crossing := &business.TenantCrossing{
-		ID:          uuid.New().String(),
-		TenantID:    existing.ID,
-		PrincipalID: req.PrincipalID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   callerID,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(duration),
+		ID:       uuid.New().String(),
+		TenantID: existing.ID,
+		// A grant names no principal: it admits any root principal (ADR-025 Amendment 8).
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: callerID,
+		CreatedAt: now,
+		ExpiresAt: now.Add(duration),
 	}
 	if err := s.tenantCrossingStore.CreateTenantCrossing(r.Context(), crossing); err != nil {
 		s.logger.Error("Failed to create tenant crossing grant",

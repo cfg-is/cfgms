@@ -4513,13 +4513,12 @@ func TestUpdateStewardConfig_AccountBoundRootScoped_WithCrossing_Allowed(t *test
 	principal := accountBoundLowAssuranceRootPrincipal("root-op-config-2")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-config-1",
-		TenantID:    "msp-a",
-		PrincipalID: principal.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-config-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	rec := putStewardConfigAsPrincipal(server, "s-config-boundary-2", principal)

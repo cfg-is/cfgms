@@ -86,6 +86,44 @@ func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillTenantCrossings adds the reason-category and approval columns to a
+// pre-existing tenant_crossings table (existing rows read back as approved with an
+// empty category) and clears the principal on grant rows, which name none. Idempotent.
+func backfillTenantCrossings(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "tenant_crossings")
+	if err != nil {
+		return fmt.Errorf("sqlite: tenant crossing back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"reason_category", `ALTER TABLE tenant_crossings ADD COLUMN reason_category TEXT NOT NULL DEFAULT ''`},
+		{"approval_state", `ALTER TABLE tenant_crossings ADD COLUMN approval_state TEXT NOT NULL DEFAULT 'approved'`},
+		{"approved_by", `ALTER TABLE tenant_crossings ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`},
+		{"approved_at", `ALTER TABLE tenant_crossings ADD COLUMN approved_at TEXT`},
+	} {
+		present, err := columnExists(ctx, db, "tenant_crossings", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: tenant crossing back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: tenant_crossings back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tenant_crossings SET principal_id = '' WHERE kind = 'grant' AND principal_id <> ''`); err != nil {
+		return fmt.Errorf("sqlite: tenant_crossings grant principal clear failed: %w", err)
+	}
+	return nil
+}
+
 // backfillStewardColumns adds the four registration-refresh identity columns and
 // the tenant_id column to a pre-existing stewards table created without them
 // (Issue #2093 ADR-010; Issue #2341 tenant-move). Fresh databases (table absent)
@@ -557,6 +595,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillStewardColumns(ctx, db); err != nil {
 		return err
 	}
+	if err := backfillTenantCrossings(ctx, db); err != nil {
+		return err
+	}
 	if err := backfillNodeRegistryColumns(ctx, db); err != nil {
 		return err
 	}
@@ -638,7 +679,11 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			justification  TEXT NOT NULL DEFAULT '',
 			created_at     TEXT NOT NULL,
 			expires_at     TEXT NOT NULL,
-			revoked_at     TEXT
+			revoked_at     TEXT,
+			reason_category TEXT NOT NULL DEFAULT '',
+			approval_state  TEXT NOT NULL DEFAULT 'approved',
+			approved_by     TEXT NOT NULL DEFAULT '',
+			approved_at     TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_tenant_id    ON tenant_crossings(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_principal_id ON tenant_crossings(principal_id)`,
