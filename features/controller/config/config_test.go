@@ -663,13 +663,14 @@ func TestClusterStorageSessionHMACKeyEnvVarOverridesYAML(t *testing.T) {
 storage:
   cluster:
     postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms sslmode=require"
-    session_hmac_key: "from-yaml"
+    session_hmac_key: "${CFGMS_TEST_YAML_HMAC}"
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
 
 	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "") // clear so the YAML DSN is not overridden
 	t.Setenv("CFGMS_HA_MODE", "")                      // clear so HA mode is not set by env
 
+	t.Setenv("CFGMS_TEST_YAML_HMAC", "from-yaml")
 	// Env var unset: the YAML value survives.
 	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "")
 	cfg, err := LoadWithPath(configPath)

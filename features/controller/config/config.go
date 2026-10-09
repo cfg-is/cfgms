@@ -1090,6 +1090,13 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 		content := string(data)
 
+		// Refuse literal secrets in secret-bearing keys. This must see the raw
+		// text: after expansion a ${VAR} reference is indistinguishable from a
+		// literal (Issue #4664).
+		if err := validateNoLiteralSecrets(content); err != nil {
+			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
+		}
+
 		// Validate that all referenced env vars (without defaults) are set
 		// This provides fail-safe behavior for missing env vars
 		if err := validateEnvVars(content); err != nil {

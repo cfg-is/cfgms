@@ -13,8 +13,8 @@ ha:
 
 storage:
   cluster:
-    postgres_dsn: "host=pg.internal port=5432 dbname=cfgms user=cfgms password=... sslmode=require"
-    session_hmac_key: "..."  # required — see below
+    postgres_dsn: "host=pg.internal port=5432 dbname=cfgms user=cfgms password=${CFGMS_STORAGE_DB_PASSWORD} sslmode=require"
+    session_hmac_key: "${CFGMS_SESSION_HMAC_KEY}"  # required — see below
     s3:                  # installer artifact blob store (S3-compatible)
       bucket: cfgms-installers
       region: us-east-1
@@ -30,6 +30,13 @@ Postgres-backed session store and **must be identical across every node in
 the cluster** — a token issued on one node must validate on any peer node.
 Generate it once (`openssl rand -hex 32`) and distribute the same value to
 every node; do not let each node generate its own.
+
+The controller refuses literal values in `postgres_dsn` (a literal password),
+`session_hmac_key`, and the S3 `access_key_id` / `secret_access_key`: deliver
+them as `${VAR}` references (resolved from `<VAR>` or the sealed `<VAR>_FILE`
+credential). `${VAR:-default}` is refused as well. A DSN with no password
+(certificate or `.pgpass` authentication) is allowed. See the secret-bearing key
+table in the [config schema](../reference/config-schema.md#environment-variable-reference-syntax).
 
 Cluster mode also requires an S3-compatible blob store for installer artifacts,
 shared by every node: cluster mode refuses to start unless a bucket is set in
