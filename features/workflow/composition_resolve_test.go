@@ -37,9 +37,13 @@ func loadWorkflowFileForTest(path string) (Workflow, error) {
 func waitForTerminal(t *testing.T, engine *Engine, execID string) *WorkflowExecution {
 	t.Helper()
 	var execution *WorkflowExecution
+	// The run may belong to any tenant; read it under the tenant the engine recorded.
+	engine.mutex.RLock()
+	tenantID := engine.executions[execID].TenantID
+	engine.mutex.RUnlock()
 	require.Eventually(t, func() bool {
 		var err error
-		execution, err = engine.GetExecution(execID)
+		execution, err = engine.GetExecution(context.Background(), tenantID, execID)
 		require.NoError(t, err)
 		s := execution.Status
 		return s == StatusCompleted || s == StatusFailed || s == StatusCancelled

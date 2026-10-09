@@ -1345,6 +1345,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateWorkflowExecutionsTable(ctx, db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1931,6 +1935,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS session_token_store;",
 		"DROP TABLE IF EXISTS cfgms_alert_states;",
 		"DROP TABLE IF EXISTS cfgms_workflow_approvals;",
+		"DROP TABLE IF EXISTS cfgms_workflow_executions;",
 		// Issue #3401: omitted here, so pending-registration rows survived
 		// setupTestDatabase and every re-run of the store's tests failed with
 		// "already exists" on the second and later runs.
@@ -2105,6 +2110,33 @@ func (s DatabaseSchemas) CreateWorkflowApprovalsTable(ctx context.Context, db *s
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to create cfgms_workflow_approvals table: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateWorkflowExecutionsTable creates the cfgms_workflow_executions table backing
+// business.WorkflowExecutionStore (Issue #4675). Rows are keyed by
+// (tenant_id, execution_id), tenant_id ” being the root tenant, and visible to every
+// controller node. payload is opaque engine-owned JSON; run variables are never stored.
+func (s DatabaseSchemas) CreateWorkflowExecutionsTable(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS cfgms_workflow_executions (
+			tenant_id     TEXT NOT NULL,
+			execution_id  TEXT NOT NULL,
+			workflow_name TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL DEFAULT '',
+			start_time    TIMESTAMP WITH TIME ZONE NOT NULL,
+			end_time      TIMESTAMP WITH TIME ZONE,
+			payload       BYTEA NOT NULL DEFAULT ''::bytea,
+			PRIMARY KEY (tenant_id, execution_id)
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_workflow_executions_tenant_start ON cfgms_workflow_executions(tenant_id, start_time DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow ON cfgms_workflow_executions(tenant_id, workflow_name, start_time DESC);",
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create cfgms_workflow_executions table: %w", err)
 		}
 	}
 	return nil

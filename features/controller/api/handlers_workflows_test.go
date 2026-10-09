@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -463,14 +464,17 @@ func TestWorkflowHandler_GetWorkflowExecutions_CrossTenant_Returns403(t *testing
 	// Create and execute the workflow in tenant A so at least one execution exists.
 	createAndExecuteWorkflow(t, router, engine, "xsec-list-wf", "tenant-a", false)
 
-	// Tenant B has no workflow named "xsec-list-wf" → listing its executions must
-	// deny, not silently return tenant A's execution history.
+	// The engine lists only the caller's tenant, so tenant B's listing is empty and
+	// never contains tenant A's execution history.
 	req := httptest.NewRequest("GET", "/workflows/xsec-list-wf/executions", nil)
 	req = withTenantContext(req, "tenant-b")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 0, resp["count"], "tenant B must not see tenant A's executions")
 }
 
 // --- trigger routes ----------------------------------------------------------
@@ -738,7 +742,7 @@ func TestWorkflowHandler_CancelExecution_RunningExecution_Returns200(t *testing.
 
 // waitForTerminalState blocks until the execution reaches a terminal state or fails the test
 // after 5 seconds. Uses a ticker so the goroutine scheduler drives the check, not a sleep.
-func waitForTerminalState(t *testing.T, eng *workflow.Engine, execID string) {
+func waitForTerminalState(t *testing.T, eng *workflow.Engine, tenantID, execID string) {
 	t.Helper()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
@@ -747,7 +751,7 @@ func waitForTerminalState(t *testing.T, eng *workflow.Engine, execID string) {
 	for {
 		select {
 		case <-ticker.C:
-			ex, err := eng.GetExecution(execID)
+			ex, err := eng.GetExecution(context.Background(), tenantID, execID)
 			if err == nil && ex != nil {
 				s := ex.GetStatus()
 				if s == workflow.StatusCompleted || s == workflow.StatusFailed || s == workflow.StatusCancelled {
@@ -766,7 +770,7 @@ func TestWorkflowHandler_CancelExecution_TerminalExecution_Returns409(t *testing
 
 	// Task step with no module name fails immediately → terminal state reached quickly.
 	execID := createAndExecuteWorkflow(t, router, engine, "quick-wf", "test-tenant", false)
-	waitForTerminalState(t, engine, execID)
+	waitForTerminalState(t, engine, "test-tenant", execID)
 
 	req := httptest.NewRequest("POST", "/workflows/quick-wf/executions/"+execID+"/cancel", nil)
 	req = withTenantContext(req, "test-tenant")
@@ -786,14 +790,18 @@ func TestWorkflowHandler_CancelExecution_CrossTenant_Returns403(t *testing.T) {
 	// Create and execute the workflow in tenant A with a long delay so it stays non-terminal.
 	execID := createAndExecuteWorkflow(t, router, engine, "xsec-cancel-wf", "tenant-a", true)
 
-	// Tenant B tries to cancel tenant A's execution. tenant-b has no workflow
-	// named "xsec-cancel-wf" in its config namespace → 403.
+	// Tenant B tries to cancel tenant A's execution. The lookup is scoped to the
+	// caller's tenant, so A's execution is not found for B — not forbidden, not
+	// cancelled.
 	req := httptest.NewRequest("POST", "/workflows/xsec-cancel-wf/executions/"+execID+"/cancel", nil)
 	req = withTenantContext(req, "tenant-b")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	ex, err := engine.GetExecution(context.Background(), "tenant-a", execID)
+	require.NoError(t, err)
+	assert.NotEqual(t, workflow.StatusCancelled, ex.GetStatus(), "tenant B must not cancel tenant A's run")
 }
 
 // --- get execution ------------------------------------------------------------
@@ -824,14 +832,85 @@ func TestWorkflowHandler_GetExecution_CrossTenant_Returns403(t *testing.T) {
 	// Create and execute the workflow in tenant A.
 	execID := createAndExecuteWorkflow(t, router, engine, "xsec-wf", "tenant-a", true)
 
-	// Tenant B tries to access tenant A's execution.
-	// tenant-b has no workflow named "xsec-wf" → 403.
+	// Tenant B tries to access tenant A's execution. The lookup is scoped to the
+	// caller's tenant, so A's execution is not found for B (never forbidden, never
+	// A's record).
 	req := httptest.NewRequest("GET", "/workflows/xsec-wf/executions/"+execID, nil)
 	req = withTenantContext(req, "tenant-b")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "xsec-wf\"", "tenant A's record must not be returned")
+}
+
+// TestWorkflowHandler_GetExecution_StoreOnlyRecord_ReturnsTerminalStatus proves the
+// durable store answers for an execution the handler's own engine never ran (it ran
+// on another node), and that another tenant's caller gets none of it (Issue #4675).
+func TestWorkflowHandler_GetExecution_StoreOnlyRecord_ReturnsTerminalStatus(t *testing.T) {
+	storageManager := pkgtesting.SetupTestStorage(t)
+	execStore := storageManager.GetWorkflowExecutionStore()
+	require.NotNil(t, execStore, "the test storage manager must provide a workflow execution store")
+	logger := logging.NewNoopLogger()
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil, nil, nil, nil, nil,
+		workflow.WithExecutionStore(execStore))
+	t.Cleanup(engine.Shutdown)
+	h := NewWorkflowHandler(engine, storageManager.GetConfigStore(), nil, logger)
+	router := newWorkflowRouter(h)
+
+	// The workflow definition is shared storage; the execution record is written by
+	// another node's engine, so this engine holds nothing in memory for it.
+	for _, tenant := range []string{"tenant-a", "tenant-b"} {
+		rec := postWorkflowAsTenant(t, router, http.MethodPost, "/workflows", tenant, minimalWorkflowBody("remote-wf"))
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	start := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, execStore.Save(context.Background(), &business.WorkflowExecutionRecord{
+		TenantID: "tenant-a", ExecutionID: "exec-remote-1", WorkflowName: "remote-wf", Status: "completed",
+		StartTime: start, EndTime: start.Add(time.Second),
+		Payload: []byte(`{"step_results":{"s1":{"status":"completed","start_time":"` + start.Format(time.RFC3339Nano) + `","duration":1000}}}`),
+	}))
+
+	req := withTenantContext(httptest.NewRequest("GET", "/workflows/remote-wf/executions/exec-remote-1", nil), "tenant-a")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "completed", resp["status"])
+	assert.Equal(t, "exec-remote-1", resp["id"])
+	assert.Contains(t, resp["step_results"], "s1")
+
+	// The listing and the workflow summary read the same shared history.
+	req = withTenantContext(httptest.NewRequest("GET", "/workflows/remote-wf/executions", nil), "tenant-a")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 1, resp["count"])
+
+	// Tenant B owns a workflow of the same name but must not see tenant A's record.
+	req = withTenantContext(httptest.NewRequest("GET", "/workflows/remote-wf/executions/exec-remote-1", nil), "tenant-b")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "completed")
+	req = withTenantContext(httptest.NewRequest("GET", "/workflows/remote-wf/executions", nil), "tenant-b")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 0, resp["count"])
+
+	// A run with no owner on this node cannot be cancelled here.
+	require.NoError(t, execStore.Save(context.Background(), &business.WorkflowExecutionRecord{
+		TenantID: "tenant-a", ExecutionID: "exec-remote-2", WorkflowName: "remote-wf", Status: "running",
+		StartTime: start, Payload: []byte(`{}`),
+	}))
+	req = withTenantContext(httptest.NewRequest("POST", "/workflows/remote-wf/executions/exec-remote-2/cancel", nil), "tenant-a")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestWorkflowHandler_GetExecution_NotFound_Returns404(t *testing.T) {
@@ -1017,7 +1096,7 @@ func TestWorkflowHandler_UnsetTenantScope_Refused(t *testing.T) {
 	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
 	assert.EqualValues(t, 1, execResp["count"], "a refused execute must not start a second execution")
 
-	execution, err := engine.GetExecution(execID)
+	execution, err := engine.GetExecution(context.Background(), tenant, execID)
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 	assert.NotEqual(t, workflow.StatusCancelled, execution.GetStatus(),
@@ -1465,7 +1544,7 @@ func TestWorkflowHandler_Inputs_ExecuteMissingRequiredReturns400(t *testing.T) {
 	require.Len(t, resp.Fields, 1)
 	assert.Equal(t, "host", resp.Fields[0].Field)
 
-	execs, err := eng.ListExecutions()
+	execs, err := eng.ListExecutions(context.Background(), "test-tenant")
 	require.NoError(t, err)
 	for _, ex := range execs {
 		assert.Equal(t, workflow.StatusFailed, ex.GetStatus(), "no execution may have started")
@@ -1555,7 +1634,7 @@ func TestWorkflowHandler_Validate_PersistsAndExecutesNothing(t *testing.T) {
 	assert.EqualValues(t, 0, list["count"], "validate must not store a workflow")
 	assert.NotNil(t, store)
 
-	execs, err := h.engine.ListExecutions()
+	execs, err := h.engine.ListExecutions(context.Background(), "test-tenant")
 	require.NoError(t, err)
 	assert.Empty(t, execs, "validate must not start an execution")
 }
@@ -1769,7 +1848,7 @@ func TestWorkflowHandler_YAMLEndpoints_WriteNothing(t *testing.T) {
 	var list map[string]interface{}
 	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
 	assert.EqualValues(t, 0, list["count"])
-	execs, err := h.engine.ListExecutions()
+	execs, err := h.engine.ListExecutions(context.Background(), "test-tenant")
 	require.NoError(t, err)
 	assert.Empty(t, execs)
 }

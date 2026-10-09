@@ -2481,6 +2481,12 @@ func initializeWorkflowHandler(
 	if approvalStore := storageManager.GetApprovalStore(); approvalStore != nil {
 		engineOpts = append(engineOpts, workflow.WithApprovalStore(approvalStore))
 	}
+	// Execution history is written through to the shared store so every node can
+	// answer for any run and history survives a restart (Issue #4675); a nil store
+	// (provider without one) leaves executions node-local.
+	if executionStore := storageManager.GetWorkflowExecutionStore(); executionStore != nil {
+		engineOpts = append(engineOpts, workflow.WithExecutionStore(executionStore))
+	}
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor, engineOpts...)
 	// Composed workflows (nested steps, error workflows, components) resolve by
 	// name from the executing tenant's workflow store (Issue #4638).

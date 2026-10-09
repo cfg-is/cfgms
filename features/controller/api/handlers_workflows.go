@@ -216,6 +216,42 @@ func (h *WorkflowHandler) workflowStoreForRequest(w http.ResponseWriter, r *http
 	return workflow.NewWorkflowStore(h.configStore, tenantID), true
 }
 
+// executionScopeForRequest resolves the tenant whose executions the request reads
+// and, when a config store is wired, the workflow store scoped to it. The tenant is
+// the one workflows are stored and executions are run under (store.TenantID()), so a
+// root-scoped caller reads the root tenant's runs rather than every tenant's. It
+// writes the response and returns ok=false when the request is refused.
+func (h *WorkflowHandler) executionScopeForRequest(w http.ResponseWriter, r *http.Request) (tenantID string, store *workflow.WorkflowStore, ok bool) {
+	if h.configStore == nil {
+		tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
+		return tenantID, nil, true
+	}
+	store, ok = h.workflowStoreForRequest(w, r)
+	if !ok {
+		return "", nil, false
+	}
+	return store.TenantID(), store, true
+}
+
+// executionLookupFailed answers a failed GetExecution: not found (including another
+// tenant's run) is a 404, a store failure is a 500.
+func (h *WorkflowHandler) executionLookupFailed(w http.ResponseWriter, execID, logMsg, nameForLog, execIDForLog string, err error) {
+	// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+	safeErrStr := ""
+	if err != nil {
+		safeErrStr = logging.SanitizeLogValue(err.Error())
+		safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+		safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+	}
+	if err != nil && !errors.Is(err, workflow.ErrExecutionNotFound) {
+		h.logger.Error("Execution lookup failed", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
+		h.sendError(w, http.StatusInternalServerError, "failed to retrieve execution")
+		return
+	}
+	h.logger.Error(logMsg, "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
+	h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+}
+
 // rootScopedTenant resolves the tenant a root-scoped request operates on
 // (Issue #4576): ?tenant= when given, after the crossing check, else the
 // deployment's root tenant. It writes the response and returns false when the
@@ -300,7 +336,7 @@ func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Req
 	// the tenant the workflow store resolved, so another tenant's triggers and runs
 	// are never counted.
 	triggerCounts, enabledCounts := h.triggerCountsByWorkflow(r.Context(), store.TenantID())
-	lastRuns := h.lastExecutionsByWorkflow(store.TenantID())
+	lastRuns := h.lastExecutionsByWorkflow(r.Context(), store.TenantID())
 
 	items := make([]workflowListItem, 0, len(workflows))
 	for _, wf := range workflows {
@@ -344,11 +380,11 @@ func (h *WorkflowHandler) triggerCountsByWorkflow(ctx context.Context, tenantID 
 	return total, enabled
 }
 
-// lastExecutionsByWorkflow scans the engine's executions once and returns the
-// most recently started run per workflow name, restricted to the tenant.
-func (h *WorkflowHandler) lastExecutionsByWorkflow(tenantID string) map[string]*workflowLastExecution {
+// lastExecutionsByWorkflow scans the tenant's executions once and returns the
+// most recently started run per workflow name.
+func (h *WorkflowHandler) lastExecutionsByWorkflow(ctx context.Context, tenantID string) map[string]*workflowLastExecution {
 	last := map[string]*workflowLastExecution{}
-	all, err := h.engine.ListExecutions()
+	all, err := h.engine.ListExecutions(ctx, tenantID)
 	if err != nil {
 		h.logger.Warn("Failed to list executions for workflow summary", "error", logging.SanitizeLogValue(err.Error()))
 		return last
@@ -807,9 +843,13 @@ func (h *WorkflowHandler) handleGetWorkflowExecutions(w http.ResponseWriter, r *
 	}
 
 	nameForLog := logging.SanitizeLogValue(name)
-	all, err := h.engine.ListExecutions()
+	tenantID, _, ok := h.executionScopeForRequest(w, r)
+	if !ok {
+		return
+	}
+	all, err := h.engine.ListExecutions(r.Context(), tenantID)
 	if err != nil {
-		h.logger.Error("Failed to list workflow executions", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to list workflow executions", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to retrieve executions")
 		return
 	}
@@ -875,17 +915,13 @@ func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Requ
 	execIDForLog = strings.ReplaceAll(execIDForLog, "\n", "_")
 	execIDForLog = strings.ReplaceAll(execIDForLog, "\r", "_")
 
-	execution, err := h.engine.GetExecution(execID)
+	tenantID, store, ok := h.executionScopeForRequest(w, r)
+	if !ok {
+		return
+	}
+	execution, err := h.engine.GetExecution(r.Context(), tenantID, execID)
 	if err != nil || execution == nil {
-		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
-		safeErrStr := ""
-		if err != nil {
-			safeErrStr = logging.SanitizeLogValue(err.Error())
-			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
-			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
-		}
-		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
-		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+		h.executionLookupFailed(w, execID, "Execution not found", nameForLog, execIDForLog, err)
 		return
 	}
 
@@ -897,11 +933,7 @@ func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Requ
 	// Tenant isolation: verify the workflow exists in the calling tenant's namespace.
 	// A future GET /api/v1/executions/{exec_id} lookup-by-ID endpoint can bypass this
 	// once executions carry a tenant_id field.
-	if h.configStore != nil {
-		store, ok := h.workflowStoreForRequest(w, r)
-		if !ok {
-			return
-		}
+	if store != nil {
 		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
 			h.logger.Error("Tenant isolation check failed for execution get",
 				"name", nameForLog, "exec_id", execIDForLog)
@@ -941,17 +973,13 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 	// Pre-check existence before acting. CancelExecution returns nil for already-terminal
 	// executions (it skips the cancel when Cancel func is nil) and a plain error string for
 	// not-found — neither signal is suitable for HTTP status mapping, so we gate here.
-	execution, err := h.engine.GetExecution(execID)
+	tenantID, store, ok := h.executionScopeForRequest(w, r)
+	if !ok {
+		return
+	}
+	execution, err := h.engine.GetExecution(r.Context(), tenantID, execID)
 	if err != nil || execution == nil {
-		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
-		safeErrStr := ""
-		if err != nil {
-			safeErrStr = logging.SanitizeLogValue(err.Error())
-			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
-			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
-		}
-		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
-		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+		h.executionLookupFailed(w, execID, "Execution not found for cancel", nameForLog, execIDForLog, err)
 		return
 	}
 
@@ -961,11 +989,7 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 	}
 
 	// Tenant isolation: reject cross-tenant cancellation.
-	if h.configStore != nil {
-		store, ok := h.workflowStoreForRequest(w, r)
-		if !ok {
-			return
-		}
+	if store != nil {
 		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
 			h.logger.Error("Tenant isolation check failed for execution cancel",
 				"name", nameForLog, "exec_id", execIDForLog)
@@ -982,6 +1006,12 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 	}
 
 	if cancelErr := h.engine.CancelExecution(execID); cancelErr != nil {
+		// A record read from the store has no live owner on this node: only the node
+		// running the execution can cancel it.
+		if errors.Is(cancelErr, workflow.ErrExecutionNotFound) {
+			h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+			return
+		}
 		h.logger.Error("Failed to cancel execution", "name", nameForLog, "exec_id", execIDForLog,
 			"error", logging.SanitizeLogValue(cancelErr.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to cancel execution")

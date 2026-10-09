@@ -119,7 +119,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 }
 
 func execStatus(e *Engine, id string) ExecutionStatus {
-	ex, err := e.GetExecution(id)
+	ex, err := e.GetExecution(context.Background(), approvalTestTenant, id)
 	if err != nil {
 		return ""
 	}
@@ -237,7 +237,7 @@ func TestApproval_ExpiryWithoutRestartFailsRunViaSweep(t *testing.T) {
 	exec, rec := h.runToGate(e, wf, nil)
 
 	eventually(t, "sweep fails the expired run", func() bool { return execStatus(e, exec.ID) == StatusFailed })
-	got, err := e.GetExecution(exec.ID)
+	got, err := e.GetExecution(context.Background(), approvalTestTenant, exec.ID)
 	require.NoError(t, err)
 	assert.Contains(t, got.Error, "timed out")
 	rec2, err := h.store.GetApproval(context.Background(), rec.TenantID, rec.ApprovalID)
@@ -268,7 +268,7 @@ func TestApproval_KilledResumeIsReclaimedAndCompletesOnce(t *testing.T) {
 	e2 := h.engine(WithApprovalLease(lease), WithNodeID("node-2"))
 	// Within the lease the claim holds: nothing is resumed.
 	require.NoError(t, e2.RecoverApprovals(context.Background()))
-	_, err = e2.GetExecution(rec.ExecutionID)
+	_, err = e2.GetExecution(context.Background(), approvalTestTenant, rec.ExecutionID)
 	assert.Error(t, err, "a live claim must not be taken over")
 
 	time.Sleep(lease + 50*time.Millisecond)
@@ -337,7 +337,7 @@ func TestApproval_RestartThenApproveCompletes(t *testing.T) {
 	require.NoError(t, e2.RecoverApprovals(context.Background()))
 
 	eventually(t, "restarted engine completes the run", func() bool { return execStatus(e2, exec.ID) == StatusCompleted })
-	got, err := e2.GetExecution(exec.ID)
+	got, err := e2.GetExecution(context.Background(), approvalTestTenant, exec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "eu", got.Variables["region"], "steps after the gate see the checkpointed variables")
 }
@@ -353,7 +353,7 @@ func TestApproval_TimedOutApprovalIsRejectedDuringRecovery(t *testing.T) {
 	e2 := h.engine()
 	require.NoError(t, e2.RecoverApprovals(context.Background()))
 
-	got, err := e2.GetExecution(exec.ID)
+	got, err := e2.GetExecution(context.Background(), approvalTestTenant, exec.ID)
 	require.NoError(t, err, "the run stays visible after restart")
 	assert.Equal(t, StatusFailed, got.Status)
 	assert.Contains(t, got.Error, "timed out")
@@ -404,12 +404,12 @@ func TestApproval_UnrestorableCheckpointFailsRunVisibly(t *testing.T) {
 			e2 := h.engine()
 			require.NoError(t, e2.RecoverApprovals(context.Background()))
 
-			got, err := e2.GetExecution(exec.ID)
+			got, err := e2.GetExecution(context.Background(), approvalTestTenant, exec.ID)
 			require.NoError(t, err, "the run must not disappear")
 			assert.Equal(t, StatusFailed, got.Status)
 			assert.Contains(t, got.Error, "checkpoint could not be restored")
 			assert.Equal(t, approvalTestTenant, got.TenantID)
-			list, err := e2.ListExecutions()
+			list, err := e2.ListExecutions(context.Background(), approvalTestTenant)
 			require.NoError(t, err)
 			var listed bool
 			for _, l := range list {

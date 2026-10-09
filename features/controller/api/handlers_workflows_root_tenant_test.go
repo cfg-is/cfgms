@@ -32,7 +32,7 @@ func rootTenantWorkflowFixture(t *testing.T) (*Server, *mux.Router, cfgconfig.Co
 // executionTenant starts the named workflow through the API and returns the
 // authenticated tenant the engine recorded on the execution — the tenant every
 // tenant-scoped step acts on (Issue #4338).
-func executionTenant(t *testing.T, router *mux.Router, engine *workflow.Engine, req *http.Request) string {
+func executionTenant(t *testing.T, router *mux.Router, engine *workflow.Engine, wantTenant string, req *http.Request) string {
 	t.Helper()
 	rec := serveWorkflowAs(router, req)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -40,7 +40,7 @@ func executionTenant(t *testing.T, router *mux.Router, engine *workflow.Engine, 
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	execID, _ := resp["execution_id"].(string)
 	require.NotEmpty(t, execID)
-	execution, err := engine.GetExecution(execID)
+	execution, err := engine.GetExecution(context.Background(), wantTenant, execID)
 	require.NoError(t, err)
 	return execution.TenantID
 }
@@ -75,7 +75,7 @@ func TestWorkflow_RootScoped_UsesRootTenant(t *testing.T) {
 
 	// The execution runs under the root tenant: a root-scoped caller's own context
 	// carries no tenant, which left tenant-scoped steps with nothing to act on.
-	assert.Equal(t, testRootTenantID, executionTenant(t, router, engine,
+	assert.Equal(t, testRootTenantID, executionTenant(t, router, engine, testRootTenantID,
 		requestAsPrincipal(t, http.MethodPost, "/workflows/root-wf/execute", "", caller, []byte("{}"))))
 
 	// ?tenant=<root> selects the same tenant explicitly and needs no crossing.
@@ -114,7 +114,7 @@ func TestWorkflow_RootScopedClientTenant_RequiresCrossing(t *testing.T) {
 
 	// Executing it runs under the selected tenant — the one the crossing covers —
 	// so its steps act on that tenant's devices and nothing else.
-	assert.Equal(t, "msp-sel", executionTenant(t, router, engine,
+	assert.Equal(t, "msp-sel", executionTenant(t, router, engine, "msp-sel",
 		requestAsPrincipal(t, http.MethodPost, "/workflows/client-wf/execute?tenant=msp-sel", "", caller, []byte("{}"))))
 
 	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows", "", caller, nil))

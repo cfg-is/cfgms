@@ -30,7 +30,7 @@ func runNotifyWorkflow(t *testing.T, engine *Engine, step Step, vars map[string]
 	execution, err := engine.ExecuteWorkflow(context.Background(), wf, nil)
 	require.NoError(t, err)
 	waitForWorkflowCompletion(t, execution, 5*time.Second)
-	final, err := engine.GetExecution(execution.ID)
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
 	require.NoError(t, err)
 	return final
 }

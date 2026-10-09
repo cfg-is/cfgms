@@ -242,6 +242,25 @@ checkpoint can carry step outputs and credentials, so it is written through the 
 provider (SOPS-encrypted at rest); the approval record holds only `CheckpointRef`. Like
 `AlertStore`, it is not yet carried by `cfg migrate --provider storage`.
 
+**`WorkflowExecutionStore` (Issue #4675).** Workflow execution history — status, step
+results, error and timestamps — lives in a provider-backed store: `flatfile`
+(`workflow_executions/<tenant>/<execution>.json`, one file per execution), `sqlite`
+(`workflow_executions`) and `database` (`cfgms_workflow_executions`). Only the `database`
+provider is cluster-visible; `flatfile` and `sqlite` are readable by the node that wrote them
+and across its restarts. Records are keyed by tenant and execution id, and the empty tenant
+is the root tenant's key, never "all tenants": `Get` and `List` never cross tenants, and an
+id that exists under another tenant is reported as not found. Tenant, id, workflow name,
+status and the start and end times are columns; step results, trace and error are an opaque
+JSON payload. Run variables are never stored, because they carry values resolved at run time
+that can be secrets, and the variable snapshots that errors and trace entries attach are
+dropped from the payload for the same reason. The engine writes through when an execution is
+registered, after each step result, and at its terminal status; a terminal record is never
+overwritten by a later non-terminal write, and a store failure is logged without failing the
+run. Retention is bounded per tenant: after each terminal write the engine calls `Prune`,
+which keeps the newest `DefaultExecutionRetention` (1000, `WithExecutionRetention`) terminal
+records and never deletes a non-terminal one. Like `AlertStore`, it is not yet carried by
+`cfg migrate --provider storage`.
+
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
 ```yaml

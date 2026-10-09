@@ -74,6 +74,11 @@ type Engine struct {
 	setHARoleExecutor             SetHARoleStepExecutor
 	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
 
+	// Durable execution history (engine_execution_store.go). A nil store keeps
+	// executions node-local.
+	executionStore     business.WorkflowExecutionStore
+	executionRetention int
+
 	// Approval gate state (engine_approval.go). secrets holds encrypted
 	// checkpoints, approvalStore the pending/decided approval records.
 	secrets       secretsif.SecretStore
@@ -132,6 +137,7 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 		approvalLease:                 defaultApprovalLease,
 		nodeID:                        defaultApprovalNodeID(),
 		resuming:                      make(map[string]struct{}),
+		executionRetention:            DefaultExecutionRetention,
 	}
 	engine.baseCtx, engine.baseCancel = context.WithCancel(context.Background())
 	for _, opt := range opts {
@@ -209,6 +215,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	e.mutex.Lock()
 	e.executions[executionID] = execution
 	e.mutex.Unlock()
+	e.persistExecution(execution)
 
 	logger := e.logger.WithTenant(tenantID)
 
@@ -237,8 +244,12 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 	// This is the first defer so it runs last (LIFO), after the panic recovery
 	// defer below finishes its logging.
 	defer close(execution.Done)
+	// Runs after the panic recovery below and before Done closes, so a waiter
+	// released by Done sees the terminal state already written through.
+	defer e.persistExecution(execution)
 
 	execution.SetStatus(StatusRunning)
+	e.persistExecution(execution)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -405,7 +416,7 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 							retryKey := StepResultKey(step)
 							if result, exists := execution.GetStepResult(retryKey); exists {
 								result.RetryCount = attempt
-								execution.SetStepResult(retryKey, result)
+								e.recordStepResult(execution, retryKey, result)
 							}
 							if lastRetryErr == nil {
 								break
@@ -514,7 +525,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	}
 
 	// Store initial result safely
-	execution.SetStepResult(key, result)
+	e.recordStepResult(execution, key, result)
 
 	var err error
 	switch step.Type {
@@ -576,7 +587,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var transformResult StepResult
 			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
-			execution.SetStepResult(key, transformResult)
+			e.recordStepResult(execution, key, transformResult)
 		}
 	case StepTypeQueryRingHealth:
 		if e.ringHealthExecutor == nil {
@@ -584,7 +595,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var rhResult StepResult
 			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
-			execution.SetStepResult(key, rhResult)
+			e.recordStepResult(execution, key, rhResult)
 		}
 	case StepTypeSetHARole:
 		if e.setHARoleExecutor == nil {
@@ -592,7 +603,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var haResult StepResult
 			haResult, err = e.setHARoleExecutor.ExecuteSetHARoleStep(ctx, step, execution)
-			execution.SetStepResult(key, haResult)
+			e.recordStepResult(execution, key, haResult)
 		}
 	case StepTypeMoveResourceToCluster:
 		if e.moveResourceToClusterExecutor == nil {
@@ -600,7 +611,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var moveResult StepResult
 			moveResult, err = e.moveResourceToClusterExecutor.ExecuteMoveResourceToClusterStep(ctx, step, execution)
-			execution.SetStepResult(key, moveResult)
+			e.recordStepResult(execution, key, moveResult)
 		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
@@ -644,7 +655,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	// Add execution trace entry
 	AddExecutionTrace(execution, key, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
 
-	execution.SetStepResult(key, result)
+	e.recordStepResult(execution, key, result)
 	return err
 }
 
@@ -781,56 +792,6 @@ func (e *Engine) executeConditionalStep(ctx context.Context, step Step, executio
 	return e.executeSteps(ctx, step.Steps, execution)
 }
 
-// GetExecution returns the status of a workflow execution
-func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
-	e.mutex.RLock()
-	execution, exists := e.executions[executionID]
-	e.mutex.RUnlock()
-
-	if !exists {
-		return nil, fmt.Errorf("execution not found: %s", executionID)
-	}
-
-	// Return a copy to avoid race conditions - use thread-safe methods
-	executionCopy := WorkflowExecution{
-		ID:             execution.ID,
-		WorkflowName:   execution.WorkflowName,
-		TenantID:       execution.TenantID,
-		Status:         execution.GetStatus(),
-		StartTime:      execution.StartTime,
-		EndTime:        execution.GetEndTime(),
-		CurrentStep:    execution.GetCurrentStep(),
-		StepResults:    execution.GetStepResults(),
-		Variables:      execution.GetVariables(),
-		ExecutionTrace: execution.GetExecutionTrace(),
-		Error:          execution.GetError(),
-		ErrorDetails:   execution.GetErrorDetails(),
-		Context:        execution.Context,
-		Cancel:         execution.Cancel,
-	}
-
-	// Copy EndTime if it exists (GetEndTime returns the pointer, so copy the value)
-	if executionCopy.EndTime != nil {
-		endTimeCopy := *executionCopy.EndTime
-		executionCopy.EndTime = &endTimeCopy
-	}
-
-	return &executionCopy, nil
-}
-
-// ListExecutions returns all workflow executions
-func (e *Engine) ListExecutions() ([]*WorkflowExecution, error) {
-	e.mutex.RLock()
-	defer e.mutex.RUnlock()
-
-	executions := make([]*WorkflowExecution, 0, len(e.executions))
-	for _, execution := range e.executions {
-		executions = append(executions, execution)
-	}
-
-	return executions, nil
-}
-
 // CancelExecution cancels a running workflow execution
 func (e *Engine) CancelExecution(executionID string) error {
 	e.mutex.RLock()
@@ -838,7 +799,7 @@ func (e *Engine) CancelExecution(executionID string) error {
 	e.mutex.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("execution not found: %s", executionID)
+		return fmt.Errorf("%w: %s", ErrExecutionNotFound, executionID)
 	}
 
 	if execution.Cancel != nil {
@@ -848,6 +809,7 @@ func (e *Engine) CancelExecution(executionID string) error {
 		execution.SetEndTime(&endTime)
 		e.mutex.Unlock()
 		execution.SetStatus(StatusCancelled)
+		e.persistExecution(execution)
 	}
 
 	return nil
@@ -1467,6 +1429,7 @@ func (e *Engine) recordRejectedExecution(ctx context.Context, workflow Workflow,
 	e.mutex.Lock()
 	e.executions[execution.ID] = execution
 	e.mutex.Unlock()
+	e.persistExecution(execution)
 
 	e.logger.WithTenant(tenantID).WarnCtx(ctx, "Workflow execution rejected: invalid inputs",
 		"operation", "workflow_execute",

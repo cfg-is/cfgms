@@ -72,7 +72,7 @@ func newApprovalFixture(t *testing.T) *approvalFixture {
 // status reports the current status of execution id. Resume rebuilds the execution
 // under the same ID, so the pointer from the original run goes stale.
 func (f *approvalFixture) status(id string) workflow.ExecutionStatus {
-	e, err := f.engine.GetExecution(id)
+	e, err := f.engine.GetExecution(context.Background(), approvalTenant, id)
 	if err != nil || e == nil {
 		return ""
 	}

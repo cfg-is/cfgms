@@ -177,6 +177,10 @@ func (t *TestStorageProvider) CreateApprovalStore(_ map[string]interface{}) (bus
 	return nil, business.ErrNotSupported
 }
 
+func (t *TestStorageProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

@@ -91,6 +91,10 @@ func (p *testNonClusterProvider) CreateApprovalStore(_ map[string]interface{}) (
 	return nil, business.ErrNotSupported
 }
 
+func (p *testNonClusterProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // testClusterProvider implements interfaces.StorageProvider with ClusterCapable() == true.
 // All store factory methods return business.ErrNotSupported. Used to isolate the S3 gate
 // in assertClusterBackendsReady without requiring a real Postgres connection.
@@ -150,6 +154,10 @@ func (p *testClusterProvider) CreateAlertStore(_ map[string]interface{}) (busine
 }
 
 func (p *testClusterProvider) CreateApprovalStore(_ map[string]interface{}) (business.ApprovalStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (p *testClusterProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
 	return nil, business.ErrNotSupported
 }
 
