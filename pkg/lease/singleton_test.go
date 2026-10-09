@@ -312,6 +312,86 @@ func TestSingletonJob_RenewWithRetry_SingleTransientErrorDoesNotLoseLease(t *tes
 	assert.False(t, ctxCancelled, "a single transient renewal error must not cancel fn's context / lose the lease")
 }
 
+// renewRunFailingStore delegates every call to a real store, but fails the
+// AcquireOrRenew calls numbered firstFail..lastFail (1-indexed) with a
+// transient-looking error, then resumes delegating. Models a store hiccup that
+// lasts several consecutive attempts rather than one.
+type renewRunFailingStore struct {
+	business.LeaseStore
+	firstFail, lastFail int32
+	calls               int32
+}
+
+func (s *renewRunFailingStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	if n := atomic.AddInt32(&s.calls, 1); n >= s.firstFail && n <= s.lastFail {
+		return nil, errors.New("simulated transient lease store error")
+	}
+	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// [REQUIRED TEST] (Issue #4541) A renewal that keeps failing for longer than
+// Manager's MaxAllowedRenewalLatency, but recovers while the holder's lease is
+// still inside its safety margin, must not cost the holder the lease. The
+// retry budget is the remaining local-authority window, not the (much
+// shorter) per-call latency budget: giving up at the latter cancels fn and
+// stops renewing while the lease is still valid, so it lapses mid-cycle and a
+// second node acquires it.
+func TestSingletonJob_RenewWithRetry_OutageLongerThanLatencyBudget_KeepsLease(t *testing.T) {
+	base := newTestStore(t)
+	// Call #1 is the initial TryAcquire; calls #2-#9 are the first renewal
+	// tick and its retries. The per-call latency budget (200ms) is exhausted
+	// by call #6 or so; the lease TTL (2s) is not.
+	store := &renewRunFailingStore{LeaseStore: base, firstFail: 2, lastFail: 9}
+	ttl := 2 * time.Second
+	renewInterval := 200 * time.Millisecond
+	m, err := NewManager(store, ttl, renewInterval, renewInterval)
+	require.NoError(t, err)
+	job, err := NewSingletonJob(m, "x", "node-1", ttl, renewInterval, nil)
+	require.NoError(t, err)
+
+	var ctxCancelled bool
+	ran := job.RunIfLeader(context.Background(), func(ctx context.Context) {
+		time.Sleep(ttl + ttl/2)
+		select {
+		case <-ctx.Done():
+			ctxCancelled = true
+		default:
+		}
+	})
+	assert.True(t, ran)
+	assert.False(t, ctxCancelled, "an outage shorter than the lease's safety margin must not cancel fn's context")
+
+	// The lease never lapsed, so a second holder is still fenced out.
+	_, acquired, err := m.TryAcquire(context.Background(), "x", "node-2", ttl)
+	require.NoError(t, err)
+	assert.False(t, acquired, "the lease must still be held after the outage")
+}
+
+// A renewal outage that outlasts the whole safety margin must still give up
+// (cancel fn) before the lease can expire in the store.
+func TestSingletonJob_RenewWithRetry_OutageBeyondSafetyMargin_CancelsBeforeExpiry(t *testing.T) {
+	base := newTestStore(t)
+	store := &renewFailingStore{LeaseStore: base, failAfter: 1}
+	ttl := 1 * time.Second
+	renewInterval := 100 * time.Millisecond
+	m, err := NewManager(store, ttl, renewInterval, renewInterval)
+	require.NoError(t, err)
+	job, err := NewSingletonJob(m, "x", "node-1", ttl, renewInterval, nil)
+	require.NoError(t, err)
+
+	start := time.Now()
+	var cancelledAfter time.Duration
+	job.RunIfLeader(context.Background(), func(ctx context.Context) {
+		select {
+		case <-ctx.Done():
+			cancelledAfter = time.Since(start)
+		case <-time.After(3 * time.Second):
+		}
+	})
+	require.NotZero(t, cancelledAfter, "fn's context was never cancelled")
+	assert.Less(t, cancelledAfter, ttl, "fn must be cancelled before the lease can expire in the store")
+}
+
 func TestSingletonJob_AcquireErrorSkipsCycle(t *testing.T) {
 	base := newTestStore(t)
 	store := &renewFailingStore{LeaseStore: base, failAfter: 0} // every call fails, including the initial acquire
