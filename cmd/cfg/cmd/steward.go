@@ -1121,14 +1121,14 @@ func runStewardDNA(_ *cobra.Command, args []string) error {
 	return overallErr
 }
 
-// stewardModulesCmd lists modules currently loaded by every steward a selector matches.
+// stewardModulesCmd lists modules in use on every steward a selector matches.
 var stewardModulesCmd = &cobra.Command{
 	Use:   "modules <selector>",
-	Short: "List modules loaded by stewards matching a selector",
-	Long: `Display the modules currently loaded by every steward the selector matches.
+	Short: "List modules in use on stewards matching a selector",
+	Long: `Display the modules that own at least one resource on every steward the selector matches.
 
-Retrieves module data from each steward's DNA attributes reported to the controller.
-When a steward does not report module data, a 501 response is returned and the
+Derives the module list from the owning module of each DNA fragment the steward
+has reported to the controller. When a steward has reported no DNA, a 501 response is returned and the
 entry exits 0 with an informational message.
 
 Examples:
@@ -1355,7 +1355,7 @@ func runStewardModules(_ *cobra.Command, args []string) error {
 			Status string `json:"status"`
 		}
 		if json.Unmarshal(r.Payload, &statusCheck) == nil && statusCheck.Status == "not_implemented" {
-			fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
+			fmt.Println("Module list not available for this steward. The steward has not reported DNA yet.")
 			continue
 		}
 
@@ -1373,7 +1373,7 @@ func runStewardModules(_ *cobra.Command, args []string) error {
 		}
 
 		if len(apiResp.Data.Modules) == 0 {
-			fmt.Println("No modules loaded.")
+			fmt.Println("No modules own resources on this steward.")
 			continue
 		}
 

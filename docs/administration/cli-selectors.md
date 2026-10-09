@@ -224,7 +224,7 @@ The `payload` field is verb-specific:
 |------|-----------------|
 | `status` | Full steward status record |
 | `dna` | DNA snapshot record |
-| `modules` | Module list |
+| `modules` | Module list: the modules that own at least one resource on the steward, derived from DNA fragment authorities |
 | `exec` | `exit_code`, `output`, `status` |
 | `move` | `steward_id`, `tenant_id`, `previous_tenant`, `status` |
 | `decommission` | `status: "decommissioned"` |
