@@ -7,7 +7,13 @@ package oskeychain
 
 import (
 	"context"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/stretchr/testify/assert"
@@ -83,4 +89,126 @@ func TestLinuxKeyringFallback(t *testing.T) {
 	require.NoError(t, store.DeleteSecret(ctx, key))
 	_, err = store.GetSecret(ctx, key)
 	assert.Error(t, err, "secret must be gone after delete")
+}
+
+// helperEnv switches the re-executed test binary into the never-exiting
+// secret-tool stand-in used by the timeout tests.
+const helperEnv = "CFGMS_OSKEYCHAIN_HANG_HELPER"
+
+// TestMain lets the test binary double as a secret-tool that never answers: the
+// standard Go helper-process pattern. It is a real child process, so the
+// timeout path really kills a real process.
+func TestMain(m *testing.M) {
+	if os.Getenv(helperEnv) == "1" {
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func shortTimeouts(t *testing.T) {
+	t.Helper()
+	oldProbe, oldTool := probeTimeout, toolTimeout
+	probeTimeout, toolTimeout = 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { probeTimeout, toolTimeout = oldProbe, oldTool })
+}
+
+func hangingBackend(t *testing.T) *secretServiceBackend {
+	t.Helper()
+	t.Setenv(helperEnv, "1")
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	return &secretServiceBackend{bin: exe}
+}
+
+// TestSecretServiceAvailable_SilentBus: a bus socket that accepts connections
+// and never replies must make available() return false within the probe
+// timeout, not hang.
+func TestSecretServiceAvailable_SilentBus(t *testing.T) {
+	shortTimeouts(t)
+	sock := filepath.Join(t.TempDir(), "bus.sock")
+	l, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		_ = l.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+sock)
+
+	b := &secretServiceBackend{bin: "/bin/true"}
+	start := time.Now()
+	assert.False(t, b.available())
+	assert.Less(t, time.Since(start), probeTimeout+time.Second)
+}
+
+func TestSecretServiceAvailable_NothingListening(t *testing.T) {
+	shortTimeouts(t)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(t.TempDir(), "absent.sock"))
+	b := &secretServiceBackend{bin: "/bin/true"}
+	assert.False(t, b.available())
+}
+
+// TestSecretToolTimeouts: a secret-tool that never exits is killed at the
+// timeout; every call returns an error and get never reports "not found".
+func TestSecretToolTimeouts(t *testing.T) {
+	shortTimeouts(t)
+	b := hangingBackend(t)
+
+	start := time.Now()
+	err := b.set("k", []byte("v"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	_, err = b.get("k")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, errors.Is(err, errSecretNotFound), "a timed-out lookup is not 'not found'")
+
+	err = b.del("k")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 3*toolTimeout+2*time.Second)
+}
+
+func TestSecretServiceGet_StartFailureIsNotNotFound(t *testing.T) {
+	b := &secretServiceBackend{bin: filepath.Join(t.TempDir(), "missing")}
+	_, err := b.get("k")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, errSecretNotFound))
+}
+
+func TestSecretServiceGet_CleanExitNoOutputIsNotFound(t *testing.T) {
+	b := &secretServiceBackend{bin: "/bin/false"}
+	_, err := b.get("k")
+	assert.ErrorIs(t, err, errSecretNotFound)
+}
+
+// TestCompareAndSwap_TimedOutLookupIsNotVersionZero: a version lookup that
+// timed out must fail the swap rather than be read as version 0.
+func TestCompareAndSwap_TimedOutLookupIsNotVersionZero(t *testing.T) {
+	shortTimeouts(t)
+	store := newStore(hangingBackend(t))
+	v, ok, err := store.CompareAndSwapSecret(context.Background(), "cfgms/session/cas-hang",
+		0, &interfaces.SecretRequest{Key: "cfgms/session/cas-hang", Value: "v"})
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, 0, v)
 }

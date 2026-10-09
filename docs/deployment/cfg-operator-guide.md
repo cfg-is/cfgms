@@ -559,6 +559,13 @@ The OS-native secret stores in use:
 | macOS | macOS Keychain |
 | Linux | Secret Service API (e.g., GNOME Keyring, KWallet) or kernel keyring |
 
+On Linux the Secret Service is used only when it answers and its default
+collection is unlocked; the check never prompts. On a host without an unlocked
+Secret Service (for example over SSH, where the login keyring is locked and
+cannot show an unlock prompt), the session token is held in the kernel session
+keyring. That token ends with the login session, so a new SSH session needs
+`cfg connect` again.
+
 ### Why the controller only stores a token hash
 
 The controller stores `SHA-256(token)`, not the token value itself. If the
