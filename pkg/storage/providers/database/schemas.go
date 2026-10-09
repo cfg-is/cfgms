@@ -955,7 +955,7 @@ func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db *sql.DB) err
 // controller node reads and completes runs through these shared tables.
 func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS script_runs (
+		`CREATE TABLE IF NOT EXISTS cfgms_script_runs (
 			run_id         TEXT PRIMARY KEY,
 			tenant_id      TEXT NOT NULL,
 			created_by     TEXT NOT NULL DEFAULT '',
@@ -973,10 +973,10 @@ func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) 
 		);`,
 		// Migration for tables created before steward actions (Issue #4625): existing
 		// rows take the 'script' default.
-		"ALTER TABLE script_runs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'script';",
-		"ALTER TABLE script_runs ADD COLUMN IF NOT EXISTS action_json JSONB;",
-		"CREATE INDEX IF NOT EXISTS idx_script_runs_tenant_created ON script_runs(tenant_id, created_at DESC);",
-		`CREATE TABLE IF NOT EXISTS script_run_jobs (
+		"ALTER TABLE cfgms_script_runs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'script';",
+		"ALTER TABLE cfgms_script_runs ADD COLUMN IF NOT EXISTS action_json JSONB;",
+		"CREATE INDEX IF NOT EXISTS idx_script_runs_tenant_created ON cfgms_script_runs(tenant_id, created_at DESC);",
+		`CREATE TABLE IF NOT EXISTS cfgms_script_run_jobs (
 			job_id       TEXT PRIMARY KEY,
 			run_id       TEXT NOT NULL,
 			device_id    TEXT NOT NULL,
@@ -990,11 +990,11 @@ func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) 
 			result_code  TEXT NOT NULL DEFAULT '',
 			dispatched_at TIMESTAMP WITH TIME ZONE
 		);`,
-		"ALTER TABLE script_run_jobs ADD COLUMN IF NOT EXISTS result_code TEXT NOT NULL DEFAULT '';",
-		"ALTER TABLE script_run_jobs ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMP WITH TIME ZONE;",
-		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_run_id ON script_run_jobs(run_id);",
-		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_open ON script_run_jobs(status) WHERE status IN ('pending', 'dispatched');",
-		`CREATE TABLE IF NOT EXISTS execution_grants (
+		"ALTER TABLE cfgms_script_run_jobs ADD COLUMN IF NOT EXISTS result_code TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE cfgms_script_run_jobs ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMP WITH TIME ZONE;",
+		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_run_id ON cfgms_script_run_jobs(run_id);",
+		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_open ON cfgms_script_run_jobs(status) WHERE status IN ('pending', 'dispatched');",
+		`CREATE TABLE IF NOT EXISTS cfgms_execution_grants (
 			execution_id TEXT PRIMARY KEY,
 			device_id    TEXT NOT NULL,
 			tenant_id    TEXT NOT NULL,
@@ -1003,7 +1003,7 @@ func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) 
 			expires_at   TIMESTAMP WITH TIME ZONE NOT NULL,
 			consumed     BOOLEAN NOT NULL DEFAULT false
 		);`,
-		"CREATE INDEX IF NOT EXISTS idx_execution_grants_device ON execution_grants(device_id, execution_id);",
+		"CREATE INDEX IF NOT EXISTS idx_execution_grants_device ON cfgms_execution_grants(device_id, execution_id);",
 	}
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -1913,9 +1913,9 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_leases;",
 		"DROP TABLE IF EXISTS cfgms_routing;",
 		"DROP TABLE IF EXISTS cfgms_execution_queue;",
-		"DROP TABLE IF EXISTS execution_grants;",
-		"DROP TABLE IF EXISTS script_run_jobs;",
-		"DROP TABLE IF EXISTS script_runs;",
+		"DROP TABLE IF EXISTS cfgms_execution_grants;",
+		"DROP TABLE IF EXISTS cfgms_script_run_jobs;",
+		"DROP TABLE IF EXISTS cfgms_script_runs;",
 		"DROP TABLE IF EXISTS cfgms_node_registry;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",

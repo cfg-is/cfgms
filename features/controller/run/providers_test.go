@@ -23,7 +23,8 @@ import (
 )
 
 // newTestClusterStorage returns a cluster-mode StorageManager over the test
-// PostgreSQL database, or skips when it is unavailable.
+// PostgreSQL database, or skips when it is unavailable
+// (fails instead when CFGMS_TEST_INTEGRATION=1).
 func newTestClusterStorage(t *testing.T) *interfaces.StorageManager {
 	t.Helper()
 	if testing.Short() {
@@ -39,6 +40,9 @@ func newTestClusterStorage(t *testing.T) *interfaces.StorageManager {
 	require.NoError(t, err)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
+		if os.Getenv("CFGMS_TEST_INTEGRATION") == "1" {
+			t.Fatalf("PostgreSQL test database not reachable with CFGMS_TEST_INTEGRATION=1: %v", err)
+		}
 		t.Skip("PostgreSQL test database not reachable:", err)
 	}
 	_ = db.Close()
