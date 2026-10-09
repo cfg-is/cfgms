@@ -765,3 +765,41 @@ func BenchmarkDatabaseProvider_CreateStores(b *testing.B) {
 
 // Helper function to check if PostgreSQL is available for tests
 // Note: Cannot use testing.Short() in init() as it's called before flag parsing
+
+// TestDropAllTables_RemovesEveryProviderTable guards against DropAllTables
+// omitting a table the provider creates (Issue #4519): a leftover table makes a
+// second run of the package against the same database fail on stale rows.
+func TestDropAllTables_RemovesEveryProviderTable(t *testing.T) {
+	db := setupTestDatabase(t)
+	defer func() { _ = db.Close() }()
+
+	schemas := NewDatabaseSchemas()
+	ctx := context.Background()
+
+	require.NoError(t, schemas.CreateAllTables(ctx, db))
+	require.NoError(t, schemas.CreateTenantTables(ctx, db))
+	require.NoError(t, schemas.CreatePendingDeletionsTable(ctx, db))
+	require.NoError(t, schemas.CreateTenantCrossingsTable(ctx, db))
+	require.NoError(t, schemas.CreateBlastRadiusPolicyOverridesTable(ctx, db))
+
+	tables := []string{
+		"tenant_crossings",
+		"blast_radius_policy_overrides",
+		"cfgms_tenant_pending_deletions",
+		"cfgms_tenants",
+	}
+
+	for _, table := range tables {
+		var regclass sql.NullString
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, table).Scan(&regclass))
+		require.True(t, regclass.Valid, "table %s should exist before DropAllTables", table)
+	}
+
+	require.NoError(t, schemas.DropAllTables(ctx, db))
+
+	for _, table := range tables {
+		var regclass sql.NullString
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, table).Scan(&regclass))
+		assert.False(t, regclass.Valid, "table %s should be dropped by DropAllTables", table)
+	}
+}
