@@ -30,13 +30,14 @@ var (
 	accountAPIURL string
 
 	// Lifecycle verb flags
-	accountUsername    string
-	accountTenantID    string
-	accountRootScope   bool
-	accountPermissions []string
-	accountDisabled    string // "true" or "false"; empty means not set
-	accountJSONOutput  bool
-	accountForce       bool
+	accountUsername         string
+	accountTenantID         string
+	accountRootScope        bool
+	accountPermissions      []string
+	accountDisabled         string // "true" or "false"; empty means not set
+	accountResetCredentials bool
+	accountJSONOutput       bool
+	accountForce            bool
 
 	// Cert-binding verb flags
 	accountCertSerial      string
@@ -228,6 +229,7 @@ func init() {
 	// update flags
 	accountUpdateCmd.Flags().StringArrayVar(&accountPermissions, "permission", nil, "Permission to set (repeatable; replaces existing set)")
 	accountUpdateCmd.Flags().StringVar(&accountDisabled, "disabled", "", "Set disabled state: true or false")
+	accountUpdateCmd.Flags().BoolVar(&accountResetCredentials, "reset-credentials", false, "Revoke existing passkeys and issue a new enrollment link")
 	accountUpdateCmd.Flags().BoolVar(&accountJSONOutput, "json", false, "Emit JSON output")
 
 	// delete flags
@@ -311,6 +313,8 @@ type apiAccountCreateRequest struct {
 type apiAccountUpdateRequest struct {
 	Permissions *[]string `json:"permissions"`
 	Disabled    *bool     `json:"disabled"`
+	// ResetCredentials is omitted unless set so plain updates never reset passkeys.
+	ResetCredentials bool `json:"reset_credentials,omitempty"`
 }
 
 // apiAccountInfo mirrors api.AccountInfo.
@@ -633,10 +637,20 @@ func runAccountCreate(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Account provisioned: %s\n", result.Username)
 	printAccountInfo(cmd, &result.apiAccountInfo)
 	if result.EnrollmentMagicLink != "" {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Enrollment link: %s\n", result.EnrollmentMagicLink)
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  (shown once — share with the account holder via a secure channel)\n")
+		printEnrollmentLink(cmd, client.BaseURL(), result.EnrollmentMagicLink)
+	} else {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+			"\n  No enrollment link issued (account already exists). To issue a new one run:\n    cfg account update %s --reset-credentials\n",
+			result.Username)
 	}
 	return nil
+}
+
+// printEnrollmentLink prints the single-use enrollment URL (<controller_url>/enroll/<token>).
+// The token is printed once and never logged.
+func printEnrollmentLink(cmd *cobra.Command, baseURL, token string) {
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Enrollment link: %s/enroll/%s\n", strings.TrimRight(baseURL, "/"), token)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  (shown once — share with the account holder via a secure channel)\n")
 }
 
 func runAccountList(cmd *cobra.Command, args []string) error {
@@ -706,7 +720,7 @@ func runAccountGet(cmd *cobra.Command, args []string) error {
 func runAccountUpdate(cmd *cobra.Command, args []string) error {
 	username := args[0]
 
-	req := &apiAccountUpdateRequest{}
+	req := &apiAccountUpdateRequest{ResetCredentials: accountResetCredentials}
 
 	if len(accountPermissions) > 0 {
 		perms := accountPermissions
@@ -742,6 +756,9 @@ func runAccountUpdate(cmd *cobra.Command, args []string) error {
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Account updated: %s\n", result.Username)
 	printAccountInfo(cmd, &result.apiAccountInfo)
+	if result.EnrollmentMagicLink != "" {
+		printEnrollmentLink(cmd, client.BaseURL(), result.EnrollmentMagicLink)
+	}
 	return nil
 }
 

@@ -14,14 +14,15 @@
  *      validate the token server-side and receive WebAuthn creation options.
  *   3. navigator.credentials.create({ publicKey }) — browser-native ceremony.
  *   4. POST /api/v1/web/passkey/enroll/finish (via apiFetch) with the
- *      attestation; a 201 fires onSessionConfirmed → AuthContext signedIn.
- *   5. navigate('/') → fleet view (session probe already resolved).
+ *      attestation. A 201 mints no session (the link is single-use and is not
+ *      a login credential).
+ *   5. Show a "passkey registered" step linking to /login.
  *
  * Terminal error states (no retry): invalid/expired/revoked/already-enrolled
  * token. Cancelled ceremony returns to the ready state for a retry.
  */
 import { useEffect, useState } from 'react'
-import { useParams, useNavigate } from 'react-router'
+import { useParams, Link } from 'react-router'
 import {
   passkeyEnrollBeginRequest,
   passkeyEnrollFinishRequest,
@@ -89,13 +90,13 @@ function toAttestationJSON(cred: PublicKeyCredential): AttestationJSON {
  * validating — begin request in flight (server-side token check)
  * ready      — token valid, showing "Register passkey" button
  * running    — navigator.credentials.create() pending
+ * done       — passkey registered; sign in at /login (no session minted)
  * error      — terminal: invalid/expired/revoked token, or already enrolled
  */
-type Phase = 'validating' | 'ready' | 'running' | 'error'
+type Phase = 'validating' | 'ready' | 'running' | 'done' | 'error'
 
 export default function Enroll() {
   const { token } = useParams<{ token: string }>()
-  const navigate = useNavigate()
   // Derive initial state directly: a missing token is already an error at
   // render time (useParams returned undefined), no async check needed.
   const [phase, setPhase] = useState<Phase>(() => (token ? 'validating' : 'error'))
@@ -150,7 +151,12 @@ export default function Enroll() {
       const isCancelled = err instanceof DOMException && err.name === 'NotAllowedError'
       setPhase('ready')
       if (!isCancelled) {
-        setErrorMsg('An unexpected error occurred. Please try again.')
+        console.error('Passkey enrollment ceremony failed', err)
+        const name =
+          typeof (err as { name?: unknown })?.name === 'string'
+            ? (err as { name: string }).name
+            : 'UnknownError'
+        setErrorMsg(`Passkey registration failed (${name}). Please try again.`)
         setPhase('error')
       }
       return
@@ -184,10 +190,36 @@ export default function Enroll() {
       return
     }
 
-    // Successful 201: apiFetch fired onSessionConfirmed → AuthContext is now
-    // signedIn. Navigate to the app root; the fleet view's own data call
-    // confirms the session (existing probe architecture — no separate probe).
-    void navigate('/', { replace: true })
+    // Successful 201: the server mints no session, so the next step is sign-in.
+    setPhase('done')
+  }
+
+  if (phase === 'done') {
+    return (
+      <div className="enroll-stage">
+        <div className="enroll-win">
+          <div className="enroll-titlebar">
+            <span className="enroll-title mono">cfgms · first-time setup</span>
+          </div>
+          <div className="enroll-body">
+            <div className="enroll-wordmark">
+              <b>CFGMS</b>
+              <span>config management</span>
+            </div>
+            <p className="enroll-lead">Passkey registered</p>
+            <p className="enroll-desc">
+              Your passkey is set up. Sign in to continue.
+            </p>
+            <Link className="enroll-register" to="/login">
+              <span className="enroll-register-txt">Sign in</span>
+            </Link>
+            <div className="enroll-foot">
+              <span className="mono">© 2026 cfg.is</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   if (phase === 'validating') {

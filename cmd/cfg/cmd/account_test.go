@@ -46,6 +46,8 @@ type accountServerConfig struct {
 	accounts     []apiAccountInfo
 	certs        []apiCertBindingInfo
 	capturedBody *[]byte // when non-nil, the server stores the last request body here
+	noCreateLink bool    // when true, POST /accounts returns no enrollment_magic_link
+	updateLink   string  // enrollment_magic_link returned by PUT /accounts/{username}
 }
 
 // newAccountTestServer creates a plain-HTTP test server that handles all
@@ -104,7 +106,7 @@ func newAccountTestServer(t *testing.T, cfg accountServerConfig) *httptest.Serve
 			if len(cfg.accounts) > 0 {
 				acct = cfg.accounts[0]
 			}
-			resp := apiAccountCreateResponse{apiAccountInfo: acct}
+			resp := apiAccountCreateResponse{apiAccountInfo: acct, EnrollmentMagicLink: cfg.updateLink}
 			writeEnvelope(w, resp)
 
 		// GET /api/v1/accounts/{username}
@@ -133,6 +135,9 @@ func newAccountTestServer(t *testing.T, cfg accountServerConfig) *httptest.Serve
 					CreatedAt:   "2026-08-01T00:00:00Z",
 				},
 				EnrollmentMagicLink: "deadbeefcafe1234",
+			}
+			if cfg.noCreateLink {
+				created.EnrollmentMagicLink = ""
 			}
 			if created.Permissions == nil {
 				created.Permissions = []string{}
@@ -186,6 +191,7 @@ func saveAccountFlags(t *testing.T) func() {
 	origRootScope := accountRootScope
 	origPermissions := accountPermissions
 	origDisabled := accountDisabled
+	origResetCredentials := accountResetCredentials
 	origJSONOutput := accountJSONOutput
 	origForce := accountForce
 	origCertSerial := accountCertSerial
@@ -202,6 +208,7 @@ func saveAccountFlags(t *testing.T) func() {
 		accountRootScope = origRootScope
 		accountPermissions = origPermissions
 		accountDisabled = origDisabled
+		accountResetCredentials = origResetCredentials
 		accountJSONOutput = origJSONOutput
 		accountForce = origForce
 		accountCertSerial = origCertSerial
@@ -241,6 +248,91 @@ func TestAccountCreateHappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "alice")
 	assert.Contains(t, out.String(), "Enrollment link", "output should include the enrollment magic link")
+}
+
+func TestAccountCreatePrintsFullEnrollURL(t *testing.T) {
+	srv, restore := setupAccountTest(t, accountServerConfig{})
+	defer restore()
+	accountUsername = "alice"
+
+	var out bytes.Buffer
+	accountCreateCmd.SetOut(&out)
+	t.Cleanup(func() { accountCreateCmd.SetOut(nil) })
+
+	require.NoError(t, runAccountCreate(accountCreateCmd, nil))
+	assert.Contains(t, out.String(), "Enrollment link: "+srv.URL+"/enroll/deadbeefcafe1234\n")
+}
+
+func TestAccountCreateJSONKeepsRawToken(t *testing.T) {
+	_, restore := setupAccountTest(t, accountServerConfig{})
+	defer restore()
+	accountUsername = "alice"
+	accountJSONOutput = true
+
+	var out bytes.Buffer
+	accountCreateCmd.SetOut(&out)
+	t.Cleanup(func() { accountCreateCmd.SetOut(nil) })
+
+	require.NoError(t, runAccountCreate(accountCreateCmd, nil))
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	assert.Equal(t, "deadbeefcafe1234", got["enrollment_magic_link"])
+}
+
+func TestAccountCreateNoLinkNotice(t *testing.T) {
+	_, restore := setupAccountTest(t, accountServerConfig{noCreateLink: true})
+	defer restore()
+	accountUsername = "alice"
+
+	var out bytes.Buffer
+	accountCreateCmd.SetOut(&out)
+	t.Cleanup(func() { accountCreateCmd.SetOut(nil) })
+
+	require.NoError(t, runAccountCreate(accountCreateCmd, nil))
+	assert.NotContains(t, out.String(), "Enrollment link:")
+	assert.Contains(t, out.String(), "No enrollment link issued")
+	assert.Contains(t, out.String(), "cfg account update alice --reset-credentials")
+}
+
+func TestAccountUpdateResetCredentials(t *testing.T) {
+	var captured []byte
+	cfg := accountServerConfig{
+		accounts:     []apiAccountInfo{{ID: "id-1", Username: "alice", CreatedAt: "2026-08-01T00:00:00Z"}},
+		capturedBody: &captured,
+		updateLink:   "feedface0042",
+	}
+	srv, restore := setupAccountTest(t, cfg)
+	defer restore()
+	accountResetCredentials = true
+
+	var out bytes.Buffer
+	accountUpdateCmd.SetOut(&out)
+	t.Cleanup(func() { accountUpdateCmd.SetOut(nil) })
+
+	require.NoError(t, runAccountUpdate(accountUpdateCmd, []string{"alice"}))
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(captured, &sent))
+	assert.Equal(t, true, sent["reset_credentials"])
+	assert.Contains(t, out.String(), "Enrollment link: "+srv.URL+"/enroll/feedface0042\n")
+}
+
+func TestAccountUpdateOmitsResetCredentialsByDefault(t *testing.T) {
+	var captured []byte
+	cfg := accountServerConfig{
+		accounts:     []apiAccountInfo{{ID: "id-1", Username: "alice", CreatedAt: "2026-08-01T00:00:00Z"}},
+		capturedBody: &captured,
+	}
+	_, restore := setupAccountTest(t, cfg)
+	defer restore()
+	accountDisabled = "true"
+
+	var out bytes.Buffer
+	accountUpdateCmd.SetOut(&out)
+	t.Cleanup(func() { accountUpdateCmd.SetOut(nil) })
+
+	require.NoError(t, runAccountUpdate(accountUpdateCmd, []string{"alice"}))
+	assert.NotContains(t, string(captured), "reset_credentials")
+	assert.NotContains(t, out.String(), "Enrollment link:")
 }
 
 func TestAccountCreateNoBundle(t *testing.T) {
