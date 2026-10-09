@@ -27,3 +27,19 @@ func readFenceRatchetFile(path string) ([]byte, error) {
 	// caller-supplied or remote component. See the precondition above.
 	return os.ReadFile(path)
 }
+
+// syncFenceRatchetDir fsyncs dir so the rename of the ratchet file survives
+// power loss.
+func syncFenceRatchetDir(dir string) error {
+	// #nosec G304 -- dir is the operator-configured cert-store directory.
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}

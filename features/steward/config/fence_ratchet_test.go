@@ -305,3 +305,37 @@ func TestFenceRatchet_ConcurrentLoadAndSave(t *testing.T) {
 		require.NoError(t, loadErrs[i], "concurrent Load %d must never see a partial write", i)
 	}
 }
+
+// TestFenceRatchet_SaveEndToEnd verifies a Save completes (temp file synced,
+// renamed, directory synced), leaves only the target file behind, and the
+// persisted state round-trips through a fresh Load.
+func TestFenceRatchet_SaveEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, NewFenceRatchet(dir).Save(true, 42))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no temp files may remain after Save")
+	assert.Equal(t, fenceRatchetFileName, entries[0].Name())
+
+	set, term, err := NewFenceRatchet(dir).Load()
+	require.NoError(t, err)
+	assert.True(t, set)
+	assert.Equal(t, uint64(42), term)
+}
+
+// TestFenceRatchet_LoadZeroFilledFileNamesPath reproduces the file left behind
+// by an unclean host shutdown (rename persisted, data blocks not) and asserts
+// Load fails loudly with an error that names the file.
+func TestFenceRatchet_LoadZeroFilledFileNamesPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, fenceRatchetFileName)
+	require.NoError(t, os.WriteFile(path, make([]byte, 64), 0o600))
+
+	set, term, err := NewFenceRatchet(dir).Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), path)
+	assert.False(t, set)
+	assert.Zero(t, term)
+}

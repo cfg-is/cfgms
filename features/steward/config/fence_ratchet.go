@@ -102,11 +102,11 @@ func (r *FenceRatchet) loadStateLocked() (fenceRatchetState, error) {
 		return state, nil
 	}
 	if readErr != nil {
-		return fenceRatchetState{}, fmt.Errorf("read fence ratchet: %w", readErr)
+		return fenceRatchetState{}, fmt.Errorf("read fence ratchet %s: %w", r.filePath(), readErr)
 	}
 
 	if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
-		return fenceRatchetState{}, fmt.Errorf("parse fence ratchet: %w", unmarshalErr)
+		return fenceRatchetState{}, fmt.Errorf("parse fence ratchet %s: %w", r.filePath(), unmarshalErr)
 	}
 
 	r.savedSet, r.savedTerm, r.seeded = state.RatchetSet, state.HighestTermSeen, true
@@ -181,6 +181,14 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 			tmpFile.Close(),
 		))
 	}
+	// Sync before rename: without it a power loss can persist the rename but not
+	// the data blocks, leaving a zero-filled ratchet file at the target path.
+	if syncErr := tmpFile.Sync(); syncErr != nil {
+		return discardTmp(errors.Join(
+			fmt.Errorf("sync fence ratchet tmp: %w", syncErr),
+			tmpFile.Close(),
+		))
+	}
 	// Close before rename so the bytes are handed to the filesystem, and so the
 	// rename does not publish a file with a write error still pending.
 	if closeErr := tmpFile.Close(); closeErr != nil {
@@ -196,7 +204,13 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 		return discardTmp(fmt.Errorf("rename fence ratchet: %w", renameErr))
 	}
 
+	// Persist the directory entry created by the rename. The new file is already
+	// in place and durable in content, so a failure here is reported but the
+	// in-memory mirror still tracks what is on disk.
 	r.savedSet, r.savedTerm = ratchetSet, highestTermSeen
+	if syncErr := syncFenceRatchetDir(r.dir); syncErr != nil {
+		return fmt.Errorf("sync fence ratchet dir: %w", syncErr)
+	}
 	return nil
 }
 
