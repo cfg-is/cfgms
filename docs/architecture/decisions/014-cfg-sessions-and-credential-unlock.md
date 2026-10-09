@@ -59,7 +59,7 @@ No bespoke crypto: all secret handling goes through `pkg/secrets`; `pkg/credenti
 
 ### 6. CLI surface
 
-`cfg connect [<name>] [--bundle <path>] [--url <url>]`, `cfg disconnect`, `cfg connections list`, `cfg connections current`. After connect, every `cfg` admin command works with no `--bundle`/`--url` flags in a fresh shell until the session ends. `--bundle` / `--api-url` remain supported as **one-shot, no-session overrides** (the path for CI/automation without a secret store). `cfg connect` **requires HTTPS** for the controller URL (no `http://` for non-loopback; it does not inherit the legacy `http://localhost:9080` default).
+`cfg connect [<name>] [--bundle <path>] [--url <url>]`, `cfg disconnect`, `cfg connections list`, `cfg connections current`. After connect, every `cfg` admin command works with no `--bundle`/`--url` flags in a fresh shell until the session ends. `--bundle` / `--url` remain supported as **one-shot, no-session overrides** (the path for CI/automation without a secret store). `cfg connect` **requires HTTPS** for the controller URL (no `http://` for non-loopback; it does not inherit the legacy `http://localhost:9080` default).
 
 ### 7. Relationship to auth-tier policy (#1419)
 
@@ -86,7 +86,7 @@ Session-token principals are **RBAC-equivalent to API-key principals**. This mod
 - No cleartext secret on disk — the rule holds with no carve-out.
 - Reuses the central `pkg/secrets` system and the existing steward encryptor; the OS-native store is a normal new provider, not a bespoke seam.
 - The non-interactive machine-bound default keeps automation and remote sessions working; the `CredentialUnlocker` seam allows hardware/keychain/passphrase unlock to be added later without rework.
-- `--bundle` / `--api-url` one-shot overrides preserve the existing scripted/CI path unchanged.
+- `--bundle` / `--url` one-shot overrides preserve the existing scripted/CI path unchanged.
 
 **Negative / costs**
 

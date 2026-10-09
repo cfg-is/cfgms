@@ -745,7 +745,7 @@ func (s *FleetTestSuite) approveRefreshViaCLI(t *testing.T, pendingID string) {
 	cmd := exec.CommandContext(ctx, cfgBinary(),
 		"steward", "refresh", "approve", pendingID,
 		"--bundle", s.bundlePath,
-		"--api-url", s.controllerURL)
+		"--url", s.controllerURL)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "approveRefreshViaCLI: cfg steward refresh approve %s failed: %s",
 		pendingID, strings.TrimSpace(string(out)))

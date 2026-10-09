@@ -1410,7 +1410,16 @@ func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
 	managerA := newLeaseBackedClusterManager(t, "cmdterm-a", store)
 	managerB := newLeaseBackedClusterManager(t, "cmdterm-b", store)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Under a loaded runner the lease can briefly lapse and be re-acquired (with a
+	// new fencing token) between the leadership check and the CommandTerm reads,
+	// and a follower read taken in that gap legitimately caches 0 or the old
+	// token for up to commandTermCacheTTL. The claim under test is about a stable
+	// lease, so wait for a consistent snapshot — one holder whose term is
+	// unchanged across every read — bounded by the lease timing with a wide
+	// margin (Eventually returns as soon as the snapshot is consistent).
+	electionTimeout := FastElectionConfig().ElectionTimeout
+	leaseWait := 150 * electionTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*leaseWait)
 	defer cancel()
 	require.NoError(t, managerA.Start(ctx))
 	require.NoError(t, managerB.Start(ctx))
@@ -1419,19 +1428,27 @@ func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
 		assert.NoError(t, managerB.Stop(context.Background()))
 	})
 
-	require.Eventually(t, func() bool { return managerA.HasLeadership() != managerB.HasLeadership() },
-		5*time.Second, 5*time.Millisecond, "exactly one node holds the lease")
-	leader, follower := managerA, managerB
-	if managerB.HasLeadership() {
-		leader, follower = managerB, managerA
-	}
-
-	leaderTerm := leader.GetTerm()
-	require.NotZero(t, leaderTerm)
-	assert.Zero(t, follower.GetTerm(), "GetTerm reports local authority only")
-	assert.Equal(t, leaderTerm, follower.CommandTerm(), "a follower stamps the lease's current token")
-	assert.Equal(t, leaderTerm, leader.CommandTerm(), "the holder stamps its own term")
-	assert.Equal(t, leaderTerm, CommandTermSource{Manager: follower}.GetTerm())
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		aLeads, bLeads := managerA.HasLeadership(), managerB.HasLeadership()
+		if !assert.NotEqual(c, aLeads, bLeads, "exactly one node holds the lease") {
+			return
+		}
+		leader, follower := managerA, managerB
+		if bLeads {
+			leader, follower = managerB, managerA
+		}
+		leaderTerm := leader.GetTerm()
+		if !assert.NotZero(c, leaderTerm) {
+			return
+		}
+		assert.Zero(c, follower.GetTerm(), "GetTerm reports local authority only")
+		assert.Equal(c, leaderTerm, follower.CommandTerm(), "a follower stamps the lease's current token")
+		assert.Equal(c, leaderTerm, leader.CommandTerm(), "the holder stamps its own term")
+		assert.Equal(c, leaderTerm, CommandTermSource{Manager: follower}.GetTerm())
+		// The holder and its token must not have changed while the reads ran.
+		assert.True(c, leader.HasLeadership() && !follower.HasLeadership(), "lease holder changed mid-snapshot")
+		assert.Equal(c, leaderTerm, leader.GetTerm(), "lease token changed mid-snapshot")
+	}, leaseWait, 10*time.Millisecond)
 }
 
 // TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to

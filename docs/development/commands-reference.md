@@ -759,7 +759,7 @@ naming the exported path.
 | `--credential-name` | `signing-key` | Name the encrypted signing key is stored under in the credential store |
 | `--export-plaintext-key` | false | Also export the private key as a cleartext PEM (development only); required to use `--key-out` |
 | `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path for the cleartext key export; ignored unless `--export-plaintext-key` is passed, and an error if passed without it |
-| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 
@@ -810,7 +810,7 @@ as an error naming that condition. Requires `enrolment-token:revoke` at
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 
@@ -1019,7 +1019,7 @@ already revoked.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
 | `--force` | false | Skip the interactive confirmation prompt (not on `list-orphaned`) |
 | `--json` | false | Emit JSON output (`list-orphaned` only) |
 
@@ -1459,7 +1459,7 @@ serial, the new serial, and the granted marker set.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--unattended` | false | Only contact the controller if the certificate is within its renewal window; exit `0` without renewing otherwise |
-| `--api-url` | bundle's `controller_url` | Controller REST API URL override |
+| `--url` | bundle's `controller_url` | Controller REST API URL override |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 
@@ -1951,7 +1951,7 @@ cfg webauthn register --username alice --label "YubiKey 5C"
 | `--username` | — | Account username (required) |
 | `--label` | — | Human-readable label for the credential |
 | `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
-| `--api-url` | bundle URL | Override controller URL |
+| `--url` | bundle URL | Override controller URL |
 
 ### cfg webauthn list
 
@@ -1981,7 +1981,7 @@ cfg webauthn list --username alice
 |------|---------|-------------|
 | `--username` | — | Account username (required) |
 | `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
-| `--api-url` | bundle URL | Override controller URL |
+| `--url` | bundle URL | Override controller URL |
 | `--json` | false | Output as JSON |
 
 ### cfg webauthn revoke
@@ -2018,7 +2018,7 @@ cfg webauthn revoke Y3JlZGVudGlhbC1pZC0x --username alice --force
 | `--username` | — | Account username (required) |
 | `--force` | false | Required when revoking the last credential |
 | `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
-| `--api-url` | bundle URL | Override controller URL |
+| `--url` | bundle URL | Override controller URL |
 
 ## cfg account — Account Lifecycle and Certificate Credentials (Issue #3582)
 
@@ -2060,7 +2060,7 @@ cfg account create --username alice --tenant-id acme-corp
 | `--root-scope` | false | Grant cross-tenant root scope (mutually exclusive with `--tenant-id`) |
 | `--permission` | — | Permission to grant (repeatable) |
 | `--json` | false | Output as JSON (includes the enrollment link) |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account list
 
@@ -2075,7 +2075,7 @@ cfg account list [--json]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | false | Output as JSON |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account get
 
@@ -2092,7 +2092,7 @@ cfg account get <username> [--json]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | false | Output as JSON |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account update
 
@@ -2117,7 +2117,7 @@ cfg account update alice --permission account:list --permission account:get
 | `--permission` | — | Permissions to set (repeatable; replaces the full existing set) |
 | `--disabled` | — | Set disabled state: `true` or `false` |
 | `--json` | false | Output as JSON |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account delete
 
@@ -2134,7 +2134,7 @@ cfg account delete <username> [--force]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--force` | false | Skip confirmation prompt |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account bind-cert
 
@@ -2152,7 +2152,7 @@ cfg account bind-cert <username> --serial <s> [--label <l>] [--fingerprint <f>]
 | `--serial` | — | Certificate serial number (required; 1-40 alphanumeric chars) |
 | `--fingerprint` | — | Certificate fingerprint (optional; stored for audit correlation) |
 | `--label` | — | Human-readable label for the binding |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account certs
 
@@ -2197,7 +2197,7 @@ affects whether a request is authorised.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | false | Output as JSON |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account revoke-cert
 
@@ -2214,7 +2214,7 @@ cfg account revoke-cert <username> <serial> [--force]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--force` | false | Skip confirmation prompt |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ### cfg account rotate-cert
 
@@ -2237,7 +2237,7 @@ cfg account rotate-cert <username> <old_serial> --new-serial <s> [--force]
 | `--new-serial` | — | New certificate serial number (required) |
 | `--fingerprint` | — | New certificate fingerprint (optional; for audit) |
 | `--force` | false | Skip confirmation prompt |
-| `--api-url` | env/bundle | Override controller URL |
+| `--url` | env/bundle | Override controller URL |
 
 ## Step-Up Authentication (ADR-021 Decision 6)
 

@@ -100,16 +100,16 @@ Examples:
 }
 
 func init() {
-	credentialRevokeByTokenCmd.Flags().StringVar(&credentialContainmentAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	credentialRevokeByTokenCmd.Flags().StringVar(&credentialContainmentAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialRevokeByTokenCmd.Flags().BoolVar(&credentialContainmentForce, "force", false, "Skip confirmation prompt")
 
-	credentialCancelRequestCmd.Flags().StringVar(&credentialContainmentAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	credentialCancelRequestCmd.Flags().StringVar(&credentialContainmentAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialCancelRequestCmd.Flags().BoolVar(&credentialContainmentForce, "force", false, "Skip confirmation prompt")
 
-	credentialListOrphanedCmd.Flags().StringVar(&credentialContainmentAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	credentialListOrphanedCmd.Flags().StringVar(&credentialContainmentAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialListOrphanedCmd.Flags().BoolVar(&credentialListOrphanedJSONOut, "json", false, "Emit JSON output")
 
-	credentialRevokeOrphanedCmd.Flags().StringVar(&credentialContainmentAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	credentialRevokeOrphanedCmd.Flags().StringVar(&credentialContainmentAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialRevokeOrphanedCmd.Flags().BoolVar(&credentialContainmentForce, "force", false, "Skip confirmation prompt")
 
 	credentialCmd.AddCommand(credentialRevokeByTokenCmd)

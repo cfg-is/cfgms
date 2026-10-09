@@ -145,7 +145,7 @@ environment variables):
 
 | Flag              | Env var              | Description                               |
 |-------------------|----------------------|-------------------------------------------|
-| `--api-url`       | `CFGMS_API_URL`      | Controller REST API URL                   |
+| `--url`       | `CFGMS_API_URL`      | Controller REST API URL                   |
 | `--bundle`        | `CFGMS_ADMIN_BUNDLE` | Path to admin mTLS bundle                 |
 | `--tls-ca-cert`   | `CFGMS_TLS_CA_CERT`  | Path to CA certificate for TLS            |
 | `--tls-insecure`  | `CFGMS_TLS_INSECURE` | Skip TLS verification (development only)  |

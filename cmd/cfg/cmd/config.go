@@ -213,27 +213,27 @@ func init() {
 	// List command flags
 	configListCmd.Flags().StringVar(&configListTenantID, "tenant", "", "Filter by tenant ID (optional)")
 	configListCmd.Flags().BoolVar(&configListJSON, "json", false, "Emit raw JSON instead of human-readable table")
-	configListCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configListCmd.Flags().StringVar(&configAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	configListCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configListCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	configListCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Show command flags (connection flags share vars with list/delete)
 	configShowCmd.Flags().BoolVar(&configShowJSON, "json", false, "Emit raw JSON instead of human-readable output")
-	configShowCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configShowCmd.Flags().StringVar(&configAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	configShowCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configShowCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	configShowCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Delete command flags
-	configDeleteCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configDeleteCmd.Flags().StringVar(&configAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	configDeleteCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeleteCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	configDeleteCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Deployments command flags
 	configDeploymentsCmd.Flags().BoolVar(&configDeploymentsJSON, "json", false, "Emit raw JSON instead of human-readable output")
-	configDeploymentsCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configDeploymentsCmd.Flags().StringVar(&configAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	configDeploymentsCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeploymentsCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	configDeploymentsCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -241,7 +241,7 @@ func init() {
 	// Diff command flags
 	configDiffCmd.Flags().BoolVar(&configDiffJSON, "json", false, "Emit JSON diff format instead of human-readable text")
 	configDiffCmd.Flags().BoolVar(&configDiffIncludeSecrets, "include-secrets", false, "Include raw secret values (skips redaction of token/secret/password/credential/api_key keys)")
-	configDiffCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configDiffCmd.Flags().StringVar(&configAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	configDiffCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDiffCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	configDiffCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -250,7 +250,7 @@ func init() {
 	configRollbackCmd.Flags().StringVar(&configRollbackTo, "to", "", "Version (commit SHA) to roll back to; omit to list available rollback points")
 	configRollbackCmd.Flags().BoolVar(&configRollbackDryRun, "dry-run", false, "Preview the rollback without executing (calls /rollback/preview)")
 	configRollbackCmd.Flags().BoolVar(&configRollbackJSON, "json", false, "Emit raw JSON instead of human-readable output")
-	configRollbackCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configRollbackCmd.Flags().StringVar(&configAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	configRollbackCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configRollbackCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	configRollbackCmd.Flags().StringVar(&configServerName, "server-name", "", "Override TLS server name for certificate verification")

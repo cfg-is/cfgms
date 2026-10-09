@@ -99,7 +99,7 @@ func TestBillingReport_NoLabelArgument(t *testing.T) {
 }
 
 // TestGetBillingAPIClient_NoURLNoCleartextFallback verifies that with no
-// --api-url, no CFGMS_API_URL, no bundle and no session, the billing client is
+// --url, no CFGMS_API_URL, no bundle and no session, the billing client is
 // not silently built against a cleartext http:// default controller URL.
 func TestGetBillingAPIClient_NoURLNoCleartextFallback(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -129,6 +129,6 @@ func TestGetBillingAPIClient_NoURLNoCleartextFallback(t *testing.T) {
 	client, err := getBillingAPIClient()
 	require.Error(t, err, "billing client must not fall back to a default controller URL")
 	assert.Nil(t, client)
-	assert.Contains(t, err.Error(), "--api-url")
+	assert.Contains(t, err.Error(), "--url")
 	assert.Contains(t, err.Error(), "CFGMS_API_URL")
 }

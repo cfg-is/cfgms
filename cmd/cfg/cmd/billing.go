@@ -49,7 +49,7 @@ Examples:
 }
 
 func init() {
-	billingCmd.PersistentFlags().StringVar(&billingAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	billingCmd.PersistentFlags().StringVar(&billingAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	billingCmd.PersistentFlags().BoolVar(&billingTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	billingCmd.PersistentFlags().StringVar(&billingServerName, "server-name", "", "Override TLS server name for certificate verification")
 	billingReportCmd.Flags().BoolVar(&billingJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
@@ -184,7 +184,7 @@ func getBillingAPIClient() (*APIClient, error) {
 	// controller URL must be supplied explicitly when no session or bundle
 	// resolves a client.
 	if apiURL == "" {
-		return nil, fmt.Errorf("controller API URL not configured: set --api-url or CFGMS_API_URL (or run 'cfg connect')")
+		return nil, fmt.Errorf("controller API URL not configured: set --url or CFGMS_API_URL (or run 'cfg connect')")
 	}
 	return newClientFromFlags(apiURL, "", tlsInsecure)
 }

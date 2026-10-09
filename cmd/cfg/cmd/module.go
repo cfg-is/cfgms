@@ -113,7 +113,7 @@ Examples:
 }
 
 func init() {
-	moduleCmd.PersistentFlags().StringVar(&moduleAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	moduleCmd.PersistentFlags().StringVar(&moduleAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	moduleCmd.PersistentFlags().StringVar(&moduleTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	moduleCmd.PersistentFlags().BoolVar(&moduleTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	moduleCmd.PersistentFlags().StringVar(&moduleServerName, "server-name", "", "Override TLS server name for certificate verification")
