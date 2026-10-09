@@ -3,8 +3,8 @@
 This deployment publishes the authenticated HTTPS API (`9080/tcp`) and mTLS
 QUIC steward transport (`4433/udp`) publicly. Product metrics use a distinct
 HTTPS listener (`9090/tcp`) bound to the container's fixed private bridge IP
-and published only on host loopback. It does not publish a separate Raft,
-database, object-storage management, or secret-management port.
+and published only on host loopback. It does not publish a separate
+cluster-peer, database, object-storage management, or secret-management port.
 Both initialization and runtime select the `public-beta` security profile,
 which blocks startup without valid signing roots and rejects unsigned ad-hoc
 execution.

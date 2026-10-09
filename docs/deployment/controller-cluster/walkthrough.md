@@ -23,9 +23,9 @@ This section summarises the key operational facts derived from that validation.
 | `ctrl-node-03` | cluster member | `<node-private-ip>:9443` | `<node-private-ip>:9444` | `:9080` |
 
 All three nodes connect to a **shared PostgreSQL backend** and a **shared S3-compatible
-blob store** (MinIO or equivalent). No data replication is done via Raft — Raft owns
-leader election and cluster membership/session bookkeeping only. Config data, registration
-records, audit, and RBAC all live in shared Postgres.
+blob store** (MinIO or equivalent). Nodes do not replicate data
+between themselves — config data, registration records, audit, and RBAC all live in shared
+Postgres, and leadership is a lease held in that shared store (ADR-031).
 
 ### Key configuration: per-node env vars
 
@@ -35,8 +35,8 @@ are the critical per-node values:
 
 | Variable | Purpose |
 |---|---|
-| `CFGMS_NODE_ID` | This node's stable identity in the Raft cluster (use the node's private IP) |
-| `CFGMS_HA_EXTERNAL_ADDRESS` | This node's advertised address for peer-to-peer Raft traffic |
+| `CFGMS_NODE_ID` | This node's stable identity in the cluster (use the node's private IP) |
+| `CFGMS_HA_EXTERNAL_ADDRESS` | This node's advertised address to its peers |
 | `CFGMS_HA_CLUSTER_NODES` | Comma-separated list of all cluster nodes' internal addresses |
 | `CFGMS_HA_CA_CERT_PATH` | Path to the shared cluster CA certificate (from OpenBao or equivalent) |
 | `CFGMS_SECRETS_KEY_FILE` | Path to the sealed root-of-trust key (identical value on every node) |
@@ -71,9 +71,11 @@ Every cluster node serves steward ControlChannel traffic directly against the sh
 Postgres backend — leader election is invisible to a steward whose own node stays up.
 A plain liveness probe on `GET /api/v1/health` suffices if you do use an LB for this path.
 
-**Enrollment (registration and token endpoints):** After #3473, these endpoints are
-gated on `HasLeadership()`. A follower answers `503`. If you use an LB for enrollment,
-it **must** health-gate on `GET /api/v1/raft/status` → `is_leader`, not just liveness.
+**Enrollment (registration and token endpoints):** Every node serves these endpoints;
+a follower does not answer `503` (ADR-031 removes the leadership gate from the API request
+path). A plain liveness probe on `GET /api/v1/health` is enough on every node. Operators who
+want to see which node currently holds leadership can query `GET /api/v1/ha/status`
+(`is_leader`, lease-backed) on a node, or `GET /api/v1/ha/leader` for the current leader.
 
 **Steward's-own-node failure:** A steward has exactly one controller URL. When its own
 node goes down, it retries that node until the node returns. To keep stewards attached
@@ -83,11 +85,11 @@ through a node outage, place an LB/VIP in front of the cluster, point the stewar
 
 ### Starting and stopping the cluster
 
-All nodes must be stopped and started **together** for a coordinated restart. The Raft
-log is persisted to `<data>/raft-log/raft.db` (since #3284); starting a node alone while
-peers are already running risks diverging Raft state. Use the `haRestoreQuorum` helper
-(in `test/e2e/ha/leader_election_real_test.go`) as a reference for the safe
-stop-all/start-all sequence.
+Nodes can be started and stopped one at a time, in any order. Each node serves requests
+as soon as it is up, against the shared Postgres backend, and leadership moves to another
+node through the lease when the holder stops. No coordinated stop-all/start-all is needed.
+For a rolling restart, restart one node, confirm `GET /api/v1/health` returns healthy, then
+move to the next.
 
 See §3 of the runbook for the full cluster-join procedure, rollback drill, and quorum
 verification commands.
