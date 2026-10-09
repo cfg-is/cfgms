@@ -216,8 +216,8 @@ if ($goBinDir) {
     $verifiedTools = @(
         @{
             Name   = 'trivy'
-            Url    = 'https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_windows-64bit.zip'
-            Sha256 = '94c40e0696e4b907a74b7b2e1438d5d72ebaca83115817407f568a002d520842'
+            Url    = 'https://github.com/aquasecurity/trivy/releases/download/v0.75.0/trivy_0.75.0_windows-64bit.zip'
+            Sha256 = '4e43bd71a30f51aee39525f60f2b47043af77eb8df8fe082aae4372b69c6660f'
             Member = 'trivy.exe'
         },
         @{
