@@ -97,8 +97,10 @@ func (m *Manager) isProtectedRootTenant(ctx context.Context, tenantID string) bo
 
 // checkTopLevelCreatable refuses a tenant with no parent when one already
 // exists: a deployment has exactly one root (ADR-032), and a second parentless
-// tenant would make the root ambiguous (Issue #4542). Callers hold topLevelMu
-// across this check and the write.
+// tenant would make the root ambiguous (Issue #4542). This is a fast path that
+// spares a write in the common refusal; it is not the guarantee. Two nodes can
+// both pass it, so the store's CreateTopLevelTenant is what enforces the
+// invariant atomically (Issue #4547).
 func (m *Manager) checkTopLevelCreatable(ctx context.Context) error {
 	topLevel, err := m.topLevelTenantIDs(ctx)
 	if err != nil {

@@ -5,6 +5,7 @@ package tenant
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -177,4 +178,92 @@ func TestRootTenantGuards_AmbiguousRootFailsClosed(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCannotSuspendRoot)
 	_, err = m.SuspendTenant(ctx, "client-1")
 	assert.NoError(t, err, "a tenant with a parent is never the root")
+}
+
+// TestCreateTenant_TwoManagersRacingTopLevelLeaveOne guards Issue #4547: two
+// managers — standing in for two controller nodes, sharing no in-process lock —
+// over one real store racing top-level creates leave exactly one parentless
+// tenant. The store, not the managers' pre-check, is the guarantee.
+func TestCreateTenant_TwoManagersRacingTopLevelLeaveOne(t *testing.T) {
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		m1 := newBareTestTenantManager(t)
+		m2 := NewManager(m1.store, nil)
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		start := make(chan struct{})
+		for j, c := range []struct {
+			m  *Manager
+			id string
+		}{{m1, "root"}, {m2, "team-root"}} {
+			wg.Add(1)
+			go func(j int, m *Manager, id string) {
+				defer wg.Done()
+				<-start
+				_, errs[j] = m.CreateTenant(ctx, &TenantRequest{ID: id})
+			}(j, c.m, c.id)
+		}
+		close(start)
+		wg.Wait()
+
+		var succeeded int
+		for _, err := range errs {
+			if err == nil {
+				succeeded++
+			} else {
+				require.ErrorIs(t, err, ErrTopLevelTenantExists)
+			}
+		}
+		require.Equal(t, 1, succeeded)
+		topLevel, err := m1.topLevelTenantIDs(ctx)
+		require.NoError(t, err)
+		require.Len(t, topLevel, 1)
+	}
+}
+
+// topLevelFaultStore returns scripted errors from CreateTopLevelTenant before
+// delegating to the real store, and counts the calls.
+type topLevelFaultStore struct {
+	Store
+	faults []error
+	calls  int
+}
+
+func (s *topLevelFaultStore) CreateTopLevelTenant(ctx context.Context, td *business.TenantData) error {
+	s.calls++
+	if len(s.faults) > 0 {
+		err := s.faults[0]
+		s.faults = s.faults[1:]
+		return err
+	}
+	return s.Store.CreateTopLevelTenant(ctx, td)
+}
+
+// TestCreateTenant_TopLevelBillingLabelCollisionRetries guards Issue #4547: a
+// billing-label collision on the top-level path retries with a new label, and an
+// ErrTopLevelTenantExists result is not retried.
+func TestCreateTenant_TopLevelBillingLabelCollisionRetries(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("label collision retries with a new label", func(t *testing.T) {
+		m := newBareTestTenantManager(t)
+		fs := &topLevelFaultStore{Store: m.store, faults: []error{
+			fmt.Errorf("create tenant: %w", business.ErrTenantAlreadyExists)}}
+		m.store = fs
+		td, err := m.CreateTenant(ctx, &TenantRequest{ID: "root"})
+		require.NoError(t, err)
+		assert.Equal(t, 2, fs.calls, "one collision, one successful retry")
+		got, err := fs.GetTenant(ctx, td.ID)
+		require.NoError(t, err)
+		assert.Equal(t, td.BillingLabel, got.BillingLabel)
+	})
+
+	t.Run("top-level exists is not retried", func(t *testing.T) {
+		m := newBareTestTenantManager(t)
+		fs := &topLevelFaultStore{Store: m.store, faults: []error{business.ErrTopLevelTenantExists}}
+		m.store = fs
+		_, err := m.CreateTenant(ctx, &TenantRequest{ID: "root"})
+		require.ErrorIs(t, err, ErrTopLevelTenantExists)
+		assert.Equal(t, 1, fs.calls)
+	})
 }

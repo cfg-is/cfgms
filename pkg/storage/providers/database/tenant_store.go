@@ -81,40 +81,48 @@ func (s *DatabaseTenantStore) Close() error {
 	return nil
 }
 
-// CreateTenant implements TenantStore.CreateTenant
-func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business.TenantData) error {
+// topLevelTenantLockID is the fixed key of the transaction-scoped advisory lock
+// that serializes CreateTopLevelTenant across every connection and controller
+// node sharing the database (Issue #4547).
+const topLevelTenantLockID = 13579290
+
+// prepareTenantInsert validates tenant and fills in the billing label a direct
+// store write may have omitted.
+func prepareTenantInsert(tenant *business.TenantData) ([]byte, error) {
 	if tenant == nil {
-		return fmt.Errorf("tenant cannot be nil")
+		return nil, fmt.Errorf("tenant cannot be nil")
 	}
 	if tenant.ID == "" {
-		return fmt.Errorf("tenant ID cannot be empty")
+		return nil, fmt.Errorf("tenant ID cannot be empty")
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	// Serialize metadata to JSON
 	metadataJSON, err := json.Marshal(tenant.Metadata)
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
+		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
 	}
-
 	// A caller that supplied no label (direct store writes) still gets a random
 	// one so the unique index never sees two empty values.
 	if tenant.BillingLabel == "" {
 		label, err := business.NewBillingLabel()
 		if err != nil {
-			return fmt.Errorf("failed to generate tenant billing label: %w", err)
+			return nil, fmt.Errorf("failed to generate tenant billing label: %w", err)
 		}
 		tenant.BillingLabel = label
 	}
+	return metadataJSON, nil
+}
 
+// execer is the ExecContext surface shared by *sql.DB and *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+func insertTenant(ctx context.Context, ex execer, tenant *business.TenantData, metadataJSON []byte) error {
 	query := `
 		INSERT INTO cfgms_tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
 
-	_, err = s.db.ExecContext(ctx, query,
+	_, err := ex.ExecContext(ctx, query,
 		tenant.ID,
 		tenant.Name,
 		tenant.Description,
@@ -134,7 +142,60 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business
 		}
 		return fmt.Errorf("failed to create tenant: %w", err)
 	}
+	return nil
+}
 
+// CreateTenant implements TenantStore.CreateTenant
+func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business.TenantData) error {
+	metadataJSON, err := prepareTenantInsert(tenant)
+	if err != nil {
+		return err
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	return insertTenant(ctx, s.db, tenant, metadataJSON)
+}
+
+// CreateTopLevelTenant implements TenantStore.CreateTopLevelTenant. The
+// existence check and the insert run in one transaction under a
+// transaction-scoped advisory lock, so concurrent callers on any connection or
+// node are serialized and the lock cannot outlive the transaction.
+func (s *DatabaseTenantStore) CreateTopLevelTenant(ctx context.Context, tenant *business.TenantData) error {
+	metadataJSON, err := prepareTenantInsert(tenant)
+	if err != nil {
+		return err
+	}
+	if tenant.ParentID != "" {
+		return fmt.Errorf("top-level tenant must not have a parent")
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", topLevelTenantLockID); err != nil {
+		return fmt.Errorf("failed to acquire top-level tenant lock: %w", err)
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM cfgms_tenants WHERE parent_id IS NULL)").Scan(&exists); err != nil {
+		return fmt.Errorf("failed to check for a top-level tenant: %w", err)
+	}
+	if exists {
+		return business.ErrTopLevelTenantExists
+	}
+	if err := insertTenant(ctx, tx, tenant, metadataJSON); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit top-level tenant: %w", err)
+	}
 	return nil
 }
 

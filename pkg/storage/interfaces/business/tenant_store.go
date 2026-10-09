@@ -14,6 +14,13 @@ import (
 // with the given ID already exists. Handlers must use errors.Is to detect it.
 var ErrTenantAlreadyExists = errors.New("tenant already exists")
 
+// ErrTopLevelTenantExists is returned by TenantStore.CreateTopLevelTenant when a
+// tenant with no parent already exists: a deployment has exactly one root
+// tenant, the single tenant with no parent (ADR-032, Issue #4542). It is
+// distinct from ErrTenantAlreadyExists so a caller that retries on an ID or
+// billing-label collision does not retry this refusal.
+var ErrTopLevelTenantExists = errors.New("a top-level tenant already exists; create the tenant under a parent")
+
 // ErrTenantDoesNotExist is returned by every TenantStore operation that
 // addresses a tenant which has no row: GetTenant, UpdateTenant and
 // DeleteTenant. Providers wrap it with %w so the message may carry the tenant
@@ -62,6 +69,13 @@ type PendingDeletion struct {
 type TenantStore interface {
 	// Tenant management
 	CreateTenant(ctx context.Context, tenant *TenantData) error
+	// CreateTopLevelTenant creates a tenant with no parent only if no tenant
+	// without a parent exists, atomically with the insert and across every
+	// handle onto the same backing database (Issue #4547). tenant.ParentID must
+	// be empty. It fails with ErrTopLevelTenantExists if any parentless tenant
+	// exists, and with ErrTenantAlreadyExists for an ID or billing-label
+	// collision. CreateTenant stays unguarded for migrators and seeding.
+	CreateTopLevelTenant(ctx context.Context, tenant *TenantData) error
 	GetTenant(ctx context.Context, tenantID string) (*TenantData, error)
 	UpdateTenant(ctx context.Context, tenant *TenantData) error
 	DeleteTenant(ctx context.Context, tenantID string) error

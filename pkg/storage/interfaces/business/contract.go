@@ -4,6 +4,8 @@ package business
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,6 +184,119 @@ func TenantStoreBillingLabelContract(t *testing.T, store TenantStore) {
 		assert.NotEmpty(t, ga.BillingLabel)
 		assert.NotEmpty(t, gb.BillingLabel)
 		assert.NotEqual(t, ga.BillingLabel, gb.BillingLabel)
+	})
+}
+
+// TenantStoreTopLevelContract verifies CreateTopLevelTenant's atomic single
+// parentless-tenant guarantee (Issue #4547): concurrent calls through separate
+// handles over one backing database produce exactly one success, the rest
+// returning ErrTopLevelTenantExists. newHandle must return a fresh handle onto
+// the same database on every call. Parentless tenants already in the database
+// are deleted first so the race starts from none.
+func TenantStoreTopLevelContract(t *testing.T, newHandle func() TenantStore) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	setup := newHandle()
+	existing, err := setup.ListTenants(ctx, nil)
+	require.NoError(t, err)
+	children := map[string][]string{}
+	for _, tn := range existing {
+		children[tn.ParentID] = append(children[tn.ParentID], tn.ID)
+	}
+	// Delete each parentless tenant's subtree children-first: the parent_id
+	// foreign key refuses to remove a tenant that still has children.
+	var deleteSubtree func(id string)
+	deleteSubtree = func(id string) {
+		for _, child := range children[id] {
+			deleteSubtree(child)
+		}
+		require.NoError(t, setup.DeleteTenant(ctx, id))
+	}
+	for _, id := range children[""] {
+		deleteSubtree(id)
+	}
+
+	// The backing database may be shared with other tests; leave nothing behind.
+	t.Cleanup(func() {
+		// Children first, for the same foreign-key reason as above.
+		for _, id := range []string{"top-under", "top-late", "top-child"} {
+			_ = setup.DeleteTenant(ctx, id)
+		}
+		for i := 0; i < 8; i++ {
+			_ = setup.DeleteTenant(ctx, fmt.Sprintf("top-%d", i))
+		}
+	})
+
+	const racers = 8
+	handles := make([]TenantStore, racers)
+	for i := range handles {
+		handles[i] = newHandle()
+	}
+
+	t.Run("concurrent creates through independent handles yield one success", func(t *testing.T) {
+		errs := make([]error, racers)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				errs[i] = handles[i].CreateTopLevelTenant(ctx, &TenantData{
+					ID: fmt.Sprintf("top-%d", i), Name: "Top", Status: TenantStatusActive, CreatedAt: now, UpdatedAt: now})
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		successes := 0
+		for _, e := range errs {
+			if e == nil {
+				successes++
+			} else {
+				assert.ErrorIs(t, e, ErrTopLevelTenantExists)
+				assert.NotErrorIs(t, e, ErrTenantAlreadyExists)
+			}
+		}
+		assert.Equal(t, 1, successes, "exactly one concurrent top-level create succeeds")
+
+		all, err := setup.ListTenants(ctx, nil)
+		require.NoError(t, err)
+		parentless := 0
+		for _, tn := range all {
+			if tn.ParentID == "" {
+				parentless++
+			}
+		}
+		assert.Equal(t, 1, parentless)
+	})
+
+	t.Run("a later top-level create is refused", func(t *testing.T) {
+		err := setup.CreateTopLevelTenant(ctx, &TenantData{ID: "top-late", Name: "Late", Status: TenantStatusActive, CreatedAt: now, UpdatedAt: now})
+		assert.ErrorIs(t, err, ErrTopLevelTenantExists)
+	})
+
+	t.Run("a non-empty ParentID is rejected", func(t *testing.T) {
+		err := setup.CreateTopLevelTenant(ctx, &TenantData{ID: "top-child", Name: "Child", ParentID: "top-late", Status: TenantStatusActive, CreatedAt: now, UpdatedAt: now})
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrTopLevelTenantExists)
+		_, getErr := setup.GetTenant(ctx, "top-child")
+		assert.ErrorIs(t, getErr, ErrTenantDoesNotExist)
+	})
+
+	t.Run("plain CreateTenant still accepts a tenant with a parent", func(t *testing.T) {
+		all, err := setup.ListTenants(ctx, nil)
+		require.NoError(t, err)
+		var rootID string
+		for _, tn := range all {
+			if tn.ParentID == "" {
+				rootID = tn.ID
+			}
+		}
+		require.NotEmpty(t, rootID)
+		require.NoError(t, setup.CreateTenant(ctx, &TenantData{ID: "top-under", Name: "Under", ParentID: rootID, Status: TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
 	})
 }
 
