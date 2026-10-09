@@ -1091,6 +1091,12 @@ var (
 	// current signing certificate. The operator rotates first, then revokes the
 	// superseded serial.
 	ErrRevokeCurrentSigningCert = errors.New("the current signing certificate cannot be revoked; rotate first")
+	// ErrNotSigningCertificate is returned when the serial is well formed but does
+	// not name a known config-signing certificate. It wraps ErrInvalidSerial so the
+	// API maps it to 400: the signing revoke must never reach operator (admin,
+	// client) or steward certificates, which have their own revoke path and
+	// authorization.
+	ErrNotSigningCertificate = fmt.Errorf("%w: not a known signing certificate", ErrInvalidSerial)
 )
 
 // RetireRotatingSigningCertificate marks the cursor's rotating serial retired
@@ -1133,6 +1139,33 @@ func (m *Manager) RevokeSigningCertificate(serial, note string) error {
 	}
 	if serial == currentSerial {
 		return ErrRevokeCurrentSigningCert
+	}
+
+	// The revocation store is shared with operator and steward certificates
+	// (IsRevoked gates mTLS admin login), so only a serial that is known to be a
+	// config-signing certificate may be written here. A serial the node-local
+	// store records under any other type is refused outright; otherwise the
+	// serial must be the cursor's rotating serial or held in the cluster signing
+	// key store.
+	if local, lerr := m.store.GetCertificate(serial); lerr == nil {
+		if local.Type != CertificateTypeConfigSigning {
+			return ErrNotSigningCertificate
+		}
+	} else {
+		known := cursor != nil && cursor.RotatingSerial == serial
+		if !known && m.signingKeys != nil {
+			_, gerr := m.signingKeys.GetSigningKey(context.Background(), serial)
+			switch {
+			case gerr == nil:
+				known = true
+			case errors.Is(gerr, certinterfaces.ErrSigningKeyNotFound):
+			default:
+				return fmt.Errorf("resolve signing certificate: %w", gerr)
+			}
+		}
+		if !known {
+			return ErrNotSigningCertificate
+		}
 	}
 
 	reason := RevocationReasonSigningCert

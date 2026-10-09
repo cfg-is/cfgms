@@ -196,6 +196,56 @@ func TestHandleRevokeSigningCert_RejectsCurrentSerialAndMalformedSerial(t *testi
 	assert.Empty(t, revoked, "refused requests record nothing")
 }
 
+// The signing revoke is gated on certificate:rotate and shares the revocation
+// store that gates admin login and steward connections; it must refuse any
+// serial that is not a signing certificate (400) and record nothing for it, so
+// it cannot bypass the certificate:revoke route and its crossing boundary.
+func TestHandleRevokeSigningCert_RefusesAdminAndClientCertificateSerials(t *testing.T) {
+	f := newRevokeFixture(t)
+	admin, err := f.mgrA.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "operator-admin", Organization: "CFGMS", ValidityDays: 1, TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	client, err := f.mgrA.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "steward-1", Organization: "CFGMS", ValidityDays: 1,
+	})
+	require.NoError(t, err)
+
+	for name, serial := range map[string]string{"admin": admin.SerialNumber, "client": client.SerialNumber} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			f.server.handleRevokeSigningCert(rec, revokeRequest(strongRootPrincipal(), ctxkeys.NewRootScope(),
+				`{"serial":"`+serial+`","reason":"x"}`))
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+			for _, m := range []*cert.Manager{f.mgrA, f.mgrB} {
+				revoked, rErr := m.IsRevoked(serial)
+				require.NoError(t, rErr)
+				assert.False(t, revoked, "a refused signing revoke writes nothing to the revocation store")
+			}
+		})
+	}
+
+	entries, err := f.mgrB.ListRevoked()
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	// Pushes from the fixture's setup rotations may still be arriving; none may
+	// carry a retirement, because a refused revoke never reaches the fan-out.
+	for {
+		select {
+		case sc := <-f.stewards["steward-1"]:
+			r := sc.RawParams
+			if r == nil {
+				r = types.InterfaceParamsToStringMap(sc.Command.Params)
+			}
+			assert.Empty(t, r["retire_serials"], "refused revoke must not fan out a retirement")
+			continue
+		default:
+		}
+		break
+	}
+}
+
 func TestHandleRevokeSigningCert_RecordsRetiresFansOutAndAudits(t *testing.T) {
 	f := newRevokeFixture(t)
 

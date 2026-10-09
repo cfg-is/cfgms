@@ -319,9 +319,12 @@ func TestReconnectAfterSweepGetsRetirementInSingleOnConnectPush(t *testing.T) {
 	env.subscribe("steward-late")
 	require.NoError(t, env.rotation.OnConnect(context.Background(), "steward-late"))
 
-	pushes := env.waitPushes("steward-late", 1)
+	first := env.waitPushes("steward-late", 1)
+	require.Len(t, first, 1, "the on-connect hook delivers a single push")
+	assert.Equal(t, []string{rotating}, retireSerialsOf(t, first[0]),
+		"the first push already carries the retirement")
 	time.Sleep(100 * time.Millisecond)
-	pushes = env.pushes("steward-late")
+	pushes := env.pushes("steward-late")
 	require.Len(t, pushes, 1, "retirement rides the one on-connect push, not a second command")
 	assert.Equal(t, []string{rotating}, retireSerialsOf(t, pushes[0]))
 	assert.Equal(t, current, rawParamsOf(pushes[0])["serial"])
