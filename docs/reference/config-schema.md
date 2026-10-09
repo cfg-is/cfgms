@@ -255,8 +255,8 @@ The `CFGMS_STORAGE_DATABASE_*` pair is read first; the shorter `CFGMS_DB_*` form
 
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
-| `postgres_dsn` | string | `""` | required (cluster) | libpq connection string for the shared Postgres backend. Every node in the cluster must point at the same instance. |
-| `session_hmac_key` | string | `""` | required (cluster) | Key backing the Postgres session store's bearer-token hashing. The store fails closed when empty; all nodes must share one key. Deliver it through `${VAR}` or `<VAR>_FILE` (see [Environment variable reference syntax](#environment-variable-reference-syntax)), never as a literal. |
+| `postgres_dsn` | string | `""` | required (cluster) | **Secret-bearing:** a literal password is refused; use `password=${VAR}` or no password. libpq connection string for the shared Postgres backend. Every node in the cluster must point at the same instance. |
+| `session_hmac_key` | string | `""` | required (cluster) | **Secret-bearing (`${VAR}` only).** Key backing the Postgres session store's bearer-token hashing. The store fails closed when empty; all nodes must share one key. Deliver it through `${VAR}` or `<VAR>_FILE` (see [Environment variable reference syntax](#environment-variable-reference-syntax)), never as a literal. |
 | `s3` | map | `{}` | optional | S3-compatible blob store keys for installer artifacts: `bucket` (required), `region`, `endpoint_url`, `access_key_id`, `secret_access_key`. When empty, the bucket name is read from `CFGMS_S3_INSTALLER_BUCKET` at startup. |
 
 ---
@@ -701,6 +701,16 @@ before YAML parsing: `features/controller/config/config.go` `expandEnvWithDefaul
 | `$VAR` | Expands like `${VAR}` but is not checked by `validateEnvVars`; an unset `VAR` expands to an empty string. Prefer the braced form. |
 
 Supported forms: `${VAR}` and `${VAR:-default}`.
+
+**Secret-bearing keys.** The controller loader refuses a literal value in these keys, checking the raw file before `${VAR}` expansion (`SecretBearingKeys` in `features/controller/config/secret_keys.go`). The error names the key and the accepted forms, never the value. `${VAR:-default}` is refused too, because the default is a literal on disk. Environment-variable overrides are not checked.
+
+| Key | Accepted forms |
+|---|---|
+| `storage.cluster.session_hmac_key` | `${VAR}` |
+| `storage.cluster.s3.access_key_id`, `storage.cluster.s3.secret_access_key` | `${VAR}`, or key absent |
+| `audit.worm.access_key_id`, `audit.worm.secret_access_key` | `${VAR}`, or key absent |
+| `storage.config.password` | `${VAR}`, or key absent |
+| `storage.cluster.postgres_dsn`, `storage.config.dsn` | `${VAR}` for the whole value; a DSN whose password (`password=` keyword or `postgres://user:password@host`) is exactly `${VAR}`; or a DSN with no password |
 
 **Controller only:** a `${VAR}` reference also resolves from a companion file variable
 `<VAR>_FILE` (`EnvFileSuffix`, `resolveEnvValue`). When `VAR` is unset and `VAR_FILE` names a
