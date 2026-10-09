@@ -820,9 +820,9 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 		if cp, ok := controlPlane.(*grpcCP.Provider); ok {
 			if tc := cp.TransportClient(); tc != nil {
 				emitter = NewEventEmitter(EventEmitterConfig{
-					Client:    tc,
-					StewardID: stewardID,
-					Logger:    c.logger,
+					ClientSource: cp.TransportClient,
+					StewardID:    stewardID,
+					Logger:       c.logger,
 				})
 			}
 		}
@@ -1263,9 +1263,9 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		if grpcProv, ok := cp.(*grpcCP.Provider); ok {
 			if tc := grpcProv.TransportClient(); tc != nil {
 				built := NewEventEmitter(EventEmitterConfig{
-					Client:    tc,
-					StewardID: stewardID,
-					Logger:    c.logger,
+					ClientSource: grpcProv.TransportClient,
+					StewardID:    stewardID,
+					Logger:       c.logger,
 				})
 				built.Start(context.Background())
 				c.mu.Lock()
