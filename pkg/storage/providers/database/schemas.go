@@ -1420,10 +1420,28 @@ func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql
 			justification  TEXT NOT NULL DEFAULT '',
 			created_at     TIMESTAMPTZ NOT NULL,
 			expires_at     TIMESTAMPTZ NOT NULL,
-			revoked_at     TIMESTAMPTZ
+			revoked_at     TIMESTAMPTZ,
+			reason_category TEXT NOT NULL DEFAULT '',
+			approval_state  TEXT NOT NULL DEFAULT 'approved',
+			approved_by     TEXT NOT NULL DEFAULT '',
+			approved_at     TIMESTAMPTZ
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create tenant_crossings table: %w", err)
+	}
+	// Idempotent upgrade for tables created before the approval columns existed; a grant
+	// names no principal, so clear it on existing grant rows.
+	upgrades := []string{
+		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS reason_category TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS approval_state TEXT NOT NULL DEFAULT 'approved'`,
+		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`,
+		`UPDATE tenant_crossings SET principal_id = '' WHERE kind = 'grant' AND principal_id <> ''`,
+	}
+	for _, up := range upgrades {
+		if _, err := db.ExecContext(ctx, up); err != nil {
+			return fmt.Errorf("failed to upgrade tenant_crossings table: %w", err)
+		}
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_tenant_crossings_tenant_id ON tenant_crossings(tenant_id);",

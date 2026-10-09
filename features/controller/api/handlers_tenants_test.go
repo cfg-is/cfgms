@@ -1384,13 +1384,12 @@ func TestHandleListTenants_RootScopedCallerAllowedWithActiveGrant(t *testing.T) 
 	caller := rootScopedPrincipal("root-operator-list-2")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-list-1",
-		TenantID:    "msp-a",
-		PrincipalID: caller.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-list-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants", "", caller, nil)

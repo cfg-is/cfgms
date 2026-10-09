@@ -156,7 +156,7 @@ func TestHandleListTenants_RootScoped_GrantYieldsOneFullRow(t *testing.T) {
 	caller := rootScopedPrincipal("root-op-boundary-3")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
-		ID: "grant-boundary-1", TenantID: "msp-a", PrincipalID: caller.ID,
+		ID: "grant-boundary-1", TenantID: "msp-a",
 		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-a-admin",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}))

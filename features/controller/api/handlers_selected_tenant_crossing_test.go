@@ -33,7 +33,7 @@ func grantSelectedTenantCrossing(t *testing.T, server *Server, principalID strin
 	t.Helper()
 	now := time.Now()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
-		ID: "grant-sel-" + principalID, TenantID: "msp-sel", PrincipalID: principalID,
+		ID: "grant-sel-" + principalID, TenantID: "msp-sel",
 		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-admin",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}))

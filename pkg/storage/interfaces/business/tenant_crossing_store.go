@@ -11,6 +11,85 @@ import (
 // ErrTenantCrossingNotFound indicates no tenant-crossing record exists for the given ID.
 var ErrTenantCrossingNotFound = errors.New("tenant crossing not found")
 
+// ErrTenantCrossingNotPending indicates ApproveTenantCrossing was called on a crossing
+// that is not pending, unexpired and unrevoked (already approved, expired, or revoked).
+var ErrTenantCrossingNotPending = errors.New("tenant crossing is not pending approval")
+
+// ErrTenantCrossingPrincipalRequired indicates a break-glass crossing was created
+// without the PrincipalID it admits.
+var ErrTenantCrossingPrincipalRequired = errors.New("break-glass tenant crossing requires a principal ID")
+
+// ErrGrantPrincipalNotAllowed indicates a grant crossing was created naming a principal;
+// a grant admits any root principal and names none.
+var ErrGrantPrincipalNotAllowed = errors.New("grant tenant crossing must not name a principal")
+
+// TenantCrossingReasonCategory classifies why a break-glass crossing was invoked
+// (ADR-025 Amendment 8). Empty for grants.
+type TenantCrossingReasonCategory string
+
+const (
+	TenantCrossingReasonAccountRecovery  TenantCrossingReasonCategory = "account_recovery"
+	TenantCrossingReasonSecurityIncident TenantCrossingReasonCategory = "security_incident"
+	TenantCrossingReasonLegalRequest     TenantCrossingReasonCategory = "legal_request"
+	TenantCrossingReasonBillingDispute   TenantCrossingReasonCategory = "billing_dispute"
+)
+
+// ValidTenantCrossingReasonCategory reports whether c is one of the defined, non-empty
+// reason categories.
+func ValidTenantCrossingReasonCategory(c TenantCrossingReasonCategory) bool {
+	switch c {
+	case TenantCrossingReasonAccountRecovery,
+		TenantCrossingReasonSecurityIncident,
+		TenantCrossingReasonLegalRequest,
+		TenantCrossingReasonBillingDispute:
+		return true
+	}
+	return false
+}
+
+// TenantCrossingApprovalState is the approval state of a crossing. Only approved
+// crossings admit requests.
+type TenantCrossingApprovalState string
+
+const (
+	TenantCrossingApprovalApproved TenantCrossingApprovalState = "approved"
+	TenantCrossingApprovalPending  TenantCrossingApprovalState = "pending"
+)
+
+// ValidateTenantCrossingForCreate applies the rules every provider enforces on create:
+// a break-glass names its principal, a grant names none. It returns the approval state
+// to persist (an unset state is stored as approved).
+func ValidateTenantCrossingForCreate(c *TenantCrossing) (TenantCrossingApprovalState, error) {
+	if c == nil {
+		return "", errors.New("tenant crossing cannot be nil")
+	}
+	if c.ID == "" || c.TenantID == "" {
+		return "", errors.New("tenant crossing ID and tenant ID are required")
+	}
+	switch c.Kind {
+	case TenantCrossingKindGrant:
+		if c.PrincipalID != "" {
+			return "", ErrGrantPrincipalNotAllowed
+		}
+	case TenantCrossingKindBreakGlass:
+		if c.PrincipalID == "" {
+			return "", ErrTenantCrossingPrincipalRequired
+		}
+	default:
+		return "", errors.New("tenant crossing kind must be grant or break-glass")
+	}
+	if c.ReasonCategory != "" && !ValidTenantCrossingReasonCategory(c.ReasonCategory) {
+		return "", errors.New("tenant crossing reason category is not recognised")
+	}
+	switch c.ApprovalState {
+	case "":
+		return TenantCrossingApprovalApproved, nil
+	case TenantCrossingApprovalApproved, TenantCrossingApprovalPending:
+		return c.ApprovalState, nil
+	}
+	return "", errors.New("tenant crossing approval state must be approved or pending")
+}
+
 // TenantCrossingKind distinguishes ADR-025 Decision 2's two crossing mechanisms.
 type TenantCrossingKind string
 
@@ -32,13 +111,18 @@ const (
 type TenantCrossing struct {
 	ID            string
 	TenantID      string // the MSP subtree root this crossing covers
-	PrincipalID   string // the root-scoped principal granted temporary access
+	PrincipalID   string // break-glass: the root-scoped principal admitted; grant: always empty (a grant admits any root principal)
 	Kind          TenantCrossingKind
 	GrantedBy     string // principal ID that created the record (MSP admin for grants, self for break-glass)
 	Justification string // required by the handler for break-glass; optional for grants
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
 	RevokedAt     *time.Time // nil while active
+
+	ReasonCategory TenantCrossingReasonCategory // break-glass reason; empty for grants
+	ApprovalState  TenantCrossingApprovalState  // approved or pending; unset on create is stored as approved
+	ApprovedBy     string                       // approver principal ID; empty until approved via ApproveTenantCrossing
+	ApprovedAt     *time.Time                   // nil until approved via ApproveTenantCrossing
 }
 
 // TenantCrossingStore persists ADR-025 Decision 2 grant and break-glass records. Both
@@ -52,12 +136,22 @@ type TenantCrossingStore interface {
 	// to tenantID, newest first — the MSP's own tenant-crossing activity view (ADR-025
 	// Decision 2: both crossing kinds must be visible to the affected MSP).
 	ListTenantCrossings(ctx context.Context, tenantID string) ([]*TenantCrossing, error)
-	// HasActiveTenantCrossing reports whether principalID currently holds a non-expired,
-	// non-revoked crossing whose TenantID is exactly tenantID. Callers resolve ancestry
+	// HasActiveTenantCrossing reports whether principalID currently holds an approved,
+	// non-expired, non-revoked crossing whose TenantID is exactly tenantID. An active
+	// approved grant on tenantID satisfies it for any principalID; a break-glass only for
+	// its own principal. Pending crossings never satisfy it. Callers resolve ancestry
 	// themselves (via TenantStore.GetTenantPath) and probe each candidate tenantID in the
 	// caller's path — this keeps the store free of a cross-package dependency on TenantStore.
 	HasActiveTenantCrossing(ctx context.Context, principalID, tenantID string) (bool, error)
 	RevokeTenantCrossing(ctx context.Context, id string) error
+	// ApproveTenantCrossing atomically moves a pending, unexpired, unrevoked crossing to
+	// approved, recording approverID and at, and resetting ExpiresAt to newExpiresAt. It
+	// returns ErrTenantCrossingNotPending when the crossing is in any other state and
+	// ErrTenantCrossingNotFound when absent.
+	ApproveTenantCrossing(ctx context.Context, id, approverID string, at, newExpiresAt time.Time) error
+	// ListActiveTenantCrossings returns every approved, unexpired, unrevoked crossing as of
+	// now. Pending crossings are not included.
+	ListActiveTenantCrossings(ctx context.Context, now time.Time) ([]*TenantCrossing, error)
 
 	Initialize(ctx context.Context) error
 	Close() error

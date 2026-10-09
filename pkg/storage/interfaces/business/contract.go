@@ -382,14 +382,29 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 
 	now := time.Now().UTC()
 	crossing := &TenantCrossing{
-		ID:          "contract-probe-crossing-1",
-		TenantID:    tenantID,
-		PrincipalID: principalID,
-		Kind:        TenantCrossingKindGrant,
-		GrantedBy:   "contract-probe-msp-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "contract-probe-crossing-1",
+		TenantID:  tenantID,
+		Kind:      TenantCrossingKindGrant,
+		GrantedBy: "contract-probe-msp-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}
+
+	t.Run("a grant naming a principal and a break-glass without one are refused", func(t *testing.T) {
+		err := store.CreateTenantCrossing(ctx, &TenantCrossing{
+			ID: "contract-probe-bad-grant", TenantID: tenantID, PrincipalID: principalID,
+			Kind: TenantCrossingKindGrant, GrantedBy: "x", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		})
+		assert.ErrorIs(t, err, ErrGrantPrincipalNotAllowed)
+		err = store.CreateTenantCrossing(ctx, &TenantCrossing{
+			ID: "contract-probe-bad-bg", TenantID: tenantID,
+			Kind: TenantCrossingKindBreakGlass, GrantedBy: "x", Justification: "j", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		})
+		assert.ErrorIs(t, err, ErrTenantCrossingPrincipalRequired)
+		_, err = store.GetTenantCrossing(ctx, "contract-probe-bad-grant")
+		assert.ErrorIs(t, err, ErrTenantCrossingNotFound, "a refused create must persist nothing")
+	})
+
 	require.NoError(t, store.CreateTenantCrossing(ctx, crossing))
 
 	t.Run("GetTenantCrossing round-trips the created record", func(t *testing.T) {
@@ -397,24 +412,22 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, crossing.TenantID, got.TenantID)
-		assert.Equal(t, crossing.PrincipalID, got.PrincipalID)
+		assert.Empty(t, got.PrincipalID)
 		assert.Equal(t, crossing.Kind, got.Kind)
 		assert.Equal(t, crossing.GrantedBy, got.GrantedBy)
 		assert.Nil(t, got.RevokedAt)
+		assert.Empty(t, got.ReasonCategory)
+		assert.Equal(t, TenantCrossingApprovalApproved, got.ApprovalState, "an unset approval state is stored as approved")
+		assert.Nil(t, got.ApprovedAt)
 	})
 
-	t.Run("HasActiveTenantCrossing is true once an unexpired, unrevoked crossing exists", func(t *testing.T) {
-		active, err := store.HasActiveTenantCrossing(ctx, principalID, tenantID)
-		require.NoError(t, err)
-		assert.True(t, active)
-	})
-
-	t.Run("HasActiveTenantCrossing does not match a different principal or tenant", func(t *testing.T) {
-		active, err := store.HasActiveTenantCrossing(ctx, "someone-else", tenantID)
-		require.NoError(t, err)
-		assert.False(t, active)
-
-		active, err = store.HasActiveTenantCrossing(ctx, principalID, "some-other-tenant")
+	t.Run("an active grant admits any principal on its tenant only", func(t *testing.T) {
+		for _, p := range []string{principalID, "someone-else"} {
+			active, err := store.HasActiveTenantCrossing(ctx, p, tenantID)
+			require.NoError(t, err)
+			assert.True(t, active, "grant must admit %s", p)
+		}
+		active, err := store.HasActiveTenantCrossing(ctx, principalID, "some-other-tenant")
 		require.NoError(t, err)
 		assert.False(t, active)
 	})
@@ -429,7 +442,7 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 	t.Run("expired crossings are not active", func(t *testing.T) {
 		expired := &TenantCrossing{
 			ID:            "contract-probe-crossing-expired",
-			TenantID:      tenantID,
+			TenantID:      "contract-probe-expired-msp",
 			PrincipalID:   "contract-probe-root-operator-expired",
 			Kind:          TenantCrossingKindBreakGlass,
 			GrantedBy:     "contract-probe-root-operator-expired",
@@ -438,7 +451,7 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 			ExpiresAt:     now.Add(-time.Hour),
 		}
 		require.NoError(t, store.CreateTenantCrossing(ctx, expired))
-		active, err := store.HasActiveTenantCrossing(ctx, expired.PrincipalID, tenantID)
+		active, err := store.HasActiveTenantCrossing(ctx, expired.PrincipalID, expired.TenantID)
 		require.NoError(t, err)
 		assert.False(t, active, "an expired crossing must not grant access")
 	})
@@ -458,6 +471,123 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 		err := store.RevokeTenantCrossing(ctx, "contract-probe-crossing-absent")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrTenantCrossingNotFound)
+	})
+
+	// Approval-state, reason-category and active-listing cases use their own tenant so
+	// they do not interact with the cases above.
+	const bgTenant = "contract-probe-bg-msp"
+	const bgPrincipal = "contract-probe-bg-operator"
+	bg := func(id string, state TenantCrossingApprovalState, expires time.Time) *TenantCrossing {
+		return &TenantCrossing{
+			ID: id, TenantID: bgTenant, PrincipalID: bgPrincipal, Kind: TenantCrossingKindBreakGlass,
+			GrantedBy: bgPrincipal, Justification: "contract probe",
+			ReasonCategory: TenantCrossingReasonAccountRecovery, ApprovalState: state,
+			CreatedAt: now, ExpiresAt: expires,
+		}
+	}
+
+	t.Run("reason category round-trips and a pending crossing is not active", func(t *testing.T) {
+		require.NoError(t, store.CreateTenantCrossing(ctx, bg("contract-probe-pending", TenantCrossingApprovalPending, now.Add(time.Hour))))
+		got, err := store.GetTenantCrossing(ctx, "contract-probe-pending")
+		require.NoError(t, err)
+		assert.Equal(t, TenantCrossingReasonAccountRecovery, got.ReasonCategory)
+		assert.Equal(t, TenantCrossingApprovalPending, got.ApprovalState)
+
+		active, err := store.HasActiveTenantCrossing(ctx, bgPrincipal, bgTenant)
+		require.NoError(t, err)
+		assert.False(t, active, "a pending break-glass must never admit a request")
+
+		list, err := store.ListActiveTenantCrossings(ctx, now)
+		require.NoError(t, err)
+		for _, c := range list {
+			assert.NotEqual(t, "contract-probe-pending", c.ID)
+		}
+	})
+
+	t.Run("ApproveTenantCrossing activates a pending crossing", func(t *testing.T) {
+		approvedAt := now.Add(time.Minute)
+		newExpiry := now.Add(3 * time.Hour)
+		require.NoError(t, store.ApproveTenantCrossing(ctx, "contract-probe-pending", "contract-probe-approver", approvedAt, newExpiry))
+
+		got, err := store.GetTenantCrossing(ctx, "contract-probe-pending")
+		require.NoError(t, err)
+		assert.Equal(t, TenantCrossingApprovalApproved, got.ApprovalState)
+		assert.Equal(t, "contract-probe-approver", got.ApprovedBy)
+		require.NotNil(t, got.ApprovedAt)
+		assert.WithinDuration(t, approvedAt, *got.ApprovedAt, time.Second)
+		assert.WithinDuration(t, newExpiry, got.ExpiresAt, time.Second)
+
+		active, err := store.HasActiveTenantCrossing(ctx, bgPrincipal, bgTenant)
+		require.NoError(t, err)
+		assert.True(t, active)
+		active, err = store.HasActiveTenantCrossing(ctx, "someone-else", bgTenant)
+		require.NoError(t, err)
+		assert.False(t, active, "a break-glass admits only its own principal")
+
+		list, err := store.ListActiveTenantCrossings(ctx, now)
+		require.NoError(t, err)
+		var found bool
+		for _, c := range list {
+			found = found || c.ID == "contract-probe-pending"
+		}
+		assert.True(t, found, "approved crossing must be listed active")
+	})
+
+	t.Run("ApproveTenantCrossing refuses non-pending crossings and changes nothing", func(t *testing.T) {
+		newExpiry := now.Add(9 * time.Hour)
+		// already approved
+		err := store.ApproveTenantCrossing(ctx, "contract-probe-pending", "second-approver", now, newExpiry)
+		assert.ErrorIs(t, err, ErrTenantCrossingNotPending)
+		got, err := store.GetTenantCrossing(ctx, "contract-probe-pending")
+		require.NoError(t, err)
+		assert.Equal(t, "contract-probe-approver", got.ApprovedBy)
+
+		// expired pending
+		require.NoError(t, store.CreateTenantCrossing(ctx, bg("contract-probe-pending-expired", TenantCrossingApprovalPending, now.Add(-time.Minute))))
+		assert.ErrorIs(t, store.ApproveTenantCrossing(ctx, "contract-probe-pending-expired", "a", now, newExpiry), ErrTenantCrossingNotPending)
+
+		// revoked pending
+		require.NoError(t, store.CreateTenantCrossing(ctx, bg("contract-probe-pending-revoked", TenantCrossingApprovalPending, now.Add(time.Hour))))
+		require.NoError(t, store.RevokeTenantCrossing(ctx, "contract-probe-pending-revoked"))
+		assert.ErrorIs(t, store.ApproveTenantCrossing(ctx, "contract-probe-pending-revoked", "a", now, newExpiry), ErrTenantCrossingNotPending)
+		for _, id := range []string{"contract-probe-pending-expired", "contract-probe-pending-revoked"} {
+			c, err := store.GetTenantCrossing(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, TenantCrossingApprovalPending, c.ApprovalState)
+			assert.Nil(t, c.ApprovedAt)
+			assert.Empty(t, c.ApprovedBy)
+			assert.True(t, c.ExpiresAt.Before(now.Add(2*time.Hour)), "expiry must be unchanged")
+		}
+
+		// absent
+		assert.ErrorIs(t, store.ApproveTenantCrossing(ctx, "contract-probe-crossing-absent", "a", now, newExpiry), ErrTenantCrossingNotFound)
+	})
+
+	t.Run("ListActiveTenantCrossings excludes expired and revoked and includes both kinds", func(t *testing.T) {
+		const listTenant = "contract-probe-list-msp"
+		activeGrant := &TenantCrossing{ID: "contract-probe-list-grant", TenantID: listTenant, Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		activeBG := &TenantCrossing{ID: "contract-probe-list-bg", TenantID: listTenant, PrincipalID: "op", Kind: TenantCrossingKindBreakGlass,
+			GrantedBy: "op", Justification: "j", ReasonCategory: TenantCrossingReasonSecurityIncident, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		expiredGrant := &TenantCrossing{ID: "contract-probe-list-expired", TenantID: listTenant, Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}
+		revokedGrant := &TenantCrossing{ID: "contract-probe-list-revoked", TenantID: listTenant, Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		for _, c := range []*TenantCrossing{activeGrant, activeBG, expiredGrant, revokedGrant} {
+			require.NoError(t, store.CreateTenantCrossing(ctx, c))
+		}
+		require.NoError(t, store.RevokeTenantCrossing(ctx, revokedGrant.ID))
+
+		list, err := store.ListActiveTenantCrossings(ctx, now)
+		require.NoError(t, err)
+		ids := map[string]bool{}
+		for _, c := range list {
+			ids[c.ID] = true
+		}
+		assert.True(t, ids[activeGrant.ID])
+		assert.True(t, ids[activeBG.ID])
+		assert.False(t, ids[expiredGrant.ID])
+		assert.False(t, ids[revokedGrant.ID])
 	})
 }
 

@@ -1879,7 +1879,7 @@ func grantRunCrossing(t *testing.T, server *Server, principalID, tenantID string
 	t.Helper()
 	now := time.Now()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
-		ID: "grant-" + principalID, TenantID: tenantID, PrincipalID: principalID,
+		ID: "grant-" + principalID, TenantID: tenantID,
 		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-admin",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}))

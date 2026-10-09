@@ -565,13 +565,12 @@ func TestPutStewardRebootWindow_RootScopedCallerWithActiveCrossing_Allowed(t *te
 	caller := rootScopedPrincipal("root-operator-rw2")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-reboot-window-1",
-		TenantID:    "msp-rw2",
-		PrincipalID: caller.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-rw2-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-reboot-window-1",
+		TenantID:  "msp-rw2",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-rw2-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	body, err := json.Marshal(rebootWindowPutRequest{ScheduleYAML: sampleScheduleYAML})

@@ -232,13 +232,12 @@ func TestTerminalScope_AccountBoundLowAssurance_WithCrossing_Allowed(t *testing.
 	principal := accountBoundLowAssuranceRootPrincipal("low-assurance-op-terminal-2")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-terminal-low-assurance-1",
-		TenantID:    "msp-a",
-		PrincipalID: principal.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-a-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-terminal-low-assurance-1",
+		TenantID:  "msp-a",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	rec, reached := serveTerminalScopeAsRootScoped(server, principal, "steward-msp")
@@ -263,13 +262,12 @@ func TestTerminalScope_RootScoped_WithCrossing_Allowed(t *testing.T) {
 	principal := rootScopedPrincipal("root-op-2")
 	now := time.Now().UTC()
 	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
-		ID:          "grant-terminal-1",
-		TenantID:    "msp-b",
-		PrincipalID: principal.ID,
-		Kind:        business.TenantCrossingKindGrant,
-		GrantedBy:   "msp-b-admin",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
+		ID:        "grant-terminal-1",
+		TenantID:  "msp-b",
+		Kind:      business.TenantCrossingKindGrant,
+		GrantedBy: "msp-b-admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
 	}))
 
 	rec, reached := serveTerminalScopeAsRootScoped(server, principal, "steward-msp-b")
