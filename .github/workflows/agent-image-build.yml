@@ -1,0 +1,115 @@
+name: Agent Image Build
+
+# Builds the agent image (.devcontainer/Dockerfile) without pushing it, so a PR
+# that breaks the image cannot merge (Issue #4493). Dependabot PR #4462 bumped
+# pyjwt to a version semgrep refused; every required check stayed green and the
+# first signal was the host's image-staleness gate refusing every agent launch.
+#
+# One always-run job posts the `Agent Image Build` context on every
+# pull_request and merge_group, so the context can be made required without
+# stranding PRs that do not touch the image. The decision to build is made
+# INSIDE the job by the changed-files gate below, not by a trigger-level
+# `paths:` filter and not by an `if:` on the job. There is deliberately no
+# separate stub workflow and no job-level `if:`: a skipped run satisfies a
+# required check (CLAUDE.md "Stub exclusivity"), so the one poster of this
+# context must always run and must itself decide. Do NOT add `paths:` or a
+# job-level `if:` to this workflow.
+#
+# The gate fails closed: any defect in its input (git error, empty list)
+# resolves to "build".
+
+on:
+  pull_request:
+    branches: [ develop, main ]
+  merge_group:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: agent-image-build-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  agent-image-build:
+    name: Agent Image Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Image build inputs: every path the Dockerfile COPYs that only the image
+      # consumes, plus .dockerignore (it shapes the build context). Go source is
+      # also copied (`COPY . .` in cfg-builder) but is NOT listed: other jobs
+      # build it, and gating on every Go change would build the image on nearly
+      # every PR.
+      - name: Detect agent image input changes
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          set -uo pipefail
+
+          # FAILS CLOSED: build=false posts a passing required context with no
+          # build run. Every input defect resolves to build=true.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${BASE_SHA:-}" ] || [ -z "${HEAD_SHA:-}" ]; then
+            echo "::warning::base/head SHA missing — building the image"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed_files.txt 2> diff.err; then
+            echo "::warning::git diff failed ($(head -c 300 diff.err | tr -d ':')) — building the image"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          listed=$(wc -l < changed_files.txt)
+          echo "${listed} changed file(s):"
+          # Filenames are PR-controlled: indent them so a name starting with
+          # `::` is never read as a workflow command.
+          sed 's/^/  /' changed_files.txt
+
+          if [ "$listed" -eq 0 ]; then
+            echo "::warning::changed-file list is empty — building the image"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if grep -Eq '^(\.devcontainer/|go\.mod$|go\.sum$|web/\.nvmrc$|web/package\.json$|web/package-lock\.json$|\.claude/metrics/token_report\.py$|\.claude/metrics/pricing\.json$|\.claude/model-routing\.yaml$|\.dockerignore$|\.github/workflows/agent-image-build\.yml$)' changed_files.txt; then
+            echo "Agent image inputs changed — building"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No agent image inputs changed — skipping build"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # No registry login, no secrets, no push. ignore-error keeps a cache
+      # export failure (e.g. fork PRs) from failing an otherwise good build.
+      - name: Build agent image
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          push: false
+          load: false
+          cache-from: type=gha,scope=cfgms-agent-image
+          cache-to: type=gha,mode=max,scope=cfgms-agent-image,ignore-error=true
