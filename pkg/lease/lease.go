@@ -262,6 +262,24 @@ func (m *Manager) recordLocalAuthority(name, holderID string, token uint64, call
 	}
 }
 
+// LocalAuthorityDeadline returns the monotonic instant at which holderID's
+// cached authority for name lapses (the last successful acquire/renew's call
+// start plus the safety margin). ok is false when holderID has no cached
+// authority for name — never acquired, or invalidated because the store
+// reported a different holder. The deadline is strictly earlier than the
+// store row's own expiry, so work stopped by this instant is stopped before
+// another holder can legitimately take the lease.
+func (m *Manager) LocalAuthorityDeadline(name, holderID string) (deadline time.Time, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	c, exists := m.cached[name]
+	if !exists || c.holderID != holderID {
+		return time.Time{}, false
+	}
+	return c.acquiredOrRenewedAt.Add(m.safetyMargin), true
+}
+
 // invalidateLocalAuthority clears the cached entry for name, but only if it
 // currently belongs to holderID — a losing contender must not be able to
 // clear the winner's cache entry out from under it.

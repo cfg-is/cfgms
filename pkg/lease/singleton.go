@@ -147,27 +147,26 @@ func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.Canc
 }
 
 // renewWithRetry calls Manager.Renew, retrying with bounded exponential
-// backoff while j.Manager.MaxAllowedRenewalLatency's budget has not yet
-// elapsed. Manager's doc comment defines that field as "the longest a
-// renewal call is allowed to take (including retries) before it must be
-// treated as failed" — SafetyMargin is derived from it on that assumption,
-// so retrying here, bounded by the same duration, costs nothing against the
-// margin the Manager already reserves for exactly this.
+// backoff until this holder's local authority lapses — the last successful
+// acquire/renew's call start plus Manager's safety margin
+// (Manager.LocalAuthorityDeadline). That instant is strictly earlier than the
+// store row's expiry, so giving up at it still cancels fn before another node
+// can acquire.
 //
-// Without this, a single transient error from the store — e.g. the flatfile
-// provider's atomic-rename write path on Windows, which deliberately does
-// not retry (pkg/storage/providers/flatfile/rename_windows.go; see Issues
-// #4262, #1919, #2068 for the same underlying Windows file-locking
-// flakiness on other call paths) — would cost the lease outright on its
-// very next tick, even though the lease was never actually lost to another
-// holder.
+// The budget is deliberately the remaining authority window, not
+// MaxAllowedRenewalLatency. That field bounds how long one call may take for
+// the safety-margin derivation; it says nothing about how long the lease
+// stays valid after a failure. Giving up after that short budget (Issue
+// #4541) cancelled fn and stopped renewing while the lease still had most of
+// its TTL left, so an outage of a few hundred milliseconds — e.g. the
+// flatfile provider's atomic-rename write path on Windows, which does not
+// retry (pkg/storage/providers/flatfile/rename_windows.go; Issues #4262,
+// #1919, #2068) — let the lease lapse mid-cycle and a second node run.
 //
-// A genuine fencing loss (another holder legitimately holds the lease)
-// fails the same way on every retry, but cheaply: the store's contended
-// branch returns without writing, so the loop still gives up promptly, well
-// within the budget.
+// When the store reports a genuine fencing loss, Manager.Renew invalidates
+// the cached authority, the deadline lookup fails, and the loop gives up at
+// once: a lost lease is not retried.
 func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64, error) {
-	deadline := time.Now().Add(j.Manager.MaxAllowedRenewalLatency())
 	backoff := renewRetryBaseBackoff
 
 	for {
@@ -176,9 +175,16 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 			return newToken, nil
 		}
 
+		deadline, ok := j.Manager.LocalAuthorityDeadline(j.Name, j.HolderID)
+		if !ok {
+			return 0, err
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return 0, err
+		}
+		if backoff > j.RenewInterval {
+			backoff = j.RenewInterval
 		}
 		if backoff > remaining {
 			backoff = remaining

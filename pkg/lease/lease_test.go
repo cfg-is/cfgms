@@ -426,3 +426,25 @@ func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing
 
 	assert.True(t, holder2EverAcquired, "holder-2 must eventually acquire the lease once holder-1's stopped renewing")
 }
+
+func TestManager_LocalAuthorityDeadline(t *testing.T) {
+	ttl := time.Second
+	m, err := NewManager(newTestStore(t), ttl, 100*time.Millisecond, 100*time.Millisecond)
+	require.NoError(t, err)
+
+	_, ok := m.LocalAuthorityDeadline("x", "node-1")
+	assert.False(t, ok, "no authority before any acquire")
+
+	before := time.Now()
+	_, acquired, err := m.TryAcquire(context.Background(), "x", "node-1", ttl)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	deadline, ok := m.LocalAuthorityDeadline("x", "node-1")
+	require.True(t, ok)
+	assert.False(t, deadline.Before(before.Add(m.SafetyMargin())), "deadline is call start + safety margin")
+	assert.True(t, deadline.Before(before.Add(ttl)), "deadline precedes store expiry")
+
+	_, ok = m.LocalAuthorityDeadline("x", "node-2")
+	assert.False(t, ok, "another holder has no authority")
+}
