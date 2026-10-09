@@ -87,18 +87,17 @@ func (s *DatabaseWorkflowExecutionStore) Get(ctx context.Context, tenantID, exec
 
 // List implements business.WorkflowExecutionStore.
 func (s *DatabaseWorkflowExecutionStore) List(ctx context.Context, tenantID, workflowName string, limit int) ([]*business.WorkflowExecutionRecord, error) {
-	query := `SELECT ` + workflowExecutionColumns + ` FROM cfgms_workflow_executions WHERE tenant_id = $1`
-	args := []any{tenantID}
-	if workflowName != "" {
-		args = append(args, workflowName)
-		query += fmt.Sprintf(` AND workflow_name = $%d`, len(args))
+	if limit < 0 {
+		limit = 0
 	}
-	query += ` ORDER BY start_time DESC, execution_id DESC`
-	if limit > 0 {
-		args = append(args, limit)
-		query += fmt.Sprintf(` LIMIT $%d`, len(args))
-	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// One static, fully parameterized statement: an empty workflow name matches
+	// every workflow, and a zero limit becomes LIMIT NULL, which Postgres treats
+	// as no limit.
+	rows, err := s.db.QueryContext(ctx, `SELECT `+workflowExecutionColumns+` FROM cfgms_workflow_executions
+		WHERE tenant_id = $1 AND ($2::text = '' OR workflow_name = $2::text)
+		ORDER BY start_time DESC, execution_id DESC
+		LIMIT NULLIF($3::bigint, 0)`,
+		tenantID, workflowName, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list workflow executions: %w", err)
 	}

@@ -17,7 +17,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 const executionTestTenant = "tenant-exec"

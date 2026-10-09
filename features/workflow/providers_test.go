@@ -17,6 +17,9 @@ import (
 	// The approval-gate tests open the flatfile approval store through
 	// interfaces.GetStorageProvider; this blank import registers the provider.
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	// The execution-store tests open the sqlite workflow execution store through
+	// interfaces.GetStorageProvider; this blank import registers the provider.
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // capturingLogEntry holds a single captured log entry (message + key-value pairs).
