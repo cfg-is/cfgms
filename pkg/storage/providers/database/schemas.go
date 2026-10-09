@@ -1942,6 +1942,13 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_signing_cursor;",
 		"DROP TABLE IF EXISTS cfgms_module_approvals;",
 		"DROP TABLE IF EXISTS cfgms_rate_counters;",
+		// Issue #4519: omitted here, so a second run against the same database
+		// failed on stale rows. cfgms_tenants has a self-referencing parent_id
+		// foreign key and is dropped after the tables that depend on it.
+		"DROP TABLE IF EXISTS tenant_crossings;",
+		"DROP TABLE IF EXISTS blast_radius_policy_overrides;",
+		"DROP TABLE IF EXISTS cfgms_tenant_pending_deletions;",
+		"DROP TABLE IF EXISTS cfgms_tenants;",
 	}
 
 	for _, query := range dropQueries {
