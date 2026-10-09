@@ -9,9 +9,12 @@
 package api
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 const (
@@ -68,13 +71,36 @@ const (
 	passkeyLoginStored            passkeyLoginStoreResult = iota
 	passkeyLoginStoreClientCapped                         // sess.clientKey is at its per-client cap
 	passkeyLoginStoreGlobalCapped                         // the global pending cap is reached
+	passkeyLoginStoreUnavailable                          // ClusterMode: shared store unwired or erroring; nothing stored
 )
 
 // storePasskeyLoginSession reserves a per-client slot (keyed by sess.clientKey) and
 // then a global slot, and stores sess under ceremonyID. Storing nothing, it returns
 // passkeyLoginStoreClientCapped or passkeyLoginStoreGlobalCapped when either cap is
 // reached; a refused global reservation gives the per-client slot back.
-func (s *Server) storePasskeyLoginSession(ceremonyID string, sess *passkeyLoginSession) passkeyLoginStoreResult {
+//
+// In ClusterMode (Issue #4527) the session goes to the shared NonceStore and the caps
+// are counted on the shared RateCounterStore as begins per passkeyLoginBeginWindow
+// rather than concurrently pending sessions: a finish on another node cannot release a
+// node-local gauge. This is a deliberate semantic change, with unchanged limits. The
+// store failing, or being unwired, refuses the begin (passkeyLoginStoreUnavailable).
+func (s *Server) storePasskeyLoginSession(ctx context.Context, ceremonyID string, sess *passkeyLoginSession) passkeyLoginStoreResult {
+	if s.webAuthnClusterMode() {
+		res, err := s.reservePasskeyLoginBegin(sess.clientKey)
+		if err != nil {
+			s.logger.Error("Passkey login begin cap unavailable",
+				"error", logging.SanitizeLogValue(err.Error()))
+			return passkeyLoginStoreUnavailable
+		}
+		if res != passkeyLoginStored {
+			return res
+		}
+		if s.putClusterCeremony(ctx, ceremonyPrefixLogin, ceremonyID, sess.toWire(),
+			passkeyLoginCeremonyMaxAge*time.Second) != ceremonyOK {
+			return passkeyLoginStoreUnavailable
+		}
+		return passkeyLoginStored
+	}
 	if sess.clientKey != "" {
 		raw, _ := s.passkeyLoginPendingByClient.LoadOrStore(sess.clientKey, new(atomic.Int64))
 		slot := raw.(*atomic.Int64)
@@ -98,13 +124,26 @@ func (s *Server) storePasskeyLoginSession(ceremonyID string, sess *passkeyLoginS
 }
 
 // takePasskeyLoginSession removes and returns the pending ceremony for ceremonyID,
-// releasing its slots. Single-use: a second call for the same ID returns ok=false.
-func (s *Server) takePasskeyLoginSession(ceremonyID string) (any, bool) {
-	raw, ok := s.passkeyLoginSessions.LoadAndDelete(ceremonyID)
-	if ok {
-		s.releasePasskeyLoginSlots(raw)
+// releasing its slots. Single-use: a second call for the same ID, on any node in
+// ClusterMode, returns ceremonyNotFound.
+func (s *Server) takePasskeyLoginSession(ctx context.Context, ceremonyID string) (*passkeyLoginSession, ceremonyOutcome) {
+	if s.webAuthnClusterMode() {
+		w, out := takeClusterCeremony[passkeyLoginWire](s, ctx, ceremonyPrefixLogin, ceremonyID)
+		if out != ceremonyOK {
+			return nil, out
+		}
+		return w.toSession(), ceremonyOK
 	}
-	return raw, ok
+	raw, ok := s.passkeyLoginSessions.LoadAndDelete(ceremonyID)
+	if !ok {
+		return nil, ceremonyNotFound
+	}
+	s.releasePasskeyLoginSlots(raw)
+	sess, ok := raw.(*passkeyLoginSession)
+	if !ok {
+		return nil, ceremonyNotFound
+	}
+	return sess, ceremonyOK
 }
 
 // releasePasskeyLoginSlots releases the global slot and, when one was reserved, the
@@ -167,8 +206,9 @@ func (s *Server) startWebAuthnCeremonySweep() {
 	}()
 }
 
-// sweepExpiredWebAuthnCeremonies deletes every ceremony, presence-token and throttle
-// entry whose validity has passed as of now. Entries are removed with CompareAndDelete
+// sweepExpiredWebAuthnCeremonies deletes every node-local ceremony, presence-token and
+// throttle entry whose validity has passed as of now. In ClusterMode the state lives in
+// the shared stores, which enforce their own TTL, so these maps stay empty there. Entries are removed with CompareAndDelete
 // so one that a concurrent begin replaced under the same key is never reaped.
 func (s *Server) sweepExpiredWebAuthnCeremonies(now time.Time) {
 	sweepExpired(&s.webAuthnSessions, now, pendingSessionExpiry, nil)

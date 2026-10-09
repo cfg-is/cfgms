@@ -132,7 +132,7 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Issue #4572: per-client then global pending-ceremony caps; refuse rather than grow memory.
-	switch s.storePasskeyLoginSession(ceremonyID, &passkeyLoginSession{
+	switch s.storePasskeyLoginSession(r.Context(), ceremonyID, &passkeyLoginSession{
 		data:         *sessionData,
 		expires:      time.Now().Add(passkeyLoginCeremonyMaxAge * time.Second),
 		accountID:    req.Username,
@@ -146,6 +146,9 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 	case passkeyLoginStoreGlobalCapped:
 		s.writeErrorResponse(w, http.StatusServiceUnavailable,
 			"Too many pending login ceremonies — try again later", "CEREMONY_CAPACITY")
+		return
+	case passkeyLoginStoreUnavailable:
+		s.writeCeremonyUnavailable(w)
 		return
 	}
 
@@ -196,16 +199,14 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	ceremonyID := ceremonyCookie.Value
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
-	rawSession, ok := s.takePasskeyLoginSession(ceremonyID)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
+	pending, out := s.takePasskeyLoginSession(r.Context(), ceremonyID)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
 		return
 	}
-	pending, ok := rawSession.(*passkeyLoginSession)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Invalid session state", "SESSION_STATE_ERROR")
+	if out != ceremonyOK {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
 		return
 	}
 
@@ -217,6 +218,14 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 
 	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
+
+	// Issue #4527: bind at begin, check at finish. In ClusterMode the ceremony must be
+	// finished by the client that began it (the entry is already consumed).
+	if s.webAuthnClusterMode() && pending.clientKey != "" && pending.clientKey != ipKey {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
+		return
+	}
 
 	// Per-IP throttle check (fast rejection without account resolution).
 	if ipKey != "" {
@@ -435,36 +444,16 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 }
 
 // checkPasskeyLoginThrottle returns (true, retryAfter) when the key is currently throttled,
-// or (false, 0) when the call may proceed.
+// or (false, 0) when the call may proceed. In ClusterMode the failure count is
+// cluster-shared (Issue #4527, see throttleBlocked).
 func (s *Server) checkPasskeyLoginThrottle(key string) (blocked bool, retryAfter time.Duration) {
-	raw, ok := s.passkeyLoginThrottle.Load(key)
-	if !ok {
-		return false, 0
-	}
-	rec, ok := raw.(*elevateThrottleRecord)
-	if !ok {
-		return false, 0
-	}
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if !rec.nextAllowed.IsZero() && time.Now().Before(rec.nextAllowed) {
-		return true, time.Until(rec.nextAllowed)
-	}
-	return false, 0
+	return s.throttleBlocked(&s.passkeyLoginThrottle, passkeyLoginThrottleKeyPrefix, key)
 }
 
 // recordPasskeyLoginFailure increments the failure counter for key and sets the
-// next-allowed timestamp. Reuses the elevateBackoff schedule and elevateThrottleRecord
-// type — the throttle policy is identical.
+// next-allowed timestamp. Reuses the elevateBackoff schedule — the throttle policy is
+// identical to step-up. In ClusterMode the failure is counted on the shared
+// RateCounterStore (Issue #4527).
 func (s *Server) recordPasskeyLoginFailure(key string) {
-	raw, _ := s.passkeyLoginThrottle.LoadOrStore(key, &elevateThrottleRecord{})
-	rec := raw.(*elevateThrottleRecord)
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	rec.fails++
-	rec.lastFailure = time.Now()
-	delay := elevateBackoff(rec.fails)
-	if delay > 0 {
-		rec.nextAllowed = time.Now().Add(delay)
-	}
+	s.recordThrottleFailure(&s.passkeyLoginThrottle, passkeyLoginThrottleKeyPrefix, key)
 }

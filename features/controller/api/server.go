@@ -171,7 +171,7 @@ type Server struct {
 	hypervProfileConfigStore        cfgconfig.ConfigStore                    // Issue #3785: hyperv profile storage under hyperv-profiles namespace
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
-	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
+	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions (non-ClusterMode only; ClusterMode uses NonceStore, Issue #4527); key=username, value=*webAuthnPendingSession
 	webAuthnPresenceSessions        sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
 	presenceTokens                  sync.Map                                 // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
 	webAuthnElevateSessions         sync.Map                                 // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
