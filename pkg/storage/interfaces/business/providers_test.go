@@ -16,7 +16,9 @@ package business_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -331,7 +333,10 @@ func contractAuditEntry(id, action, resourceID string) *business.AuditEntry {
 // not before — the interface's other hard requirement (checksums come from the
 // manager's key, not the store, so the store can never compute Checksum itself).
 func contractChecksum(e *business.AuditEntry) string {
-	return fmt.Sprintf("chk-%d-%s-%s", e.SequenceNumber, e.PreviousChecksum, e.ID)
+	// Hashed to a fixed 64 hex characters so the value fits the checksum
+	// varchar(64) column on PostgreSQL.
+	sum := sha256.Sum256([]byte(fmt.Sprintf("chk-%d-%s-%s", e.SequenceNumber, e.PreviousChecksum, e.ID)))
+	return hex.EncodeToString(sum[:])
 }
 
 // assertAuditChainAppendGapFreeAndLinked is the shared invariant body for
