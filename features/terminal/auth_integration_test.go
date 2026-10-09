@@ -3,6 +3,7 @@
 package terminal
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newMinimalAuthManager builds an AuthenticatedTerminalManager with only the
@@ -212,31 +219,115 @@ func TestGetClientIP_FallsBackToRawRemoteAddrWhenUnparseable(t *testing.T) {
 // TenantID field (Issue #4337) ahead of the legacy Metadata fallback.
 func TestExtractTenantID_PrefersTokenField(t *testing.T) {
 	token := &SessionToken{TenantID: "tenant-a", Metadata: map[string]string{"tenant_id": "tenant-b"}}
-	assert.Equal(t, "tenant-a", extractTenantID(token))
+	id, ok := extractTenantID(token)
+	assert.True(t, ok)
+	assert.Equal(t, "tenant-a", id)
 }
 
 // TestExtractTenantID_FallsBackWhenFieldEmpty verifies extractTenantID's legacy
-// fallback chain (Metadata, then "default") still applies to a token that predates the
-// TenantID field.
+// Metadata fallback still applies to a token that predates the TenantID field, and
+// that a token with no tenant anywhere resolves to none rather than a substitute.
 func TestExtractTenantID_FallsBackWhenFieldEmpty(t *testing.T) {
-	assert.Equal(t, "tenant-b", extractTenantID(&SessionToken{Metadata: map[string]string{"tenant_id": "tenant-b"}}))
-	assert.Equal(t, "default", extractTenantID(&SessionToken{Metadata: map[string]string{}}))
+	id, ok := extractTenantID(&SessionToken{Metadata: map[string]string{"tenant_id": "tenant-b"}})
+	assert.True(t, ok)
+	assert.Equal(t, "tenant-b", id)
+
+	id, ok = extractTenantID(&SessionToken{Metadata: map[string]string{}})
+	assert.False(t, ok)
+	assert.Empty(t, id)
+
+	id, ok = extractTenantID(&SessionToken{})
+	assert.False(t, ok)
+	assert.Empty(t, id)
 }
 
-func TestRegisterUnregisterTokenRefreshChannel(t *testing.T) {
-	atm := newMinimalAuthManager(time.Hour)
-	sessionID := "reg-test-session"
-	ch := make(chan *TerminalMessage, 1)
+// newTenantlessTokenManager builds an AuthenticatedTerminalManager on a real
+// session manager and audit store, holding one live session whose token carries
+// no tenant.
+func newTenantlessTokenManager(t *testing.T) (*AuthenticatedTerminalManager, *audit.Manager, string, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "terminal-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditMgr.Stop(ctx)
+		_ = storageManager.Close()
+	})
 
-	atm.RegisterTokenRefreshChannel(sessionID, ch)
-	atm.tokenMutex.RLock()
-	_, registered := atm.notifyChannels[sessionID]
-	atm.tokenMutex.RUnlock()
-	assert.True(t, registered, "channel must be present after RegisterTokenRefreshChannel")
+	base, err := NewSessionManager(&Config{SessionTimeout: 30 * time.Minute, MaxSessions: 10}, testutil.NewMockLogger(true))
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, base)
 
-	atm.UnregisterTokenRefreshChannel(sessionID)
+	session, err := base.CreateSession(context.Background(), &SessionRequest{
+		TenantID:  "t-1",
+		StewardID: "steward-1",
+		UserID:    "user-1",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	})
+	require.NoError(t, err)
+
+	atm := &AuthenticatedTerminalManager{
+		baseManager:    base,
+		auditManager:   auditMgr,
+		sessionMonitor: NewSessionMonitor(NewSecurityValidator(nil), DefaultMonitorConfig()),
+		sessionTokens:  make(map[string]*SessionToken),
+		notifyChannels: make(map[string]chan<- *TerminalMessage),
+		config:         &AuthConfig{SessionTimeout: 4 * time.Hour},
+	}
+	tokenStr := "tenantless-token"
+	atm.sessionTokens[tokenStr] = &SessionToken{
+		Token:     tokenStr,
+		SessionID: session.ID,
+		UserID:    "user-1",
+		IssuedAt:  time.Now(),
+		ExpiresAt: time.Now().Add(time.Hour),
+		Active:    true,
+		Metadata:  map[string]string{},
+	}
+	return atm, auditMgr, tokenStr, session.ID
+}
+
+func TestValidateSessionToken_RejectsTokenWithNoTenant(t *testing.T) {
+	atm, _, tokenStr, _ := newTenantlessTokenManager(t)
+
+	token, err := atm.ValidateSessionToken(context.Background(), httptest.NewRequest(http.MethodGet, "/", nil), tokenStr)
+	require.Error(t, err)
+	assert.Nil(t, token)
+	assert.Contains(t, err.Error(), "no tenant")
+}
+
+func TestTerminateSession_TokenWithNoTenantAuditsUnderSystemTenant(t *testing.T) {
+	atm, auditMgr, tokenStr, sessionID := newTenantlessTokenManager(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	require.NoError(t, atm.TerminateSession(ctx, sessionID, "test"))
+
 	atm.tokenMutex.RLock()
-	_, registered = atm.notifyChannels[sessionID]
+	_, exists := atm.sessionTokens[tokenStr]
 	atm.tokenMutex.RUnlock()
-	assert.False(t, registered, "channel must be absent after UnregisterTokenRefreshChannel")
+	assert.False(t, exists, "the tenantless token must still be terminated")
+
+	require.NoError(t, auditMgr.Flush(ctx))
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID:      audit.SystemTenantID,
+		ResourceTypes: []string{"session"},
+		ResourceIDs:   []string{sessionID},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "termination must be audited under audit.SystemTenantID")
+	assert.Equal(t, "terminal.session.end", entries[0].Action)
+
+	defaultEntries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID:    "default",
+		ResourceIDs: []string{sessionID},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, defaultEntries)
 }

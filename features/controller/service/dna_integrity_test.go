@@ -783,7 +783,7 @@ func TestAcceptRegistration_RejectsDegenerateInitialDNA(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	log := logging.NewCapturingLogger()
 	svc := NewControllerServiceWithStorage(log, storage)
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
 
 	req := &controllerpb.RegisterRequest{
 		Version:        "1.0.0",
@@ -817,7 +817,7 @@ func TestAcceptRegistration_RejectsDegenerateInitialDNA(t *testing.T) {
 func TestAcceptRegistration_AcceptsValidInitialDNA(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
 
 	req := &controllerpb.RegisterRequest{
 		Version:        "1.0.0",
@@ -853,7 +853,7 @@ func TestAcceptRegistration_AcceptsRealGathererDNA_NoHostnameModuleConfigured(t 
 	storage := newTestFleetStorage(t)
 	log := logging.NewCapturingLogger()
 	svc := NewControllerServiceWithStorage(log, storage)
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
 
 	req := &controllerpb.RegisterRequest{
 		Version:        "1.0.0",
@@ -883,7 +883,7 @@ func TestAcceptRegistration_AcceptsRealGathererDNA_NoHostnameModuleConfigured(t 
 func TestAcceptRegistration_RejectsNilInitialDNA(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
 
 	req := &controllerpb.RegisterRequest{
 		Version:        "1.0.0",

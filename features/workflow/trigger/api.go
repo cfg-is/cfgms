@@ -3,7 +3,6 @@
 package trigger
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -472,32 +471,4 @@ func (api *APIHandler) sendErrorResponse(w http.ResponseWriter, statusCode int, 
 	}
 
 	api.sendJSONResponse(w, statusCode, errorResponse)
-}
-
-// TriggerAPIMiddleware provides middleware for trigger API requests
-func TriggerAPIMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Add CORS headers for browser compatibility
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Tenant-ID")
-
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Extract tenant ID from header and add to context
-		tenantID := r.Header.Get("X-Tenant-ID")
-		if tenantID == "" {
-			// Default tenant for testing
-			tenantID = "default"
-		}
-
-		ctx := context.WithValue(r.Context(), TenantIDContextKey, tenantID)
-		r = r.WithContext(ctx)
-
-		next.ServeHTTP(w, r)
-	})
 }

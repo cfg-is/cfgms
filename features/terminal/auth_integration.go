@@ -471,6 +471,13 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 		return nil, fmt.Errorf("session token is inactive")
 	}
 
+	// No substituted tenant: a token that resolves to no tenant cannot be
+	// attributed or authorised, so it is refused.
+	tokenTenantID, hasTenant := extractTenantID(token)
+	if !hasTenant {
+		return nil, fmt.Errorf("session token has no tenant scope")
+	}
+
 	// Check token expiration
 	if time.Now().After(token.ExpiresAt) {
 		atm.invalidateToken(token.Token)
@@ -483,7 +490,7 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 		if token.ClientIP != clientIP {
 			_ = atm.auditManager.RecordEvent(ctx,
 				audit.NewEventBuilder().
-					Tenant(extractTenantID(token)).
+					Tenant(tokenTenantID).
 					Type(business.AuditEventSecurityEvent).
 					Action("terminal.session_hijack_attempt").
 					User(token.UserID, business.AuditUserTypeHuman).
@@ -508,7 +515,7 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 		if token.TLSFingerprint != currentFingerprint {
 			_ = atm.auditManager.RecordEvent(ctx,
 				audit.NewEventBuilder().
-					Tenant(extractTenantID(token)).
+					Tenant(tokenTenantID).
 					Type(business.AuditEventSecurityEvent).
 					Action("terminal.session_hijack_attempt").
 					User(token.UserID, business.AuditUserTypeHuman).
@@ -543,7 +550,7 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 	for tokenString, token := range atm.sessionTokens {
 		if token.SessionID == sessionID {
 			terminatedUserID = token.UserID
-			terminatedTenantID = extractTenantID(token)
+			terminatedTenantID, _ = extractTenantID(token)
 			delete(atm.sessionTokens, tokenString)
 			break
 		}
@@ -939,19 +946,20 @@ func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Contex
 	}, nil
 }
 
-// extractTenantID extracts tenant ID from session token
-func extractTenantID(token *SessionToken) string {
+// extractTenantID returns the tenant ID of a session token and whether one was
+// present. It never substitutes a tenant.
+func extractTenantID(token *SessionToken) (string, bool) {
 	// token.TenantID (Issue #4337) is set by generateSessionToken from the
 	// SessionRequest that authenticated the session — the authoritative scope.
-	// Metadata["tenant_id"] and the "default" fallback remain for any token built
-	// before that field existed (or directly, outside generateSessionToken).
+	// Metadata["tenant_id"] remains for any token built before that field existed
+	// (or directly, outside generateSessionToken).
 	if token.TenantID != "" {
-		return token.TenantID
+		return token.TenantID, true
 	}
-	if tenantID, exists := token.Metadata["tenant_id"]; exists {
-		return tenantID
+	if tenantID := token.Metadata["tenant_id"]; tenantID != "" {
+		return tenantID, true
 	}
-	return "default" // Fallback to default tenant
+	return "", false
 }
 
 // TerminalRBACStatus represents the RBAC status of a terminal session

@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	_ "modernc.org/sqlite" // registers the "sqlite" driver used by dropDeviceTenantTable
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -1915,4 +1917,26 @@ func TestListFleetStewards_TenantMapLossWithoutStewardStoreFallbackDropsDevice(t
 	assert.Empty(t, second,
 		"a device_tenant read failure with no StewardStore fallback must drop the device from this call's "+
 			"result — ListFleetStewards reads durable storage directly and has no cache to retain a prior answer in")
+}
+
+// TestAcceptRegistration_NoTenantRefusedBeforeStateChange verifies a context with
+// no tenant is refused with InvalidArgument and registers nothing.
+func TestAcceptRegistration_NoTenantRefusedBeforeStateChange(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	for name, ctx := range map[string]context.Context{
+		"no tenant":    context.Background(),
+		"empty tenant": context.WithValue(context.Background(), ctxkeys.TenantID, ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := svc.AcceptRegistration(ctx, &controllerpb.RegisterRequest{
+				Version:    "1.0.0",
+				InitialDna: &commonpb.DNA{Id: "dna-no-tenant"},
+			})
+			require.Error(t, err)
+			assert.Nil(t, resp)
+			assert.Equal(t, codes.InvalidArgument, grpcstatus.Code(err))
+			assert.Equal(t, 0, svc.GetStewardCount())
+		})
+	}
 }

@@ -196,7 +196,9 @@ func TestHandleGRPC_MatchingStewardIDProceedsNormally(t *testing.T) {
 
 	ca := newTestCA(t)
 	svc := createTestService(t)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca))
+	controllerSvc := service.NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "default", "localhost:4433", "connected"))
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca)).WithControllerService(controllerSvc)
 
 	// Store a real configuration so GetConfiguration returns OK.
 	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "default", stewardID, minimalStewardConfig(stewardID))
@@ -267,7 +269,9 @@ func TestHandleGRPC_PopulatesSignatureWhenSignerSet(t *testing.T) {
 	ca := newTestCA(t)
 	svc := createTestService(t)
 	signer := newTestSignerFromCA(t, ca)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), signer)
+	controllerSvc := service.NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "default", "localhost:4433", "connected"))
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), signer).WithControllerService(controllerSvc)
 
 	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "default", stewardID, minimalStewardConfig(stewardID))
 	require.NoError(t, err)
@@ -301,7 +305,9 @@ func TestHandleGRPC_RejectsWhenSignerNil(t *testing.T) {
 
 	ca := newTestCA(t)
 	svc := createTestService(t)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil) // nil signer
+	controllerSvc := service.NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "default", "localhost:4433", "connected"))
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil).WithControllerService(controllerSvc) // nil signer
 
 	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "default", stewardID, minimalStewardConfig(stewardID))
 	require.NoError(t, err)
@@ -348,7 +354,7 @@ func createTestServiceWithControllerSvc(t *testing.T, controllerSvc *service.Con
 // The test uses two storage slots: a distinct config under "tenant-a" and a distinct
 // config under "default". WithControllerService injects "tenant-a" into the context,
 // so GetConfiguration resolves to the tenant-a config. Without the injection the
-// handler would fall back to "default" and return the wrong config.
+// handler would have no tenant and refuse the lookup.
 func TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig(t *testing.T) {
 	const stewardID = "steward-tenant-a"
 
@@ -379,11 +385,10 @@ func TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig(t *testing.T)
 }
 
 // TestHandleGRPC_TenantIsolation_NoInjection_FallsBackToDefault verifies the
-// baseline: without WithControllerService, a gRPC context carrying no tenant
-// falls back to "default" for config lookup, and fails when no default config
-// exists for the steward. This confirms the injection in the positive test is
-// doing meaningful work.
-func TestHandleGRPC_TenantIsolation_NoInjection_FallsBackToDefault(t *testing.T) {
+// baseline: without WithControllerService, a gRPC context carries no tenant and
+// no tenant is substituted, so the config lookup fails. This confirms the
+// injection in the positive test is doing meaningful work.
+func TestHandleGRPC_TenantIsolation_NoInjection_FailsClosed(t *testing.T) {
 	const stewardID = "steward-tenant-b"
 
 	ca := newTestCA(t)
@@ -400,7 +405,6 @@ func TestHandleGRPC_TenantIsolation_NoInjection_FallsBackToDefault(t *testing.T)
 
 	err := h.HandleGRPC(ctx, req, stream)
 	require.Error(t, err,
-		"without tenant injection, context has no tenant so lookup falls back to default; "+
-			"no config is stored under default for this steward, so the call must fail")
+		"without tenant injection, context has no tenant and none is substituted, so the call must fail")
 	assert.Empty(t, stream.chunks, "no chunks should be sent when config is not found")
 }

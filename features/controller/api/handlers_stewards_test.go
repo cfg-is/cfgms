@@ -4881,6 +4881,31 @@ func TestHandleValidateConfig_OwningTenant_Returns200(t *testing.T) {
 	assert.True(t, resp.Data.Valid, "a well-formed steward config must validate: %+v", resp.Data.Errors)
 }
 
+// TestHandleValidateConfig_ValidatesUnderStewardTenant asserts the tenant that
+// reaches the validation service is the steward's own tenant (reported back in the
+// result metadata), not a substituted one.
+func TestHandleValidateConfig_ValidatesUnderStewardTenant(t *testing.T) {
+	server := setupTestServer(t)
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "validate-tenant-host", "os": "linux",
+	}, "test-tenant")
+	apiKey := NewTestKey(t, server, []string{"steward:validate-config"})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/config/validate",
+		strings.NewReader(validateConfigBody(stewardID)))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Data ConfigValidationResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "test-tenant", resp.Data.Metadata["tenant_id"])
+}
+
 // TestHandleValidateConfig_MalformedBody_Returns400 pins the handler's input
 // validation alongside the happy path above.
 func TestHandleValidateConfig_MalformedBody_Returns400(t *testing.T) {

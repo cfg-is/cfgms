@@ -294,10 +294,8 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	router := mux.NewRouter()
 	// testTenantHeaderMiddleware stands in for the real authentication middleware,
 	// which sets ctxkeys.TenantID from a verified principal, not a raw header
-	// (Issue #4326). TriggerAPIMiddleware also exists in api.go but is unused and
-	// out of scope for this story — and it wrote the trigger package's own,
-	// now-removed context key, which this suite's tenant-isolation assertions
-	// depended on before the fix.
+	// (Issue #4326). The live trigger routes use triggerTenantMiddleware in
+	// features/controller/api/handlers_workflows.go.
 	router.Use(testTenantHeaderMiddleware)
 	sub := router.PathPrefix("/triggers").Subrouter()
 	apiHandler.RegisterRoutes(sub)

@@ -107,8 +107,8 @@ type account struct {
 //
 // root_scope and tenant_id are mutually exclusive. Setting root_scope:true grants
 // cross-tenant visibility; an explicit tenant_id scopes to that subtree. If neither
-// is set on creation the account defaults to "default" (backward-compat); on reset
-// the existing scope is retained.
+// is set on creation the account takes the caller's own tenant; a caller with no
+// tenant is refused with 403 NO_TENANT_SCOPE. On reset the existing scope is retained.
 //
 // ResetCredentials is the admin-mediated reset of ADR-021 Amendment 1 Decision 4:
 // it re-provisions an existing account to the zero-authenticator state, discarding

@@ -55,8 +55,8 @@ func NewConfigHandler(configService *service.ConfigurationServiceV2, logger logg
 
 // WithControllerService wires the fleet registry into the handler so the steward's
 // authenticated tenant ID is injected into the request context before GetConfiguration
-// is called. Without this, extractTenantID(ctx) returns "default" on the data-plane
-// sync path and the config lookup scopes to the wrong tenant. (Issue #1720)
+// is called. Without this, extractTenantID(ctx) reports no tenant on the data-plane
+// sync path and the config lookup has no tenant to scope to. (Issue #1720)
 func (h *ConfigHandler) WithControllerService(cs *service.ControllerService) *ConfigHandler {
 	h.controllerSvc = cs
 	return h
@@ -93,7 +93,7 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	// Inject the steward's authenticated tenant ID from the fleet registry into the
 	// request context before calling GetConfiguration. The mTLS data-plane sync path
 	// carries no tenant context value, so without this injection extractTenantID(ctx)
-	// returns "default" and the config lookup scopes to the wrong tenant. (Issue #1720)
+	// reports no tenant and the config lookup has nothing to scope to. (Issue #1720)
 	//
 	// The caller here is a steward proven by its certificate to be stewardID, not a
 	// tenant principal, so the context is marked system-internal (Issue #4665); the

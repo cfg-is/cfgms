@@ -22,6 +22,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -343,8 +345,12 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 		req.InitialDna = &common.DNA{}
 	}
 
-	// Extract tenant information from gRPC metadata
-	tenantID := s.extractTenantID(ctx)
+	// Registration is attributed to the caller's tenant; with none there is no
+	// tenant to register under, so refuse before touching any state.
+	tenantID, ok := ctx.Value(ctxkeys.TenantID).(string)
+	if !ok || tenantID == "" {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "tenant context required for registration")
+	}
 
 	s.logger.Info("Registration request received",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
@@ -1489,17 +1495,6 @@ func (s *ControllerService) verifySyncStatus(existingSteward *StewardInfo, req *
 		"client_fingerprint", clientFingerprint)
 
 	return syncStatus, requiresDNAResync, requiresConfigResync
-}
-
-// extractTenantID extracts tenant ID from context
-func (s *ControllerService) extractTenantID(ctx context.Context) string {
-	// Extract tenant ID from context value (set by auth middleware)
-	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok && tenantID != "" {
-		return tenantID
-	}
-
-	s.logger.Debug("No tenant ID in context, using default tenant")
-	return "default"
 }
 
 // clusterTenantInScope reports whether resourceTenant falls within the subtree
