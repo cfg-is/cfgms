@@ -642,3 +642,32 @@ func TestParse_TableCoverage(t *testing.T) {
 		})
 	}
 }
+
+func TestParse_BareStewardID_ResolvesAsID(t *testing.T) {
+	for _, tok := range []string{
+		"steward-0123456789abcdef0123456789abcdef",
+		"steward-1787449304425826730-0a1b2c3d4e5f6a7b",
+	} {
+		f, _, err := Parse(tok)
+		require.NoError(t, err)
+		assert.Equal(t, []string{tok}, f.IDs)
+		assert.Equal(t, "", f.Name)
+
+		g, _, err := Parse("id:" + tok)
+		require.NoError(t, err)
+		assert.Equal(t, g, f, "bare and id: forms must parse identically")
+	}
+}
+
+func TestParse_BareHostname_StaysName(t *testing.T) {
+	for _, tok := range []string{"web-01", "steward-web", "steward-abc-xyz"} {
+		f, _, err := Parse(tok)
+		require.NoError(t, err)
+		assert.Equal(t, tok, f.Name)
+		assert.Empty(t, f.IDs)
+	}
+	f, _, err := Parse("name:steward-abc123")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-abc123", f.Name)
+	assert.Empty(t, f.IDs)
+}

@@ -60,6 +60,19 @@ cfg steward list 'db-?-east'
 A bare token can only ever match zero or more hosts exactly — it never fans
 out to unexpected hosts. Globbing requires an explicit `*` or `?` in the value.
 
+A bare token shaped like a steward ID (`steward-<hex>` or
+`steward-<unixnano>-<hex>`, as printed by `cfg steward list`) is an **ID
+match**, equivalent to `id:<token>`. A hostname that happens to have that shape
+must be written with the `name:` key to force a hostname match:
+
+```sh
+# ID match: same as id:steward-1787449304425826730-0a1b2c3d4e5f6a7b
+cfg steward status steward-1787449304425826730-0a1b2c3d4e5f6a7b
+
+# Hostname match despite the steward-ID shape
+cfg steward status name:steward-abc123
+```
+
 ---
 
 ## Tenant-path scoping
