@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -346,4 +347,46 @@ func TestExec_MissingJobRecord_JSONMode(t *testing.T) {
 	require.NotNil(t, s2, "s2 entry must be present even with no job record")
 	assert.Equal(t, false, s2["success"], "s2 missing a job record must be success=false")
 	assert.NotEmpty(t, s2["error"], "s2 must carry an error message")
+}
+
+// TestExec_BareStewardID_SameResolutionAsIDForm verifies the CLI forwards a
+// bare steward ID verbatim (as it does the id: form) and that the server-side
+// selector parser resolves both to the same filter (#4515).
+func TestExec_BareStewardID_SameResolutionAsIDForm(t *testing.T) {
+	const id = "steward-1787449304425826730-0a1b2c3d4e5f6a7b"
+	dir := t.TempDir()
+	bundleFile := generateTestBundleWithRSA(t, dir)
+
+	var filters []interface{}
+	for _, arg := range []string{id, "id:" + id} {
+		var capturedTarget string
+		srv := newExecTestServer(t, "run-id",
+			[]StewardInfo{{ID: id, DNA: &StewardInfoDNA{Hostname: "h1"}}},
+			[]map[string]interface{}{
+				{"job_id": "j1", "device_id": id, "status": "completed", "output": "ok\n", "exit_code": 0},
+			},
+			&capturedTarget,
+		)
+
+		saveExecGlobals(t)
+		stewardURL = srv.URL
+		stewardTLSInsecure = true
+		bundlePath = bundleFile
+		stewardExecCommand = "hostname"
+		stewardExecShell = "bash"
+		stewardExecTimeout = 30 * time.Second
+		runWaitPollInterval = time.Millisecond
+
+		_ = captureStdout(t, func() {
+			require.NoError(t, runRunCommandSingle(stewardExecCmd, []string{arg}))
+		})
+		srv.Close()
+		assert.Equal(t, arg, capturedTarget, "selector must reach the server unmodified")
+
+		f, _, err := selector.Parse(capturedTarget)
+		require.NoError(t, err)
+		assert.Equal(t, []string{id}, f.IDs)
+		filters = append(filters, f)
+	}
+	assert.Equal(t, filters[0], filters[1])
 }

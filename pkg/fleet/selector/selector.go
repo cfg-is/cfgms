@@ -4,6 +4,7 @@ package selector
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -89,6 +90,11 @@ func extractTenantPrefix(expr string) (tenantPath, rest string) {
 	return normalized, expr[splitAt+1:]
 }
 
+// stewardIDPattern matches both generated steward ID formats:
+// steward-<32 hex> and steward-<unixnano>-<16 hex>. It is applied only to bare
+// tokens so `cfg steward list` output can be pasted into any selector.
+var stewardIDPattern = regexp.MustCompile(`^steward-[0-9a-f]+(-[0-9a-f]+)?$`)
+
 type term struct {
 	key   string
 	value string
@@ -99,6 +105,8 @@ type term struct {
 // double-quoted values may contain spaces. A token with no colon before its
 // next space (or end of string) is a bare token and maps to an implicit
 // name:<value> term, enabling bare hostname targeting without a key prefix.
+// A bare token shaped like a steward ID is an id:<value> term instead; use
+// name:<value> to force a hostname match.
 func tokenize(expr string) ([]term, error) {
 	var terms []term
 	i := 0
@@ -122,7 +130,12 @@ func tokenize(expr string) ([]term, error) {
 			if spaceRel >= 0 {
 				end = i + spaceRel
 			}
-			terms = append(terms, term{key: "name", value: expr[i:end]})
+			tok := expr[i:end]
+			key := "name"
+			if stewardIDPattern.MatchString(tok) {
+				key = "id"
+			}
+			terms = append(terms, term{key: key, value: tok})
 			i = end
 			continue
 		}
