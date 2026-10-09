@@ -19,6 +19,10 @@ A2.2's rejection of `GlobalScope`, whose reasoning no longer matches the code.
 per-client sizes under opaque labels — never client names — without a grant; the MSP sees
 the same report for its own clients with real names. Supersedes A2.5's "bulk list silently
 omits" rule for MSP-level rows.
+**Amended:** 2026-10-06 — [Amendment 8](#amendment-8-2026-10-06--root-reads-of-client-tenants-require-a-crossing-loud-break-glass):
+root reads of client-tenant records need a crossing, the same as actions (supersedes A7.2's
+"read breadth is unchanged"); the always-visible set is closed; break-glass gains four
+reason categories, all loud; a second approver is a setting, off by default.
 
 **Deciders:** Founder, Architecture
 
@@ -244,14 +248,17 @@ not a backdoor into tenant administration.
 
 ## Remaining tunables (PO-set, founder may override)
 
-1. **Whether break-glass requires a second approver by default** — this ADR requires
-   break-glass to be time-boxed and justified/audited, but does not fix whether it
-   additionally needs dual approval.
+1. **Whether break-glass requires a second approver by default** — **resolved by
+   [Amendment 8](#a86--second-approver-a-setting-off-by-default) (A8.6):** a controller
+   setting, off by default.
 2. **Exact permission names** (e.g. `tenant:cross-boundary-access`, `tenant:break-glass`) —
    left to the implementing story, following existing RBAC naming conventions in
    `features/rbac/defaults.go`.
 3. **Whether client-granted access defaults to a fixed expiry** (e.g. 24h, renewable) or
-   stays open until the MSP explicitly revokes it.
+   stays open until the MSP explicitly revokes it. **Current behavior:** every grant has a
+   fixed expiry the MSP chooses, with a 24-hour ceiling (`maxTenantCrossingGrantDuration`);
+   no grant is open-ended. Whether the ceiling is founder-fixed policy stays open
+   (Tunable 6).
 4. **The exact carve-out allowlist's final shape** — the category list in Decision 4 is
    founder-confirmed at the level described; the precise audit-event-type enum is an
    implementation detail for the story that builds it.
@@ -1138,7 +1145,8 @@ through `TenantScope`.
   keep root's existing fleet-wide breadth: such a read is no stricter than the list it
   drills into. Whether root reads of a client tenant's data should themselves require a
   crossing, as Decision 4 implies for business data, is a separate decision this amendment
-  does not take.
+  does not take. **Superseded by [Amendment 8](#a82--reads-need-a-crossing) (A8.2):** root
+  reads of client-tenant records now require a crossing.
 - **Enforced by an architecture rule.** In `features/controller/api`, any root-allow
   decision made outside `tenantAccessForScope` — a `TenantScope.IsRoot()` branch, an
   `isWithinTenantScope` call fed the root caller's empty filter, or a hand-written
@@ -1177,3 +1185,146 @@ through `TenantScope`.
 - The steward-binary `default` namespace: root publishes there because deployed stewards'
   self-fetch falls back to it.
 
+## Amendment 8 (2026-10-06) — Root reads of client tenants require a crossing; loud break-glass
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** A7.2 ("Read breadth is
+unchanged"), Decision 2, Remaining Tunables 1 and 3 · **Related:** Epic
+[#4701](https://github.com/cfg-is/cfgms/issues/4701), `docs/design/mockups/crossing-prompt.html`,
+`docs/design/mockups/support-access.html`
+
+### A8.1 — Context
+
+A7.2 put actions on client-tenant records behind a crossing but kept root's fleet-wide read
+breadth, and left open whether those reads should need a crossing too. Decision 4 already
+says the boundary gates business data, and reading a client's records is access to its
+business data. The founder decided (2026-10-06) that reads need a crossing as well, that the
+MSP's own grant is the normal way in, and that break-glass must be loud. The founder fixed
+the grant beneficiary and the visibility rule on 2026-10-07.
+
+### A8.2 — Reads need a crossing
+
+- **Reads are judged like actions.** For a root-scoped principal subject to Decision 1's
+  boundary, a read of any record owned by a tenant below root needs an active crossing — an
+  MSP grant or a break-glass — for that tenant. This applies to list endpoints and by-ID
+  reads alike, in the API and in the web console.
+- **Lists without a crossing.** A list returns root's own tenant records, the always-visible
+  categories (A8.3), and nothing owned by a client tenant without a crossing. A6.4's boundary
+  rows for MSPs stay.
+- **By-ID reads without a crossing.** A by-ID read of a client-tenant record answers with the
+  crossing challenge (Decision 3, A2.5).
+- **Existence is not hidden by the challenge.** As for writes in A7.2, the challenge tells root
+  that the record exists behind the boundary. Root can already see each MSP through A6.4.
+- **Visibility rule (2026-10-07).** Without a crossing, a root-scoped principal sees MSP
+  tenants only. It never sees the name or path of an MSP's client tenant in any API response
+  or console surface. A6.2's opaque labels are the only per-client handle root holds.
+
+### A8.3 — The always-visible set is closed
+
+Without a crossing, a root-scoped principal can reach exactly these, and nothing else:
+
+1. **Root's own tenant records.**
+2. **Identity data for root's own principals** — the account, certificate and registration
+   records needed to authenticate and manage root's own principals.
+3. **Decision 4's categories:**
+   1. Authentication failures, account lockouts and suspicious-login patterns on MSP
+      administrator accounts.
+   2. The meta-log of crossings: grant created, used, revoked or expired; break-glass
+      invoked, approved, ended or expired.
+   3. Abuse and resource-exhaustion signals: rate-limit trips, unusual API volume and
+      similar platform-health indicators.
+   4. Billing and subscription state changes, including non-payment flags.
+   5. System and platform logs and metrics needed to run the deployment.
+4. **Amendment 6's billing facts:** for each MSP, its name and tenant ID, tech count,
+   endpoint count and anonymized platform metrics; per-client endpoint and tech counts under
+   opaque labels only (A6.1, A6.2).
+
+Growing this set is a founder decision, not a reviewer's judgement call.
+
+The crossing meta-log (item 3.2) is written to two audit scopes: the affected tenant's, so the
+MSP sees it, and root's own, so root can audit its own crossings without a crossing.
+
+### A8.4 — The grant is the primary path
+
+- **The MSP decides.** An MSP-issued grant is the normal way root gets into a client tenant.
+  An MSP administrator can issue, list and revoke grants, and end a break-glass it does not
+  accept. The MSP also manages its administrator contact addresses (A8.5).
+- **A grant names no person (2026-10-07).** A grant takes a duration only. While it is active,
+  it admits every root-scoped principal subject to the boundary — all root support — to the
+  granting MSP and its descendants.
+- **First use is audited by name.** The first read by each root principal under a grant writes
+  a `tenant.crossing_grant_used` entry that names that principal.
+- **Root cannot revoke a grant.** A grant is the MSP's consent. Only the MSP ends it, or it
+  expires.
+- **A break-glass is personal.** It is bound to the principal that invoked it. A root operator
+  can end only its own break-glass early.
+- **Not in this amendment.** Narrower root roles, for example a support role that a grant
+  admits alone, are future work.
+
+### A8.5 — Break-glass: reason categories, and all of them are loud
+
+**Reason categories.** Every break-glass invocation names one category and gives the
+existing justification (10-1000 characters). The categories are exactly:
+
+| Identifier | Use |
+| ---------- | --- |
+| `account_recovery` | The MSP has lost access to its own administrator accounts and cannot issue a grant. |
+| `security_incident` | An active security incident needs root to look inside the tenant now. |
+| `legal_request` | A legal obligation requires access. |
+| `billing_dispute` | Records needed to settle a billing dispute are behind the boundary. |
+
+All four categories are loud. No category is quiet.
+
+**"Loud" means three channels.** When a break-glass becomes active:
+
+1. **Email.** The controller emails the affected MSP's administrator contacts, if email
+   delivery is configured.
+2. **Console notification.** The MSP's console shows a notification. It stays as an
+   active-elevation indicator until the break-glass expires or is ended.
+3. **Audit.** The controller writes the critical-severity tenant-scoped audit entry and a
+   root-scope meta-log entry (A8.3).
+
+**Email never blocks.** If email delivery is not configured or the send fails, the elevation
+still starts and the other two channels still fire. The audit entry records the email
+outcome: sent, not configured, or failed.
+
+**What the MSP sees.** The email, the notification and the audit entry each show the reason
+category, the justification, the invoking principal, the start time and the expiry time.
+
+**Window.** The window stays 30 minutes (`tenantCrossingBreakGlassDuration`), counted from
+activation.
+
+### A8.6 — Second approver: a setting, off by default
+
+This resolves Remaining Tunable 1.
+
+- A controller setting requires a second approver for break-glass. It is **off by default**.
+- When it is on, an invocation stays **pending** until a different root-scoped principal
+  subject to the boundary approves it. The invoker cannot approve its own invocation.
+- A pending invocation grants nothing. The loud channels (A8.5) fire when the break-glass
+  becomes active on approval, not when it is requested.
+- Approval and the pending request are meta-log events (A8.3).
+
+### A8.7 — Account recovery: policy
+
+The operator guide written under Epic #4701 gives the step-by-step procedure. The policy is:
+
+- **Who invokes.** A root-scoped principal that holds the break-glass permission, acting on a
+  request that comes from the MSP.
+- **Justification.** It names who made the request and by what channel, and how that
+  person's identity was confirmed. It never contains secrets or credentials.
+- **What the MSP sees.** The three loud channels (A8.5), and every action taken under the
+  break-glass in its own audit view.
+- **How it ends.** At the 30-minute expiry, when the invoker ends it, or when an MSP
+  administrator ends it. Once the MSP has working administrator access again, further
+  support goes through a grant, not a second break-glass.
+
+### A8.8 — Consequences
+
+- Every read path in `features/controller/api` that serves client-tenant records goes through
+  `tenantAccessForScope`. The A7.2 architecture rule extends to reads.
+- Root's fleet-wide console views, for example the fleet list and dashboards, show only the
+  A8.3 set for client tenants unless a crossing is active.
+- Break-glass needs controller email-delivery settings. Credentials are held through
+  `pkg/secrets`, never in cleartext. It also needs per-MSP administrator contact addresses
+  that the MSP manages.
+- Billing views (Amendment 6) are unchanged.
