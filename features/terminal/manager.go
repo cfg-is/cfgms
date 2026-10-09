@@ -40,7 +40,9 @@ type DefaultSessionManager struct {
 }
 
 // NewSessionManager creates a new session manager
-func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, error) {
+// recorderOpts are passed to the session recorder (e.g. WithSecretsStore so the
+// recording HMAC key survives restarts); they are ignored when recording is off.
+func NewSessionManager(config *Config, logger logging.Logger, recorderOpts ...RecorderOption) (SessionManager, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
@@ -77,7 +79,7 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 	if config.RecordSessions {
 		recorderConfig := DefaultRecorderConfig()
 		recorderConfig.StoragePath = config.RecordingStoragePath
-		recorder, err := NewSessionRecorder(recorderConfig, logger)
+		recorder, err := NewSessionRecorder(recorderConfig, logger, recorderOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize session recorder: %w", err)
 		}

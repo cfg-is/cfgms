@@ -352,7 +352,10 @@ The HMAC key for recordings is stored at secrets slot
 random key is generated on first boot via `crypto/rand` and persisted via
 `pkg/secrets`. Without a secrets store the key is ephemeral — per-event
 integrity is maintained within the process run, but cross-restart
-verification requires `WithSecretsStore`.
+verification requires `WithSecretsStore`. The controller always wires the
+controller secrets store into the session manager (and refuses to start without
+one), so in a controller the key persists across restarts and is shared by all
+cluster nodes.
 
 ### Verification
 

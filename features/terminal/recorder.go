@@ -64,17 +64,26 @@ func WithSecretsStore(store secretsInterfaces.SecretStore) RecorderOption {
 				return nil
 			}
 		}
+		// Only a confirmed absent key may be replaced; a transient store or
+		// decryption failure must not overwrite the key earlier recordings use.
+		if err != nil && !errors.Is(err, secretsInterfaces.ErrSecretNotFound) {
+			return fmt.Errorf("load recording HMAC key: %w", err)
+		}
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			return fmt.Errorf("failed to generate recording HMAC key: %w", err)
 		}
 		if err := store.StoreSecret(ctx, &secretsInterfaces.SecretRequest{
-			Key:         keyName,
+			// The store addresses slots as "<tenant>/<key>", so the slot
+			// terminal/recording-hmac-key is tenant "terminal", key "recording-hmac-key".
+			Key:         "recording-hmac-key",
+			TenantID:    "terminal",
+			CreatedBy:   "controller",
 			Value:       hex.EncodeToString(key),
 			Description: "HMAC signing key for session recording chain integrity",
 		}); err != nil {
 			r.logger.Warn("failed to persist recording HMAC key; using in-process key",
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 		r.hmacKey = key
 		return nil
