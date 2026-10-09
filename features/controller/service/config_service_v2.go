@@ -159,17 +159,6 @@ func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID
 		return nil, nil
 	}
 
-	// Build attrs map from DNA fragments; merge in controller-stored tags so tag: selector terms work.
-	var attrs map[string]string
-	if info.DNA != nil {
-		attrs = FlattenDNAFragments(info.DNA.GetFragments())
-	} else {
-		attrs = make(map[string]string)
-	}
-	if ts := a.controllerSvc.TagStore(); ts != nil {
-		attrs = mergeTagsIntoAttrs(attrs, ts.TagsFor(stewardID))
-	}
-
 	entries, err := a.configStore.ListConfigs(ctx, &cfgconfig.ConfigFilter{
 		TenantID:  info.TenantID,
 		Namespace: "role-policies",
@@ -179,12 +168,7 @@ func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID
 			logging.SanitizeLogValue(info.TenantID), err)
 	}
 
-	stewardData := fleet.StewardData{
-		ID:            stewardID,
-		TenantID:      info.TenantID,
-		DNAAttributes: attrs,
-	}
-	q := fleet.NewMemoryQuery(&singleStewardProvider{s: stewardData})
+	q := a.controllerSvc.stewardSelectorQuery(info)
 
 	var matched []config.RoleFragment
 	for _, entry := range entries {
@@ -218,6 +202,45 @@ func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID
 	})
 
 	return matched, nil
+}
+
+// stewardSelectorQuery builds the single-steward fleet query a role selector is
+// evaluated against: attrs come from the steward's DNA fragments with the
+// controller-stored tags merged in so tag: selector terms work. It is the one
+// place a steward's selector-visible attributes are assembled, shared by
+// roleConfigAdapter and StewardMatchesSelector so the two cannot disagree.
+func (s *ControllerService) stewardSelectorQuery(info *StewardInfo) *fleet.MemoryQuery {
+	var attrs map[string]string
+	if info.DNA != nil {
+		attrs = FlattenDNAFragments(info.DNA.GetFragments())
+	} else {
+		attrs = make(map[string]string)
+	}
+	if ts := s.TagStore(); ts != nil {
+		attrs = mergeTagsIntoAttrs(attrs, ts.TagsFor(info.ID))
+	}
+	return fleet.NewMemoryQuery(&singleStewardProvider{s: fleet.StewardData{
+		ID:            info.ID,
+		TenantID:      info.TenantID,
+		DNAAttributes: attrs,
+	}})
+}
+
+// StewardMatchesSelector reports whether stewardID's current DNA + controller-stored
+// tags satisfy the role selector expression. It uses the same evaluation as
+// roleConfigAdapter.MatchingRoleFragments. An unknown steward does not match; an
+// unparseable selector is an error.
+func (s *ControllerService) StewardMatchesSelector(ctx context.Context, stewardID, selectorExpr string) (bool, error) {
+	filter, _, err := selector.Parse(selectorExpr)
+	if err != nil {
+		return false, fmt.Errorf("parse selector: %w", err)
+	}
+	info, exists := s.GetStewardInfo(stewardID)
+	if !exists {
+		return false, nil
+	}
+	count, _ := s.stewardSelectorQuery(info).Count(ctx, filter)
+	return count > 0, nil
 }
 
 // mergeTagsIntoAttrs returns a copy of attrs with ctrlTags merged into the "tags" key.
