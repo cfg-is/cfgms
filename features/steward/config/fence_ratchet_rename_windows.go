@@ -161,3 +161,9 @@ func isRetryableRenameError(err error) bool {
 	}
 	return false
 }
+
+// syncFenceRatchetDir is a no-op on Windows: directories cannot be opened for
+// fsync, and ReplaceFileW is called with WRITE_THROUGH so the swap is committed.
+func syncFenceRatchetDir(string) error {
+	return nil
+}

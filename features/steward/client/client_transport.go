@@ -743,8 +743,10 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	ratchetSet, highestTermSeen, err := fenceRatchet.Load()
 	if err != nil {
 		// Corrupt or unreadable state file: log and start fresh rather than
-		// refusing to start. The fence still works in-memory for this run.
-		cfg.Logger.Warn("failed to load persisted fence ratchet state; starting fresh",
+		// refusing to start. The fence still works in-memory for this run. ERROR
+		// level because a lost ratchet silently drops the fencing high-water mark.
+		cfg.Logger.Error("failed to load persisted fence ratchet state; starting fresh",
+			"path", logging.SanitizeLogValue(filepath.Join(cfg.CertStoreDir, "fence_ratchet.json")),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 
