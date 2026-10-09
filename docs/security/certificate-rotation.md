@@ -34,6 +34,24 @@ When a rotation is triggered, the controller mints a new signing cert and enters
 The overlap window closes after `overlap_days` days (default: 30). After the window
 closes, only the new cert serial is trusted.
 
+### Retirement at Overlap End
+
+When the window closes, the controller retires the superseded certificate from the fleet
+instead of leaving stewards to trust it indefinitely. The controller node that holds
+leadership checks the signing cursor once a minute. When a rotating serial exists, its
+window has elapsed and it is not yet retired, that node sends every steward a
+`push_signing_cert` carrying the current certificate and `retire_serials` naming the
+rotating serial (a JSON array of strings), then marks the cursor retired with a
+conditional write. Only the leader sweeps; a node without leadership sends nothing. The
+sweep is skipped while the cluster still signs with per-node local keys (the legacy
+identity), because retiring there would strand stewards that do not trust the current
+key. The retirement is audit-logged as `signing_certificate_retired`.
+
+A steward that is offline at that moment does not get a second command. The
+refresh-on-connect push it receives when it reconnects already carries `retire_serials`
+(the elapsed rotating serial plus every serial revoked as a signing certificate), so
+connect still delivers one command, signed by a key that steward trusts.
+
 ### Refresh-on-Connect (Story B2d)
 
 Stewards that are offline during rotation receive the updated signing cert
@@ -219,6 +237,38 @@ If the signing key is suspected compromised:
 
 2. Bring offline stewards online as soon as possible so refresh-on-connect can deliver
    the new cert.
+
+### Emergency Revoke of a Superseded Signing Certificate
+
+To withdraw one named signing certificate from the whole fleet without waiting for its
+overlap window, revoke it. The current signing certificate cannot be revoked in one step,
+so the runbook is:
+
+1. Rotate with no overlap, so the compromised certificate becomes the superseded one:
+   ```bash
+   cfg controller signing-cert rotate --overlap-days 0
+   ```
+2. Revoke the old serial (admin certificate, root scope; the same gates as rotation):
+   ```bash
+   curl --cert admin.crt --key admin.key --cacert ca.crt -X POST \
+     https://controller.example.com/api/v1/certificates/signing/revoke \
+     -H 'Content-Type: application/json' \
+     -d '{"serial": "<old serial>", "reason": "key exposed in a build log"}'
+   ```
+
+The controller records the serial in the revocation store with a signing-certificate
+reason, retires it from the cursor when it is the rotating serial, and sends
+`retire_serials` to every steward. The response reports `stewards_notified`. Attempting
+to revoke the current serial returns `409 CURRENT_SIGNING_CERT`. The revoke is audit-logged
+as `signing_certificate_revoked`.
+
+From the moment a serial is revoked the controller does not sign anything with it. The one
+exception is the push that retires that same serial for a steward that was offline and
+trusts nothing else; that single delivery is signed by the serial it retires so the steward
+can verify it.
+
+**Offline stewards:** a steward that was offline for the revoke receives the retirement on
+its next connect, in the same single push that refreshes its signing certificate.
 
 ### Offline Steward Recovery
 

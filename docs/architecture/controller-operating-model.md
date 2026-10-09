@@ -519,6 +519,8 @@ This risk is tracked in [ADR-008](decisions/008-durable-execution-substrate.md) 
 
 Every cfg distributed to a steward is signed using the controller's dedicated signing certificate (or server cert in unified mode). The steward verifies this signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source.
 
+**Retiring superseded signing certificates (Issue #4795).** A rotation leaves the previous signing certificate trusted by stewards until it is explicitly retired. A retirement service on the controller does that at overlap end: on the node holding `HasLeadership()`, when the cursor names a rotating serial whose overlap window has elapsed and `RetiredAt` is unset, it sends every steward a `push_signing_cert` with `retire_serials` naming that serial and then marks the cursor retired with a conditional write (skipped in `LegacyLocal` signing-identity mode). An operator holding an admin certificate can withdraw a named superseded serial immediately with `POST /api/v1/certificates/signing/revoke`; the serial is recorded in the revocation store with a signing-certificate reason and fanned out the same way. A steward that was offline receives the retirement inside the single `push_signing_cert` it gets on connect (`EnsureStewardCurrent`), never as a second command, because a second command signed by the new key could be rejected before the first has been applied. The controller never signs with a revoked serial except in that one delivery, for a steward that trusts nothing else.
+
 ## Fleet Management
 
 The controller maintains awareness of all registered stewards and their state.

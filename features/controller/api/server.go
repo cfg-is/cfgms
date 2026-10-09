@@ -133,6 +133,7 @@ type Server struct {
 	trustedProxies                  []net.IPNet                              // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
 	blobStore                       blob.BlobStore                           // Issue #1702: installer artifact storage
 	signingRotationService          *service.SigningRotationService          // Issue #1816: signing cert rotation endpoint
+	signingRetirementService        *service.SigningRetirementService        // Issue #4795: signing cert emergency revoke endpoint
 	moduleCacheLister               resolution.CacheLister                   // Issue #1884: controller module cache for required_modules resolution
 	moduleBundleResolver            resolution.BundleResolver                // Issue #1884: git source resolver for uncached modules
 	moduleBundleApprover            resolution.BundleApprover                // Issue #1884: approval workflow for newly resolved modules
@@ -1986,6 +1987,15 @@ func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signingRotationService = svc
+}
+
+// SetSigningRetirementService wires the retirement service for the
+// POST /api/v1/certificates/signing/revoke endpoint (Issue #4795).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetSigningRetirementService(svc *service.SigningRetirementService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signingRetirementService = svc
 }
 
 // SetSessionManager wires the session Manager for admin session-token issuance and

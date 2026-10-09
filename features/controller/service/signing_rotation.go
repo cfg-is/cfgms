@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -162,7 +163,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		// new-cert-signed command, creating a bootstrapping deadlock (Issue #1844).
 		// Sign the fan-out with the rotating cert so the steward's existing verifier
 		// can authenticate the command before updating its trust set.
-		oldSigner := s.buildRotatingSigner(oldSerial)
+		oldSigner := s.signerForPush(oldSerial, nil)
 
 		// The signing CA is controller-wide, not per-tenant: every steward in the
 		// fleet verifies commands against it, so every steward must receive the new
@@ -190,6 +191,15 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 			"cert_pem":           certPEM,
 			"serial":             newCert.SerialNumber,
 			"overlap_expires_at": overlapExpiresAt,
+		}
+		// Serials already revoked as signing certificates are retired by this
+		// same push, so a revoke that predates the rotation still reaches every
+		// steward.
+		if retire, retireErr := s.retireSet(ctx, nil, newCert.SerialNumber, nil); retireErr != nil {
+			s.logger.Warn("signing rotation: could not list revoked signing serials for the push",
+				"error", logging.SanitizeLogValue(retireErr.Error()))
+		} else if len(retire) > 0 {
+			params["retire_serials"] = retire
 		}
 		for _, steward := range stewards {
 			var pubErr error
@@ -229,6 +239,13 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 // the specified steward via COMMAND_TYPE_PUSH_SIGNING_CERT. The push is
 // fire-and-forget (no ack required). Idempotent: the steward ignores pushes
 // with the same fingerprint it already holds.
+//
+// The same single command carries retire_serials (Issue #4795): a rotating
+// serial whose overlap window has elapsed and every serial revoked as a signing
+// certificate. A steward that was offline when the controller fanned the
+// retirement out gets it here, in the push it already receives on connect. A
+// second command signed by the new key right after this one could be rejected,
+// because the steward verifies on receipt, before this push has been applied.
 func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewardID string) error {
 	s.mu.RLock()
 	publisher := s.publisher
@@ -238,50 +255,26 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		return fmt.Errorf("signing rotation service: publisher not initialized")
 	}
 
-	signingCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+	push, err := s.buildPush(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("signing rotation service: load signing cursor: %w", err)
+		return err
 	}
 
-	certPEM, _, err := s.certManager.ExportCertificate(signingCert.SerialNumber, false, true)
-	if err != nil {
-		return fmt.Errorf("signing rotation service: export signing cert serial=%s: %w", signingCert.SerialNumber, err)
-	}
-	if len(certPEM) == 0 {
-		return fmt.Errorf("signing rotation service: empty cert PEM for serial=%s", signingCert.SerialNumber)
-	}
-
-	// Compute overlap_expires_at from the active cursor if rotation is in progress.
-	// Also capture the rotating serial: push_signing_cert must be signed with the
-	// rotating (old) cert so stewards that were offline during the rotation fan-out
-	// can verify the command before their trust set is updated (Issue #1844).
-	var overlapExpiresAt string
-	var rotatingSigner signature.Signer
-	if rotCursor, cursorErr := s.certManager.GetSigningCursorState(); cursorErr == nil && rotCursor != nil && rotCursor.RotatingSerial != "" {
-		deadline := rotCursor.RotatedAt.Add(time.Duration(rotCursor.OverlapWindowDays) * 24 * time.Hour)
-		overlapExpiresAt = deadline.UTC().Format(time.RFC3339)
-		// Always sign push_signing_cert with the rotating (old) cert, regardless of
-		// whether the overlap window has expired. A steward that was offline during
-		// the rotation fan-out only trusts the rotating cert; signing with the new
-		// cert would make verification fail before the trust set is updated —
-		// the bootstrapping deadlock from Issue #1844. The overlap expiry only controls
-		// how the steward filters its own trust set after receiving this push.
-		// If the rotating cert has been purged, buildRotatingSigner returns nil and
-		// we fall back to the DynamicSigner (requiring re-enrollment via Issue #1845).
-		rotatingSigner = s.buildRotatingSigner(rotCursor.RotatingSerial)
-	}
-
-	params := map[string]interface{}{
-		"cert_pem":           base64.StdEncoding.EncodeToString(certPEM),
-		"serial":             signingCert.SerialNumber,
-		"overlap_expires_at": overlapExpiresAt,
-	}
+	// push_signing_cert must be signed with the rotating (old) cert so stewards
+	// that were offline during the rotation fan-out can verify the command before
+	// their trust set is updated (Issue #1844). Always sign with the rotating cert,
+	// regardless of whether the overlap window has expired: a steward that missed
+	// the fan-out only trusts the rotating cert, and signing with the new cert
+	// would fail verification before the trust set is updated. If the rotating
+	// cert has been purged, signerForPush returns nil and we fall back to the
+	// DynamicSigner (requiring re-enrollment via Issue #1845).
+	rotatingSigner := s.signerForPush(push.rotatingSerial, push.retireSerials)
 
 	var pubErr error
 	if rotatingSigner != nil {
-		_, pubErr = publisher.PublishCommandWithSigner(ctx, stewardID, types.CommandPushSigningCert, params, rotatingSigner)
+		_, pubErr = publisher.PublishCommandWithSigner(ctx, stewardID, types.CommandPushSigningCert, push.params, rotatingSigner)
 	} else {
-		_, pubErr = publisher.PublishCommand(ctx, stewardID, types.CommandPushSigningCert, params)
+		_, pubErr = publisher.PublishCommand(ctx, stewardID, types.CommandPushSigningCert, push.params)
 	}
 	if pubErr != nil {
 		return fmt.Errorf("signing rotation service: publish push_signing_cert to steward %s: %w", stewardID, pubErr)
@@ -289,9 +282,156 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 
 	s.logger.Info("signing cert pushed to steward on connect",
 		"steward_id", logging.SanitizeLogValue(stewardID),
-		"serial", logging.SanitizeLogValue(signingCert.SerialNumber))
+		"serial", logging.SanitizeLogValue(push.currentSerial),
+		"retire_count", len(push.retireSerials))
 
 	return nil
+}
+
+// signingPush is a push_signing_cert payload together with what the signer
+// choice depends on.
+type signingPush struct {
+	params        map[string]interface{}
+	currentSerial string
+	// rotatingSerial is the cursor's rotating serial while one exists, "" otherwise.
+	rotatingSerial string
+	// retireSerials is the retire_serials list carried in params.
+	retireSerials []string
+}
+
+// buildPush assembles the push_signing_cert payload for the current signing
+// certificate. extraRetire names serials the caller is withdrawing right now, on
+// top of the ones the cursor and the revocation store already require retiring.
+// It refuses when the current signing certificate is itself revoked.
+func (s *SigningRotationService) buildPush(ctx context.Context, extraRetire []string) (*signingPush, error) {
+	signingCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+	if err != nil {
+		return nil, fmt.Errorf("signing rotation service: load signing cursor: %w", err)
+	}
+	revoked, err := s.certManager.IsRevoked(signingCert.SerialNumber)
+	if err != nil {
+		return nil, fmt.Errorf("signing rotation service: check revocation of current signing cert: %w", err)
+	}
+	if revoked {
+		return nil, fmt.Errorf("signing rotation service: current signing cert serial=%s is revoked; refusing to sign", signingCert.SerialNumber)
+	}
+
+	certPEM, _, err := s.certManager.ExportCertificate(signingCert.SerialNumber, false, true)
+	if err != nil {
+		return nil, fmt.Errorf("signing rotation service: export signing cert serial=%s: %w", signingCert.SerialNumber, err)
+	}
+	if len(certPEM) == 0 {
+		return nil, fmt.Errorf("signing rotation service: empty cert PEM for serial=%s", signingCert.SerialNumber)
+	}
+
+	// overlap_expires_at comes from the active cursor while a rotation is in
+	// progress, and is sent on every push: omitting it would clear a deadline the
+	// steward already holds and leave the rotating cert trusted indefinitely.
+	var overlapExpiresAt string
+	var rotatingSerial string
+	cursor, cursorErr := s.certManager.GetSigningCursorState()
+	if cursorErr == nil && cursor != nil && cursor.RotatingSerial != "" {
+		rotatingSerial = cursor.RotatingSerial
+		deadline := cursor.RotatedAt.Add(time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour)
+		overlapExpiresAt = deadline.UTC().Format(time.RFC3339)
+	}
+
+	retire, err := s.retireSet(ctx, cursor, signingCert.SerialNumber, extraRetire)
+	if err != nil {
+		return nil, err
+	}
+
+	params := map[string]interface{}{
+		"cert_pem":           base64.StdEncoding.EncodeToString(certPEM),
+		"serial":             signingCert.SerialNumber,
+		"overlap_expires_at": overlapExpiresAt,
+	}
+	if len(retire) > 0 {
+		// A JSON array of strings, never a comma-joined string: the steward would
+		// decode a bare decimal serial as a number.
+		params["retire_serials"] = retire
+	}
+	return &signingPush{
+		params:         params,
+		currentSerial:  signingCert.SerialNumber,
+		rotatingSerial: rotatingSerial,
+		retireSerials:  retire,
+	}, nil
+}
+
+// retireSet is the sorted, de-duplicated set of serials a push must retire: the
+// rotating serial once its overlap window has elapsed or it is marked retired
+// (never in LegacyLocal mode, where the current local key is not trusted by every
+// steward and a retirement would strand some), every serial revoked as a signing
+// certificate, and extra. The current serial is never in the set.
+func (s *SigningRotationService) retireSet(ctx context.Context, cursor *cert.SigningCertCursor, currentSerial string, extra []string) ([]string, error) {
+	set := make(map[string]struct{})
+	for _, serial := range extra {
+		set[serial] = struct{}{}
+	}
+
+	revoked, err := s.certManager.ListRevokedSigningSerials()
+	if err != nil {
+		return nil, fmt.Errorf("signing rotation service: list revoked signing serials: %w", err)
+	}
+	for _, serial := range revoked {
+		set[serial] = struct{}{}
+	}
+
+	if cursor != nil && cursor.RotatingSerial != "" && rotatingWindowClosed(cursor, time.Now()) {
+		mode, modeErr := s.certManager.SigningIdentityMode(ctx)
+		if modeErr == nil && mode != cert.SigningIdentityLegacyLocal && mode != cert.SigningIdentityUnprovisioned {
+			set[cursor.RotatingSerial] = struct{}{}
+		}
+	}
+
+	delete(set, currentSerial)
+	out := make([]string, 0, len(set))
+	for serial := range set {
+		out = append(out, serial)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// rotatingWindowClosed reports whether the cursor's rotating serial is past its
+// overlap window or already marked retired.
+func rotatingWindowClosed(cursor *cert.SigningCertCursor, now time.Time) bool {
+	if cursor.RetiredAt != nil {
+		return true
+	}
+	deadline := cursor.RotatedAt.Add(time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour)
+	return !now.Before(deadline)
+}
+
+// signerForPush returns a signer backed by the rotating serial for a push, or nil
+// to fall back to the current (dynamic) signer. A revoked serial is never used to
+// sign, except for the one push that retires that same serial: a steward that
+// trusts nothing else can verify nothing but this one delivery.
+func (s *SigningRotationService) signerForPush(rotatingSerial string, retire []string) signature.Signer {
+	if rotatingSerial == "" {
+		return nil
+	}
+	revoked, err := s.certManager.IsRevoked(rotatingSerial)
+	if err != nil {
+		s.logger.Warn("signing rotation: could not check revocation of rotating cert; falling back to dynamic signer",
+			"serial", logging.SanitizeLogValue(rotatingSerial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil
+	}
+	if revoked && !containsString(retire, rotatingSerial) {
+		return nil
+	}
+	return s.buildRotatingSigner(rotatingSerial)
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // buildRotatingSigner exports the cert identified by serial and returns a Signer

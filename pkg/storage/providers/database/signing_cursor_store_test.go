@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,4 +210,38 @@ func TestDatabaseSigningCursorStore_ConcurrentTransitionsConverge(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, "contender", final.CurrentSerial, "the single winner's serial must be the persisted cursor")
 	assert.Equal(t, "seed-serial", final.RotatingSerial)
+}
+
+func TestDatabaseSigningCursorStore_MarkRetired_ConcurrentCallersRetireOnce(t *testing.T) {
+	store := newTestSigningCursorStore(t)
+	ctx := context.Background()
+
+	_, err := store.TransitionCursor(ctx, "serial-v1", 0, false)
+	require.NoError(t, err)
+	_, err = store.TransitionCursor(ctx, "serial-v2", 0, false)
+	require.NoError(t, err)
+
+	const callers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	winners := 0
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, mErr := store.MarkRetired(ctx, "serial-v1", time.Now())
+			assert.NoError(t, mErr)
+			if got != nil {
+				mu.Lock()
+				winners++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, 1, winners, "exactly one caller performs the retirement")
+
+	loaded, err := store.LoadCursor(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, loaded.RetiredAt)
 }

@@ -52,4 +52,13 @@ type SigningCursorStore interface {
 	// rather than diverging. Returns ErrSigningRotationInProgress if a
 	// rotation is already in progress and force is false.
 	TransitionCursor(ctx context.Context, newSerial string, overlapDays int, force bool) (*SigningCertCursor, error)
+
+	// MarkRetired sets RetiredAt to at, only when RotatingSerial equals
+	// rotatingSerial and RetiredAt is still nil. The check-and-set is atomic
+	// with respect to every other caller of this store, so a sweep and an
+	// operator revoke racing on the same serial retire it exactly once.
+	// Returns the updated cursor when this call performed the retirement, and
+	// nil (with a nil error) when nothing changed: no cursor, a different
+	// rotating serial, or a serial already retired.
+	MarkRetired(ctx context.Context, rotatingSerial string, at time.Time) (*SigningCertCursor, error)
 }

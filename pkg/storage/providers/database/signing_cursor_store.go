@@ -134,3 +134,22 @@ func (s *DatabaseSigningCursorStore) TransitionCursor(ctx context.Context, newSe
 		time.Since(current.RotatedAt).Truncate(time.Second),
 	)
 }
+
+// MarkRetired implements certinterfaces.SigningCursorStore.MarkRetired. The
+// guard and the write are one conditional UPDATE, so two nodes retiring the
+// same serial at once get one affected row between them.
+func (s *DatabaseSigningCursorStore) MarkRetired(ctx context.Context, rotatingSerial string, at time.Time) (*certinterfaces.SigningCertCursor, error) {
+	if rotatingSerial == "" {
+		return nil, nil
+	}
+	row := s.db.QueryRowContext(ctx, `
+		UPDATE cfgms_signing_cursor SET retired_at = $2
+		WHERE id = $3 AND rotating_serial = $1 AND retired_at IS NULL
+		RETURNING current_serial, rotating_serial, overlap_window_days, rotated_at, retired_at`,
+		rotatingSerial, at.UTC(), signingCursorRowID)
+	cursor, err := scanCursor(row)
+	if err != nil {
+		return nil, fmt.Errorf("database: failed to mark signing serial retired: %w", err)
+	}
+	return cursor, nil
+}

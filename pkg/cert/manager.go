@@ -55,6 +55,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -1032,7 +1033,8 @@ func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
 // for verifying config signatures right now. It uses GetAllValidCertificatesForPurpose
 // as the source list, then filters by the signing cursor state:
 //   - CurrentSerial is always included (if valid).
-//   - RotatingSerial is included only while still within its overlap window.
+//   - RotatingSerial is included only while still within its overlap window and
+//     not yet retired (cursor.RetiredAt).
 //   - If no cursor file exists (no rotation in progress) all valid signing certs are returned.
 func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
 	if m.signingKeys != nil {
@@ -1055,7 +1057,7 @@ func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
 	allowed := make(map[string]bool, 2)
 	allowed[cursor.CurrentSerial] = true
 
-	if cursor.RotatingSerial != "" {
+	if cursor.RotatingSerial != "" && cursor.RetiredAt == nil {
 		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
 		if time.Since(cursor.RotatedAt) < overlapDuration {
 			allowed[cursor.RotatingSerial] = true
@@ -1069,6 +1071,136 @@ func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
 		}
 	}
 	return result, nil
+}
+
+// RevocationReasonSigningCert marks a revocation-store entry as a withdrawn
+// config-signing certificate, as opposed to an operator (admin or client)
+// certificate. ListRevokedSigningSerials filters on it.
+const RevocationReasonSigningCert = "signing_certificate"
+
+// maxSigningRevocationNoteLen bounds the operator-supplied note kept with a
+// signing-certificate revocation.
+const maxSigningRevocationNoteLen = 256
+
+// Errors returned by RevokeSigningCertificate.
+var (
+	// ErrInvalidSerial is returned for a serial that does not have the shape the
+	// certificate store accepts.
+	ErrInvalidSerial = errors.New("invalid certificate serial number")
+	// ErrRevokeCurrentSigningCert is returned when the named serial is the
+	// current signing certificate. The operator rotates first, then revokes the
+	// superseded serial.
+	ErrRevokeCurrentSigningCert = errors.New("the current signing certificate cannot be revoked; rotate first")
+	// ErrNotSigningCertificate is returned when the serial is well formed but does
+	// not name a known config-signing certificate. It wraps ErrInvalidSerial so the
+	// API maps it to 400: the signing revoke must never reach operator (admin,
+	// client) or steward certificates, which have their own revoke path and
+	// authorization.
+	ErrNotSigningCertificate = fmt.Errorf("%w: not a known signing certificate", ErrInvalidSerial)
+)
+
+// RetireRotatingSigningCertificate marks the cursor's rotating serial retired
+// once. It reports true only when this call performed the retirement; false
+// means the cursor names a different rotating serial or it was already retired.
+func (m *Manager) RetireRotatingSigningCertificate(rotatingSerial string) (bool, error) {
+	cursor, err := m.cursor.MarkRetired(context.Background(), rotatingSerial, time.Now().UTC())
+	if err != nil {
+		return false, fmt.Errorf("mark signing certificate retired: %w", err)
+	}
+	return cursor != nil, nil
+}
+
+// RevokeSigningCertificate withdraws serial as a config-signing certificate: it
+// is recorded in the revocation store with RevocationReasonSigningCert (visible
+// to every node sharing the store) and, when it is the cursor's rotating serial,
+// retired from the cursor. The current signing certificate is refused with
+// ErrRevokeCurrentSigningCert. note is an operator-supplied explanation, bounded
+// and appended to the stored reason.
+func (m *Manager) RevokeSigningCertificate(serial, note string) error {
+	if !serialNumberPattern.MatchString(serial) {
+		return ErrInvalidSerial
+	}
+	if len(note) > maxSigningRevocationNoteLen {
+		return fmt.Errorf("revocation reason exceeds %d characters", maxSigningRevocationNoteLen)
+	}
+
+	cursor, err := m.cursor.LoadCursor(context.Background())
+	if err != nil {
+		return fmt.Errorf("load signing cursor: %w", err)
+	}
+	currentSerial := ""
+	if cursor != nil {
+		currentSerial = cursor.CurrentSerial
+	}
+	if currentSerial == "" {
+		if current, cErr := m.GetCurrentCertForPurpose(PurposeSigning); cErr == nil && current != nil {
+			currentSerial = current.SerialNumber
+		}
+	}
+	if serial == currentSerial {
+		return ErrRevokeCurrentSigningCert
+	}
+
+	// The revocation store is shared with operator and steward certificates
+	// (IsRevoked gates mTLS admin login), so only a serial that is known to be a
+	// config-signing certificate may be written here. A serial the node-local
+	// store records under any other type is refused outright; otherwise the
+	// serial must be the cursor's rotating serial or held in the cluster signing
+	// key store.
+	if local, lerr := m.store.GetCertificate(serial); lerr == nil {
+		if local.Type != CertificateTypeConfigSigning {
+			return ErrNotSigningCertificate
+		}
+	} else {
+		known := cursor != nil && cursor.RotatingSerial == serial
+		if !known && m.signingKeys != nil {
+			_, gerr := m.signingKeys.GetSigningKey(context.Background(), serial)
+			switch {
+			case gerr == nil:
+				known = true
+			case errors.Is(gerr, certinterfaces.ErrSigningKeyNotFound):
+			default:
+				return fmt.Errorf("resolve signing certificate: %w", gerr)
+			}
+		}
+		if !known {
+			return ErrNotSigningCertificate
+		}
+	}
+
+	reason := RevocationReasonSigningCert
+	if note != "" {
+		reason += ": " + note
+	}
+	if err := m.revocation.Revoke(context.Background(), RevocationEntry{
+		Serial:    serial,
+		RevokedAt: time.Now().UTC(),
+		Reason:    reason,
+	}); err != nil {
+		return fmt.Errorf("record signing certificate revocation: %w", err)
+	}
+
+	if cursor != nil && cursor.RotatingSerial == serial {
+		if _, err := m.RetireRotatingSigningCertificate(serial); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListRevokedSigningSerials returns the serials revoked as signing certificates.
+func (m *Manager) ListRevokedSigningSerials() ([]string, error) {
+	entries, err := m.revocation.ListRevoked(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("list revoked signing certificates: %w", err)
+	}
+	var serials []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Reason, RevocationReasonSigningCert) {
+			serials = append(serials, e.Serial)
+		}
+	}
+	return serials, nil
 }
 
 // GetSigningCursorState returns the current signing cursor, or nil if no rotation

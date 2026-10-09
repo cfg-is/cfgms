@@ -167,6 +167,7 @@ type Server struct {
 	rbacService             *service.RBACService
 	certProvisioningService *service.CertificateProvisioningService
 	certManager             *cert.Manager
+	signingRetirementSvc    *service.SigningRetirementService // Issue #4795: retires superseded signing certs at overlap end
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
@@ -1073,6 +1074,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// signingRotationSvc is hoisted so it can be wired to both the gRPC on-connect hook
 	// and the HTTP API rotate endpoint (Issue #1816).
 	var signingRotationSvc *service.SigningRotationService
+	var signingRetirementSvc *service.SigningRetirementService
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -1239,20 +1241,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		var commandSigner signature.Signer
 		if certManager != nil {
 			cm := certManager
-			commandSigner = signature.NewDynamicSigner(func() (string, func() (signature.SigningKeyExport, error), error) {
-				current, err := cm.GetCurrentCertForPurpose(cert.PurposeSigning)
-				if err != nil {
-					return "", nil, err
-				}
-				serial := current.SerialNumber
-				return serial, func() (signature.SigningKeyExport, error) {
-					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true, false)
-					if exportErr != nil {
-						return signature.SigningKeyExport{}, exportErr
-					}
-					return signature.SigningKeyExport{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}, nil
-				}, nil
-			})
+			commandSigner = signature.NewDynamicSigner(service.NewSigningResolver(cm))
 		}
 
 		// ADR-031 Decision 3, Issue #3764: shared steward-routing table + internal
@@ -1606,20 +1595,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		configSigner := hoistedSigner
 		if certManager != nil {
 			cm := certManager
-			configSigner = signature.NewDynamicSigner(func() (string, func() (signature.SigningKeyExport, error), error) {
-				current, err := cm.GetCurrentCertForPurpose(cert.PurposeSigning)
-				if err != nil {
-					return "", nil, err
-				}
-				serial := current.SerialNumber
-				return serial, func() (signature.SigningKeyExport, error) {
-					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true, false)
-					if exportErr != nil {
-						return signature.SigningKeyExport{}, exportErr
-					}
-					return signature.SigningKeyExport{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}, nil
-				}, nil
-			})
+			configSigner = signature.NewDynamicSigner(service.NewSigningResolver(cm))
 		}
 
 		configHandler = controllerTransport.NewConfigHandler(configService, logger, configSigner).
@@ -1927,6 +1903,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		signingRotationSvc.SetControllerService(controllerService)
 		httpServer.SetSigningRotationService(signingRotationSvc)
 		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
+
+		// Issue #4795: the retirement sweep and the emergency revoke share one
+		// service. In a cluster only the node holding lease-backed authority
+		// sweeps; HasLeadership(), never the raw Raft flag. A nil haManager is
+		// single-node mode, which is always authoritative.
+		var hasLeadership func() bool
+		if haManager != nil {
+			hasLeadership = haManager.HasLeadership
+		}
+		signingRetirementSvc = service.NewSigningRetirementService(signingRotationSvc, hasLeadership, logger)
+		signingRetirementSvc.SetAuditManager(auditManager)
+		httpServer.SetSigningRetirementService(signingRetirementSvc)
 	}
 
 	// Wire the registration admission stores the REST handlers read from.
@@ -1983,6 +1971,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacService:             rbacService,
 		certProvisioningService: certProvisioningService,
 		certManager:             certManager,
+		signingRetirementSvc:    signingRetirementSvc,
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
@@ -2962,6 +2951,13 @@ func (s *Server) Start() error {
 		go s.resumePendingPushes(context.Background())
 	}
 
+	// Issue #4795: retire superseded signing certificates when a rotation's
+	// overlap window ends. The sweep itself checks HasLeadership() each tick, so
+	// every node runs the loop and only the current leader acts.
+	if s.signingRetirementSvc != nil && s.commandPublisher != nil {
+		s.signingRetirementSvc.Start(context.Background())
+	}
+
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
@@ -3242,6 +3238,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop config source sync service", "error", err)
 		}
 		stopCancel()
+	}
+
+	// Stop the signing-retirement sweep before the cert manager it reads is closed.
+	if s.signingRetirementSvc != nil {
+		s.signingRetirementSvc.Stop()
 	}
 
 	// Release the cert manager's retained vault connection (cluster mode): the

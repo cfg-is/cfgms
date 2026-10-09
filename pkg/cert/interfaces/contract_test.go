@@ -131,6 +131,63 @@ func TestSigningCursorStore_Contract(t *testing.T) {
 	}
 }
 
+// TestSigningCursorStore_MarkRetired_Contract: MarkRetired sets RetiredAt once,
+// only for the named rotating serial, and never changes anything on a repeat
+// or mismatched call (Issue #4795).
+func TestSigningCursorStore_MarkRetired_Contract(t *testing.T) {
+	for _, tc := range storeProviderCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			_, curStore, skip := tc.newStores(t)
+			if skip != "" {
+				t.Skip(skip)
+			}
+			ctx := context.Background()
+
+			// No cursor yet: nothing to retire.
+			got, err := curStore.MarkRetired(ctx, "serial-v1", time.Now())
+			require.NoError(t, err)
+			assert.Nil(t, got, "no cursor means nothing is retired")
+
+			_, err = curStore.TransitionCursor(ctx, "serial-v1", 0, false)
+			require.NoError(t, err)
+			_, err = curStore.TransitionCursor(ctx, "serial-v2", 0, false)
+			require.NoError(t, err)
+
+			// Mismatched serial changes nothing.
+			got, err = curStore.MarkRetired(ctx, "not-the-rotating-serial", time.Now())
+			require.NoError(t, err)
+			assert.Nil(t, got)
+			loaded, err := curStore.LoadCursor(ctx)
+			require.NoError(t, err)
+			assert.Nil(t, loaded.RetiredAt)
+
+			first := time.Now().UTC().Truncate(time.Second)
+			got, err = curStore.MarkRetired(ctx, "serial-v1", first)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			require.NotNil(t, got.RetiredAt)
+			assert.Equal(t, "serial-v1", got.RotatingSerial)
+
+			// A second call keeps the first timestamp and reports no change.
+			got, err = curStore.MarkRetired(ctx, "serial-v1", first.Add(time.Hour))
+			require.NoError(t, err)
+			assert.Nil(t, got, "a repeat call changes nothing")
+			loaded, err = curStore.LoadCursor(ctx)
+			require.NoError(t, err)
+			require.NotNil(t, loaded.RetiredAt)
+			assert.WithinDuration(t, first, *loaded.RetiredAt, time.Second)
+
+			// A later rotation starts a fresh, un-retired window.
+			_, err = curStore.TransitionCursor(ctx, "serial-v3", 0, false)
+			require.NoError(t, err)
+			loaded, err = curStore.LoadCursor(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "serial-v2", loaded.RotatingSerial)
+			assert.Nil(t, loaded.RetiredAt)
+		})
+	}
+}
+
 // ackStoreCase names one SigningTrustAckStore implementation to run the shared
 // contract against (Issue #4691). newStore returns a fresh, isolated store or
 // a non-empty skip reason.

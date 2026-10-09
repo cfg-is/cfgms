@@ -55,51 +55,9 @@ type RotateSigningCertResponse struct {
 // AssuranceStrong-gated in permissionAssurance — this guard mirrors that bar so the
 // defense holds even if rbacService is nil.
 func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request) {
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
-		return
-	}
-
-	// Defense-in-depth: mirror the AssuranceStrong bar for certificate:rotate.
-	// requirePermission skips checks when rbacService is nil (RBAC-nil bypass);
-	// a CA-key operation must NEVER be reachable by a sub-Strong-assurance principal.
-	if principal.Assurance < session.AssuranceStrong {
-		s.writeErrorResponse(w, http.StatusForbidden, "Admin certificate required", "FORBIDDEN")
-		return
-	}
-
-	if s.signingRotationService == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Signing rotation service not available", "SERVICE_UNAVAILABLE")
-		return
-	}
-
-	// Issue #4334: the signing CA is a single fleet-wide resource, not owned by any
-	// one tenant — rotating it replaces the chain every tenant's certificates verify
-	// against. Only an unscoped (root) caller may perform it, mirroring
-	// handleGetRevocationManifest's unscoped-only rule for the other fleet-wide
-	// certificate surface. An unset scope is refused by the same IsRoot() check
-	// (Issue #4316 fail-closed contract) — the AssuranceStrong gate above proves the
-	// credential, never the caller's tenant scope.
-	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !scope.IsRoot() { //architecture:allow-root-scope -- the signing CA is one fleet-wide resource owned by no tenant
-		s.logger.Warn("Denied tenant-scoped signing certificate rotation",
-			"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"Signing certificate rotation is available to unscoped administrators only", "FORBIDDEN")
-		return
-	}
-	// Rotation replaces the chain every steward verifies operator commands against —
-	// a rarely-touched, fleet-wide operation with the largest blast radius of any
-	// certificate surface. It stays with a certificate-authenticated root
-	// principal, as before root sessions were bound to the root tenant: a root web
-	// or Bearer session, which a phished passkey could yield, may not rotate the
-	// signing CA (Issue #4665).
-	if principal.CertSerial == "" {
-		s.logger.Warn("Denied signing certificate rotation from a non-certificate session",
-			"principal_id", logging.SanitizeLogValue(principal.ID))
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"Signing certificate rotation requires an admin certificate", "FORBIDDEN")
+	principal, ok := s.requireSigningAdmin(w, r, s.signingRotationService != nil,
+		"Signing rotation service not available", "rotation")
+	if !ok {
 		return
 	}
 
@@ -156,6 +114,159 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		StewardsNotified: result.StewardsNotified,
 		OverlapExpiresAt: result.OverlapExpiresAt,
 	})
+}
+
+// requireSigningAdmin is the gate shared by the signing-certificate operations
+// that act on the fleet-wide signing CA (rotate and emergency revoke). It writes
+// the denial response itself and returns ok=false when the caller is refused;
+// op names the operation in log lines and denial text ("rotation", "revocation").
+//
+// The gates, in order:
+//   - an authenticated principal;
+//   - AssuranceStrong (mTLS admin cert). Defense-in-depth: requirePermission
+//     skips checks when rbacService is nil (RBAC-nil bypass), and a CA-key
+//     operation must NEVER be reachable by a sub-Strong-assurance principal;
+//   - the backing service is wired (available);
+//   - an unscoped (root) caller (Issue #4334). The signing CA is a single
+//     fleet-wide resource owned by no tenant; the AssuranceStrong gate proves the
+//     credential, never the caller's tenant scope, and an unset scope is refused
+//     by the same IsRoot() check (Issue #4316 fail-closed contract);
+//   - a certificate-authenticated session (Issue #4665): a root web or Bearer
+//     session, which a phished passkey could yield, may not act on the signing CA.
+func (s *Server) requireSigningAdmin(w http.ResponseWriter, r *http.Request, available bool, unavailableMsg, op string) (*Principal, bool) {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return nil, false
+	}
+
+	if principal.Assurance < session.AssuranceStrong {
+		s.writeErrorResponse(w, http.StatusForbidden, "Admin certificate required", "FORBIDDEN")
+		return nil, false
+	}
+
+	if !available {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, unavailableMsg, "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !scope.IsRoot() { //architecture:allow-root-scope -- the signing CA is one fleet-wide resource owned by no tenant
+		s.logger.Warn("Denied tenant-scoped signing certificate "+op,
+			"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Signing certificate "+op+" is available to unscoped administrators only", "FORBIDDEN")
+		return nil, false
+	}
+
+	if principal.CertSerial == "" {
+		s.logger.Warn("Denied signing certificate "+op+" from a non-certificate session",
+			"principal_id", logging.SanitizeLogValue(principal.ID))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Signing certificate "+op+" requires an admin certificate", "FORBIDDEN")
+		return nil, false
+	}
+	return principal, true
+}
+
+// RevokeSigningCertRequest is the JSON body for the signing-certificate revoke endpoint.
+type RevokeSigningCertRequest struct {
+	Serial string `json:"serial"`
+	Reason string `json:"reason"`
+}
+
+// RevokeSigningCertResponse is the JSON response from the revoke endpoint.
+type RevokeSigningCertResponse struct {
+	Serial            string `json:"serial"`
+	StewardsNotified  int    `json:"stewards_notified"`
+	RetiredFromCursor bool   `json:"retired_from_cursor"`
+}
+
+// maxRevokeSigningBodyBytes bounds the revoke request body.
+const maxRevokeSigningBodyBytes = 4096
+
+// handleRevokeSigningCert handles POST /api/v1/certificates/signing/revoke
+// (Issue #4795): it withdraws one named signing certificate from the whole fleet
+// immediately. It shares rotation's admin-certificate gate. The current signing
+// certificate cannot be revoked in one step (409): rotate first, then revoke the
+// superseded serial.
+func (s *Server) handleRevokeSigningCert(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireSigningAdmin(w, r, s.signingRetirementService != nil,
+		"Signing retirement service not available", "revocation")
+	if !ok {
+		return
+	}
+
+	var req RevokeSigningCertRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRevokeSigningBodyBytes)).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+	if req.Serial == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "serial is required", "VALIDATION_ERROR")
+		return
+	}
+	if len(req.Reason) > maxSigningRevokeReasonLen {
+		s.writeErrorResponse(w, http.StatusBadRequest, "reason must be at most 256 characters", "VALIDATION_ERROR")
+		return
+	}
+
+	result, err := s.signingRetirementService.Revoke(r.Context(), principal.CertSerial, req.Serial, req.Reason)
+	if err != nil {
+		switch {
+		case errors.Is(err, cert.ErrInvalidSerial):
+			s.writeErrorResponse(w, http.StatusBadRequest, "serial is not a valid certificate serial number", "VALIDATION_ERROR")
+		case errors.Is(err, cert.ErrRevokeCurrentSigningCert):
+			s.writeErrorResponse(w, http.StatusConflict,
+				"The current signing certificate cannot be revoked; rotate first, then revoke the superseded serial", "CURRENT_SIGNING_CERT")
+		default:
+			s.logger.Error("Signing certificate revocation failed",
+				"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
+				"serial", logging.SanitizeLogValue(req.Serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Revocation failed", "REVOCATION_ERROR")
+		}
+		return
+	}
+
+	s.emitSigningRevokeAudit(r.Context(), principal.CertSerial, req.Reason, result)
+
+	s.writeSuccessResponse(w, RevokeSigningCertResponse{
+		Serial:            result.Serial,
+		StewardsNotified:  result.StewardsNotified,
+		RetiredFromCursor: result.RetiredFromCursor,
+	})
+}
+
+// maxSigningRevokeReasonLen bounds the operator-supplied revoke reason.
+const maxSigningRevokeReasonLen = 256
+
+// emitSigningRevokeAudit records a signing-certificate revocation with the
+// operator's certificate serial, the revoked serial, the reason and the number of
+// stewards notified. No PEM or key material. No-op when auditManager is nil.
+func (s *Server) emitSigningRevokeAudit(ctx context.Context, operatorSerial, reason string, result *service.RevokeResult) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action("signing_certificate_revoked").
+		User(logging.SanitizeLogValue(operatorSerial), business.AuditUserTypeHuman).
+		Resource("signing_certificate", logging.SanitizeLogValue(result.Serial), "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh).
+		Details(map[string]interface{}{
+			"operator_serial":     logging.SanitizeLogValue(operatorSerial),
+			"serial":              logging.SanitizeLogValue(result.Serial),
+			"reason":              logging.SanitizeLogValue(reason),
+			"stewards_notified":   result.StewardsNotified,
+			"retired_from_cursor": result.RetiredFromCursor,
+		})
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit signing revoke audit event",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // emitSigningRotationAudit records a successful signing-certificate rotation with
