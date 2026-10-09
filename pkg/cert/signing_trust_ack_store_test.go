@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,7 +34,10 @@ func TestFileSigningTrustAckStore_SurvivesReconstruction(t *testing.T) {
 
 	info, err := os.Stat(filepath.Join(dir, "signing-trust-acks.json"))
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		// Windows does not report Unix permission bits.
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
 }
 
 func TestFileSigningTrustAckStore_RejectsEmptyBasePath(t *testing.T) {
