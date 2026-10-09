@@ -376,18 +376,81 @@ func (m *Manager) generateSharedIdentity(ctx context.Context, signingCfg *Signin
 	return nil
 }
 
-// clusterRotationUnavailable is the temporary guard on rotation for a Manager
-// with a SigningKeyStore: a rotation here could write a local key or move the
-// cursor to a serial other nodes cannot resolve.
-func (m *Manager) clusterRotationUnavailable(ctx context.Context) error {
+// rotateClusterSigningCertificate is rotateSigningCertificate for a Manager with
+// a SigningKeyStore. The sequence is: claim the cluster-wide rotation, generate,
+// store the key create-if-absent, transition the shared cursor, release the claim.
+// The claim precedes generation so concurrent rotations never each generate and
+// store a key. A crash between the store write and the cursor transition leaves
+// an unreferenced key in the store; it is harmless (the cursor never names it)
+// and is not swept.
+func (m *Manager) rotateClusterSigningCertificate(ctx context.Context, overlapWindowDays int, force bool) (*Certificate, error) {
 	mode, _, err := m.resolveSigningIdentity(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if mode == SigningIdentityLegacyLocal {
-		return fmt.Errorf("%w: signing rotation is unavailable until this cluster moves to the shared signing identity", ErrSigningMigrationPending)
+	switch mode {
+	case SigningIdentityShared:
+	case SigningIdentityLegacyLocal:
+		return nil, fmt.Errorf("%w: signing rotation is unavailable until this cluster moves to the shared signing identity", ErrSigningMigrationPending)
+	default:
+		return nil, fmt.Errorf("no cluster signing identity has been provisioned; nothing to rotate")
 	}
-	return fmt.Errorf("cluster signing rotation not yet available")
+
+	claimer, ok := m.signingKeys.(certinterfaces.SigningRotationClaimer)
+	if !ok {
+		return nil, fmt.Errorf("signing key store cannot arbitrate rotation; refusing to rotate")
+	}
+	won, err := claimer.ClaimSigningRotation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !won {
+		return nil, fmt.Errorf("%w: another node holds the cluster rotation claim", ErrSigningRotationInProgress)
+	}
+	defer func() {
+		// The claim has a TTL, so a failed release only delays the next rotation.
+		if rerr := claimer.ReleaseSigningRotation(context.WithoutCancel(ctx)); rerr != nil {
+			certLog().Warn("Failed to release signing rotation claim", "error", logging.SanitizeLogValue(rerr.Error()))
+		}
+	}()
+
+	if !force {
+		if err := m.checkRotationNotInProgress(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	// Seeding is a no-op in Shared mode: the cursor already names the current serial.
+	if err := m.seedSigningCursor(ctx); err != nil {
+		return nil, err
+	}
+
+	newCert, err := m.ca.GenerateSigningCertificate(&SigningCertConfig{
+		CommonName:   "cfgms-config-signer",
+		ValidityDays: 1095,
+		KeySize:      4096,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate signing certificate: %w", err)
+	}
+	if err := m.signingKeys.PutSigningKey(ctx, &certinterfaces.SigningKeyMaterial{
+		Serial:         newCert.SerialNumber,
+		CertificatePEM: newCert.CertificatePEM,
+		PrivateKeyPEM:  newCert.PrivateKeyPEM,
+		IssuerChainPEM: newCert.IssuerChainPEM,
+	}); err != nil {
+		return nil, fmt.Errorf("publish signing certificate: %w", err)
+	}
+	if _, err := m.cursor.TransitionCursor(ctx, newCert.SerialNumber, overlapWindowDays, force); err != nil {
+		return nil, fmt.Errorf("transition signing cursor: %w", err)
+	}
+	// The rotation is committed; the node-local public copy is a convenience for
+	// trust-path listings and is re-created on the next resolve if this fails.
+	if err := m.persistSharedCertificate(newCert); err != nil {
+		certLog().Warn("Rotated signing certificate could not be recorded locally", "error", logging.SanitizeLogValue(err.Error()))
+	}
+	m.invalidateSigningCache()
+	return newCert, nil
 }
 
 // exportSharedSigningCertificate serves ExportCertificate for a serial held in

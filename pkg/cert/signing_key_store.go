@@ -26,6 +26,14 @@ const (
 	// signingKeyClaimBootstrapKey is the bootstrap claim record.
 	signingKeyClaimBootstrapKey = "config-signing/claims/bootstrap"
 
+	// signingKeyClaimRotationKey is the rotation claim record.
+	signingKeyClaimRotationKey = "config-signing/claims/rotation"
+
+	// signingRotationClaimTTL bounds how long a rotation claim blocks other
+	// nodes. It must cover RSA-4096 key generation plus the key store write and
+	// the cursor transition.
+	signingRotationClaimTTL = 2 * time.Minute
+
 	// signingBootstrapClaimTTL bounds how long a bootstrap claim blocks other
 	// nodes. It must comfortably exceed RSA-4096 key generation.
 	signingBootstrapClaimTTL = 2 * time.Minute
@@ -47,6 +55,7 @@ type secretStoreSigningKeyStore struct {
 var (
 	_ certinterfaces.SigningKeyStore         = (*secretStoreSigningKeyStore)(nil)
 	_ certinterfaces.SigningBootstrapClaimer = (*secretStoreSigningKeyStore)(nil)
+	_ certinterfaces.SigningRotationClaimer  = (*secretStoreSigningKeyStore)(nil)
 )
 
 // NewSecretStoreSigningKeyStore returns a SigningKeyStore that keeps signing
@@ -205,6 +214,33 @@ func (s *secretStoreSigningKeyStore) ClaimSigningBootstrap(ctx context.Context) 
 		return false, fmt.Errorf("claim signing bootstrap: %s", logging.SanitizeLogValue(err.Error()))
 	}
 	return ok, nil
+}
+
+// ClaimSigningRotation implements certinterfaces.SigningRotationClaimer.
+func (s *secretStoreSigningKeyStore) ClaimSigningRotation(ctx context.Context) (bool, error) {
+	key := s.key(signingKeyClaimRotationKey)
+	_, ok, err := s.store.CompareAndSwapSecret(ctx, s.tenantID+"/"+key, 0, &secretsinterfaces.SecretRequest{
+		Key:         key,
+		Value:       "",
+		TenantID:    s.tenantID,
+		CreatedBy:   signingKeyCreatedBy,
+		Description: "config-signing rotation claim",
+		Tags:        []string{"config_signing_claim"},
+		TTL:         signingRotationClaimTTL,
+	})
+	if err != nil {
+		return false, fmt.Errorf("claim signing rotation: %s", logging.SanitizeLogValue(err.Error()))
+	}
+	return ok, nil
+}
+
+// ReleaseSigningRotation implements certinterfaces.SigningRotationClaimer.
+func (s *secretStoreSigningKeyStore) ReleaseSigningRotation(ctx context.Context) error {
+	err := s.store.DeleteSecret(ctx, s.tenantID+"/"+s.key(signingKeyClaimRotationKey))
+	if err != nil && !errors.Is(err, secretsinterfaces.ErrSecretNotFound) {
+		return fmt.Errorf("release signing rotation claim: %s", logging.SanitizeLogValue(err.Error()))
+	}
+	return nil
 }
 
 func marshalSigningRecord(m *certinterfaces.SigningKeyMaterial) (string, error) {

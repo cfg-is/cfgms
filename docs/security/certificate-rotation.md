@@ -63,6 +63,37 @@ A second `rotate` call while `RotatingSerial` is set is rejected with HTTP 409
 "rotation in progress". Operators must wait for the first rotation to complete
 before starting another.
 
+### Clustered Controllers
+
+When controller nodes share a signing identity (shared secret store), a rotation
+requested through any node runs as one cluster-wide event:
+
+1. The node takes the cluster-wide rotation claim (`config-signing/claims/rotation`,
+   create-if-absent with a 2-minute TTL). If another node holds it, the request fails
+   with HTTP 409 `ROTATION_IN_PROGRESS` before any key is generated. Retry once the
+   other rotation finishes; an abandoned claim expires on its own.
+2. The node generates the new certificate and stores it, with its key, in the shared
+   key store (create-if-absent).
+3. The node transitions the shared cursor (`CurrentSerial` = new, `RotatingSerial` =
+   old; `force` bypasses only the overlap guard, not the claim).
+4. The claim is released, on success or failure.
+
+Every node resolves the new current certificate from the shared store (within a few
+seconds, the resolve-cache interval), and any node can sign the fan-out and
+refresh-on-connect pushes with the rotating certificate. No signing key is written to
+a node's local disk.
+
+If the cluster has not yet moved to the shared signing identity (nodes still sign with
+local keys), rotation is refused with HTTP 409 `SIGNING_MIGRATION_PENDING` and nothing
+changes.
+
+A node that crashes between step 2 and step 3 leaves a stored key that no cursor
+references. It is harmless — nothing signs with it and a later rotation generates a
+fresh certificate — and it is not swept automatically.
+
+Each successful rotation is audit-logged (`signing_certificate_rotated`) with the
+operator's certificate serial, the old and new serials and the performing node's ID.
+
 ## CLI Reference
 
 ### `cfg controller signing-cert rotate`
@@ -195,6 +226,8 @@ Align with your heartbeat SLO if you have one.
 | Failure | Symptom | Recovery |
 |---------|---------|----------|
 | Second rotate call during active rotation | HTTP 409 "rotation in progress" | Wait for first rotation to complete or contact support |
+| Rotate while another cluster node is rotating | HTTP 409 `ROTATION_IN_PROGRESS` | Retry after the other rotation finishes (claim TTL: 2 minutes) |
+| Rotate before the cluster has a shared signing identity | HTTP 409 `SIGNING_MIGRATION_PENDING` | Complete the signing identity migration first |
 | Steward offline past overlap, pre-B2d controller | Config push rejected after reconnect | Re-register steward, or upgrade controller |
 | Steward offline past overlap, B2d controller | Normal reconnect, refresh-on-connect delivers cert | No action needed — automatic |
 | Network partition during rotation | Some stewards not notified | Stewards receive cert on reconnect via refresh-on-connect |

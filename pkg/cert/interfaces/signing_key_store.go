@@ -68,3 +68,19 @@ type SigningBootstrapClaimer interface {
 	// bootstrap forever.
 	ClaimSigningBootstrap(ctx context.Context) (bool, error)
 }
+
+// SigningRotationClaimer is implemented by a SigningKeyStore that can serialize
+// signing-certificate rotations across controller nodes. The claim must be taken
+// before a rotation generates a key: without it two nodes each generate and
+// store a key and the loser's cursor transition leaves its key unreferenced.
+type SigningRotationClaimer interface {
+	// ClaimSigningRotation atomically claims the right to rotate. It reports
+	// true for exactly one caller until the claim is released or its
+	// time-to-live lapses, so a claimant that crashes cannot block rotation
+	// forever.
+	ClaimSigningRotation(ctx context.Context) (bool, error)
+
+	// ReleaseSigningRotation drops the rotation claim. Releasing an absent
+	// claim is not an error.
+	ReleaseSigningRotation(ctx context.Context) error
+}

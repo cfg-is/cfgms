@@ -577,31 +577,12 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 	ctx := context.Background()
 
 	if m.signingKeys != nil {
-		return nil, m.clusterRotationUnavailable(ctx)
+		return m.rotateClusterSigningCertificate(ctx, overlapWindowDays, force)
 	}
 
 	if !force {
-		// Fail fast, before generating a certificate, when a rotation is
-		// already in progress. This is an optimization, not the authority:
-		// TransitionCursor below re-evaluates the same guard atomically
-		// against the store (cluster-wide when the store is cluster-visible),
-		// so a race with a concurrent rotation on another node is still
-		// caught correctly even though this pre-check is not itself atomic.
-		cursor, err := m.cursor.LoadCursor(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("load signing cursor: %w", err)
-		}
-		if cursor != nil && cursor.RotatingSerial != "" {
-			overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
-			if time.Since(cursor.RotatedAt) < overlapDuration {
-				return nil, fmt.Errorf(
-					"%w: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
-					ErrSigningRotationInProgress,
-					cursor.RotatingSerial,
-					cursor.OverlapWindowDays,
-					time.Since(cursor.RotatedAt).Truncate(time.Second),
-				)
-			}
+		if err := m.checkRotationNotInProgress(ctx); err != nil {
+			return nil, err
 		}
 	}
 
@@ -628,6 +609,32 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 	}
 
 	return newCert, nil
+}
+
+// checkRotationNotInProgress fails fast, before a certificate is generated, when
+// a rotation's overlap window is still open. This is an optimization, not the
+// authority: TransitionCursor re-evaluates the same guard atomically against the
+// store (cluster-wide when the store is cluster-visible), so a race with a
+// concurrent rotation on another node is still caught correctly even though this
+// pre-check is not itself atomic.
+func (m *Manager) checkRotationNotInProgress(ctx context.Context) error {
+	cursor, err := m.cursor.LoadCursor(ctx)
+	if err != nil {
+		return fmt.Errorf("load signing cursor: %w", err)
+	}
+	if cursor != nil && cursor.RotatingSerial != "" {
+		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
+		if time.Since(cursor.RotatedAt) < overlapDuration {
+			return fmt.Errorf(
+				"%w: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+				ErrSigningRotationInProgress,
+				cursor.RotatingSerial,
+				cursor.OverlapWindowDays,
+				time.Since(cursor.RotatedAt).Truncate(time.Second),
+			)
+		}
+	}
+	return nil
 }
 
 // seedSigningCursor records the controller's current signing cert in the cursor
