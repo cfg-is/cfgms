@@ -81,8 +81,29 @@ orchestrator frozen per ADR-007 and explicitly not the supported path:
 ```bash
 cfg controller upgrade restart \
     --binary /opt/cfgms/cfgms-controller-v0.6.0 \
-    --config /etc/cfgms/controller.cfg
+    --config /etc/cfgms/controller.cfg \
+    --url=https://<node-host>:9080
 ```
+
+**Credential-backed units.** If the installed systemd unit
+(`/etc/systemd/system/cfgms-controller.service`) uses `LoadCredential=` or
+`LoadCredentialEncrypted=` (ADR-030), `upgrade restart` refuses to run before
+touching any file: the side-port candidate it starts runs outside the unit and
+cannot receive the credentials. Use this procedure instead:
+
+```bash
+# 1. Keep the previous binary, then stage the new one at the install path
+sudo cp /usr/local/bin/cfgms-controller /usr/local/bin/cfgms-controller.prev
+sudo install -m 0755 /opt/cfgms/cfgms-controller-v0.6.0 /usr/local/bin/cfgms-controller
+# 2. Restart the unit
+sudo systemctl restart cfgms-controller
+# 3. Verify readiness
+curl -fsS https://<node-host>:9080/api/v1/ready
+```
+
+If the node is not ready, restore the previous binary by hand
+(`sudo cp /usr/local/bin/cfgms-controller.prev /usr/local/bin/cfgms-controller`)
+and restart the unit again.
 
 ### 6. Decommission the old node entry
 

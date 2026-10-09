@@ -56,6 +56,8 @@ func saveRestartGlobals(t *testing.T) {
 	origSmoketestTO := upgradeSmoketestTimeout
 	origMgrFn := upgradeRestartMgrFn
 	origSpawnFn := upgradeRestartSpawnFn
+	origUnitPath := upgradeRestartUnitPath
+	upgradeRestartUnitPath = filepath.Join(t.TempDir(), "absent.service")
 	t.Cleanup(func() {
 		upgradeBinaryPath = origBinary
 		upgradeConfigPath = origConfig
@@ -66,6 +68,7 @@ func saveRestartGlobals(t *testing.T) {
 		upgradeSmoketestTimeout = origSmoketestTO
 		upgradeRestartMgrFn = origMgrFn
 		upgradeRestartSpawnFn = origSpawnFn
+		upgradeRestartUnitPath = origUnitPath
 	})
 }
 
@@ -334,4 +337,61 @@ func TestControllerUpgradeRestart_503AbortsAndRetainsPreviousBinary(t *testing.T
 	// StageBinaryAndRestart must NOT have been called.
 	assert.Empty(t, fakeMgr.stagedBinary,
 		"StageBinaryAndRestart must not be called when the pre-restart readiness check fails")
+}
+
+// TestControllerUpgradeRestart_CredentialUnitRefusesBeforeBackup verifies a unit
+// with LoadCredentialEncrypted= is refused before any file is touched.
+func TestControllerUpgradeRestart_CredentialUnitRefusesBeforeBackup(t *testing.T) {
+	for _, directive := range []string{"LoadCredentialEncrypted=db:/etc/cfgms/db.cred", "LoadCredential=db:/etc/cfgms/db"} {
+		saveRestartGlobals(t)
+		dir := t.TempDir()
+		installPath := filepath.Join(dir, "cfgms-controller")
+		prevContent := []byte("installed binary")
+		require.NoError(t, os.WriteFile(installPath, prevContent, 0750))
+		newBinaryPath := filepath.Join(dir, "cfgms-controller-new")
+		require.NoError(t, os.WriteFile(newBinaryPath, []byte("new"), 0755))
+
+		unit := filepath.Join(dir, "cfgms-controller.service")
+		require.NoError(t, os.WriteFile(unit, []byte("[Service]\nExecStart=/x\n  "+directive+"\n"), 0644))
+		upgradeRestartUnitPath = unit
+
+		fakeMgr := &fakeRestartManager{installPathVal: installPath}
+		upgradeRestartMgrFn = func() (service.Manager, error) { return fakeMgr, nil }
+		spawned := false
+		upgradeRestartSpawnFn = func(string, string) *cutover.ExecProcessHandle {
+			spawned = true
+			return cutover.NewExecProcessHandle("/bin/true", "")
+		}
+		upgradeBinaryPath = newBinaryPath
+		upgradeConfigPath = filepath.Join(dir, "controller.cfg")
+
+		err := runControllerUpgradeRestart(controllerUpgradeRestartCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), unit)
+		assert.Contains(t, err.Error(), "systemctl restart cfgms-controller")
+		assert.Contains(t, err.Error(), "cannot receive")
+		assert.False(t, spawned, "candidate must not be started")
+		assert.Empty(t, fakeMgr.stagedBinary)
+
+		got, readErr := os.ReadFile(installPath)
+		require.NoError(t, readErr)
+		assert.Equal(t, prevContent, got)
+		_, statErr := os.Stat(installPath + ".prev")
+		assert.True(t, os.IsNotExist(statErr), ".prev must not be created")
+	}
+}
+
+// TestCheckUnitCredentialsPreflight_Proceeds verifies commented directives, a
+// credential-free unit, and a missing unit file all pass the preflight.
+func TestCheckUnitCredentialsPreflight_Proceeds(t *testing.T) {
+	saveRestartGlobals(t)
+	dir := t.TempDir()
+
+	unit := filepath.Join(dir, "plain.service")
+	require.NoError(t, os.WriteFile(unit, []byte("[Service]\nExecStart=/x\n# LoadCredentialEncrypted=a:b\n; LoadCredential=a:b\n"), 0644))
+	upgradeRestartUnitPath = unit
+	assert.NoError(t, checkUnitCredentialsPreflight())
+
+	upgradeRestartUnitPath = filepath.Join(dir, "missing.service")
+	assert.NoError(t, checkUnitCredentialsPreflight())
 }

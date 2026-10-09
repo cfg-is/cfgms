@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
@@ -24,6 +25,37 @@ var upgradeRestartMgrFn = func() (service.Manager, error) {
 		return nil, fmt.Errorf("restart: resolve executable path: %w", err)
 	}
 	return service.New(exe), nil
+}
+
+// upgradeRestartUnitPath is the installed systemd unit inspected by the
+// credential preflight. Keep in sync with linuxSystemdUnit in
+// cmd/controller/service/manager_linux.go. Overridable in tests.
+var upgradeRestartUnitPath = "/etc/systemd/system/cfgms-controller.service"
+
+// checkUnitCredentialsPreflight refuses the side-port candidate start when the
+// installed systemd unit loads credentials (ADR-030). A candidate spawned as a
+// child of cfg runs outside the unit and never receives them. A missing or
+// unreadable unit file skips the check.
+func checkUnitCredentialsPreflight() error {
+	data, err := os.ReadFile(upgradeRestartUnitPath)
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "LoadCredential=") || strings.HasPrefix(line, "LoadCredentialEncrypted=") {
+			return fmt.Errorf("restart: unit %s loads systemd credentials (LoadCredential/LoadCredentialEncrypted); "+
+				"the side-port candidate started by cfg runs outside the unit and cannot receive them. "+
+				"Use the supported procedure instead: (1) copy the new binary to the install path, "+
+				"(2) run `systemctl restart cfgms-controller`, "+
+				"(3) check GET %s and restore the previous binary by hand if it is not ready",
+				upgradeRestartUnitPath, "/api/v1/ready")
+		}
+	}
+	return nil
 }
 
 // upgradeRestartSpawnFn creates the ExecProcessHandle for the candidate
@@ -393,6 +425,10 @@ func runControllerUpgradeRestart(_ *cobra.Command, _ []string) error {
 	}
 	if info.IsDir() {
 		return fmt.Errorf("restart: --binary %s is a directory, not an executable", upgradeBinaryPath)
+	}
+
+	if err := checkUnitCredentialsPreflight(); err != nil {
+		return err
 	}
 
 	mgr, err := upgradeRestartMgrFn()
