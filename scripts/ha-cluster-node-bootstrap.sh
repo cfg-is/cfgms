@@ -514,33 +514,28 @@ else
     if [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
         ARCH="arm64"
     fi
-    TARBALL_URL="https://github.com/cfg-is/cfgms/releases/download/${VERSION_FLAG}/cfgms-linux-${ARCH}.tar.gz"
-    BUNDLE_URL="${TARBALL_URL}.sigstore.json"
-
-    TMPTAR="$(mktemp /tmp/cfgms-XXXXXX.tar.gz)"
-    TMPBUNDLE="$(mktemp /tmp/cfgms-XXXXXX.sigstore.json)"
-    cleanup_tar() { rm -f "$TMPTAR" "$TMPBUNDLE"; }
-    trap cleanup_tar EXIT INT TERM
-
-    curl -fsSL "$TARBALL_URL" -o "$TMPTAR"
-    curl -fsSL "$BUNDLE_URL" -o "$TMPBUNDLE"
-
-    VERIFY_SCRIPT="$SCRIPT_DIR/verify-release-artifact.sh"
-    if [[ ! -f "$VERIFY_SCRIPT" ]]; then
-        echo "Error: release verifier not found at $VERIFY_SCRIPT." >&2
-        echo "  Run the bootstrap from a complete CFGMS source checkout." >&2
+    if [[ "$ARCH" != "amd64" ]]; then
+        echo "Error: release binaries are published for linux/amd64 only (found $ARCH)." >&2
         exit 1
     fi
-    bash "$VERIFY_SCRIPT" "$TMPTAR" "$TMPBUNDLE" "$VERSION_FLAG"
+    ASSET="cfgms-controller-linux-${ARCH}"
+    BASE_URL="https://github.com/cfg-is/cfgms/releases/download/${VERSION_FLAG}"
 
-    if ! tar -tzf "$TMPTAR" cfgms-controller >/dev/null 2>&1; then
-        echo "Error: signed archive does not contain top-level cfgms-controller." >&2
+    TMPDL="$(mktemp -d /tmp/cfgms-XXXXXX)"
+    cleanup_dl() { rm -rf "$TMPDL"; }
+    trap cleanup_dl EXIT INT TERM
+
+    curl -fsSL "${BASE_URL}/${ASSET}" -o "$TMPDL/$ASSET"
+    curl -fsSL "${BASE_URL}/SHA256SUMS" -o "$TMPDL/SHA256SUMS"
+
+    # Releases are unsigned; integrity is the published checksum only.
+    if ! (cd "$TMPDL" && grep -F -- " $ASSET" SHA256SUMS | sha256sum -c - >/dev/null 2>&1); then
+        echo "Error: checksum verification failed for $ASSET." >&2
         exit 1
     fi
-    tar -xzf "$TMPTAR" -C "$CFGMS_BIN_DIR" cfgms-controller
-    chmod 0755 "$CONTROLLER_BIN"
+    install -m 0755 "$TMPDL/$ASSET" "$CONTROLLER_BIN"
 
-    rm -f "$TMPTAR" "$TMPBUNDLE"
+    rm -rf "$TMPDL"
     trap - EXIT INT TERM
     log "Binary installed to $CONTROLLER_BIN"
 fi

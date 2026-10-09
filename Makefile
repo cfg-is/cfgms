@@ -419,7 +419,8 @@ release-artifacts:
 
 test-release-artifacts:
 	@bash scripts/release/build-reproducible_test.sh
-	@bash scripts/verify-release-artifact_test.sh
+	@bash scripts/release/build-binaries_test.sh
+	@bash scripts/release/changelog-section_test.sh
 
 # Run Linux install.sh tests (Story #1708)
 test-install-sh:

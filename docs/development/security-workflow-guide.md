@@ -284,7 +284,6 @@ These Scorecard alerts stay open deliberately. Each has a reason; none is un-tri
 
 | Alert | Reason |
 |---|---|
-| `TokenPermissionsID` — `release.yml:publish` (`contents`/`id-token`/`attestations`/`artifact-metadata: write`) | The job's purpose is to publish a signed release. It cannot do that without write. Scoped to one job in a `release` environment. |
 | `TokenPermissionsID` — `codeql-pack-publish.yml:publish` (`packages: write`) | Publishes the CodeQL extension pack to ghcr.io. Write to packages is the job. |
 | `TokenPermissionsID` — `dast-scan.yml:dast-scan` (`security-events: write`) | Uploads ZAP SARIF to the Security tab. Write to security-events is the job. |
 | `PinnedDependenciesID` — `goCommand` (`go install …@vX.Y.Z` in `security-scan.yml`) | Tool installs are version-pinned, and the module checksum database plus `go.sum` provide the integrity guarantee a hash pin would. `dependency-pin-check.yml` already tracks these versions weekly. |

@@ -137,16 +137,15 @@ Each tagged version will have a corresponding GitHub Release with:
 
 - Release notes summarizing changes
 - Link to relevant CHANGELOG entries
-- Binary artifacts for supported platforms
+- Unsigned binaries: controller for Linux amd64; steward for Windows, macOS and Linux (amd64 and arm64)
 - SHA256 checksums for all artifacts
-- Keyless Sigstore bundles for every artifact and checksum manifest
-- An SPDX JSON SBOM plus repository-bound SBOM and build-provenance attestations
-- Authenticode-signed Windows payloads/MSI and signed, notarized macOS packages
 
-Release tags must be annotated canonical semantic versions, resolve to a commit
-reachable from `main`, and pass the protected `release` environment. Generic
-archives are rebuilt independently with the `go.mod` toolchain and compared
-byte for byte before signing. See
+The binaries are unsigned (no code signing, notarization or attestation); the
+checksum file is the only integrity check.
+
+Release tags must be annotated canonical semantic versions and resolve to a
+commit reachable from `main`. Every binary is built twice with the `go.mod`
+toolchain and compared byte for byte before publishing. See
 [Release Artifact Verification](../deployment/release-artifact-verification.md).
 
 ## Build Information

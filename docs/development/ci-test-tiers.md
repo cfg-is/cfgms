@@ -204,7 +204,7 @@ run-history stats, not a forced 50-run PR/queue figure.
 | `fuzz-nightly.yml` | schedule, daily 02:00 UTC | 5/5 success |
 | `dast-scan.yml` | schedule, weekly Sun 03:00 UTC + workflow_dispatch | **5/5 failure** (2025-08-16 through 2026-09-13) — flagged as a candidate follow-up, see [AC8](#ac8-candidate-follow-up-stories) |
 | `scorecard.yml` | push-to-develop + weekly schedule | 5/5 success (push side) |
-| `release.yml` | push, tags `v*.*.*` | 5/5 failure, but all from 2026-05-23–27 — no tag push since; current state unverified, see AC8 |
+| `release.yml` | push, tags `v*.*.*` | 5/5 failure, all from signed-release runs (2026-05-23–27, and `v0.10.5`, which lacked signing inputs); rewritten as the unsigned checksum-only release (#4732), first tag push pending |
 | `develop-sanity.yml` | push-to-develop | 5/5 success |
 | `codeql-pack-publish.yml` | push to main/develop, path-gated to `.github/codeql/extensions/**` + workflow_dispatch | 5/5 success, infrequent (weeks apart) |
 

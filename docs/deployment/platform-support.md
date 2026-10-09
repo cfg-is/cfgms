@@ -121,9 +121,10 @@ The project includes automated builds and testing for all supported platforms:
 
 ### Building from Source
 
-No pre-built artifact should be treated as available or trusted until the new
-protected signed-release workflow has completed successfully for a frozen tag.
-Until then, build from source:
+Tagged releases publish unsigned binaries with a `SHA256SUMS` file (see
+[Release Artifact Verification](release-artifact-verification.md)): the
+controller for Linux amd64 and the steward for Windows, macOS and Linux (amd64
+and arm64). To build from source instead:
 
 ```bash
 # Clone and build

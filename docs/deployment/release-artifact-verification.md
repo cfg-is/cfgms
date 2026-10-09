@@ -1,73 +1,40 @@
 # Release Artifact Verification
 
-The signed-release workflow is a pre-RC control and has not yet produced or
-certified a release. When a protected tag build is eventually published, verify
-an artifact before extracting or executing it.
+CFGMS release binaries are **unsigned**. Pushing a release tag publishes a
+GitHub release with raw binaries and a `SHA256SUMS` file. The checksum file
+detects corruption or a mismatched download; it does not authenticate the
+publisher, because it is served from the same release as the binaries.
 
 ## What the release carries
 
-For every supported archive or native installer, the release workflow produces:
+- `cfgms-controller-linux-amd64`
+- `cfgms-steward-<os>-<arch>` for `linux`, `darwin` and `windows`, each `amd64`
+  and `arm64` (`.exe` suffix on Windows)
+- `SHA256SUMS`, covering every binary above
 
-- `SHA256SUMS`, covering the primary archives, installers, and SPDX JSON SBOM;
-- a keyless Sigstore bundle beside each covered file
-  (`<artifact>.sigstore.json`);
-- an SPDX JSON software bill of materials;
-- repository-bound GitHub build-provenance and SBOM attestation bundles;
-- Authenticode-signed Windows executable payloads and MSI; and
-- Developer ID-signed, notarized, and stapled macOS payloads and packages.
+The release notes are the matching `CHANGELOG.md` section. When the repository
+variable `CFGMS_RELEASE_PUBLISHER_KEY` is unset, the notes begin with a line
+stating the steward binaries carry the development placeholder publisher key.
 
 The workflow publishes nothing unless the tag is annotated, is canonical
 semantic versioning, resolves to the checked-out commit, and is reachable from
-`main`. Its protected `release` environment must supply all publisher and native
-signing identities. The generic archives are built twice with the pinned Go
-toolchain and compared byte for byte before signing.
+`main`. Every binary is built twice with the pinned Go toolchain and compared
+byte for byte before it is published.
 
 ## Verify a downloaded artifact
 
-With GitHub CLI attestation support:
+Download the binaries you need and `SHA256SUMS` into one directory, then:
 
 ```bash
-gh attestation verify cfgms-linux-amd64.tar.gz \
-  --repo cfg-is/cfgms \
-  --signer-workflow cfg-is/cfgms/.github/workflows/release.yml \
-  --source-ref refs/tags/vX.Y.Z
+sha256sum -c --ignore-missing SHA256SUMS
 ```
 
-Or verify its attached keyless signature with Cosign:
+On macOS use `shasum -a 256 -c SHA256SUMS`; on Windows compare
+`Get-FileHash -Algorithm SHA256 <file>` with the matching line.
 
-```bash
-cosign verify-blob \
-  --bundle cfgms-linux-amd64.tar.gz.sigstore.json \
-  --certificate-identity \
-    "https://github.com/cfg-is/cfgms/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
-  --certificate-oidc-issuer \
-    "https://token.actions.githubusercontent.com" \
-  cfgms-linux-amd64.tar.gz
-```
+The Tier-1 and HA-node bootstrap scripts perform this check automatically for
+`cfgms-controller-linux-amd64` and refuse to install on a mismatch.
 
-Then verify the authenticated checksum manifest:
-
-```bash
-sha256sum -c SHA256SUMS
-```
-
-The Tier-1 bootstrap performs the repository-bound GitHub-attestation check
-automatically when a compatible `gh` is installed. Otherwise it requires
-Cosign and pins the exact release workflow, tag, and GitHub Actions OIDC issuer.
-It refuses extraction if neither verifier is available or verification fails.
-
-## Native checks
-
-After Sigstore/GitHub verification, native platform policy can be checked
-independently:
-
-```powershell
-signtool verify /pa /all cfgms-steward-windows-amd64.msi
-```
-
-```bash
-pkgutil --check-signature cfgms-steward-darwin-arm64.pkg
-xcrun stapler validate cfgms-steward-darwin-arm64.pkg
-```
-
-Do not treat a checksum alone as publisher authentication.
+Because the binaries are unsigned, macOS Gatekeeper and Windows SmartScreen may
+warn on first run, and hosts enforcing application allowlisting must allow the
+binaries explicitly.
