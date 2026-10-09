@@ -100,6 +100,16 @@ func newControlPlaneFixture(t *testing.T, stewardIDs ...string) *controlPlaneFix
 }
 
 func setupTestServer(t *testing.T) *Server {
+	return buildTestServer(t, true)
+}
+
+// setupTestServerWithoutRootTenant builds the setupTestServer server with an
+// empty tenant store, so no root tenant resolves.
+func setupTestServerWithoutRootTenant(t *testing.T) *Server {
+	return buildTestServer(t, false)
+}
+
+func buildTestServer(t *testing.T, seedRoot bool) *Server {
 	// Isolate secrets storage per test. initializeSecretStore() defaults to a
 	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
 	setTestSecretsEnv(t)
@@ -133,7 +143,9 @@ func setupTestServer(t *testing.T) *Server {
 	// Initialize tenant management with durable storage (git-backed)
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
-	seedTestRootTenant(t, tenantManager)
+	if seedRoot {
+		seedTestRootTenant(t, tenantManager)
+	}
 	testTenantStores.Store(tenantManager, tenantStore)
 
 	// Create services
@@ -1738,12 +1750,27 @@ func TestSeedTestAPIKeys(t *testing.T) {
 
 		require.True(t, exists, "installer key must be seeded when gate and env var are both set")
 		require.Equal(t, "installer-test-key", keyInfo.Key)
-		require.Equal(t, "root", keyInfo.TenantID,
-			"installer key must use tenant 'root' so the public download endpoint can find it")
+		require.NotEmpty(t, keyInfo.TenantID)
+		require.Equal(t, server.rootTenantID(context.Background()), keyInfo.TenantID,
+			"installer key must use the resolved root tenant so the public download endpoint can find it")
 		require.ElementsMatch(t,
 			[]string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
 			keyInfo.Permissions,
 			"installer key permissions must allow upload+read+delete on installer artifacts and steward listing for the E2E flow")
+	})
+
+	t.Run("gate on, installer var set, no resolvable root tenant: installer key not seeded", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
+		t.Setenv("CFGMS_API_KEY_INSTALLER", "installer-test-key")
+
+		server := setupTestServerWithoutRootTenant(t)
+		require.Empty(t, server.rootTenantID(context.Background()), "precondition: no root tenant resolves")
+
+		server.mu.RLock()
+		_, exists := server.apiKeys["installer-test-key"]
+		server.mu.RUnlock()
+
+		require.False(t, exists, "installer key must NOT be seeded when no root tenant resolves")
 	})
 
 	t.Run("gate on, east/central/west loop: keys seeded in the HA steward tenant with steward permissions", func(t *testing.T) {

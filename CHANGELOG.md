@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] - Unreleased
+
+### Removed
+
+- The public installer download no longer falls back to an artifact uploaded under a tenant
+  literally named `root`; it serves only the root tenant's own artifacts, so public installers must
+  be uploaded as root. The seeded `CFGMS_API_KEY_INSTALLER` key is no longer assigned the literal
+  `root` tenant when no root tenant resolves: it is not seeded and a warning is logged
+  (Issue #4673).
+
 ## [0.10.5] - 2026-10-07
 
 Stable snapshot promoted to `main`, covering the v0.10.0–v0.10.5 roadmap milestones. Bundles the

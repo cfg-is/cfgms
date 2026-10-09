@@ -884,14 +884,13 @@ func downloadInstaller(server *Server, platform, arch string) *httptest.Response
 	return rec
 }
 
-// TestHandleDownloadInstallPackage_LegacyRootNamespace guards Issue #4667: the
-// public download serves the positional root tenant's artifact, and — while a
-// deployment migrates — falls back, read-only, to an artifact uploaded under the
-// legacy literal "root" namespace the download used before #4634.
-func TestHandleDownloadInstallPackage_LegacyRootNamespace(t *testing.T) {
+// TestHandleDownloadInstallPackage_NoLegacyRootNamespace guards Issue #4673: the
+// public download serves only the positional root tenant's artifacts. An artifact
+// stored under a different tenant that happens to be named "root" is never served.
+func TestHandleDownloadInstallPackage_NoLegacyRootNamespace(t *testing.T) {
 	const linuxArtifact = "installer/linux-amd64/cfgms-steward-amd64"
 
-	t.Run("root tenant's own artifact", func(t *testing.T) {
+	t.Run("root tenant's own artifact is served", func(t *testing.T) {
 		server, store := serverWithRootTenant(t, "acme-root")
 		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
 		rec := downloadInstaller(server, "linux", "amd64")
@@ -899,27 +898,19 @@ func TestHandleDownloadInstallPackage_LegacyRootNamespace(t *testing.T) {
 		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
 	})
 
-	t.Run("legacy root namespace fallback", func(t *testing.T) {
+	t.Run("artifact under a tenant named root is not served", func(t *testing.T) {
 		server, store := serverWithRootTenant(t, "acme-root")
-		putInstaller(t, store, legacyInstallerTenant, "linux-amd64", []byte("legacy"))
-		rec := downloadInstaller(server, "linux", "amd64")
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Equal(t, []byte("legacy"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
-	})
-
-	t.Run("root tenant's own artifact wins over the legacy one", func(t *testing.T) {
-		server, store := serverWithRootTenant(t, "acme-root")
-		putInstaller(t, store, legacyInstallerTenant, "linux-amd64", []byte("legacy"))
-		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
-		rec := downloadInstaller(server, "linux", "amd64")
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
-	})
-
-	t.Run("neither namespace has the artifact", func(t *testing.T) {
-		server, store := serverWithRootTenant(t, "acme-root")
-		putInstaller(t, store, legacyInstallerTenant, "windows-amd64", []byte("other platform"))
+		putInstaller(t, store, "root", "linux-amd64", []byte("legacy"))
 		rec := downloadInstaller(server, "linux", "amd64")
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+
+	t.Run("root tenant's own artifact wins over a tenant named root", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, "root", "linux-amd64", []byte("legacy"))
+		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
 	})
 }
