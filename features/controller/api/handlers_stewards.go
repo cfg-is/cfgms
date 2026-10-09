@@ -1842,6 +1842,12 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 					"source_in_scope": sourceInScope,
 					"dest_in_scope":   destInScope,
 				})
+			if !sourceInScope {
+				// A steward outside the caller's subtree is indistinguishable from an
+				// unknown one, as on every other per-steward route (no existence oracle).
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+				return
+			}
 			s.writeErrorResponse(w, http.StatusForbidden, "Insufficient scope to move steward between these tenants", "INSUFFICIENT_SCOPE")
 			return
 		}
