@@ -165,6 +165,15 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 		Source:    "role-admin",
 	}
 
+	// A create over an existing role is an update: stewards that matched the
+	// replaced selector also see their effective config change.
+	var previousSelector string
+	if old, getErr := s.roleConfigStore.GetConfig(r.Context(), entry.Key); getErr == nil {
+		if prev, decErr := unmarshalRoleConfig(old); decErr == nil {
+			previousSelector = prev.Selector
+		}
+	}
+
 	if err := s.roleConfigStore.StoreConfig(r.Context(), entry); err != nil {
 		s.logger.Error("Failed to store role config", "name", logging.SanitizeLogValue(req.Name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store role config", "INTERNAL_ERROR")
@@ -172,6 +181,7 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.logger.Info("Role config created", "name", logging.SanitizeLogValue(req.Name), "tenant_id", logging.SanitizeLogValue(tenantID))
+	s.syncStewardsMatchingRoleSelectors(r.Context(), tenantID, principal.ID, req.Selector, previousSelector)
 	s.writeResponse(w, http.StatusCreated, rc)
 }
 
@@ -286,11 +296,19 @@ func (s *Server) handleDeleteRoleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err := s.roleConfigStore.DeleteConfig(r.Context(), &cfgconfig.ConfigKey{
+	roleKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
 		Namespace: "role-policies",
 		Name:      name,
-	})
+	}
+	var deletedSelector string
+	if old, getErr := s.roleConfigStore.GetConfig(r.Context(), roleKey); getErr == nil {
+		if prev, decErr := unmarshalRoleConfig(old); decErr == nil {
+			deletedSelector = prev.Selector
+		}
+	}
+
+	err := s.roleConfigStore.DeleteConfig(r.Context(), roleKey)
 	if err != nil {
 		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Role config not found", "NOT_FOUND")
@@ -302,6 +320,7 @@ func (s *Server) handleDeleteRoleConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.logger.Info("Role config deleted", "name", logging.SanitizeLogValue(name), "tenant_id", logging.SanitizeLogValue(tenantID))
+	s.syncStewardsMatchingRoleSelectors(r.Context(), tenantID, principal.ID, deletedSelector)
 	s.writeSuccessResponse(w, map[string]string{"deleted": name})
 }
 

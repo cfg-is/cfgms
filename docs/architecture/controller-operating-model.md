@@ -377,7 +377,7 @@ The `promote-hv-role` workflow (epics #2657/#2807, stories #2667–#2671) is the
 
 ### Role-Policies Namespace (Issues #2543, #2546)
 
-The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward's DNA + controller-stored tags, and merges the fragments into the effective config after cluster-policies and before device config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb.
+The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward's DNA + controller-stored tags, and merges the fragments into the effective config after cluster-policies and before device config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb. Tag and role edits push the new effective config to affected stewards: adding or removing a steward tag that changes its tag set, and creating, replacing or deleting a role config, each record a durable `sync_config` command and trigger a config sync (the same delivery path as a config upload) for every affected steward — the tagged steward, or the stewards in the role's tenant whose selector matches the new or the replaced/deleted role. A failed delivery is logged and left pending; it does not fail the tag or role request. Inherited tenant policy edits are not covered by this trigger.
 
 **Role config object shape:**
 

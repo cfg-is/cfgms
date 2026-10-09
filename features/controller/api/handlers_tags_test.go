@@ -17,8 +17,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/tagstore"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // setupTagServer creates a test server wired with a tag store and a pre-registered steward.
@@ -466,4 +469,65 @@ func TestHandleAddStewardTags_Concurrent(t *testing.T) {
 	require.True(t, ok)
 	got, _ := data["tags"].([]interface{})
 	assert.Len(t, got, goroutines, "all %d concurrent tag additions must be preserved", goroutines)
+}
+
+// syncConfigRecords returns the sync_config CommandRecords stored for stewardID.
+func syncConfigRecords(t *testing.T, store business.CommandStore, stewardID string) []*business.CommandRecord {
+	t.Helper()
+	recs, err := store.ListCommandsByDevice(context.Background(), stewardID)
+	require.NoError(t, err)
+	var out []*business.CommandRecord
+	for _, rec := range recs {
+		if rec.Type == string(controlplaneTypes.CommandSyncConfig) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// newSyncRecorder wires a real command store and a real publisher over a recording
+// control plane into server, and returns both for assertions. The WaitGroup is
+// pre-charged because TriggerConfigSync calls are synchronous in the handlers.
+func newSyncRecorder(t *testing.T, server *Server) (*syncedControlPlane, business.CommandStore) {
+	t.Helper()
+	store := pkgtesting.SetupTestStorage(t).GetCommandStore()
+	require.NotNil(t, store)
+	server.SetCommandStore(store)
+	cp := &syncedControlPlane{}
+	cp.wg.Add(1000)
+	server.commandPublisher = makeSyncedPublisher(t, cp)
+	return cp, store
+}
+
+// TestTagChangeTriggersConfigSync: tagging a steward publishes exactly one
+// sync_config, removing the tag publishes one more, and re-adding a tag already
+// present (or removing an absent one) publishes none.
+func TestTagChangeTriggersConfigSync(t *testing.T) {
+	server := setupTagServer(t)
+	cp, store := newSyncRecorder(t, server)
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:write"}, "test-tenant", 5*time.Minute)
+	addTagTestSteward(t, server, "s-tag-sync", "test-tenant")
+	path := "/api/v1/stewards/s-tag-sync/tags"
+	body := map[string]interface{}{"tags": []string{"e2e-role"}}
+
+	rec := doTagRequest(server, http.MethodPost, path, apiKey, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"s-tag-sync"}, cp.ReceivedIDs())
+	recs := syncConfigRecords(t, store, "s-tag-sync")
+	require.Len(t, recs, 1)
+	assert.Equal(t, business.DeliveryStatusDelivered, recs[0].DeliveryStatus)
+	assert.Equal(t, "test-tenant", recs[0].TenantID)
+
+	rec = doTagRequest(server, http.MethodPost, path, apiKey, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, cp.ReceivedIDs(), 1, "re-adding a present tag must not sync")
+
+	rec = doTagRequest(server, http.MethodDelete, path, apiKey, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, cp.ReceivedIDs(), 2, "removing the tag must sync again")
+	assert.Len(t, syncConfigRecords(t, store, "s-tag-sync"), 2)
+
+	rec = doTagRequest(server, http.MethodDelete, path, apiKey, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, cp.ReceivedIDs(), 2, "removing an absent tag must not sync")
 }

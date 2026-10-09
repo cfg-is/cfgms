@@ -78,8 +78,11 @@ func (s *Server) handleAddStewardTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	incoming := req.Tags
+	var changed bool
 	merged, err := ts.Update(r.Context(), stewardID, func(current []string) ([]string, error) {
-		return mergeTags(current, incoming), nil
+		next := mergeTags(current, incoming)
+		changed = !sameTagSet(current, next)
+		return next, nil
 	})
 	if err != nil {
 		if errors.Is(err, tagstore.ErrInvalidTag) {
@@ -96,6 +99,9 @@ func (s *Server) handleAddStewardTags(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Tags added",
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"count", len(merged))
+	if changed {
+		s.syncStewardAfterTagChange(r, stewardID)
+	}
 	s.writeSuccessResponse(w, tagsResponse{Tags: merged})
 }
 
@@ -122,8 +128,11 @@ func (s *Server) handleDeleteStewardTags(w http.ResponseWriter, r *http.Request)
 	}
 
 	toRemove := req.Tags
+	var changed bool
 	remaining, err := ts.Update(r.Context(), stewardID, func(current []string) ([]string, error) {
-		return removeTags(current, toRemove), nil
+		next := removeTags(current, toRemove)
+		changed = !sameTagSet(current, next)
+		return next, nil
 	})
 	if err != nil {
 		s.logger.Error("Failed to set tags after removal",
@@ -137,7 +146,37 @@ func (s *Server) handleDeleteStewardTags(w http.ResponseWriter, r *http.Request)
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"removed", len(toRemove),
 		"remaining", len(remaining))
+	if changed {
+		s.syncStewardAfterTagChange(r, stewardID)
+	}
 	s.writeSuccessResponse(w, tagsResponse{Tags: remaining})
+}
+
+// syncStewardAfterTagChange pushes the steward's new effective configuration after
+// its tag set changed (role fragments are selected by tag).
+func (s *Server) syncStewardAfterTagChange(r *http.Request, stewardID string) {
+	tenantID, _ := s.stewardOwnerTenant(r.Context(), stewardID)
+	var issuedBy string
+	if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil {
+		issuedBy = principal.ID
+	}
+	s.syncStewardConfig(r.Context(), stewardID, tenantID, issuedBy)
+}
+
+// sameTagSet reports whether a and b hold the same tags, ignoring order and duplicates.
+func sameTagSet(a, b []string) bool {
+	set := make(map[string]struct{}, len(a))
+	for _, t := range a {
+		set[t] = struct{}{}
+	}
+	other := make(map[string]struct{}, len(b))
+	for _, t := range b {
+		other[t] = struct{}{}
+		if _, ok := set[t]; !ok {
+			return false
+		}
+	}
+	return len(set) == len(other)
 }
 
 // resolveStewardForTags validates the steward ID, looks up the steward, and enforces

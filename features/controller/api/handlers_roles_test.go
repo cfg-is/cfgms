@@ -18,6 +18,7 @@ import (
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -448,4 +449,76 @@ func TestHandleRoleConfig_RootAdminTenantTargeting(t *testing.T) {
 	server.handleDeleteRoleConfig(recDel, delNoTenant)
 	assert.Equal(t, http.StatusBadRequest, recDel.Code,
 		"root admin DELETE without ?tenant= must be 400, not 500; body: %s", recDel.Body.String())
+}
+
+// TestRoleConfigChangeTriggersConfigSyncForMatchingStewards: creating a role syncs
+// the stewards matching its selector (not an untagged steward in the tenant),
+// replacing it also syncs stewards that matched the old selector, deleting it syncs
+// the tagged steward again, and a steward in another tenant is never synced.
+func TestRoleConfigChangeTriggersConfigSyncForMatchingStewards(t *testing.T) {
+	server := setupTagServer(t)
+	server.SetRoleConfigStore(pkgtesting.SetupTestStorage(t).GetConfigStore())
+	// Production wires the same tag store into the controller service (server.go).
+	server.controllerService.SetTagStore(server.tagStore)
+	cp, store := newSyncRecorder(t, server)
+	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+
+	addTagTestSteward(t, server, "s-tagged", "test-tenant")
+	addTagTestSteward(t, server, "s-untagged", "test-tenant")
+	addTagTestSteward(t, server, "s-other-tenant", "other-tenant")
+	for _, id := range []string{"s-tagged", "s-other-tenant"} {
+		_, err := server.tagStore.Update(context.Background(), id, func([]string) ([]string, error) {
+			return []string{"e2e-role"}, nil
+		})
+		require.NoError(t, err)
+	}
+	do := func(method, url string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, url, bytes.NewReader(body))
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := do(http.MethodPost, "/api/v1/roles", validRolePayload("e2e", "tag:e2e-role"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"s-tagged"}, cp.ReceivedIDs())
+	recs := syncConfigRecords(t, store, "s-tagged")
+	require.Len(t, recs, 1)
+	assert.Equal(t, business.DeliveryStatusDelivered, recs[0].DeliveryStatus)
+
+	// Replace with a selector the steward no longer matches: it matched the old one.
+	rec = do(http.MethodPost, "/api/v1/roles", validRolePayload("e2e", "tag:nobody"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"s-tagged", "s-tagged"}, cp.ReceivedIDs())
+
+	rec = do(http.MethodPost, "/api/v1/roles", validRolePayload("e2e", "tag:e2e-role"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Len(t, cp.ReceivedIDs(), 3)
+
+	rec = do(http.MethodDelete, "/api/v1/roles/e2e", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"s-tagged", "s-tagged", "s-tagged", "s-tagged"}, cp.ReceivedIDs())
+
+	assert.Empty(t, syncConfigRecords(t, store, "s-untagged"))
+	assert.Empty(t, syncConfigRecords(t, store, "s-other-tenant"),
+		"a steward in another tenant must never be synced by this tenant's role change")
+}
+
+// TestRoleConfigChangeSyncWithoutPublisherIsNoOp: with no command store or publisher
+// wired the role request still succeeds.
+func TestRoleConfigChangeSyncWithoutPublisherIsNoOp(t *testing.T) {
+	server := setupTagServer(t)
+	server.SetRoleConfigStore(pkgtesting.SetupTestStorage(t).GetConfigStore())
+	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	addTagTestSteward(t, server, "s-np", "test-tenant")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles",
+		bytes.NewReader(validRolePayload("np", "tag:x")))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
