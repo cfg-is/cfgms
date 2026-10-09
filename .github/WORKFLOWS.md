@@ -105,34 +105,31 @@ This document describes the GitHub Actions workflows configured for the CFGMS pr
 
 **Timeout:** 10 minutes
 
-### 5. Signed Release Workflow (`.github/workflows/release.yml`)
+### 5. Release Workflow (`.github/workflows/release.yml`)
 
-**Status:** Implemented for pre-RC review; protected-environment execution and
-native signing remain unverified.
+**Status:** Implemented; first real tag push is a post-merge observation.
 
-The workflow runs only for annotated semantic-version tags whose commit is
-reachable from `main`. Generic cross-platform archives use the Go toolchain
-pinned in `go.mod`, normalize timestamps and ownership, build twice, and fail
-unless the two trees match byte for byte.
+Runs on `v*.*.*` tag pushes. The `validate` job fails closed unless the tag is
+an annotated canonical semantic version whose commit is the checkout and is
+reachable from `main`. The `build` job (`contents: read`) runs
+`scripts/release/build-binaries.sh`, which builds each binary twice with the
+Go toolchain pinned in `go.mod` and fails unless the bytes match:
 
-The protected `release` environment must provide a non-placeholder publisher
-public key, Windows signing certificate, Apple application/installer identities,
-and Apple notarization credentials. Release mode fails closed if any is absent.
-Windows executables and MSI are Authenticode-signed and verified. macOS
-executables and packages are signed, the package is notarized and stapled, and
-both layers are verified.
+- controller: `cfgms-controller-linux-amd64`
+- steward: `cfgms-steward-<os>-<arch>[.exe]` for linux, darwin and windows,
+  each amd64 and arm64
 
-Only after all platform jobs pass does the publish job:
+The `publish` job (the only job with `contents: write`) writes and checks
+`SHA256SUMS`, builds the notes from the matching `CHANGELOG.md` section
+(`scripts/release/changelog-section.sh`), and runs `gh release view`: absent
+creates the release, present edits the notes and re-uploads assets with
+`--clobber`, so re-running a tag is idempotent.
 
-- generate an SPDX JSON SBOM;
-- generate and validate `SHA256SUMS`;
-- keyless-sign every artifact with a pinned Cosign installer;
-- create repository-bound build-provenance and SBOM attestations; and
-- create the corresponding tagged GitHub release.
-
-All third-party actions are pinned to full commit SHAs and job permissions are
-scoped to their purpose. No release has been produced or certified by adding
-this workflow.
+Binaries are unsigned and no secret is used. The steward embeds the publisher
+public key from the repository variable `CFGMS_RELEASE_PUBLISHER_KEY` when it
+is set (a public key, not a secret); when unset the notes begin with a line
+stating the development placeholder key is in use. All third-party actions are
+pinned to full commit SHAs.
 
 ## Activation Timeline
 
@@ -201,7 +198,7 @@ These workflows will **activate immediately** when repository becomes public:
 | No CodeQL SAST | CodeQL workflow | Industry-leading vulnerability detection |
 | No container scanning in CI | Trivy workflow | Catch base image vulnerabilities |
 | No license compliance | License check workflow | Prevent incompatible licenses |
-| No SBOM/provenance/signing pipeline | Protected signed-release workflow | Authenticated artifacts and supply-chain evidence |
+| No automated release publishing | Tag-triggered release workflow | Reproducible, checksummed binaries published on tag |
 
 ## Security Posture Improvement
 

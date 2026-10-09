@@ -253,11 +253,16 @@ gh pr create --base main --title "Release vX.Y.Z" --body "Release description"
 # GitHub UI will only show "Create a merge commit" option
 gh pr merge [PR_NUMBER] --merge
 
-# 7. Tag the release on main
+# 7. Tag the release on main (annotated; the tag must be canonical semver)
+# Pushing the tag publishes the GitHub release: .github/workflows/release.yml
+# builds the unsigned binaries, writes SHA256SUMS, and uses the CHANGELOG
+# section for vX.Y.Z as the notes. There is no manual `gh release create` step.
+# Make sure CHANGELOG.md has a "## [X.Y.Z]" section before tagging.
 git checkout main
 git pull origin main
-git tag vX.Y.Z
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push origin vX.Y.Z
+# Re-running the workflow on the same tag is idempotent (edits notes, replaces assets).
 
 # 8. Back-sync main to develop (brings release merge + any hotfixes)
 # Develop requires PRs, so create a sync branch:
@@ -320,7 +325,7 @@ gh pr create --base develop --title "Hotfix: Critical Security Fix"
 # 4. After both PRs merge, tag new version
 git checkout main
 git pull origin main
-git tag v0.4.7.1
+git tag -a v0.4.7.1 -m "Release v0.4.7.1"
 git push origin v0.4.7.1
 ```
 
