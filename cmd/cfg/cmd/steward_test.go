@@ -1596,3 +1596,31 @@ func TestStewardModules_MultiMatchFanOut(t *testing.T) {
 		require.Error(t, err, "command must exit non-zero when any steward fetch fails")
 	})
 }
+
+func TestStewardStatus_ClockOffsetLine(t *testing.T) {
+	run := func(t *testing.T, data map[string]interface{}) string {
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
+		})
+		server := httptest.NewServer(wrapWithResolve(t, "steward-abc123", handler))
+		defer server.Close()
+		origURL, origInsecure := stewardURL, stewardTLSInsecure
+		t.Cleanup(func() { stewardURL, stewardTLSInsecure = origURL, origInsecure })
+		stewardURL = server.URL
+		stewardTLSInsecure = true
+		return captureStdout(t, func() {
+			require.NoError(t, runStewardStatus(stewardStatusCmd, []string{"steward-abc123"}))
+		})
+	}
+
+	t.Run("prints line when present", func(t *testing.T) {
+		out := run(t, map[string]interface{}{"id": "steward-abc123", "status": "active", "clock_offset_ms": -12000})
+		assert.Contains(t, out, "Clock Offset:")
+		assert.Contains(t, out, "-12s")
+	})
+	t.Run("omits line when absent", func(t *testing.T) {
+		out := run(t, map[string]interface{}{"id": "steward-abc123", "status": "active"})
+		assert.NotContains(t, out, "Clock Offset:")
+	})
+}

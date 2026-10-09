@@ -2115,6 +2115,12 @@ components:
           type: string
           format: date-time
           description: Last time the steward was seen
+        clock_offset_ms:
+          type: integer
+          format: int64
+          description: >-
+            Steward clock minus controller clock in milliseconds, from the last
+            heartbeat (negative when the steward is behind). Omitted when unknown.
         version:
           type: string
           description: Steward software version

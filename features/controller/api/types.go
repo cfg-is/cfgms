@@ -43,6 +43,10 @@ type StewardInfo struct {
 	Hidden bool `json:"hidden,omitempty"`
 	// Tags are the steward's operator-assigned tags (Issue #4595). Omitted when empty.
 	Tags []string `json:"tags,omitempty"`
+	// ClockOffsetMs is the steward clock minus the controller clock in
+	// milliseconds, from the last heartbeat (negative = steward behind).
+	// Nil when unknown, which is distinct from 0 ms (Issue #4539).
+	ClockOffsetMs *int64 `json:"clock_offset_ms,omitempty"`
 	// ActiveSessions is 1 when the steward has an active ControlChannel stream,
 	// 0 otherwise. Each steward holds at most one stream at a time, so this is
 	// a binary sentinel, not a real connection count.
