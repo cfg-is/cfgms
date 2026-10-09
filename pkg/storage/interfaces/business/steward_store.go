@@ -162,9 +162,10 @@ type StewardStore interface {
 	RegisterSteward(ctx context.Context, record *StewardRecord) error
 
 	// UpdateHeartbeat records a heartbeat for the given steward, updating both
-	// last_heartbeat_at and last_seen to the current time.
+	// last_heartbeat_at and last_seen to the current time. A non-empty version
+	// replaces the stored Version; an empty version leaves it unchanged.
 	// Returns ErrStewardNotFound if no record exists for the ID.
-	UpdateHeartbeat(ctx context.Context, stewardID string) error
+	UpdateHeartbeat(ctx context.Context, stewardID, version string) error
 
 	// GetSteward retrieves the record for the given steward ID.
 	// Returns ErrStewardNotFound if no record exists.

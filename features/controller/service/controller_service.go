@@ -32,6 +32,16 @@ import (
 // failure to persist the move, which is not benign (Issue #3324).
 var ErrStewardNotInRegistry = errors.New("steward not present in live registry")
 
+// heartbeatPersistInterval bounds how often a steward's last-seen is written to
+// the shared steward store. It is well inside the 60s StewardOfflineTimeout.
+const heartbeatPersistInterval = 30 * time.Second
+
+// heartbeatPersistState is the last attempted store write time and last successfully persisted version for one steward.
+type heartbeatPersistState struct {
+	at      time.Time
+	version string
+}
+
 // ControllerService implements the Controller service
 type ControllerService struct {
 	logger     logging.Logger
@@ -43,6 +53,12 @@ type ControllerService struct {
 	// SetStewardStore after construction. Nil when the storage backend does not
 	// provide one (e.g. in-memory-only test setups).
 	stewardStore business.StewardStore
+
+	// heartbeatPersist rate-limits RecordHeartbeat's write-through to
+	// stewardStore (Issue #4525). It has its own mutex so the registry lock s.mu
+	// is never held across storage I/O.
+	heartbeatPersistMu sync.Mutex
+	heartbeatPersist   map[string]heartbeatPersistState
 
 	// tenantAncestry resolves tenant subtree containment for ListFleetStewards'
 	// tenant scoping. Wired via SetTenantAncestry; nil denies every non-identical
@@ -832,6 +848,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 			steward.Status = "active"
 		}
 		s.mu.Unlock()
+		s.persistHeartbeat(stewardID, version)
 		return true
 	}
 	s.mu.Unlock()
@@ -870,6 +887,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 			steward.Status = "active"
 		}
 		s.mu.Unlock()
+		s.persistHeartbeat(stewardID, version)
 		return true
 	}
 	s.stewards[stewardID] = &StewardInfo{
@@ -886,7 +904,62 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// Persist so the durable record's timestamp is refreshed consistently with
 	// EnsureSteward. storeDNA runs outside s.mu.
 	s.storeDNA(context.Background(), stewardID, tenantID, dna, "active")
+	s.persistHeartbeat(stewardID, version)
 	return true
+}
+
+// persistHeartbeat writes last-seen and version to the shared steward store so
+// every controller node reports the same values (Issue #4525). It writes at most
+// once per heartbeatPersistInterval per steward unless the version changed. It
+// must be called without s.mu held. Failures are logged and never propagate:
+// the in-memory heartbeat has already succeeded. The update keys on the steward
+// ID only and never touches the tenant.
+func (s *ControllerService) persistHeartbeat(stewardID, version string) {
+	if s.stewardStore == nil {
+		return
+	}
+	now := time.Now()
+
+	s.heartbeatPersistMu.Lock()
+	last, seen := s.heartbeatPersist[stewardID]
+	versionChanged := version != "" && version != last.version
+	if seen && !versionChanged && now.Sub(last.at) < heartbeatPersistInterval {
+		s.heartbeatPersistMu.Unlock()
+		return
+	}
+	if s.heartbeatPersist == nil {
+		s.heartbeatPersist = make(map[string]heartbeatPersistState)
+	}
+	if version == "" {
+		version = last.version
+		versionChanged = false
+	}
+	// Record the attempt time now (rate limit, no duplicate concurrent writes) but
+	// keep the previously persisted version until the write succeeds, so a failed
+	// version write is retried on the next heartbeat.
+	s.heartbeatPersist[stewardID] = heartbeatPersistState{at: now, version: last.version}
+	s.heartbeatPersistMu.Unlock()
+
+	writeVersion := ""
+	if versionChanged {
+		writeVersion = version
+	}
+	// Persist the version only when it changed; an empty version leaves the
+	// stored value untouched.
+	if err := s.stewardStore.UpdateHeartbeat(context.Background(), stewardID, writeVersion); err != nil {
+		if errors.Is(err, business.ErrStewardNotFound) {
+			return
+		}
+		s.logger.Warn("Failed to persist steward heartbeat",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	s.heartbeatPersistMu.Lock()
+	st := s.heartbeatPersist[stewardID]
+	st.version = version
+	s.heartbeatPersist[stewardID] = st
+	s.heartbeatPersistMu.Unlock()
 }
 
 // EnsureSteward upserts a steward into the in-memory admin registry on an

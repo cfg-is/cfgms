@@ -65,6 +65,23 @@ func TestFlatFileStewardStore_GetNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
+func TestFlatFileStewardStore_UpdateHeartbeat_Version(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRecord("s-ver")))
+
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-ver", "v1.2.3"))
+	got, err := store.GetSteward(ctx, "s-ver")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got.Version)
+
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-ver", ""))
+	got, err = store.GetSteward(ctx, "s-ver")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got.Version, "empty version must leave the stored version unchanged")
+}
+
 func TestFlatFileStewardStore_UpdateHeartbeat(t *testing.T) {
 	store, err := NewFlatFileStewardStore(t.TempDir())
 	require.NoError(t, err)
@@ -73,7 +90,7 @@ func TestFlatFileStewardStore_UpdateHeartbeat(t *testing.T) {
 	require.NoError(t, store.RegisterSteward(ctx, testStewardRecord("s-hb")))
 
 	before := time.Now().Add(-time.Second)
-	require.NoError(t, store.UpdateHeartbeat(ctx, "s-hb"))
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-hb", ""))
 
 	got, err := store.GetSteward(ctx, "s-hb")
 	require.NoError(t, err)
@@ -85,7 +102,7 @@ func TestFlatFileStewardStore_UpdateHeartbeat_NotFound(t *testing.T) {
 	store, err := NewFlatFileStewardStore(t.TempDir())
 	require.NoError(t, err)
 
-	err = store.UpdateHeartbeat(context.Background(), "ghost")
+	err = store.UpdateHeartbeat(context.Background(), "ghost", "")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
@@ -182,7 +199,7 @@ func TestFlatFileStewardStore_RestartPersistence(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, store1.RegisterSteward(ctx, testStewardRecord("s-persist")))
-	require.NoError(t, store1.UpdateHeartbeat(ctx, "s-persist"))
+	require.NoError(t, store1.UpdateHeartbeat(ctx, "s-persist", ""))
 	require.NoError(t, store1.UpdateStewardStatus(ctx, "s-persist", business.StewardStatusActive))
 	require.NoError(t, store1.Close())
 
