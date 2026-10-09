@@ -5,6 +5,8 @@ package cert
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,9 +71,33 @@ func (s *inMemSecretStore) DeleteSecret(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *inMemSecretStore) ListSecrets(_ context.Context, _ *secretsinterfaces.SecretFilter) ([]*secretsinterfaces.SecretMetadata, error) {
-	return nil, nil
+// ListSecrets returns the direct children of filter.TenantID (a path prefix), the
+// way the OpenBao provider lists a metadata directory. Keys are reported without
+// the first path segment, as that provider reports them.
+func (s *inMemSecretStore) ListSecrets(_ context.Context, filter *secretsinterfaces.SecretFilter) ([]*secretsinterfaces.SecretMetadata, error) {
+	if filter == nil || filter.TenantID == "" {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*secretsinterfaces.SecretMetadata
+	prefix := filter.TenantID + "/"
+	for k := range s.secrets {
+		rest, ok := strings.CutPrefix(k, prefix)
+		if !ok || strings.Contains(rest, "/") {
+			continue
+		}
+		tenant, key, _ := strings.Cut(k, "/")
+		out = append(out, &secretsinterfaces.SecretMetadata{Key: key, TenantID: tenant, Version: s.versions[k]})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }
+
+// CompareAndSwapIsClusterAtomic lets the signing key store accept this store: the
+// compare-and-swap above is atomic under the store's mutex, which is the property
+// the interface asks for within this single in-process "cluster".
+func (s *inMemSecretStore) CompareAndSwapIsClusterAtomic() bool { return true }
 
 func (s *inMemSecretStore) GetSecrets(ctx context.Context, keys []string) (map[string]*secretsinterfaces.Secret, error) {
 	result := make(map[string]*secretsinterfaces.Secret, len(keys))

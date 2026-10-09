@@ -25,6 +25,8 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/cert"
 	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -243,4 +245,109 @@ func revocationEntriesContain(entries []certinterfaces.RevocationEntry, serial s
 		}
 	}
 	return false
+}
+
+// clusterSigningConfig is certStoreTestConfig("cluster") with the cluster CA vault
+// settings initClusterCAWithStore reads.
+func clusterSigningConfig() *config.Config {
+	cfg := certStoreTestConfig("cluster")
+	cfg.Certificate.ClusterCA = &config.ClusterCAConfig{
+		VaultAddress: "https://vault.test:8200",
+		VaultKeyPath: "signing-tenant/cluster-ca",
+	}
+	return cfg
+}
+
+func signingKeyPEMFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	var found []string
+	require.NoError(t, filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "key.pem" {
+			found = append(found, p)
+		}
+		return err
+	}))
+	return found
+}
+
+// TestInitClusterCAWithStore_SigningIdentityLivesInTheSharedStore is the wiring test
+// for Issue #4689: the Manager initClusterCAWithStore builds must hold a signing
+// key store over the same vault connection, so bootstrapping its identity lands the
+// certificate and key in that vault under the cluster CA tenant — and writes no
+// signing key to the node's certificate directory.
+func TestInitClusterCAWithStore_SigningIdentityLivesInTheSharedStore(t *testing.T) {
+	fx := newCertStoreFixture(t)
+	vault := newInMemSecretStore()
+	certPath := t.TempDir()
+	ctx := context.Background()
+
+	cfg := clusterSigningConfig()
+	managerCfg, err := newClusterManagerConfig(cfg, certPath, fx.storageManager)
+	require.NoError(t, err)
+	require.Nil(t, managerCfg.SigningKeyStore, "the key store is built from the open vault connection, not earlier")
+
+	mgr, err := initClusterCAWithStore(ctx, cfg, managerCfg, vault, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, managerCfg.SigningKeyStore)
+
+	mode, err := mgr.SigningIdentityMode(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cert.SigningIdentityUnprovisioned, mode)
+
+	require.NoError(t, mgr.EnsureSigningCertificate(&cert.SigningCertConfig{KeySize: 2048, ValidityDays: 30}))
+	current, err := mgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+
+	stored, err := vault.GetSecret(ctx, "signing-tenant/config-signing/shared/"+current.SerialNumber)
+	require.NoError(t, err, "the signing identity must be stored in the cluster vault, keyed by serial")
+	assert.Contains(t, stored.Value, current.SerialNumber)
+
+	cursor, err := fx.cursor.LoadCursor(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	assert.Equal(t, current.SerialNumber, cursor.CurrentSerial)
+
+	assert.Empty(t, signingKeyPEMFiles(t, certPath), "no signing key may be written to node-local disk")
+	assert.False(t, vault.closed.Load(), "initClusterCAWithStore must leave the vault connection open for the Manager's lifetime")
+
+	// Closing the Manager releases the connection its owner attached.
+	mgr.AttachCloser(vault)
+	require.NoError(t, mgr.Close())
+	assert.True(t, vault.closed.Load(), "Manager.Close must close the retained vault connection")
+}
+
+// TestInitClusterCAWithStore_ImportedIntermediateReceivesSigningKeyStore covers the
+// regional-intermediate import path, which builds its Manager through
+// cert.NewManagerFromImportedCA rather than NewManagerFromSecretStore.
+func TestInitClusterCAWithStore_ImportedIntermediateReceivesSigningKeyStore(t *testing.T) {
+	fx := newCertStoreFixture(t)
+	vault := newInMemSecretStore()
+	certPath := t.TempDir()
+	ctx := context.Background()
+
+	certFile, keyFile, chainFile, _, _ := externalIntermediateFixture(t)
+	cfg := clusterCAConfigWithExternalPaths(certFile, keyFile, chainFile)
+	cfg.HA = &config.HAConfig{Mode: "cluster"}
+	managerCfg, err := newClusterManagerConfig(cfg, certPath, fx.storageManager)
+	require.NoError(t, err)
+
+	mgr, err := initClusterCAWithStore(ctx, cfg, managerCfg, vault, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	mode, err := mgr.SigningIdentityMode(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, cert.SigningIdentityUnprovisioned, mode, "an imported-intermediate Manager must use the shared signing identity")
+}
+
+// TestInitClusterCAWithStore_RefusesNonAtomicVault: a vault whose compare-and-swap
+// is not atomic across nodes cannot arbitrate a single signing identity.
+func TestInitClusterCAWithStore_RefusesNonAtomicVault(t *testing.T) {
+	fx := newCertStoreFixture(t)
+	cfg := clusterSigningConfig()
+	managerCfg, err := newClusterManagerConfig(cfg, t.TempDir(), fx.storageManager)
+	require.NoError(t, err)
+
+	_, err = initClusterCAWithStore(context.Background(), cfg, managerCfg, struct{ secretsinterfaces.SecretStore }{newInMemSecretStore()}, logging.NewNoopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "atomic")
 }

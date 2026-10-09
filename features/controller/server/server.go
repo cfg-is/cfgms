@@ -1183,7 +1183,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
 					return nil, fmt.Errorf("public-beta signing certificate initialization failed: %w", ensureErr)
 				}
-				logger.Warn("Failed to ensure config signing certificate", "error", ensureErr)
+				if cfg.HA != nil && cfg.HA.IsClusterMode() {
+					// A clustered node must not run without the cluster's signing
+					// identity: nothing falls back to a local key.
+					return nil, fmt.Errorf("cluster signing identity initialization failed: %w", ensureErr)
+				}
+				logger.Warn("Failed to ensure config signing certificate", "error", logging.SanitizeLogValue(ensureErr.Error()))
 			}
 			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
 			if scErr == nil {
@@ -3234,6 +3239,15 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop config source sync service", "error", err)
 		}
 		stopCancel()
+	}
+
+	// Release the cert manager's retained vault connection (cluster mode): the
+	// shared signing-key store reads through it for the Manager's whole lifetime
+	// (Issue #4689). Runs after every component that signs has stopped.
+	if s.certManager != nil {
+		if err := s.certManager.Close(); err != nil {
+			s.logger.Warn("Failed to close certificate manager secret store", "error", logging.SanitizeLogValue(err.Error()))
+		}
 	}
 
 	// Close the dedicated config-router secret store (Issue #4408) — a separate

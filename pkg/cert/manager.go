@@ -52,6 +52,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -92,6 +93,13 @@ type ManagerConfig struct {
 	// file-backed signing-cursor store. Same clustered-vs-single-node
 	// selection as RevocationStore.
 	SigningCursorStore certinterfaces.SigningCursorStore
+
+	// SigningKeyStore, if non-nil, makes this a cluster-mode signing identity:
+	// the config-signing certificate and key live in the shared store, keyed by
+	// serial, and every node signs with the certificate the shared cursor names.
+	// Nil preserves the node-local, file-backed signing path exactly. It requires
+	// a cluster-visible SigningCursorStore; the two together define the identity.
+	SigningKeyStore certinterfaces.SigningKeyStore
 }
 
 // Manager provides high-level certificate management functionality
@@ -104,6 +112,20 @@ type Manager struct {
 	revocation certinterfaces.RevocationStore
 	cursor     certinterfaces.SigningCursorStore
 	rotateMu   sync.Mutex // serialises RotateSigningCertificate calls
+
+	// signingKeys is config.SigningKeyStore; nil outside cluster mode.
+	signingKeys certinterfaces.SigningKeyStore
+	// signingCache memoises the resolved shared signing identity for
+	// signingResolveCacheTTL so per-command signing issues no cursor query or
+	// vault read.
+	signingCacheMu sync.Mutex
+	signingCache   *cachedSigningIdentity
+	// closer releases a resource the Manager's owner opened on its behalf (the
+	// vault connection the SigningKeyStore reads through). Set by AttachCloser.
+	closer    io.Closer
+	closeOnce sync.Once
+	// signingCacheTTLOverride replaces signingResolveCacheTTL in tests.
+	signingCacheTTLOverride *time.Duration
 }
 
 // resolveRevocationStore returns config.RevocationStore if set, otherwise
@@ -179,7 +201,7 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	validator := NewValidator(caCert)
 
 	// Initialize renewer
-	renewer := NewRenewer(ca, store, validator)
+	renewer := newManagerRenewer(config, ca, store, validator)
 
 	// Initialize revocation and signing-cursor stores (reads existing state if
 	// present, empty/nil state if not — or a cluster-visible override).
@@ -193,13 +215,14 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	}
 
 	manager := &Manager{
-		ca:         ca,
-		store:      store,
-		validator:  validator,
-		renewer:    renewer,
-		config:     config,
-		revocation: revStore,
-		cursor:     cursorStore,
+		ca:          ca,
+		store:       store,
+		validator:   validator,
+		renewer:     renewer,
+		config:      config,
+		revocation:  revStore,
+		cursor:      cursorStore,
+		signingKeys: config.SigningKeyStore,
 	}
 
 	// Store the CA certificate in the certificate store for easy retrieval. Reads
@@ -325,7 +348,7 @@ func (m *Manager) ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM []byte) er
 	}
 
 	m.validator = NewValidator(m.ca.certificate)
-	m.renewer = NewRenewer(m.ca, m.store, m.validator)
+	m.renewer = newManagerRenewer(m.config, m.ca, m.store, m.validator)
 
 	caDir := filepath.Join(m.config.StoragePath, "ca")
 	if err := os.MkdirAll(caDir, 0700); err != nil {
@@ -390,11 +413,12 @@ func NewManagerFromImportedCA(ctx context.Context, store secretsinterfaces.Secre
 	}
 
 	m := &Manager{
-		ca:         &CA{},
-		store:      fileStore,
-		config:     config,
-		revocation: revStore,
-		cursor:     cursorStore,
+		ca:          &CA{},
+		store:       fileStore,
+		config:      config,
+		revocation:  revStore,
+		cursor:      cursorStore,
+		signingKeys: config.SigningKeyStore,
 	}
 
 	if err := m.ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM); err != nil {
@@ -410,6 +434,11 @@ func NewManagerFromImportedCA(ctx context.Context, store secretsinterfaces.Secre
 
 // GenerateSigningCertificate creates a config signing certificate and stores it
 func (m *Manager) GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error) {
+	if m.signingKeys != nil {
+		// Would write the signing private key to node-local disk and name a
+		// serial the other nodes cannot resolve.
+		return nil, fmt.Errorf("%w: signing certificates are provisioned through the shared signing identity", certinterfaces.ErrSigningMigrationPending)
+	}
 	cert, err := m.ca.GenerateSigningCertificate(config)
 	if err != nil {
 		return nil, err
@@ -459,6 +488,12 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 		}
 	}
 
+	// A shared signing identity is bootstrapped through the key store, never
+	// generated into the node-local store.
+	if m.signingKeys != nil {
+		return m.EnsureSigningCertificate(signingCfg)
+	}
+
 	// Check for existing config signing certificate
 	signingCerts, err := m.store.getCertificatesByType(CertificateTypeConfigSigning)
 	if err != nil {
@@ -492,6 +527,9 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 // certificate, which may be regenerated per boot. When signingCfg is nil, a
 // default 1095-day RSA-4096 signing certificate is generated.
 func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error {
+	if m.signingKeys != nil {
+		return m.ensureClusterSigningIdentity(signingCfg)
+	}
 	signingCerts, err := m.store.getCertificatesByType(CertificateTypeConfigSigning)
 	if err != nil {
 		return fmt.Errorf("failed to check for config signing certificates: %w", err)
@@ -537,6 +575,10 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 	m.rotateMu.Lock()
 	defer m.rotateMu.Unlock()
 	ctx := context.Background()
+
+	if m.signingKeys != nil {
+		return nil, m.clusterRotationUnavailable(ctx)
+	}
 
 	if !force {
 		// Fail fast, before generating a certificate, when a rotation is
@@ -643,6 +685,9 @@ func purposeToType(p CertificatePurpose) (CertificateType, error) {
 // signing paths use this method; verification/trust paths use
 // GetAllValidCertificatesForPurpose instead.
 func (m *Manager) GetCurrentCertForPurpose(purpose CertificatePurpose) (*Certificate, error) {
+	if purpose == PurposeSigning && m.signingKeys != nil {
+		return m.currentClusterSigningCert(context.Background())
+	}
 	certType, err := purposeToType(purpose)
 	if err != nil {
 		return nil, err
@@ -838,6 +883,11 @@ func (m *Manager) ImportCertificate(certPEM, keyPEM []byte, certType Certificate
 // (only possible when it was issued by an intermediate CA), the chain is appended
 // to certPEM after the leaf.
 func (m *Manager) ExportCertificate(serialNumber string, includePrivateKey, includeChain bool) (certPEM []byte, keyPEM []byte, err error) {
+	if m.signingKeys != nil {
+		if certPEM, keyPEM, handled, err := m.exportSharedSigningCertificate(serialNumber, includePrivateKey, includeChain); handled {
+			return certPEM, keyPEM, err
+		}
+	}
 	cert, err := m.store.GetCertificate(serialNumber)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get certificate: %w", err)
@@ -978,6 +1028,9 @@ func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
 //   - RotatingSerial is included only while still within its overlap window.
 //   - If no cursor file exists (no rotation in progress) all valid signing certs are returned.
 func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
+	if m.signingKeys != nil {
+		return m.allValidClusterSigningCertificates(context.Background())
+	}
 	all, err := m.GetAllValidCertificatesForPurpose(PurposeSigning)
 	if err != nil {
 		return nil, err
@@ -1118,7 +1171,7 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 	}
 
 	validator := NewValidator(ca.certificate)
-	renewer := NewRenewer(ca, fileStore, validator)
+	renewer := newManagerRenewer(config, ca, fileStore, validator)
 
 	revStore, err := resolveRevocationStore(config)
 	if err != nil {
@@ -1130,13 +1183,14 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 	}
 
 	return &Manager{
-		ca:         ca,
-		store:      fileStore,
-		validator:  validator,
-		renewer:    renewer,
-		config:     config,
-		revocation: revStore,
-		cursor:     cursorStore,
+		ca:          ca,
+		store:       fileStore,
+		validator:   validator,
+		renewer:     renewer,
+		config:      config,
+		revocation:  revStore,
+		cursor:      cursorStore,
+		signingKeys: config.SigningKeyStore,
 	}, nil
 }
 
@@ -1215,7 +1269,7 @@ func NewManagerFromCAMaterial(config *ManagerConfig, certPEM, keyPEM, issuerChai
 	}
 
 	validator := NewValidator(ca.certificate)
-	renewer := NewRenewer(ca, store, validator)
+	renewer := newManagerRenewer(config, ca, store, validator)
 
 	revStore, err := resolveRevocationStore(config)
 	if err != nil {
@@ -1227,12 +1281,13 @@ func NewManagerFromCAMaterial(config *ManagerConfig, certPEM, keyPEM, issuerChai
 	}
 
 	return &Manager{
-		ca:         ca,
-		store:      store,
-		validator:  validator,
-		renewer:    renewer,
-		config:     config,
-		revocation: revStore,
-		cursor:     cursorStore,
+		ca:          ca,
+		store:       store,
+		validator:   validator,
+		renewer:     renewer,
+		config:      config,
+		revocation:  revStore,
+		cursor:      cursorStore,
+		signingKeys: config.SigningKeyStore,
 	}, nil
 }

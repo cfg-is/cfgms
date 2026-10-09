@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -845,6 +846,7 @@ type inMemSecretStore struct {
 	mu       sync.RWMutex
 	secrets  map[string]string
 	versions map[string]int
+	closed   atomic.Bool
 }
 
 func newInMemSecretStore() *inMemSecretStore {
@@ -954,7 +956,11 @@ func (s *inMemSecretStore) ExpireSecret(ctx context.Context, key string) error {
 }
 
 func (s *inMemSecretStore) HealthCheck(_ context.Context) error { return nil }
-func (s *inMemSecretStore) Close() error                        { return nil }
+func (s *inMemSecretStore) Close() error                        { s.closed.Store(true); return nil }
+
+// CompareAndSwapIsClusterAtomic reports true: CompareAndSwapSecret is atomic under
+// the store's mutex, the property the cluster signing-key store requires.
+func (s *inMemSecretStore) CompareAndSwapIsClusterAtomic() bool { return true }
 
 var _ secretsinterfaces.SecretStore = (*inMemSecretStore)(nil)
 

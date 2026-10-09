@@ -590,6 +590,10 @@ func applyClusterCAExternalPaths(caConfig *cert.CAConfig, clusterCA *config.Clus
 // token must come from OPENBAO_TOKEN or BAO_TOKEN env vars; it is not read from
 // the config file. Exported so server.go's regular (post-init) startup path can
 // reuse it via BuildClusterCertManager above.
+//
+// The returned Manager owns the vault connection (cert.Manager.AttachCloser): the
+// caller must call manager.Close() on shutdown. The connection is closed here only
+// when initialization fails.
 func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.ManagerConfig, logger logging.Logger) (*cert.Manager, error) {
 	clusterCA := cfg.Certificate.ClusterCA
 
@@ -613,13 +617,19 @@ func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.Man
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OpenBao secret store for cluster CA: %w", err)
 	}
-	defer func() {
-		if cErr := store.Close(); cErr != nil {
-			logger.Error("Failed to close vault secret store after CA init", "error", cErr)
-		}
-	}()
 
-	return initClusterCAWithStore(ctx, cfg, managerCfg, store, logger)
+	manager, err := initClusterCAWithStore(ctx, cfg, managerCfg, store, logger)
+	if err != nil {
+		if cErr := store.Close(); cErr != nil {
+			logger.Error("Failed to close vault secret store after CA init failure", "error", logging.SanitizeLogValue(cErr.Error()))
+		}
+		return nil, err
+	}
+	// The signing-key store reads through this connection for the Manager's whole
+	// lifetime, so it stays open: the Manager's owner closes it with manager.Close
+	// on shutdown.
+	manager.AttachCloser(store)
+	return manager, nil
 }
 
 // initClusterCAWithStore is InitClusterCA's body once a SecretStore is open: it
@@ -637,6 +647,23 @@ func initClusterCAWithStore(ctx context.Context, cfg *config.Config, managerCfg 
 	tenantID, keyPath, err := splitVaultKeyPath(clusterCA.VaultKeyPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// The config-signing identity lives in the same vault, under its own path, so
+	// every node signs with one certificate and no signing key reaches node-local
+	// disk. Attached before either CA constructor so the regional-intermediate
+	// import path receives it too. Agreeing on one identity also needs a
+	// cluster-visible signing cursor store, which wireClusterCertStores supplies
+	// from the cluster storage provider.
+	if managerCfg.SigningKeyStore == nil {
+		signingKeys, err := cert.NewSecretStoreSigningKeyStore(store, tenantID, "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to build cluster signing key store: %w", err)
+		}
+		managerCfg.SigningKeyStore = signingKeys
+	}
+	if managerCfg.SigningCursorStore == nil {
+		logger.Warn("Cluster mode has no cluster-visible signing cursor store; nodes cannot agree on one signing identity")
 	}
 
 	if managerCfg.CAConfig != nil && managerCfg.CAConfig.ExternalCertPath != "" {
