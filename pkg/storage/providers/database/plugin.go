@@ -51,16 +51,17 @@ type DatabaseProvider struct {
 // the dependent endpoints answering 503 (Issue #3755, and #3401 before it).
 // These assertions turn that class of regression back into a build failure.
 var (
-	_ interfaces.StorageProvider            = (*DatabaseProvider)(nil)
-	_ interfaces.NonceStoreCreator          = (*DatabaseProvider)(nil)
-	_ interfaces.LeaseStoreCreator          = (*DatabaseProvider)(nil)
-	_ interfaces.RoutingStoreCreator        = (*DatabaseProvider)(nil)
-	_ interfaces.ScriptRunStoreCreator      = (*DatabaseProvider)(nil)
-	_ interfaces.ExecutionQueueStoreCreator = (*DatabaseProvider)(nil)
-	_ interfaces.CertRevocationStoreCreator = (*DatabaseProvider)(nil)
-	_ interfaces.SigningCursorStoreCreator  = (*DatabaseProvider)(nil)
-	_ interfaces.ModuleApprovalStoreCreator = (*DatabaseProvider)(nil)
-	_ interfaces.RateCounterStoreCreator    = (*DatabaseProvider)(nil)
+	_ interfaces.StorageProvider             = (*DatabaseProvider)(nil)
+	_ interfaces.NonceStoreCreator           = (*DatabaseProvider)(nil)
+	_ interfaces.LeaseStoreCreator           = (*DatabaseProvider)(nil)
+	_ interfaces.RoutingStoreCreator         = (*DatabaseProvider)(nil)
+	_ interfaces.ScriptRunStoreCreator       = (*DatabaseProvider)(nil)
+	_ interfaces.ExecutionQueueStoreCreator  = (*DatabaseProvider)(nil)
+	_ interfaces.CertRevocationStoreCreator  = (*DatabaseProvider)(nil)
+	_ interfaces.SigningCursorStoreCreator   = (*DatabaseProvider)(nil)
+	_ interfaces.SigningTrustAckStoreCreator = (*DatabaseProvider)(nil)
+	_ interfaces.ModuleApprovalStoreCreator  = (*DatabaseProvider)(nil)
+	_ interfaces.RateCounterStoreCreator     = (*DatabaseProvider)(nil)
 )
 
 // Name returns the provider name
@@ -468,6 +469,21 @@ func (p *DatabaseProvider) CreateSigningCursorStore(config map[string]interface{
 	store, err := NewDatabaseSigningCursorStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database signing cursor store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateSigningTrustAckStore creates a PostgreSQL-backed SigningTrustAckStore
+// so per-steward signing-certificate acknowledgements are cluster-visible
+// (Issue #4691). Implements interfaces.SigningTrustAckStoreCreator.
+func (p *DatabaseProvider) CreateSigningTrustAckStore(config map[string]interface{}) (certinterfaces.SigningTrustAckStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseSigningTrustAckStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database signing trust ack store: %w", err)
 	}
 	return store, nil
 }

@@ -182,6 +182,15 @@ type SigningCursorStoreCreator interface {
 	CreateSigningCursorStore(config map[string]interface{}) (certinterfaces.SigningCursorStore, error)
 }
 
+// SigningTrustAckStoreCreator is an optional StorageProvider extension for
+// backends that support cluster-visible per-steward signing-certificate
+// acknowledgement storage (Issue #4691). Backends that do not implement this
+// interface leave the store nil; pkg/cert's node-local file-backed
+// implementation is the single-node default.
+type SigningTrustAckStoreCreator interface {
+	CreateSigningTrustAckStore(config map[string]interface{}) (certinterfaces.SigningTrustAckStore, error)
+}
+
 // ModuleApprovalStoreCreator is an optional StorageProvider extension for
 // backends that support cluster-visible, CAS-protected module bundle approval
 // storage (ADR-031 Decision 1, Issue #3886). Backends that do not implement this
@@ -868,25 +877,26 @@ type StorageManager struct {
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
-	alertStore               business.AlertStore               // Issue #3266: alert acknowledge and silence
-	approvalStore            business.ApprovalStore            // Issue #4607: durable workflow approvals
-	workflowExecutionStore   business.WorkflowExecutionStore   // Issue #4675: durable workflow execution history
-	pendingRefreshStore      business.PendingRefreshStore      // Issue #2098: registration-refresh approval queue
-	refreshPolicyStore       business.RefreshPolicyStore       // Issue #2098: per-tenant refresh policy
-	assurancePolicyStore     business.AssurancePolicyStore     // Issue #2845: per-tenant assurance-policy overrides
-	blastRadiusPolicyStore   business.BlastRadiusPolicyStore   // Issue #3698: per-tenant operator-payload blast-radius overrides
-	tenantCrossingStore      business.TenantCrossingStore      // ADR-025 Decision 2: tenant-crossing grants and break-glass
-	caseStore                business.CaseStore                // ADR-022 §8: cockpit investigation cases
-	nonceStore               business.NonceStore               // Issue #3755, ADR-031: durable registration-refresh nonce
-	leaseStore               business.LeaseStore               // ADR-031 Decision 5: fenced singleton-claim leases
-	routingStore             business.RoutingStore             // ADR-031 Decision 3, Issue #3764: shared steward-routing table
-	scriptRunStore           business.ScriptRunStore           // Issue #4528: shared script runs (cluster mode)
-	executionQueueStore      business.ExecutionQueueStore      // Issue #4528: shared execution queue (cluster mode)
-	nodeRegistryStore        business.NodeRegistryStore        // Issue #3763, ADR-031 Decision 5: post-Raft cluster membership
-	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
-	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
-	moduleApprovalStore      business.ModuleApprovalStore      // Issue #3886, ADR-031: cluster-visible, CAS-protected module approval status
-	rateCounterStore         business.RateCounterStore         // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counters
+	alertStore               business.AlertStore                 // Issue #3266: alert acknowledge and silence
+	approvalStore            business.ApprovalStore              // Issue #4607: durable workflow approvals
+	workflowExecutionStore   business.WorkflowExecutionStore     // Issue #4675: durable workflow execution history
+	pendingRefreshStore      business.PendingRefreshStore        // Issue #2098: registration-refresh approval queue
+	refreshPolicyStore       business.RefreshPolicyStore         // Issue #2098: per-tenant refresh policy
+	assurancePolicyStore     business.AssurancePolicyStore       // Issue #2845: per-tenant assurance-policy overrides
+	blastRadiusPolicyStore   business.BlastRadiusPolicyStore     // Issue #3698: per-tenant operator-payload blast-radius overrides
+	tenantCrossingStore      business.TenantCrossingStore        // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	caseStore                business.CaseStore                  // ADR-022 §8: cockpit investigation cases
+	nonceStore               business.NonceStore                 // Issue #3755, ADR-031: durable registration-refresh nonce
+	leaseStore               business.LeaseStore                 // ADR-031 Decision 5: fenced singleton-claim leases
+	routingStore             business.RoutingStore               // ADR-031 Decision 3, Issue #3764: shared steward-routing table
+	scriptRunStore           business.ScriptRunStore             // Issue #4528: shared script runs (cluster mode)
+	executionQueueStore      business.ExecutionQueueStore        // Issue #4528: shared execution queue (cluster mode)
+	nodeRegistryStore        business.NodeRegistryStore          // Issue #3763, ADR-031 Decision 5: post-Raft cluster membership
+	certRevocationStore      certinterfaces.RevocationStore      // Issue #3852, ADR-031: cluster-visible cert revocation list
+	signingCursorStore       certinterfaces.SigningCursorStore   // Issue #3852, ADR-031: cluster-visible signing rotation cursor
+	signingTrustAckStore     certinterfaces.SigningTrustAckStore // Issue #4691, ADR-031: cluster-visible per-steward signing-cert acknowledgements
+	moduleApprovalStore      business.ModuleApprovalStore        // Issue #3886, ADR-031: cluster-visible, CAS-protected module approval status
+	rateCounterStore         business.RateCounterStore           // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counters
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -1194,6 +1204,19 @@ func (sm *StorageManager) SetSigningCursorStore(s certinterfaces.SigningCursorSt
 	sm.signingCursorStore = s
 }
 
+// GetSigningTrustAckStore returns the cluster-visible per-steward signing
+// certificate acknowledgement store (Issue #4691). Returns nil when the running
+// provider does not implement SigningTrustAckStoreCreator; callers fall back to
+// pkg/cert's node-local file-backed implementation.
+func (sm *StorageManager) GetSigningTrustAckStore() certinterfaces.SigningTrustAckStore {
+	return sm.signingTrustAckStore
+}
+
+// SetSigningTrustAckStore wires the signing trust ack store after construction.
+func (sm *StorageManager) SetSigningTrustAckStore(s certinterfaces.SigningTrustAckStore) {
+	sm.signingTrustAckStore = s
+}
+
 // GetModuleApprovalStore returns the cluster-visible, CAS-protected module bundle
 // approval store (ADR-031 Decision 1, Issue #3886). Returns nil when the running
 // provider does not implement ModuleApprovalStoreCreator; callers fall back to
@@ -1280,6 +1303,7 @@ func (sm *StorageManager) Close() error {
 		sm.moduleApprovalStore,
 		sm.certRevocationStore,
 		sm.signingCursorStore,
+		sm.signingTrustAckStore,
 		sm.rateCounterStore,
 		sm.scriptRunStore,
 		sm.executionQueueStore,
@@ -1696,6 +1720,19 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		if signingCursorStore != nil {
 			sm.SetSigningCursorStore(signingCursorStore)
 			appendIfCloser(&openedStores, signingCursorStore)
+		}
+	}
+	// Wire signing trust ack store if the provider implements SigningTrustAckStoreCreator
+	// (Issue #4691: per-steward signing-cert acknowledgements must be readable from
+	// every controller node).
+	if tac, ok := provider.(SigningTrustAckStoreCreator); ok {
+		signingTrustAckStore, err := tac.CreateSigningTrustAckStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create signing trust ack store: %w", err)
+		}
+		if signingTrustAckStore != nil {
+			sm.SetSigningTrustAckStore(signingTrustAckStore)
+			appendIfCloser(&openedStores, signingTrustAckStore)
 		}
 	}
 	// Wire module approval store if the provider implements ModuleApprovalStoreCreator

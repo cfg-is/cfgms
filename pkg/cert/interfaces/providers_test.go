@@ -42,6 +42,21 @@ func init() {
 	})
 }
 
+func init() {
+	registeredAckCases = append(registeredAckCases, ackStoreCase{
+		name: "database",
+		newStore: func(t *testing.T) (certinterfaces.SigningTrustAckStore, string) {
+			db, skip := testPostgresDB(t)
+			if skip != "" {
+				return nil, skip
+			}
+			s, err := database.NewDatabaseSigningTrustAckStore(db, testPostgresConfig())
+			require.NoError(t, err)
+			return s, ""
+		},
+	})
+}
+
 // testPostgresConfig mirrors pkg/storage/providers/database's own test
 // configuration convention (host/port/credentials via CFGMS_TEST_DB_* env vars).
 func testPostgresConfig() map[string]interface{} {
