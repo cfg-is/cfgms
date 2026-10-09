@@ -4,6 +4,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,9 @@ import (
 )
 
 const defaultEmitterBufferDepth = 256
+
+// errNoClient is returned by sendStream when the client source has no client yet.
+var errNoClient = errors.New("no transport client available")
 
 // EventEmitter owns a buffered channel of LogEntry values and a background
 // goroutine that streams queued entries to the controller via the LogStream RPC.
@@ -24,7 +28,7 @@ type EventEmitter struct {
 	ch        chan *transportpb.LogEntry
 	dropCount atomic.Int64
 
-	client    transportpb.StewardTransportClient
+	clientSrc func() transportpb.StewardTransportClient
 	stewardID string
 	logger    logging.Logger
 
@@ -40,8 +44,11 @@ type EventEmitter struct {
 
 // EventEmitterConfig holds configuration for creating an EventEmitter.
 type EventEmitterConfig struct {
-	// Client is the gRPC client used to open the LogStream RPC.
-	Client transportpb.StewardTransportClient
+	// ClientSource returns the gRPC client used to open the LogStream RPC. It is
+	// called on every stream attempt so the emitter follows the control-plane
+	// provider across reconnects. A nil result means no connection is available
+	// yet; the emitter backs off without logging a warning.
+	ClientSource func() transportpb.StewardTransportClient
 
 	// StewardID is stamped into every emitted LogEntry.
 	StewardID string
@@ -65,7 +72,7 @@ func NewEventEmitter(cfg EventEmitterConfig) *EventEmitter {
 	}
 	return &EventEmitter{
 		ch:        make(chan *transportpb.LogEntry, depth),
-		client:    cfg.Client,
+		clientSrc: cfg.ClientSource,
 		stewardID: cfg.StewardID,
 		logger:    logger,
 		done:      make(chan struct{}),
@@ -137,8 +144,10 @@ func (e *EventEmitter) sendLoop(ctx context.Context, stop <-chan struct{}) {
 				return
 			default:
 			}
-			e.logger.Warn("EventEmitter: LogStream send failed, reconnecting",
-				"error", err, "attempt", attempt)
+			if !errors.Is(err, errNoClient) {
+				e.logger.Warn("EventEmitter: LogStream send failed, reconnecting",
+					"error", logging.SanitizeLogValue(err.Error()), "attempt", attempt)
+			}
 			delay := emitterBackoff(attempt)
 			attempt++
 			select {
@@ -161,7 +170,14 @@ func (e *EventEmitter) sendLoop(ctx context.Context, stop <-chan struct{}) {
 // The gRPC stream uses ctx (not stop) so cancellation of the parent context
 // still terminates the stream immediately when needed.
 func (e *EventEmitter) sendStream(ctx context.Context, stop <-chan struct{}) error {
-	stream, err := e.client.LogStream(ctx)
+	var client transportpb.StewardTransportClient
+	if e.clientSrc != nil {
+		client = e.clientSrc()
+	}
+	if client == nil {
+		return errNoClient
+	}
+	stream, err := client.LogStream(ctx)
 	if err != nil {
 		return err
 	}

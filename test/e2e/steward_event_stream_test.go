@@ -379,10 +379,10 @@ func newStreamEnv(t *testing.T) *streamEnv {
 
 	// ── 5. Create and start the EventEmitter ─────────────────────────────────
 	emitter := client.NewEventEmitter(client.EventEmitterConfig{
-		Client:      cp.TransportClient(),
-		StewardID:   reg.StewardID,
-		Logger:      logging.ForModule("e2e-event-stream"),
-		BufferDepth: 64,
+		ClientSource: cp.TransportClient,
+		StewardID:    reg.StewardID,
+		Logger:       logging.ForModule("e2e-event-stream"),
+		BufferDepth:  64,
 	})
 	emitter.Start(ctx)
 	t.Cleanup(func() { emitter.Close() })

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,6 +145,7 @@ var _ transportpb.StewardTransportServer = (*testLogStreamServer)(nil)
 type emitterTestEnv struct {
 	srv    *testLogStreamServer
 	client transportpb.StewardTransportClient
+	conn   *grpc.ClientConn
 }
 
 // newEmitterTestEnv starts an in-process gRPC server and returns a paired client.
@@ -182,6 +184,7 @@ func newEmitterTestEnv(t *testing.T) *emitterTestEnv {
 	return &emitterTestEnv{
 		srv:    srv,
 		client: transportpb.NewStewardTransportClient(conn),
+		conn:   conn,
 	}
 }
 
@@ -195,9 +198,9 @@ func TestEventEmitter_EnqueueAndDeliver(t *testing.T) {
 	env := newEmitterTestEnv(t)
 
 	emitter := client.NewEventEmitter(client.EventEmitterConfig{
-		Client:    env.client,
-		StewardID: "steward-deliver",
-		Logger:    logging.NewNoopLogger(),
+		ClientSource: func() transportpb.StewardTransportClient { return env.client },
+		StewardID:    "steward-deliver",
+		Logger:       logging.NewNoopLogger(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -318,10 +321,10 @@ func TestEventEmitter_ReconnectsOnStreamError(t *testing.T) {
 	require.NoError(t, err)
 
 	emitter := client.NewEventEmitter(client.EventEmitterConfig{
-		Client:      transportpb.NewStewardTransportClient(conn1),
-		StewardID:   "steward-reconnect",
-		Logger:      logging.NewNoopLogger(),
-		BufferDepth: 8,
+		ClientSource: func() transportpb.StewardTransportClient { return transportpb.NewStewardTransportClient(conn1) },
+		StewardID:    "steward-reconnect",
+		Logger:       logging.NewNoopLogger(),
+		BufferDepth:  8,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -381,4 +384,106 @@ func TestEventEmitter_Close_BeforeStart(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Close() blocked when Start() was never called")
 	}
+}
+
+// warnCountingLogger counts Warn calls; all other levels are no-ops.
+type warnCountingLogger struct {
+	logging.Logger
+	warns atomic.Int64
+}
+
+func (l *warnCountingLogger) Warn(string, ...interface{}) { l.warns.Add(1) }
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func hasStewardEntry(srv *testLogStreamServer, id string) bool {
+	for _, e := range srv.Collected() {
+		if e.StewardId == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEventEmitter_FollowsClientSourceAcrossReconnect verifies that closing the
+// first connection and repointing the client source at a second one resumes
+// delivery to the second server without further send-failed warnings.
+func TestEventEmitter_FollowsClientSourceAcrossReconnect(t *testing.T) {
+	env1 := newEmitterTestEnv(t)
+	env2 := newEmitterTestEnv(t)
+
+	var current atomic.Pointer[transportpb.StewardTransportClient]
+	current.Store(&env1.client)
+	log := &warnCountingLogger{Logger: logging.NewNoopLogger()}
+
+	emitter := client.NewEventEmitter(client.EventEmitterConfig{
+		ClientSource: func() transportpb.StewardTransportClient { return *current.Load() },
+		StewardID:    "steward-swap",
+		Logger:       log,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	emitter.Start(ctx)
+	defer emitter.Close()
+
+	select {
+	case <-env1.srv.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for first LogStream")
+	}
+
+	// Close the first connection; the next send on the stranded stream fails once.
+	require.NoError(t, env1.conn.Close())
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "sacrificial"})
+	waitFor(t, "send-failed warning", func() bool { return log.warns.Load() >= 1 })
+
+	// Reconnect: the source now yields the second connection.
+	current.Store(&env2.client)
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "after-swap"})
+	waitFor(t, "delivery to second server", func() bool { return hasStewardEntry(env2.srv, "after-swap") })
+
+	warnsAtResume := log.warns.Load()
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "after-resume"})
+	waitFor(t, "second delivery on second server", func() bool { return hasStewardEntry(env2.srv, "after-resume") })
+	assert.Equal(t, warnsAtResume, log.warns.Load(), "no further warnings once delivery resumed")
+}
+
+// TestEventEmitter_NilClientSource verifies a nil source result neither panics
+// nor warns, and that delivery starts once the source yields a client.
+func TestEventEmitter_NilClientSource(t *testing.T) {
+	env := newEmitterTestEnv(t)
+
+	var current atomic.Pointer[transportpb.StewardTransportClient]
+	log := &warnCountingLogger{Logger: logging.NewNoopLogger()}
+	emitter := client.NewEventEmitter(client.EventEmitterConfig{
+		ClientSource: func() transportpb.StewardTransportClient {
+			if c := current.Load(); c != nil {
+				return *c
+			}
+			return nil
+		},
+		StewardID: "steward-nil",
+		Logger:    log,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	emitter.Start(ctx)
+	defer emitter.Close()
+
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "queued-while-nil"})
+	time.Sleep(300 * time.Millisecond)
+	assert.Zero(t, log.warns.Load(), "nil client source must not warn")
+
+	current.Store(&env.client)
+	waitFor(t, "delivery after source yields a client", func() bool { return hasStewardEntry(env.srv, "queued-while-nil") })
+	assert.Zero(t, log.warns.Load())
 }
