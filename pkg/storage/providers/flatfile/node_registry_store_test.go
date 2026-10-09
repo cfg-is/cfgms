@@ -89,3 +89,25 @@ func TestFlatFileNodeRegistryStore_RegisterNode_RejectsEmptyID(t *testing.T) {
 	store := newTestFlatFileNodeRegistryStore(t)
 	require.Error(t, store.RegisterNode(context.Background(), business.NodeRecord{Address: "10.0.0.1:9080"}))
 }
+
+// TestNodeRegistryStore_VersionStartedAtLastSeen_RoundTrip registers a record
+// with Version and StartedAt and asserts ListNodes returns them plus a LastSeen
+// stamped by the store's own clock, ignoring any caller-supplied LastSeen.
+func TestFlatFileNodeRegistryStore_VersionStartedAtLastSeen_RoundTrip(t *testing.T) {
+	store := newTestFlatFileNodeRegistryStore(t)
+	ctx := context.Background()
+
+	startedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	bogusLastSeen := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, store.RegisterNode(ctx, business.NodeRecord{
+		ID: "node-a", Address: "10.0.0.1:9080", Version: "v1.2.3", StartedAt: startedAt, LastSeen: bogusLastSeen,
+	}))
+
+	nodes, err := store.ListNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "v1.2.3", nodes[0].Version)
+	assert.True(t, startedAt.Equal(nodes[0].StartedAt), "StartedAt round-trip: want %s got %s", startedAt, nodes[0].StartedAt)
+	assert.False(t, nodes[0].LastSeen.IsZero())
+	assert.WithinDuration(t, time.Now(), nodes[0].LastSeen, time.Minute, "LastSeen must come from the store clock, not the caller")
+}

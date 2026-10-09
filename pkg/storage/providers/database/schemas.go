@@ -1055,8 +1055,12 @@ func (s DatabaseSchemas) CreateNodeRegistryTable(ctx context.Context, db *sql.DB
 		CREATE TABLE IF NOT EXISTS cfgms_node_registry (
 			node_id    TEXT PRIMARY KEY,
 			address    TEXT NOT NULL,
+			version    TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMP WITH TIME ZONE,
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 		);
+		ALTER TABLE cfgms_node_registry ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT '';
+		ALTER TABLE cfgms_node_registry ADD COLUMN IF NOT EXISTS started_at TIMESTAMP WITH TIME ZONE;
 	`
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create cfgms_node_registry table: %w", err)

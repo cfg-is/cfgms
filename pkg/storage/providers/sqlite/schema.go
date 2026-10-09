@@ -125,6 +125,40 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillNodeRegistryColumns adds the version and started_at columns to a
+// pre-existing cfgms_node_registry table created without them. Fresh databases
+// (table absent) are skipped. Rows written by an older build keep an empty
+// value until the node's next registration refresh.
+func backfillNodeRegistryColumns(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "cfgms_node_registry")
+	if err != nil {
+		return fmt.Errorf("sqlite: node registry back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"version", `ALTER TABLE cfgms_node_registry ADD COLUMN version TEXT NOT NULL DEFAULT ''`},
+		{"started_at", `ALTER TABLE cfgms_node_registry ADD COLUMN started_at TEXT NOT NULL DEFAULT ''`},
+	} {
+		present, err := columnExists(ctx, db, "cfgms_node_registry", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: node registry back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: node registry back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	return nil
+}
+
 // backfillSessionTokenRecords adds the device-continuity columns to a pre-existing
 // session_token_records table (Issue #2788). Fresh databases (table absent) are skipped.
 // Column-existence is checked via PRAGMA before each ALTER TABLE so the pass is idempotent.
@@ -521,6 +555,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillStewardColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillNodeRegistryColumns(ctx, db); err != nil {
 		return err
 	}
 	if err := backfillSessionTokenRecords(ctx, db); err != nil {
@@ -992,6 +1029,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS cfgms_node_registry (
 			node_id    TEXT PRIMARY KEY,
 			address    TEXT NOT NULL,
+			version    TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
 		)`,
 

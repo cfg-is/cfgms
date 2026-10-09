@@ -51,14 +51,21 @@ func (s *DatabaseNodeRegistryStore) RegisterNode(ctx context.Context, self busin
 		return fmt.Errorf("database: node id cannot be empty")
 	}
 
+	var startedAt interface{}
+	if !self.StartedAt.IsZero() {
+		startedAt = self.StartedAt.UTC()
+	}
+
 	const query = `
-		INSERT INTO cfgms_node_registry (node_id, address, updated_at)
-		VALUES ($1, $2, now())
+		INSERT INTO cfgms_node_registry (node_id, address, version, started_at, updated_at)
+		VALUES ($1, $2, $3, $4, now())
 		ON CONFLICT (node_id) DO UPDATE SET
 			address    = EXCLUDED.address,
+			version    = EXCLUDED.version,
+			started_at = EXCLUDED.started_at,
 			updated_at = now()
 	`
-	if _, err := s.db.ExecContext(ctx, query, self.ID, self.Address); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, self.ID, self.Address, self.Version, startedAt); err != nil {
 		return fmt.Errorf("failed to register cluster node %q: %w", self.ID, err)
 	}
 	return nil
@@ -70,7 +77,7 @@ func (s *DatabaseNodeRegistryStore) RegisterNode(ctx context.Context, self busin
 // like a never-registered node.
 func (s *DatabaseNodeRegistryStore) ListNodes(ctx context.Context) ([]business.NodeRecord, error) {
 	const query = `
-		SELECT node_id, address
+		SELECT node_id, address, version, started_at, updated_at
 		FROM cfgms_node_registry
 		WHERE updated_at >= now() - ($1::double precision * interval '1 second')
 	`
@@ -83,8 +90,12 @@ func (s *DatabaseNodeRegistryStore) ListNodes(ctx context.Context) ([]business.N
 	var records []business.NodeRecord
 	for rows.Next() {
 		var r business.NodeRecord
-		if err := rows.Scan(&r.ID, &r.Address); err != nil {
+		var startedAt sql.NullTime
+		if err := rows.Scan(&r.ID, &r.Address, &r.Version, &startedAt, &r.LastSeen); err != nil {
 			return nil, fmt.Errorf("failed to scan cluster node row: %w", err)
+		}
+		if startedAt.Valid {
+			r.StartedAt = startedAt.Time
 		}
 		records = append(records, r)
 	}

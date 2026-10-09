@@ -132,9 +132,20 @@ func (fm *failoverManager) GetFailoverHistory() ([]*FailoverEvent, error) {
 	fm.mu.RLock()
 	defer fm.mu.RUnlock()
 
-	// Return a copy to prevent modification
+	// Return deep copies: recorded events are mutated in place by
+	// executeFailover (under fm.mu), so handing out the shared pointers would
+	// let callers read them concurrently with that mutation.
 	events := make([]*FailoverEvent, len(fm.failoverEvents))
-	copy(events, fm.failoverEvents)
+	for i, e := range fm.failoverEvents {
+		c := *e
+		if e.Details != nil {
+			c.Details = make(map[string]interface{}, len(e.Details))
+			for k, v := range e.Details {
+				c.Details[k] = v
+			}
+		}
+		events[i] = &c
+	}
 
 	return events, nil
 }
@@ -231,13 +242,26 @@ func (fm *failoverManager) triggerAutomaticFailover(reason string) {
 		ctx, cancel := context.WithTimeout(context.Background(), fm.cfg.MaxDuration)
 		defer cancel()
 
+		// executeFailover mutates failover state and the event history, so it
+		// must run with fm.mu held — the same contract TriggerFailover honours.
+		// Re-check the guards: another failover may have started or completed
+		// between releasing the lock above and this goroutine acquiring it.
+		fm.mu.Lock()
+		defer fm.mu.Unlock()
+
+		if fm.isFailingOver || time.Since(fm.lastFailover) < fm.cfg.GracePeriod {
+			return
+		}
+
 		if err := fm.executeFailover(ctx, reason, false); err != nil {
 			fm.logger.Error("Automatic failover failed", "error", err)
 		}
 	}()
 }
 
-// executeFailover executes the failover process
+// executeFailover executes the failover process. The caller must hold fm.mu
+// for writing: it updates isFailingOver, lastFailover and the event history,
+// and mutates the event after it has been recorded.
 func (fm *failoverManager) executeFailover(ctx context.Context, reason string, manual bool) error {
 	startTime := time.Now()
 	eventID := fmt.Sprintf("failover-%d", startTime.Unix())

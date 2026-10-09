@@ -29,6 +29,18 @@ type NodeRecord struct {
 	// Address is the node's advertised address for peer-to-peer traffic
 	// (e.g. the internal delivery service).
 	Address string
+
+	// Version is the node's build version.
+	Version string
+
+	// StartedAt is when the node's process started, as reported by the node.
+	StartedAt time.Time
+
+	// LastSeen is when the node last refreshed its record. It is set by the
+	// store from its own clock when ListNodes returns the record; any
+	// caller-supplied value passed to RegisterNode is ignored. ListNodes omits
+	// stale records, so a record's presence in ListNodes means the node is live.
+	LastSeen time.Time
 }
 
 // NodeRegistryStore defines the shared controller-node registry (Issue
