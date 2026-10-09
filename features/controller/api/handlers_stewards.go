@@ -15,10 +15,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 	"gopkg.in/yaml.v3"
 
+	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -1398,8 +1401,50 @@ func (s *Server) emitVisibilityAudit(ctx context.Context, tenantID, principalID,
 	}
 }
 
+// Limits on the module list built from steward-supplied fragment authorities.
+const (
+	maxReportedModules = 64
+	maxModuleNameLen   = 64
+)
+
+// nonModuleAuthorities are fragment authorities that identify a steward component
+// rather than a module: host-fact gatherers and the osquery observer.
+var nonModuleAuthorities = map[string]bool{"gatherer": true, "osquery": true}
+
+// moduleNamesFromFragments returns the distinct, sorted authorities of the fragments
+// that are owned by a module. Authority is steward-supplied and the host may be
+// compromised, so each value is untrusted display data: blank values, values with
+// control or format characters, and over-long values are dropped, and the list is capped.
+func moduleNamesFromFragments(frags []*common.Fragment) []string {
+	seen := make(map[string]struct{})
+	for _, f := range frags {
+		name := strings.TrimSpace(f.GetAuthority())
+		if name == "" || len(name) > maxModuleNameLen || nonModuleAuthorities[name] {
+			continue
+		}
+		// Control and format characters (bidi overrides, zero-width) could make a name
+		// render as a different module in a terminal.
+		if strings.IndexFunc(name, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 || !utf8.ValidString(name) {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) > maxReportedModules {
+		names = names[:maxReportedModules]
+	}
+	return names
+}
+
 // handleGetStewardModules handles GET /api/v1/stewards/{id}/modules.
-// Returns a 501 placeholder when the steward has no modules.loaded DNA attribute.
+// The list is the modules that own at least one resource on the steward, derived from
+// the Authority of the stored DNA fragments (ADR-017). It returns 501 only when the
+// steward has no DNA at all. The steward's fragment budget can truncate module
+// fragments on very large hosts, in which case a module may be missing from the list.
 func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -1428,21 +1473,10 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Check DNA fragments for modules.loaded key.
 	if stewardInfo.DNA == nil {
 		s.logger.Info("Modules unavailable: steward has no DNA", "steward_id", stewardIDForLog)
 		s.writeErrorResponse(w, http.StatusNotImplemented,
-			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
-			"MODULES_UNAVAILABLE")
-		return
-	}
-
-	dnaAttrs := service.FlattenDNAFragments(stewardInfo.DNA.Fragments)
-	modulesRaw, ok := dnaAttrs["modules.loaded"]
-	if !ok {
-		s.logger.Info("Modules unavailable: modules.loaded attribute absent", "steward_id", stewardIDForLog)
-		s.writeErrorResponse(w, http.StatusNotImplemented,
-			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"steward has not reported DNA yet; module list unavailable",
 			"MODULES_UNAVAILABLE")
 		return
 	}
@@ -1450,13 +1484,10 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 	type moduleEntry struct {
 		Name string `json:"name"`
 	}
-	parts := strings.Split(modulesRaw, ",")
-	modules := make([]moduleEntry, 0, len(parts))
-	for _, name := range parts {
-		name = strings.TrimSpace(name)
-		if name != "" {
-			modules = append(modules, moduleEntry{Name: name})
-		}
+	names := moduleNamesFromFragments(stewardInfo.DNA.Fragments)
+	modules := make([]moduleEntry, 0, len(names))
+	for _, name := range names {
+		modules = append(modules, moduleEntry{Name: name})
 	}
 
 	s.logger.Info("Fetched steward loaded modules", "steward_id", stewardIDForLog, "count", len(modules))

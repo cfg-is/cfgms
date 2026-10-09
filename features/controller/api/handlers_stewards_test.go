@@ -586,7 +586,6 @@ func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 		"hostname":        true,
 		"os":              true,
 		"arch":            true,
-		"modules.loaded":  true,
 		"steward.version": true,
 	}
 	if hostname := attrs["hostname"]; hostname != "" {
@@ -601,11 +600,6 @@ func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 	}
 	if archName := attrs["arch"]; archName != "" {
 		frag, err := sdna.NewFragment("host:cpu", "test", sdna.MapState(map[string]interface{}{"arch": archName}))
-		require.NoError(t, err)
-		frags = append(frags, frag)
-	}
-	if modulesLoaded := attrs["modules.loaded"]; modulesLoaded != "" {
-		frag, err := sdna.NewFragment("modules", "test", sdna.MapState(map[string]interface{}{"modules.loaded": modulesLoaded}))
 		require.NoError(t, err)
 		frags = append(frags, frag)
 	}
@@ -724,37 +718,6 @@ func TestHandleGetSteward_FragmentSourced_AttributesPassthrough(t *testing.T) {
 		"os must be present in fragment-sourced attributes map")
 	assert.Equal(t, "test-tenant", resp.Data.DNA.Attributes["tenant"],
 		"controller-injected tenant key must be present")
-}
-
-// TestHandleGetStewardModules_FragmentSourced verifies that the modules endpoint
-// reads modules.loaded from DNA fragments, not DNA.Attributes, and returns the
-// correct parsed module list.
-func TestHandleGetStewardModules_FragmentSourced(t *testing.T) {
-	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
-
-	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
-		"hostname": "frag-modules-host", "os": "linux",
-		"modules.loaded": "file, patch",
-	})
-
-	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	var resp struct {
-		Data struct {
-			Modules []struct {
-				Name string `json:"name"`
-			} `json:"modules"`
-		} `json:"data"`
-	}
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	require.Len(t, resp.Data.Modules, 2)
-	assert.Equal(t, "file", resp.Data.Modules[0].Name)
-	assert.Equal(t, "patch", resp.Data.Modules[1].Name)
 }
 
 func TestHandleListStewards_NoFilter_ReturnsAll(t *testing.T) {
@@ -1699,39 +1662,36 @@ func TestHandleGetStewardModules_StewardNotFound(t *testing.T) {
 	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
 }
 
-// TestHandleGetStewardModules_ReturnsNotImplemented verifies 501 + MODULES_UNAVAILABLE
-// for a known steward with no module DNA and a tenant-authorized admin.
-func TestHandleGetStewardModules_ReturnsNotImplemented(t *testing.T) {
-	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
-
-	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
-		"hostname": "no-modules-host", "os": "linux",
-	})
-
-	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
-	var errResp ErrorResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.Equal(t, "MODULES_UNAVAILABLE", errResp.Error.Code)
-	assert.Contains(t, errResp.Error.Message, "steward does not report loaded modules")
+// moduleFragments builds one fragment per authority, each with a distinct fragment
+// ID, mirroring how module-owned resources appear in stored DNA (ADR-017).
+func moduleFragments(t *testing.T, authorities ...string) []*common.Fragment {
+	t.Helper()
+	var frags []*common.Fragment
+	for i, auth := range authorities {
+		frag, err := sdna.NewFragment(fmt.Sprintf("res:%s:%d", auth, i), auth,
+			sdna.MapState(map[string]interface{}{"k": "v"}))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
+	return frags
 }
 
-// TestHandleGetStewardModules_Returns200WithModules verifies that a steward with a
-// modules.loaded DNA attribute returns 200 with the parsed module list.
-func TestHandleGetStewardModules_Returns200WithModules(t *testing.T) {
-	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
-
+// registerStewardWithAuthorities registers a steward and replaces its stored DNA with
+// one fragment per given authority.
+func registerStewardWithAuthorities(t *testing.T, server *Server, authorities ...string) string {
+	t.Helper()
 	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
 		"hostname": "modules-host", "os": "linux",
-		"modules.loaded": "file, service, package",
 	})
+	require.True(t, server.controllerService.SetStewardDNA(stewardID, &common.DNA{
+		Id:        "dna-" + stewardID,
+		Fragments: moduleFragments(t, authorities...),
+	}))
+	return stewardID
+}
 
+func getModuleNames(t *testing.T, server *Server, apiKey, stewardID string) []string {
+	t.Helper()
 	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
 	req.Header.Set("X-API-Key", apiKey)
 	rec := httptest.NewRecorder()
@@ -1746,10 +1706,78 @@ func TestHandleGetStewardModules_Returns200WithModules(t *testing.T) {
 		} `json:"data"`
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	require.Len(t, resp.Data.Modules, 3)
-	assert.Equal(t, "file", resp.Data.Modules[0].Name)
-	assert.Equal(t, "service", resp.Data.Modules[1].Name)
-	assert.Equal(t, "package", resp.Data.Modules[2].Name)
+	names := []string{}
+	for _, m := range resp.Data.Modules {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
+// TestHandleGetStewardModules_NoDNA_ReturnsNotImplemented verifies 501 +
+// MODULES_UNAVAILABLE for a known steward that has no DNA at all.
+func TestHandleGetStewardModules_NoDNA_ReturnsNotImplemented(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "no-dna-host", "os": "linux",
+	})
+	require.True(t, server.controllerService.SetStewardDNA(stewardID, nil))
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MODULES_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleGetStewardModules_ModuleAuthorities verifies the list is the distinct,
+// sorted fragment authorities with the non-module authorities removed.
+func TestHandleGetStewardModules_ModuleAuthorities(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerStewardWithAuthorities(t, server,
+		"service", "gatherer", "file", "osquery", "file")
+
+	assert.Equal(t, []string{"file", "service"}, getModuleNames(t, server, apiKey, stewardID))
+}
+
+// TestHandleGetStewardModules_OnlyGatherer_EmptyList verifies a steward with DNA but
+// no module-owned fragment returns 200 with an empty list, not 501.
+func TestHandleGetStewardModules_OnlyGatherer_EmptyList(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerStewardWithAuthorities(t, server, "gatherer", "gatherer")
+
+	assert.Empty(t, getModuleNames(t, server, apiKey, stewardID))
+}
+
+// TestHandleGetStewardModules_UntrustedAuthority verifies steward-supplied authority
+// values are bounded: blank/control-character values are dropped and the list is capped.
+func TestHandleGetStewardModules_UntrustedAuthority(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	auths := []string{"", "  ", "bad\nname", "evil\u202Emod", strings.Repeat("x", 500)}
+	for i := 0; i < maxReportedModules+20; i++ {
+		auths = append(auths, fmt.Sprintf("mod%04d", i))
+	}
+	stewardID := registerStewardWithAuthorities(t, server, auths...)
+
+	names := getModuleNames(t, server, apiKey, stewardID)
+	assert.LessOrEqual(t, len(names), maxReportedModules)
+	for _, n := range names {
+		assert.NotEmpty(t, strings.TrimSpace(n))
+		assert.NotContains(t, n, "\n")
+		assert.NotContains(t, n, "\u202E")
+		assert.LessOrEqual(t, len(n), maxModuleNameLen)
+	}
 }
 
 // TestHandleGetStewardModules_InvalidStewardID verifies 400 for a malformed steward ID.
