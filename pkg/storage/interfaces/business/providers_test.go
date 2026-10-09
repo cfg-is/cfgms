@@ -54,7 +54,9 @@ func newContractSQLiteStewardStore(t *testing.T) business.StewardStore {
 }
 
 // newContractDatabaseStewardStoreOrSkip returns a live DatabaseStewardStore, or
-// skips when PostgreSQL is not available. The skip is intentional: the database
+// skips when PostgreSQL is not available (short mode, no password, or a failed
+// connect/ping). Once the database answers a ping, a store-initialisation error
+// fails the test. The skip is intentional: the database
 // provider's own integration tests gate the PR merge, so skipping here on a
 // machine without PostgreSQL is safe. The test must still pass in CI, where the
 // merge-queue run has a real database and CFGMS_TEST_DB_PASSWORD is set.
@@ -86,7 +88,9 @@ func newContractDatabaseStewardStoreOrSkip(t *testing.T) business.StewardStore {
 	t.Cleanup(func() { _ = db.Close() })
 	store, err := database.NewDatabaseStewardStore(db, map[string]interface{}{})
 	if err != nil {
-		t.Skipf("PostgreSQL not available for contract test: %v", err)
+		// The database is reachable, so an init failure (e.g. a schema migration
+		// error) is a real defect and must not be hidden by a skip.
+		t.Fatalf("PostgreSQL reachable but database steward store failed to initialise: %v", err)
 	}
 	return store
 }
@@ -271,8 +275,8 @@ func newContractSQLiteAuditStore(t *testing.T) business.AuditStore {
 }
 
 // newContractDatabaseAuditStoreOrSkip returns a live DatabaseAuditStore, or skips
-// when PostgreSQL is not available — see newContractDatabaseStewardStoreOrSkip
-// above for why skipping here (rather than failing) is safe.
+// when PostgreSQL is not available. A store-initialisation failure against a
+// reachable database fails the test — see newContractDatabaseStewardStoreOrSkip.
 func newContractDatabaseAuditStoreOrSkip(t *testing.T) business.AuditStore {
 	t.Helper()
 	if testing.Short() {
@@ -301,7 +305,9 @@ func newContractDatabaseAuditStoreOrSkip(t *testing.T) business.AuditStore {
 	t.Cleanup(func() { _ = db.Close() })
 	store, err := database.NewDatabaseAuditStore(db, map[string]interface{}{})
 	if err != nil {
-		t.Skipf("PostgreSQL not available for contract test: %v", err)
+		// The database is reachable, so an init failure (e.g. a schema migration
+		// error) is a real defect and must not be hidden by a skip.
+		t.Fatalf("PostgreSQL reachable but database audit store failed to initialise: %v", err)
 	}
 	return store
 }
