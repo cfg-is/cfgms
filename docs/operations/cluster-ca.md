@@ -102,6 +102,72 @@ path "secret/data/root/cluster-ca-key" {
 }
 ```
 
+## Config-signing key path
+
+In cluster mode the controller's config-signing certificate and private key are stored in
+the same vault as the CA, under their own path, and every node signs with the one
+certificate the shared signing cursor names. No signing private key is written to a node's
+local certificate directory; the key exists in process memory only while signing. (A node
+that still holds its own signing certificate and has no shared entry yet keeps signing with
+it and logs a `legacy node-local mode` warning, so a rolling upgrade never interrupts
+signing.)
+
+The path is fixed and sits under the tenant of `certificate.cluster_ca.vault_key_path` (the
+part before the first `/`). For `vault_key_path: root/cluster-ca` and the default mount:
+
+| Purpose | KV v2 data path | KV v2 metadata path |
+|---------|-----------------|---------------------|
+| One secret per signing serial (certificate, key and chain together) | `secret/data/root/config-signing/shared/<serial>` | `secret/metadata/root/config-signing/shared/<serial>` |
+| Bootstrap claim (TTL-bound, taken by the one node that generates the first identity) | `secret/data/root/config-signing/claims/bootstrap` | `secret/metadata/root/config-signing/claims/bootstrap` |
+
+Entries are written create-if-absent (compare-and-swap against "no version") and are never
+replaced. Node tokens therefore need no `update` or `delete` on the signing-key prefix.
+
+```hcl
+# Signing identities: read and create only. No update, no delete, so a compromised
+# node token cannot replace or remove the cluster's signing identity.
+path "secret/data/root/config-signing/shared/*" {
+  capabilities = ["read", "create"]
+}
+path "secret/metadata/root/config-signing/shared" {
+  capabilities = ["list"]
+}
+path "secret/metadata/root/config-signing/shared/*" {
+  capabilities = ["read", "list"]
+}
+
+# Bootstrap claim: expires on its own; a crashed claimant's record is taken over with
+# an update once its TTL has lapsed.
+path "secret/data/root/config-signing/claims/*" {
+  capabilities = ["read", "create", "update"]
+}
+path "secret/metadata/root/config-signing/claims/*" {
+  capabilities = ["read"]
+}
+```
+
+Keep this policy separate from the CA policy above: the CA path is read by every node once
+at start, while the signing path is read on the signing hot path (cached for at most five
+seconds per node). If the vault cannot be read, signing fails with an error; there is no
+fallback to a local key for a serial that is meant to be shared.
+
+### Audit logging
+
+The signing key is the credential stewards trust for every command and configuration the
+controller sends, so every access to it must be attributable. Enable a vault audit device
+that records requests under `config-signing/` before enabling cluster mode:
+
+```sh
+bao audit enable file file_path=/var/log/openbao/audit.log
+bao audit list -detailed        # the device must be listed and not disabled
+```
+
+Confirm it is on by listing the devices and by reading a signing entry as an authorized
+operator, then finding that request (path `secret/data/root/config-signing/shared/<serial>`)
+in the audit log. Ship the audit log off the vault host. Alert on any `update`, `delete` or
+`destroy` against `config-signing/shared/`, on reads from tokens other than the controller
+node roles, and on any `create` after the cluster's first identity exists.
+
 ## Realm Assignment
 
 `realm_id` names this cluster's home cell (ADR-032 Decision 3). It is a single

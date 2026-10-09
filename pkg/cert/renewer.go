@@ -12,6 +12,19 @@ type Renewer struct {
 	ca        *CA
 	store     *FileStore
 	validator *Validator
+
+	// refuseConfigSigning is set on a Manager with a shared signing identity:
+	// renewing a signing certificate here would write its key to node-local disk
+	// and name a serial the other nodes cannot resolve.
+	refuseConfigSigning bool
+}
+
+// newManagerRenewer builds the Renewer for a Manager, applying config's signing
+// identity mode.
+func newManagerRenewer(config *ManagerConfig, ca *CA, store *FileStore, validator *Validator) *Renewer {
+	r := NewRenewer(ca, store, validator)
+	r.refuseConfigSigning = config != nil && config.SigningKeyStore != nil
+	return r
 }
 
 // NewRenewer creates a new certificate renewer
@@ -65,6 +78,10 @@ func (r *Renewer) RenewCertificate(serialNumber string, config interface{}) (*Ce
 	existingCert, err := r.store.GetCertificate(serialNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get existing certificate: %w", err)
+	}
+
+	if r.refuseConfigSigning && existingCert.Type == CertificateTypeConfigSigning {
+		return nil, fmt.Errorf("%w: signing certificates are not renewed node-locally", ErrSigningMigrationPending)
 	}
 
 	// Generate new certificate based on the existing one's type and configuration
@@ -217,6 +234,9 @@ func (r *Renewer) AutoRenewCertificates(withinDays int) ([]*Certificate, error) 
 	for _, candidate := range renewalCandidates {
 		// Skip CA certificates for auto-renewal
 		if candidate.Certificate.Type == CertificateTypeCA {
+			continue
+		}
+		if r.refuseConfigSigning && candidate.Certificate.Type == CertificateTypeConfigSigning {
 			continue
 		}
 
