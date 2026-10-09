@@ -788,6 +788,7 @@ func TestOperatorPayloadSignBegin_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	principal := &Principal{ID: username}
 
 	server.haManager = newNonAuthoritativeHAManager(t)
+	server.SetNonceStore(newClusterFixture(t).nonces) // ClusterMode ceremony state is cluster-shared (Issue #4527)
 
 	rec := doSignBegin(t, server, principal, "nonauthoritative-sess", validBeginBody())
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -818,6 +819,7 @@ func TestOperatorPayloadSignFinish_SucceedsOnNonAuthoritativeNode(t *testing.T) 
 	principal := &Principal{ID: username}
 
 	server.haManager = newNonAuthoritativeHAManager(t)
+	server.SetNonceStore(newClusterFixture(t).nonces) // ClusterMode ceremony state is cluster-shared (Issue #4527)
 
 	const sessID = "nonauthoritative-finish-sess"
 	beginRec := doSignBegin(t, server, principal, sessID, validBeginBody())

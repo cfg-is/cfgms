@@ -314,13 +314,16 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	s.operatorPayloadSignSessions.Store(sessID, &operatorPayloadSignSession{
+	if out := s.putPayloadSignSession(r.Context(), sessID, &operatorPayloadSignSession{
 		data:      *sessionData,
 		expires:   time.Now().Add(webAuthnSessionTTL),
 		accountID: principal.ID,
 		envelope:  envelope,
 		hash:      hash,
-	})
+	}); out != ceremonyOK {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
 
 	s.logger.Info("WebAuthn operator-payload sign ceremony started",
 		"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -381,16 +384,20 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	}
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
-	rawSession, ok := s.operatorPayloadSignSessions.LoadAndDelete(sessID)
-	if !ok {
+	pending, out := s.takePayloadSignSession(r.Context(), sessID)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
+	if out != ceremonyOK {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"No active sign session — call begin first", "NO_ACTIVE_SIGN_SESSION")
 		return
 	}
-	pending, ok := rawSession.(*operatorPayloadSignSession)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Invalid session state", "SESSION_STATE_ERROR")
+	// Bind at begin, check at finish: only the principal that began may finish.
+	if pending.accountID != "" && pending.accountID != principal.ID {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active sign session — call begin first", "NO_ACTIVE_SIGN_SESSION")
 		return
 	}
 	if time.Now().After(pending.expires) {

@@ -1954,12 +1954,27 @@ func mintPresenceToken(t *testing.T, s *Server, principalID string) string {
 	require.NoError(t, err)
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	tokenHash := hashPresenceToken(token)
-	s.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+	storePresenceTokenForTest(t, s, tokenHash, &presenceTokenRecord{
 		principalID: principalID,
 		expires:     time.Now().Add(presenceTokenTTL),
 	})
-	t.Cleanup(func() { s.presenceTokens.Delete(tokenHash) })
 	return token
+}
+
+// storePresenceTokenForTest stores rec the way the server under test keeps presence
+// tokens: in the node-local map, or — on a ClusterMode node (Issue #4527) — in the
+// cluster-shared NonceStore, wiring a real one first when the test did not.
+func storePresenceTokenForTest(t *testing.T, s *Server, tokenHash string, rec *presenceTokenRecord) {
+	t.Helper()
+	if s.webAuthnClusterMode() {
+		if s.NonceStore() == nil {
+			s.SetNonceStore(newClusterFixture(t).nonces)
+		}
+		require.Equal(t, ceremonyOK, s.putPresenceToken(context.Background(), tokenHash, rec))
+		return
+	}
+	s.presenceTokens.Store(tokenHash, rec)
+	t.Cleanup(func() { s.presenceTokens.Delete(tokenHash) })
 }
 
 // --- User-presence enforcement tests (Issue #2784, ADR-021 Decision 4) ---
@@ -2171,7 +2186,7 @@ func mintBoundPresenceToken(t *testing.T, s *Server, principalID, method, path, 
 	require.NoError(t, err)
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	tokenHash := hashPresenceToken(token)
-	s.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+	storePresenceTokenForTest(t, s, tokenHash, &presenceTokenRecord{
 		principalID:       principalID,
 		expires:           time.Now().Add(presenceTokenTTL),
 		boundMethod:       method,
@@ -2179,7 +2194,6 @@ func mintBoundPresenceToken(t *testing.T, s *Server, principalID, method, path, 
 		boundBodyHash:     bodyHash,
 		boundPermissionID: permissionID,
 	})
-	t.Cleanup(func() { s.presenceTokens.Delete(tokenHash) })
 	return token
 }
 

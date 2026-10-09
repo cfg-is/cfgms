@@ -73,12 +73,18 @@ import (
 )
 
 // webAuthnPendingSession holds an in-progress WebAuthn registration ceremony state
-// server-side. Stored in s.webAuthnSessions (sync.Map) keyed by username. It is
+// server-side. Stored in s.webAuthnSessions (sync.Map; the cluster NonceStore in
+// ClusterMode, Issue #4527) keyed by username. It is
 // single-use (deleted on every finish attempt, success or failure) and expires after
 // webAuthnSessionTTL — preventing replay of stale begin responses.
 type webAuthnPendingSession struct {
 	data    webauthn.SessionData
 	expires time.Time
+
+	// binding records who began the ceremony (acting principal ID for register and
+	// presence, account ID for first-passkey enrolment). Finish refuses a different
+	// actor. Issue #4527. Empty only for sessions stored without a binding.
+	binding string
 }
 
 // webauthnUser adapts an account to the go-webauthn/webauthn User interface.
@@ -215,11 +221,15 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	acct, _, ok := s.resolveAccountForCredentials(w, r)
+	acct, beginPrincipal, ok := s.resolveAccountForCredentials(w, r)
 	if !ok {
 		return
 	}
 	username := acct.Username
+	beginActor := ""
+	if beginPrincipal != nil {
+		beginActor = beginPrincipal.ID
+	}
 
 	user := buildWebauthnUser(acct)
 
@@ -253,10 +263,14 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 	// Store the session server-side, single-use, time-bounded.
 	// The authoritative challenge lives in sessionData.Challenge — the server's
 	// copy is what FinishRegistration verifies against.
-	s.webAuthnSessions.Store(username, &webAuthnPendingSession{
+	if out := s.putPendingSession(r.Context(), &s.webAuthnSessions, ceremonyPrefixRegister, username, &webAuthnPendingSession{
 		data:    *sessionData,
 		expires: time.Now().Add(webAuthnSessionTTL),
-	})
+		binding: beginActor,
+	}, webAuthnSessionTTL); out != ceremonyOK {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
 
 	s.logger.Info("WebAuthn registration ceremony started",
 		"username", logging.SanitizeLogValue(username))
@@ -301,16 +315,16 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 	// Load and unconditionally delete the pending session (single-use enforcement).
 	// A second finish attempt returns NO_ACTIVE_REGISTRATION because the session
 	// is already consumed, regardless of whether the first attempt succeeded.
-	rawSession, ok := s.webAuthnSessions.LoadAndDelete(username)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active registration session — call begin first", "NO_ACTIVE_REGISTRATION")
+	pending, out := s.takePendingSession(r.Context(), &s.webAuthnSessions, ceremonyPrefixRegister, username)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
 		return
 	}
-	pending, ok := rawSession.(*webAuthnPendingSession)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Invalid session state", "SESSION_STATE_ERROR")
+	// Bind at begin, check at finish (Issue #4527): the acting principal must be the
+	// one that began. The entry is already consumed either way.
+	if out != ceremonyOK || (pending.binding != "" && pending.binding != actingPrincipalID) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active registration session — call begin first", "NO_ACTIVE_REGISTRATION")
 		return
 	}
 
@@ -521,10 +535,14 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store server-side, single-use, time-bounded (same TTL as registration sessions).
-	s.webAuthnPresenceSessions.Store(principal.ID, &webAuthnPendingSession{
+	if out := s.putPendingSession(r.Context(), &s.webAuthnPresenceSessions, ceremonyPrefixPresence, principal.ID, &webAuthnPendingSession{
 		data:    *sessionData,
 		expires: time.Now().Add(webAuthnSessionTTL),
-	})
+		binding: principal.ID,
+	}, webAuthnSessionTTL); out != ceremonyOK {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
 
 	s.logger.Info("WebAuthn presence ceremony started",
 		"principal_id", logging.SanitizeLogValue(principal.ID))
@@ -629,16 +647,14 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
-	rawSession, ok := s.webAuthnPresenceSessions.LoadAndDelete(principal.ID)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active presence session — call begin first", "NO_ACTIVE_PRESENCE_SESSION")
+	pending, out := s.takePendingSession(r.Context(), &s.webAuthnPresenceSessions, ceremonyPrefixPresence, principal.ID)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
 		return
 	}
-	pending, ok := rawSession.(*webAuthnPendingSession)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Invalid session state", "SESSION_STATE_ERROR")
+	if out != ceremonyOK || (pending.binding != "" && pending.binding != principal.ID) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active presence session — call begin first", "NO_ACTIVE_PRESENCE_SESSION")
 		return
 	}
 
@@ -687,7 +703,10 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		record.boundBodyHash = cliPresenceReq.BodyHash
 		record.boundPermissionID = cliPresenceReq.PermissionID
 	}
-	s.presenceTokens.Store(tokenHash, record)
+	if out := s.putPresenceToken(r.Context(), tokenHash, record); out != ceremonyOK {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
 
 	if cliPresenceReq != nil {
 		// Hand the minted token to the durable request record for the waiting CLI's
@@ -703,7 +722,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("Failed to persist cli-presence approval",
 				"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
 				"error", logging.SanitizeLogValue(err.Error()))
-			s.presenceTokens.Delete(tokenHash)
+			s.discardPresenceToken(r.Context(), tokenHash)
 			s.writeErrorResponse(w, http.StatusInternalServerError,
 				"Failed to complete presence request", "STORE_ERROR")
 			return
@@ -1026,10 +1045,14 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 	// Key the ceremony by tokenHash, not username. This decouples the session lookup
 	// from any caller-supplied identity at finish time (self-scoping invariant).
 	tokenHash := hashEnrollmentToken(rawToken)
-	s.passkeyEnrollSessions.Store(tokenHash, &webAuthnPendingSession{
+	if out := s.putPendingSession(r.Context(), &s.passkeyEnrollSessions, ceremonyPrefixEnroll, tokenHash, &webAuthnPendingSession{
 		data:    *sessionData,
 		expires: time.Now().Add(webAuthnSessionTTL),
-	})
+		binding: acct.ID,
+	}, webAuthnSessionTTL); out != ceremonyOK {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
 
 	s.logger.Info("Passkey enrollment ceremony started",
 		"account_id", logging.SanitizeLogValue(acct.ID))
@@ -1069,16 +1092,14 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	tokenHash := hashEnrollmentToken(rawToken)
 
 	// LoadAndDelete is the single-use gate: only the first finish call succeeds.
-	rawSession, ok := s.passkeyEnrollSessions.LoadAndDelete(tokenHash)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active enrollment session — call begin first", "NO_ACTIVE_ENROLLMENT")
+	pending, out := s.takePendingSession(r.Context(), &s.passkeyEnrollSessions, ceremonyPrefixEnroll, tokenHash)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
 		return
 	}
-	pending, ok := rawSession.(*webAuthnPendingSession)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Invalid session state", "SESSION_STATE_ERROR")
+	if out != ceremonyOK {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active enrollment session — call begin first", "NO_ACTIVE_ENROLLMENT")
 		return
 	}
 
@@ -1101,6 +1122,12 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	if acct == nil || !verifyEnrollmentToken(acct, rawToken) {
 		s.writeErrorResponse(w, http.StatusUnauthorized,
 			"Enrollment token is no longer valid", "TOKEN_INVALID")
+		return
+	}
+	// Bind at begin, check at finish (Issue #4527): the ceremony began for this account.
+	if pending.binding != "" && pending.binding != acct.ID {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active enrollment session — call begin first", "NO_ACTIVE_ENROLLMENT")
 		return
 	}
 

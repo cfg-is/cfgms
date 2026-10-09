@@ -1770,8 +1770,12 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 
 				// Validate and atomically consume the token (single-use via LoadAndDelete).
 				tokenHash := hashPresenceToken(presenceToken)
-				raw, tokenFound := s.presenceTokens.LoadAndDelete(tokenHash)
-				if !tokenFound {
+				record, tokenOutcome := s.takePresenceToken(r.Context(), tokenHash)
+				if tokenOutcome == ceremonyUnavailable {
+					s.writeCeremonyUnavailable(w)
+					return
+				}
+				if tokenOutcome != ceremonyOK {
 					// Token not found (already used, never issued, or tampered).
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
 					w.Header().Set("Content-Type", "application/json")
@@ -1785,8 +1789,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					}, "presence_token_invalid")
 					return
 				}
-				record, _ := raw.(*presenceTokenRecord)
-				if record == nil || time.Now().After(record.expires) {
+				if time.Now().After(record.expires) {
 					// Expired token (already removed from map above).
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
 					w.Header().Set("Content-Type", "application/json")

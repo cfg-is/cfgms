@@ -47,7 +47,7 @@ import (
 type webAuthnElevateSession struct {
 	data      webauthn.SessionData
 	expires   time.Time
-	accountID string // principal.ID at begin time; finish re-derives this from context
+	accountID string // principal.ID at begin time; finish refuses a different principal
 }
 
 // elevateThrottleRecord tracks per-key failed elevation attempts with exponential backoff.
@@ -125,11 +125,14 @@ func (s *Server) handleStepUpBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.webAuthnElevateSessions.Store(sessID, &webAuthnElevateSession{
+	if out := s.putElevateSession(r.Context(), sessID, &webAuthnElevateSession{
 		data:      *sessionData,
 		expires:   time.Now().Add(webAuthnSessionTTL),
 		accountID: principal.ID,
-	})
+	}); out != ceremonyOK {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
 
 	s.logger.Info("WebAuthn step-up elevation ceremony started",
 		"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -185,16 +188,21 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
-	rawSession, ok := s.webAuthnElevateSessions.LoadAndDelete(sessID)
-	if !ok {
+	pending, out := s.takeElevateSession(r.Context(), sessID)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
+		return
+	}
+	if out != ceremonyOK {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"No active elevation session — call begin first", "NO_ACTIVE_ELEVATION_SESSION")
 		return
 	}
-	pending, ok := rawSession.(*webAuthnElevateSession)
-	if !ok {
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Invalid session state", "SESSION_STATE_ERROR")
+	// Bind at begin, check at finish: the ceremony must be finished by the principal
+	// that began it (the entry is already consumed either way).
+	if pending.accountID != "" && pending.accountID != principal.ID {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active elevation session — call begin first", "NO_ACTIVE_ELEVATION_SESSION")
 		return
 	}
 	if time.Now().After(pending.expires) {
@@ -331,37 +339,17 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 // checkElevateThrottle returns (true, retryAfter) when the key is currently throttled,
-// or (false, 0) when the call may proceed. Thread-safe.
+// or (false, 0) when the call may proceed. Thread-safe. In ClusterMode the failure
+// count is cluster-shared (Issue #4527, see throttleBlocked).
 func (s *Server) checkElevateThrottle(key string) (blocked bool, retryAfter time.Duration) {
-	raw, ok := s.webAuthnElevateThrottle.Load(key)
-	if !ok {
-		return false, 0
-	}
-	rec, ok := raw.(*elevateThrottleRecord)
-	if !ok {
-		return false, 0
-	}
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if !rec.nextAllowed.IsZero() && time.Now().Before(rec.nextAllowed) {
-		return true, time.Until(rec.nextAllowed)
-	}
-	return false, 0
+	return s.throttleBlocked(&s.webAuthnElevateThrottle, elevateThrottleKeyPrefix, key)
 }
 
 // recordElevateFailure increments the failure counter for key and sets the next-allowed
-// timestamp based on the backoff schedule. No hard lockout is ever applied.
+// timestamp based on the backoff schedule. No hard lockout is ever applied. In
+// ClusterMode the failure is counted on the shared RateCounterStore (Issue #4527).
 func (s *Server) recordElevateFailure(key string) {
-	raw, _ := s.webAuthnElevateThrottle.LoadOrStore(key, &elevateThrottleRecord{})
-	rec := raw.(*elevateThrottleRecord)
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	rec.fails++
-	rec.lastFailure = time.Now()
-	delay := elevateBackoff(rec.fails)
-	if delay > 0 {
-		rec.nextAllowed = time.Now().Add(delay)
-	}
+	s.recordThrottleFailure(&s.webAuthnElevateThrottle, elevateThrottleKeyPrefix, key)
 }
 
 // elevateBackoff returns the cooldown duration after a given number of consecutive failures.
