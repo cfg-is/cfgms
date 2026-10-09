@@ -178,7 +178,7 @@ These workflows will **activate immediately** when repository becomes public:
 - **Weekly:** Review Dependabot PRs
 - **Monthly:** Check workflow execution logs
 - **Quarterly:** Update action versions (handled by Dependabot)
-- **Per Release:** Verify SBOM generation
+- **Per Release:** Verify `SHA256SUMS` is published and `sha256sum -c SHA256SUMS` passes
 
 ### Monitoring
 - GitHub Security tab for vulnerability findings
