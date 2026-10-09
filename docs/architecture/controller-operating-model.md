@@ -802,7 +802,9 @@ shared queue as a script run (Issue #4528), as a run and queue entry of kind
 
 - **Record.** The run (`script_runs.kind`, `action_json`) and each device's job
   (`script_run_jobs.result_code`, `dispatched_at`) are kept in the run store — the
-  shared database in cluster mode, SQLite on a single node. Runs that predate the
+  shared database in cluster mode, SQLite on a single node. The controller-local
+  SQLite store uses those table names; the cluster-shared Postgres store uses
+  `cfgms_script_runs` and `cfgms_script_run_jobs`. Runs that predate the
   field read back as `script`. The queue entry carries `Kind`, the action spec and,
   in its `Metadata`, the operator envelope exactly as the operator signed it: the
   X.509 (`signature_*`) or WebAuthn (`webauthn_*`, including the manifest)

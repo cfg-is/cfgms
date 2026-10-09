@@ -58,7 +58,7 @@ func runKindOrScript(kind string) string {
 
 // CreateRun implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) CreateRun(ctx context.Context, r *business.ScriptRun) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO script_runs (`+scriptRunColumns+`)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO cfgms_script_runs (`+scriptRunColumns+`)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		r.RunID, r.TenantID, r.CreatedBy, r.CreatedAt.UTC(), r.Status, nullJSON(r.FilterJSON),
 		r.ScriptRef, r.InlineContent, r.Shell, r.JobCount, r.CompletedJobs, r.FailedJobs,
@@ -75,7 +75,7 @@ func (s *DatabaseScriptRunStore) CreateJob(ctx context.Context, j *business.Scri
 	if j.CompletedAt != nil {
 		completedAt = j.CompletedAt.UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO script_run_jobs
+	_, err := s.db.ExecContext(ctx, `INSERT INTO cfgms_script_run_jobs
 		(job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code,
 		 result_code, dispatched_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
@@ -107,7 +107,7 @@ func scanScriptRun(row rowScanner) (*business.ScriptRun, error) {
 // GetRun implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) GetRun(ctx context.Context, runID string) (*business.ScriptRun, error) {
 	r, err := scanScriptRun(s.db.QueryRowContext(ctx,
-		`SELECT `+scriptRunColumns+` FROM script_runs WHERE run_id = $1`, runID))
+		`SELECT `+scriptRunColumns+` FROM cfgms_script_runs WHERE run_id = $1`, runID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, business.ErrScriptRunNotFound
 	}
@@ -124,10 +124,10 @@ func (s *DatabaseScriptRunStore) ListRuns(ctx context.Context, tenantID string, 
 		err  error
 	)
 	if tenantID != "" {
-		rows, err = s.db.QueryContext(ctx, `SELECT `+scriptRunColumns+` FROM script_runs
+		rows, err = s.db.QueryContext(ctx, `SELECT `+scriptRunColumns+` FROM cfgms_script_runs
 			WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`, tenantID, limit, offset)
 	} else {
-		rows, err = s.db.QueryContext(ctx, `SELECT `+scriptRunColumns+` FROM script_runs
+		rows, err = s.db.QueryContext(ctx, `SELECT `+scriptRunColumns+` FROM cfgms_script_runs
 			ORDER BY created_at DESC LIMIT $1 OFFSET $2`, limit, offset)
 	}
 	if err != nil {
@@ -185,7 +185,7 @@ func collectScriptRunJobs(rows *sql.Rows) ([]*business.ScriptRunJob, error) {
 // ListRunJobs implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) ListRunJobs(ctx context.Context, runID string) ([]*business.ScriptRunJob, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+scriptRunJobColumns+`
-		FROM script_run_jobs WHERE run_id = $1 ORDER BY created_at ASC`, runID)
+		FROM cfgms_script_run_jobs WHERE run_id = $1 ORDER BY created_at ASC`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("database: list script run jobs: %w", err)
 	}
@@ -206,7 +206,7 @@ func nullTime(t *time.Time) interface{} {
 
 // UpdateJobStatus implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) UpdateJobStatus(ctx context.Context, jobID, status, executionID string, completedAt *time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs
+	_, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs
 		SET status = $1,
 		    execution_id = CASE WHEN $2::text <> '' THEN $2::text ELSE execution_id END,
 		    completed_at = COALESCE($3::timestamptz, completed_at)
@@ -219,7 +219,7 @@ func (s *DatabaseScriptRunStore) UpdateJobStatus(ctx context.Context, jobID, sta
 
 // UpdateJobResult implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) UpdateJobResult(ctx context.Context, jobID, status, executionID, output, stderr string, exitCode int, completedAt *time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs
+	_, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs
 		SET status = $1,
 		    execution_id = CASE WHEN $2::text <> '' THEN $2::text ELSE execution_id END,
 		    completed_at = COALESCE($3::timestamptz, completed_at),
@@ -233,7 +233,7 @@ func (s *DatabaseScriptRunStore) UpdateJobResult(ctx context.Context, jobID, sta
 
 // UpdateJobResultCode implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) UpdateJobResultCode(ctx context.Context, jobID, code string) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs SET result_code = $1 WHERE job_id = $2`, code, jobID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs SET result_code = $1 WHERE job_id = $2`, code, jobID); err != nil {
 		return fmt.Errorf("database: update script run job result code: %w", err)
 	}
 	return nil
@@ -241,7 +241,7 @@ func (s *DatabaseScriptRunStore) UpdateJobResultCode(ctx context.Context, jobID,
 
 // MarkJobDispatched implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) MarkJobDispatched(ctx context.Context, jobID string, at time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs SET status = 'dispatched', dispatched_at = $1
+	res, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs SET status = 'dispatched', dispatched_at = $1
 		WHERE job_id = $2 AND status = 'pending'`, at.UTC(), jobID)
 	if err != nil {
 		return false, fmt.Errorf("database: mark script run job dispatched: %w", err)
@@ -252,7 +252,7 @@ func (s *DatabaseScriptRunStore) MarkJobDispatched(ctx context.Context, jobID st
 // ListStaleActionJobs implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) ListStaleActionJobs(ctx context.Context, pendingBefore, dispatchedBefore time.Time) ([]*business.ScriptRunJob, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumnsQualified+`
-		FROM script_run_jobs j JOIN script_runs r ON r.run_id = j.run_id
+		FROM cfgms_script_run_jobs j JOIN cfgms_script_runs r ON r.run_id = j.run_id
 		WHERE r.kind = $1 AND j.completed_at IS NULL AND j.result_code = ''
 		  AND ((j.status = 'pending' AND j.created_at < $2)
 		    OR (j.status = 'dispatched' AND j.dispatched_at < $3))
@@ -269,7 +269,7 @@ func (s *DatabaseScriptRunStore) ListStaleActionJobs(ctx context.Context, pendin
 // UPDATE is atomic: of several concurrent callers exactly one matches the
 // status predicate and reports changed.
 func (s *DatabaseScriptRunStore) ExpireJobIfStatus(ctx context.Context, jobID, fromStatus, resultCode string, at time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs
+	res, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs
 		SET status = $1, result_code = $1, completed_at = $2
 		WHERE job_id = $3 AND status = $4`, resultCode, at.UTC(), jobID, fromStatus)
 	if err != nil {
@@ -288,7 +288,7 @@ func rowsChanged(res sql.Result) (bool, error) {
 
 // UpdateRunStatus implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) UpdateRunStatus(ctx context.Context, runID, status string) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE script_runs SET status = $1 WHERE run_id = $2`, status, runID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_runs SET status = $1 WHERE run_id = $2`, status, runID); err != nil {
 		return fmt.Errorf("database: update script run status: %w", err)
 	}
 	return nil
@@ -296,7 +296,7 @@ func (s *DatabaseScriptRunStore) UpdateRunStatus(ctx context.Context, runID, sta
 
 // UpdateRunCounts implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) UpdateRunCounts(ctx context.Context, runID string, completedJobs, failedJobs int) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE script_runs SET completed_jobs = $1, failed_jobs = $2 WHERE run_id = $3`,
+	if _, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_runs SET completed_jobs = $1, failed_jobs = $2 WHERE run_id = $3`,
 		completedJobs, failedJobs, runID); err != nil {
 		return fmt.Errorf("database: update script run counts: %w", err)
 	}
@@ -309,7 +309,7 @@ func (s *DatabaseScriptRunStore) CreateExecutionGrant(ctx context.Context, g *bu
 	if err != nil {
 		return fmt.Errorf("database: marshal grant scope: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO execution_grants
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO cfgms_execution_grants
 		(execution_id, device_id, tenant_id, scope_json, created_at, expires_at, consumed)
 		VALUES ($1, $2, $3, $4, $5, $6, false)`,
 		g.ExecutionID, g.DeviceID, g.TenantID, string(scope), g.CreatedAt.UTC(), g.ExpiresAt.UTC()); err != nil {
@@ -323,7 +323,7 @@ func (s *DatabaseScriptRunStore) LookupGrant(ctx context.Context, deviceID, exec
 	g := &business.ExecutionGrant{}
 	var scope string
 	err := s.db.QueryRowContext(ctx, `SELECT device_id, tenant_id, execution_id, scope_json,
-		created_at, expires_at, consumed FROM execution_grants
+		created_at, expires_at, consumed FROM cfgms_execution_grants
 		WHERE execution_id = $1 AND device_id = $2`, executionID, deviceID).
 		Scan(&g.DeviceID, &g.TenantID, &g.ExecutionID, &scope, &g.CreatedAt, &g.ExpiresAt, &g.Consumed)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -346,7 +346,7 @@ func (s *DatabaseScriptRunStore) LookupGrant(ctx context.Context, deviceID, exec
 
 // ConsumeGrant implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) ConsumeGrant(ctx context.Context, executionID string) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE execution_grants SET consumed = true WHERE execution_id = $1`, executionID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE cfgms_execution_grants SET consumed = true WHERE execution_id = $1`, executionID); err != nil {
 		return fmt.Errorf("database: consume execution grant: %w", err)
 	}
 	return nil
