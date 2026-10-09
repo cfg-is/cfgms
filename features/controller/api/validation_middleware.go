@@ -143,6 +143,14 @@ func (s *Server) validateURLParameters(validator *security.EnhancedValidator, re
 	for param, value := range vars {
 		switch param {
 		case "id":
+			// Cluster node IDs may be IPs or FQDNs, so the node lifecycle routes admit '.'.
+			if strings.HasPrefix(r.URL.Path, "/api/v1/cluster/nodes/") {
+				validator.ValidateString(result, "path."+param, value, "required", "charset:node_id", "max_length:64")
+				if strings.Contains(value, "..") {
+					result.AddError("path."+param, "", "no_dot_dot", "must not contain '..'")
+				}
+				break
+			}
 			// Validate ID parameters (should be UUIDs or alphanumeric)
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")
 		case "tenant_path":

@@ -309,3 +309,36 @@ func TestValidateQueryParameters_TenantIDWithSlash(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateURLParameters_ClusterNodeID verifies that cluster node lifecycle routes admit
+// dotted node IDs (IPs, FQDNs) while every other {id} route keeps alphanumeric_dash.
+func TestValidateURLParameters_ClusterNodeID(t *testing.T) {
+	s := &Server{}
+	validator := security.NewEnhancedValidator(nil)
+
+	tests := []struct {
+		name      string
+		path      string
+		value     string
+		wantValid bool
+	}{
+		{"ipv4 drain", "/api/v1/cluster/nodes/x/drain", "192.168.234.106", true},
+		{"fqdn drain", "/api/v1/cluster/nodes/x/drain", "ctrl-01.lab.internal", true},
+		{"ipv4 decommission", "/api/v1/cluster/nodes/x/decommission", "192.168.234.106", true},
+		{"underscore drain", "/api/v1/cluster/nodes/x/drain", "node_1", true},
+		{"dot-dot rejected", "/api/v1/cluster/nodes/x/drain", "a..b", false},
+		{"slash rejected", "/api/v1/cluster/nodes/x/drain", "a/b", false},
+		{"leading dot rejected", "/api/v1/cluster/nodes/x/drain", ".hidden", false},
+		{"ipv4 on non-cluster route rejected", "/api/v1/stewards/x", "192.168.234.106", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req = mux.SetURLVars(req, map[string]string{"id": tc.value})
+			result := &security.ValidationResult{Valid: true}
+			s.validateURLParameters(validator, result, req)
+			assert.Equal(t, tc.wantValid, result.Valid, "id=%q errors=%v", tc.value, result.Errors)
+		})
+	}
+}
