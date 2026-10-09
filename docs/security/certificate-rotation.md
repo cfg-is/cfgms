@@ -50,6 +50,34 @@ Refresh-on-connect makes the overlap window a **defense-in-depth parameter** rat
 than a hard deadline. Even if a steward is offline for longer than `overlap_days`,
 it will recover on its next connection.
 
+### Steward Trust-Set Rules
+
+A steward applies a `push_signing_cert` command only when **both** checks pass:
+the command signature verifies against a key the steward already trusts, and the
+pushed certificate chains to the controller CA the steward pins, with the
+CodeSigning key usage. The CA check applies even when the steward holds no trust
+set yet, so omitting the command signature never bypasses it. Intermediates are
+taken from the PEM bundle the controller pushes (leaf first, issuer chain after);
+the controller therefore sends the issuer chain with each signing certificate it
+pushes, so certificates issued by an imported intermediate CA verify. Only the
+leaf is stored.
+
+- **De-duplication**: the trust set is de-duplicated by the SHA-256 fingerprint of
+  the certificate DER, on every push and when the persisted set is loaded at
+  startup. Re-pushing a certificate, or pushing it with different PEM whitespace
+  or a trailing chain, does not add an entry.
+- **Rejected pushes**: a certificate that is expired, lacks CodeSigning, or does
+  not chain to the pinned CA is rejected, as is any push when the steward has no
+  valid pinned CA roots. A rejected push changes neither the in-memory nor the
+  persisted trust set, and error text carries no certificate bytes.
+- **`retire_serials`**: an optional JSON array of serial strings (decimal
+  `SerialNumber.String()` form) naming certificates to remove from the trust set.
+  Unknown serials are ignored. The certificate carried by the same command is never
+  removed, and a command that would leave the set empty is rejected. Removal is
+  persisted before it is applied in memory.
+- **`retire_old`** is unchanged: it replaces the whole set with the pushed
+  certificate.
+
 ### Rotation State Machine
 
 The rotation lifecycle is guarded by a cursor with the following states:

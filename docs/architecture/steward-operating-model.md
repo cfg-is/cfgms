@@ -607,6 +607,8 @@ The steward receives new cfgs via two paths, both arriving over the gRPC data pl
 
 Either path lands the same outcome: the steward fetches the new cfg, verifies the controller's signature, stores it locally, and triggers a convergence run. Cfgs are signed by the controller's signing certificate — the steward verifies the signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source.
 
+The steward's signing trust set is de-duplicated by certificate fingerprint. A certificate pushed to it by `push_signing_cert` is applied only if the command is signed by an already-trusted key **and** the certificate chains to the controller CA the steward pins (CodeSigning usage, intermediates taken from the pushed bundle); the command can also name serials to remove with `retire_serials`, never the pushed certificate and never leaving the set empty. See [Certificate Rotation](../security/certificate-rotation.md#steward-trust-set-rules).
+
 If the controller connection is later lost, the steward continues using the last-received cfg.
 
 ### Ad-Hoc Script Execution
