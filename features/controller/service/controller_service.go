@@ -79,6 +79,59 @@ type ControllerService struct {
 	// Tags are controller-owned and survive DNA refreshes.  Wired in via
 	// SetTagStore following the late-wiring idiom; nil until wired.
 	tagStore *tagstore.Store
+
+	// clockSkewWarnThreshold is the absolute clock offset above which
+	// RecordHeartbeat logs a warning (Issue #4539). Guarded by s.mu.
+	clockSkewWarnThreshold time.Duration
+}
+
+// DefaultClockSkewWarnThreshold is the default absolute steward clock offset
+// above which a warning is logged.
+const DefaultClockSkewWarnThreshold = 30 * time.Second
+
+// clockSkewWarnInterval is the minimum time between clock-skew warnings for
+// one steward.
+const clockSkewWarnInterval = 5 * time.Minute
+
+// SetClockSkewWarnThreshold sets the absolute clock offset above which a
+// heartbeat logs a skew warning. A non-positive value restores the default.
+func (s *ControllerService) SetClockSkewWarnThreshold(d time.Duration) {
+	if d <= 0 {
+		d = DefaultClockSkewWarnThreshold
+	}
+	s.mu.Lock()
+	s.clockSkewWarnThreshold = d
+	s.mu.Unlock()
+}
+
+// recordClockOffset stores the offset on steward and reports whether a skew
+// warning is due. Caller must hold s.mu for writing.
+func (s *ControllerService) recordClockOffset(steward *StewardInfo, offset time.Duration, known bool, now time.Time) (warn bool) {
+	steward.ClockOffsetKnown = known
+	if !known {
+		steward.ClockOffset = 0
+		return false
+	}
+	steward.ClockOffset = offset
+	abs := offset
+	if abs < 0 {
+		abs = -abs
+	}
+	threshold := s.clockSkewWarnThreshold
+	if threshold <= 0 {
+		threshold = DefaultClockSkewWarnThreshold
+	}
+	if abs <= threshold || now.Sub(steward.lastSkewWarn) < clockSkewWarnInterval {
+		return false
+	}
+	steward.lastSkewWarn = now
+	return true
+}
+
+func (s *ControllerService) warnClockSkew(stewardID string, offset time.Duration) {
+	s.logger.Warn("Steward clock offset exceeds threshold",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"clock_offset", offset.String())
 }
 
 // StewardInfo holds connection/heartbeat state for a registered steward.
@@ -92,6 +145,14 @@ type StewardInfo struct {
 	Status        string
 	Metrics       map[string]string
 	Token         string
+
+	// ClockOffset is the steward's clock minus the controller's clock at the
+	// last heartbeat (negative when the steward is behind). Only meaningful
+	// when ClockOffsetKnown is true (Issue #4539).
+	ClockOffset      time.Duration
+	ClockOffsetKnown bool
+	// lastSkewWarn rate-limits the clock-skew warning for this steward.
+	lastSkewWarn time.Time
 
 	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
 	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
@@ -131,8 +192,9 @@ func copyMetrics(m map[string]string) map[string]string {
 // Use NewControllerServiceWithStorage to enable durable DNA persistence.
 func NewControllerService(logger logging.Logger) *ControllerService {
 	return &ControllerService{
-		logger:   logger,
-		stewards: make(map[string]*StewardInfo),
+		logger:                 logger,
+		clockSkewWarnThreshold: DefaultClockSkewWarnThreshold,
+		stewards:               make(map[string]*StewardInfo),
 	}
 }
 
@@ -833,8 +895,15 @@ func (s *ControllerService) TenantForTarget(_ context.Context, targetType rollba
 // Returns false when the steward is unknown to this controller (e.g. a heartbeat
 // arriving before warm-load or for a deregistered steward).
 func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.Time) bool {
-	if ts.IsZero() {
-		ts = time.Now()
+	receivedAt := time.Now()
+	// A zero ts means the caller has no steward timestamp: the offset is
+	// unknown, not zero (Issue #4539).
+	offsetKnown := !ts.IsZero()
+	var offset time.Duration
+	if offsetKnown {
+		offset = ts.Sub(receivedAt)
+	} else {
+		ts = receivedAt
 	}
 	if len(version) > maxVersionLen {
 		version = version[:maxVersionLen]
@@ -853,7 +922,11 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		if steward.Status == "" || steward.Status == "registered" {
 			steward.Status = "active"
 		}
+		warn := s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
 		s.mu.Unlock()
+		if warn {
+			s.warnClockSkew(stewardID, offset)
+		}
 		s.persistHeartbeat(stewardID, version)
 		return true
 	}
@@ -892,11 +965,15 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		if steward.Status == "" || steward.Status == "registered" {
 			steward.Status = "active"
 		}
+		warn := s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
 		s.mu.Unlock()
+		if warn {
+			s.warnClockSkew(stewardID, offset)
+		}
 		s.persistHeartbeat(stewardID, version)
 		return true
 	}
-	s.stewards[stewardID] = &StewardInfo{
+	created := &StewardInfo{
 		ID:            stewardID,
 		TenantID:      tenantID,
 		Version:       version,
@@ -905,7 +982,12 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		Status:        "active",
 		Metrics:       make(map[string]string),
 	}
+	s.stewards[stewardID] = created
+	warn := s.recordClockOffset(created, offset, offsetKnown, receivedAt)
 	s.mu.Unlock()
+	if warn {
+		s.warnClockSkew(stewardID, offset)
+	}
 
 	// Persist so the durable record's timestamp is refreshed consistently with
 	// EnsureSteward. storeDNA runs outside s.mu.

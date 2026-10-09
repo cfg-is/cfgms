@@ -5002,3 +5002,32 @@ func TestHandleListStewards_IncludesTags_ScopedCallerSeesOnlyVisibleRows(t *test
 		}
 	}
 }
+
+// TestHandleGetSteward_ClockOffset verifies clock_offset_ms is present after a
+// skewed heartbeat and omitted for a steward that has not heartbeated.
+func TestHandleGetSteward_ClockOffset(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+	get := func(id string) map[string]interface{} {
+		req := httptest.NewRequest("GET", "/api/v1/stewards/"+id, nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Data map[string]interface{} `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp.Data
+	}
+
+	quiet := registerTestSteward(t, server.controllerService, map[string]string{"hostname": "quiet", "os": "linux"})
+	_, present := get(quiet)["clock_offset_ms"]
+	assert.False(t, present, "no heartbeat -> field omitted")
+
+	skewed := registerTestSteward(t, server.controllerService, map[string]string{"hostname": "skewed", "os": "linux"})
+	require.True(t, server.controllerService.RecordHeartbeat(skewed, "v1", time.Now().Add(-20*time.Second)))
+	v, present := get(skewed)["clock_offset_ms"]
+	require.True(t, present)
+	assert.InDelta(t, -20000.0, v.(float64), 2000)
+}

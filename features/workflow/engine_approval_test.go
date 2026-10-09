@@ -231,10 +231,13 @@ func TestApproval_RejectWithOnFailureContinueRunsTail(t *testing.T) {
 func TestApproval_ExpiryWithoutRestartFailsRunViaSweep(t *testing.T) {
 	h := newApprovalHarness(t)
 	e := h.engine()
-	e.StartApprovalRecovery(context.Background(), 20*time.Millisecond)
 
 	wf := Workflow{Name: "short", Steps: []Step{gateStep("gate", 80*time.Millisecond), delayStep("after", time.Millisecond)}}
 	exec, rec := h.runToGate(e, wf, nil)
+	// The sweep starts only after the pending record is captured: started
+	// earlier, it can expire the short gate before runToGate observes it.
+	// Nothing else expires a record, so the failure below is the sweep's doing.
+	e.StartApprovalRecovery(context.Background(), 20*time.Millisecond)
 
 	eventually(t, "sweep fails the expired run", func() bool { return execStatus(e, exec.ID) == StatusFailed })
 	got, err := e.GetExecution(context.Background(), approvalTestTenant, exec.ID)

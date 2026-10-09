@@ -1940,3 +1940,48 @@ func TestAcceptRegistration_NoTenantRefusedBeforeStateChange(t *testing.T) {
 		})
 	}
 }
+
+func seedHeartbeatSteward(svc *ControllerService, id string) {
+	svc.mu.Lock()
+	svc.stewards[id] = &StewardInfo{ID: id, Status: "registered", Metrics: map[string]string{}}
+	svc.mu.Unlock()
+}
+
+func TestRecordHeartbeat_RecordsClockOffset(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	seedHeartbeatSteward(svc, "sw-skew")
+
+	require.True(t, svc.RecordHeartbeat("sw-skew", "v1", time.Now().Add(-20*time.Second)))
+	info, ok := svc.GetStewardInfo("sw-skew")
+	require.True(t, ok)
+	assert.True(t, info.ClockOffsetKnown)
+	assert.InDelta(t, -20*time.Second, info.ClockOffset, float64(2*time.Second))
+
+	require.True(t, svc.RecordHeartbeat("sw-skew", "v1", time.Now().Add(20*time.Second)))
+	info, _ = svc.GetStewardInfo("sw-skew")
+	assert.True(t, info.ClockOffsetKnown)
+	assert.InDelta(t, 20*time.Second, info.ClockOffset, float64(2*time.Second))
+
+	require.True(t, svc.RecordHeartbeat("sw-skew", "v1", time.Time{}))
+	info, _ = svc.GetStewardInfo("sw-skew")
+	assert.False(t, info.ClockOffsetKnown, "zero timestamp must record no offset")
+	assert.Zero(t, info.ClockOffset)
+}
+
+func TestRecordHeartbeat_ClockSkewWarnRateLimited(t *testing.T) {
+	log := logging.NewCapturingLogger()
+	svc := NewControllerService(log)
+	assert.Equal(t, DefaultClockSkewWarnThreshold, svc.clockSkewWarnThreshold)
+	svc.SetClockSkewWarnThreshold(30 * time.Second)
+	seedHeartbeatSteward(svc, "sw-warn")
+
+	svc.RecordHeartbeat("sw-warn", "v1", time.Now().Add(-60*time.Second))
+	assert.Equal(t, 1, log.WarnCount())
+
+	svc.RecordHeartbeat("sw-warn", "v1", time.Now().Add(-60*time.Second))
+	assert.Equal(t, 1, log.WarnCount(), "second heartbeat inside the window must not warn")
+
+	seedHeartbeatSteward(svc, "sw-ok")
+	svc.RecordHeartbeat("sw-ok", "v1", time.Now().Add(-5*time.Second))
+	assert.Equal(t, 1, log.WarnCount(), "offset under threshold must not warn")
+}

@@ -315,6 +315,10 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			Metrics:     steward.Metrics,
 			Hidden:      steward.Hidden,
 		}
+		if steward.ClockOffsetKnown {
+			ms := steward.ClockOffset.Milliseconds()
+			info.ClockOffsetMs = &ms
+		}
 
 		if steward.DNA != nil {
 			attrs := filteredDNAAttrs(service.FlattenDNAFragments(steward.DNA.Fragments))
@@ -514,6 +518,10 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 		Metrics:         stewardInfo.Metrics,
 		ActiveSessions:  activeSessions,
 		ConnectionState: connectionState,
+	}
+	if stewardInfo.ClockOffsetKnown {
+		ms := stewardInfo.ClockOffset.Milliseconds()
+		apiStewardInfo.ClockOffsetMs = &ms
 	}
 
 	// Include DNA information if available

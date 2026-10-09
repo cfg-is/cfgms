@@ -1164,11 +1164,22 @@ type stewardStatusInfo struct {
 	TenantID        string            `json:"tenant_id,omitempty"`
 	Group           string            `json:"group,omitempty"`
 	Metrics         map[string]string `json:"metrics,omitempty"`
+	ClockOffsetMs   *int64            `json:"clock_offset_ms,omitempty"`
 	DNA             *struct {
 		Hostname     string `json:"hostname"`
 		OS           string `json:"os"`
 		Architecture string `json:"architecture"`
 	} `json:"dna,omitempty"`
+}
+
+// formatClockOffset renders a millisecond clock offset as a signed duration
+// (for example "-12s", "+1.5s", "+0s").
+func formatClockOffset(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	if d < 0 {
+		return d.String()
+	}
+	return "+" + d.String()
 }
 
 func runStewardStatus(_ *cobra.Command, args []string) error {
@@ -1253,6 +1264,9 @@ func runStewardStatus(_ *cobra.Command, args []string) error {
 		}
 		fmt.Printf("Last Seen:        %s\n", lastSeen)
 		fmt.Printf("Version:          %s\n", s.Version)
+		if s.ClockOffsetMs != nil {
+			fmt.Printf("Clock Offset:     %s\n", formatClockOffset(*s.ClockOffsetMs))
+		}
 		if s.DNA != nil {
 			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
 			fmt.Printf("OS:               %s\n", s.DNA.OS)
