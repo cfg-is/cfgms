@@ -3124,8 +3124,8 @@ func setupMoveAuthServer(t *testing.T) (*Server, business.StewardStore) {
 	return server, st
 }
 
-// TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource verifies 403 when a scoped
-// admin's scope does not cover the source tenant.
+// TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource verifies 404 when a scoped
+// admin's scope does not cover the source tenant: the steward is not disclosed.
 func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource(t *testing.T) {
 	server, st := setupMoveAuthServer(t)
 
@@ -3140,10 +3140,10 @@ func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource(t *testing.T) {
 	scopedPrincipal := &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "other-msp", CertSerial: "SN-001", CertFingerprint: "fp-001"}
 	rec := postMoveStewardWithPrincipal(server, "s-auth-nosrc", "dest-tenant", scopedPrincipal)
 
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.Equal(t, "INSUFFICIENT_SCOPE", errResp.Error.Code)
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
 }
 
 // TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverDestination verifies 403 when a
@@ -3354,7 +3354,7 @@ func TestHandleMoveSteward_AuditOnDenial(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.handleMoveSteward(rec, req)
 
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 
 	require.NoError(t, server.auditManager.Flush(context.Background()))
 
