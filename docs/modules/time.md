@@ -32,6 +32,34 @@ ntp_servers:
 ntp_sync_enabled: true
 ```
 
+## Example resource
+
+A role config resource (full file: `docs/examples/role-configs/time-sync.cfg`):
+
+```yaml
+resources:
+  - name: "time-sync"
+    module: "time"
+    config:
+      timezone: "UTC"
+      ntp_servers:
+        - "time1.example.com"
+        - "time2.example.com"
+      ntp_sync_enabled: true
+```
+
+## Opting out
+
+The module owns the `time` DNA object kind only for a host whose config
+declares a `time` resource (ADR-016 clause 5). To leave time unmanaged — for
+example where time comes from directory services or a hypervisor — declare no
+`time` resource for that host or role. Omitting the resource leaves time
+unmanaged.
+
+`ntp_sync_enabled: false` is not an opt-out. It is a declared state: the host
+is converged to NTP sync disabled. Because `timezone` is required, any declared
+`time` resource must also set it.
+
 ## Platform behaviour
 
 ### Linux

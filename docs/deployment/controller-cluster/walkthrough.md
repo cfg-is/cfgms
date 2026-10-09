@@ -47,6 +47,27 @@ The `CFGMS_SECRETS_KEY_FILE` and `CFGMS_SESSION_HMAC_KEY_FILE` values **must be 
 across all nodes** — they encrypt/authenticate shared rows in the cluster Postgres backend.
 Independently generated per-node values produce ciphertext-authentication failures.
 
+### Controller node time sync
+
+Every controller node must sync its clock to a common time source. Clock
+disagreement between nodes skews audit timelines and certificate validity
+checks. Controller nodes are not stewards, so configure the time daemon on the
+host directly.
+
+`systemd-timesyncd` (`/etc/systemd/timesyncd.conf`):
+
+```ini
+[Time]
+NTP=time1.example.com time2.example.com
+```
+
+`chrony` (`chrony.conf`):
+
+```text
+server time1.example.com iburst
+server time2.example.com iburst
+```
+
 ### Cross-node command delivery
 
 Set `internal_delivery_listen_addr` on every node (`ha-cluster-node-bootstrap.sh` renders
