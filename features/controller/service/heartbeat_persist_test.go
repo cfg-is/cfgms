@@ -134,3 +134,30 @@ func TestRecordHeartbeat_StoreErrorsDoNotAffectResult(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordHeartbeat_FailedWriteRetriesVersion(t *testing.T) {
+	for name, failErr := range map[string]error{
+		"store failure":   errors.New("transient"),
+		"steward missing": business.ErrStewardNotFound,
+	} {
+		t.Run(name, func(t *testing.T) {
+			counting := &countingStewardStore{StewardStore: newSharedStewardStore(t, "dev-1"), failErr: failErr}
+			svc := NewControllerService(logging.NewNoopLogger())
+			svc.SetStewardStore(counting)
+			registerLiveSteward(t, svc, "dev-1")
+
+			require.True(t, svc.RecordHeartbeat("dev-1", "v1", time.Now()))
+			assert.EqualValues(t, 1, counting.calls.Load())
+
+			counting.failErr = nil
+			require.True(t, svc.RecordHeartbeat("dev-1", "v1", time.Now()))
+			assert.EqualValues(t, 2, counting.calls.Load(), "version must be retried after a failed write")
+			rec, err := counting.GetSteward(context.Background(), "dev-1")
+			require.NoError(t, err)
+			assert.Equal(t, "v1", rec.Version)
+
+			require.True(t, svc.RecordHeartbeat("dev-1", "v1", time.Now()))
+			assert.EqualValues(t, 2, counting.calls.Load(), "no rewrite once persisted")
+		})
+	}
+}

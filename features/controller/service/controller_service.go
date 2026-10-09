@@ -32,17 +32,17 @@ import (
 // failure to persist the move, which is not benign (Issue #3324).
 var ErrStewardNotInRegistry = errors.New("steward not present in live registry")
 
-// ControllerService implements the Controller service
 // heartbeatPersistInterval bounds how often a steward's last-seen is written to
 // the shared steward store. It is well inside the 60s StewardOfflineTimeout.
 const heartbeatPersistInterval = 30 * time.Second
 
-// heartbeatPersistState is the last successful-or-attempted store write for one steward.
+// heartbeatPersistState is the last attempted store write time and last successfully persisted version for one steward.
 type heartbeatPersistState struct {
 	at      time.Time
 	version string
 }
 
+// ControllerService implements the Controller service
 type ControllerService struct {
 	logger     logging.Logger
 	mu         sync.RWMutex
@@ -934,7 +934,10 @@ func (s *ControllerService) persistHeartbeat(stewardID, version string) {
 		version = last.version
 		versionChanged = false
 	}
-	s.heartbeatPersist[stewardID] = heartbeatPersistState{at: now, version: version}
+	// Record the attempt time now (rate limit, no duplicate concurrent writes) but
+	// keep the previously persisted version until the write succeeds, so a failed
+	// version write is retried on the next heartbeat.
+	s.heartbeatPersist[stewardID] = heartbeatPersistState{at: now, version: last.version}
 	s.heartbeatPersistMu.Unlock()
 
 	writeVersion := ""
@@ -950,7 +953,13 @@ func (s *ControllerService) persistHeartbeat(stewardID, version string) {
 		s.logger.Warn("Failed to persist steward heartbeat",
 			"steward_id", logging.SanitizeLogValue(stewardID),
 			"error", logging.SanitizeLogValue(err.Error()))
+		return
 	}
+	s.heartbeatPersistMu.Lock()
+	st := s.heartbeatPersist[stewardID]
+	st.version = version
+	s.heartbeatPersist[stewardID] = st
+	s.heartbeatPersistMu.Unlock()
 }
 
 // EnsureSteward upserts a steward into the in-memory admin registry on an
