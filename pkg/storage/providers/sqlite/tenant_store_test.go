@@ -218,3 +218,18 @@ func TestTenantStore_MultiTenantIsolation(t *testing.T) {
 	// Verify they don't cross-contaminate
 	assert.NotEqual(t, got1.ID, got2.ID)
 }
+
+// TestTenantStore_TopLevelContract holds this provider to the atomic
+// single-top-level-tenant contract across independent handles on one database
+// file (Issue #4547).
+func TestTenantStore_TopLevelContract(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenants.db")
+	business.TenantStoreTopLevelContract(t, func() business.TenantStore {
+		p := sqlite.NewSQLiteProvider(dir)
+		store, err := p.CreateTenantStore(map[string]interface{}{"path": path})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		return store
+	})
+}

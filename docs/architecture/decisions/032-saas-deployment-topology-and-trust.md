@@ -70,7 +70,9 @@ the permanent shape.
 - **Single-root stands.** Each cell has exactly one root tenant; MSPs are children
   of it. The multi-root-in-one-deployment SaaS illustration in the controller
   operating model is redrawn as cells; the single-root statement in
-  ARCHITECTURE.md is the picture that stands.
+  ARCHITECTURE.md is the picture that stands. The invariant is enforced atomically
+  at the tenant store (`CreateTopLevelTenant`), across controller nodes, not only
+  by the manager's pre-check.
 
 ### Decision 2 — One offline root CA; one intermediate CA per region
 

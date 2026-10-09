@@ -15,6 +15,10 @@ type Store interface {
 	// CreateTenant creates a new tenant
 	CreateTenant(ctx context.Context, tenant *business.TenantData) error
 
+	// CreateTopLevelTenant creates a tenant with no parent atomically, failing
+	// with ErrTopLevelTenantExists if one already exists (Issue #4547)
+	CreateTopLevelTenant(ctx context.Context, tenant *business.TenantData) error
+
 	// GetTenant retrieves a tenant by ID
 	GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error)
 
@@ -69,8 +73,9 @@ var (
 	ErrCannotSuspendRoot = fmt.Errorf("cannot suspend root tenant")
 	// ErrTopLevelTenantExists is returned when a tenant with no parent is created
 	// while one already exists: a deployment has exactly one root tenant, the
-	// single tenant with no parent (ADR-032, Issue #4542).
-	ErrTopLevelTenantExists = fmt.Errorf("a top-level tenant already exists; create the tenant under a parent")
+	// single tenant with no parent (ADR-032, Issue #4542). It aliases the
+	// storage-layer sentinel the store returns atomically (Issue #4547).
+	ErrTopLevelTenantExists = business.ErrTopLevelTenantExists
 
 	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
 	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")

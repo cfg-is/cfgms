@@ -180,3 +180,12 @@ func newTestAuditStore(t *testing.T) *DatabaseAuditStore {
 	require.NoError(t, err)
 	return store
 }
+
+// TestDatabaseTenantStore_TopLevelContract holds the Postgres provider to the
+// atomic single-top-level-tenant contract across independent connection pools
+// (Issue #4547).
+func TestDatabaseTenantStore_TopLevelContract(t *testing.T) {
+	business.TenantStoreTopLevelContract(t, func() business.TenantStore {
+		return newRegressionTenantStore(t)
+	})
+}

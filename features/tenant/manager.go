@@ -47,11 +47,6 @@ type Manager struct {
 	// suspension has already been recorded (Issue #4347).
 	suspendMu sync.Mutex
 
-	// topLevelMu serializes top-level tenant creation with the single-top-level
-	// check (root.go). It is node-local; see Issue #4547 for the cluster-wide
-	// constraint.
-	topLevelMu sync.Mutex
-
 	// Root tenant resolution cache (root.go, Issue #4542).
 	rootMu         sync.Mutex
 	rootID         string
@@ -182,12 +177,10 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 	}
 
 	// Create the tenant in storage. A tenant with no parent is the deployment
-	// root, of which there is exactly one: a top-level create holds topLevelMu
-	// across the check and the write, so a concurrent top-level create on this
-	// node cannot slip in between them (Issue #4542).
+	// root, of which there is exactly one. The store's CreateTopLevelTenant is
+	// the atomic guarantee across controller nodes (Issue #4547); the pre-check
+	// only spares a write in the common refusal.
 	if td.ParentID == "" {
-		m.topLevelMu.Lock()
-		defer m.topLevelMu.Unlock()
 		if err := m.checkTopLevelCreatable(ctx); err != nil {
 			return nil, err
 		}
@@ -242,7 +235,11 @@ const maxBillingLabelAttempts = 5
 func (m *Manager) createTenantWithUniqueLabel(ctx context.Context, td *business.TenantData) error {
 	var err error
 	for attempt := 0; attempt < maxBillingLabelAttempts; attempt++ {
-		err = m.store.CreateTenant(ctx, td)
+		if td.ParentID == "" {
+			err = m.store.CreateTopLevelTenant(ctx, td)
+		} else {
+			err = m.store.CreateTenant(ctx, td)
+		}
 		if err == nil || !errors.Is(err, business.ErrTenantAlreadyExists) {
 			return err
 		}

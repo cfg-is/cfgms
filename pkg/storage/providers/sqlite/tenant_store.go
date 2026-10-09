@@ -31,13 +31,14 @@ func (s *SQLiteTenantStore) Close() error {
 	return nil
 }
 
-// CreateTenant persists a new tenant.
-func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.TenantData) error {
+// prepareTenantInsert validates tenant, defaults its timestamps and billing
+// label, and returns the serialized metadata.
+func prepareTenantInsert(tenant *business.TenantData) (string, error) {
 	if tenant == nil {
-		return fmt.Errorf("tenant cannot be nil")
+		return "", fmt.Errorf("tenant cannot be nil")
 	}
 	if tenant.ID == "" {
-		return fmt.Errorf("tenant ID cannot be empty")
+		return "", fmt.Errorf("tenant ID cannot be empty")
 	}
 
 	now := nowUTC()
@@ -50,7 +51,7 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.T
 
 	meta, err := marshalJSON(tenant.Metadata)
 	if err != nil {
-		return fmt.Errorf("failed to marshal tenant metadata: %w", err)
+		return "", fmt.Errorf("failed to marshal tenant metadata: %w", err)
 	}
 
 	// A caller that supplied no label (direct store writes) still gets a random
@@ -58,9 +59,18 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.T
 	if tenant.BillingLabel == "" {
 		label, err := business.NewBillingLabel()
 		if err != nil {
-			return fmt.Errorf("failed to generate tenant billing label: %w", err)
+			return "", fmt.Errorf("failed to generate tenant billing label: %w", err)
 		}
 		tenant.BillingLabel = label
+	}
+	return meta, nil
+}
+
+// CreateTenant persists a new tenant.
+func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.TenantData) error {
+	meta, err := prepareTenantInsert(tenant)
+	if err != nil {
+		return err
 	}
 
 	_, err = s.db.ExecContext(ctx, `
@@ -83,6 +93,55 @@ func (s *SQLiteTenantStore) CreateTenant(ctx context.Context, tenant *business.T
 			return fmt.Errorf("create tenant %s: %w", tenant.ID, business.ErrTenantAlreadyExists)
 		}
 		return fmt.Errorf("failed to create tenant %s: %w", tenant.ID, err)
+	}
+	return nil
+}
+
+// CreateTopLevelTenant persists a tenant with no parent only if none exists.
+// The check and the insert are one INSERT ... SELECT ... WHERE NOT EXISTS
+// statement, which SQLite executes atomically under its single-writer lock.
+func (s *SQLiteTenantStore) CreateTopLevelTenant(ctx context.Context, tenant *business.TenantData) error {
+	meta, err := prepareTenantInsert(tenant)
+	if err != nil {
+		return err
+	}
+	if tenant.ParentID != "" {
+		return fmt.Errorf("top-level tenant must not have a parent")
+	}
+
+	var inserted int64
+	// A single autocommit statement does not partially apply on BUSY, so
+	// retrying it is idempotent.
+	err = retryOnBusy(ctx, func() error {
+		res, execErr := s.db.ExecContext(ctx, `
+			INSERT INTO tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, billing_label, created_at, updated_at)
+			SELECT ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?
+			WHERE NOT EXISTS (SELECT 1 FROM tenants WHERE parent_id IS NULL)`,
+			tenant.ID,
+			tenant.Name,
+			tenant.Description,
+			meta,
+			string(tenant.Status),
+			boolToInt(tenant.DirectlySuspended),
+			nullString(stringPtrVal(tenant.CascadeSuspendedFrom)),
+			tenant.BillingLabel,
+			formatTime(tenant.CreatedAt),
+			formatTime(tenant.UpdatedAt),
+		)
+		if execErr != nil {
+			return execErr
+		}
+		inserted, execErr = res.RowsAffected()
+		return execErr
+	})
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			return fmt.Errorf("create tenant %s: %w", tenant.ID, business.ErrTenantAlreadyExists)
+		}
+		return fmt.Errorf("failed to create tenant %s: %w", tenant.ID, err)
+	}
+	if inserted == 0 {
+		return business.ErrTopLevelTenantExists
 	}
 	return nil
 }
