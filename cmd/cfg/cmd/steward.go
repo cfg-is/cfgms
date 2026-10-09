@@ -272,7 +272,7 @@ Examples:
   cfg steward exec os:linux --command "uname -r" --shell bash --yes
 
   # Explicit steward ID
-  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 30s
+  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 2m
 
   # JSON output keyed by hostname#steward-id
   cfg steward exec web-01 --command "uptime" --shell bash --json`,
@@ -789,7 +789,7 @@ func init() {
 	stewardExecCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
 	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
-	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", 30*time.Second, "Maximum time to wait for job completion")
+	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", defaultStewardExecTimeout, "Maximum time to wait for job completion (must exceed the dispatcher poll interval plus steward heartbeat)")
 	stewardExecCmd.Flags().BoolVar(&stewardExecJSONOutput, "json", false, "Emit JSON job record instead of plain output")
 
 	// run-status flags
@@ -1743,7 +1743,7 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 
 	timeout := stewardExecTimeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = defaultStewardExecTimeout
 	}
 
 	client, err := getStewardClient()
@@ -2224,6 +2224,11 @@ func fetchRunRecord(ctx context.Context, client *APIClient, runID string) (*runR
 	return &apiResp.Data, nil
 }
 
+// defaultStewardExecTimeout is the default --timeout for `cfg steward exec`. It
+// must exceed the dispatcher poll interval (30s) plus the steward heartbeat
+// interval (20s) plus jitter so a healthy steward can receive and run a command.
+const defaultStewardExecTimeout = 2 * time.Minute
+
 // waitForRun polls GET /api/v1/runs/{runID} every runWaitPollInterval until the
 // run reaches a terminal state or the timeout elapses. Progress text is written
 // to progressW so callers can route it to stdout or stderr without mutating
@@ -2248,7 +2253,7 @@ func waitForRun(ctx context.Context, client *APIClient, runID string, timeout ti
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out after %s waiting for run %s (status: %s, %d/%d jobs completed)",
+			return fmt.Errorf("timed out after %s waiting for run %s: run is still in progress on the controller and will continue to execute (status: %s, %d/%d jobs completed)",
 				timeout, runID, run.Status, run.CompletedJobs, run.JobCount)
 		}
 

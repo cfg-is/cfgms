@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -389,4 +390,44 @@ func TestExec_BareStewardID_SameResolutionAsIDForm(t *testing.T) {
 		filters = append(filters, f)
 	}
 	assert.Equal(t, filters[0], filters[1])
+}
+
+// TestExec_DefaultTimeout_CoversDispatchLatency asserts the --timeout default is
+// 2m, above the dispatcher poll interval plus heartbeat interval plus jitter.
+func TestExec_DefaultTimeout_CoversDispatchLatency(t *testing.T) {
+	f := stewardExecCmd.Flags().Lookup("timeout")
+	require.NotNil(t, f)
+	assert.Equal(t, (2 * time.Minute).String(), f.DefValue)
+	assert.Equal(t, 2*time.Minute, defaultStewardExecTimeout)
+	assert.Contains(t, stewardExecCmd.Long, "--timeout 2m")
+}
+
+// TestWaitForRun_Timeout_ReportsRunStillInProgress asserts the timeout error
+// names the run ID and says the run is still in progress on the controller.
+func TestWaitForRun_Timeout_ReportsRunStillInProgress(t *testing.T) {
+	const runID = "run-timeout-1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/"+runID {
+			writeRunAPIResponse(w, map[string]interface{}{
+				"run_id": runID, "status": "running", "job_count": 1, "completed_jobs": 0,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	saveExecGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	bundlePath = generateTestBundleWithRSA(t, t.TempDir())
+	runWaitPollInterval = time.Millisecond
+
+	client, err := getStewardClient()
+	require.NoError(t, err)
+
+	err = waitForRun(context.Background(), client, runID, 20*time.Millisecond, io.Discard)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), runID)
+	assert.Contains(t, err.Error(), "still in progress")
 }
