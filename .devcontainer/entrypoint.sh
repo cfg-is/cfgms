@@ -128,6 +128,14 @@ _salvage_stage_work() {
             echo "WARN: salvage: skipping nested repository ${f}"
             continue
         fi
+        # The branch is pushed to a public repo. .gitignore covers the repo's
+        # own secret patterns; also refuse credential-style names it does not.
+        case "${f##*/}" in
+            id_rsa*|id_dsa*|id_ecdsa*|id_ed25519*|.netrc|.npmrc|.pypirc|.git-credentials|*.p12|*.pfx|*.jks|*.keystore|*.kdbx)
+                echo "WARN: salvage: skipping credential-like untracked file ${f}"
+                continue
+                ;;
+        esac
         size=$(wc -c < "$f" 2>/dev/null) || size=""
         if ! [[ "$size" =~ ^[0-9]+$ ]]; then
             echo "WARN: salvage: skipping unreadable untracked file ${f}"

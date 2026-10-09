@@ -749,6 +749,8 @@ test_18c_salvage_includes_untracked_files() {
     git -C "$SALVAGE_REPO" update-ref refs/remotes/origin/develop HEAD
     echo "not-a-real-key" > "$SALVAGE_REPO/agent.key"
     head -c 2048 /dev/zero > "$SALVAGE_REPO/big.bin"
+    echo "not-a-real-key" > "$SALVAGE_REPO/id_ed25519"
+    echo "machine example.invalid" > "$SALVAGE_REPO/pkg/.netrc"
 
     local out
     out=$(
@@ -776,6 +778,12 @@ test_18c_salvage_includes_untracked_files() {
         "oversized untracked file is not committed"
     assert_contains "$out" "skipping untracked file big.bin" \
         "oversized file is logged as skipped"
+    assert_not_contains "$committed" "id_ed25519" \
+        "credential-like file not covered by .gitignore is not committed"
+    assert_not_contains "$committed" ".netrc" \
+        "credential-like file in a subdirectory is not committed"
+    assert_contains "$out" "skipping credential-like untracked file id_ed25519" \
+        "credential-like file is logged as skipped"
     assert_contains "$(cat "$SALVAGE_LOG")" "pr create --base develop --draft" \
         "salvaged work becomes a draft PR"
 
