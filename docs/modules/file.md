@@ -150,6 +150,21 @@ modules:
             access: FullControl
 ```
 
+## `module: "directory"` alias
+
+In a steward config, `module: "directory"` is an alias for the file module. The alias does **not** imply `type: directory`: an empty `type` resolves to `file`, so a `directory` resource without `type: directory` describes a regular file. Always set `type: directory` explicitly, together with `allowed_base_path`:
+
+```yaml
+resources:
+  - name: app-data-dir
+    module: directory
+    config:
+      type: directory
+      allowed_base_path: /var/myapp
+      path: /var/myapp/data
+      permissions: 750
+```
+
 ## Migration from standalone `directory` module
 
 The `directory` module has been merged into the `file` module. Existing configs using `type: directory` in the framework continue to work — the factory maps the `"directory"` module name to the file module. To update configs explicitly:
