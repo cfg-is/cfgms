@@ -10,7 +10,8 @@
  *  - WebAuthn create ceremony drives navigator.credentials.create
  *  - Terminal error states: invalid/expired/reused token, already-enrolled account
  *  - Ceremony cancellation returns to ready state (no infinite retry for token errors)
- *  - Success: navigate to '/' after finish responds 201
+ *  - Success: sign-in step linking to /login after finish responds 201 (no session minted)
+ *  - Non-cancel ceremony failures show the error name and are logged
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -77,6 +78,7 @@ function renderEnroll(token = 'abc123') {
       <Routes>
         <Route path="/enroll/:token" element={<Enroll />} />
         <Route path="/" element={<div data-testid="app-root">APP</div>} />
+        <Route path="/login" element={<div data-testid="login-page">LOGIN</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -373,10 +375,29 @@ describe('ceremony cancellation', () => {
   })
 })
 
+// ── Ceremony failures ─────────────────────────────────────────────────────────
+
+describe('ceremony failure', () => {
+  it('shows the error name and calls console.error for a non-NotAllowedError failure', async () => {
+    const boom = new DOMException('no authenticator', 'NotSupportedError')
+    vi.stubGlobal('navigator', { credentials: { create: vi.fn().mockRejectedValue(boom) } })
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fetchMock.mockResolvedValue(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
+
+    renderEnroll()
+    await waitFor(() => screen.getByRole('button', { name: /register a passkey/i }))
+    fireEvent.click(screen.getByRole('button', { name: /register a passkey/i }))
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('NotSupportedError'))
+    expect(consoleError).toHaveBeenCalledWith(expect.any(String), boom)
+    consoleError.mockRestore()
+  })
+})
+
 // ── Success routing ───────────────────────────────────────────────────────────
 
 describe('success routing', () => {
-  it('navigates to / after a successful enrollment (finish returns 201)', async () => {
+  it('shows the sign-in step and does not navigate to / when finish returns 201', async () => {
     vi.stubGlobal('navigator', {
       credentials: { create: vi.fn().mockResolvedValue(makeAttestationCredential()) },
     })
@@ -394,8 +415,10 @@ describe('success routing', () => {
     fireEvent.click(screen.getByRole('button', { name: /register a passkey/i }))
 
     await waitFor(() =>
-      expect(screen.getByTestId('app-root')).toBeInTheDocument(),
+      expect(screen.getByText(/passkey registered/i)).toBeInTheDocument(),
     )
+    expect(screen.queryByTestId('app-root')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /sign in/i })).toHaveAttribute('href', '/login')
   })
 
   it('fires the onSessionConfirmed listener via apiFetch on the finish call', async () => {
