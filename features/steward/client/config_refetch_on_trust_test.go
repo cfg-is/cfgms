@@ -43,7 +43,7 @@ func newRotatedClient(t *testing.T) (*TransportClient, *countingConfigSession, *
 	t.Helper()
 	const stewardID = "steward-refetch-on-trust"
 	_, _, oldPEM := newSigningCA(t)
-	_, newSigner, newPEM := newSigningCA(t)
+	newCA, newSigner, newPEM := newSigningCA(t)
 
 	configData := buildMinimalSignedConfigBytes(t, newSigner, stewardID)
 	sess := &countingConfigSession{
@@ -59,6 +59,8 @@ func newRotatedClient(t *testing.T) (*TransportClient, *countingConfigSession, *
 	c.mu.Lock()
 	c.signingCertPEMs = []string{oldPEM}
 	c.mu.Unlock()
+	// The client pins the CA that issued the cert it will later be pushed.
+	pinCA(t, c, newCA)
 	return c, sess, capture, newPEM
 }
 

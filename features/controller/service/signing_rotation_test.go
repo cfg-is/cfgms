@@ -5,9 +5,13 @@ package service_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -722,4 +726,130 @@ func TestRotate_RequiresRootScope(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, result)
 	})
+}
+
+// intermediateCertManager builds a Manager whose CA is an imported intermediate
+// signed by a separate root, and returns the root PEM a steward would pin.
+func intermediateCertManager(t *testing.T) (*cert.Manager, []byte) {
+	t.Helper()
+	rootMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "Test Root", Country: "US", ValidityDays: 365, KeySize: 2048,
+			PathLength: 1, PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+	rootPEM, err := rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	sub, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &cert.SubordinateCAConfig{
+		CommonName: "Test Intermediate", Organization: "Test Org", ValidityDays: 300, PathLength: 0,
+	})
+	require.NoError(t, err)
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(subKey)})
+
+	mgr, err := cert.NewManagerFromCAMaterial(&cert.ManagerConfig{StoragePath: t.TempDir()}, sub.CertificatePEM, subKeyPEM, rootPEM)
+	require.NoError(t, err)
+	require.NoError(t, mgr.EnsureSigningCertificate(nil))
+	return mgr, rootPEM
+}
+
+// assertPushedCertChainsToRoot checks the pushed cert_pem bundle verifies to
+// rootPEM for CodeSigning only when its carried intermediates are used.
+func assertPushedCertChainsToRoot(t *testing.T, params map[string]interface{}, rootPEM []byte) {
+	t.Helper()
+	b64, ok := params["cert_pem"].(string)
+	require.True(t, ok)
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	require.NoError(t, err)
+
+	roots := x509.NewCertPool()
+	require.True(t, roots.AppendCertsFromPEM(rootPEM))
+	intermediates := x509.NewCertPool()
+	var leaf *x509.Certificate
+	for rest := raw; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		c, perr := x509.ParseCertificate(block.Bytes)
+		require.NoError(t, perr)
+		if leaf == nil {
+			leaf = c
+		} else {
+			intermediates.AddCert(c)
+		}
+	}
+	require.NotNil(t, leaf)
+	_, err = leaf.Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: intermediates,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	})
+	assert.NoError(t, err, "pushed signing cert must verify to the pinned root using the carried chain")
+}
+
+// A signing certificate issued by an imported intermediate CA is pushed with its
+// issuer chain by both Rotate and EnsureStewardCurrent.
+func TestSigningPushes_IntermediateIssuedCertCarriesChain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+	const stewardID = "steward-intermediate"
+
+	certMgr, rootPEM := intermediateCertManager(t)
+
+	bus := memory.NewBus()
+	server := memory.New(memory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Stop(stopCtx)
+	})
+	controllerSvc := service.NewControllerService(logger)
+	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "root/tenant-a", "", "active"))
+
+	client := memory.New(memory.ModeClient)
+	require.NoError(t, client.Initialize(ctx, map[string]interface{}{"bus": bus, "steward_id": stewardID}))
+	require.NoError(t, client.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = client.Stop(stopCtx)
+	})
+	received := make(chan *types.SignedCommand, 4)
+	require.NoError(t, client.SubscribeCommands(ctx, stewardID, func(_ context.Context, sc *types.SignedCommand) error {
+		received <- sc
+		return nil
+	}))
+
+	publisher, err := commands.New(&commands.Config{ControlPlane: server, Logger: logger})
+	require.NoError(t, err)
+	svc := service.NewSigningRotationService(certMgr, logger)
+	svc.SetPublisher(publisher)
+	svc.SetControllerService(controllerSvc)
+
+	next := func() *types.SignedCommand {
+		select {
+		case sc := <-received:
+			require.Equal(t, types.CommandPushSigningCert, sc.Command.Type)
+			return sc
+		case <-time.After(5 * time.Second):
+			t.Fatal("push_signing_cert not received")
+			return nil
+		}
+	}
+
+	require.NoError(t, svc.EnsureStewardCurrent(ctx, stewardID))
+	assertPushedCertChainsToRoot(t, next().Command.Params, rootPEM)
+
+	rootCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	_, err = svc.Rotate(rootCtx, "operator-serial", 7, false)
+	require.NoError(t, err)
+	assertPushedCertChainsToRoot(t, next().Command.Params, rootPEM)
 }

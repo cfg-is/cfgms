@@ -15,6 +15,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -756,6 +757,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
 		signingCertPEMs = []string{cfg.SigningCertPEM}
 	}
+	signingCertPEMs = dedupeSigningCertPEMs(signingCertPEMs)
 
 	c := &TransportClient{
 		heartbeatInterval:               heartbeatInterval,
@@ -2861,6 +2863,110 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// certFingerprint returns the hex SHA-256 of a certificate's DER bytes.
+func certFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
+
+// dedupeSigningCertPEMs drops entries whose certificate DER fingerprint was
+// already seen, preserving order. Entries that do not parse are kept verbatim
+// (de-duplicated by exact text) so a malformed persisted entry is not silently
+// discarded here.
+func dedupeSigningCertPEMs(pems []string) []string {
+	if len(pems) == 0 {
+		return pems
+	}
+	seen := make(map[string]struct{}, len(pems))
+	out := make([]string, 0, len(pems))
+	for _, p := range pems {
+		key := "raw:" + p
+		if parsed, err := cert.ParseCertificateFromPEM([]byte(p)); err == nil {
+			key = certFingerprint(parsed.Raw)
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+// verifyPushedSigningCertChain verifies leaf against the pinned CA roots with
+// the CodeSigning usage, using any further certificates in bundlePEM as
+// intermediates. Errors never include certificate bytes.
+func verifyPushedSigningCertChain(bundlePEM []byte, leaf *x509.Certificate, caPEM string, now time.Time) error {
+	roots, err := validControllerCARoots(caPEM, now)
+	if err != nil {
+		return fmt.Errorf("no usable pinned controller CA to verify signing certificate")
+	}
+	intermediates := x509.NewCertPool()
+	rest := bundlePEM
+	first := true
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if first {
+			first = false
+			continue
+		}
+		if ic, perr := x509.ParseCertificate(block.Bytes); perr == nil {
+			intermediates.AddCert(ic)
+		}
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		CurrentTime:   now,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}); err != nil {
+		return fmt.Errorf("signing certificate does not chain to the pinned controller CA")
+	}
+	return nil
+}
+
+// parseRetireSerials decodes the optional retire_serials param (JSON array of
+// strings; params cross the wire as strings and are JSON-decoded back).
+func parseRetireSerials(v interface{}) (map[string]bool, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var items []string
+	switch t := v.(type) {
+	case []string:
+		items = t
+	case []interface{}:
+		for _, e := range t {
+			str, ok := e.(string)
+			if !ok {
+				return nil, fmt.Errorf("retire_serials must be an array of strings")
+			}
+			items = append(items, str)
+		}
+	case string:
+		if t == "" {
+			return nil, nil
+		}
+		if err := json.Unmarshal([]byte(t), &items); err != nil {
+			return nil, fmt.Errorf("retire_serials must be a JSON array of strings")
+		}
+	default:
+		return nil, fmt.Errorf("retire_serials must be an array of strings")
+	}
+	out := make(map[string]bool, len(items))
+	for _, it := range items {
+		out[it] = true
+	}
+	return out, nil
+}
+
 // handlePushSigningCert processes a COMMAND_TYPE_PUSH_SIGNING_CERT command from the
 // controller. It validates the pushed cert, persists it atomically (persist-before-ack),
 // then updates the in-memory signing cert set and rebuilds the MultiVerifier (Issue #1816).
@@ -2898,6 +3004,21 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 		return fmt.Errorf("push_signing_cert: cert missing ExtKeyUsageCodeSigning")
 	}
 
+	// The pushed certificate must chain to the CA roots this steward pins, in
+	// addition to arriving in a command signed by a trusted key. Applies even
+	// when no trust set exists yet (no command-signature check in that case).
+	c.mu.RLock()
+	caPEM := c.caCertPEM
+	c.mu.RUnlock()
+	if err := verifyPushedSigningCertChain(pemBytes, x509Cert, caPEM, time.Now()); err != nil {
+		return fmt.Errorf("push_signing_cert: %w", err)
+	}
+
+	retireSerials, err := parseRetireSerials(cmd.Params["retire_serials"])
+	if err != nil {
+		return fmt.Errorf("push_signing_cert: %w", err)
+	}
+
 	// Parse optional overlap_expires_at (RFC3339).
 	var overlapExpiresAt *time.Time
 	if raw, ok := cmd.Params["overlap_expires_at"].(string); ok && raw != "" {
@@ -2916,12 +3037,29 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 	copy(existing, c.signingCertPEMs)
 	c.mu.RUnlock()
 
+	// Persist only the leaf; any chain carried in the bundle is verification input.
+	leafPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: x509Cert.Raw}))
 	var newPEMs []string
-	newPEMStr := string(pemBytes)
 	if retireOld {
-		newPEMs = []string{newPEMStr}
+		newPEMs = []string{leafPEM}
 	} else {
-		newPEMs = append(existing, newPEMStr)
+		newPEMs = dedupeSigningCertPEMs(append(existing, leafPEM))
+		if len(retireSerials) > 0 {
+			pushedFP := certFingerprint(x509Cert.Raw)
+			kept := make([]string, 0, len(newPEMs))
+			for _, p := range newPEMs {
+				parsed, perr := cert.ParseCertificateFromPEM([]byte(p))
+				if perr == nil && certFingerprint(parsed.Raw) != pushedFP &&
+					retireSerials[parsed.SerialNumber.String()] {
+					continue
+				}
+				kept = append(kept, p)
+			}
+			if len(kept) == 0 {
+				return fmt.Errorf("push_signing_cert: retire_serials would leave the trust set empty")
+			}
+			newPEMs = kept
+		}
 	}
 
 	// Persist BEFORE updating in-memory state (persist-before-ack).

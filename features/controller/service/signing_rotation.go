@@ -175,7 +175,17 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		// request's cancellation and deadline (Issue #4665).
 		fleetCtx := ctxkeys.WithSystem(ctx)
 		stewards := controllerSvc.ListFleetStewards(fleetCtx)
-		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
+		// Send the issuer chain with the leaf so a certificate issued by an
+		// imported intermediate CA verifies against the steward's pinned root.
+		pushPEM, _, exportErr := s.certManager.ExportCertificate(newCert.SerialNumber, false, true)
+		if exportErr != nil {
+			// The rotation has already committed; fall back to the leaf alone.
+			s.logger.Warn("signing rotation: could not export issuer chain for push; pushing leaf only",
+				"serial", logging.SanitizeLogValue(newCert.SerialNumber),
+				"error", logging.SanitizeLogValue(exportErr.Error()))
+			pushPEM = newCert.CertificatePEM
+		}
+		certPEM := base64.StdEncoding.EncodeToString(pushPEM)
 		params := map[string]interface{}{
 			"cert_pem":           certPEM,
 			"serial":             newCert.SerialNumber,
@@ -233,7 +243,7 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		return fmt.Errorf("signing rotation service: load signing cursor: %w", err)
 	}
 
-	certPEM, _, err := s.certManager.ExportCertificate(signingCert.SerialNumber, false, false)
+	certPEM, _, err := s.certManager.ExportCertificate(signingCert.SerialNumber, false, true)
 	if err != nil {
 		return fmt.Errorf("signing rotation service: export signing cert serial=%s: %w", signingCert.SerialNumber, err)
 	}
