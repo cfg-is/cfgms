@@ -92,16 +92,6 @@ func (c *MSPOAuth2Config) GetApplicationScopeString() string {
 	return "https://graph.microsoft.com/.default"
 }
 
-// GetAdminConsentURL generates the admin consent URL for client onboarding
-func (c *MSPOAuth2Config) GetAdminConsentURL(state string) string {
-	return fmt.Sprintf(
-		"https://login.microsoftonline.com/common/adminconsent?client_id=%s&redirect_uri=%s&state=%s",
-		c.ClientID,
-		c.AdminCallbackURI,
-		state,
-	)
-}
-
 // ToLegacyOAuth2Config converts to the existing OAuth2Config for backward compatibility
 func (c *MSPOAuth2Config) ToLegacyOAuth2Config(clientTenantID string) *OAuth2Config {
 	return &OAuth2Config{

@@ -91,55 +91,7 @@ In your **MSP tenant (cfgis.onmicrosoft.com)**:
 4. **DO NOT grant admin consent** (each client will consent individually)
 5. **Create Client Secret** and **Certificate** (prod)
 
-### 2.2 MSP Client Onboarding
-
-**Step 1: MSP Admin Initiates**
-
-```go
-// Generate admin consent URL for new client
-func OnboardNewClient(clientName, mspEmployee string) (string, error) {
-    flow := NewAdminConsentFlow(mspConfig, clientStore)
-    
-    request, adminURL, err := flow.StartAdminConsentFlow(
-        ctx, 
-        generateClientID(), 
-        clientName, 
-        mspEmployee,
-    )
-    
-    return adminURL, err
-}
-```
-
-**Step 2: Send to Client Admin**
-
-```
-Subject: CFGMS MSP Setup - Admin Consent Required
-
-Click to authorize CFGMS MSP access to your M365:
-[ADMIN CONSENT URL]
-
-This allows our team to manage your M365 environment 
-per your service agreement.
-```
-
-**Step 3: Client Admin Clicks** → Signs into their tenant → Grants consent
-
-**Step 4: Handle Callback**
-
-```go
-func HandleAdminCallback(w http.ResponseWriter, r *http.Request) {
-    result, err := flow.HandleAdminConsentCallback(ctx, r.URL.String())
-    
-    if result.Success {
-        // Client tenant now ready for MSP management
-        log.Printf("Client %s activated", result.ClientTenant.TenantID)
-        http.Redirect(w, r, "/msp/clients", http.StatusFound)
-    }
-}
-```
-
-### 2.3 MSP Operations
+### 2.2 MSP Operations
 
 **Get Token for Client Tenant:**
 
@@ -179,141 +131,7 @@ func ValidateClient(clientTenantID string) {
 }
 ```
 
-## Part 3: Storage Configuration
-
-CFGMS follows a **pluggable storage architecture** that allows choosing the appropriate storage backend based on deployment requirements.
-
-### Storage Options
-
-#### 3.1 File Storage (Default - Simple Deployments)
-
-```yaml
-# cfgms.yaml
-msp:
-  client_store:
-    type: file
-    file_path: /var/lib/cfgms/msp-client-data
-    enable_sharding: false
-```
-
-**Use Cases:**
-
-- Development environments
-- Small MSP deployments (< 50 clients)
-- Single-node deployments
-- No external dependencies required
-
-#### 3.2 Git Storage (Recommended - CFGMS Philosophy)
-
-```yaml
-# cfgms.yaml
-msp:
-  client_store:
-    type: git
-    git_repository: https://github.com/your-msp/client-config.git
-    git_branch: production
-    enable_sharding: false
-```
-
-**Use Cases:**
-
-- Distributed MSP teams
-- Configuration version control
-- Audit trail requirements
-- Works with Mozilla's secret management
-
-#### 3.3 Database Storage (Production - High Volume)
-
-```yaml
-# cfgms.yaml
-msp:
-  client_store:
-    type: database
-    database_url: postgresql://user:pass@localhost/cfgms_msp
-    enable_sharding: true
-    shard_count: 8
-```
-
-**Database Schema (Auto-created):**
-
-```sql
--- Client tenant tracking
-CREATE TABLE client_tenants (
-    id SERIAL PRIMARY KEY,
-    client_identifier VARCHAR(100) UNIQUE NOT NULL,
-    tenant_id VARCHAR(36) UNIQUE NOT NULL,
-    tenant_name VARCHAR(255) NOT NULL,
-    domain_name VARCHAR(255),
-    admin_email VARCHAR(255),
-    status VARCHAR(20) DEFAULT 'pending',
-    created_by VARCHAR(100),
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW(),
-    consented_at TIMESTAMP,
-    metadata JSONB
-);
-
--- Admin consent request tracking
-CREATE TABLE admin_consent_requests (
-    id SERIAL PRIMARY KEY,
-    state VARCHAR(255) UNIQUE NOT NULL,
-    client_identifier VARCHAR(100) NOT NULL,
-    client_name VARCHAR(255) NOT NULL,
-    requested_by VARCHAR(100) NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW(),
-    expires_at TIMESTAMP NOT NULL,
-    metadata JSONB
-);
-```
-
-**Use Cases:**
-
-- Large MSP deployments (> 100 clients)
-- High availability requirements
-- Complex querying needs
-- Multiple concurrent operators
-
-#### 3.4 Hybrid Storage (Enterprise)
-
-```yaml
-# cfgms.yaml
-msp:
-  client_store:
-    type: hybrid
-    hybrid:
-      git_repository: https://github.com/your-msp/client-config.git
-      database_url: postgresql://user:pass@localhost/cfgms_msp
-      sync_interval: 5m
-    enable_sharding: true
-    shard_count: 16
-```
-
-**Use Cases:**
-
-- Enterprise MSP deployments
-- Best of both worlds (performance + audit trail)
-- Disaster recovery requirements
-- Complex compliance needs
-
-### Storage Migration
-
-**Upgrade Path:** Simple → Git → Database → Hybrid
-
-```bash
-# Start simple for POC
-cfgms init --storage-type=file
-
-# Upgrade to git for team collaboration
-cfgms migrate-storage --from=file --to=git --repository=https://github.com/msp/config.git
-
-# Scale to database for production
-cfgms migrate-storage --from=git --to=database --url=postgresql://...
-
-# Add hybrid for enterprise features
-cfgms migrate-storage --from=database --to=hybrid
-```
-
-## Part 4: Capability Testing
+## Part 3: Capability Testing
 
 ### MSP Capabilities Tested
 
@@ -344,7 +162,7 @@ if report.OverallSuccess {
 }
 ```
 
-## Part 5: Configuration
+## Part 4: Configuration
 
 ### MSP Production Config
 
@@ -419,8 +237,7 @@ This means the API call is working but the service principal lacks required perm
 
 **"Client tenant not found" errors:**
 
-- Verify admin consent callback was processed successfully
-- Check client_tenants table for tenant record
+- Verify the client tenant exists in CFGMS
 
 **API access denied:**
 
