@@ -653,3 +653,27 @@ func TestSQLiteCommandStore_PendingSurvivesRestart(t *testing.T) {
 	assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus,
 		"a pending delivery row must survive a controller restart unmodified")
 }
+
+func TestSQLiteCommandStore_DeliveryStatusRejected(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("delivery-rejected")))
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "delivery-rejected", business.DeliveryStatusDelivered, ""))
+
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "delivery-rejected", business.DeliveryStatusRejected, "term_fenced"))
+	got, err := store.GetCommandRecord(ctx, "delivery-rejected")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusRejected, got.DeliveryStatus)
+	assert.Equal(t, "term_fenced", got.DeliveryDetail)
+
+	err = store.UpdateDeliveryStatus(ctx, "delivery-rejected", business.DeliveryStatusDelivered, "")
+	assert.ErrorIs(t, err, business.ErrDeliveryStatusTerminal)
+	got, err = store.GetCommandRecord(ctx, "delivery-rejected")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusRejected, got.DeliveryStatus)
+	assert.Equal(t, "term_fenced", got.DeliveryDetail)
+
+	err = store.UpdateDeliveryStatus(ctx, "no-such-record", business.DeliveryStatusRejected, "term_fenced")
+	assert.ErrorIs(t, err, business.ErrCommandNotFound)
+}

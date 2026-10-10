@@ -439,12 +439,12 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 
 	// 3. Timestamp freshness.
 	if time.Since(cmd.Timestamp) > h.replayWindow {
-		return ErrCommandReplay
+		return ErrCommandStale
 	}
 
 	// 4. Replay deduplication.
 	if !h.replayCache.Add(cmd.ID) {
-		return ErrCommandReplay
+		return ErrCommandDuplicate
 	}
 
 	// 5. Params size bound.

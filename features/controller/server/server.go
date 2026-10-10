@@ -1509,6 +1509,20 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			}
 		}
 
+		// Issue #4569: record steward receive-path rejections on the delivery
+		// record. Responses reach only the node holding the steward's stream, so
+		// subscribe on the raw controlPlane (the provider deliveryServer wraps),
+		// never dispatchControlPlane. The command store is shared across nodes.
+		if respSub, ok := controlPlane.(controlplaneInterfaces.ResponseSubscriber); ok {
+			if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
+				rejectionRecorder := service.NewCommandRejectionRecorder(cmdStore, logger)
+				if subErr := rejectionRecorder.Subscribe(context.Background(), respSub); subErr != nil {
+					logger.Warn("Failed to subscribe command rejection recorder",
+						"error", logging.SanitizeLogValue(subErr.Error()))
+				}
+			}
+		}
+
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		// Issue #1844: commandSigner is a DynamicSigner — see block above.
 		// Issue #3390: haManager is passed as TermSource so every outbound command

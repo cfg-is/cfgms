@@ -913,6 +913,32 @@ re-send instead of running the command a second time. A re-send after the window
 or after a steward restart, still runs; `sync_config` is idempotent. Send paths
 with no delivery record keep generated IDs.
 
+**Steward rejection report (Issue #4569).** When a steward refuses an inbound
+command on its receive path, it sends the controller a `types.Response` with
+`Success=false`, `CommandID`, and a reason code in `Message` and
+`Details["reason"]` (`Details["retryable"]` is a bool, true only for
+`term_fenced`). The controller node holding the steward's stream receives it
+through `ResponseSubscriber`; `features/controller/service.CommandRejectionRecorder`
+(subscribed on the node-local control plane, not the cluster-aware sender)
+checks that the record's `StewardID` equals the authenticated steward and writes
+`DeliveryStatus` `rejected` with `DeliveryDetail` set to the reason code. The
+outcome is visible through the command-record API, a Warn log line and a
+per-reason counter (`RejectionCounts()`). Reason codes: `term_fenced`,
+`unauthenticated`, `wrong_steward`, `stale_timestamp`, `duplicate_id`,
+`params_too_large`, `invalid_command`. The recorder accepts only these codes and
+writes `DeliveryDetail` from its own constants, never the wire string. Two rules:
+
+- `duplicate_id` on a `pending` or `delivered` record means the steward already
+  holds the ID, so the record becomes `delivered` (this is how a drained re-send
+  of an already-accepted command resolves).
+- Any other code on a `pending` or `delivered` record makes it `rejected`.
+  Records in any other state are left unchanged.
+
+`rejected` is terminal: `UpdateDeliveryStatus` never moves a record out of it and
+returns `ErrDeliveryStatusTerminal`, which also settles the race where the
+steward's rejection arrives before the publisher's own `delivered` write.
+Commands with no delivery record (generated IDs) are counted, not recorded.
+
 On-connect hooks run as soon as the ControlChannel stream registers, which is
 before the steward has subscribed its command handler: the steward opens the
 stream first and builds its handler after. The steward-side control-plane

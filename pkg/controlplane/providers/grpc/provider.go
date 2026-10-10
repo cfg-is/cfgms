@@ -165,6 +165,7 @@ type Provider struct {
 	// Subscription handlers (server mode)
 	eventHandlers     []eventSubscription
 	heartbeatHandlers []interfaces.HeartbeatHandler
+	responseHandlers  []interfaces.ResponseHandler
 
 	// Lifecycle
 	ctx    context.Context
@@ -193,6 +194,11 @@ type eventSubscription struct {
 	filter  *types.EventFilter
 	handler interfaces.EventHandler
 }
+
+var (
+	_ interfaces.ResponseSender     = (*Provider)(nil)
+	_ interfaces.ResponseSubscriber = (*Provider)(nil)
+)
 
 // New creates a new gRPC control plane provider.
 func New(mode Mode, opts ...option) *Provider {
@@ -940,6 +946,7 @@ func (p *Provider) stopServer() error {
 	p.serverImpl = nil
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
+	p.responseHandlers = nil
 	p.mu.Unlock()
 
 	if ownGRPC {
@@ -1135,6 +1142,46 @@ func (p *Provider) SubscribeHeartbeats(ctx context.Context, handler interfaces.H
 	p.mu.Unlock()
 
 	return nil
+}
+
+// SubscribeResponses registers a server-side handler for steward responses
+// (Issue #4569). Handlers run on the control-channel receive goroutine, after
+// the authenticated-CN check, so resp.StewardID is always the sender's identity.
+func (p *Provider) SubscribeResponses(ctx context.Context, handler interfaces.ResponseHandler) error {
+	if p.mode != ModeServer {
+		return fmt.Errorf("SubscribeResponses is only available in server mode")
+	}
+	if handler == nil {
+		return fmt.Errorf("SubscribeResponses: handler must not be nil")
+	}
+
+	p.mu.Lock()
+	p.responseHandlers = append(p.responseHandlers, handler)
+	p.mu.Unlock()
+
+	return nil
+}
+
+// dispatchResponse runs every subscribed response handler synchronously. A
+// handler error is logged and never ends the stream.
+func (p *Provider) dispatchResponse(resp *types.Response) {
+	p.mu.RLock()
+	handlers := make([]interfaces.ResponseHandler, len(p.responseHandlers))
+	copy(handlers, p.responseHandlers)
+	ctx := p.ctx
+	p.mu.RUnlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	for _, handler := range handlers {
+		if err := handler(ctx, resp); err != nil {
+			p.logger.Error("response handler error",
+				"command_id", logging.SanitizeLogValue(resp.CommandID),
+				"steward_id", logging.SanitizeLogValue(resp.StewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
 }
 
 func (p *Provider) SendResponse(ctx context.Context, response *types.Response) error {
@@ -1573,14 +1620,14 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 				s.provider.identityMismatches.Add(1)
 				continue
 			}
-			// Response handling is currently receive-only — no controller logic
-			// awaits responses. See epic #747 for the rationale (WaitForResponse
-			// had zero callers). If sync-ack becomes a product need, reinstate a
-			// per-(CN, CommandID)-scoped waiter with a ceiling at that time.
+			// No controller logic awaits responses (epic #747 removed
+			// WaitForResponse); subscribers receive them fire-and-forget, e.g. the
+			// command rejection recorder (Issue #4569).
 			s.provider.responsesReceived.Add(1)
 			s.provider.logger.Debug("controlchannel response received",
 				"command_id", logging.SanitizeLogValue(resp.CommandID),
 				"steward_id", logging.SanitizeLogValue(resp.StewardID))
+			s.provider.dispatchResponse(resp)
 		}
 	}
 }

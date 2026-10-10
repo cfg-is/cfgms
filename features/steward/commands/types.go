@@ -4,6 +4,7 @@ package commands
 
 import (
 	"errors"
+	"fmt"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 )
@@ -24,6 +25,14 @@ var (
 	// ErrCommandReplay is returned when a command timestamp exceeds the replay window
 	// or when the command ID has already been processed within the current window.
 	ErrCommandReplay = errors.New("command replay detected")
+
+	// ErrCommandStale is returned when the command timestamp is outside the replay
+	// window. It wraps ErrCommandReplay, so errors.Is(err, ErrCommandReplay) holds.
+	ErrCommandStale = fmt.Errorf("%w: timestamp outside replay window", ErrCommandReplay)
+
+	// ErrCommandDuplicate is returned when the command ID is already in the replay
+	// cache. It wraps ErrCommandReplay, so errors.Is(err, ErrCommandReplay) holds.
+	ErrCommandDuplicate = fmt.Errorf("%w: command ID already processed", ErrCommandReplay)
 
 	// ErrWrongSteward is returned when the command's StewardID does not match this
 	// handler's steward identity.

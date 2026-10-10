@@ -187,6 +187,7 @@ type Provider struct {
 	// Subscriptions (server mode)
 	eventHandlers     []eventSubscription
 	heartbeatHandlers []interfaces.HeartbeatHandler
+	responseHandlers  []interfaces.ResponseHandler
 
 	// Lifecycle
 	ctx      context.Context
@@ -205,6 +206,11 @@ type Provider struct {
 
 // Compile-time proof that Provider satisfies the central provider interface.
 var _ interfaces.ControlPlaneProvider = (*Provider)(nil)
+
+var (
+	_ interfaces.ResponseSender     = (*Provider)(nil)
+	_ interfaces.ResponseSubscriber = (*Provider)(nil)
+)
 
 // Option configures optional Provider behaviour at construction time.
 type Option func(*Provider)
@@ -341,6 +347,7 @@ func (p *Provider) Stop(ctx context.Context) error {
 	p.commands.Reset()
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
+	p.responseHandlers = nil
 	p.mu.Unlock()
 
 	if bus != nil {
@@ -653,6 +660,73 @@ func (p *Provider) SubscribeHeartbeats(_ context.Context, handler interfaces.Hea
 	return nil
 }
 
+// --- Responses (Steward → Controller, Issue #4569) ---
+
+// SendResponse sends a steward response to the controller. The response's
+// StewardID is stamped with this provider's identity, as the gRPC provider
+// does from the authenticated CN; a payload naming another steward is refused.
+func (p *Provider) SendResponse(_ context.Context, response *types.Response) error {
+	if p.mode != ModeClient {
+		return fmt.Errorf("SendResponse is only available in client mode")
+	}
+	if response == nil {
+		return fmt.Errorf("SendResponse: response must not be nil")
+	}
+
+	p.mu.RLock()
+	ownID := p.stewardID
+	p.mu.RUnlock()
+	if response.StewardID != "" && response.StewardID != ownID {
+		return fmt.Errorf("SendResponse: response steward ID does not match provider identity")
+	}
+
+	server, err := p.serverForSend()
+	if err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send response: %w", err)
+	}
+
+	out := cloneResponse(response)
+	out.StewardID = ownID
+	server.receiveResponse(out)
+	return nil
+}
+
+// receiveResponse is the server-side ingress for a response.
+func (p *Provider) receiveResponse(resp *types.Response) {
+	p.mu.RLock()
+	handlers := make([]interfaces.ResponseHandler, len(p.responseHandlers))
+	copy(handlers, p.responseHandlers)
+	ctx := p.ctx
+	p.mu.RUnlock()
+
+	for _, handler := range handlers {
+		handler := handler
+		p.dispatchAsync(func() {
+			if err := handler(ctx, cloneResponse(resp)); err != nil {
+				p.logger.Error("response handler error",
+					"steward_id", logging.SanitizeLogValue(resp.StewardID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		})
+	}
+}
+
+// SubscribeResponses registers a server-side response handler.
+func (p *Provider) SubscribeResponses(_ context.Context, handler interfaces.ResponseHandler) error {
+	if p.mode != ModeServer {
+		return fmt.Errorf("SubscribeResponses is only available in server mode")
+	}
+	if handler == nil {
+		return fmt.Errorf("SubscribeResponses: handler must not be nil")
+	}
+
+	p.mu.Lock()
+	p.responseHandlers = append(p.responseHandlers, handler)
+	p.mu.Unlock()
+	return nil
+}
+
 // --- Status & Monitoring ---
 
 // GetStats returns the provider's operational counters.
@@ -790,6 +864,19 @@ func cloneHeartbeat(hb *types.Heartbeat) *types.Heartbeat {
 			metrics[k] = v
 		}
 		out.Metrics = metrics
+	}
+	return &out
+}
+
+// cloneResponse returns a copy of resp with an independent Details map.
+func cloneResponse(resp *types.Response) *types.Response {
+	out := *resp
+	if resp.Details != nil {
+		details := make(map[string]interface{}, len(resp.Details))
+		for k, v := range resp.Details {
+			details[k] = v
+		}
+		out.Details = details
 	}
 	return &out
 }

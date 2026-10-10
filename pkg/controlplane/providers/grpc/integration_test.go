@@ -911,3 +911,38 @@ func TestIsIdentityRejection(t *testing.T) {
 		})
 	}
 }
+
+func TestStewardSendsResponse_ControllerSubscriberReceives(t *testing.T) {
+	env := newTestEnv(t, "steward-resp-test")
+
+	received := make(chan *types.Response, 1)
+	err := env.server.SubscribeResponses(context.Background(), func(ctx context.Context, resp *types.Response) error {
+		received <- resp
+		return nil
+	})
+	require.NoError(t, err)
+
+	// StewardID left empty: the server stamps it from the authenticated CN.
+	err = env.client.SendResponse(context.Background(), &types.Response{
+		CommandID: "cmd-rejected-1",
+		Success:   false,
+		Message:   "term_fenced",
+		Timestamp: time.Now(),
+		Details:   map[string]interface{}{"reason": "term_fenced", "retryable": true},
+	})
+	require.NoError(t, err)
+
+	select {
+	case got := <-received:
+		assert.Equal(t, "cmd-rejected-1", got.CommandID)
+		assert.Equal(t, "steward-resp-test", got.StewardID)
+		assert.False(t, got.Success)
+		assert.Equal(t, "term_fenced", got.Details["reason"])
+		assert.Equal(t, true, got.Details["retryable"], "retryable must round-trip as a bool")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for response")
+	}
+
+	assert.Error(t, env.client.SubscribeResponses(context.Background(), func(context.Context, *types.Response) error { return nil }))
+	assert.Error(t, env.server.SendResponse(context.Background(), &types.Response{CommandID: "x"}))
+}
