@@ -539,7 +539,7 @@ func TestStewardsInTenantScope_FragmentsAndHostnameIndex(t *testing.T) {
 		clusterFragment(t, "cfg-prod", nil))
 
 	t.Run("root scope sees every steward with fragments and hostnames", func(t *testing.T) {
-		stewards, hostnames := server.stewardsInTenantScope("")
+		stewards, hostnames := server.stewardsInTenantCut("")
 		require.Len(t, stewards, 2)
 		for _, sd := range stewards {
 			assert.Nil(t, sd.DNAAttributes,
@@ -553,7 +553,7 @@ func TestStewardsInTenantScope_FragmentsAndHostnameIndex(t *testing.T) {
 	})
 
 	t.Run("tenant scope filters both views", func(t *testing.T) {
-		stewards, hostnames := server.stewardsInTenantScope("tenant-a")
+		stewards, hostnames := server.stewardsInTenantCut("tenant-a")
 		require.Len(t, stewards, 1)
 		assert.Equal(t, "steward-a", stewards[0].ID)
 		assert.Equal(t, map[string]string{"CFG-70-01": "steward-a"}, hostnames,
@@ -578,7 +578,7 @@ func TestStewardsInTenantScope_DuplicateHostnameClaim(t *testing.T) {
 	require.True(t, server.controllerService.RecordHeartbeat("steward-fresh", "", time.Now()))
 
 	for i := 0; i < 5; i++ {
-		_, hostnames := server.stewardsInTenantScope("default")
+		_, hostnames := server.stewardsInTenantCut("default")
 		require.Equal(t, "steward-fresh", hostnames["CFG-70-02"],
 			"duplicate hostname claims must resolve to the most recent heartbeat, every call")
 	}
@@ -587,7 +587,7 @@ func TestStewardsInTenantScope_DuplicateHostnameClaim(t *testing.T) {
 // TestStewardsInTenantScope_PeerAttachedSteward proves the cluster-aware read path
 // (Issue #3495, ADR-031 Decision 3 / Issue #3764): a steward whose only record lives
 // in durable fleet storage — never registered through this controller node, so absent
-// from the node-local live registry — is visible to stewardsInTenantScope immediately,
+// from the node-local live registry — is visible to stewardsInTenantCut immediately,
 // since ListFleetStewards reads durable storage directly on every call. Pre-story code
 // read GetAllStewards() and could never see it.
 func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
@@ -628,7 +628,7 @@ func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
 	}
 	require.True(t, found, "peer steward must appear in the fleet-wide view immediately")
 
-	stewards, hostnames := server.stewardsInTenantScope("")
+	stewards, hostnames := server.stewardsInTenantCut("")
 	foundInScope := false
 	for _, sd := range stewards {
 		if sd.ID == "peer-steward" {
@@ -638,11 +638,11 @@ func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
 		}
 	}
 	require.True(t, foundInScope,
-		"peer steward must be visible in stewardsInTenantScope immediately")
+		"peer steward must be visible in stewardsInTenantCut immediately")
 	assert.NotNil(t, hostnames, "the hostname index must still be built alongside the scoped view")
 
 	// Tenant scoping still applies to the cluster-wide source.
-	outOfScope, _ := server.stewardsInTenantScope("tenant-b")
+	outOfScope, _ := server.stewardsInTenantCut("tenant-b")
 	for _, sd := range outOfScope {
 		assert.NotEqual(t, "peer-steward", sd.ID,
 			"a peer steward outside the caller's tenant subtree must stay hidden")

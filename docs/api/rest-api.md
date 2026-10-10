@@ -59,6 +59,15 @@ A tenant-scoped caller reaches its own tenant's records. A root caller's lists, 
 
 Bulk approvals (approve-all, approve-by-CIDR) skip registrations the caller may not act on instead of returning the challenge.
 
+**Entity graph, cluster and cockpit reads.** These reads apply the same rule to a root caller subject to the boundary, per owning tenant:
+
+- Entity lists (`GET /api/v1/entities`, `/entities/drifted`) return only entities owned by the root tenant plus tenants covered by an active crossing. `GET /api/v1/entities/timeline` omits the entities the caller may not read. `GET /api/v1/entities/{eid}/edges` and `/neighborhood` omit any edge or neighbor that is a client-tenant entity the caller may not read.
+- An entity-keyed read of a client-tenant entity (`/entities/{eid}` and its `/edges`, `/neighborhood`, `/history`, `/diff`, `/drift` and `/desired-state` sub-routes) returns the crossing challenge. A tenant-scoped caller still gets `404` for an entity outside its subtree.
+- `GET /api/v1/clusters` is built only from stewards the caller can read. `GET /api/v1/clusters/{name}` and `/reconciliation` return the crossing challenge for a cluster that exists only in a client tenant the caller holds no crossing for, and `404` otherwise.
+- `POST /api/v1/cases/intake-assist` drops candidate entities in a client tenant without a crossing. `GET /api/v1/cases/{id}/watch` returns the crossing challenge, before the WebSocket upgrade, for a case in a client tenant.
+
+With an active crossing the same requests succeed as before.
+
 Where an operation needs a tenant the request does not name, it uses the caller's own tenant — the root tenant for a root caller — never a fallback tenant.
 
 ## Response Format

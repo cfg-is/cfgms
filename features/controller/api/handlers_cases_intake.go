@@ -171,10 +171,11 @@ func (s *Server) handleCasesIntakeAssist(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	callerTenant := callerTenantSubtree(r)
+	tenant, ids := s.entityCut(r)
+	scope := s.tenantReadScope(r, "POST /api/v1/cases/intake-assist")
 	candidates := make([]eginterfaces.EIDRef, 0, len(eids))
 	for _, eid := range eids {
-		ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenant)
+		owner, found, accessErr := s.entityOwner(r.Context(), eid, tenant, ids)
 		if accessErr != nil {
 			s.logger.Error("handleCasesIntakeAssist: entity access check failed",
 				"error", logging.SanitizeLogValue(accessErr.Error()),
@@ -182,11 +183,14 @@ func (s *Server) handleCasesIntakeAssist(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "resolve failed", http.StatusInternalServerError)
 			return
 		}
-		if ok {
+		// An eid outside the caller's tenant cut, or in a client tenant a
+		// boundary-subject root caller holds no crossing for, is silently dropped,
+		// not surfaced as an error (ADR-022 §7, ADR-025 A2.5).
+		if found && scope.Allows(owner) {
 			candidates = append(candidates, eid)
 		}
-		// Cross-tenant eid: silently drop, not surfaced as an error (ADR-022 §7).
 	}
+	scope.LogSummary()
 
 	writeEntityJSON(w, candidates)
 }
