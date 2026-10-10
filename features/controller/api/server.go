@@ -198,6 +198,7 @@ type Server struct {
 	assurancePolicyStore            business.AssurancePolicyStore            // Issue #2839: per-tenant assurance-policy overrides
 	blastRadiusPolicyStore          business.BlastRadiusPolicyStore          // Issue #3698: per-tenant operator-payload blast-radius overrides
 	tenantCrossingStore             business.TenantCrossingStore             // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	crossingGrantUseSeen            sync.Map                                 // principal|grant -> struct{}: grant-use audit dedup hint (tenantReadScope)
 	casesStore                      business.CaseStore                       // Issue #3605: cockpit investigation case CRUD
 	egWatchProv                     egWatchProvider                          // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
 	watchPongWait                   time.Duration                            // Issue #3613: cockpit watch keepalive window; 0 = defaultWatchPongWait
