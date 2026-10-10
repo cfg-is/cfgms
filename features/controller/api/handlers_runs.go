@@ -789,15 +789,16 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 // store paged them.
 func (s *Server) listReadableRuns(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*controllerrun.RunRecord, error) {
 	const pageSize = 500
-	// Bound the limit here as well as in the caller so the allocation never
-	// scales with a request-supplied value.
+	// Bound the limit here as well as in the caller so a page never exceeds
+	// pageSize. The slice grows by append rather than being pre-sized from the
+	// request-supplied limit, so no allocation size derives from user input.
 	if limit < 1 {
 		limit = 1
 	}
 	if limit > pageSize {
 		limit = pageSize
 	}
-	out := make([]*controllerrun.RunRecord, 0, limit)
+	out := make([]*controllerrun.RunRecord, 0)
 	skip := offset
 	for storeOffset := 0; ; storeOffset += pageSize {
 		page, err := s.runManager.ListRuns(ctx, "", pageSize, storeOffset)

@@ -315,15 +315,16 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // dropped after the store paged them.
 func (s *Server) listReadableBatchJobs(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*batchjob.BatchJob, error) {
 	const pageSize = 500
-	// Bound the limit here as well as in the caller so the allocation never
-	// scales with a request-supplied value.
+	// Bound the limit here as well as in the caller so a page never exceeds
+	// pageSize. The slice grows by append rather than being pre-sized from the
+	// request-supplied limit, so no allocation size derives from user input.
 	if limit < 1 {
 		limit = 1
 	}
 	if limit > pageSize {
 		limit = pageSize
 	}
-	out := make([]*batchjob.BatchJob, 0, limit)
+	out := make([]*batchjob.BatchJob, 0)
 	skip := offset
 	for storeOffset := 0; ; storeOffset += pageSize {
 		page, err := s.batchJobStore.ListBatchJobs(ctx, "", pageSize, storeOffset)
