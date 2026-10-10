@@ -169,6 +169,60 @@ func (s *Server) requireSigningAdmin(w http.ResponseWriter, r *http.Request, ava
 	return principal, true
 }
 
+// SigningMigrationProgressResponse is the JSON response from the signing
+// migration progress endpoint.
+type SigningMigrationProgressResponse struct {
+	SharedSerial         string   `json:"shared_serial"`
+	Stewards             int      `json:"stewards"`
+	Confirmed            int      `json:"confirmed"`
+	Unconfirmed          []string `json:"unconfirmed_steward_ids"`
+	UnconfirmedTruncated bool     `json:"unconfirmed_truncated"`
+}
+
+// handleGetSigningMigrationProgress handles GET /api/v1/certificates/signing/migration
+// (Issue #4797): how many stewards have confirmed the shared signing certificate
+// and which have not (a bounded list). It shares rotation's admin-certificate gate,
+// because the report spans the whole fleet and is tenant-independent.
+func (s *Server) handleGetSigningMigrationProgress(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	svc := s.stewardSigningMigration
+	s.mu.RUnlock()
+	principal, ok := s.requireSigningAdmin(w, r, svc != nil,
+		"Steward signing migration not available", "migration progress")
+	if !ok {
+		return
+	}
+
+	progress, err := svc.Progress(r.Context())
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrStewardMigrationNotShared):
+			s.writeErrorResponse(w, http.StatusConflict,
+				"The cluster has no shared signing certificate yet", "NOT_SHARED_MODE")
+		case errors.Is(err, service.ErrStewardMigrationUnavailable):
+			s.writeErrorResponse(w, http.StatusServiceUnavailable,
+				"Steward signing migration not available", "SERVICE_UNAVAILABLE")
+		default:
+			s.logger.Error("Signing migration progress failed",
+				"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Progress unavailable", "MIGRATION_PROGRESS_ERROR")
+		}
+		return
+	}
+	unconfirmed := progress.Unconfirmed
+	if unconfirmed == nil {
+		unconfirmed = []string{}
+	}
+	s.writeSuccessResponse(w, SigningMigrationProgressResponse{
+		SharedSerial:         progress.SharedSerial,
+		Stewards:             progress.Stewards,
+		Confirmed:            progress.Confirmed,
+		Unconfirmed:          unconfirmed,
+		UnconfirmedTruncated: progress.UnconfirmedTruncated,
+	})
+}
+
 // RevokeSigningCertRequest is the JSON body for the signing-certificate revoke endpoint.
 type RevokeSigningCertRequest struct {
 	Serial string `json:"serial"`

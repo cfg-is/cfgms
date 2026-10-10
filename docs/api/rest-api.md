@@ -1120,6 +1120,46 @@ validated and imported into the migration namespace.
 (`security_event`, severity high) with `operator_serial` and `serial`. No certificate or key
 material is recorded.
 
+#### GET /api/v1/certificates/signing/migration
+
+Progress of moving the stewards onto the shared signing certificate (Issue #4797): the
+shared serial, how many stewards exist, how many have confirmed the shared certificate,
+and a bounded list of those that have not. See
+[Cluster Signing Identity Migration](../operations/cluster-signing-migration.md#moving-stewards-to-the-shared-certificate).
+
+**Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
+**Required permission:** `certificate:list`
+
+**Caller:** the same gates as rotation: a certificate-authenticated root principal. A
+tenant-scoped caller, a principal below `AssuranceStrong` and a session without an admin
+certificate serial are refused with `403 FORBIDDEN`. The report is fleet-wide and
+tenant-independent.
+
+**Response:**
+
+```json
+{
+  "data": {
+    "shared_serial": "123456789",
+    "stewards": 120,
+    "confirmed": 118,
+    "unconfirmed_steward_ids": ["steward-017", "steward-094"],
+    "unconfirmed_truncated": false
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+`unconfirmed_steward_ids` is sorted and holds at most 100 IDs; `unconfirmed_truncated` is
+`true` when more stewards are unconfirmed than listed.
+
+**Errors:**
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 409 | `NOT_SHARED_MODE` | The cluster has no shared signing certificate yet, so there is nothing to report. |
+| 503 | `SERVICE_UNAVAILABLE` | The controller has no steward migration service (no transport configured). |
+
 ### Signing Credentials
 
 #### POST /api/v1/signing-credential/request

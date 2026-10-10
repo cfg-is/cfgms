@@ -235,6 +235,78 @@ func (p *Publisher) PublishCommandWithCallback(
 	return commandID, nil
 }
 
+// PublishCommandWithSignerAndCallback is PublishCommandWithCallback signing with
+// a caller-supplied signer instead of the publisher default (Issue #4797). The
+// signing-cert migration needs it: the key a steward trusts is not the
+// publisher's, and the next step may be sent only once the previous one has
+// completed.
+//
+// The pending entry and its timer are registered before the command is sent. A
+// steward completion event can reach HandleEventUpdate before SendCommand
+// returns, and an entry registered afterwards would miss it. The entry is
+// cancelled when the send fails, so neither callback fires for a command that
+// never left. A nil signer sends the command unsigned, as PublishCommandWithSigner does.
+func (p *Publisher) PublishCommandWithSignerAndCallback(
+	ctx context.Context,
+	stewardID string,
+	cmdType controlplaneTypes.CommandType,
+	params map[string]interface{},
+	signer signature.Signer,
+	timeout time.Duration,
+	onComplete func(event *controlplaneTypes.Event),
+	onTimeout func(),
+) (string, error) {
+	commandID := uuid.New().String()
+
+	cmd := &controlplaneTypes.Command{
+		ID:        commandID,
+		Type:      cmdType,
+		StewardID: stewardID,
+		Timestamp: time.Now(),
+		Params:    params,
+		Term:      p.currentTerm(),
+	}
+
+	sc, err := p.signCommandWith(cmd, signer)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign command: %w", err)
+	}
+
+	pending := &pendingCommand{
+		CommandID:  commandID,
+		StewardID:  stewardID,
+		Type:       cmdType,
+		SentAt:     time.Now(),
+		Timeout:    timeout,
+		OnComplete: onComplete,
+		OnTimeout:  onTimeout,
+	}
+	p.mu.Lock()
+	p.pending[commandID] = pending
+	pending.cancelTimer = time.AfterFunc(timeout, func() {
+		p.handleCommandTimeout(commandID)
+	})
+	p.mu.Unlock()
+
+	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
+		p.mu.Lock()
+		if _, exists := p.pending[commandID]; exists {
+			delete(p.pending, commandID)
+			pending.cancelTimer.Stop()
+		}
+		p.mu.Unlock()
+		return "", fmt.Errorf("failed to send command: %w", err)
+	}
+
+	p.logger.Info("Sent command to steward",
+		"command_id", commandID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"type", cmdType,
+		"signed", sc.Signature != nil)
+
+	return commandID, nil
+}
+
 // HandleEventUpdate processes an event from a steward via the ControlPlaneProvider.
 // Story #363: Replaces HandleStatusUpdate via ControlPlaneProvider events.
 func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTypes.Event) error {

@@ -7,8 +7,8 @@ node, as files in each node's certificate directory. This runbook describes how 
 nodes converge on one shared certificate, what each node does on its own, and what the
 operator does.
 
-Pushing the shared certificate to stewards and retiring the legacy keys from stewards is a
-separate step and is not covered here.
+Stewards are moved onto the shared certificate by a second mechanism, described in
+[Moving stewards to the shared certificate](#moving-stewards-to-the-shared-certificate).
 
 ## Modes
 
@@ -63,6 +63,68 @@ The overwrite before the unlink is best effort. It does not defeat media-level r
 on a node disk as exposed to anyone with access to that disk's backing media, and rotate
 after the migration if that matters to your threat model.
 
+## Moving stewards to the shared certificate
+
+Once a node is in `shared` mode it signs everything with the shared certificate, which a
+steward that trusts only one legacy node key cannot verify. A steward migration service
+runs on every node, only while that node is in `shared` mode, and migrates the stewards
+connected to that node. Only the node holding a steward's stream receives its completion
+events, so each node handles its own stewards; every node holds all legacy signers because
+they are in the migration namespace.
+
+For each connected steward with no recorded confirmation for the shared serial, the service
+sends `push_signing_cert` commands one at a time, waiting for the steward's completion
+event before the next:
+
+1. The shared certificate, signed by the shared key. If the steward completes it, it
+   already trusts the shared key.
+2. Otherwise the same push signed by each legacy migration signer in turn. The first that
+   completes is the key the steward trusts. A steward drops a command signed by an untrusted
+   key silently, so each candidate is bounded by a 10 second timeout.
+3. A confirmation push signed by the shared key. Its completion proves the steward trusts
+   the shared key.
+4. The confirmation is recorded in the acknowledgement store (keyed by steward and shared
+   serial, visible to every node). Only after that, a push signed by the shared key with
+   `retire_serials` naming every legacy migration serial. The steward then trusts the shared
+   certificate alone.
+
+The work never delays a steward connecting: the connect hook only queues the steward for a
+bounded worker pool (eight stewards at a time per node), and a steward that could not be
+migrated is retried no more often than every five minutes. A reconciler re-checks the
+stewards connected to the node every 30 seconds, so stewards already connected when the
+shared certificate became active are migrated without reconnecting. A steward with a
+recorded confirmation is skipped without sending anything.
+
+### Reading progress
+
+`GET /api/v1/certificates/signing/migration` returns the shared serial, the number of
+stewards, the number that confirmed and up to 100 unconfirmed steward IDs (see the
+[REST API](../api/rest-api.md#get-apiv1certificatessigningmigration)). The endpoint needs an
+admin certificate and an unscoped (root) caller.
+
+A steward stays unconfirmed when:
+
+- it is offline, or not connected to any node. Nothing is sent to a steward that is not
+  connected; it is migrated on its next connect.
+- it trusts none of the keys in the migration namespace (for example it was enrolled on a
+  node whose signing certificate was never imported). Every candidate times out; the
+  service logs `no candidate key delivered the shared certificate` and retries after the
+  backoff. Re-enroll such a steward.
+- the confirmation could not be recorded. The legacy certificates are not retired from it.
+
+If the retire push itself does not complete after the confirmation was recorded, the node
+retries it after the backoff for as long as the process runs. Restarting the node loses
+that memory; the legacy certificates then stay trusted by that steward until they are
+retired by an operator revocation (`POST /api/v1/certificates/signing/revoke`).
+
+### When it is safe to delete the migration entries
+
+Delete the entries under `config-signing/migration/` only when the progress endpoint shows
+every steward you intend to keep confirmed (`confirmed` equal to `stewards`, an empty
+`unconfirmed_steward_ids`). A steward that has not confirmed can only be reached through the
+legacy signers held in that namespace. After a later rotation the shared serial changes and
+each steward is covered by the normal rotation push.
+
 ## When a node refuses a local certificate
 
 A local certificate is refused, never imported, when any of these hold:
@@ -114,8 +176,10 @@ alert on any `update`, `delete` or `destroy` against it.
 4. Confirm each node reports `shared` mode and logs `signing_migration_local_key_removed`
    for its local key; no signing `key.pem` should remain under any node's certificate
    directory.
-5. **Cleanup (operator only).** After every node has finished and the migration signers are
-   no longer needed, delete the entries under `config-signing/migration/` from the vault
-   with `bao kv metadata delete`. Nodes never delete them, and later stories that need to
-   sign under a certificate a steward already trusts read from this namespace, so delete
-   only once those steps are complete.
+5. Watch `GET /api/v1/certificates/signing/migration` until every steward you intend to keep
+   is confirmed.
+6. **Cleanup (operator only).** After every node has finished and every steward is
+   confirmed, delete the entries under `config-signing/migration/` from the vault with
+   `bao kv metadata delete`. Nodes never delete them, and the steward migration reads its
+   legacy signers from this namespace, so delete only once the progress endpoint shows no
+   unconfirmed stewards.
