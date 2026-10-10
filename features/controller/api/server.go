@@ -2161,20 +2161,19 @@ func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
 			s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 			return
 		}
-		callerTenant := callerTenantFilter(r.Context())
-		info, exists := s.controllerService.GetStewardInfo(stewardID)
-		if callerTenant != "" { //architecture:allow-root-scope -- telemetry stream is a read; root read breadth (ADR-025 A7.2)
-			stewardTenant := ""
-			if exists {
-				stewardTenant = info.TenantID
-			}
-			if !exists || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
-				// 404 instead of 403 to avoid disclosing steward existence across tenants.
-				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
-			}
-		} else if !exists {
+		// Live telemetry is served from the node-local registry, so a steward known
+		// only to the durable store is not found here. A tenant-scoped caller is
+		// confined to its subtree (404); a root caller subject to the ADR-025
+		// boundary needs a crossing for a client tenant's steward (Issue #4715).
+		notFound := func() {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		}
+		info, exists := s.controllerService.GetStewardInfo(stewardID)
+		if !exists {
+			notFound()
+			return
+		}
+		if !s.authorizeRecordRead(w, r, info.TenantID, "GET /api/v1/telemetry/ws/{id}", notFound) {
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -65,12 +65,16 @@ func (s *Server) handleGetStewardConnection(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Tenant isolation: API-key principals carry a non-empty TenantID; admin mTLS
-	// principals have TenantID="" meaning no scope restriction.
-	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" && stewardInfo.TenantID != callerTenant { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		// 404 instead of 403 to avoid disclosing steward existence across tenants.
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	// Tenant isolation: a tenant-scoped caller reads only its own tenant's stewards
+	// (exact match, as before), and a root caller subject to the ADR-025 boundary
+	// needs a crossing for a client tenant's steward (Issue #4715). Every refusal but
+	// the challenge is a 404 so existence is not disclosed across tenants.
+	notFound := func() { s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND") }
+	if scope := callerTenantScope(r); scope.IsTenant() && stewardInfo.TenantID != scope.Path() {
+		notFound()
+		return
+	}
+	if !s.authorizeRecordRead(w, r, stewardInfo.TenantID, "GET /api/v1/stewards/{id}/connection", notFound) {
 		return
 	}
 
@@ -125,14 +129,21 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 	// fleet-wide read is marked system-internal: a bare context is refused
 	// (Issue #4665).
 	clusterCtx := ctxkeys.WithSystem(r.Context())
-	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	if callerTenant != "" { //architecture:allow-root-scope -- selects the cluster read context only; visibility is decided by tenantReadScope below
 		clusterCtx = context.WithValue(r.Context(), ctxkeys.TenantID, callerTenant)
 	}
 	allStewards := s.controllerService.ListFleetStewards(clusterCtx)
+	// A root caller subject to the ADR-025 boundary sees only root-tenant and
+	// crossing-covered stewards; bulk lists silently omit the rest (A2.5).
+	readScope := s.tenantReadScope(r, "GET /api/v1/stewards/connections/all")
 	allowedIDs := make(map[string]bool, len(allStewards))
 	for _, st := range allStewards {
+		if readScope.boundarySubject() && !readScope.Allows(st.TenantID) {
+			continue
+		}
 		allowedIDs[st.ID] = true
 	}
+	readScope.LogSummary()
 
 	allConns := reg.GetAll()
 	items := make([]StewardConnectionItem, 0, len(allConns))

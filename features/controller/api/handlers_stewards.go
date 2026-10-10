@@ -122,9 +122,15 @@ func paginateStewards(stewards []StewardInfo, limit, offset int) StewardListPage
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
 	tenantID := ""
-	if tid := callerTenantFilter(r.Context()); tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	if tid := callerTenantFilter(r.Context()); tid != "" { //architecture:allow-root-scope -- builds the query filter only; visibility of the results is decided by readScope below
 		tenantID = tid
 	}
+
+	// A root caller subject to the ADR-025 boundary lists only root-tenant and
+	// crossing-covered stewards; the rest are silently omitted (A2.5), so the
+	// pagination total counts visible rows only (Issue #4715).
+	readScope := s.tenantReadScope(r, "GET /api/v1/stewards")
+	defer readScope.LogSummary()
 
 	// Selector-based search path: when ?q=<selector> is present, parse the
 	// expression and apply tenant-scope enforcement identical to handleResolveSelector
@@ -172,6 +178,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 			return
 		}
+		results, _ = splitReadableResults(readScope, results)
 		stewardList := make([]StewardInfo, 0, len(results))
 		for _, res := range results {
 			info := StewardInfo{
@@ -237,6 +244,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 			return
 		}
+		results, _ = splitReadableResults(readScope, results)
 		stewardList := make([]StewardInfo, 0, len(results))
 		for _, res := range results {
 			info := StewardInfo{
@@ -292,7 +300,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	for _, steward := range stewards {
 		// A tenant-scoped caller must not see other tenants' stewards. The
 		// node-local map is unscoped, so this filter applies to it too.
-		if !s.isWithinTenantScope(r.Context(), tenantID, steward.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		if !readScope.Allows(steward.TenantID) {
 			continue
 		}
 		seen[steward.ID] = true
@@ -346,7 +354,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// node has no heartbeat from them and must not invent one (Issue #3480).
 	if haveDurable {
 		for id, rec := range durable {
-			if seen[id] {
+			if seen[id] || !readScope.Allows(rec.TenantID) {
 				continue
 			}
 			if !includeDeregistered && rec.Status == business.StewardStatusDeregistered {
@@ -485,15 +493,14 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cross-tenant scope check: API-key principals carry a non-empty TenantID; admin mTLS
-	// principals have TenantID="" meaning no scope restriction (callerTenant == "" → always allowed).
-	callerTenant := callerTenantFilter(r.Context())
-	if !s.isWithinTenantScope(r.Context(), callerTenant, stewardInfo.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		// 404 instead of 403 to avoid disclosing steward existence across tenants.
+	// Cross-tenant read: a tenant-scoped caller is confined to its subtree (404), and a
+	// root caller subject to the ADR-025 boundary needs a crossing for a client
+	// tenant's steward (Issue #4715).
+	if !s.authorizeRecordRead(w, r, stewardInfo.TenantID, "GET /api/v1/stewards/{id}", func() {
 		s.logger.Info("Cross-tenant steward get refused",
-			"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID))
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	}) {
 		return
 	}
 
@@ -587,24 +594,10 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
-	// principals have TenantID="" meaning no scope restriction.
-	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a".
-	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		info, ok := s.controllerService.GetStewardInfo(stewardID)
-		stewardTenant := ""
-		if ok {
-			stewardTenant = info.TenantID
-		}
-		// Allow access when the caller's tenant is the steward's tenant or one of its
-		// ParentID ancestors (e.g. "msp-a" can read "client-1" stewards). Ancestry
-		// replaces the old separator guard: "msp-ab" is not a descendant of "msp-a".
-		if !ok || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
-			// 404 instead of 403 to avoid disclosing steward existence across tenants.
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
+	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a";
+	// a root caller subject to the ADR-025 boundary needs a crossing (Issue #4715).
+	if !s.authorizeStewardRead(w, r, stewardID, "GET /api/v1/stewards/{id}/dna") {
+		return
 	}
 
 	// Create gRPC request
@@ -683,6 +676,37 @@ func (s *Server) authorizeStewardScope(w http.ResponseWriter, r *http.Request, s
 		return false
 	}
 	return true
+}
+
+// authorizeStewardRead decides a by-ID read of a steward-keyed resource. It
+// resolves the steward's owning tenant (live registry, then the durable store)
+// and applies the shared read decision (Issue #4715): a root caller subject to the
+// ADR-025 boundary with no crossing for that tenant gets the crossing challenge,
+// and every other refusal — including a steward known nowhere — is the 404
+// STEWARD_NOT_FOUND, so response shape is no existence oracle.
+func (s *Server) authorizeStewardRead(w http.ResponseWriter, r *http.Request, stewardID, route string) bool {
+	_, ok := s.authorizeStewardReadTenant(w, r, stewardID, route)
+	return ok
+}
+
+// authorizeStewardReadTenant is authorizeStewardRead returning the steward's
+// owning tenant for handlers that need it after the decision.
+func (s *Server) authorizeStewardReadTenant(w http.ResponseWriter, r *http.Request, stewardID, route string) (string, bool) {
+	stewardTenant, exists := "", false
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
+		stewardTenant, exists = info.TenantID, true
+	} else if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil {
+		stewardTenant, exists = rec.TenantID, true
+	}
+	notFound := func() { s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND") }
+	if !exists {
+		notFound()
+		return "", false
+	}
+	if !s.authorizeRecordRead(w, r, stewardTenant, route, notFound) {
+		return "", false
+	}
+	return stewardTenant, true
 }
 
 // authorizeStewardScopeLenient resolves stewardID's owning tenant the same way
@@ -1471,15 +1495,12 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Cross-tenant check: the caller's tenant must equal or be a ParentID ancestor of the
-	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
-	// A root caller has fleet-wide reach; anyone else is confined (Issue #4665).
-	callerTenantID := callerTenantFilter(r.Context())
-	if callerTenantID != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		if !s.tenantSubtreeContains(r.Context(), callerTenantID, stewardInfo.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
+	// The caller's tenant must equal or be a ParentID ancestor of the steward's tenant
+	// (404 otherwise); a boundary-subject root caller needs a crossing (Issue #4715).
+	if !s.authorizeRecordRead(w, r, stewardInfo.TenantID, "GET /api/v1/stewards/{id}/modules", func() {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	}) {
+		return
 	}
 
 	if stewardInfo.DNA == nil {
@@ -1582,23 +1603,9 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		"module", logging.SanitizeLogValue(module),
 	)
 
-	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
-	// principals have TenantID="" meaning no scope restriction.
-	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a".
-	callerTenant := callerTenantFilter(r.Context())
-	info, exists := s.controllerService.GetStewardInfo(stewardID)
-	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		stewardTenant := ""
-		if exists {
-			stewardTenant = info.TenantID
-		}
-		if !exists || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
-			// 404 instead of 403 to avoid disclosing steward existence across tenants.
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
-	} else if !exists {
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a";
+	// a root caller subject to the ADR-025 boundary needs a crossing (Issue #4715).
+	if !s.authorizeStewardRead(w, r, stewardID, "GET /api/v1/stewards/{id}/logs") {
 		return
 	}
 

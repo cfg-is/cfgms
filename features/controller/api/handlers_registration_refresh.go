@@ -877,15 +877,15 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 	}
 
 	// TenantID is always taken from the authenticated context for scoped callers;
-	// unscoped admins (TenantID=="") may use the query param to filter.
-	// A scoped caller sees its own tenant and every descendant: the store is read
-	// unfiltered and narrowed by the caller's ancestry-resolved subtree.
-	callerTenant := callerTenantFilter(r.Context())
+	// unscoped admins may use the query param to filter. The store is read
+	// unfiltered for a scoped caller and narrowed by the shared read decision: a
+	// scoped caller sees its own tenant and every descendant, and a root caller
+	// subject to the ADR-025 boundary sees only root-tenant and crossing-covered
+	// entries (Issue #4715).
+	readScope := s.tenantReadScope(r, "GET /api/v1/stewards/refresh/pending")
 	tenantID := r.URL.Query().Get("tenant_id")
-	var callerSubtree tenantSubtreeSet
-	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	if callerTenantScope(r).IsTenant() {
 		tenantID = ""
-		callerSubtree = s.tenantSubtreeIDs(r.Context(), callerTenant)
 	}
 
 	entries, err := s.pendingRefreshStore.ListPendingRefresh(r.Context(), tenantID)
@@ -894,15 +894,14 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "failed to list pending refreshes", http.StatusInternalServerError)
 		return
 	}
-	if callerSubtree != nil {
-		scoped := make([]*business.PendingRefreshEntry, 0, len(entries))
-		for _, e := range entries {
-			if callerSubtree.Contains(e.TenantID) {
-				scoped = append(scoped, e)
-			}
+	scoped := make([]*business.PendingRefreshEntry, 0, len(entries))
+	for _, e := range entries {
+		if readScope.Allows(e.TenantID) {
+			scoped = append(scoped, e)
 		}
-		entries = scoped
 	}
+	entries = scoped
+	readScope.LogSummary()
 
 	out := make([]APIPendingRefreshEntry, 0, len(entries))
 	for _, e := range entries {

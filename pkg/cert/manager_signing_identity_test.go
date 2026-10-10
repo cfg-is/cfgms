@@ -260,6 +260,21 @@ func TestSigningIdentity_ResolutionCacheIsBoundedAndObservesRotation(t *testing.
 	b, _ := c.node(t, c.secrets, true)
 	ttl := 300 * time.Millisecond
 	b.signingCacheTTLOverride = &ttl
+	// Drive the cache clock explicitly: generating the next identity below can
+	// take longer than the TTL on the wall clock (RSA under -race), which would
+	// make the within-bound assertion depend on machine speed.
+	var nowMu sync.Mutex
+	now := time.Now()
+	b.signingCacheNowOverride = func() time.Time {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		nowMu.Lock()
+		now = now.Add(d)
+		nowMu.Unlock()
+	}
 	require.NoError(t, a.EnsureSigningCertificate(fastSigningCfg))
 
 	first, err := b.GetCurrentCertForPurpose(PurposeSigning)
@@ -279,10 +294,17 @@ func TestSigningIdentity_ResolutionCacheIsBoundedAndObservesRotation(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, first.SerialNumber, cached.SerialNumber, "resolution is served from cache within the bound")
 
-	require.Eventually(t, func() bool {
-		got, err := b.GetCurrentCertForPurpose(PurposeSigning)
-		return err == nil && got.SerialNumber == next.SerialNumber
-	}, 5*time.Second, 50*time.Millisecond, "a serial change must be observed within the cache bound")
+	// Just inside the bound the cached identity is still served.
+	advance(ttl - time.Millisecond)
+	cached, err = b.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+	assert.Equal(t, first.SerialNumber, cached.SerialNumber, "resolution is served from cache within the bound")
+
+	// Once the bound elapses the serial change must be observed.
+	advance(time.Millisecond)
+	got, err := b.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+	assert.Equal(t, next.SerialNumber, got.SerialNumber, "a serial change must be observed within the cache bound")
 
 	valid, err := b.GetAllValidSigningCertificates()
 	require.NoError(t, err)

@@ -58,9 +58,11 @@ func setupTestServerWithBlobStore(t *testing.T) (*Server, blob.BlobStore) {
 // an empty tenant alone grants nothing (Issue #4665).
 func withTenant(r *http.Request, tenantID string) *http.Request {
 	ctx := context.WithValue(r.Context(), ctxkeys.TenantID, tenantID)
-	if tenantID == "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	scope := ctxkeys.NewRootScope()
+	if tenantID != "" {
+		scope = ctxkeys.NewTenantScope(tenantID)
 	}
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scope)
 	return r.WithContext(ctx)
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -30,6 +31,76 @@ type FleetHealthResponse struct {
 	Degraded    int `json:"degraded"`
 	Unreachable int `json:"unreachable"`
 	Hidden      int `json:"hidden"`
+
+	// WalledOff holds the anonymized aggregate of client-tenant stewards a root
+	// caller subject to the ADR-025 boundary holds no crossing for (A6.1). It is
+	// counts only, and is absent for every other caller and when nothing is
+	// walled off. The four counters above cover only stewards the caller may read.
+	WalledOff *FleetAnonymizedMetrics `json:"walled_off,omitempty"`
+}
+
+// FleetAnonymizedMetrics is the Amendment 6 (A6.1) anonymized metric set: online
+// and offline totals, operating-system platform mix and steward version mix. It
+// has no field that can carry a host name or device identifier. Online counts
+// active stewards and Offline counts lost ones, as in the billing rollup.
+type FleetAnonymizedMetrics struct {
+	Online   int            `json:"online"`
+	Offline  int            `json:"offline"`
+	Platform platformCounts `json:"platform"`
+	Versions map[string]int `json:"versions"`
+}
+
+// add counts one steward into the anonymized set.
+func (m *FleetAnonymizedMetrics) add(res fleet.StewardResult) {
+	switch res.Status {
+	case "active":
+		m.Online++
+	case "lost":
+		m.Offline++
+	}
+	osName := strings.ToLower(res.OS)
+	switch {
+	case strings.Contains(osName, "windows"):
+		m.Platform.Windows++
+	case strings.Contains(osName, "linux"):
+		m.Platform.Linux++
+	case strings.Contains(osName, "darwin"), strings.Contains(osName, "macos"):
+		m.Platform.Darwin++
+	default:
+		m.Platform.Other++
+	}
+	version := res.RunningVersion
+	if version == "" {
+		version = res.DNAAttributes["steward.version"]
+	}
+	if version == "" {
+		version = unknownStewardVersion
+	}
+	if m.Versions == nil {
+		m.Versions = make(map[string]int)
+	}
+	m.Versions[version]++
+}
+
+// splitReadableResults partitions search results into those the caller may read
+// and the rest. A caller not subject to the ADR-025 boundary keeps every result:
+// its tenant scoping is already in the query filter. A boundary-subject root
+// caller keeps only root-tenant and crossing-covered rows (A2.5: a bulk read
+// silently omits the others).
+func splitReadableResults(scope *tenantReadScope, results []fleet.StewardResult) (readable, walledOff []fleet.StewardResult) {
+	if !scope.boundarySubject() {
+		return results, nil
+	}
+	readable = make([]fleet.StewardResult, 0, len(results))
+	for _, res := range results {
+		if scope.Allows(res.TenantID) {
+			readable = append(readable, res)
+		} else {
+			walledOff = append(walledOff, res)
+		}
+	}
+	scope.LogSummary()
+	return readable, walledOff
 }
 
 // SelectorResolveRequest is the request body for POST /api/v1/fleet/resolve.
@@ -80,7 +151,7 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tid string
 	switch {
-	case scope.IsRoot(): //architecture:allow-root-scope -- selector resolution follows list breadth; callers that act on the result apply authorizeFleetTargets
+	case scope.IsRoot(): //architecture:allow-root-scope -- builds the query filter only; a read filters its results with splitReadableResults and an action applies authorizeFleetTargets
 		// Unrestricted: tid stays "".
 	case scope.IsTenant() && scope.Path() != "":
 		tid = scope.Path()
@@ -137,6 +208,10 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A root caller subject to the ADR-025 boundary resolves only the stewards of
+	// tenants it may read (Issue #4715).
+	results, _ = splitReadableResults(s.tenantReadScope(r, "POST /api/v1/fleet/resolve"), results)
+
 	stewardList := make([]StewardInfo, 0, len(results))
 	for _, res := range results {
 		info := StewardInfo{
@@ -177,7 +252,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	tid := callerTenantFilter(r.Context())
 
 	filter := fleet.Filter{}
-	if tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	if tid != "" { //architecture:allow-root-scope -- builds the query filter only; the read filter is splitReadableResults below
 		s.scopeFilterToTenantSubtree(r.Context(), &filter, tid)
 	}
 
@@ -188,8 +263,19 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Counters cover only stewards the caller may read. Client-tenant stewards a
+	// boundary-subject root caller holds no crossing for contribute only the
+	// anonymized A6.1 aggregate (Issue #4715).
+	results, walledOff := splitReadableResults(s.tenantReadScope(r, "GET /api/v1/fleet/health"), results)
+
 	now := time.Now()
 	resp := FleetHealthResponse{}
+	if len(walledOff) > 0 {
+		resp.WalledOff = &FleetAnonymizedMetrics{Versions: map[string]int{}}
+		for _, res := range walledOff {
+			resp.WalledOff.add(res)
+		}
+	}
 	for _, res := range results {
 		// Count hidden stewards in the caller's scope regardless of include_hidden
 		// (non-suppressible: the operator must always see that concealment is in effect).

@@ -1574,15 +1574,13 @@ func TestHandleGetStewardDNA_RejectsPrefixCollision(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "prefix-collision tenant must return 404")
 }
 
-// TestHandleGetStewardDNA_InternalError verifies that a GetStewardDNA service error
-// returns HTTP 500 with code INTERNAL_ERROR. The handler is called directly (bypassing
-// auth middleware) with an empty TenantID so the cross-tenant guard is skipped, and
-// the steward ID does not exist in the service - causing GetStewardDNA to return an error.
-func TestHandleGetStewardDNA_InternalError(t *testing.T) {
+// TestHandleGetStewardDNA_UnknownSteward verifies an unknown steward is a 404
+// STEWARD_NOT_FOUND for an unrestricted caller too (Issue #4715): the tenant of the
+// steward must be resolved before any read, so there is no unscoped fall-through to
+// the service for an ID the registry and durable store do not know.
+func TestHandleGetStewardDNA_UnknownSteward(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Call handler directly: empty TenantID skips cross-tenant check; non-existent steward
-	// causes GetStewardDNA to return an error, exercising the INTERNAL_ERROR path.
 	req := httptest.NewRequest("GET", "/api/v1/stewards/ghost-steward/dna", nil)
 	req = withTenant(req, "")
 	req = withVars(req, map[string]string{"id": "ghost-steward"})
@@ -1590,10 +1588,10 @@ func TestHandleGetStewardDNA_InternalError(t *testing.T) {
 
 	server.handleGetStewardDNA(rec, req)
 
-	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
 }
 
 // TestHandleGetStewardDNA_DNANotFound verifies HTTP 404 with code DNA_NOT_FOUND when

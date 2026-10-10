@@ -188,7 +188,7 @@ func (m *Manager) currentClusterSigningCert(ctx context.Context) (*Certificate, 
 	m.signingCacheMu.Lock()
 	defer m.signingCacheMu.Unlock()
 
-	if c := m.signingCache; c != nil && time.Now().Before(c.expiresAt) {
+	if c := m.signingCache; c != nil && m.signingCacheClock().Before(c.expiresAt) {
 		out := *c.cert
 		return &out, nil
 	}
@@ -212,7 +212,7 @@ func (m *Manager) currentClusterSigningCert(ctx context.Context) (*Certificate, 
 				return nil, err
 			}
 		}
-		m.signingCache = &cachedSigningIdentity{cert: c, expiresAt: time.Now().Add(m.signingCacheTTL())}
+		m.signingCache = &cachedSigningIdentity{cert: c, expiresAt: m.signingCacheClock().Add(m.signingCacheTTL())}
 		out := *c
 		return &out, nil
 	case SigningIdentityLegacyLocal:
@@ -220,7 +220,7 @@ func (m *Manager) currentClusterSigningCert(ctx context.Context) (*Certificate, 
 		if err != nil {
 			return nil, err
 		}
-		m.signingCache = &cachedSigningIdentity{cert: c, expiresAt: time.Now().Add(m.signingCacheTTL())}
+		m.signingCache = &cachedSigningIdentity{cert: c, expiresAt: m.signingCacheClock().Add(m.signingCacheTTL())}
 		out := *c
 		return &out, nil
 	default:
@@ -233,6 +233,14 @@ func (m *Manager) signingCacheTTL() time.Duration {
 		return *m.signingCacheTTLOverride
 	}
 	return signingResolveCacheTTL
+}
+
+// signingCacheClock is the time source for signing-cache expiry.
+func (m *Manager) signingCacheClock() time.Time {
+	if m.signingCacheNowOverride != nil {
+		return m.signingCacheNowOverride()
+	}
+	return time.Now()
 }
 
 func (m *Manager) invalidateSigningCache() {
