@@ -53,6 +53,14 @@ type SigningCursorStore interface {
 	// rotation is already in progress and force is false.
 	TransitionCursor(ctx context.Context, newSerial string, overlapDays int, force bool) (*SigningCertCursor, error)
 
+	// SeedCursorIfAbsent atomically creates a cursor naming serial as current
+	// with no rotating serial, only when no cursor exists. It reports
+	// created=true for exactly one caller among concurrent callers; every other
+	// caller gets created=false and the existing cursor. It never changes an
+	// existing cursor, which is why election uses it instead of TransitionCursor
+	// (that would demote an existing current serial to rotating).
+	SeedCursorIfAbsent(ctx context.Context, serial string) (cursor *SigningCertCursor, created bool, err error)
+
 	// MarkRetired sets RetiredAt to at, only when RotatingSerial equals
 	// rotatingSerial and RetiredAt is still nil. The check-and-set is atomic
 	// with respect to every other caller of this store, so a sweep and an

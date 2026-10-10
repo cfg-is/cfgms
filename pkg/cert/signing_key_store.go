@@ -23,6 +23,12 @@ const (
 	// vault policy can grant nodes read and create on it without touching the CA.
 	signingKeySharedDir = "config-signing/shared"
 
+	// signingKeyMigrationDir holds node-local signing material a node has
+	// validated and imported while the cluster moves to the shared identity. It is
+	// a separate prefix from signingKeySharedDir so a vault policy can let nodes
+	// read and create here while only an operator may delete.
+	signingKeyMigrationDir = "config-signing/migration"
+
 	// signingKeyClaimBootstrapKey is the bootstrap claim record.
 	signingKeyClaimBootstrapKey = "config-signing/claims/bootstrap"
 
@@ -85,11 +91,11 @@ func (s *secretStoreSigningKeyStore) key(parts ...string) string {
 	return path.Join(segments...)
 }
 
-func (s *secretStoreSigningKeyStore) serialKey(serial string) (string, error) {
+func (s *secretStoreSigningKeyStore) serialKey(dir, serial string) (string, error) {
 	if !signingSerialPattern.MatchString(serial) {
 		return "", fmt.Errorf("invalid signing certificate serial %q", logging.SanitizeLogValue(serial))
 	}
-	return s.key(signingKeySharedDir, serial), nil
+	return s.key(dir, serial), nil
 }
 
 // signingKeyRecord is the stored form: certificate, key and chain together.
@@ -101,6 +107,15 @@ type signingKeyRecord struct {
 }
 
 func (s *secretStoreSigningKeyStore) PutSigningKey(ctx context.Context, m *certinterfaces.SigningKeyMaterial) error {
+	return s.put(ctx, signingKeySharedDir, m)
+}
+
+// PutMigrationSigner implements certinterfaces.SigningKeyStore.
+func (s *secretStoreSigningKeyStore) PutMigrationSigner(ctx context.Context, m *certinterfaces.SigningKeyMaterial) error {
+	return s.put(ctx, signingKeyMigrationDir, m)
+}
+
+func (s *secretStoreSigningKeyStore) put(ctx context.Context, dir string, m *certinterfaces.SigningKeyMaterial) error {
 	if m == nil || len(m.CertificatePEM) == 0 || len(m.PrivateKeyPEM) == 0 {
 		return fmt.Errorf("signing key material requires a certificate and a private key")
 	}
@@ -114,7 +129,7 @@ func (s *secretStoreSigningKeyStore) PutSigningKey(ctx context.Context, m *certi
 	if x509Cert.SerialNumber.String() != m.Serial {
 		return fmt.Errorf("signing material serial does not match its certificate")
 	}
-	key, err := s.serialKey(m.Serial)
+	key, err := s.serialKey(dir, m.Serial)
 	if err != nil {
 		return err
 	}
@@ -152,7 +167,16 @@ func (s *secretStoreSigningKeyStore) PutSigningKey(ctx context.Context, m *certi
 }
 
 func (s *secretStoreSigningKeyStore) GetSigningKey(ctx context.Context, serial string) (*certinterfaces.SigningKeyMaterial, error) {
-	key, err := s.serialKey(serial)
+	return s.get(ctx, signingKeySharedDir, serial)
+}
+
+// GetMigrationSigner implements certinterfaces.SigningKeyStore.
+func (s *secretStoreSigningKeyStore) GetMigrationSigner(ctx context.Context, serial string) (*certinterfaces.SigningKeyMaterial, error) {
+	return s.get(ctx, signingKeyMigrationDir, serial)
+}
+
+func (s *secretStoreSigningKeyStore) get(ctx context.Context, dir, serial string) (*certinterfaces.SigningKeyMaterial, error) {
+	key, err := s.serialKey(dir, serial)
 	if err != nil {
 		return nil, err
 	}
@@ -180,10 +204,19 @@ func (s *secretStoreSigningKeyStore) GetSigningKey(ctx context.Context, serial s
 }
 
 func (s *secretStoreSigningKeyStore) ListSigningSerials(ctx context.Context) ([]string, error) {
-	// The provider lists the direct children of a tenant path, so the shared
-	// directory is addressed as a (sub)tenant.
+	return s.list(ctx, signingKeySharedDir)
+}
+
+// ListMigrationSigners implements certinterfaces.SigningKeyStore.
+func (s *secretStoreSigningKeyStore) ListMigrationSigners(ctx context.Context) ([]string, error) {
+	return s.list(ctx, signingKeyMigrationDir)
+}
+
+func (s *secretStoreSigningKeyStore) list(ctx context.Context, dir string) ([]string, error) {
+	// The provider lists the direct children of a tenant path, so the directory
+	// is addressed as a (sub)tenant.
 	metas, err := s.store.ListSecrets(ctx, &secretsinterfaces.SecretFilter{
-		TenantID: s.tenantID + "/" + s.key(signingKeySharedDir),
+		TenantID: s.tenantID + "/" + s.key(dir),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list signing keys: %s", logging.SanitizeLogValue(err.Error()))

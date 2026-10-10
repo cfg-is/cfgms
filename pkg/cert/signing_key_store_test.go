@@ -193,3 +193,35 @@ func TestSigningKeyStore_BootstrapClaimIsExclusive(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, won, "a second claimant must lose while the claim is held")
 }
+
+func TestSigningKeyStore_MigrationNamespaceIsSeparate(t *testing.T) {
+	ctx := context.Background()
+	ks := newTestSigningKeyStore(t, newInMemSecretStore())
+	mat := newSigningMaterial(t, newTestCAForSigning(t))
+
+	_, err := ks.GetMigrationSigner(ctx, mat.Serial)
+	assert.True(t, errors.Is(err, certinterfaces.ErrSigningKeyNotFound))
+
+	require.NoError(t, ks.PutMigrationSigner(ctx, mat))
+	require.NoError(t, ks.PutMigrationSigner(ctx, mat), "same material is idempotent")
+
+	got, err := ks.GetMigrationSigner(ctx, mat.Serial)
+	require.NoError(t, err)
+	assert.Equal(t, mat.PrivateKeyPEM, got.PrivateKeyPEM)
+
+	migrated, err := ks.ListMigrationSigners(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{mat.Serial}, migrated)
+	shared, err := ks.ListSigningSerials(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, shared, "migration entries are not shared signing identities")
+	_, err = ks.GetSigningKey(ctx, mat.Serial)
+	assert.True(t, errors.Is(err, certinterfaces.ErrSigningKeyNotFound))
+
+	// Different material for the same serial is refused, naming no key bytes.
+	other := newSigningMaterial(t, newTestCAForSigning(t))
+	other.Serial = mat.Serial
+	err = ks.PutMigrationSigner(ctx, other)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "PRIVATE KEY")
+}

@@ -118,6 +118,7 @@ part before the first `/`). For `vault_key_path: root/cluster-ca` and the defaul
 | Purpose | KV v2 data path | KV v2 metadata path |
 |---------|-----------------|---------------------|
 | One secret per signing serial (certificate, key and chain together) | `secret/data/root/config-signing/shared/<serial>` | `secret/metadata/root/config-signing/shared/<serial>` |
+| One secret per migration signer (a node-local signing certificate and key imported during the move to the shared identity) | `secret/data/root/config-signing/migration/<serial>` | `secret/metadata/root/config-signing/migration/<serial>` |
 | Bootstrap claim (TTL-bound, taken by the one node that generates the first identity) | `secret/data/root/config-signing/claims/bootstrap` | `secret/metadata/root/config-signing/claims/bootstrap` |
 
 Entries are written create-if-absent (compare-and-swap against "no version") and are never
@@ -136,6 +137,19 @@ path "secret/metadata/root/config-signing/shared/*" {
   capabilities = ["read", "list"]
 }
 
+# Migration signers: nodes import their node-local signing certificates here and read
+# them back. Same read-and-create rule; only the operator may delete (see
+# cluster-signing-migration.md).
+path "secret/data/root/config-signing/migration/*" {
+  capabilities = ["read", "create"]
+}
+path "secret/metadata/root/config-signing/migration" {
+  capabilities = ["list"]
+}
+path "secret/metadata/root/config-signing/migration/*" {
+  capabilities = ["read", "list"]
+}
+
 # Bootstrap claim: expires on its own; a crashed claimant's record is taken over with
 # an update once its TTL has lapsed.
 path "secret/data/root/config-signing/claims/*" {
@@ -145,6 +159,10 @@ path "secret/metadata/root/config-signing/claims/*" {
   capabilities = ["read"]
 }
 ```
+
+A cluster that had one signing certificate per node before this path existed moves to one
+shared certificate through the migration namespace; see
+[Cluster Signing Identity Migration](cluster-signing-migration.md).
 
 Keep this policy separate from the CA policy above: the CA path is read by every node once
 at start, while the signing path is read on the signing hot path (cached for at most five

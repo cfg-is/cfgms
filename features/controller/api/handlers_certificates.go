@@ -238,6 +238,99 @@ func (s *Server) handleRevokeSigningCert(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// ElectSigningCertRequest is the JSON body for the signing-certificate elect endpoint.
+type ElectSigningCertRequest struct {
+	Serial string `json:"serial"`
+}
+
+// ElectSigningCertResponse is the JSON response from the elect endpoint.
+type ElectSigningCertResponse struct {
+	Serial string `json:"serial"`
+}
+
+// maxElectSigningBodyBytes bounds the elect request body.
+const maxElectSigningBodyBytes = 1024
+
+// handleElectSigningCert handles POST /api/v1/certificates/signing/elect (Issue
+// #4796): it names one node-local signing certificate, already imported into the
+// migration namespace, as the cluster's shared signing certificate by creating the
+// signing cursor. It shares rotation's admin-certificate gate. It never overrides
+// an existing cursor (409 naming its serial) and never picks a serial itself.
+func (s *Server) handleElectSigningCert(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireSigningAdmin(w, r, s.certManager != nil,
+		"Certificate manager not available", "election")
+	if !ok {
+		return
+	}
+
+	var req ElectSigningCertRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxElectSigningBodyBytes)).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+	if req.Serial == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "serial is required", "VALIDATION_ERROR")
+		return
+	}
+
+	cursor, created, err := s.certManager.ElectSharedSigningSerial(r.Context(), req.Serial)
+	if err != nil {
+		switch {
+		case errors.Is(err, cert.ErrInvalidSerial):
+			s.writeErrorResponse(w, http.StatusBadRequest, "serial is not a valid certificate serial number", "VALIDATION_ERROR")
+		case errors.Is(err, cert.ErrSigningSerialNotMigrated):
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"serial is not in the migration namespace; only a validated, imported signing certificate can be elected", "SERIAL_NOT_MIGRATED")
+		case errors.Is(err, cert.ErrSigningSerialRevoked):
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"serial is revoked; a revoked signing certificate cannot be elected", "SERIAL_REVOKED")
+		case errors.Is(err, cert.ErrNoSigningKeyStore):
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Signing certificate election applies to clustered controllers only", "NOT_CLUSTER_MODE")
+		default:
+			s.logger.Error("Signing certificate election failed",
+				"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
+				"serial", logging.SanitizeLogValue(req.Serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Election failed", "ELECTION_ERROR")
+		}
+		return
+	}
+	if !created {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"A shared signing certificate is already elected: serial "+logging.SanitizeLogValue(cursor.CurrentSerial), "ALREADY_ELECTED")
+		return
+	}
+
+	s.emitSigningElectionAudit(r.Context(), principal.CertSerial, cursor.CurrentSerial)
+	s.writeSuccessResponse(w, ElectSigningCertResponse{Serial: cursor.CurrentSerial})
+}
+
+// emitSigningElectionAudit records an explicit election with the operator's
+// certificate serial and the elected serial. No PEM or key material. No-op when
+// auditManager is nil.
+func (s *Server) emitSigningElectionAudit(ctx context.Context, operatorSerial, serial string) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action("signing_certificate_elected").
+		User(logging.SanitizeLogValue(operatorSerial), business.AuditUserTypeHuman).
+		Resource("signing_certificate", logging.SanitizeLogValue(serial), "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh).
+		Details(map[string]interface{}{
+			"operator_serial": logging.SanitizeLogValue(operatorSerial),
+			"serial":          logging.SanitizeLogValue(serial),
+		})
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit signing election audit event",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
 // maxSigningRevokeReasonLen bounds the operator-supplied revoke reason.
 const maxSigningRevokeReasonLen = 256
 

@@ -189,6 +189,29 @@ func (f *fileSigningCursorStore) TransitionCursor(_ context.Context, newSerial s
 	return loadSigningCursor(f.basePath)
 }
 
+// SeedCursorIfAbsent implements certinterfaces.SigningCursorStore.SeedCursorIfAbsent.
+// The check-and-create runs under the file store's write lock.
+func (f *fileSigningCursorStore) SeedCursorIfAbsent(_ context.Context, serial string) (*SigningCertCursor, bool, error) {
+	if serial == "" {
+		return nil, false, fmt.Errorf("signing serial cannot be empty")
+	}
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+
+	existing, err := loadSigningCursor(f.basePath)
+	if err != nil {
+		return nil, false, fmt.Errorf("load signing cursor to seed: %w", err)
+	}
+	if existing != nil && existing.CurrentSerial != "" {
+		return existing, false, nil
+	}
+	seeded := &SigningCertCursor{CurrentSerial: serial, RotatedAt: time.Now().UTC()}
+	if err := saveSigningCursor(f.basePath, seeded); err != nil {
+		return nil, false, err
+	}
+	return seeded, true, nil
+}
+
 // MarkRetired implements certinterfaces.SigningCursorStore.MarkRetired. The
 // read-modify-write runs under the file store's write lock so concurrent
 // callers on this node retire the serial once.

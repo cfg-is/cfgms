@@ -188,6 +188,45 @@ func TestSigningCursorStore_MarkRetired_Contract(t *testing.T) {
 	}
 }
 
+// TestSigningCursorStore_SeedCursorIfAbsent_Contract: the first call creates a
+// cursor naming the serial with no rotating serial; later calls change nothing
+// and return the existing cursor (Issue #4796).
+func TestSigningCursorStore_SeedCursorIfAbsent_Contract(t *testing.T) {
+	for _, tc := range storeProviderCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			_, curStore, skip := tc.newStores(t)
+			if skip != "" {
+				t.Skip(skip)
+			}
+			ctx := context.Background()
+
+			_, _, err := curStore.SeedCursorIfAbsent(ctx, "")
+			require.Error(t, err)
+
+			got, created, err := curStore.SeedCursorIfAbsent(ctx, "serial-a")
+			require.NoError(t, err)
+			require.True(t, created)
+			assert.Equal(t, "serial-a", got.CurrentSerial)
+			assert.Empty(t, got.RotatingSerial)
+
+			got, created, err = curStore.SeedCursorIfAbsent(ctx, "serial-b")
+			require.NoError(t, err)
+			assert.False(t, created)
+			assert.Equal(t, "serial-a", got.CurrentSerial, "the existing cursor is returned unchanged")
+
+			loaded, err := curStore.LoadCursor(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "serial-a", loaded.CurrentSerial)
+			assert.Empty(t, loaded.RotatingSerial)
+
+			// A rotation after election works normally.
+			next, err := curStore.TransitionCursor(ctx, "serial-c", 0, false)
+			require.NoError(t, err)
+			assert.Equal(t, "serial-a", next.RotatingSerial)
+		})
+	}
+}
+
 // ackStoreCase names one SigningTrustAckStore implementation to run the shared
 // contract against (Issue #4691). newStore returns a fresh, isolated store or
 // a non-empty skip reason.

@@ -253,6 +253,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/cases/intake-assist",
 	"POST /api/v1/cases/{id}/pins",
 	"POST /api/v1/certificates/provision",
+	"POST /api/v1/certificates/signing/elect",
 	"POST /api/v1/certificates/signing/revoke",
 	"POST /api/v1/certificates/signing/rotate",
 	"POST /api/v1/certificates/{serial}/revoke",
