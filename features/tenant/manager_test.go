@@ -2018,3 +2018,103 @@ func TestEnforceRealmGuard_UnrecognisedEnvironment_NonClusterMode_NeverGated(t *
 	}
 	require.NoError(t, EnforceRealmGuard(cfg))
 }
+
+func TestManager_AdminContacts_RoundTripAndPreservedOnUpdate(t *testing.T) {
+	m := newTestTenantManager(t)
+	ctx := context.Background()
+	td, err := m.CreateTenant(ctx, &TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+
+	got, err := m.SetAdminContacts(ctx, td.ID, []string{"Ops@Example.com", "ops@example.com", "sec@example.com"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ops@example.com", "sec@example.com"}, got)
+
+	read, err := m.GetAdminContacts(ctx, td.ID)
+	require.NoError(t, err)
+	assert.Equal(t, got, read)
+
+	// Update omitting metadata keeps the contacts.
+	_, err = m.UpdateTenant(ctx, td.ID, &TenantRequest{Name: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	read, _ = m.GetAdminContacts(ctx, td.ID)
+	assert.Equal(t, got, read)
+
+	// Update with other metadata keeps the contacts and the other key.
+	updated, err := m.UpdateTenant(ctx, td.ID, &TenantRequest{Name: "msp-a", Metadata: map[string]string{"k": "v"}})
+	require.NoError(t, err)
+	assert.Equal(t, "v", updated.Metadata["k"])
+	read, _ = m.GetAdminContacts(ctx, td.ID)
+	assert.Equal(t, got, read)
+
+	// Empty list clears.
+	_, err = m.SetAdminContacts(ctx, td.ID, []string{})
+	require.NoError(t, err)
+	read, _ = m.GetAdminContacts(ctx, td.ID)
+	assert.Empty(t, read)
+}
+
+func TestManager_ReservedMetadataKeyRejected(t *testing.T) {
+	m := newTestTenantManager(t)
+	ctx := context.Background()
+	reserved := map[string]string{MetaKeyAdminContacts: `["x@example.com"]`}
+
+	_, err := m.CreateTenant(ctx, &TenantRequest{ID: "msp-a", ParentID: testRootTenantID, Metadata: reserved})
+	require.ErrorIs(t, err, ErrReservedMetadataKey)
+
+	td, err := m.CreateTenant(ctx, &TenantRequest{ID: "msp-b", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	_, err = m.UpdateTenant(ctx, td.ID, &TenantRequest{Name: "msp-b", Metadata: reserved})
+	require.ErrorIs(t, err, ErrReservedMetadataKey)
+	read, _ := m.GetAdminContacts(ctx, td.ID)
+	assert.Empty(t, read)
+}
+
+func TestNormalizeAdminContacts_Validation(t *testing.T) {
+	tooMany := make([]string, MaxAdminContacts+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("u%d@example.com", i)
+	}
+	for name, in := range map[string][]string{
+		"not an address": {"nope"},
+		"display name":   {"Ops <ops@example.com>"},
+		"crlf":           {"a@example.com\r\nBcc: b@example.com"},
+		"lf":             {"a@example.com\n"},
+		"empty entry":    {""},
+		"too many":       tooMany,
+		"comment form":   {"ops@example.com (Ops)"},
+		"two in one":     {"a@example.com, b@example.com"},
+		"overlong":       {strings.Repeat("a", 250) + "@example.com"},
+	} {
+		_, err := NormalizeAdminContacts(in)
+		assert.ErrorIs(t, err, ErrInvalidAdminContacts, name)
+	}
+	out, err := NormalizeAdminContacts(nil)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+}
+
+func TestManager_ResolveMSPAdminContacts(t *testing.T) {
+	m := newTestTenantManager(t)
+	ctx := context.Background()
+	for _, r := range []*TenantRequest{
+		{ID: "msp-a", ParentID: testRootTenantID},
+		{ID: "client-1", ParentID: "msp-a"},
+		{ID: "site-1", ParentID: "client-1"},
+	} {
+		_, err := m.CreateTenant(ctx, r)
+		require.NoError(t, err)
+	}
+
+	assert.Empty(t, m.ResolveMSPAdminContacts(ctx, "site-1"), "unset resolves empty")
+
+	_, err := m.SetAdminContacts(ctx, "msp-a", []string{"ops@example.com"})
+	require.NoError(t, err)
+	// Contacts on a non-seam tenant must not be used.
+	_, err = m.SetAdminContacts(ctx, "client-1", []string{"other@example.com"})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"ops@example.com"}, m.ResolveMSPAdminContacts(ctx, "site-1"))
+	assert.Equal(t, []string{"ops@example.com"}, m.ResolveMSPAdminContacts(ctx, "msp-a"))
+	assert.Empty(t, m.ResolveMSPAdminContacts(ctx, testRootTenantID))
+	assert.Empty(t, m.ResolveMSPAdminContacts(ctx, "missing"))
+}

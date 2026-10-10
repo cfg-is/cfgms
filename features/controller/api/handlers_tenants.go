@@ -443,6 +443,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusConflict, "tenant already exists", "TENANT_EXISTS")
 			return
 		}
+		if errors.Is(err, tenant.ErrReservedMetadataKey) {
+			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "RESERVED_METADATA_KEY")
+			return
+		}
 		if errors.Is(err, tenant.ErrTopLevelTenantExists) {
 			s.writeErrorResponse(w, http.StatusConflict, "a top-level tenant already exists; specify parent_id", "TOP_LEVEL_TENANT_EXISTS")
 			return
@@ -760,6 +764,10 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		if errors.Is(err, tenant.ErrReservedMetadataKey) {
+			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "RESERVED_METADATA_KEY")
 			return
 		}
 		// Only the caller-actionable rejection classes carry their detail back over

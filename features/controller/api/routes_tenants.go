@@ -27,6 +27,14 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
+	// MSP-managed administrator contact addresses (Issue #4711). Both routes use the
+	// ordinary tenant:read / tenant:update gates, so a root-scoped caller meets the
+	// crossing boundary first; the PUT handler additionally refuses root outright.
+	tenants.Handle("/{id}/admin-contacts",
+		s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenantAdminContacts))).Methods("GET")
+	tenants.Handle("/{id}/admin-contacts",
+		s.requirePermission("tenant", "update")(http.HandlerFunc(s.handlePutTenantAdminContacts))).Methods("PUT")
+
 	// Tenant deletion pipeline (ADR-027 Decisions 3-4, Issue #3182).
 	// POST requests deletion; DELETE cancels; GET reads the pending state;
 	// POST /approve is the dual-control terminal approval step.
