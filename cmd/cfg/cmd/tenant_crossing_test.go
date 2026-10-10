@@ -53,15 +53,15 @@ func newCrossingServer(t *testing.T, status int, body string) *crossingServer {
 	return cs
 }
 
-const crossingJSON = `{"data":{"ID":"c-1","TenantID":"client-1","PrincipalID":"op-1","Kind":"grant","GrantedBy":"admin","CreatedAt":"2026-01-01T00:00:00Z","ExpiresAt":"2999-01-01T00:00:00Z","RevokedAt":null}}`
+const crossingJSON = `{"data":{"id":"c-1","tenant_id":"client-1","principal_id":"","kind":"grant","granted_by":"admin","reason_category":"","approval_state":"approved","status":"active","created_at":"2026-01-01T00:00:00Z","expires_at":"2999-01-01T00:00:00Z","revoked_at":null}}`
 
 func setupCrossingCmd(t *testing.T, url string) {
 	t.Helper()
 	origURL, origInsecure, origYes, origJSON := tenantAPIURL, tenantTLSInsecure, tenantCrossingYes, tenantJSONOutput
-	origJust, origPrin, origDur := tenantBreakGlassJustification, tenantGrantPrincipal, tenantGrantDuration
+	origJust, origReason, origDur := tenantBreakGlassJustification, tenantBreakGlassReason, tenantGrantDuration
 	t.Cleanup(func() {
 		tenantAPIURL, tenantTLSInsecure, tenantCrossingYes, tenantJSONOutput = origURL, origInsecure, origYes, origJSON
-		tenantBreakGlassJustification, tenantGrantPrincipal, tenantGrantDuration = origJust, origPrin, origDur
+		tenantBreakGlassJustification, tenantBreakGlassReason, tenantGrantDuration = origJust, origReason, origDur
 	})
 	t.Setenv("CFGMS_ADMIN_BUNDLE", "")
 	tenantAPIURL = url
@@ -71,42 +71,87 @@ func setupCrossingCmd(t *testing.T, url string) {
 }
 
 func TestBreakGlass_RequestShape(t *testing.T) {
-	srv := newCrossingServer(t, http.StatusCreated, crossingJSON)
+	for _, reason := range []string{"account_recovery", "security_incident", "legal_request", "billing_dispute"} {
+		srv := newCrossingServer(t, http.StatusCreated, crossingJSON)
+		setupCrossingCmd(t, srv.URL)
+		tenantBreakGlassReason = reason
+		tenantBreakGlassJustification = "P1 outage ticket 1234"
+
+		out := captureStdout(t, func() {
+			require.NoError(t, runTenantBreakGlass(tenantBreakGlassCmd, []string{"client-1"}))
+		})
+
+		reqs := srv.requests()
+		require.Len(t, reqs, 1)
+		assert.Equal(t, http.MethodPost, reqs[0].Method)
+		assert.Equal(t, "/api/v1/tenants/client-1/break-glass", reqs[0].Path)
+		var body map[string]interface{}
+		require.NoError(t, json.Unmarshal(reqs[0].Body, &body))
+		assert.Equal(t, map[string]interface{}{"reason_category": reason, "justification": "P1 outage ticket 1234"}, body)
+		assert.Contains(t, out, "c-1")
+		assert.Contains(t, out, "2999-01-01T00:00:00Z")
+		assert.NotContains(t, out, "approve-break-glass")
+	}
+}
+
+func TestBreakGlass_PendingNotice(t *testing.T) {
+	srv := newCrossingServer(t, http.StatusCreated,
+		`{"data":{"id":"c-9","tenant_id":"client-1","kind":"break_glass","reason_category":"account_recovery","approval_state":"pending","status":"pending","expires_at":"2999-01-01T00:00:00Z"}}`)
 	setupCrossingCmd(t, srv.URL)
-	tenantBreakGlassJustification = "P1 outage ticket 1234"
+	tenantBreakGlassReason = "account_recovery"
+	tenantBreakGlassJustification = "MSP admins locked out"
 
 	out := captureStdout(t, func() {
 		require.NoError(t, runTenantBreakGlass(tenantBreakGlassCmd, []string{"client-1"}))
 	})
-
-	reqs := srv.requests()
-	require.Len(t, reqs, 1)
-	assert.Equal(t, http.MethodPost, reqs[0].Method)
-	assert.Equal(t, "/api/v1/tenants/client-1/break-glass", reqs[0].Path)
-	assert.Equal(t, "P1 outage ticket 1234", reqs[0].Header.Get("X-Justification"))
-	assert.Empty(t, reqs[0].Body)
-	assert.Contains(t, out, "c-1")
-	assert.Contains(t, out, "2999-01-01T00:00:00Z")
+	assert.Contains(t, out, "cfg tenant approve-break-glass client-1 c-9")
 }
 
-func TestBreakGlass_JustificationBounds(t *testing.T) {
+func TestBreakGlass_ValidationSendsNothing(t *testing.T) {
 	srv := newCrossingServer(t, http.StatusCreated, crossingJSON)
 	setupCrossingCmd(t, srv.URL)
 
+	tenantBreakGlassReason = "account_recovery"
 	for _, j := range []string{strings.Repeat("a", 9), strings.Repeat("a", 1001), "   short   "} {
 		tenantBreakGlassJustification = j
 		err := runTenantBreakGlass(tenantBreakGlassCmd, []string{"client-1"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "10-1000")
 	}
+	tenantBreakGlassJustification = "a long enough reason"
+	for _, r := range []string{"", "bogus", "ACCOUNT_RECOVERY"} {
+		tenantBreakGlassReason = r
+		err := runTenantBreakGlass(tenantBreakGlassCmd, []string{"client-1"})
+		require.Error(t, err, r)
+		assert.Contains(t, err.Error(), "--reason")
+	}
 	assert.Empty(t, srv.requests())
+}
+
+func TestApproveBreakGlass_RequestAndErrors(t *testing.T) {
+	srv := newCrossingServer(t, http.StatusOK, crossingJSON)
+	setupCrossingCmd(t, srv.URL)
+	out := captureStdout(t, func() {
+		require.NoError(t, runTenantApproveBreakGlass(tenantApproveBreakGlassCmd, []string{"client-1", "c-1"}))
+	})
+	reqs := srv.requests()
+	require.Len(t, reqs, 1)
+	assert.Equal(t, http.MethodPost, reqs[0].Method)
+	assert.Equal(t, "/api/v1/tenants/client-1/break-glass/c-1/approve", reqs[0].Path)
+	assert.Contains(t, out, "break-glass approved: c-1")
+
+	for code, status := range map[string]int{"SAME_APPROVER": 403, "NOT_PENDING": 409} {
+		esrv := newCrossingServer(t, status, `{"error":{"code":"`+code+`","message":"cannot approve"}}`)
+		setupCrossingCmd(t, esrv.URL)
+		err := runTenantApproveBreakGlass(tenantApproveBreakGlassCmd, []string{"client-1", "c-1"})
+		require.Error(t, err, code)
+		assert.Contains(t, err.Error(), code)
+	}
 }
 
 func TestGrant_DurationAndBody(t *testing.T) {
 	srv := newCrossingServer(t, http.StatusCreated, crossingJSON)
 	setupCrossingCmd(t, srv.URL)
-	tenantGrantPrincipal = "op-1"
-
 	tenantGrantDuration = "90m"
 	_ = captureStdout(t, func() {
 		require.NoError(t, runTenantGrant(tenantGrantCmd, []string{"client-1"}))
@@ -117,8 +162,8 @@ func TestGrant_DurationAndBody(t *testing.T) {
 	assert.Equal(t, "/api/v1/tenants/client-1/access-grants", reqs[0].Path)
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal(reqs[0].Body, &body))
-	assert.Equal(t, "op-1", body["principal_id"])
-	assert.EqualValues(t, 90, body["duration_minutes"])
+	assert.Equal(t, map[string]interface{}{"duration_minutes": float64(90)}, body)
+	assert.Nil(t, tenantGrantCmd.Flags().Lookup("principal"))
 
 	for _, d := range []string{"30s", "25h", "90m30s", "0m", "bogus"} {
 		tenantGrantDuration = d
@@ -139,12 +184,15 @@ func TestCrossingCommands_ErrorStatuses(t *testing.T) {
 	}
 	runners := map[string]func() error{
 		"break-glass": func() error {
-			tenantBreakGlassJustification = "a long enough reason"
+			tenantBreakGlassReason, tenantBreakGlassJustification = "account_recovery", "a long enough reason"
 			return runTenantBreakGlass(tenantBreakGlassCmd, []string{"client-1"})
 		},
 		"grant": func() error {
-			tenantGrantPrincipal, tenantGrantDuration = "op-1", "30m"
+			tenantGrantDuration = "30m"
 			return runTenantGrant(tenantGrantCmd, []string{"client-1"})
+		},
+		"approve": func() error {
+			return runTenantApproveBreakGlass(tenantApproveBreakGlassCmd, []string{"client-1", "c-1"})
 		},
 		"crossings":    func() error { return runTenantCrossings(tenantCrossingsCmd, []string{"client-1"}) },
 		"end-crossing": func() error { return runTenantEndCrossing(tenantEndCrossingCmd, []string{"client-1", "c-1"}) },
@@ -190,6 +238,18 @@ func TestCrossings_EmptyAndJSON(t *testing.T) {
 	assert.JSONEq(t, `[]`, out)
 }
 
+func TestCrossings_DecodesSnakeCase(t *testing.T) {
+	srv := newCrossingServer(t, http.StatusOK,
+		`{"data":[{"id":"bg-1","tenant_id":"client-1","kind":"break_glass","reason_category":"legal_request","approval_state":"pending","status":"pending","expires_at":"2999-01-01T00:00:00Z","revoked_at":null}]}`)
+	setupCrossingCmd(t, srv.URL)
+	out := captureStdout(t, func() {
+		require.NoError(t, runTenantCrossings(tenantCrossingsCmd, []string{"client-1"}))
+	})
+	for _, want := range []string{"bg-1", "break_glass", "legal_request", "pending", "2999-01-01T00:00:00Z"} {
+		assert.Contains(t, out, want)
+	}
+}
+
 func TestCrossings_ListsOnlyActive(t *testing.T) {
 	var buf bytes.Buffer
 	revoked := "2026-01-01T00:00:00Z"
@@ -207,10 +267,11 @@ func TestCrossingMutations_RefuseWithoutYesOrTTY(t *testing.T) {
 	srv := newCrossingServer(t, http.StatusCreated, crossingJSON)
 	setupCrossingCmd(t, srv.URL)
 	tenantCrossingYes = false
-	tenantBreakGlassJustification = "a long enough reason"
-	tenantGrantPrincipal, tenantGrantDuration = "op-1", "30m"
+	tenantBreakGlassReason, tenantBreakGlassJustification = "account_recovery", "a long enough reason"
+	tenantGrantDuration = "30m"
 
 	assert.Error(t, runTenantBreakGlass(tenantBreakGlassCmd, []string{"client-1"}))
+	assert.Error(t, runTenantApproveBreakGlass(tenantApproveBreakGlassCmd, []string{"client-1", "c-1"}))
 	assert.Error(t, runTenantGrant(tenantGrantCmd, []string{"client-1"}))
 	assert.Error(t, runTenantEndCrossing(tenantEndCrossingCmd, []string{"client-1", "c-1"}))
 	assert.Empty(t, srv.requests())
@@ -230,11 +291,14 @@ func TestEndCrossing_SendsDelete(t *testing.T) {
 	assert.Contains(t, out, "crossing ended")
 }
 
-func TestBreakGlass_StepUpReplayKeepsJustification(t *testing.T) {
+func TestBreakGlass_StepUpReplayKeepsBody(t *testing.T) {
 	var mu sync.Mutex
 	var seen []http.Header
+	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
+		bodies = append(bodies, string(b))
 		seen = append(seen, r.Header.Clone())
 		n := len(seen)
 		mu.Unlock()
@@ -256,9 +320,10 @@ func TestBreakGlass_StepUpReplayKeepsJustification(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, _, err = client.BreakGlassTenant(t.Context(), "client-1", "P1 outage ticket 1234")
+	_, _, err = client.BreakGlassTenant(t.Context(), "client-1", &APIBreakGlassRequest{ReasonCategory: "account_recovery", Justification: "P1 outage ticket 1234"})
 	require.NoError(t, err)
 	require.Len(t, seen, 2)
-	assert.Equal(t, "P1 outage ticket 1234", seen[1].Get("X-Justification"))
+	assert.Contains(t, bodies[1], "P1 outage ticket 1234")
+	assert.Contains(t, bodies[1], "account_recovery")
 	assert.Equal(t, "presence-token", seen[1].Get("X-Presence-Token"))
 }

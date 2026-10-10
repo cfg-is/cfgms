@@ -28,9 +28,13 @@ const (
 	crossingBreakGlassWindow = "30 minutes"
 )
 
+// crossingReasonCategories mirrors the controller's break-glass reason identifiers;
+// the API stays the authority and rejects anything else with INVALID_REASON_CATEGORY.
+var crossingReasonCategories = []string{"account_recovery", "security_incident", "legal_request", "billing_dispute"}
+
 var (
 	tenantBreakGlassJustification string
-	tenantGrantPrincipal          string
+	tenantBreakGlassReason        string
 	tenantGrantDuration           string
 	tenantCrossingYes             bool
 )
@@ -41,9 +45,15 @@ var tenantBreakGlassCmd = &cobra.Command{
 	Long: `Invoke a justified, audited break-glass elevation into a tenant.
 
 Only root-scoped callers may use break-glass. The elevation window is fixed by the
-controller at ` + crossingBreakGlassWindow + `; there is no duration flag. The justification
-(10-1000 characters) is sent only in the X-Justification request header and is recorded
-in the audit trail.
+controller at ` + crossingBreakGlassWindow + `; there is no duration flag. --reason takes one of
+account_recovery, security_incident, legal_request or billing_dispute. The justification
+(10-1000 characters) is sent in the request body and recorded in the audit trail.
+
+Break-glass is the account-recovery path when the console is unusable, for example an MSP
+locked out of its own accounts. The controller notifies the tenant loudly for every
+invocation, whichever client makes it. When the controller requires a second approver the
+crossing starts pending and admits nothing until a different root-scoped operator runs
+cfg tenant approve-break-glass.
 
 The command is step-up gated: when the controller asks for presence verification the
 CLI completes it and replays the request.
@@ -52,16 +62,37 @@ It prints what it will do and asks for confirmation. --yes skips the prompt; wit
 terminal and without --yes the command refuses and exits non-zero.
 
 Examples:
-  cfg tenant break-glass client-1 --justification "P1 outage, ticket INC-1234"
-  cfg tenant break-glass client-1 --justification "P1 outage, ticket INC-1234" --yes --json`,
+  cfg tenant break-glass client-1 --reason account_recovery --justification "MSP admins locked out, ticket INC-1234"
+  cfg tenant break-glass client-1 --reason security_incident --justification "P1 outage, ticket INC-1234" --yes --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTenantBreakGlass,
 }
 
+var tenantApproveBreakGlassCmd = &cobra.Command{
+	Use:   "approve-break-glass <tenant> <crossing-id>",
+	Short: "Approve a pending break-glass crossing as the second operator",
+	Long: `Approve a break-glass crossing that is waiting for a second approver.
+
+The approver must be a root-scoped operator other than the one who invoked the
+break-glass (SAME_APPROVER otherwise), and the crossing must still be pending
+(NOT_PENDING otherwise). Approval opens the ` + crossingBreakGlassWindow + ` window from the moment of
+approval. The command is step-up gated.
+
+It prints what it will do and asks for confirmation. --yes skips the prompt; without a
+terminal and without --yes the command refuses and exits non-zero.
+
+Examples:
+  cfg tenant approve-break-glass client-1 5b0c2f0e-1111-4222-8333-944455556666
+  cfg tenant approve-break-glass client-1 5b0c2f0e-1111-4222-8333-944455556666 --yes --json`,
+	Args: cobra.ExactArgs(2),
+	RunE: runTenantApproveBreakGlass,
+}
+
 var tenantGrantCmd = &cobra.Command{
 	Use:   "grant <tenant>",
-	Short: "Grant a support principal time-boxed access into a tenant",
-	Long: `Authorise a different operator principal to cross into a tenant for a limited time.
+	Short: "Grant root operators time-boxed access into a tenant",
+	Long: `Authorise root-scoped operators to cross into a tenant for a limited time. A grant names
+no person; it admits any root-scoped operator until it expires or is ended.
 
 Only an MSP administrator of the tenant may grant; root-scoped callers use break-glass
 instead. --duration is a Go duration of whole minutes between 1m and 24h (for example
@@ -71,8 +102,8 @@ It prints what it will do and asks for confirmation. --yes skips the prompt; wit
 terminal and without --yes the command refuses and exits non-zero.
 
 Examples:
-  cfg tenant grant client-1 --principal support-op-7 --duration 90m
-  cfg tenant grant client-1 --principal support-op-7 --duration 2h --yes --json`,
+  cfg tenant grant client-1 --duration 90m
+  cfg tenant grant client-1 --duration 2h --yes --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTenantGrant,
 }
@@ -113,20 +144,31 @@ Examples:
 }
 
 func init() {
+	tenantBreakGlassCmd.Flags().StringVar(&tenantBreakGlassReason, "reason", "", "Reason category: "+strings.Join(crossingReasonCategories, ", ")+" (required)")
+	_ = tenantBreakGlassCmd.MarkFlagRequired("reason")
 	tenantBreakGlassCmd.Flags().StringVar(&tenantBreakGlassJustification, "justification", "", "Reason for the elevation, 10-1000 characters (required)")
 	_ = tenantBreakGlassCmd.MarkFlagRequired("justification")
-	tenantGrantCmd.Flags().StringVar(&tenantGrantPrincipal, "principal", "", "Operator principal ID being granted access (required)")
 	tenantGrantCmd.Flags().StringVar(&tenantGrantDuration, "duration", "", "Grant length: whole minutes as a Go duration, 1m to 24h (required)")
-	_ = tenantGrantCmd.MarkFlagRequired("principal")
 	_ = tenantGrantCmd.MarkFlagRequired("duration")
 
-	for _, c := range []*cobra.Command{tenantBreakGlassCmd, tenantGrantCmd, tenantEndCrossingCmd} {
+	for _, c := range []*cobra.Command{tenantBreakGlassCmd, tenantApproveBreakGlassCmd, tenantGrantCmd, tenantEndCrossingCmd} {
 		c.Flags().BoolVarP(&tenantCrossingYes, "yes", "y", false, "Skip the confirmation prompt")
 	}
-	for _, c := range []*cobra.Command{tenantBreakGlassCmd, tenantGrantCmd, tenantCrossingsCmd, tenantEndCrossingCmd} {
+	for _, c := range []*cobra.Command{tenantBreakGlassCmd, tenantApproveBreakGlassCmd, tenantGrantCmd, tenantCrossingsCmd, tenantEndCrossingCmd} {
 		c.Flags().BoolVar(&tenantJSONOutput, "json", false, "Emit the response as received instead of human-readable text")
 		tenantCmd.AddCommand(c)
 	}
+}
+
+// validateCrossingReason requires one of the API's reason identifiers.
+func validateCrossingReason(r string) (string, error) {
+	r = strings.TrimSpace(r)
+	for _, v := range crossingReasonCategories {
+		if r == v {
+			return r, nil
+		}
+	}
+	return "", fmt.Errorf("--reason must be one of: %s", strings.Join(crossingReasonCategories, ", "))
 }
 
 // validateCrossingJustification applies the controller's bounds to the trimmed value.
@@ -185,20 +227,25 @@ func crossingClient() (*APIClient, error) {
 
 func runTenantBreakGlass(_ *cobra.Command, args []string) error {
 	tenantID := args[0]
+	reason, err := validateCrossingReason(tenantBreakGlassReason)
+	if err != nil {
+		return err
+	}
 	justification, err := validateCrossingJustification(tenantBreakGlassJustification)
 	if err != nil {
 		return err
 	}
 	if err := confirmCrossingAction(fmt.Sprintf(
-		"This will start a break-glass session into tenant %q for %s. The session is audited at critical severity.",
-		tenantID, crossingBreakGlassWindow), tenantCrossingYes); err != nil {
+		"This will start a break-glass session (%s) into tenant %q for %s. The session is audited at critical severity and the tenant is notified.",
+		reason, tenantID, crossingBreakGlassWindow), tenantCrossingYes); err != nil {
 		return err
 	}
 	client, err := crossingClient()
 	if err != nil {
 		return err
 	}
-	cr, raw, err := client.BreakGlassTenant(context.Background(), tenantID, justification)
+	cr, raw, err := client.BreakGlassTenant(context.Background(), tenantID,
+		&APIBreakGlassRequest{ReasonCategory: reason, Justification: justification})
 	if err != nil {
 		return err
 	}
@@ -207,6 +254,34 @@ func runTenantBreakGlass(_ *cobra.Command, args []string) error {
 		return nil
 	}
 	fmt.Printf("break-glass started: %s\n", cr.ID)
+	fmt.Printf("Tenant:     %s\n", orDash(cr.TenantID))
+	fmt.Printf("Expires at: %s\n", orDash(cr.ExpiresAt))
+	if cr.ApprovalState == "pending" {
+		fmt.Printf("Approval pending: a second operator must run `cfg tenant approve-break-glass %s %s` before this session admits access.\n", tenantID, cr.ID)
+	}
+	return nil
+}
+
+func runTenantApproveBreakGlass(_ *cobra.Command, args []string) error {
+	tenantID, crossingID := args[0], args[1]
+	if err := confirmCrossingAction(fmt.Sprintf(
+		"This will approve pending break-glass %q on tenant %q and open its %s window now.",
+		crossingID, tenantID, crossingBreakGlassWindow), tenantCrossingYes); err != nil {
+		return err
+	}
+	client, err := crossingClient()
+	if err != nil {
+		return err
+	}
+	cr, raw, err := client.ApproveTenantBreakGlass(context.Background(), tenantID, crossingID)
+	if err != nil {
+		return err
+	}
+	if tenantJSONOutput {
+		fmt.Printf("%s\n", raw)
+		return nil
+	}
+	fmt.Printf("break-glass approved: %s\n", cr.ID)
 	fmt.Printf("Tenant:     %s\n", orDash(cr.TenantID))
 	fmt.Printf("Expires at: %s\n", orDash(cr.ExpiresAt))
 	return nil
@@ -218,12 +293,9 @@ func runTenantGrant(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(tenantGrantPrincipal) == "" {
-		return fmt.Errorf("--principal must not be empty")
-	}
 	if err := confirmCrossingAction(fmt.Sprintf(
-		"This will grant principal %q access into tenant %q for %d minute(s).",
-		tenantGrantPrincipal, tenantID, minutes), tenantCrossingYes); err != nil {
+		"This will grant root-scoped operators access into tenant %q for %d minute(s).",
+		tenantID, minutes), tenantCrossingYes); err != nil {
 		return err
 	}
 	client, err := crossingClient()
@@ -231,7 +303,7 @@ func runTenantGrant(_ *cobra.Command, args []string) error {
 		return err
 	}
 	cr, raw, err := client.CreateTenantAccessGrant(context.Background(), tenantID,
-		&APICrossingGrantRequest{PrincipalID: tenantGrantPrincipal, DurationMinutes: minutes})
+		&APICrossingGrantRequest{DurationMinutes: minutes})
 	if err != nil {
 		return err
 	}
@@ -241,7 +313,6 @@ func runTenantGrant(_ *cobra.Command, args []string) error {
 	}
 	fmt.Printf("access grant created: %s\n", cr.ID)
 	fmt.Printf("Tenant:     %s\n", orDash(cr.TenantID))
-	fmt.Printf("Principal:  %s\n", orDash(cr.PrincipalID))
 	fmt.Printf("Expires at: %s\n", orDash(cr.ExpiresAt))
 	return nil
 }
@@ -271,9 +342,9 @@ func renderCrossings(w io.Writer, list []APITenantCrossing, now time.Time) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tKIND\tPRINCIPAL\tGRANTED BY\tEXPIRES AT")
+	_, _ = fmt.Fprintln(tw, "ID\tKIND\tREASON\tSTATUS\tEXPIRES AT")
 	for _, c := range active {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", c.ID, orDash(c.Kind), orDash(c.PrincipalID), orDash(c.GrantedBy), orDash(c.ExpiresAt))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", c.ID, orDash(c.Kind), orDash(c.ReasonCategory), orDash(c.Status), orDash(c.ExpiresAt))
 	}
 	_ = tw.Flush()
 }
