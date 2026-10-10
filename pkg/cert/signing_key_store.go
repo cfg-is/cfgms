@@ -56,6 +56,10 @@ type secretStoreSigningKeyStore struct {
 	store    secretsinterfaces.SecretStore
 	tenantID string
 	prefix   string
+
+	// clusterAtomic records that the backing store's compare-and-swap is atomic
+	// across controller nodes. Only NewSecretStoreSigningKeyStore sets it.
+	clusterAtomic bool
 }
 
 var (
@@ -79,7 +83,31 @@ func NewSecretStoreSigningKeyStore(store secretsinterfaces.SecretStore, tenantID
 	if !secretsinterfaces.CompareAndSwapIsClusterAtomic(store) {
 		return nil, fmt.Errorf("signing key store requires a secret store whose compare-and-swap is atomic across controller nodes")
 	}
+	return &secretStoreSigningKeyStore{store: store, tenantID: tenantID, prefix: strings.Trim(prefix, "/"), clusterAtomic: true}, nil
+}
+
+// NewSingleNodeSigningKeyStore returns a SigningKeyStore over store for a
+// controller that is the only node. It has the same key layout, create-if-absent
+// and claim semantics as NewSecretStoreSigningKeyStore but does not require a
+// cluster-atomic compare-and-swap: one process on one host serializes through the
+// store's own lock. A cluster must never use it; SigningKeyStoreIsClusterAtomic
+// reports false for the result so cluster wiring can refuse it.
+func NewSingleNodeSigningKeyStore(store secretsinterfaces.SecretStore, tenantID, prefix string) (certinterfaces.SigningKeyStore, error) {
+	if store == nil {
+		return nil, fmt.Errorf("secret store is required")
+	}
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant ID is required")
+	}
 	return &secretStoreSigningKeyStore{store: store, tenantID: tenantID, prefix: strings.Trim(prefix, "/")}, nil
+}
+
+// SigningKeyStoreIsClusterAtomic reports whether ks was built by
+// NewSecretStoreSigningKeyStore. Any other implementation returns false, so an
+// unknown key store fails a cluster guard closed.
+func SigningKeyStoreIsClusterAtomic(ks certinterfaces.SigningKeyStore) bool {
+	s, ok := ks.(*secretStoreSigningKeyStore)
+	return ok && s != nil && s.clusterAtomic
 }
 
 func (s *secretStoreSigningKeyStore) key(parts ...string) string {
@@ -89,6 +117,32 @@ func (s *secretStoreSigningKeyStore) key(parts ...string) string {
 	}
 	segments = append(segments, parts...)
 	return path.Join(segments...)
+}
+
+// address resolves a logical key to the (tenant, key) a SecretRequest carries and
+// the combined reference GetSecret takes. The logical path is the same in every
+// mode. A cluster store keeps the whole key under the tenant, as a vault path. A
+// single-node store folds the key's directory into the tenant and keeps only the
+// last segment as the key, because the flatfile backend behind the single-node
+// secret store rejects "/" in a secret name.
+func (s *secretStoreSigningKeyStore) address(key string) (tenant, name, ref string) {
+	ref = s.tenantID + "/" + key
+	if s.clusterAtomic {
+		return s.tenantID, key, ref
+	}
+	return s.tenantID + "/" + path.Dir(key), path.Base(key), ref
+}
+
+// read fetches the secret at key. A single-node store addresses it by explicit
+// (tenant, key) when the backend offers it, so no combined reference is resolved.
+func (s *secretStoreSigningKeyStore) read(ctx context.Context, key string) (*secretsinterfaces.Secret, error) {
+	tenant, name, ref := s.address(key)
+	if !s.clusterAtomic {
+		if acc, ok := s.store.(secretsinterfaces.TenantSecretAccessor); ok {
+			return acc.GetTenantSecret(ctx, tenant, name)
+		}
+	}
+	return s.store.GetSecret(ctx, ref)
 }
 
 func (s *secretStoreSigningKeyStore) serialKey(dir, serial string) (string, error) {
@@ -138,16 +192,16 @@ func (s *secretStoreSigningKeyStore) put(ctx context.Context, dir string, m *cer
 		return err
 	}
 
-	lookup := s.tenantID + "/" + key
+	tenant, name, lookup := s.address(key)
 	same := func(stored string) error { return sameSigningMaterial(stored, m) }
 
-	if existing, err := s.store.GetSecret(ctx, lookup); err == nil {
+	if existing, err := s.read(ctx, key); err == nil {
 		return same(existing.Value)
 	}
 	_, ok, err := s.store.CompareAndSwapSecret(ctx, lookup, 0, &secretsinterfaces.SecretRequest{
-		Key:         key,
+		Key:         name,
 		Value:       value,
-		TenantID:    s.tenantID,
+		TenantID:    tenant,
 		CreatedBy:   signingKeyCreatedBy,
 		Description: "CFGMS config-signing certificate and key",
 		Tags:        []string{"config_signing_key"},
@@ -158,7 +212,7 @@ func (s *secretStoreSigningKeyStore) put(ctx context.Context, dir string, m *cer
 	if ok {
 		return nil
 	}
-	existing, getErr := s.store.GetSecret(ctx, lookup)
+	existing, getErr := s.read(ctx, key)
 	if getErr != nil {
 		return fmt.Errorf("signing key for serial %s is already claimed but could not be read back: %s",
 			logging.SanitizeLogValue(m.Serial), logging.SanitizeLogValue(getErr.Error()))
@@ -180,7 +234,7 @@ func (s *secretStoreSigningKeyStore) get(ctx context.Context, dir, serial string
 	if err != nil {
 		return nil, err
 	}
-	secret, err := s.store.GetSecret(ctx, s.tenantID+"/"+key)
+	secret, err := s.read(ctx, key)
 	if err != nil {
 		if errors.Is(err, secretsinterfaces.ErrSecretNotFound) {
 			return nil, fmt.Errorf("%w: serial %s", certinterfaces.ErrSigningKeyNotFound, logging.SanitizeLogValue(serial))
@@ -234,10 +288,11 @@ func (s *secretStoreSigningKeyStore) list(ctx context.Context, dir string) ([]st
 // ClaimSigningBootstrap implements certinterfaces.SigningBootstrapClaimer.
 func (s *secretStoreSigningKeyStore) ClaimSigningBootstrap(ctx context.Context) (bool, error) {
 	key := s.key(signingKeyClaimBootstrapKey)
-	_, ok, err := s.store.CompareAndSwapSecret(ctx, s.tenantID+"/"+key, 0, &secretsinterfaces.SecretRequest{
-		Key:         key,
+	tenant, name, ref := s.address(key)
+	_, ok, err := s.store.CompareAndSwapSecret(ctx, ref, 0, &secretsinterfaces.SecretRequest{
+		Key:         name,
 		Value:       "",
-		TenantID:    s.tenantID,
+		TenantID:    tenant,
 		CreatedBy:   signingKeyCreatedBy,
 		Description: "config-signing bootstrap claim",
 		Tags:        []string{"config_signing_claim"},
@@ -249,13 +304,36 @@ func (s *secretStoreSigningKeyStore) ClaimSigningBootstrap(ctx context.Context) 
 	return ok, nil
 }
 
+// ReleaseSigningBootstrap drops the bootstrap claim. The claim only has to hold
+// while an identity is being provisioned: once the cursor names it, other nodes
+// adopt it from the cursor and never contend for the claim again.
+func (s *secretStoreSigningKeyStore) ReleaseSigningBootstrap(ctx context.Context) error {
+	return s.deleteClaim(ctx, signingKeyClaimBootstrapKey, "bootstrap")
+}
+
+// deleteClaim removes the claim record at logical key; a missing claim is success.
+func (s *secretStoreSigningKeyStore) deleteClaim(ctx context.Context, logical, what string) error {
+	tenant, name, ref := s.address(s.key(logical))
+	var err error
+	if acc, ok := s.store.(secretsinterfaces.TenantSecretAccessor); ok && !s.clusterAtomic {
+		err = acc.DeleteTenantSecret(ctx, tenant, name)
+	} else {
+		err = s.store.DeleteSecret(ctx, ref)
+	}
+	if err != nil && !errors.Is(err, secretsinterfaces.ErrSecretNotFound) {
+		return fmt.Errorf("release signing %s claim: %s", what, logging.SanitizeLogValue(err.Error()))
+	}
+	return nil
+}
+
 // ClaimSigningRotation implements certinterfaces.SigningRotationClaimer.
 func (s *secretStoreSigningKeyStore) ClaimSigningRotation(ctx context.Context) (bool, error) {
 	key := s.key(signingKeyClaimRotationKey)
-	_, ok, err := s.store.CompareAndSwapSecret(ctx, s.tenantID+"/"+key, 0, &secretsinterfaces.SecretRequest{
-		Key:         key,
+	tenant, name, ref := s.address(key)
+	_, ok, err := s.store.CompareAndSwapSecret(ctx, ref, 0, &secretsinterfaces.SecretRequest{
+		Key:         name,
 		Value:       "",
-		TenantID:    s.tenantID,
+		TenantID:    tenant,
 		CreatedBy:   signingKeyCreatedBy,
 		Description: "config-signing rotation claim",
 		Tags:        []string{"config_signing_claim"},
@@ -269,11 +347,7 @@ func (s *secretStoreSigningKeyStore) ClaimSigningRotation(ctx context.Context) (
 
 // ReleaseSigningRotation implements certinterfaces.SigningRotationClaimer.
 func (s *secretStoreSigningKeyStore) ReleaseSigningRotation(ctx context.Context) error {
-	err := s.store.DeleteSecret(ctx, s.tenantID+"/"+s.key(signingKeyClaimRotationKey))
-	if err != nil && !errors.Is(err, secretsinterfaces.ErrSecretNotFound) {
-		return fmt.Errorf("release signing rotation claim: %s", logging.SanitizeLogValue(err.Error()))
-	}
-	return nil
+	return s.deleteClaim(ctx, signingKeyClaimRotationKey, "rotation")
 }
 
 func marshalSigningRecord(m *certinterfaces.SigningKeyMaterial) (string, error) {

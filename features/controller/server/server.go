@@ -3567,15 +3567,30 @@ func loadExistingCertificateManager(cfg *config.Config, storageManager *interfac
 		return manager, nil
 	}
 
-	manager, err := cert.NewManager(&cert.ManagerConfig{
+	managerCfg := &cert.ManagerConfig{
 		StoragePath:          certPath,
 		LoadExistingCA:       true,
 		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
 		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
-	})
+	}
+
+	// Single node: the config-signing key is held in the configured secret store,
+	// never in the node-local certificate directory.
+	secretStore, err := api.NewSecretStore(cfg)
 	if err != nil {
+		return nil, fmt.Errorf("failed to open secret store for signing key custody: %w", err)
+	}
+	if err := initialization.WireSingleNodeSigningKeyStore(managerCfg, cfg, secretStore); err != nil {
+		_ = secretStore.Close()
+		return nil, err
+	}
+
+	manager, err := cert.NewManager(managerCfg)
+	if err != nil {
+		_ = secretStore.Close()
 		return nil, fmt.Errorf("failed to load existing CA from %s: %w", cfg.Certificate.CAPath, err)
 	}
+	manager.AttachCloser(secretStore)
 	logger.Info("Loaded existing Certificate Authority", "ca_path", cfg.Certificate.CAPath)
 
 	return manager, nil

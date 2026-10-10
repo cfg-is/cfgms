@@ -20,6 +20,10 @@ steward's trust anchor for config verification. Stewards pin this certificate wh
 they register with the controller. Any config payload signed by a different key is
 rejected — this is an intentional fail-closed defense.
 
+Rotation stores the new signing key in the controller's configured secret store,
+the same on a single node as in a cluster. It needs no node-local key file, and a
+rotation writes no signing `key.pem` to the certificate directory.
+
 ### Overlap Window
 
 When a rotation is triggered, the controller mints a new signing cert and enters a
