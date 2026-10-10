@@ -55,7 +55,7 @@ import {
   isCrossingActive,
   type Crossing,
 } from './useTenantCrossings.ts'
-import BreakGlassDialog from './BreakGlassDialog.tsx'
+import CrossingPrompt from './CrossingPrompt.tsx'
 import CrossingBanner from './CrossingBanner.tsx'
 import SupportAccessDialog from './SupportAccessDialog.tsx'
 
@@ -195,7 +195,7 @@ function ErrorNotice({ detail, onRetry }: { detail: string; onRetry: () => void 
 
 // ── Boundary empty state (ADR-025) ────────────────────────────────────────────
 
-function BoundaryEmptyState({ onRequestBreakGlass }: { onRequestBreakGlass: () => void }) {
+function BoundaryEmptyState() {
   return (
     <div className="notice empty" data-testid="boundary-empty-state">
       <div className="ic">🔒</div>
@@ -207,17 +207,9 @@ function BoundaryEmptyState({ onRequestBreakGlass }: { onRequestBreakGlass: () =
         invoked — both are logged and visible to the MSP.
       </p>
       <p style={{ fontSize: '0.875rem', color: 'var(--color-muted)' }}>
-        Preferred path: ask the MSP to enable support access from their own tenant.
-        Otherwise request a time-boxed, justified break-glass session.
+        Ask the MSP to enable support access from their own tenant. When a tenant needs a
+        crossing, the console asks for one at that moment.
       </p>
-      <button
-        type="button"
-        className="wf-btn-danger"
-        onClick={onRequestBreakGlass}
-        data-testid="request-break-glass-btn"
-      >
-        Request break-glass →
-      </button>
     </div>
   )
 }
@@ -791,8 +783,7 @@ export default function TenantAdminView() {
     () => new Set<string>(),
   )
   const banner = useCrossingBanner()
-  const [showBreakGlass, setShowBreakGlass] = useState(false)
-  const [breakGlassTarget, setBreakGlassTarget] = useState('')
+  const [crossingTarget, setCrossingTarget] = useState<string | null>(null)
   const [supportTenant, setSupportTenant] = useState<TenantInfo | null>(null)
   const [listTenantId, setListTenantId] = useState<string | null>(null)
   const [listVersion, setListVersion] = useState(0)
@@ -912,13 +903,12 @@ export default function TenantAdminView() {
   }
 
   function openBreakGlass(tenantId: string) {
-    setBreakGlassTarget(tenantId)
-    setShowBreakGlass(true)
+    setCrossingTarget(tenantId)
   }
 
   function handleBreakGlassInvoked(crossing: Crossing) {
     banner.adopt(crossing)
-    setShowBreakGlass(false)
+    setCrossingTarget(null)
     // The crossing exposes the tenant's subtree; reload the tree.
     retry()
   }
@@ -1015,7 +1005,7 @@ export default function TenantAdminView() {
         ) : error !== null ? (
           <ErrorNotice detail={error} onRetry={retry} />
         ) : showBoundaryState ? (
-          <BoundaryEmptyState onRequestBreakGlass={() => openBreakGlass('')} />
+          <BoundaryEmptyState />
         ) : tenants.length === 0 ? (
           <div className="notice empty" data-testid="tenants-empty">
             <div className="ic">◍</div>
@@ -1059,8 +1049,13 @@ export default function TenantAdminView() {
         )}
       </section>
 
-      {showBreakGlass && (
-        <BreakGlassDialog tenantId={breakGlassTarget} onInvoked={handleBreakGlassInvoked} onClose={() => setShowBreakGlass(false)} />
+      {crossingTarget !== null && (
+        <CrossingPrompt
+          tenantId={crossingTarget}
+          visibleTenants={tenants}
+          onGranted={handleBreakGlassInvoked}
+          onCancel={() => setCrossingTarget(null)}
+        />
       )}
       {supportTenant !== null && (
         <SupportAccessDialog

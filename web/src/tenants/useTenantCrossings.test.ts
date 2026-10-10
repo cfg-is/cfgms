@@ -7,6 +7,7 @@ import {
   bannerStorageKey,
   createAccessGrant,
   endCrossing,
+  fetchActiveCrossings,
   parseCrossing,
   requestBreakGlass,
   useCrossingBanner,
@@ -71,18 +72,55 @@ describe('parseCrossing', () => {
 })
 
 describe('crossing requests', () => {
-  it('break-glass sends the justification only as the X-Justification header', async () => {
+  it('break-glass sends reason_category and justification as a JSON body and no X-Justification header', async () => {
     fetchMock.mockResolvedValueOnce(json(201, { data: crossing() }))
-    const c = await requestBreakGlass('msp-a', 'outage response')
+    const c = await requestBreakGlass('msp-a', {
+      reasonCategory: 'account_recovery',
+      justification: 'outage response',
+    })
     expect(c.id).toBe('c-1')
     const [url, init] = fetchMock.mock.calls[0]!
     expect(url).toBe('/api/v1/tenants/msp-a/break-glass')
     expect(init?.method).toBe('POST')
-    expect(new Headers(init?.headers).get('X-Justification')).toBe('outage response')
-    expect(init?.body).toBeUndefined()
+    const headers = new Headers(init?.headers)
+    expect(headers.get('X-Justification')).toBeNull()
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      reason_category: 'account_recovery',
+      justification: 'outage response',
+    })
   })
 
-  it('break-glass retries through the step-up listener keeping the header', async () => {
+  it('parses approval_state and reason_category of the break-glass response', async () => {
+    fetchMock.mockResolvedValueOnce(
+      json(201, { data: { ...crossing(), approval_state: 'pending', reason_category: 'legal_request' } }),
+    )
+    const c = await requestBreakGlass('msp-a', { reasonCategory: 'legal_request', justification: 'x'.repeat(10) })
+    expect(c).toMatchObject({ approvalState: 'pending', reasonCategory: 'legal_request' })
+  })
+
+  it('fetchActiveCrossings issues one GET and parses the feed, dropping malformed entries', async () => {
+    fetchMock.mockResolvedValueOnce(
+      json(200, {
+        data: [
+          { id: 'c-9', tenant_id: 'msp-a', kind: 'grant', expires_at: future(), tenant_name: 'MSP A', approval_state: 'approved' },
+          { nope: true },
+        ],
+      }),
+    )
+    const list = await fetchActiveCrossings()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/v1/tenant-crossings/active')
+    expect(list).toHaveLength(1)
+    expect(list[0]).toMatchObject({ id: 'c-9', tenantId: 'msp-a', tenantName: 'MSP A', approvalState: 'approved' })
+  })
+
+  it('fetchActiveCrossings rejects on a non-2xx response', async () => {
+    fetchMock.mockResolvedValueOnce(json(500, { error: { code: 'LIST_FAILED', message: 'failed to list active crossings' } }))
+    await expect(fetchActiveCrossings()).rejects.toMatchObject({ status: 500, code: 'LIST_FAILED' })
+  })
+
+  it('break-glass retries through the step-up listener keeping the body', async () => {
     fetchMock.mockResolvedValueOnce(
       json(401, { error: 'x' }, { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms"' }),
     )
@@ -91,17 +129,17 @@ describe('crossing requests', () => {
     )
     onStepUpRequired(listener)
     fetchMock.mockResolvedValueOnce(json(201, { data: crossing() }))
-    await requestBreakGlass('msp-a', 'outage response')
+    await requestBreakGlass('msp-a', { reasonCategory: 'account_recovery', justification: 'outage response' })
     expect(listener).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(new Headers(fetchMock.mock.calls[1]![1]?.headers).get('X-Justification')).toBe('outage response')
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1]?.body)).justification).toBe('outage response')
   })
 
   it('surfaces a 403 as an error', async () => {
     fetchMock.mockResolvedValueOnce(
       json(403, { error: { code: 'NOT_ROOT_SCOPED', message: 'break-glass is only available to root-scoped callers' } }),
     )
-    await expect(requestBreakGlass('msp-a', 'outage response')).rejects.toMatchObject({
+    await expect(requestBreakGlass('msp-a', { reasonCategory: 'account_recovery', justification: 'outage response' })).rejects.toMatchObject({
       status: 403,
       code: 'NOT_ROOT_SCOPED',
     })

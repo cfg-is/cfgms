@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useEffect } from 'react'
 import { AuthProvider, RequireAuth, useAuth } from './AuthContext.tsx'
 import { apiFetch } from '../api/client.ts'
@@ -544,6 +544,86 @@ describe('AuthProvider — step-up (Story #2786)', () => {
     // Auth must stay signedIn.
     expect(screen.getByTestId('status')).toHaveTextContent('signedIn')
     expect(screen.getByTestId('principal')).toHaveTextContent('admin@msp-a')
+  })
+})
+
+describe('AuthProvider — tenant crossing (Story #4723)', () => {
+  const crossingHeaders = { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="tenant-crossing"' }
+  const challengeBody = {
+    error: 'tenant_crossing_required',
+    required_assurance: 'tenant-crossing',
+    break_glass_endpoint: '/api/v1/tenants/msp-a/break-glass',
+    reason_categories: ['account_recovery', 'security_incident', 'legal_request', 'billing_dispute'],
+  }
+
+  async function signInAndChallenge(readsAfterGrant: Response) {
+    let reads = 0
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'root-op', tenant_id: '', root_scope: true },
+    })
+    const loginImpl = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/tenants')) return Promise.resolve(jsonResponse(200, { data: [] }))
+      if (url.endsWith('/api/v1/tenants/msp-a/break-glass')) {
+        return Promise.resolve(
+          jsonResponse(201, { data: { id: 'c-1', tenant_id: 'msp-a', kind: 'break_glass', approval_state: 'approved' } }),
+        )
+      }
+      if (url.endsWith('/api/v1/tenants/msp-a/stewards')) {
+        reads++
+        return Promise.resolve(reads === 1 ? jsonResponse(401, challengeBody, crossingHeaders) : readsAfterGrant)
+      }
+      return loginImpl(input, init)
+    })
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('signedIn'))
+    return apiFetch('/api/v1/tenants/msp-a/stewards')
+  }
+
+  it('a crossing 401 opens the crossing prompt, not the passkey modal, and a granted crossing retries the request', async () => {
+    const pending = signInAndChallenge(jsonResponse(200, { data: ['steward-1'] }))
+    await waitFor(() => expect(screen.getByTestId('crossing-prompt')).toBeInTheDocument())
+    expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument()
+    expect(screen.getByTestId('status')).toHaveTextContent('signedIn')
+
+    fireEvent.change(screen.getByTestId('crossing-reason'), { target: { value: 'account_recovery' } })
+    fireEvent.change(screen.getByTestId('crossing-justification'), {
+      target: { value: 'MSP owner lost both passkeys' },
+    })
+    fireEvent.click(screen.getByTestId('crossing-submit-btn'))
+
+    const response = await pending
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: ['steward-1'] })
+    await waitFor(() => expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument())
+  })
+
+  it('a still-failing retry returns that response without re-prompting', async () => {
+    const pending = signInAndChallenge(jsonResponse(401, challengeBody, crossingHeaders))
+    await waitFor(() => screen.getByTestId('crossing-prompt'))
+    fireEvent.change(screen.getByTestId('crossing-reason'), { target: { value: 'legal_request' } })
+    fireEvent.change(screen.getByTestId('crossing-justification'), { target: { value: 'court order 2026-114' } })
+    fireEvent.click(screen.getByTestId('crossing-submit-btn'))
+    const response = await pending
+    expect(response.status).toBe(401)
+    await waitFor(() => expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument())
+    expect(screen.getByTestId('status')).toHaveTextContent('signedIn')
+  })
+
+  it('cancelling the prompt returns the original 401 and stays signed in', async () => {
+    const pending = signInAndChallenge(jsonResponse(200, {}))
+    await waitFor(() => screen.getByTestId('crossing-prompt'))
+    fireEvent.click(screen.getByTestId('crossing-cancel-btn'))
+    const response = await pending
+    expect(response.status).toBe(401)
+    await waitFor(() => expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument())
+    expect(screen.getByTestId('status')).toHaveTextContent('signedIn')
   })
 })
 

@@ -41,12 +41,16 @@ import {
   onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
+  onTenantCrossingRequired,
+  replayRequest,
   type AssertionJSON,
   type PasskeyLoginOptions,
   type StepUpRequest,
+  type TenantCrossingRequest,
 } from '../api/client.ts'
 import Login from '../pages/Login.tsx'
 import StepUpModal from './StepUpModal.tsx'
+import CrossingPrompt from '../tenants/CrossingPrompt.tsx'
 
 // ── base64url helpers (same as StepUpModal.tsx — both need WebAuthn conversions) ──
 
@@ -171,11 +175,17 @@ interface StepUpState {
   resolve: (response: Response | null) => void
 }
 
+interface CrossingState {
+  request: TenantCrossingRequest
+  resolve: (response: Response | null) => void
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('signedOut')
   const [principal, setPrincipal] = useState<Principal | null>(null)
   const [expiresAt, setExpiresAt] = useState<number | null>(loadStoredExpiry)
   const [stepUpState, setStepUpState] = useState<StepUpState | null>(null)
+  const [crossingState, setCrossingState] = useState<CrossingState | null>(null)
   // probingRef gates onSessionConfirmed (resolve the initial probe once).
   // sessionEstablishedRef tracks whether a real session has been confirmed
   // (explicit login OR probe success) — only then does a 401 mean 'expired'
@@ -214,10 +224,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setStepUpState({ request: req, resolve })
         }),
     )
+    onTenantCrossingRequired(
+      (req) =>
+        new Promise<Response | null>((resolve) => {
+          setCrossingState({ request: req, resolve })
+        }),
+    )
     return () => {
       onSessionExpired(null)
       onSessionConfirmed(null)
       onStepUpRequired(null)
+      onTenantCrossingRequired(null)
     }
   }, [])
 
@@ -321,9 +338,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     state?.resolve(null)
   }
 
+  function handleCrossingGranted() {
+    const state = crossingState
+    setCrossingState(null)
+    if (state === null) return
+    // The crossing is open: replay the challenged request once; its response
+    // (even a still-failing one) goes back to the caller without re-prompting.
+    replayRequest(state.request.path, state.request.init).then(state.resolve, () => state.resolve(null))
+  }
+
+  function handleCrossingCancel() {
+    const state = crossingState
+    setCrossingState(null)
+    state?.resolve(null)
+  }
+
   return (
     <AuthContext.Provider value={value}>
       {children}
+      {crossingState !== null && (
+        <CrossingPrompt
+          tenantId={crossingState.request.tenantId}
+          reasonCategories={crossingState.request.reasonCategories}
+          onGranted={handleCrossingGranted}
+          onCancel={handleCrossingCancel}
+        />
+      )}
       {stepUpState !== null && (
         <StepUpModal
           request={stepUpState.request}
