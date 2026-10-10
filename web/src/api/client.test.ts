@@ -13,6 +13,7 @@ import {
   onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
+  onTenantCrossingRequired,
   listCredentialRequests,
   approveCredentialRequest,
   denyCredentialRequest,
@@ -47,6 +48,7 @@ describe('apiFetch', () => {
     onSessionConfirmed(null)
     onSessionExpired(null)
     onStepUpRequired(null)
+    onTenantCrossingRequired(null)
   })
 
   afterEach(() => {
@@ -353,6 +355,145 @@ describe('apiFetch', () => {
 })
 
 // ── passkeyLoginBeginRequest / passkeyLoginFinishRequest (Issue #2993) ─────────
+
+describe('apiFetch — tenant-crossing challenge (Story #4723)', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
+    onSessionExpired(null)
+    onStepUpRequired(null)
+    onTenantCrossingRequired(null)
+  })
+
+  afterEach(() => {
+    onTenantCrossingRequired(null)
+    vi.unstubAllGlobals()
+  })
+
+  const crossing401 = (tenant = 'msp-a') =>
+    new Response(
+      JSON.stringify({
+        error: 'tenant_crossing_required',
+        required_assurance: 'tenant-crossing',
+        break_glass_endpoint: `/api/v1/tenants/${tenant}/break-glass`,
+        reason_categories: ['account_recovery', 'legal_request'],
+      }),
+      {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="tenant-crossing"',
+        },
+      },
+    )
+
+  it('routes a tenant-crossing 401 to the crossing listener and never the passkey listener', async () => {
+    const stepUp = vi.fn(async () => null)
+    const expired = vi.fn()
+    const crossing = vi.fn(async () => jsonResponse(200, { ok: true }))
+    onStepUpRequired(stepUp)
+    onSessionExpired(expired)
+    onTenantCrossingRequired(crossing)
+    fetchMock.mockResolvedValue(crossing401())
+    const res = await apiFetch('/api/v1/tenants/msp-a/stewards', { method: 'GET' })
+    expect(res.status).toBe(200)
+    expect(crossing).toHaveBeenCalledTimes(1)
+    expect(crossing).toHaveBeenCalledWith({
+      path: '/api/v1/tenants/msp-a/stewards',
+      init: { method: 'GET' },
+      tenantId: 'msp-a',
+      reasonCategories: ['account_recovery', 'legal_request'],
+    })
+    expect(stepUp).not.toHaveBeenCalled()
+    expect(expired).not.toHaveBeenCalled()
+  })
+
+  it('still routes another CFGMS-StepUp challenge to the passkey listener', async () => {
+    const stepUp = vi.fn(async () => null)
+    const crossing = vi.fn(async () => null)
+    onStepUpRequired(stepUp)
+    onTenantCrossingRequired(crossing)
+    fetchMock.mockResolvedValue(
+      new Response('{}', {
+        status: 401,
+        headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' },
+      }),
+    )
+    await apiFetch('/api/v1/stewards')
+    expect(stepUp).toHaveBeenCalledTimes(1)
+    expect(crossing).not.toHaveBeenCalled()
+  })
+
+  it('returns the original 401 (body still readable) when the listener resolves null', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    onTenantCrossingRequired(async () => null)
+    fetchMock.mockResolvedValue(crossing401())
+    const res = await apiFetch('/api/v1/tenants/msp-a/stewards')
+    expect(res.status).toBe(401)
+    expect(((await res.json()) as { error: string }).error).toBe('tenant_crossing_required')
+    expect(expired).not.toHaveBeenCalled()
+  })
+
+  it('returns a still-failing retry as is without prompting again', async () => {
+    const crossing = vi.fn(async () => crossing401())
+    onTenantCrossingRequired(crossing)
+    fetchMock.mockResolvedValue(crossing401())
+    const res = await apiFetch('/api/v1/tenants/msp-a/stewards')
+    expect(res.status).toBe(401)
+    expect(crossing).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns the 401 without session-expired when no listener is registered', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    fetchMock.mockResolvedValue(crossing401())
+    const res = await apiFetch('/api/v1/tenants/msp-a/stewards')
+    expect(res.status).toBe(401)
+    expect(expired).not.toHaveBeenCalled()
+  })
+
+  it('returns the 401 without prompting when the challenge body has no usable break_glass_endpoint', async () => {
+    const crossing = vi.fn(async () => null)
+    onTenantCrossingRequired(crossing)
+    fetchMock.mockResolvedValue(
+      new Response('{}', {
+        status: 401,
+        headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="tenant-crossing"' },
+      }),
+    )
+    const res = await apiFetch('/api/v1/tenants/msp-a/stewards')
+    expect(res.status).toBe(401)
+    expect(crossing).not.toHaveBeenCalled()
+  })
+
+  it('deduplicates concurrent crossing 401s: one prompt, the second request retries once with a fresh CSRF header', async () => {
+    document.cookie = 'cfgms_csrf=crossing-csrf; path=/'
+    let resolvePrompt!: (r: Response | null) => void
+    const prompt = new Promise<Response | null>((r) => { resolvePrompt = r })
+    const crossing = vi.fn(() => prompt)
+    onTenantCrossingRequired(crossing)
+    fetchMock
+      .mockResolvedValueOnce(crossing401())
+      .mockResolvedValueOnce(crossing401())
+      .mockResolvedValue(jsonResponse(200, {}))
+    const p1 = apiFetch('/api/v1/tenants/msp-a/a', { method: 'POST' })
+    const p2 = apiFetch('/api/v1/tenants/msp-a/b', { method: 'POST' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    resolvePrompt(jsonResponse(200, {}))
+    const [r1, r2] = await Promise.all([p1, p2])
+    expect(crossing).toHaveBeenCalledTimes(1)
+    expect(r1.status).toBe(200)
+    expect(r2.status).toBe(200)
+    const retryHeaders = new Headers(fetchMock.mock.calls[2]![1]?.headers)
+    expect(retryHeaders.get('X-CSRF-Token')).toBe('crossing-csrf')
+  })
+})
 
 describe('passkeyLoginBeginRequest', () => {
   const fetchMock = vi.fn<typeof fetch>()

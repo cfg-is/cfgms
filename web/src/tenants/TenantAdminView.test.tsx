@@ -1111,7 +1111,7 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
 
   const rootSession = { username: 'root-admin', tenant_id: '', root_scope: true }
 
-  it('replaces the old out-of-scope copy with a Request break-glass action', async () => {
+  it('boundary empty state names no target, so it offers no break-glass button', async () => {
     renderSession(rootSession, (url) =>
       url.endsWith('/api/v1/tenants') ? makeTenantsResponse([makeTenant({ id: 'root', name: 'root' })]) : jsonResponse(404, {}),
     )
@@ -1119,10 +1119,20 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     await signIn()
     const boundary = await screen.findByTestId('boundary-empty-state')
     expect(boundary).not.toHaveTextContent(/out-of-scope action/)
-    expect(screen.getByTestId('request-break-glass-btn')).toHaveTextContent('Request break-glass')
+    expect(screen.queryByTestId('request-break-glass-btn')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument()
   })
 
-  it('submits break-glass with the header, then shows the banner and ends the session', async () => {
+  const mspBoundary = () =>
+    makeTenant({ id: 'msp-a', name: 'MSP A', parent_id: 'root', boundary: true, accessible: false })
+
+  function fillPrompt(justification = 'outage response') {
+    fireEvent.change(screen.getByTestId('crossing-reason'), { target: { value: 'account_recovery' } })
+    fireEvent.change(screen.getByTestId('crossing-justification'), { target: { value: justification } })
+    fireEvent.click(screen.getByTestId('crossing-submit-btn'))
+  }
+
+  it('submits break-glass as a JSON body, then shows the banner and ends the session', async () => {
     let invoked = false
     let ended = false
     renderSession(rootSession, (url, init) => {
@@ -1130,12 +1140,16 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
         return makeTenantsResponse(
           invoked && !ended
             ? [makeTenant({ id: 'root', name: 'root' }), makeTenant({ id: 'msp-a', parent_id: 'root' })]
-            : [makeTenant({ id: 'root', name: 'root' })],
+            : [makeTenant({ id: 'root', name: 'root' }), mspBoundary()],
         )
       }
       if (url.endsWith('/api/v1/tenants/msp-a/break-glass')) {
         invoked = true
-        expect(new Headers(init?.headers).get('X-Justification')).toBe('outage response')
+        expect(new Headers(init?.headers).get('X-Justification')).toBeNull()
+        expect(JSON.parse(String(init?.body))).toEqual({
+          reason_category: 'account_recovery',
+          justification: 'outage response',
+        })
         return jsonResponse(201, { data: crossingBody() })
       }
       if (url.endsWith('/api/v1/tenants/msp-a/access-grants/c-1') && init?.method === 'DELETE') {
@@ -1144,19 +1158,17 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
       }
       return jsonResponse(404, {})
     })
-    await waitFor(() => screen.getByTestId('tenants-table'))
     await signIn()
-    fireEvent.click(await screen.findByTestId('request-break-glass-btn'))
-    fireEvent.change(screen.getByTestId('break-glass-tenant-input'), { target: { value: 'msp-a' } })
-    fireEvent.change(screen.getByTestId('break-glass-justification-input'), { target: { value: 'outage response' } })
-    fireEvent.click(screen.getByTestId('break-glass-submit-btn'))
+    fireEvent.click(await screen.findByTestId('boundary-break-glass-btn'))
+    expect(screen.getByTestId('crossing-prompt')).toBeInTheDocument()
+    fillPrompt()
 
     const banner = await screen.findByTestId('crossing-banner')
     expect(banner).toHaveTextContent('msp-a')
     expect(screen.getByTestId('crossing-banner-reason')).toHaveTextContent('outage response')
-    expect(screen.queryByTestId('break-glass-dialog')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument()
     // The crossing exposes the subtree: the tree reloads and the boundary state goes.
-    await waitFor(() => expect(screen.queryByTestId('boundary-empty-state')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByTestId('boundary-row')).not.toBeInTheDocument())
 
     fireEvent.click(screen.getByTestId('crossing-end-btn'))
     await waitFor(() => expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument())
@@ -1164,21 +1176,21 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     expect(window.sessionStorage.getItem('cfgms.tenants.crossingBanner')).toBeNull()
   })
 
-  it('a 403 on break-glass renders an error and no banner', async () => {
+  it('a 403 on break-glass renders an inline error, keeps the prompt open and shows no banner', async () => {
     renderSession(rootSession, (url) => {
-      if (url.endsWith('/api/v1/tenants')) return makeTenantsResponse([makeTenant({ id: 'root', name: 'root' })])
+      if (url.endsWith('/api/v1/tenants')) {
+        return makeTenantsResponse([makeTenant({ id: 'root', name: 'root' }), mspBoundary()])
+      }
       if (url.endsWith('/break-glass')) {
         return jsonResponse(403, { error: { code: 'ROOT_TENANT_NOT_CROSSABLE', message: 'break-glass cannot be invoked on the root tenant' } })
       }
       return jsonResponse(404, {})
     })
-    await waitFor(() => screen.getByTestId('tenants-table'))
     await signIn()
-    fireEvent.click(await screen.findByTestId('request-break-glass-btn'))
-    fireEvent.change(screen.getByTestId('break-glass-tenant-input'), { target: { value: 'root' } })
-    fireEvent.change(screen.getByTestId('break-glass-justification-input'), { target: { value: 'outage response' } })
-    fireEvent.click(screen.getByTestId('break-glass-submit-btn'))
-    expect(await screen.findByTestId('break-glass-error')).toHaveTextContent('cannot be invoked on the root tenant')
+    fireEvent.click(await screen.findByTestId('boundary-break-glass-btn'))
+    fillPrompt()
+    expect(await screen.findByTestId('crossing-error')).toHaveTextContent('cannot be invoked on the root tenant')
+    expect(screen.getByTestId('crossing-prompt')).toBeInTheDocument()
     expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument()
   })
 
@@ -1337,7 +1349,7 @@ describe('TenantAdminView — boundary rows', () => {
     expect(spacer.style.width).toBe('0px')
   })
 
-  it('opens the break-glass dialog targeting that MSP', async () => {
+  it('opens the crossing prompt naming that MSP', async () => {
     renderRoot((url) =>
       url.endsWith('/api/v1/tenants')
         ? makeTenantsResponse([makeTenant({ id: 'root', name: 'root' }), boundary({ id: 'msp-b' }), boundary({ id: 'msp-c', name: 'MSP C' })])
@@ -1346,8 +1358,8 @@ describe('TenantAdminView — boundary rows', () => {
     await signIn()
     const rows = await screen.findAllByTestId('boundary-row')
     fireEvent.click(within(rows[1]!).getByTestId('boundary-break-glass-btn'))
-    expect(screen.getByTestId('break-glass-dialog')).toBeInTheDocument()
-    expect(screen.getByTestId('break-glass-tenant-input')).toHaveValue('msp-c')
+    expect(screen.getByTestId('crossing-prompt')).toBeInTheDocument()
+    expect(screen.getByTestId('crossing-tenant-label')).toHaveTextContent('MSP C')
   })
 
   it('refetches after break-glass and renders the MSP as a normal row', async () => {
@@ -1368,8 +1380,9 @@ describe('TenantAdminView — boundary rows', () => {
     })
     await signIn()
     fireEvent.click(await screen.findByTestId('boundary-break-glass-btn'))
-    fireEvent.change(screen.getByTestId('break-glass-justification-input'), { target: { value: 'outage response' } })
-    fireEvent.click(screen.getByTestId('break-glass-submit-btn'))
+    fireEvent.change(screen.getByTestId('crossing-reason'), { target: { value: 'account_recovery' } })
+    fireEvent.change(screen.getByTestId('crossing-justification'), { target: { value: 'outage response' } })
+    fireEvent.click(screen.getByTestId('crossing-submit-btn'))
     await waitFor(() => expect(screen.getAllByTestId('tenant-row')).toHaveLength(2))
     expect(screen.queryByTestId('boundary-row')).not.toBeInTheDocument()
     expect(screen.getAllByTestId('tenant-row')[1]).toHaveAttribute('data-tenant-id', 'msp-b')

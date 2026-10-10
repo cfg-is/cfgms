@@ -19,6 +19,9 @@
  *  - A 401 with WWW-Authenticate: CFGMS-StepUp is NOT a session expiry —
  *    it is a step-up challenge (ADR-021 Decision 6). The onStepUpRequired
  *    listener handles it; the session-expired listener is NOT fired.
+ *  - The exception is the CFGMS-StepUp challenge whose required token is
+ *    tenant-crossing (a root read of an MSP needing a crossing): a passkey proof
+ *    cannot satisfy it, so it goes to the onTenantCrossingRequired listener.
  */
 
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
@@ -98,6 +101,74 @@ export function onStepUpRequired(listener: StepUpRequiredListener | null): void 
   }
 }
 
+/** Required token of the CFGMS-StepUp challenge that asks for a tenant crossing. */
+const tenantCrossingToken = 'tenant-crossing'
+
+/**
+ * Context carried to the crossing listener on a tenant-crossing 401. The tenant
+ * ID is parsed from the challenge body's break_glass_endpoint.
+ */
+export interface TenantCrossingRequest {
+  /** Original fetch path. */
+  path: string
+  /** Original fetch init (method, headers, body). */
+  init: RequestInit
+  /** Tenant the break-glass endpoint of the challenge names. */
+  tenantId: string
+  /** Break-glass reason categories the controller accepts. */
+  reasonCategories: string[]
+}
+
+/**
+ * Resolves with the retried Response once a crossing is open, or null on cancel
+ * (apiFetch then returns the original 401 without firing session-expired).
+ */
+type TenantCrossingListener = (req: TenantCrossingRequest) => Promise<Response | null>
+let tenantCrossingListener: TenantCrossingListener | null = null
+
+/** Register the central tenant-crossing handler (or clear it with null). */
+export function onTenantCrossingRequired(listener: TenantCrossingListener | null): void {
+  tenantCrossingListener = listener
+  if (listener === null) {
+    tenantCrossingPromptDone = null
+  }
+}
+
+// Concurrent crossing deduplication, same shape as the step-up slot below: one
+// prompt at a time, later 401s wait for it and then retry once.
+let tenantCrossingPromptDone: Promise<void> | null = null
+
+const breakGlassEndpointPattern = /^\/api\/v1\/tenants\/([^/]+)\/break-glass$/
+
+/** Reads the tenant ID and reason categories from a crossing challenge body; null when malformed. */
+async function parseCrossingChallenge(
+  response: Response,
+): Promise<{ tenantId: string; reasonCategories: string[] } | null> {
+  try {
+    const body = (await response.clone().json()) as Record<string, unknown>
+    const endpoint = body.break_glass_endpoint
+    if (typeof endpoint !== 'string') return null
+    const match = breakGlassEndpointPattern.exec(endpoint)
+    if (match === null) return null
+    const reasonCategories = Array.isArray(body.reason_categories)
+      ? body.reason_categories.filter((c): c is string => typeof c === 'string')
+      : []
+    return { tenantId: decodeURIComponent(match[1]!), reasonCategories }
+  } catch {
+    return null
+  }
+}
+
+/** Replays a request with a fresh CSRF header; used by listeners after their gate opens. */
+export function replayRequest(path: string, init: RequestInit): Promise<Response> {
+  const headers = new Headers(init.headers)
+  if (UNSAFE_METHODS.has((init.method ?? 'GET').toUpperCase())) {
+    const csrf = readCookie(csrfCookieSession)
+    if (csrf !== null) headers.set(csrfHeader, csrf)
+  }
+  return fetch(path, { ...init, headers, credentials: 'same-origin' })
+}
+
 // Concurrent step-up deduplication (Story #2967, ADR-021 Decision 6).
 // If two requests from the same tab simultaneously receive a CFGMS-StepUp 401,
 // only the first starts the ceremony. Subsequent callers wait for it to finish,
@@ -130,6 +201,29 @@ export async function apiFetch(
   })
   if (response.status === 401) {
     const wwwAuth = response.headers.get('WWW-Authenticate') ?? ''
+    if (wwwAuth.startsWith('CFGMS-StepUp') && wwwAuth.includes(`required="${tenantCrossingToken}"`)) {
+      // Crossing challenge: the session is intact, so session-expired never fires.
+      if (tenantCrossingPromptDone !== null) {
+        await tenantCrossingPromptDone
+        return replayRequest(path, { ...init, headers })
+      }
+      if (tenantCrossingListener !== null) {
+        // Claim the slot before the first await so concurrent 401s see it.
+        let promptDone!: () => void
+        tenantCrossingPromptDone = new Promise<void>((r) => { promptDone = r })
+        try {
+          const challenge = await parseCrossingChallenge(response)
+          if (challenge === null) return response
+          const retryResponse = await tenantCrossingListener({ path, init, ...challenge })
+          // Cap: whatever the listener resolved is returned, never re-prompted.
+          return retryResponse ?? response
+        } finally {
+          tenantCrossingPromptDone = null
+          promptDone()
+        }
+      }
+      return response
+    }
     if (wwwAuth.startsWith('CFGMS-StepUp')) {
       // Step-up challenge: NEVER fire session-expired regardless of listener state.
       // A CFGMS-StepUp 401 means the operator's session is intact but needs a

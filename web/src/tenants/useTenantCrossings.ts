@@ -8,6 +8,7 @@
  *   GET    /api/v1/tenants/{id}/access-grants                  → useTenantCrossings
  *   POST   /api/v1/tenants/{id}/access-grants                  → createAccessGrant (MSP admin)
  *   POST   /api/v1/tenants/{id}/break-glass                    → requestBreakGlass (root operator)
+ *   GET    /api/v1/tenant-crossings/active                     → fetchActiveCrossings
  *   DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}    → endCrossing
  *
  * The controller serialises business.TenantCrossing without JSON tags, so a
@@ -53,7 +54,22 @@ export interface Crossing {
   createdAt: string
   expiresAt: string
   revokedAt: string | null
+  /** Break-glass reason category; empty for a grant. */
+  reasonCategory: string
+  /** `approved` or `pending` (awaiting a second approver); empty when the server omits it. */
+  approvalState: string
 }
+
+/** Break-glass reason categories with the plain-words labels the prompt shows. */
+export const breakGlassReasons: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'account_recovery', label: 'Account recovery: the MSP is locked out' },
+  { value: 'security_incident', label: 'Security incident' },
+  { value: 'legal_request', label: 'Legal request' },
+  { value: 'billing_dispute', label: 'Billing dispute' },
+]
+
+/** `approval_state` of a break-glass awaiting a second approver. */
+export const approvalStatePending = 'pending'
 
 function pick(snake: unknown, pascal: unknown): unknown {
   return snake !== undefined ? snake : pascal
@@ -79,6 +95,8 @@ export function parseCrossing(value: unknown): Crossing | null {
     createdAt: s(pick(r.created_at, r.CreatedAt)),
     expiresAt: s(pick(r.expires_at, r.ExpiresAt)),
     revokedAt: typeof revoked === 'string' && revoked !== '' ? revoked : null,
+    reasonCategory: s(pick(r.reason_category, r.ReasonCategory)),
+    approvalState: s(pick(r.approval_state, r.ApprovalState)),
   }
 }
 
@@ -136,16 +154,48 @@ export async function listCrossings(tenantId: string): Promise<Crossing[]> {
   return parseCrossingList(unwrap(await response.json()))
 }
 
-/** Break-glass: the justification travels only in the X-Justification header. */
-export async function requestBreakGlass(tenantId: string, justification: string): Promise<Crossing> {
+export interface BreakGlassRequest {
+  reasonCategory: string
+  justification: string
+}
+
+/** Break-glass: reason category and justification travel in the JSON body. */
+export async function requestBreakGlass(tenantId: string, req: BreakGlassRequest): Promise<Crossing> {
   const response = await apiFetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/break-glass`, {
     method: 'POST',
-    headers: { 'X-Justification': justification },
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason_category: req.reasonCategory, justification: req.justification }),
   })
   if (!response.ok) throw await crossingError(response, 'Break-glass request failed')
   const crossing = parseCrossing(unwrap(await response.json()))
   if (crossing === null) throw new Error('Unexpected response shape from break-glass')
   return crossing
+}
+
+/** One entry of the active-crossings feed: a crossing plus its tenant's display name. */
+export interface ActiveCrossing extends Crossing {
+  /** Filled by the server only for tenants visible to the caller; empty otherwise. */
+  tenantName: string
+}
+
+/** Parses the GET /api/v1/tenant-crossings/active payload; malformed entries are dropped. */
+export function parseActiveCrossingList(data: unknown): ActiveCrossing[] {
+  if (!Array.isArray(data)) return []
+  const out: ActiveCrossing[] = []
+  for (const item of data) {
+    const c = parseCrossing(item)
+    if (c === null) continue
+    const name = (item as Record<string, unknown>).tenant_name
+    out.push({ ...c, tenantName: typeof name === 'string' ? name : '' })
+  }
+  return out
+}
+
+/** One GET of the active-crossings feed (approved, unexpired, unrevoked crossings the caller may see). */
+export async function fetchActiveCrossings(): Promise<ActiveCrossing[]> {
+  const response = await apiFetch('/api/v1/tenant-crossings/active')
+  if (!response.ok) throw await crossingError(response, 'List active crossings failed')
+  return parseActiveCrossingList(unwrap(await response.json()))
 }
 
 export interface CreateGrantRequest {
