@@ -225,6 +225,7 @@ var goldenRouteTable = []string{
 	"GET /api/v1/tenants",
 	"GET /api/v1/tenants/{id}",
 	"GET /api/v1/tenants/{id}/access-grants",
+	"GET /api/v1/tenant-crossings/active",
 	"GET /api/v1/tenants/{id}/admin-contacts",
 	"GET /api/v1/tenants/{id}/billing-report",
 	"GET /api/v1/tenants/{id}/delete",

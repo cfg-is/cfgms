@@ -217,6 +217,7 @@ type Server struct {
 	credentialRequestSweepLease     lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the credential-request/enrolment-token expiry sweep
 	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
 	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
+	crossingNotifyWG                sync.WaitGroup                           // Issue #4713: tracks in-flight break-glass announcement goroutines so Close() can wait for them before the audit manager stops
 	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
 	cliLoginLodgeLimiter            *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login lodge
@@ -1324,6 +1325,22 @@ func (s *Server) Close(ctx context.Context) error {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("api server close: timed out waiting for WebAuthn ceremony sweep goroutine: %w", ctx.Err())
 				}
+			}
+		}
+
+		// Issue #4713: break-glass announcements write a follow-up audit entry, so
+		// they finish before the audit manager stops. Each is bounded by
+		// tenantCrossingNotifyTimeout.
+		notifyDone := make(chan struct{})
+		go func() {
+			s.crossingNotifyWG.Wait()
+			close(notifyDone)
+		}()
+		select {
+		case <-notifyDone:
+		case <-ctx.Done():
+			if firstErr == nil {
+				firstErr = fmt.Errorf("api server close: timed out waiting for break-glass notifications: %w", ctx.Err())
 			}
 		}
 
