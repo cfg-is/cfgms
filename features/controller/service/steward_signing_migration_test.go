@@ -60,6 +60,13 @@ func (s *simSteward) trustedSerials() []string {
 	return out
 }
 
+// trustsOnly reports whether the steward's trust set is exactly the given serial.
+// Retire pushes are applied asynchronously, after the push is recorded as sent.
+func (s *simSteward) trustsOnly(serial string) bool {
+	got := s.trustedSerials()
+	return len(got) == 1 && got[0] == serial
+}
+
 // simControlPlane is the control plane of one node: SendCommand hands a command to
 // the simulated stewards connected to that node and returns their completion
 // events to that node's publisher.
@@ -201,14 +208,13 @@ func (c *simControlPlane) total() int {
 // cursor and acknowledgement store; each node held its own signing certificate
 // before the shared store existed.
 type migrationCluster struct {
-	nodes    []*cert.Manager
-	legacy   []*x509.Certificate // node i's own signing certificate
-	serials  []string
-	acks     certinterfaces.SigningTrustAckStore
-	fingers  map[string]string
-	elected  string
-	logger   logging.Logger
-	registry []*registry.InMemoryRegistry
+	nodes   []*cert.Manager
+	legacy  []*x509.Certificate // node i's own signing certificate
+	serials []string
+	acks    certinterfaces.SigningTrustAckStore
+	fingers map[string]string
+	elected string
+	logger  logging.Logger
 }
 
 func newMigrationCluster(t *testing.T) *migrationCluster {
@@ -342,7 +348,7 @@ func TestStewardMigration_StewardTrustingSharedKeyUsesNoLegacySigner(t *testing.
 
 	eventually(t, "retire push sent", func() bool {
 		p := n.cp.pushes("steward-shared")
-		return len(p) == 2 && p[1].retire != nil
+		return len(p) == 2 && p[1].retire != nil && st.trustsOnly(c.serials[0])
 	})
 	pushes := n.cp.pushes("steward-shared")
 	for _, p := range pushes {
@@ -366,7 +372,7 @@ func TestStewardMigration_LegacyOnlyStewardEndsWithSharedCertificateOnly(t *test
 
 	eventually(t, "retire push sent", func() bool {
 		p := n.cp.pushes("steward-legacy")
-		return len(p) > 0 && p[len(p)-1].retire != nil
+		return len(p) > 0 && p[len(p)-1].retire != nil && st.trustsOnly(c.serials[0])
 	})
 	pushes := n.cp.pushes("steward-legacy")
 	require.Greater(t, len(pushes), 3)
@@ -509,7 +515,11 @@ func TestStewardMigration_ReconcilerMigratesAlreadyConnectedSteward(t *testing.T
 	assert.Zero(t, n.cp.total(), "migration only runs in Shared identity mode")
 
 	c.elect(t)
-	eventually(t, "reconciler confirmed the already-connected steward", func() bool { return c.confirmed("steward-early") })
+	// The confirmation is recorded before the retire push is sent, so wait for the
+	// steward to have applied the retirement, not merely for the confirmation.
+	eventually(t, "reconciler confirmed and retired legacy trust on the already-connected steward", func() bool {
+		return c.confirmed("steward-early") && st.trustsOnly(c.serials[0])
+	})
 	assert.Equal(t, []string{c.serials[0]}, st.trustedSerials())
 }
 

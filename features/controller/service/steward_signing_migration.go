@@ -565,7 +565,12 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 	}
 	_, err := publisher.PublishCommandWithSignerAndCallback(ctx, stewardID, types.CommandPushSigningCert, params, signer, timeout,
 		func(ev *types.Event) {
-			// The publisher calls back for every event naming the command.
+			// The publisher calls back for every event naming the command. A
+			// completion counts as proof of trust only from the steward the
+			// command was sent to.
+			if ev.StewardID != stewardID {
+				return
+			}
 			switch ev.Type {
 			case types.EventCommandCompleted:
 				report(true)
