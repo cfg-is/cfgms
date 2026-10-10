@@ -95,12 +95,41 @@ stewards connected to the node every 30 seconds, so stewards already connected w
 shared certificate became active are migrated without reconnecting. A steward with a
 recorded confirmation is skipped without sending anything.
 
+### Transition window
+
+Between the moment a node promotes the shared certificate and the moment a given steward
+confirms it, that steward is exposed to a gap: **a steward that trusts only a legacy node key
+(not the shared certificate) rejects every command and config the cluster signs with the
+shared key.** A steward drops a command signed by an untrusted key silently, so the symptom is
+a command that is accepted by the controller and never runs on that steward, or a config that
+is not applied, until the steward is confirmed. A steward that already trusts the shared key
+(for example one enrolled through the node whose certificate was elected) is not affected.
+
+The window for a connected steward is bounded by the migration reconciler interval: the
+reconciler re-checks the stewards connected to a node every 30 seconds, and each steward is
+then moved in a few seconds, so a connected steward is normally confirmed within about a
+minute of the cluster reaching `shared` mode (a steward that connects after that is queued by
+its connect hook at once). A steward that is offline has no window to close until it reconnects;
+it stays unable to verify what the cluster signs until then, and is migrated on its next
+connect. Plan the election for a time when a short delay in commands to the stewards that
+trust a non-elected key is acceptable, and prefer electing the certificate that most stewards
+already trust, which shrinks the set of exposed stewards.
+
+Nodes also re-read the signing cursor at most every five seconds, so after an election the
+nodes begin signing with the shared certificate within that time, not at the same instant.
+
 ### Reading progress
 
 `GET /api/v1/certificates/signing/migration` returns the shared serial, the number of
 stewards, the number that confirmed and up to 100 unconfirmed steward IDs (see the
 [REST API](../api/rest-api.md#get-apiv1certificatessigningmigration)). The endpoint needs an
 admin certificate and an unscoped (root) caller.
+
+Read it as a count of stewards still exposed to the transition window above: `confirmed`
+rises toward `stewards`, and `unconfirmed_steward_ids` names who is left. During the first
+minute after the cluster reaches `shared` mode a steward trusting a non-elected key is expected
+to be unconfirmed. If the same steward is still listed after several reconciler intervals
+(a few minutes), it is one of the cases below.
 
 A steward stays unconfirmed when:
 
@@ -166,20 +195,65 @@ alert on any `update`, `delete` or `destroy` against it.
 
 ## Operator procedure
 
-1. Upgrade every controller node. Each imports its local signing certificate; confirm with
-   the audit log (`signing_migration_imported`, one per node) or by listing
+The end-to-end sequence for a cluster that has one signing certificate per node:
+
+1. **Upgrade every controller node.** Each imports its local signing certificate. Confirm
+   with the audit log (`signing_migration_imported`, one per node) or by listing
    `secret/metadata/root/config-signing/migration`.
-2. Check the shared cursor. If it already names a serial, nodes promote it on their next
+2. **Check the shared cursor.** If it already names a serial, nodes promote it on their next
    pass; go to step 4.
-3. If the cursor is empty, choose the serial and call the elect endpoint. Pick a
-   certificate that stewards already trust.
-4. Confirm each node reports `shared` mode and logs `signing_migration_local_key_removed`
-   for its local key; no signing `key.pem` should remain under any node's certificate
-   directory.
-5. Watch `GET /api/v1/certificates/signing/migration` until every steward you intend to keep
-   is confirmed.
-6. **Cleanup (operator only).** After every node has finished and every steward is
-   confirmed, delete the entries under `config-signing/migration/` from the vault with
+3. **Elect.** If the cursor is empty, choose the serial and call the elect endpoint. Pick a
+   certificate that stewards already trust. Record the serial.
+4. **Confirm every node is in `shared` mode** and has logged `signing_migration_local_key_removed`
+   for its local key.
+5. **Expect the transition window** (see above) and watch
+   `GET /api/v1/certificates/signing/migration` until every steward you intend to keep is
+   confirmed.
+6. **Verify** (next section).
+7. **Cleanup (operator only).** After every node has finished and every steward is confirmed,
+   delete the entries under `config-signing/migration/` from the vault with
    `bao kv metadata delete`. Nodes never delete them, and the steward migration reads its
    legacy signers from this namespace, so delete only once the progress endpoint shows no
    unconfirmed stewards.
+
+### Verification
+
+Do not rely on log text. Check these, which are what the cluster scenario tests assert:
+
+| Check | How | Expected |
+|-------|-----|----------|
+| Every node signs with one serial | Call `GET /api/v1/certificates/signing/migration` through each node | The same `shared_serial` on every node, equal to the serial you elected |
+| Every connected steward is confirmed | `GET /api/v1/certificates/signing/migration` | `confirmed` equals `stewards`; `unconfirmed_steward_ids` empty |
+| Stewards trust the shared certificate only | Steward signing trust set (one certificate, the shared serial's fingerprint) | One entry per steward |
+| No signing key on any node disk | `find <node certificate directory> -name key.pem -not -path '*/ca/*'` on each node | No output |
+| Commands and configs work through every node | Send a command to a steward through each node and apply a config | Accepted and applied |
+
+### Rollback boundaries
+
+Up to the election, nothing has changed for stewards and nothing needs to be undone: every
+node still signs with its own local key. Importing only copies certificates into the migration
+namespace.
+
+After the election the migration is **not reversible by the nodes**. The cursor is not
+overridden by a later election (the elect endpoint answers `409`), and a node that has
+promoted the shared certificate and verified its local keys deletes them. If something goes
+wrong after that point, recover forward:
+
+- A steward that is unconfirmed: re-enroll it, or wait for it to reconnect.
+- A steward that must be cut off: revoke the legacy serial it trusts with
+  `POST /api/v1/certificates/signing/revoke`. Revoke only a serial that is not the current
+  one; rotate first if the shared certificate itself is compromised.
+- The shared certificate itself is compromised: rotate with `--overlap-days 0`, then revoke
+  the superseded serial (see [Certificate Rotation](../security/certificate-rotation.md)).
+
+Deleting the migration namespace entries is the point after which a still-unconfirmed steward
+can no longer be reached through its legacy signer; that step is the last rollback boundary and
+is gated on `confirmed` equal to `stewards`.
+
+## Retirement after migration
+
+Once the cluster is in `shared` mode the retirement behaviour in
+[Certificate Rotation](../security/certificate-rotation.md#retirement-at-overlap-end) applies:
+a later rotation's superseded certificate is withdrawn from stewards at overlap end by the
+node holding leadership, and an operator can withdraw a named serial at once. Stewards that
+were offline receive the withdrawal in the single push they get on reconnect.

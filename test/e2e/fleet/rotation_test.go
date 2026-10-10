@@ -93,6 +93,52 @@ func (s *FleetTestSuite) tryRotateSigningCert(t *testing.T, overlapDays int) err
 	return nil
 }
 
+// signingCertRevokeResult holds the response fields from POST /api/v1/certificates/signing/revoke.
+type signingCertRevokeResult struct {
+	Serial            string `json:"serial"`
+	StewardsNotified  int    `json:"stewards_notified"`
+	RetiredFromCursor bool   `json:"retired_from_cursor"`
+}
+
+// revokeSigningCert calls POST /api/v1/certificates/signing/revoke and returns the
+// HTTP status, the parsed result (zero when the call was refused) and the raw body.
+func (s *FleetTestSuite) revokeSigningCert(t *testing.T, serial, reason string) (int, signingCertRevokeResult, string) {
+	t.Helper()
+
+	reqBody, err := json.Marshal(map[string]string{"serial": serial, "reason": reason})
+	if err != nil {
+		t.Fatalf("marshal revoke request: %v", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/certificates/signing/revoke", s.controllerURL)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(string(reqBody)))
+	if err != nil {
+		t.Fatalf("build revoke request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST signing/revoke: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read revoke response body: %v", err)
+	}
+
+	var result signingCertRevokeResult
+	if resp.StatusCode == http.StatusOK {
+		var apiResp struct {
+			Data signingCertRevokeResult `json:"data"`
+		}
+		if err := json.Unmarshal(body, &apiResp); err != nil {
+			t.Fatalf("parse revoke response: %v (body: %s)", err, string(body))
+		}
+		result = apiResp.Data
+	}
+	return resp.StatusCode, result, strings.TrimSpace(string(body))
+}
+
 // rotationEndpointAvailable probes the rotation route with a deliberately malformed
 // JSON body so the request is rejected at body-validation time without triggering a
 // real rotation. The endpoint returns 4xx (typically 400) when it is registered and
@@ -279,6 +325,8 @@ func TestFleetRotation(t *testing.T) {
 	t.Run("OfflinePastWindow", func(t *testing.T) { s.testOfflinePastWindow(t) })
 	t.Run("CrashMidRotation", func(t *testing.T) { s.testCrashMidRotation(t) })
 	t.Run("RefreshOnConnectNewSteward", func(t *testing.T) { s.testRefreshOnConnectNewSteward(t) })
+	t.Run("RetirementAtOverlapEnd", func(t *testing.T) { s.testRetirementAtOverlapEnd(t) })
+	t.Run("EmergencyRevoke", func(t *testing.T) { s.testEmergencyRevoke(t) })
 }
 
 // testOverlapAccept rotates with a 30-day overlap window and verifies that both
@@ -529,4 +577,136 @@ func (s *FleetTestSuite) testRefreshOnConnectNewSteward(t *testing.T) {
 	}
 	t.Logf("RefreshOnConnectNewSteward: both existing stewards received refresh push with new serial %s",
 		result.NewSerial)
+}
+
+// signingPushAppliedMarker is the steward log line written each time a
+// push_signing_cert is applied (features/steward/client handlePushSigningCert).
+const signingPushAppliedMarker = "Signing cert push applied"
+
+// requireSigningPushApplied waits for container's steward to apply a push_signing_cert
+// beyond the before count captured with stewardLogCount.
+func (s *FleetTestSuite) requireSigningPushApplied(t *testing.T, container string, before int, timeout time.Duration, what string) {
+	t.Helper()
+	if !s.waitForNewStewardLogEntry(t, container, before, timeout, signingPushAppliedMarker) {
+		log, _ := s.readStewardLog(t, container)
+		t.Fatalf("%s: %s: no new %q within %v\nlog tail:\n%s",
+			container, what, signingPushAppliedMarker, timeout, lastLines(log, 60))
+	}
+}
+
+// requireConfigAccepted uploads the fleet config for the steward in container and
+// waits for it to converge, proving the steward verifies what the controller signs now.
+func (s *FleetTestSuite) requireConfigAccepted(t *testing.T, container string) {
+	t.Helper()
+	stewardID := s.stewardIDs[container]
+	if !s.waitForConvergence(t, stewardID, 90*time.Second) {
+		t.Fatalf("%s (%s): must be connected", container, stewardID)
+	}
+	if err := s.uploadConfig(t, stewardID, "configs/fleet-config.yaml"); err != nil {
+		t.Fatalf("%s: config upload: %v", container, err)
+	}
+	if !s.waitForManagedFile(t, container, 60*time.Second) {
+		log, _ := s.readStewardLog(t, container)
+		t.Fatalf("%s: managed-file must exist after config upload\nlog tail:\n%s", container, lastLines(log, 60))
+	}
+	s.verifyManagedFile(t, container)
+}
+
+// testRetirementAtOverlapEnd rotates with overlap_days=0, so the superseded
+// certificate's window is closed at once, with fleet-steward-2 offline. The
+// controller's retirement sweep (runs on an interval) must withdraw the superseded
+// certificate from the connected steward-1; steward-2 receives the same retirement
+// in the one push it gets when it reconnects. Both must still accept signed configs.
+func (s *FleetTestSuite) testRetirementAtOverlapEnd(t *testing.T) {
+	t.Helper()
+
+	connected, away := "fleet-steward-1", "fleet-steward-2"
+	awaySessions := s.stewardLogCount(t, away, stewardSessionMarkers...)
+	s.containerStop(t, away)
+	t.Cleanup(func() { s.ensureContainerRunning(t, away, 90*time.Second) })
+
+	result := s.rotateSigningCert(t, 0)
+	if result.OldSerial == "" || result.NewSerial == "" || result.OldSerial == result.NewSerial {
+		t.Fatalf("rotation response: want distinct non-empty serials, got old=%q new=%q", result.OldSerial, result.NewSerial)
+	}
+
+	// The rotation push reaches the connected steward first; the sweep push comes after.
+	if !s.waitForStewardLogEntry(t, connected, result.NewSerial, 60*time.Second) {
+		t.Fatalf("%s: rotation push carrying %s never applied", connected, result.NewSerial)
+	}
+	appliedBefore := s.stewardLogCount(t, connected, signingPushAppliedMarker)
+
+	// The sweep interval is one minute by default; allow it two full cycles.
+	s.requireSigningPushApplied(t, connected, appliedBefore, 150*time.Second, "retirement sweep push for "+result.OldSerial)
+	s.requireConfigAccepted(t, connected)
+
+	// The steward that was away reconnects: its single on-connect push carries the retirement.
+	awayApplied := s.stewardLogCount(t, away, signingPushAppliedMarker)
+	s.containerStart(t, away, 90*time.Second)
+	s.requireNewStewardSession(t, away, awaySessions)
+	s.requireSigningPushApplied(t, away, awayApplied, 90*time.Second, "on-connect push after retirement")
+	s.requireConfigAccepted(t, away)
+	t.Logf("RetirementAtOverlapEnd: %s retired by the sweep, %s by its on-connect push; old=%s new=%s",
+		connected, away, result.OldSerial, result.NewSerial)
+}
+
+// testEmergencyRevoke rotates (30-day overlap) so the original certificate is the
+// rotating serial, refuses to revoke the current serial, then revokes the
+// superseded serial with fleet-steward-2 offline. The connected steward-1 receives
+// the withdrawal immediately; steward-2 receives it on reconnect. Both must still
+// accept signed configs, which proves the controller signs with the current
+// certificate and not the revoked one.
+func (s *FleetTestSuite) testEmergencyRevoke(t *testing.T) {
+	t.Helper()
+
+	connected, away := "fleet-steward-1", "fleet-steward-2"
+	awaySessions := s.stewardLogCount(t, away, stewardSessionMarkers...)
+	s.containerStop(t, away)
+	t.Cleanup(func() { s.ensureContainerRunning(t, away, 90*time.Second) })
+
+	result := s.rotateSigningCert(t, 30)
+	if result.OldSerial == "" || result.NewSerial == "" || result.OldSerial == result.NewSerial {
+		t.Fatalf("rotation response: want distinct non-empty serials, got old=%q new=%q", result.OldSerial, result.NewSerial)
+	}
+	if !s.waitForStewardLogEntry(t, connected, result.NewSerial, 60*time.Second) {
+		t.Fatalf("%s: rotation push carrying %s never applied", connected, result.NewSerial)
+	}
+
+	// The current signing certificate cannot be revoked.
+	status, _, body := s.revokeSigningCert(t, result.NewSerial, "e2e: current serial must be refused")
+	if status != http.StatusConflict {
+		t.Fatalf("revoking the current serial %s: status %d, want %d (body: %s)", result.NewSerial, status, http.StatusConflict, body)
+	}
+
+	appliedBefore := s.stewardLogCount(t, connected, signingPushAppliedMarker)
+	status, revoked, body := s.revokeSigningCert(t, result.OldSerial, "e2e: emergency revoke of the superseded serial")
+	if status != http.StatusOK {
+		t.Fatalf("revoking the superseded serial %s: status %d (body: %s)", result.OldSerial, status, body)
+	}
+	if revoked.Serial != result.OldSerial {
+		t.Errorf("revoke response serial = %q, want %q", revoked.Serial, result.OldSerial)
+	}
+	if !revoked.RetiredFromCursor {
+		t.Errorf("revoke response: retired_from_cursor = false, want true for the rotating serial")
+	}
+	if revoked.StewardsNotified < 1 {
+		t.Errorf("revoke response: stewards_notified = %d, want at least the connected steward", revoked.StewardsNotified)
+	}
+
+	s.requireSigningPushApplied(t, connected, appliedBefore, 60*time.Second, "withdrawal of "+result.OldSerial)
+	s.requireConfigAccepted(t, connected)
+
+	// The steward that was away receives the withdrawal in its on-connect push.
+	awayApplied := s.stewardLogCount(t, away, signingPushAppliedMarker)
+	s.containerStart(t, away, 90*time.Second)
+	s.requireNewStewardSession(t, away, awaySessions)
+	s.requireSigningPushApplied(t, away, awayApplied, 90*time.Second, "on-connect push after revoke")
+	s.requireConfigAccepted(t, away)
+
+	// A later rotation still works and supersedes the current serial, not the revoked one.
+	next := s.rotateSigningCert(t, 30)
+	if next.OldSerial != result.NewSerial {
+		t.Errorf("rotation after revoke: old_serial = %s, want the previous current serial %s", next.OldSerial, result.NewSerial)
+	}
+	t.Logf("EmergencyRevoke: revoked %s (notified %d); %s withdrew it on reconnect", result.OldSerial, revoked.StewardsNotified, away)
 }

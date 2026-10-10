@@ -307,5 +307,60 @@ a clustered controller whose provider yields no store degrades to single-writer
 approvals — logged as a warning at startup — instead of silently letting both
 nodes decide against their own local files.
 
+**Config-signing identity (Amended, epic #4687)** — Decision 1 also assumes that every
+node can sign what any other node's steward will verify. The config-signing
+certificate was a node-local file pair, so a steward enrolled through one node
+trusted that node's key alone and a rotation performed through one node left the
+others signing with the previous certificate. The cluster now has one signing
+identity:
+
+- *Shared key store.* In cluster mode the signing certificate and key live in the
+  cluster-atomic secret store, one entry per serial under `config-signing/shared/`
+  (create-if-absent; nodes never update or delete). No signing key is written to a
+  node certificate directory; a node holds the key in process memory only while it
+  signs. The first node to boot takes a TTL-bound bootstrap claim
+  (`config-signing/claims/bootstrap`) and generates the identity; the others adopt it.
+- *Cursor.* The `SigningCursorStore` (PostgreSQL in cluster mode) names the current
+  serial and, during an overlap window, the rotating serial. It is the only thing that
+  decides which stored certificate signs. A node resolves the cursor at most every
+  five seconds, so a transition reaches every node within that bound.
+- *Rotation claim.* A rotation takes a TTL-bound claim
+  (`config-signing/claims/rotation`, two minutes) before any key is generated, stores
+  the new certificate create-if-absent and transitions the cursor once. A concurrent
+  rotation through another node is refused (`ROTATION_IN_PROGRESS`) rather than
+  producing a second serial.
+- *Identity modes.* A node is `Unprovisioned`, `LegacyLocal` (the cursor does not name
+  a serial that resolves in the shared namespace, so it signs with its own local key)
+  or `Shared`. Rotation and retirement are refused or skipped in `LegacyLocal`,
+  because a node-local key is not trusted by every steward.
+- *Migration namespace.* A cluster that predates the shared identity has one signer
+  per node. Each node validates its local signing certificates and stores them
+  create-if-absent under `config-signing/migration/<serial>`. The shared certificate
+  is then chosen deterministically — the serial the cursor already names, or the one an
+  administrator elects while the cursor is empty; never the newest. Nodes promote the
+  elected serial into the shared namespace and delete their local signing keys only
+  after reading each back equal.
+- *Steward migration.* Between promotion and a steward's confirmation, a steward that
+  trusts only a legacy node key rejects what the cluster now signs. Each node therefore
+  runs a steward migration service for the stewards connected to it: it delivers the
+  shared certificate, signing with each migration signer in turn until one is trusted,
+  records the confirmation in the `SigningTrustAckStore` (readable by every node), and
+  only then retires the legacy serials from that steward.
+- *Retirement and revoke.* A rotating serial is withdrawn from stewards at overlap end
+  by a sweep that runs on the node holding `HasLeadership()` and marks the cursor
+  retired with a conditional write. An operator can withdraw a named superseded serial
+  at once; the serial is recorded in the cluster-visible revocation store and the
+  controller never signs with it again, except in the single delivery that retires it
+  for a steward that trusts nothing else. The current serial cannot be revoked. A
+  steward that was offline receives the retirement inside the one `push_signing_cert`
+  it gets on connect.
+
+The end-to-end behaviour — a steward enrolled through one node working through the
+others, across a rotation it missed, across migration and across retirement and revoke —
+is exercised by `features/steward/client/signing_identity_cluster_test.go` (three
+nodes, real steward command and push handlers) and the fleet suite's
+`TestFleetRotation`. See [Cluster Signing Identity Migration](../../operations/cluster-signing-migration.md)
+and [Certificate Rotation](../../security/certificate-rotation.md).
+
 The decisions/README.md index gains ADR-031's row; status columns for ADR-028/029
 update per above when this ADR is Accepted.
