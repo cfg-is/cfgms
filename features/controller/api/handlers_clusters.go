@@ -65,7 +65,7 @@ type ClusterResourceStatus struct {
 //
 // Intended behavior change (Issue #3495): stewards attached to peer nodes are now
 // visible here. Previously this was node-local; now it is cluster-wide.
-func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData, map[string]string) {
+func (s *Server) stewardsInTenantCut(callerTenant string) ([]fleet.StewardData, map[string]string) {
 	// Build a scoped context so ListFleetStewards applies tenant filtering
 	// internally. callerTenant is callerTenantFilter's answer, so "" means an
 	// explicitly root caller, whose fleet-wide read is marked system-internal: a
@@ -74,7 +74,12 @@ func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData
 	if callerTenant != "" {
 		ctx = context.WithValue(context.Background(), ctxkeys.TenantID, callerTenant)
 	}
-	infos := s.controllerService.ListFleetStewards(ctx)
+	return indexStewards(s.controllerService.ListFleetStewards(ctx))
+}
+
+// indexStewards builds the two views stewardsInTenantCut returns from a steward
+// list: the fragment-only StewardData slice and the hostname → steward ID map.
+func indexStewards(infos []*service.StewardInfo) ([]fleet.StewardData, map[string]string) {
 	result := make([]fleet.StewardData, 0, len(infos))
 	hostnameOwners := make(map[string]string, len(infos))
 	// hostnameClaims records which steward currently holds each hostname entry so a
@@ -119,6 +124,86 @@ func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData
 	return result, hostnameOwners
 }
 
+// clusterReadView is the steward set a cluster read endpoint builds from: the
+// stewards the caller may read, plus (for a boundary-subject root caller) the
+// ones that exist only behind a tenant crossing so a cluster found only there
+// can answer with the crossing challenge instead of a 404.
+type clusterReadView struct {
+	stewards       []fleet.StewardData
+	hostnameOwners map[string]string
+	scope          *tenantReadScope
+	gated          []fleet.StewardData // stewards that need a crossing the caller lacks
+}
+
+// stewardsInReadScope is stewardsInTenantCut put through the per-tenant read
+// decision (Issue #4718): a boundary-subject root caller's unrestricted cut is
+// narrowed to the stewards of the root tenant and of crossing-covered tenants,
+// and the hostname index is rebuilt from that set so a hidden steward cannot
+// shadow a readable one's hostname.
+func (s *Server) stewardsInReadScope(r *http.Request, route string) clusterReadView {
+	callerTenant := callerTenantFilter(r.Context())
+	scope := s.tenantReadScope(r, route)
+	ctx := ctxkeys.WithSystem(context.Background())
+	if callerTenant != "" { //architecture:allow-root-scope -- selects the fleet listing cut only; a boundary-subject root caller is narrowed by the per-tenant read decision below
+		ctx = context.WithValue(context.Background(), ctxkeys.TenantID, callerTenant)
+	}
+	infos := s.controllerService.ListFleetStewards(ctx)
+	view := clusterReadView{scope: scope}
+	if !scope.boundarySubject() {
+		view.stewards, view.hostnameOwners = indexStewards(infos)
+		return view
+	}
+	readable := make([]*service.StewardInfo, 0, len(infos))
+	gatedInfos := make([]*service.StewardInfo, 0)
+	for _, info := range infos {
+		switch scope.decide(info.TenantID) {
+		case tenantAuthAllowed:
+			readable = append(readable, info)
+		case tenantAuthNeedsCrossing:
+			gatedInfos = append(gatedInfos, info)
+		}
+	}
+	scope.LogSummary()
+	view.stewards, view.hostnameOwners = indexStewards(readable)
+	view.gated, _ = indexStewards(gatedInfos)
+	return view
+}
+
+// crossingTenantFor returns the tenant whose crossing would reveal the named
+// cluster, or "" when the cluster is not behind a crossing the caller lacks.
+func (v clusterReadView) crossingTenantFor(clusterName string) string {
+	if len(v.gated) == 0 {
+		return ""
+	}
+	entry := clusterregistry.BuildRegistry(v.gated).Cluster(clusterName)
+	if entry == nil {
+		return ""
+	}
+	members := make(map[string]struct{}, len(entry.Members))
+	for _, m := range entry.Members {
+		members[m] = struct{}{}
+	}
+	tenant := ""
+	for _, sd := range v.gated {
+		if _, ok := members[sd.ID]; ok && (tenant == "" || sd.TenantID < tenant) {
+			tenant = sd.TenantID
+		}
+	}
+	return tenant
+}
+
+// writeClusterNotFound answers a cluster read that found nothing readable: the
+// crossing challenge when the cluster exists behind a crossing a boundary-subject
+// root caller lacks, otherwise the 404 that hides existence from everyone else.
+func (s *Server) writeClusterNotFound(w http.ResponseWriter, view clusterReadView, clusterName string) {
+	if tenant := view.crossingTenantFor(clusterName); tenant != "" {
+		s.writeTenantCrossingChallenge(w, tenant)
+		return
+	}
+	// 404 not 403: avoids disclosing whether the cluster exists in another tenant.
+	s.writeErrorResponse(w, http.StatusNotFound, "Cluster not found", "CLUSTER_NOT_FOUND")
+}
+
 // dnaHostname returns the node hostname a steward published in its DNA, or ""
 // when the steward has published none.
 //
@@ -153,10 +238,8 @@ func dnaHostname(dna *commonpb.DNA) string {
 // authenticated context limits which stewards' DNA is scanned. An admin mTLS
 // principal (empty TenantID) has no scope restriction.
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
-	callerTenant := callerTenantFilter(r.Context())
-
-	stewards, _ := s.stewardsInTenantScope(callerTenant)
-	reg := clusterregistry.BuildRegistry(stewards)
+	view := s.stewardsInReadScope(r, "GET /api/v1/clusters")
+	reg := clusterregistry.BuildRegistry(view.stewards)
 
 	clusters := make([]ClusterInfo, 0, len(reg.Clusters()))
 	for name, entry := range reg.Clusters() {
@@ -190,15 +273,12 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := callerTenantFilter(r.Context())
-
-	stewards, _ := s.stewardsInTenantScope(callerTenant)
-	reg := clusterregistry.BuildRegistry(stewards)
+	view := s.stewardsInReadScope(r, "GET /api/v1/clusters/{name}")
+	reg := clusterregistry.BuildRegistry(view.stewards)
 
 	entry := reg.Cluster(clusterName)
 	if entry == nil {
-		// 404 not 403: avoids disclosing whether the cluster exists in another tenant.
-		s.writeErrorResponse(w, http.StatusNotFound, "Cluster not found", "CLUSTER_NOT_FOUND")
+		s.writeClusterNotFound(w, view, clusterName)
 		return
 	}
 
@@ -246,11 +326,12 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 
 	callerTenant := callerTenantFilter(r.Context())
 
-	stewards, hostnameOwners := s.stewardsInTenantScope(callerTenant)
+	view := s.stewardsInReadScope(r, "GET /api/v1/clusters/{name}/reconciliation")
+	stewards, hostnameOwners := view.stewards, view.hostnameOwners
 	reg := clusterregistry.BuildRegistry(stewards)
 
 	if reg.Cluster(clusterName) == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Cluster not found", "CLUSTER_NOT_FOUND")
+		s.writeClusterNotFound(w, view, clusterName)
 		return
 	}
 
@@ -259,7 +340,7 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 	declared := s.clusterDeclaredResources(r.Context(), callerTenant, clusterName)
 
 	// Build a liveness checker over steward IDs and the published node hostnames
-	// that stewardsInTenantScope indexed. The owner value in resource_owner.<role>
+	// that stewardsInTenantCut indexed. The owner value in resource_owner.<role>
 	// is the cluster node hostname (e.g. "CFG-70-02") for every module that reports
 	// clustered roles, so the hostname path is the production path — without it
 	// every live clustered role would resolve as a dead owner.

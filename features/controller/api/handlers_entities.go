@@ -86,6 +86,224 @@ func callerTenantSubtree(r *http.Request) string {
 	return t
 }
 
+// entityCut is the tenant cut the entity-graph provider applies to a read made
+// for this caller: the caller's tenant filter and its resolved descendant IDs. A
+// root caller's "" cut is unrestricted, so a boundary-subject root caller (ADR-025)
+// never reaches a client tenant through it directly: handlers pair it with
+// tenantReadScope, which filters every entity the provider returns by the
+// crossing decision.
+func (s *Server) entityCut(r *http.Request) (string, []string) {
+	tenant := callerTenantFilter(r.Context())
+	return tenant, s.tenantDescendantIDs(r.Context(), tenant)
+}
+
+// authorizeEntityRead gates an entity-keyed read. The entity is looked up inside
+// the caller's tenant cut (not found → 404, ADR-022 §7) and its owning tenant is
+// then put through authorizeRecordRead: a boundary-subject root caller with no
+// crossing for that tenant gets the crossing challenge. It writes the refusal and
+// returns false when the read must not proceed.
+func (s *Server) authorizeEntityRead(w http.ResponseWriter, r *http.Request, eid eginterfaces.EIDRef, route string) bool {
+	tenant, ids := s.entityCut(r)
+	view, err := s.egProvider.GetEntity(r.Context(), eid, eginterfaces.GetEntityOpts{TenantFilter: tenant, TenantSubtreeIDs: ids})
+	if err != nil {
+		if isEntityNotFound(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return false
+		}
+		s.logger.Error("entity access check failed",
+			"route", logging.SanitizeLogValue(route),
+			"eid", logging.SanitizeLogValue(eid.String()),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return false
+	}
+	if view == nil || view.Entity == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return false
+	}
+	return s.authorizeRecordRead(w, r, view.Entity.OwningTenant, route, func() {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+}
+
+// entityOwner returns the owning tenant of eid as the caller's tenant cut sees it.
+// found is false when the entity does not exist inside the cut.
+func (s *Server) entityOwner(ctx context.Context, eid eginterfaces.EIDRef, tenant string, ids []string) (owner string, found bool, err error) {
+	view, err := s.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{TenantFilter: tenant, TenantSubtreeIDs: ids})
+	if err != nil {
+		if isEntityNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if view == nil || view.Entity == nil {
+		return "", false, nil
+	}
+	return view.Entity.OwningTenant, true, nil
+}
+
+// entityTenantCut is one tenant the entity provider is asked about together with
+// its resolved descendant tenant IDs.
+type entityTenantCut struct {
+	tenant string
+	ids    []string
+}
+
+// boundaryReadCuts lists the cuts a boundary-subject root caller may read: the
+// root tenant on its own (no descendants, so no client tenant) and every
+// crossing-covered tenant with its subtree. It is for provider reads whose rows
+// carry no owning tenant (drift), where filtering afterwards is not possible, so
+// the provider is asked once per cut and the results are merged.
+func (s *Server) boundaryReadCuts(r *http.Request, scope *tenantReadScope) []entityTenantCut {
+	var cuts []entityTenantCut
+	if own, ok := callerOwnTenant(r.Context()); ok {
+		cuts = append(cuts, entityTenantCut{tenant: own})
+	}
+	for _, id := range scope.CrossingTenants() {
+		if !scope.Allows(id) {
+			continue
+		}
+		cuts = append(cuts, entityTenantCut{tenant: id, ids: s.tenantDescendantIDs(r.Context(), id)})
+	}
+	return cuts
+}
+
+// maxEmptyEntityPages bounds how many consecutive pages a boundary-subject query
+// skips because every entity on them is unreadable, so a fleet that is almost all
+// client tenants cannot turn one request into a full table scan.
+const maxEmptyEntityPages = 50
+
+// queryEntitiesInReadScope runs QueryEntities and, for a boundary-subject root
+// caller, keeps only the entities the caller may read. The provider cut is
+// unrestricted for such a caller, so the filtering happens here on each row's
+// owning tenant. A page that filters to nothing is skipped in favour of the next,
+// so a short or empty page never hides readable entities further along.
+func (s *Server) queryEntitiesInReadScope(r *http.Request, route string, filter eginterfaces.EntityFilter, page eginterfaces.PageToken) (*eginterfaces.EntityPage, error) {
+	scope := s.tenantReadScope(r, route)
+	if !scope.boundarySubject() {
+		return s.egProvider.QueryEntities(r.Context(), filter, page)
+	}
+	defer scope.LogSummary()
+	for skipped := 0; ; skipped++ {
+		result, err := s.egProvider.QueryEntities(r.Context(), filter, page)
+		if err != nil {
+			return nil, err
+		}
+		readable := make([]*egtypes.EntityView, 0, len(result.Entities))
+		for _, v := range result.Entities {
+			if v != nil && v.Entity != nil && scope.Allows(v.Entity.OwningTenant) {
+				readable = append(readable, v)
+			}
+		}
+		result.Entities = readable
+		if len(readable) > 0 || result.NextToken == "" || skipped >= maxEmptyEntityPages {
+			return result, nil
+		}
+		page.Token = result.NextToken
+	}
+}
+
+// listDriftedInReadScope runs ListDrifted. Drift rows carry no owning tenant, so a
+// boundary-subject root caller is served by asking the provider once for the root
+// tenant on its own and once per crossing-covered tenant, and merging the results.
+func (s *Server) listDriftedInReadScope(r *http.Request, route string, filter eginterfaces.DriftFilter) ([]*eginterfaces.DriftState, error) {
+	scope := s.tenantReadScope(r, route)
+	if !scope.boundarySubject() {
+		return s.egProvider.ListDrifted(r.Context(), filter)
+	}
+	defer scope.LogSummary()
+	merged := []*eginterfaces.DriftState{}
+	seen := make(map[string]struct{})
+	for _, cut := range s.boundaryReadCuts(r, scope) {
+		f := filter
+		f.TenantFilter = cut.tenant
+		f.TenantSubtreeIDs = cut.ids
+		states, err := s.egProvider.ListDrifted(r.Context(), f)
+		if err != nil {
+			return nil, err
+		}
+		for _, st := range states {
+			if st == nil {
+				continue
+			}
+			key := st.EID.String()
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, st)
+		}
+	}
+	return merged, nil
+}
+
+// filterReadableEdges keeps the edges both of whose ends are entities the caller
+// may read. An end that cannot be resolved is treated as unreadable.
+func (s *Server) filterReadableEdges(ctx context.Context, scope *tenantReadScope, edges []*eginterfaces.EdgeView) ([]*eginterfaces.EdgeView, error) {
+	readable := make(map[string]bool)
+	allowed := func(eid egtypes.EID) (bool, error) {
+		key := eid.String()
+		if ok, done := readable[key]; done {
+			return ok, nil
+		}
+		owner, found, err := s.entityOwner(ctx, eid, "", nil)
+		if err != nil {
+			return false, err
+		}
+		ok := found && scope.Allows(owner)
+		readable[key] = ok
+		return ok, nil
+	}
+	out := make([]*eginterfaces.EdgeView, 0, len(edges))
+	for _, e := range edges {
+		if e == nil || e.Edge == nil {
+			continue
+		}
+		fromOK, err := allowed(e.Edge.From)
+		if err != nil {
+			return nil, err
+		}
+		toOK, err := allowed(e.Edge.To)
+		if err != nil {
+			return nil, err
+		}
+		if fromOK && toOK {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// filterReadableNeighborhood drops the nodes the caller may not read and every
+// edge that touches a dropped node, so a client-tenant entity is never named as
+// the neighbor of a visible one.
+func filterReadableNeighborhood(scope *tenantReadScope, n *egtypes.Neighborhood) *egtypes.Neighborhood {
+	if n == nil {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(n.Nodes))
+	out := &egtypes.Neighborhood{Root: n.Root, Nodes: []*egtypes.Entity{}, Edges: []*egtypes.Edge{}}
+	for _, node := range n.Nodes {
+		if node == nil || !scope.Allows(node.OwningTenant) {
+			continue
+		}
+		kept[node.EID.String()] = struct{}{}
+		out.Nodes = append(out.Nodes, node)
+	}
+	for _, e := range n.Edges {
+		if e == nil {
+			continue
+		}
+		_, fromOK := kept[e.From.String()]
+		_, toOK := kept[e.To.String()]
+		if fromOK && toOK {
+			out.Edges = append(out.Edges, e)
+		}
+	}
+	return out
+}
+
 // writeEntityJSON encodes v as JSON and writes it to w with Content-Type application/json.
 func writeEntityJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -130,9 +348,10 @@ func (s *Server) handleQueryEntities(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	tenant, ids := s.entityCut(r)
 	filter := eginterfaces.EntityFilter{
-		TenantFilter:     callerTenantSubtree(r),
-		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
+		TenantFilter:     tenant,
+		TenantSubtreeIDs: ids,
 		Kind:             q.Get("kind"),
 		TextQuery:        q.Get("text_query"),
 	}
@@ -158,7 +377,7 @@ func (s *Server) handleQueryEntities(w http.ResponseWriter, r *http.Request) {
 		page.PageSize = ps
 	}
 
-	result, err := s.egProvider.QueryEntities(r.Context(), filter, page)
+	result, err := s.queryEntitiesInReadScope(r, "GET /api/v1/entities", filter, page)
 	if err != nil {
 		s.logger.Error("handleQueryEntities: query failed",
 			"error", logging.SanitizeLogValue(err.Error()),
@@ -185,9 +404,10 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	tenant, ids := s.entityCut(r)
 	opts := eginterfaces.GetEntityOpts{
-		TenantFilter:     callerTenantSubtree(r),
-		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
+		TenantFilter:     tenant,
+		TenantSubtreeIDs: ids,
 	}
 
 	if asOfStr := q.Get("as_of"); asOfStr != "" {
@@ -216,9 +436,28 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "lookup failed", http.StatusInternalServerError)
 		return
 	}
-	if view == nil {
+	if view == nil || view.Entity == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
+	}
+
+	const route = "GET /api/v1/entities/{eid}"
+	if !s.authorizeRecordRead(w, r, view.Entity.OwningTenant, route, func() {
+		http.Error(w, "not found", http.StatusNotFound)
+	}) {
+		return
+	}
+
+	// A same-as group merged across an unrestricted cut would fold client-tenant
+	// attributes into a root entity: a boundary-subject root caller gets the group
+	// cut to the entity's own tenant.
+	if opts.CollapseGroup && view.CollapseGroup != nil && s.tenantReadScope(r, route).boundarySubject() {
+		opts.TenantFilter = view.Entity.OwningTenant
+		opts.TenantSubtreeIDs = nil
+		if view, err = s.egProvider.GetEntity(r.Context(), eid, opts); err != nil || view == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	writeEntityJSON(w, view)
@@ -238,13 +477,19 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const route = "GET /api/v1/entities/{eid}/edges"
+	if !s.authorizeEntityRead(w, r, eid, route) {
+		return
+	}
+
 	q := r.URL.Query()
+	tenant, ids := s.entityCut(r)
 	filter := eginterfaces.EdgeFilter{
 		FromEID:          &eid,
 		Types:            q["edge_type"],
 		Source:           q.Get("source"),
-		TenantFilter:     callerTenantSubtree(r),
-		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
+		TenantFilter:     tenant,
+		TenantSubtreeIDs: ids,
 	}
 
 	if q.Get("direction") == "inbound" {
@@ -260,6 +505,22 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 		)
 		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
+	}
+
+	// A boundary-subject root caller's cut is unrestricted, so an edge whose other
+	// end is a client entity would otherwise name it: keep only edges whose both
+	// ends the caller may read.
+	if scope := s.tenantReadScope(r, route); scope.boundarySubject() {
+		edges, err = s.filterReadableEdges(r.Context(), scope, edges)
+		if err != nil {
+			s.logger.Error("handleGetEdges: endpoint lookup failed",
+				"eid", logging.SanitizeLogValue(eid.String()),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		scope.LogSummary()
 	}
 
 	writeEntityJSON(w, edges)
@@ -312,17 +573,7 @@ func (s *Server) handleGetNeighborhood(w http.ResponseWriter, r *http.Request) {
 	// The provider uses the root entity's owning_tenant as the traversal filter, not
 	// the caller's credential — so a cross-tenant caller without this pre-check
 	// could retrieve a foreign entity's subgraph (ADR-022 §7).
-	ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenantSubtree(r))
-	if accessErr != nil {
-		s.logger.Error("handleGetNeighborhood: entity access check failed",
-			"eid", logging.SanitizeLogValue(eid.String()),
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/neighborhood") {
 		return
 	}
 
@@ -338,6 +589,14 @@ func (s *Server) handleGetNeighborhood(w http.ResponseWriter, r *http.Request) {
 		)
 		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
+	}
+
+	// The provider cuts a traversal at the root entity's own tenant, but a
+	// boundary-subject root caller must not rely on that: drop any node it may not
+	// read and every edge that touches one.
+	if scope := s.tenantReadScope(r, "GET /api/v1/entities/{eid}/neighborhood"); scope.boundarySubject() {
+		neighborhood = filterReadableNeighborhood(scope, neighborhood)
+		scope.LogSummary()
 	}
 
 	writeEntityJSON(w, neighborhood)
@@ -365,17 +624,7 @@ func (s *Server) handleGetHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// GetHistory has no tenant filter parameter — verify access via GetEntity first.
-	ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenantSubtree(r))
-	if accessErr != nil {
-		s.logger.Error("handleGetHistory: entity access check failed",
-			"eid", logging.SanitizeLogValue(eid.String()),
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/history") {
 		return
 	}
 
@@ -418,17 +667,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Diff has no tenant filter parameter — verify access via GetEntity first.
-	ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenantSubtree(r))
-	if accessErr != nil {
-		s.logger.Error("handleDiff: entity access check failed",
-			"eid", logging.SanitizeLogValue(eid.String()),
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/diff") {
 		return
 	}
 
@@ -465,7 +704,9 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := callerTenantSubtree(r)
+	const route = "GET /api/v1/entities/timeline"
+	tenant, ids := s.entityCut(r)
+	scope := s.tenantReadScope(r, route)
 	eids := make([]eginterfaces.EIDRef, 0, len(eidStrs))
 	for _, eidStr := range eidStrs {
 		eid, err := egtypes.ParseEID(eidStr)
@@ -473,8 +714,8 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid eid: must be authority_type:authority_name[/local_id]", http.StatusBadRequest)
 			return
 		}
-		// GetTimeline has no tenant filter parameter — verify access per EID.
-		ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenant)
+		// GetTimeline has no tenant filter parameter — resolve each EID's owner.
+		owner, found, accessErr := s.entityOwner(r.Context(), eid, tenant, ids)
 		if accessErr != nil {
 			s.logger.Error("handleGetTimeline: entity access check failed",
 				"eid", logging.SanitizeLogValue(eid.String()),
@@ -483,12 +724,18 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "lookup failed", http.StatusInternalServerError)
 			return
 		}
-		if !ok {
+		if !found {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		// A timeline is a list: a boundary-subject root caller gets the entities it
+		// may read and silently loses the rest (ADR-025 A2.5), as for any bulk read.
+		if scope.boundarySubject() && !scope.Allows(owner) {
+			continue
+		}
 		eids = append(eids, eid)
 	}
+	scope.LogSummary()
 
 	tr, err := parseTimeRangeQuery(q)
 	if err != nil {
@@ -496,7 +743,12 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := s.egProvider.GetTimeline(r.Context(), eids, tr)
+	var events []*eginterfaces.TimelineEvent
+	if len(eids) > 0 {
+		events, err = s.egProvider.GetTimeline(r.Context(), eids, tr)
+	} else {
+		events = []*eginterfaces.TimelineEvent{}
+	}
 	if err != nil {
 		s.logger.Error("handleGetTimeline: query failed",
 			"error", logging.SanitizeLogValue(err.Error()),
@@ -523,17 +775,7 @@ func (s *Server) handleGetDriftState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// GetDriftState has no tenant filter parameter — verify access via GetEntity first.
-	ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenantSubtree(r))
-	if accessErr != nil {
-		s.logger.Error("handleGetDriftState: entity access check failed",
-			"eid", logging.SanitizeLogValue(eid.String()),
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/drift") {
 		return
 	}
 
@@ -569,17 +811,7 @@ func (s *Server) handleGetDesiredState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// GetDesiredState has no tenant filter parameter — verify access via GetEntity first.
-	ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenantSubtree(r))
-	if accessErr != nil {
-		s.logger.Error("handleGetDesiredState: entity access check failed",
-			"eid", logging.SanitizeLogValue(eid.String()),
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/desired-state") {
 		return
 	}
 
@@ -811,14 +1043,15 @@ func (s *Server) handleListDrifted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenant, ids := s.entityCut(r)
 	filter := eginterfaces.DriftFilter{
-		TenantFilter:     callerTenantSubtree(r),
-		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
+		TenantFilter:     tenant,
+		TenantSubtreeIDs: ids,
 		LifecycleStatus:  lifecycleStatus,
 		Kind:             q.Get("kind"),
 	}
 
-	states, err := s.egProvider.ListDrifted(r.Context(), filter)
+	states, err := s.listDriftedInReadScope(r, "GET /api/v1/entities/drifted", filter)
 	if err != nil {
 		s.logger.Error("handleListDrifted: query failed",
 			"error", logging.SanitizeLogValue(err.Error()),
