@@ -140,6 +140,10 @@ Each tagged version will have a corresponding GitHub Release with:
 - Unsigned binaries: controller for Linux amd64; steward for Windows, macOS and Linux (amd64 and arm64)
 - SHA256 checksums for all artifacts
 
+The release is a draft (visible only to accounts with write access) unless the
+repository variable `CFGMS_PUBLIC_RELEASE_BINARIES` is exactly `true`; no
+binary is attached to a published release by default.
+
 The binaries are unsigned (no code signing, notarization or attestation); the
 checksum file is the only integrity check.
 

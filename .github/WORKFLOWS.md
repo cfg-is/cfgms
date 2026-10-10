@@ -121,9 +121,15 @@ Go toolchain pinned in `go.mod` and fails unless the bytes match:
 
 The `publish` job (the only job with `contents: write`) writes and checks
 `SHA256SUMS`, builds the notes from the matching `CHANGELOG.md` section
-(`scripts/release/changelog-section.sh`), and runs `gh release view`: absent
-creates the release, present edits the notes and re-uploads assets with
-`--clobber`, so re-running a tag is idempotent.
+(`scripts/release/changelog-section.sh`), then runs
+`scripts/release/publish-release.sh`. The release is a **draft** unless the
+repository variable `CFGMS_PUBLIC_RELEASE_BINARIES` is exactly `true`; a draft
+is visible only to accounts with write access. No release exists for the tag:
+it is created (as a draft). A draft exists: the assets are re-uploaded with
+`--clobber` and the notes edited, so re-running a tag is idempotent. A
+published release exists and the variable is not `true`: the job fails and
+changes nothing. The script is tested before merge by
+`scripts/release/publish-release_test.sh` (`make test-release-artifacts`).
 
 Binaries are unsigned and no secret is used. The steward embeds the publisher
 public key from the repository variable `CFGMS_RELEASE_PUBLISHER_KEY` when it
