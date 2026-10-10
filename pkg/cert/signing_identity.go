@@ -98,6 +98,16 @@ func (m *Manager) resolveSigningIdentity(ctx context.Context) (SigningIdentityMo
 	}
 	if cursor != nil && cursor.CurrentSerial != "" {
 		mat, err := m.signingKeys.GetSigningKey(ctx, cursor.CurrentSerial)
+		if errors.Is(err, certinterfaces.ErrSigningKeyNotFound) {
+			// The cursor names a serial that has been elected but is not yet in
+			// the shared namespace: promote it from the migration namespace
+			// before reporting LegacyLocal.
+			if promoted, perr := m.promoteSerial(ctx, cursor.CurrentSerial); perr != nil {
+				return "", nil, perr
+			} else if promoted {
+				mat, err = m.signingKeys.GetSigningKey(ctx, cursor.CurrentSerial)
+			}
+		}
 		if err == nil {
 			return SigningIdentityShared, mat, nil
 		}

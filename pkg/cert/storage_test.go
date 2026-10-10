@@ -369,3 +369,25 @@ func TestNewFileStore_EmptyBasePath(t *testing.T) {
 	_, err := NewFileStore("")
 	assert.Error(t, err)
 }
+
+func TestFileStore_RemoveSigningKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := NewFileStore(dir)
+	require.NoError(t, err)
+	ca := newTestCAForSigning(t)
+	c, err := ca.GenerateSigningCertificate(&SigningCertConfig{KeySize: 2048})
+	require.NoError(t, err)
+	require.NoError(t, fs.StoreCertificate(c))
+
+	require.NoError(t, fs.RemoveSigningKeyFile(c.SerialNumber))
+	_, statErr := os.Stat(filepath.Join(dir, c.SerialNumber, "key.pem"))
+	assert.True(t, os.IsNotExist(statErr))
+	got, err := fs.GetCertificate(c.SerialNumber)
+	require.NoError(t, err)
+	assert.Empty(t, got.PrivateKeyPEM)
+	assert.Equal(t, c.CertificatePEM, got.CertificatePEM)
+
+	assert.NoError(t, fs.RemoveSigningKeyFile(c.SerialNumber), "removing an absent key is not an error")
+	assert.Error(t, fs.RemoveSigningKeyFile("../escape"))
+	assert.Error(t, fs.RemoveSigningKeyFile(""))
+}

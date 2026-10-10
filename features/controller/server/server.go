@@ -168,6 +168,7 @@ type Server struct {
 	certProvisioningService *service.CertificateProvisioningService
 	certManager             *cert.Manager
 	signingRetirementSvc    *service.SigningRetirementService // Issue #4795: retires superseded signing certs at overlap end
+	signingMigrationSvc     *service.SigningMigrationService  // Issue #4796: moves node-local signing keys to the shared identity
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
@@ -828,6 +829,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize certificate manager if enabled
 	var certManager *cert.Manager
 	var certProvisioningService *service.CertificateProvisioningService
+	var signingMigrationSvc *service.SigningMigrationService
 	if cfg.Certificate != nil && cfg.Certificate.EnableCertManagement {
 		// Init guard: controller must be initialized before normal startup
 		caPath := cfg.Certificate.CAPath
@@ -904,6 +906,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
 		}
 		logger.Info("Separated certificates ensured (internal mTLS + config signing)")
+
+		// Issue #4796: a cluster-mode node imports its node-local signing
+		// certificates into the shared store's migration namespace, promotes the
+		// elected serial, and removes verified local keys. A failure here is not
+		// fatal: the node keeps signing under its resolved identity and the
+		// background pass started with the server retries.
+		signingMigrationSvc = service.NewSigningMigrationService(certManager, logger)
+		signingMigrationSvc.SetAuditManager(auditManager)
+		if err := signingMigrationSvc.Run(context.Background()); err != nil {
+			logger.Warn("Signing identity migration pass failed at startup",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
 
 		// Create certificate provisioning service
 		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
@@ -1972,6 +1986,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certProvisioningService: certProvisioningService,
 		certManager:             certManager,
 		signingRetirementSvc:    signingRetirementSvc,
+		signingMigrationSvc:     signingMigrationSvc,
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
@@ -2958,6 +2973,12 @@ func (s *Server) Start() error {
 		s.signingRetirementSvc.Start(context.Background())
 	}
 
+	// Issue #4796: keep promoting an elected signing serial and removing verified
+	// local keys, so an election made on another node after startup converges here.
+	if s.signingMigrationSvc != nil {
+		s.signingMigrationSvc.Start(context.Background())
+	}
+
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
@@ -3243,6 +3264,9 @@ func (s *Server) Stop() error {
 	// Stop the signing-retirement sweep before the cert manager it reads is closed.
 	if s.signingRetirementSvc != nil {
 		s.signingRetirementSvc.Stop()
+	}
+	if s.signingMigrationSvc != nil {
+		s.signingMigrationSvc.Stop()
 	}
 
 	// Release the cert manager's retained vault connection (cluster mode): the

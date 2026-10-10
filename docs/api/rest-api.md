@@ -1066,6 +1066,57 @@ When a rotation's overlap window ends, the leader controller sends the same
 `retire_serials` instruction for the rotating serial without an operator request and
 records a `signing_certificate_retired` audit event.
 
+#### POST /api/v1/certificates/signing/elect
+
+Name one existing node-local signing certificate as the cluster's shared signing
+certificate (Issue #4796). Use it only when the shared signing cursor is empty and the
+cluster is still in `legacy_local` mode: the controller never picks a certificate itself,
+and with neither a cursor nor an explicit election the cluster stays in `legacy_local`
+mode. The election creates the cursor (create-if-absent), so it never overrides an
+existing one. See [Cluster Signing Identity Migration](../operations/cluster-signing-migration.md).
+
+**Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
+**Required permission:** `certificate:rotate`
+
+**Caller:** the same gates as rotation: a certificate-authenticated root principal. A
+tenant-scoped caller, a principal below `AssuranceStrong` and a session without an admin
+certificate serial are refused with `403 FORBIDDEN`.
+
+**Request Body:**
+
+```json
+{
+  "serial": "123456789"
+}
+```
+
+`serial` is required and must be the serial of a certificate that a node has already
+validated and imported into the migration namespace.
+
+**Response:**
+
+```json
+{
+  "data": {
+    "serial": "123456789"
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+**Errors:**
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `VALIDATION_ERROR` | Missing or malformed `serial`, or invalid JSON. |
+| 400 | `SERIAL_NOT_MIGRATED` | The serial is not in the migration namespace, so it was never validated or imported. |
+| 409 | `ALREADY_ELECTED` | A cursor already exists; the message names its serial. Nothing is changed. |
+| 409 | `NOT_CLUSTER_MODE` | The controller has no shared signing key store. |
+
+**Audit:** every successful election records a `signing_certificate_elected` audit event
+(`security_event`, severity high) with `operator_serial` and `serial`. No certificate or key
+material is recorded.
+
 ### Signing Credentials
 
 #### POST /api/v1/signing-credential/request

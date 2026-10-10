@@ -14,6 +14,7 @@ The four upgrade documents cover distinct scopes; start here to pick the right o
 ## Cluster Configuration
 
 - [Cluster CA Trust Anchor Configuration](cluster-ca.md) - Sourcing the controller CA from a shared OpenBao secret store in cluster mode
+- [Cluster Signing Identity Migration](cluster-signing-migration.md) - Moving a cluster from per-node signing certificates to one shared signing certificate
 - [Cluster Storage Configuration](cluster-storage-config.md) - Shared external backends required by `ha.mode: cluster`
 - [Tier 1 Controller Bring-Up](tier1-controller-bringup.md) - Source of truth for `scripts/tier1-bootstrap.sh`
 - [Backend Migration](backend-migration.md) - Operator guide to the `cfg migrate` and `cfg storage migrate` verb shape

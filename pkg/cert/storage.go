@@ -406,6 +406,57 @@ func (fs *FileStore) DeleteCertificate(serialNumber string) error {
 	return nil
 }
 
+// RemoveSigningKeyFile overwrites and then removes the private key file of one
+// certificate, keeping cert.pem, the chain and the metadata so the public half
+// stays visible to trust-path listings. The overwrite is best effort: it does not
+// defeat media-level recovery (journaling filesystems, SSD wear levelling).
+// Removing a key that is already gone is not an error.
+func (fs *FileStore) RemoveSigningKeyFile(serialNumber string) error {
+	if serialNumber == "" {
+		return fmt.Errorf("serial number is required")
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	certDir, err := resolveCertDir(fs.basePath, serialNumber)
+	if err != nil {
+		return fmt.Errorf("certificate not found")
+	}
+	keyPath := filepath.Join(certDir, "key.pem")
+	info, err := os.Lstat(keyPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat private key: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("private key path is not a regular file")
+	}
+
+	// #nosec G304 - path is resolved and contained by resolveCertDir
+	f, err := os.OpenFile(keyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open private key for overwrite: %w", err)
+	}
+	_, werr := f.Write(make([]byte, info.Size()))
+	if werr == nil {
+		werr = f.Sync()
+	}
+	cerr := f.Close()
+	if werr != nil {
+		return fmt.Errorf("failed to overwrite private key: %w", werr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("failed to close private key: %w", cerr)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		return fmt.Errorf("failed to remove private key: %w", err)
+	}
+	return nil
+}
+
 // GetExpiringCertificates returns certificates expiring within the specified days
 func (fs *FileStore) GetExpiringCertificates(withinDays int) ([]*CertificateInfo, error) {
 	fs.mu.RLock()

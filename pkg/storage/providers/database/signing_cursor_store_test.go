@@ -6,6 +6,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -244,4 +245,41 @@ func TestDatabaseSigningCursorStore_MarkRetired_ConcurrentCallersRetireOnce(t *t
 	loaded, err := store.LoadCursor(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, loaded.RetiredAt)
+}
+
+func TestDatabaseSigningCursorStore_SeedCursorIfAbsent_ConcurrentCallersCreateOnce(t *testing.T) {
+	store := newTestSigningCursorStore(t)
+	ctx := context.Background()
+
+	const callers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	creators := 0
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, created, err := store.SeedCursorIfAbsent(ctx, fmt.Sprintf("serial-%d", i))
+			assert.NoError(t, err)
+			if created {
+				mu.Lock()
+				creators++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	assert.Equal(t, 1, creators, "exactly one caller creates the cursor")
+
+	loaded, err := store.LoadCursor(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Empty(t, loaded.RotatingSerial)
+
+	got, created, err := store.SeedCursorIfAbsent(ctx, "other")
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, loaded.CurrentSerial, got.CurrentSerial)
+	_, _, err = store.SeedCursorIfAbsent(ctx, "")
+	require.Error(t, err)
 }

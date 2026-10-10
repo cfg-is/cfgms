@@ -54,6 +54,23 @@ type SigningKeyStore interface {
 
 	// ListSigningSerials returns the serials that have stored material.
 	ListSigningSerials(ctx context.Context) ([]string, error)
+
+	// PutMigrationSigner stores a node-local signing certificate and key a node
+	// has validated, create-if-absent, in the migration namespace. The namespace
+	// is a separate key prefix from the shared one so a vault policy can treat it
+	// differently, and nothing in it is a signing identity until the cursor names
+	// its serial and it is promoted. Same material again is an idempotent
+	// success; different material for the same serial is an error naming
+	// fingerprints only.
+	PutMigrationSigner(ctx context.Context, material *SigningKeyMaterial) error
+
+	// GetMigrationSigner returns the migration-namespace material for serial. An
+	// absent serial yields ErrSigningKeyNotFound.
+	GetMigrationSigner(ctx context.Context, serial string) (*SigningKeyMaterial, error)
+
+	// ListMigrationSigners returns the serials held in the migration namespace.
+	// The order is unspecified and must never influence which serial is elected.
+	ListMigrationSigners(ctx context.Context) ([]string, error)
 }
 
 // SigningBootstrapClaimer is implemented by a SigningKeyStore that can arbitrate

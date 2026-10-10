@@ -135,6 +135,36 @@ func (s *DatabaseSigningCursorStore) TransitionCursor(ctx context.Context, newSe
 	)
 }
 
+// SeedCursorIfAbsent implements certinterfaces.SigningCursorStore.SeedCursorIfAbsent.
+// The create is one INSERT ... ON CONFLICT DO NOTHING, so two nodes electing at
+// once get one inserted row between them; the loser reads the winner's cursor.
+func (s *DatabaseSigningCursorStore) SeedCursorIfAbsent(ctx context.Context, serial string) (*certinterfaces.SigningCertCursor, bool, error) {
+	if serial == "" {
+		return nil, false, fmt.Errorf("database: signing serial cannot be empty")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		INSERT INTO cfgms_signing_cursor (id, current_serial, rotating_serial, overlap_window_days, rotated_at, retired_at)
+		VALUES ($1, $2, NULL, 0, now(), NULL)
+		ON CONFLICT (id) DO NOTHING
+		RETURNING current_serial, rotating_serial, overlap_window_days, rotated_at, retired_at`,
+		signingCursorRowID, serial)
+	cursor, err := scanCursor(row)
+	if err != nil {
+		return nil, false, fmt.Errorf("database: failed to seed signing cursor: %w", err)
+	}
+	if cursor != nil {
+		return cursor, true, nil
+	}
+	existing, err := s.LoadCursor(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing == nil {
+		return nil, false, fmt.Errorf("database: signing cursor seed rejected but no cursor row exists")
+	}
+	return existing, false, nil
+}
+
 // MarkRetired implements certinterfaces.SigningCursorStore.MarkRetired. The
 // guard and the write are one conditional UPDATE, so two nodes retiring the
 // same serial at once get one affected row between them.

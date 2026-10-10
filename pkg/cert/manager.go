@@ -127,6 +127,13 @@ type Manager struct {
 	closeOnce sync.Once
 	// signingCacheTTLOverride replaces signingResolveCacheTTL in tests.
 	signingCacheTTLOverride *time.Duration
+	// migrationAudit receives signing-identity migration events (import, refusal,
+	// promotion, local-key removal). Set by SetSigningMigrationAuditSink.
+	migrationAuditMu sync.RWMutex
+	migrationAudit   SigningMigrationAuditSink
+	// migrationRefused remembers refusals already reported so a certificate that
+	// stays invalid is logged and audited once per process, not on every pass.
+	migrationRefused sync.Map
 }
 
 // resolveRevocationStore returns config.RevocationStore if set, otherwise

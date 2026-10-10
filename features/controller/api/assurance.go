@@ -31,7 +31,7 @@ type Requirement struct {
 var permissionAssurance = map[string]Requirement{
 	// Former tier3Permissions set — 20 entries, all migrated to Min: AssuranceStrong.
 	"certificate:provision":          {Min: session.AssuranceStrong},                            // POST /certificates/provision
-	"certificate:rotate":             {Min: session.AssuranceStrong},                            // POST /certificates/signing/rotate and /signing/revoke
+	"certificate:rotate":             {Min: session.AssuranceStrong},                            // POST /certificates/signing/rotate, /signing/revoke and /signing/elect
 	"certificate:revoke":             {Min: session.AssuranceStrong},                            // POST /certificates/{serial}/revoke (Issue #3129)
 	"rbac:create-role":               {Min: session.AssuranceStrong},                            // POST /rbac/roles
 	"rbac:update-role":               {Min: session.AssuranceStrong},                            // PUT  /rbac/roles/{id}
