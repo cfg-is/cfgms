@@ -416,6 +416,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: ./.github/workflows/ci-image-mirror.yml
+    uses: $/.github/workflows/ci-image-mirror.yml
     with:
       upstream_ref: ${{ matrix.upstream_ref }}
