@@ -2085,6 +2085,46 @@ Approve a pending break-glass crossing. The caller must be a root-scoped princip
 
 List every grant and break-glass crossing (active, expired and revoked) for the tenant. Break-glass rows carry `reason_category`; grant rows omit it.
 
+#### GET /api/v1/tenants/{id}/admin-contacts
+
+Read the tenant's administrator contact addresses: where security notifications for the tenant are sent. The list is MSP-managed and stored in the tenant's metadata under the reserved key `cfgms.admin_contacts`.
+
+**Authentication:** Required  
+**Required permission:** `tenant:read`
+
+**Response (`200 OK`):** `{"data": {"contacts": ["ops@example.com"]}}`. An unset list is `[]`.
+
+Applies the ordinary tenant-scope decision: a tenant outside the caller's subtree, or a missing one, is `404 TENANT_NOT_FOUND`. A root-scoped caller without an active crossing on the tenant receives the tenant-crossing challenge.
+
+#### PUT /api/v1/tenants/{id}/admin-contacts
+
+Replace the tenant's administrator contact list.
+
+**Authentication:** Required  
+**Required permission:** `tenant:update`
+
+**Request body:** `{"contacts": ["ops@example.com", "sec@example.com"]}`
+
+**Validation:**
+
+- Each entry must parse as a bare email address; display-name forms (`Ops <ops@example.com>`) are rejected.
+- At most 20 addresses; an empty list is allowed and clears the contacts.
+- CR/LF in any entry is rejected.
+- Addresses are lower-cased and deduplicated before storage.
+
+**Response (`200 OK`):** the stored list, in the same shape as the GET response.
+
+**Errors:**
+
+- `400 INVALID_CONTACTS`: an entry or the list failed validation. `400 INVALID_REQUEST`: the body is not JSON or lacks `contacts`.
+- `401` tenant-crossing challenge: the caller is root-scoped and holds no active crossing on the tenant; the contacts are unchanged.
+- `403 ROOT_SCOPED_CANNOT_EDIT_CONTACTS`: the caller is root-scoped. This applies even with an active crossing, because the list is where the MSP is told about root's own access. Only the MSP edits it.
+- `404 TENANT_NOT_FOUND`: the tenant does not exist or is outside the caller's subtree. A client-tenant admin therefore cannot write its parent MSP's contacts.
+
+Every change is audited as `tenant.admin_contacts_updated` (tenant-scoped, high severity) with the number of addresses; the addresses themselves are not written to the audit detail.
+
+The reserved key cannot be set through the generic tenant endpoints: `POST /api/v1/tenants` and `PUT /api/v1/tenants/{id}` return `400 RESERVED_METADATA_KEY` when `metadata` contains `cfgms.admin_contacts`, and `PUT /api/v1/tenants/{id}` preserves the stored contacts when `metadata` is omitted or replaced.
+
 #### DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}
 
 End an active tenant crossing (a client-granted access grant or a break-glass elevation) early. The crossing stops granting access immediately.

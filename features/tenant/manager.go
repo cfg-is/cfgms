@@ -109,6 +109,10 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		req.Name = req.ID
 	}
 
+	if _, reserved := req.Metadata[MetaKeyAdminContacts]; reserved {
+		return nil, ErrReservedMetadataKey
+	}
+
 	// Validate the request
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
@@ -263,6 +267,10 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 		return nil, err
 	}
 
+	if _, reserved := req.Metadata[MetaKeyAdminContacts]; reserved {
+		return nil, ErrReservedMetadataKey
+	}
+
 	// Validate the request
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
@@ -290,7 +298,16 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	// Update fields
 	existing.Name = req.Name
 	existing.Description = req.Description
-	existing.Metadata = req.Metadata
+	// The reserved admin-contacts key is not caller-writable here; carry it over
+	// from the stored tenant so a wholesale metadata replacement cannot drop it.
+	newMeta := make(map[string]string, len(req.Metadata)+1)
+	for k, v := range req.Metadata {
+		newMeta[k] = v
+	}
+	if contacts, ok := existing.Metadata[MetaKeyAdminContacts]; ok {
+		newMeta[MetaKeyAdminContacts] = contacts
+	}
+	existing.Metadata = newMeta
 	// Note: ParentID cannot be changed after creation to maintain hierarchy integrity
 
 	// Update in storage
