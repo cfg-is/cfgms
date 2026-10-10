@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/pkg/cache"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -28,6 +29,24 @@ import (
 type TermSource interface {
 	GetTerm() uint64
 }
+
+const (
+	// MaxFenceRetries bounds how many times one command is re-sent after the
+	// steward rejects it on its Raft-term fence (Issue #4866).
+	MaxFenceRetries = 3
+
+	// defaultFenceRetryDelay is the delay before a fence retry when
+	// Config.FenceRetryDelay is zero.
+	defaultFenceRetryDelay = 2 * time.Second
+
+	// fenceAttemptTTL is how long a command's retry-attempt count is kept. It
+	// only needs to outlive the retry sequence; it bounds memory for commands
+	// whose sequence never reaches exhaustion.
+	fenceAttemptTTL = 10 * time.Minute
+
+	// fenceRetrySendTimeout bounds one retry send and its onSent write.
+	fenceRetrySendTimeout = 30 * time.Second
+)
 
 // Publisher publishes commands to stewards via the ControlPlaneProvider.
 type Publisher struct {
@@ -49,6 +68,12 @@ type Publisher struct {
 
 	// Logger
 	logger logging.Logger
+
+	// Fence retry state (Issue #4866), guarded by mu.
+	fenceRetryDelay time.Duration
+	fenceAttempts   *cache.Cache
+	fenceTimers     map[*time.Timer]struct{}
+	stopped         bool
 }
 
 // pendingCommand tracks a command awaiting response.
@@ -76,6 +101,10 @@ type Config struct {
 	// When nil the term field is zero (pre-fencing behaviour).
 	TermSource TermSource
 
+	// FenceRetryDelay is the delay before a fence-rejected command is re-sent
+	// (Issue #4866). Defaults to 2 seconds when zero.
+	FenceRetryDelay time.Duration
+
 	// Logger for command logging
 	Logger logging.Logger
 }
@@ -89,13 +118,82 @@ func New(cfg *Config) (*Publisher, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 
+	delay := cfg.FenceRetryDelay
+	if delay <= 0 {
+		delay = defaultFenceRetryDelay
+	}
+
 	return &Publisher{
-		controlPlane: cfg.ControlPlane,
-		signer:       cfg.Signer,
-		termSource:   cfg.TermSource,
-		pending:      make(map[string]*pendingCommand),
-		logger:       cfg.Logger,
+		controlPlane:    cfg.ControlPlane,
+		signer:          cfg.Signer,
+		termSource:      cfg.TermSource,
+		pending:         make(map[string]*pendingCommand),
+		logger:          cfg.Logger,
+		fenceRetryDelay: delay,
+		fenceAttempts: cache.NewCache(cache.CacheConfig{
+			Name:            "fence-retry-attempts",
+			MaxRuntimeItems: 10000,
+			DefaultTTL:      fenceAttemptTTL,
+			CleanupInterval: time.Minute,
+			EvictionPolicy:  cache.EvictionLRU,
+		}),
+		fenceTimers: make(map[*time.Timer]struct{}),
 	}, nil
+}
+
+// RetryFenced schedules one re-send of a command the steward rejected on its
+// term fence (Issue #4866). It only schedules: the send runs on a timer
+// goroutine after FenceRetryDelay, through PublishCommandWithID under the same
+// commandID, so the term is read again for that attempt. onSent, when non-nil,
+// receives the 1-based attempt number and the send result.
+//
+// It returns true when a retry was scheduled. The call that would exceed
+// MaxFenceRetries for commandID schedules nothing, clears the attempt count and
+// returns false, as does a call on a stopped publisher.
+func (p *Publisher) RetryFenced(commandID, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}, onSent func(attempt int, err error)) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stopped {
+		return false
+	}
+
+	used := 0
+	if v, ok := p.fenceAttempts.Get(commandID); ok {
+		used, _ = v.(int)
+	}
+	if used >= MaxFenceRetries {
+		p.fenceAttempts.Delete(commandID)
+		return false
+	}
+	attempt := used + 1
+	_ = p.fenceAttempts.Set(commandID, attempt, fenceAttemptTTL)
+
+	var timer *time.Timer
+	timer = time.AfterFunc(p.fenceRetryDelay, func() {
+		p.mu.Lock()
+		delete(p.fenceTimers, timer)
+		stopped := p.stopped
+		p.mu.Unlock()
+		if stopped {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), fenceRetrySendTimeout)
+		defer cancel()
+		err := p.PublishCommandWithID(ctx, commandID, stewardID, cmdType, params)
+		if err != nil {
+			p.logger.Warn("Fence retry send failed",
+				"command_id", logging.SanitizeLogValue(commandID),
+				"attempt", attempt,
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		if onSent != nil {
+			onSent(attempt, err)
+		}
+	})
+	p.fenceTimers[timer] = struct{}{}
+	return true
 }
 
 // currentTerm returns the Raft term from the configured TermSource, or 0 when none is set.
@@ -409,7 +507,14 @@ func (p *Publisher) Stop(ctx context.Context) error {
 		}
 	}
 	p.pending = make(map[string]*pendingCommand)
+	p.stopped = true
+	for t := range p.fenceTimers {
+		t.Stop()
+	}
+	p.fenceTimers = make(map[*time.Timer]struct{})
 	p.mu.Unlock()
+
+	p.fenceAttempts.Close()
 
 	p.logger.Info("Command publisher stopped")
 	return nil

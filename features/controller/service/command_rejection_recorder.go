@@ -7,12 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// fenceRetryWriteTimeout bounds the store write after a fence retry send.
+const fenceRetryWriteTimeout = 10 * time.Second
 
 // Rejection reason codes a steward may report (Issue #4569). The set is closed:
 // the reason arrives from a possibly compromised steward, so anything outside it
@@ -40,6 +44,13 @@ var knownRejectionReasons = map[string]string{
 	RejectionInvalidCommand:  RejectionInvalidCommand,
 }
 
+// FenceRetrier re-sends a command a steward rejected on its term fence
+// (Issue #4866). *commands.Publisher satisfies it. RetryFenced only schedules
+// the re-send and returns false once the command's retry budget is spent.
+type FenceRetrier interface {
+	RetryFenced(commandID, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}, onSent func(attempt int, err error)) bool
+}
+
 // CommandRejectionRecorder records a steward's receive-path rejection of a
 // command on the command's delivery record (Issue #4569): DeliveryStatus
 // rejected and DeliveryDetail set to the reason code, except that a
@@ -52,8 +63,23 @@ type CommandRejectionRecorder struct {
 	store  business.CommandStore
 	logger logging.Logger
 
-	mu     sync.Mutex
-	counts map[string]int64
+	mu      sync.Mutex
+	counts  map[string]int64
+	retrier FenceRetrier
+}
+
+// SetRetrier enables bounded retry of retryable term_fenced rejections. It is
+// set after construction because the publisher is built after the recorder.
+func (r *CommandRejectionRecorder) SetRetrier(retrier FenceRetrier) {
+	r.mu.Lock()
+	r.retrier = retrier
+	r.mu.Unlock()
+}
+
+func (r *CommandRejectionRecorder) getRetrier() FenceRetrier {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.retrier
 }
 
 // NewCommandRejectionRecorder constructs the recorder over a command store.
@@ -134,6 +160,21 @@ func (r *CommandRejectionRecorder) HandleResponse(ctx context.Context, resp *con
 		return nil
 	}
 
+	// A term_fenced rejection the steward marked retryable is re-sent with a
+	// freshly read term. Both the reason and the flag are required: the flag
+	// comes from a steward that may be compromised.
+	if retrier := r.getRetrier(); retrier != nil && reason == RejectionTermFenced && retryableOf(resp) {
+		if retrier.RetryFenced(rec.ID, rec.StewardID, controlplaneTypes.CommandType(rec.Type), rec.Payload, r.fenceRetrySent(rec.ID)) {
+			r.logger.Info("Retrying fence-rejected command with a fresh term",
+				"command_id", logging.SanitizeLogValue(resp.CommandID),
+				"steward_id", logging.SanitizeLogValue(resp.StewardID))
+			return nil
+		}
+		r.logger.Warn("Fence retries exhausted; recording command as rejected",
+			"command_id", logging.SanitizeLogValue(resp.CommandID),
+			"steward_id", logging.SanitizeLogValue(resp.StewardID))
+	}
+
 	status := business.DeliveryStatusRejected
 	if reason == RejectionDuplicateID {
 		// The steward already holds this ID, so the command was delivered.
@@ -157,10 +198,44 @@ func (r *CommandRejectionRecorder) HandleResponse(ctx context.Context, resp *con
 	return nil
 }
 
+// fenceRetrySent returns the onSent callback for one record's fence retries. It
+// runs on the publisher's timer goroutine, so it uses its own context.
+func (r *CommandRejectionRecorder) fenceRetrySent(recordID string) func(attempt int, err error) {
+	return func(attempt int, sendErr error) {
+		ctx, cancel := context.WithTimeout(context.Background(), fenceRetryWriteTimeout)
+		defer cancel()
+
+		status := business.DeliveryStatusDelivered
+		detail := fmt.Sprintf("%s: delivered on retry %d", RejectionTermFenced, attempt)
+		if sendErr != nil {
+			// Back to pending so the on-connect drain picks it up.
+			status = business.DeliveryStatusPending
+			detail = logging.SanitizeLogValue(sendErr.Error())
+		}
+		if err := r.store.UpdateDeliveryStatus(ctx, recordID, status, detail); err != nil {
+			if errors.Is(err, business.ErrDeliveryStatusTerminal) {
+				r.logger.Debug("Fence retry outcome not recorded",
+					"command_id", logging.SanitizeLogValue(recordID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				return
+			}
+			r.logger.Warn("Failed to record fence retry outcome",
+				"command_id", logging.SanitizeLogValue(recordID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+}
+
 func (r *CommandRejectionRecorder) count(reason string) {
 	r.mu.Lock()
 	r.counts[reason]++
 	r.mu.Unlock()
+}
+
+// retryableOf reports whether the steward marked the rejection retryable.
+func retryableOf(resp *controlplaneTypes.Response) bool {
+	b, ok := resp.Details["retryable"].(bool)
+	return ok && b
 }
 
 // rejectionReasonOf reads the reason code from Details["reason"], falling back

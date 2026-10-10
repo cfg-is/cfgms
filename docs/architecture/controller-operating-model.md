@@ -934,6 +934,21 @@ writes `DeliveryDetail` from its own constants, never the wire string. Two rules
 - Any other code on a `pending` or `delivered` record makes it `rejected`.
   Records in any other state are left unchanged.
 
+A `term_fenced` rejection is the one exception, and only when the report also
+carries `retryable: true` (Issue #4866). Both the code and the flag are required,
+because the flag comes from a steward that may be compromised. Such a command was
+most likely stamped during a leadership change, so the recorder asks
+`Publisher.RetryFenced` to re-send it — same ID, type and params from the delivery
+record — after `FenceRetryDelay` (default 2 seconds), with the term read again at
+send time. A fence-rejected command never enters the steward's replay cache, so the
+re-send is not a `duplicate_id`. Each command gets at most `MaxFenceRetries` (3)
+re-sends. A re-send the steward accepts leaves the record `delivered` with detail
+`term_fenced: delivered on retry <n>`; a transport failure on a re-send returns the
+record to `pending` for the on-connect drain. When all 3 re-sends are rejected, the
+record ends `rejected` with detail `term_fenced`. The attempt count is held per
+node in a TTL cache and is not persisted, so a controller restart or a stream that
+moves nodes can restart the budget. Every other rejection code is not retried.
+
 `rejected` is terminal: `UpdateDeliveryStatus` never moves a record out of it and
 returns `ErrDeliveryStatusTerminal`, which also settles the race where the
 steward's rejection arrives before the publisher's own `delivered` write.
@@ -959,6 +974,13 @@ longer depends on which source produced the steward ID at all — it is a proper
 of `ClusterAwareSender`, not of the listing method.
 
 #### Outbound Command Contract — Fencing Term (#3390, ADR-029 Decision 5)
+
+*Fence rejections are retried (Issue #4866).* When a steward refuses a command on
+its term fence and reports it retryable, the controller re-sends the same command
+ID up to 3 times (`commands.MaxFenceRetries`), `FenceRetryDelay` (default 2 seconds)
+apart, each time stamped with a freshly read term. If all 3 re-sends are rejected the
+delivery record ends `rejected` with detail `term_fenced`. See the delivery
+lifecycle section above.
 
 The `Command` proto message carries a `term` field (field 8, `uint64`). Commands
 published through `commands.Publisher` — `PublishCommand`,

@@ -4,6 +4,7 @@ package commands_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -313,4 +314,110 @@ func TestPublishCommandWithID_SendsCallerID(t *testing.T) {
 			t.Fatal("timed out waiting for command")
 		}
 	})
+}
+
+// raisableTermSource is a settable TermSource.
+type raisableTermSource struct{ term atomic.Uint64 }
+
+func (r *raisableTermSource) GetTerm() uint64 { return r.term.Load() }
+
+func TestPublisher_RetryFenced_FreshTermAndBudget(t *testing.T) {
+	ctx := context.Background()
+	terms := &raisableTermSource{}
+	terms.term.Store(3)
+
+	bus := memory.NewBus()
+	server := memory.New(memory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	client := memory.New(memory.ModeClient)
+	require.NoError(t, client.Initialize(ctx, map[string]interface{}{"bus": bus, "steward_id": "steward-test"}))
+	require.NoError(t, client.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = client.Stop(stopCtx)
+		_ = server.Stop(stopCtx)
+	})
+
+	pub, err := commands.New(&commands.Config{
+		ControlPlane:    server,
+		TermSource:      terms,
+		FenceRetryDelay: 10 * time.Millisecond,
+		Logger:          logging.NewLogger("error"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pub.Stop(ctx) })
+
+	received := make(chan *types.SignedCommand, 8)
+	require.NoError(t, client.SubscribeCommands(ctx, "steward-test", cpinterfaces.CommandHandler(func(_ context.Context, cmd *types.SignedCommand) error {
+		received <- cmd
+		return nil
+	})))
+
+	type sent struct {
+		attempt int
+		err     error
+	}
+	sentCh := make(chan sent, 8)
+	onSent := func(attempt int, err error) { sentCh <- sent{attempt, err} }
+
+	// The term is raised before the retry fires; the re-send must carry it.
+	terms.term.Store(6)
+	require.True(t, pub.RetryFenced("cmd-1", "steward-test", types.CommandSyncConfig, nil, onSent))
+	select {
+	case cmd := <-received:
+		assert.Equal(t, "cmd-1", cmd.Command.ID)
+		assert.Equal(t, uint64(6), cmd.Command.Term)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the retry")
+	}
+	select {
+	case s := <-sentCh:
+		assert.Equal(t, 1, s.attempt)
+		assert.NoError(t, s.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("onSent not called")
+	}
+
+	// Budget: attempts 2 and 3 are accepted, the 4th call is refused.
+	terms.term.Store(7)
+	require.True(t, pub.RetryFenced("cmd-1", "steward-test", types.CommandSyncConfig, nil, onSent))
+	require.True(t, pub.RetryFenced("cmd-1", "steward-test", types.CommandSyncConfig, nil, onSent))
+	for i := 0; i < 2; i++ {
+		select {
+		case cmd := <-received:
+			assert.Equal(t, uint64(7), cmd.Command.Term)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for retry")
+		}
+	}
+	assert.False(t, pub.RetryFenced("cmd-1", "steward-test", types.CommandSyncConfig, nil, onSent))
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, received, "an over-budget call must schedule no send")
+
+	// The count was cleared on exhaustion, and other IDs have their own budget.
+	assert.True(t, pub.RetryFenced("cmd-2", "steward-test", types.CommandSyncConfig, nil, nil))
+}
+
+func TestPublisher_Stop_CancelsPendingFenceRetries(t *testing.T) {
+	ctx := context.Background()
+	pub, client := newTestPublisher(t, &staticTermSource{term: 1})
+	_ = client
+	received := make(chan *types.SignedCommand, 1)
+	require.NoError(t, client.SubscribeCommands(ctx, "steward-test", cpinterfaces.CommandHandler(func(_ context.Context, cmd *types.SignedCommand) error {
+		received <- cmd
+		return nil
+	})))
+
+	// Default 2s delay: Stop lands well before the timer fires.
+	require.True(t, pub.RetryFenced("cmd-stop", "steward-test", types.CommandSyncConfig, nil, nil))
+	require.NoError(t, pub.Stop(ctx))
+	assert.False(t, pub.RetryFenced("cmd-after", "steward-test", types.CommandSyncConfig, nil, nil))
+
+	select {
+	case <-received:
+		t.Fatal("a retry fired after Stop")
+	case <-time.After(2500 * time.Millisecond):
+	}
 }
