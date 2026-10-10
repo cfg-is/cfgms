@@ -50,9 +50,12 @@ A tenant-scoped caller reaches its own tenant's records. A root caller's lists, 
 {
   "error": "tenant_crossing_required",
   "required_assurance": "tenant-crossing",
-  "break_glass_endpoint": "/api/v1/tenants/<tenant>/break-glass"
+  "break_glass_endpoint": "/api/v1/tenants/<tenant>/break-glass",
+  "reason_categories": ["account_recovery", "security_incident", "legal_request", "billing_dispute"]
 }
 ```
+
+`reason_categories` lists the values `break_glass_endpoint` accepts as `reason_category`, so a client can render the choices.
 
 Bulk approvals (approve-all, approve-by-CIDR) skip registrations the caller may not act on instead of returning the challenge.
 
@@ -1982,6 +1985,36 @@ The same report for the subtree of one tenant, with real client names and IDs.
 **Response (`200 OK`):** `data` has `id`, `name`, `tech_count`, `endpoint_count`, `client_count`, `metrics` and `msp_own` as above, and `clients: [{id, name, endpoint_count, tech_count}]`. Counting rules are those of `GET /api/v1/billing/report`.
 
 **Errors:** a caller outside `{id}`'s subtree, or an unknown tenant, gets `404`. A root-scoped caller without an active crossing into `{id}` gets the tenant-crossing step-up challenge (`401`).
+
+#### POST /api/v1/tenants/{id}/break-glass
+
+Invoke a justified, 30-minute break-glass elevation into a tenant. Only a root-scoped caller subject to the tenant-crossing boundary may call it (`403 NOT_ROOT_SCOPED` otherwise), and not on the root tenant (`403 ROOT_TENANT_NOT_CROSSABLE`).
+
+**Authentication:** Required  
+**Required permission:** `tenant:crossing-break-glass`
+
+**Request body:**
+
+```json
+{"reason_category": "account_recovery", "justification": "Client lost all admin passkeys, ticket INC-4821"}
+```
+
+- `reason_category` (required): one of `account_recovery`, `security_incident`, `legal_request`, `billing_dispute`. There is no header fallback.
+- `justification` (required): 10-1000 characters after trimming. The `X-Justification` header is accepted when the body carries no justification.
+
+**Response (`201 Created`):** the crossing record, including `reason_category`. The audit entry `tenant.crossing_break_glass_invoked` carries `reason_category` in its details.
+
+**Errors:**
+
+- `400 REASON_CATEGORY_REQUIRED`: no `reason_category`.
+- `400 INVALID_REASON_CATEGORY`: a value outside the four categories.
+- `400 JUSTIFICATION_REQUIRED`: justification missing or outside 10-1000 characters.
+
+No crossing is created on any `400`.
+
+#### GET /api/v1/tenants/{id}/access-grants
+
+List every grant and break-glass crossing (active, expired and revoked) for the tenant. Break-glass rows carry `reason_category`; grant rows omit it.
 
 #### DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}
 

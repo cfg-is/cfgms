@@ -3,9 +3,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -38,6 +40,10 @@ const (
 	// crossing, but the same anti-abuse rationale applies verbatim here.
 	tenantCrossingJustificationMinLen = 10
 	tenantCrossingJustificationMaxLen = 1000
+
+	// tenantCrossingMaxBodyBytes bounds the break-glass request body; the largest
+	// legitimate body is a 1000-character justification plus a category.
+	tenantCrossingMaxBodyBytes = 16 * 1024
 )
 
 // handleCreateTenantCrossingGrant implements POST /api/v1/tenants/{id}/access-grants.
@@ -172,8 +178,9 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 // A root-scoped SaaS-operator principal (ADR-025 Amendment 1 A1.3) invokes a
 // justified, time-boxed, audited elevation into a tenant it does not otherwise have
 // access to (ADR-025 Decision 2(b)) — distinct from, and never granted by, the
-// system-resource-only emergency.break-glass RBAC template (features/rbac). Requires
-// X-Justification (10-1000 chars, mirroring features/rbac's M-AUTH-2 convention).
+// system-resource-only emergency.break-glass RBAC template (features/rbac). Requires a
+// reason_category and a justification (10-1000 chars, mirroring features/rbac's M-AUTH-2
+// convention) in the JSON body; X-Justification is accepted as a justification fallback.
 func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	tenantID := vars["id"]
@@ -217,24 +224,55 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	justification := strings.TrimSpace(r.Header.Get("X-Justification"))
+	// The body carries the category and, preferably, the justification; the
+	// X-Justification header is a fallback for the justification only. An empty or
+	// absent body is not a decode error here: it must still reach the category check.
+	var req struct {
+		ReasonCategory string `json:"reason_category"`
+		Justification  string `json:"justification"`
+	}
+	if body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, tenantCrossingMaxBodyBytes)); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return
+	} else if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+			return
+		}
+	}
+
+	category := business.TenantCrossingReasonCategory(strings.TrimSpace(req.ReasonCategory))
+	if category == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "reason_category is required", "REASON_CATEGORY_REQUIRED")
+		return
+	}
+	if !business.ValidTenantCrossingReasonCategory(category) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "reason_category is not a recognized category", "INVALID_REASON_CATEGORY")
+		return
+	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		justification = strings.TrimSpace(r.Header.Get("X-Justification"))
+	}
 	if len(justification) < tenantCrossingJustificationMinLen || len(justification) > tenantCrossingJustificationMaxLen {
 		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("X-Justification header is required (%d-%d characters)", tenantCrossingJustificationMinLen, tenantCrossingJustificationMaxLen),
+			fmt.Sprintf("justification is required (%d-%d characters) in the request body or X-Justification header", tenantCrossingJustificationMinLen, tenantCrossingJustificationMaxLen),
 			"JUSTIFICATION_REQUIRED")
 		return
 	}
 
 	now := time.Now().UTC()
 	crossing := &business.TenantCrossing{
-		ID:            uuid.New().String(),
-		TenantID:      existing.ID,
-		PrincipalID:   principal.ID,
-		Kind:          business.TenantCrossingKindBreakGlass,
-		GrantedBy:     principal.ID,
-		Justification: justification,
-		CreatedAt:     now,
-		ExpiresAt:     now.Add(tenantCrossingBreakGlassDuration),
+		ID:             uuid.New().String(),
+		TenantID:       existing.ID,
+		PrincipalID:    principal.ID,
+		Kind:           business.TenantCrossingKindBreakGlass,
+		GrantedBy:      principal.ID,
+		Justification:  justification,
+		ReasonCategory: category,
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(tenantCrossingBreakGlassDuration),
 	}
 	if err := s.tenantCrossingStore.CreateTenantCrossing(r.Context(), crossing); err != nil {
 		s.logger.Error("Failed to create tenant crossing break-glass session",
@@ -323,6 +361,7 @@ func (s *Server) recordTenantCrossingAudit(r *http.Request, tenantID, actorID st
 		Detail("crossing_kind", string(crossing.Kind)).
 		Detail("target_principal_id", logging.SanitizeLogValue(crossing.PrincipalID)).
 		Detail("expires_at", crossing.ExpiresAt.Format(time.RFC3339)).
+		Detail("reason_category", string(crossing.ReasonCategory)).
 		Detail("detail", logging.SanitizeLogValue(detail))
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
 		s.logger.Error("Failed to record tenant crossing audit event",
