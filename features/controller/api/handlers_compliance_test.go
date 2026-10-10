@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -305,7 +304,7 @@ func TestHandleGetStewardCompliance_TenantIsolation(t *testing.T) {
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-b/compliance", nil)
 		req = mux.SetURLVars(req, map[string]string{"id": "steward-b"})
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+		req = withTenant(req, "tenant-a")
 		rec := httptest.NewRecorder()
 		server.handleGetStewardCompliance(rec, req)
 
@@ -432,7 +431,7 @@ func TestHandleGetStewardComplianceReport_TenantIsolation(t *testing.T) {
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-b/compliance/report", nil)
 		req = mux.SetURLVars(req, map[string]string{"id": "steward-b"})
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+		req = withTenant(req, "tenant-a")
 		rec := httptest.NewRecorder()
 		server.handleGetStewardComplianceReport(rec, req)
 
@@ -446,7 +445,7 @@ func TestHandleGetStewardComplianceReport_TenantIsolation(t *testing.T) {
 
 		req := httptest.NewRequest("GET", "/api/v1/stewards/steward-a/compliance/report", nil)
 		req = mux.SetURLVars(req, map[string]string{"id": "steward-a"})
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+		req = withTenant(req, "tenant-a")
 		rec := httptest.NewRecorder()
 		server.handleGetStewardComplianceReport(rec, req)
 
@@ -585,7 +584,7 @@ func TestHandleGetComplianceSummary_TenantIsolation(t *testing.T) {
 		require.NoError(t, server.controllerService.RegisterSteward("s-b", "tenant-b", "addr-b", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+		req = withTenant(req, "tenant-a")
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 
@@ -606,7 +605,7 @@ func TestHandleGetComplianceSummary_TenantIsolation(t *testing.T) {
 		require.NoError(t, server.controllerService.RegisterSteward("s-b", "tenant-b", "addr-b", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=tenant-b", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+		req = withTenant(req, "tenant-a")
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 
@@ -631,7 +630,7 @@ func TestHandleGetComplianceSummary_TenantIsolation(t *testing.T) {
 		require.NoError(t, server.controllerService.RegisterSteward("s-ab", "msp-ab", "addr-ab", "online"))
 
 		req := httptest.NewRequest("GET", "/api/v1/compliance/summary", nil)
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a"))
+		req = withTenant(req, "msp-a")
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 

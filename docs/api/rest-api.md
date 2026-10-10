@@ -44,7 +44,7 @@ Each endpoint requires a specific permission scope. Scopes follow the format `re
 
 Every authenticated caller is either **root** (a `root_scope` account, or the bootstrap admin certificate) or **bound to one tenant**. A root caller's identity carries the deployment's root tenant; its reach comes from the root flag, never from an empty tenant. A credential that is neither root nor bound to a tenant is refused with `403 NO_TENANT_SCOPE` before any handler runs.
 
-A tenant-scoped caller reaches its own tenant's records. A root caller's lists and by-ID reads span every tenant, except for the operational records below, which a root caller subject to the tenant-crossing boundary reads for a client tenant only under a crossing. For a root caller subject to the tenant-crossing boundary (ADR-025), an action on a record owned by a tenant below root — whether the route names that tenant, names the record by ID (an account, a certificate or cert binding, a token, a registration or credential request, a rollout, a run, a rollback, an API key, a role), or selects stewards with a fleet selector (a batch job, an upgrade, an osquery query, a signed operator payload) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
+A tenant-scoped caller reaches its own tenant's records. A root caller not subject to the boundary (for example an unbound bootstrap certificate) lists and reads every tenant. For a root caller subject to the tenant-crossing boundary (ADR-025), an action on a record owned by a tenant below root — whether the route names that tenant, names the record by ID (an account, a certificate or cert binding, a token, a registration or credential request, a rollout, a run, a rollback, an API key, a role), or selects stewards with a fleet selector (a batch job, an upgrade, an osquery query, a signed operator payload) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
 
 ```json
 {
@@ -194,10 +194,12 @@ All steward management endpoints require an API key. The `cfg steward list/statu
 
 List registered stewards. The returned set depends on the session's tenant scope:
 
-- **Root-scoped session** (web account with `root_scope: true`, or mTLS admin bundle with empty tenant): returns stewards from all tenants.
+- **Root-scoped session** (web account with `root_scope: true`, or mTLS admin bundle with empty tenant): a session subject to the tenant-crossing boundary (ADR-025) returns the root tenant's own stewards plus the stewards of every tenant covered by an active grant or break-glass crossing; stewards of other tenants are silently omitted, and `total` under pagination counts only the returned set. This applies to the `?q=` selector and filter parameters too. A root session not subject to the boundary (an unbound bootstrap certificate) returns stewards from all tenants.
 - **Tenant-scoped session** (web account with a `tenant_id`): returns only stewards in the session tenant's subtree — path-prefix inclusive, not exact-match. For example, a session scoped to `root/msp-a` sees stewards under `root/msp-a`, `root/msp-a/client-1`, etc.
 
 Use the `?q=` selector parameter to narrow further (e.g. `?q=root/msp-a/all` or `?q=hostname:web-01`). The selector grammar is defined in `pkg/fleet/selector`.
+
+**Steward reads by ID need a crossing.** For a root session subject to the boundary, every `GET` under `/api/v1/stewards/{id}` — the steward, `/dna`, `/logs`, `/modules`, `/config`, `/config/effective`, `/connection`, `/scripts/executions`, `/scripts/executions/{execution_id}`, `/scripts/metrics`, `/scripts/status`, `/tags`, `/compliance`, `/compliance/report`, `/reboot-window` and `/pending-deliveries` — on a steward owned by a tenant below root returns the `401` tenant-crossing challenge (see [Tenant Scope](#tenant-scope)) instead of data, whether the steward is attached to this node or served from the durable record. With an active crossing on the owning MSP or on that client, the request succeeds as for any other caller. A steward unknown to the controller is `404` for every caller, and a tenant-scoped caller still receives `404` for a steward outside its subtree. The same rule applies to `GET /api/v1/compliance/summary`, `GET /api/v1/stewards/refresh/pending`, `POST /api/v1/fleet/resolve` and the live telemetry stream `GET /api/v1/telemetry/ws/{id}`: client-tenant rows are omitted from the lists, and the stream is refused with the challenge, until a crossing is active.
 
 By default, **operator-hidden** and **quarantined** stewards are excluded from the response. Use the visibility query parameters to re-include them.
 
@@ -416,7 +418,7 @@ Returns `connected: false` (HTTP 200) for a known steward that is not currently 
 
 #### GET /api/v1/stewards/connections/all
 
-List all currently-connected stewards from the live connection registry, filtered to the authenticated caller's tenant. Returns transport-level connection detail for each connected steward.
+List all currently-connected stewards from the live connection registry, filtered to the authenticated caller's tenant. A root session subject to the tenant-crossing boundary sees only connections of root-tenant stewards and of tenants covered by an active crossing. Returns transport-level connection detail for each connected steward.
 
 **Authentication:** Required  
 **Required permission:** `steward:read`
@@ -460,6 +462,20 @@ Return tenant-scoped counts of stewards by health classification.
 | `hidden` | `hidden == true` (excluded from healthy/degraded/unreachable buckets) |
 
 Lifecycle terminal states (registered, deregistered, archived, dormant, revoked) are not counted in any bucket. Scoping includes the caller's full tenant subtree (caller plus all descendants).
+
+For a root session subject to the tenant-crossing boundary, the four counters above cover only stewards the caller may read (root-tenant stewards and tenants covered by an active crossing). Client-tenant stewards without a crossing are summarised separately in an optional `walled_off` object, present only when such stewards exist and limited to the anonymized platform metrics of ADR-025 Amendment 6 (A6.1) — no host names or device identifiers:
+
+```json
+{
+  "healthy": 1, "degraded": 0, "unreachable": 0, "hidden": 0,
+  "walled_off": {
+    "online": 1,
+    "offline": 1,
+    "platform": { "windows": 1, "linux": 0, "darwin": 1, "other": 0 },
+    "versions": { "v2.0": 2 }
+  }
+}
+```
 
 The `hidden` field is **non-suppressible** — it is always present in the response regardless of query parameters. A non-zero value signals that concealment is in effect, so operators are never blind to hidden stewards even when the default list view excludes them.
 

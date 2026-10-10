@@ -179,13 +179,10 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	// Cross-tenant guard: a caller scoped to tenant A must not see tenant B's
 	// steward compliance data. 404 (not 403) avoids disclosing steward existence
 	// across tenants — matching tenantScopedTerminalWrapper behavior.
-	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		stewardTenant := stewardInfo.TenantID
-		if !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
-			http.Error(w, "steward not found", http.StatusNotFound)
-			return
-		}
+	if !s.authorizeRecordRead(w, r, stewardInfo.TenantID, "GET /api/v1/stewards/{id}/compliance", func() {
+		http.Error(w, "steward not found", http.StatusNotFound)
+	}) {
+		return
 	}
 
 	now := time.Now().UTC()
@@ -271,13 +268,10 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 
 	// Cross-tenant guard: mirroring tenantScopedTerminalWrapper — 404 to avoid
 	// disclosing steward existence across tenants.
-	callerTenantR := callerTenantFilter(r.Context())
-	if callerTenantR != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		stewardTenant := stewardInfo.TenantID
-		if !s.tenantSubtreeContains(r.Context(), callerTenantR, stewardTenant) {
-			http.Error(w, "steward not found", http.StatusNotFound)
-			return
-		}
+	if !s.authorizeRecordRead(w, r, stewardInfo.TenantID, "GET /api/v1/stewards/{id}/compliance/report", func() {
+		http.Error(w, "steward not found", http.StatusNotFound)
+	}) {
+		return
 	}
 
 	now := time.Now().UTC()
@@ -360,22 +354,20 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 	}
 
 	// TenantID is always taken from the authenticated context for scoped callers;
-	// unscoped admins (callerTenant == "") may use the tenant_id query param to filter.
-	callerTenant := callerTenantFilter(r.Context())
+	// unscoped callers may use the tenant_id query param to filter.
 	tenantFilter := r.URL.Query().Get("tenant_id")
 
 	// Collect steward IDs while applying tenant scoping from the steward registry.
 	stewardsByTenant := make(map[string][]string) // tenantID → steward IDs
-	var callerSubtree tenantSubtreeSet            // resolved once, not per steward
-	if callerTenant != "" {                       //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
-		callerSubtree = s.tenantSubtreeIDs(r.Context(), callerTenant)
-	}
+	// A root caller subject to the ADR-025 boundary counts only root-tenant and
+	// crossing-covered stewards (Issue #4715); a tenant-scoped caller keeps its subtree.
+	readScope := s.tenantReadScope(r, "GET /api/v1/compliance/summary")
+	tenantScoped := callerTenantScope(r).IsTenant() // tenant_id applies to unscoped callers only
 	for _, st := range s.controllerService.ListFleetStewards(r.Context()) {
-		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
-			if !callerSubtree.Contains(st.TenantID) {
-				continue
-			}
-		} else if tenantFilter != "" && st.TenantID != tenantFilter {
+		if !readScope.Allows(st.TenantID) {
+			continue
+		}
+		if tenantFilter != "" && !tenantScoped && st.TenantID != tenantFilter {
 			continue
 		}
 		stewardsByTenant[st.TenantID] = append(stewardsByTenant[st.TenantID], st.ID)

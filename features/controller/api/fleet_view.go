@@ -102,13 +102,14 @@ func (s *Server) durableStewardRecord(ctx context.Context, stewardID string) *bu
 // node genuinely has no session with it. What it must NOT do is 404, which is
 // what made a steward attached to a peer look non-existent (Issue #3480).
 func (s *Server) writeStewardFromDurableRecord(w http.ResponseWriter, r *http.Request, rec *business.StewardRecord) {
-	callerTenant := callerTenantFilter(r.Context())
-	if !s.isWithinTenantScope(r.Context(), callerTenant, rec.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		// 404 rather than 403: never disclose existence across tenants.
+	// 404 rather than 403 for a tenant-scoped caller: never disclose existence across
+	// tenants. A boundary-subject root caller gets the crossing challenge instead
+	// (Issue #4715).
+	if !s.authorizeRecordRead(w, r, rec.TenantID, "GET /api/v1/stewards/{id}", func() {
 		s.logger.Info("Cross-tenant steward get refused (durable record)",
-			"steward_tenant", logging.SanitizeLogValue(rec.TenantID),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			"steward_tenant", logging.SanitizeLogValue(rec.TenantID))
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	}) {
 		return
 	}
 
