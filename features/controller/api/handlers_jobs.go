@@ -315,6 +315,14 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // dropped after the store paged them.
 func (s *Server) listReadableBatchJobs(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*batchjob.BatchJob, error) {
 	const pageSize = 500
+	// Bound the limit here as well as in the caller so the allocation never
+	// scales with a request-supplied value.
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > pageSize {
+		limit = pageSize
+	}
 	out := make([]*batchjob.BatchJob, 0, limit)
 	skip := offset
 	for storeOffset := 0; ; storeOffset += pageSize {

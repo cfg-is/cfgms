@@ -269,3 +269,26 @@ func TestRootOpsReads_PendingDeliveriesCrossingBoundary(t *testing.T) {
 	assert.Equal(t, http.StatusOK, do(rootOperatorCaller(op)).Code)
 	assert.Equal(t, http.StatusOK, do(certAdminCaller()).Code)
 }
+
+// TestRootOpsReads_HelperLimitBounded: the list helpers bound limit themselves, so
+// an oversized or non-positive limit neither over-allocates nor changes results.
+func TestRootOpsReads_HelperLimitBounded(t *testing.T) {
+	f := setupOpsReadFixture(t)
+	ctx := context.Background()
+	op := boundRootOperator("ops-limit")
+	req := rootOperatorCaller(op)(httptest.NewRequest(http.MethodGet, "/x", nil), nil)
+	readScope := f.server.tenantReadScope(req, "GET /api/v1/jobs")
+
+	jobs, err := f.server.listReadableBatchJobs(ctx, readScope, int(^uint(0)>>1), 0)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1)
+	assert.Equal(t, "job-root", jobs[0].ID)
+
+	runs, err := f.server.listReadableRuns(ctx, readScope, int(^uint(0)>>1), 0)
+	require.NoError(t, err)
+	assert.Len(t, runs, 2)
+
+	jobs, err = f.server.listReadableBatchJobs(ctx, readScope, -5, 0)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1)
+}
