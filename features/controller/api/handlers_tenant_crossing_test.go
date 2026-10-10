@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,7 +554,7 @@ func TestHandleTenantBreakGlass_RootTenantRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	caller := rootScopedPrincipal("root-operator-1")
-	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/root/break-glass", "root", caller, []byte("{}"))
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/root/break-glass", "root", caller, []byte(`{"reason_category":"account_recovery"}`))
 	req.Header.Set("X-Justification", "Customer P1 outage, ticket INC-4821, need config diff now")
 	rec := httptest.NewRecorder()
 	server.handleTenantBreakGlass(rec, req)
@@ -576,7 +577,7 @@ func TestHandleTenantBreakGlass_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	caller := rootScopedPrincipal("root-operator-1")
-	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, []byte("{}"))
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, []byte(`{"reason_category":"account_recovery"}`))
 	req.Header.Set("X-Justification", "Customer P1 outage, ticket INC-4821, need config diff now")
 	rec := httptest.NewRecorder()
 	server.handleTenantBreakGlass(rec, req)
@@ -600,7 +601,7 @@ func TestHandleTenantBreakGlass_RequiresRootScoped(t *testing.T) {
 	require.NoError(t, err)
 
 	notRootScoped := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
-	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", notRootScoped, []byte("{}"))
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", notRootScoped, []byte(`{"reason_category":"account_recovery"}`))
 	req.Header.Set("X-Justification", "Customer P1 outage, ticket INC-4821, need config diff now")
 	rec := httptest.NewRecorder()
 	server.handleTenantBreakGlass(rec, req)
@@ -697,7 +698,7 @@ func TestHandleTenantBreakGlass_AccountBoundRootScope_Allowed(t *testing.T) {
 	require.True(t, subjectToTenantCrossingBoundary(caller), "precondition: the boundary treats this caller as root-scoped")
 	require.Equal(t, tenantAuthNeedsCrossing, server.authorizeTenantAccess(ctx, caller, "msp-a"))
 
-	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, []byte("{}"))
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, []byte(`{"reason_category":"account_recovery"}`))
 	req.Header.Set("X-Justification", "Customer P1 outage, ticket INC-4821, need config diff now")
 	rec := httptest.NewRecorder()
 	server.handleTenantBreakGlass(rec, req)
@@ -885,4 +886,174 @@ func TestHandleEndTenantCrossing_BoundaryRejectsAfterEnd(t *testing.T) {
 	getRec = httptest.NewRecorder()
 	server.handleGetTenant(getRec, requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil))
 	assert.Equal(t, http.StatusUnauthorized, getRec.Code, "the boundary must challenge once the crossing is ended")
+}
+
+func breakGlassBody(t *testing.T, category, justification string) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{"reason_category": category, "justification": justification})
+	require.NoError(t, err)
+	return b
+}
+
+func invokeBreakGlass(t *testing.T, server *Server, body []byte, header string) *httptest.ResponseRecorder {
+	t.Helper()
+	caller := rootScopedPrincipal("root-operator-1")
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, body)
+	if header != "" {
+		req.Header.Set("X-Justification", header)
+	}
+	rec := httptest.NewRecorder()
+	server.handleTenantBreakGlass(rec, req)
+	return rec
+}
+
+func breakGlassServer(t *testing.T) *Server {
+	t.Helper()
+	server := seedRootTenant(t, setupCrossingTestServer(t))
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	return server
+}
+
+func crossingErrorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.Error.Code
+}
+
+func TestHandleTenantBreakGlass_ReasonCategory(t *testing.T) {
+	const just = "Customer P1 outage, ticket INC-4821, need config diff now"
+	for _, cat := range []business.TenantCrossingReasonCategory{
+		business.TenantCrossingReasonAccountRecovery,
+		business.TenantCrossingReasonSecurityIncident,
+		business.TenantCrossingReasonLegalRequest,
+		business.TenantCrossingReasonBillingDispute,
+	} {
+		t.Run(string(cat), func(t *testing.T) {
+			server := breakGlassServer(t)
+			rec := invokeBreakGlass(t, server, breakGlassBody(t, string(cat), just), "")
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+			var got struct {
+				Data map[string]interface{} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			assert.Equal(t, string(cat), got.Data["reason_category"])
+
+			list, err := server.tenantCrossingStore.ListTenantCrossings(context.Background(), "msp-a")
+			require.NoError(t, err)
+			require.Len(t, list, 1)
+			assert.Equal(t, cat, list[0].ReasonCategory)
+			assert.Equal(t, just, list[0].Justification)
+		})
+	}
+}
+
+func TestHandleTenantBreakGlass_ReasonCategoryRejected(t *testing.T) {
+	const just = "Customer P1 outage, ticket INC-4821, need config diff now"
+	cases := []struct {
+		name, body, header, code string
+	}{
+		{"missing", `{"justification":"` + just + `"}`, "", "REASON_CATEGORY_REQUIRED"},
+		{"empty body with header", ``, just, "REASON_CATEGORY_REQUIRED"},
+		{"unknown", `{"reason_category":"because","justification":"` + just + `"}`, "", "INVALID_REASON_CATEGORY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := breakGlassServer(t)
+			rec := invokeBreakGlass(t, server, []byte(tc.body), tc.header)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Equal(t, tc.code, crossingErrorCode(t, rec))
+			list, err := server.tenantCrossingStore.ListTenantCrossings(context.Background(), "msp-a")
+			require.NoError(t, err)
+			assert.Empty(t, list)
+		})
+	}
+}
+
+func TestHandleTenantBreakGlass_JustificationBounds(t *testing.T) {
+	long := strings.Repeat("x", 1001)
+	ok1000 := strings.Repeat("x", 1000)
+	for name, tc := range map[string]struct {
+		body   func() ([]byte, string)
+		status int
+	}{
+		"body too short":   {func() ([]byte, string) { return breakGlassBody(t, "legal_request", "too short"), "" }, 400},
+		"body too long":    {func() ([]byte, string) { return breakGlassBody(t, "legal_request", long), "" }, 400},
+		"body max":         {func() ([]byte, string) { return breakGlassBody(t, "legal_request", ok1000), "" }, 201},
+		"header too short": {func() ([]byte, string) { return breakGlassBody(t, "legal_request", ""), "short" }, 400},
+		"header too long":  {func() ([]byte, string) { return breakGlassBody(t, "legal_request", ""), long }, 400},
+		"header fallback":  {func() ([]byte, string) { return breakGlassBody(t, "legal_request", ""), "  legal hold request 42  " }, 201},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := breakGlassServer(t)
+			body, header := tc.body()
+			rec := invokeBreakGlass(t, server, body, header)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.status == 400 {
+				assert.Equal(t, "JUSTIFICATION_REQUIRED", crossingErrorCode(t, rec))
+			}
+		})
+	}
+}
+
+func TestHandleTenantBreakGlass_AuditDetailCarriesCategory(t *testing.T) {
+	server := breakGlassServer(t)
+	rec := invokeBreakGlass(t, server, breakGlassBody(t, "billing_dispute", "Customer P1 outage, ticket INC-4821"), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.NotNil(t, server.auditManager)
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "msp-a"})
+	require.NoError(t, err)
+	entry := findAuditEntryByAction(t, entries, "tenant.crossing_break_glass_invoked")
+	assert.Equal(t, "billing_dispute", entry.Details["reason_category"])
+}
+
+func TestHandleListTenantCrossings_ReasonCategoryOnlyOnBreakGlass(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID: "grant-1", TenantID: "msp-a", Kind: business.TenantCrossingKindGrant, GrantedBy: "a",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID: "bg-1", TenantID: "msp-a", PrincipalID: "r", Kind: business.TenantCrossingKindBreakGlass, GrantedBy: "r",
+		Justification: "outage response", ReasonCategory: business.TenantCrossingReasonSecurityIncident,
+		CreatedAt: now, ExpiresAt: now.Add(30 * time.Minute),
+	}))
+	mspAdmin := &Principal{ID: "a", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, nil)
+	rec := httptest.NewRecorder()
+	server.handleListTenantCrossings(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 2)
+	for _, row := range resp.Data {
+		if row["ID"] == "bg-1" {
+			assert.Equal(t, "security_incident", row["reason_category"])
+		} else {
+			assert.NotContains(t, row, "reason_category")
+		}
+	}
+}
+
+func TestWriteTenantCrossingChallenge_ReasonCategories(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeTenantCrossingChallenge(rec, "msp-a")
+	var body struct {
+		ReasonCategories []string `json:"reason_categories"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []string{"account_recovery", "security_incident", "legal_request", "billing_dispute"}, body.ReasonCategories)
 }

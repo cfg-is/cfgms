@@ -311,13 +311,20 @@ func writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(struct {
-		Error              string `json:"error"`
-		RequiredAssurance  string `json:"required_assurance"`
-		BreakGlassEndpoint string `json:"break_glass_endpoint"`
+		Error              string   `json:"error"`
+		RequiredAssurance  string   `json:"required_assurance"`
+		BreakGlassEndpoint string   `json:"break_glass_endpoint"`
+		ReasonCategories   []string `json:"reason_categories"`
 	}{
 		Error:              "tenant_crossing_required",
 		RequiredAssurance:  "tenant-crossing",
 		BreakGlassEndpoint: "/api/v1/tenants/" + resourceTenant + "/break-glass",
+		ReasonCategories: []string{
+			string(business.TenantCrossingReasonAccountRecovery),
+			string(business.TenantCrossingReasonSecurityIncident),
+			string(business.TenantCrossingReasonLegalRequest),
+			string(business.TenantCrossingReasonBillingDispute),
+		},
 	})
 }
 

@@ -119,7 +119,7 @@ type TenantCrossing struct {
 	ExpiresAt     time.Time
 	RevokedAt     *time.Time // nil while active
 
-	ReasonCategory TenantCrossingReasonCategory // break-glass reason; empty for grants
+	ReasonCategory TenantCrossingReasonCategory `json:"reason_category,omitempty"` // break-glass reason; empty for grants
 	ApprovalState  TenantCrossingApprovalState  // approved or pending; unset on create is stored as approved
 	ApprovedBy     string                       // approver principal ID; empty until approved via ApproveTenantCrossing
 	ApprovedAt     *time.Time                   // nil until approved via ApproveTenantCrossing
