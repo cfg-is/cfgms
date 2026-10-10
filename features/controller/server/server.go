@@ -167,8 +167,9 @@ type Server struct {
 	rbacService             *service.RBACService
 	certProvisioningService *service.CertificateProvisioningService
 	certManager             *cert.Manager
-	signingRetirementSvc    *service.SigningRetirementService // Issue #4795: retires superseded signing certs at overlap end
-	signingMigrationSvc     *service.SigningMigrationService  // Issue #4796: moves node-local signing keys to the shared identity
+	signingRetirementSvc    *service.SigningRetirementService       // Issue #4795: retires superseded signing certs at overlap end
+	signingMigrationSvc     *service.SigningMigrationService        // Issue #4796: moves node-local signing keys to the shared identity
+	stewardMigrationSvc     *service.StewardSigningMigrationService // Issue #4797: moves connected stewards to the shared signing certificate
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
@@ -1089,6 +1090,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// and the HTTP API rotate endpoint (Issue #1816).
 	var signingRotationSvc *service.SigningRotationService
 	var signingRetirementSvc *service.SigningRetirementService
+	var stewardMigrationSvc *service.StewardSigningMigrationService
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -1144,7 +1146,23 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			if haManager != nil {
 				signingRotationSvc.SetNodeID(haManager.GetLocalNode().ID)
 			}
-			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook, completionReconciler, routingHook, drainHook)
+			// Issue #4797: moves this node's connected stewards onto the shared
+			// signing certificate. Its OnConnect only queues the steward for a
+			// bounded worker pool, so admission is never delayed. The confirmation
+			// is recorded in the cluster-visible acknowledgement store; without a
+			// provider for it the node-local file store keeps this node correct
+			// (and a single-node controller has nothing else to coordinate with).
+			trustAcks := storageManager.GetSigningTrustAckStore()
+			if trustAcks == nil {
+				fileAcks, ackErr := cert.NewFileSigningTrustAckStore(filepath.Dir(filepath.Clean(cfg.Certificate.CAPath)))
+				if ackErr != nil {
+					return nil, fmt.Errorf("failed to open signing trust acknowledgement store: %w", ackErr)
+				}
+				trustAcks = fileAcks
+			}
+			stewardMigrationSvc = service.NewStewardSigningMigrationService(certManager, trustAcks, logger)
+			stewardMigrationSvc.SetConnectedStewards(connRegistry)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -1504,6 +1522,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if signingRotationSvc != nil {
 			signingRotationSvc.SetPublisher(commandPublisher)
 			logger.Info("Signing rotation service wired (refresh-on-connect enabled)")
+		}
+		if stewardMigrationSvc != nil {
+			stewardMigrationSvc.SetPublisher(commandPublisher)
 		}
 		// Issue #3757/#3764: wire the publisher into the pending-delivery drain
 		// hook now that it exists (same init-cycle break as above).
@@ -1927,6 +1948,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if signingRotationSvc != nil {
 		signingRotationSvc.SetControllerService(controllerService)
 		httpServer.SetSigningRotationService(signingRotationSvc)
+		if stewardMigrationSvc != nil {
+			stewardMigrationSvc.SetControllerService(controllerService)
+			httpServer.SetStewardSigningMigrationService(stewardMigrationSvc)
+		}
 		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
 
 		// Issue #4795: the retirement sweep and the emergency revoke share one
@@ -1999,6 +2024,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certManager:             certManager,
 		signingRetirementSvc:    signingRetirementSvc,
 		signingMigrationSvc:     signingMigrationSvc,
+		stewardMigrationSvc:     stewardMigrationSvc,
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
@@ -2986,6 +3012,12 @@ func (s *Server) Start() error {
 		s.signingMigrationSvc.Start(context.Background())
 	}
 
+	// Issue #4797: migrate the stewards connected to this node onto the shared
+	// signing certificate, and keep re-checking them.
+	if s.stewardMigrationSvc != nil {
+		s.stewardMigrationSvc.Start(context.Background())
+	}
+
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
@@ -3274,6 +3306,9 @@ func (s *Server) Stop() error {
 	}
 	if s.signingMigrationSvc != nil {
 		s.signingMigrationSvc.Stop()
+	}
+	if s.stewardMigrationSvc != nil {
+		s.stewardMigrationSvc.Stop()
 	}
 
 	// Release the cert manager's retained vault connection (cluster mode): the
