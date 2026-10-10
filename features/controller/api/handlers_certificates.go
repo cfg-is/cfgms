@@ -514,13 +514,39 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	s.attachCertTenants(r.Context(), certificates)
+	// A failed owner lookup is fatal only for the boundary-subject read decision
+	// below; for every other caller TenantID is display enrichment and the
+	// tenant-scope filter performs its own fail-closed lookups.
+	tenantLookupErr := s.attachCertTenants(r.Context(), certificates)
 
 	// Apply tenant-scope filter: scoped callers only see certs for stewards
 	// within their own tenant subtree. Only an unscoped admin (callerTenant == "")
 	// skips filtering; every scoped caller requires an evaluable steward store.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	readScope := s.tenantReadScope(r, "GET /api/v1/certificates")
+	if readScope.boundarySubject() {
+		// A boundary-subject root caller sees root's own and crossing-covered
+		// tenants' certificates; ownership comes from the steward record, so the
+		// filter cannot be evaluated without the steward store.
+		if s.stewardStore == nil {
+			s.logger.Error("certificate list failed: steward store not configured for boundary-subject caller")
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+		if tenantLookupErr != nil {
+			// A certificate whose owner could not be resolved would carry an empty
+			// TenantID and pass the crossing check as unattributable. Fail the
+			// request rather than disclose client-tenant certificates during a
+			// store fault.
+			s.logger.Error("certificate list failed: owner lookup failed for boundary-subject caller",
+				"error", logging.SanitizeLogValue(tenantLookupErr.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
+			return
+		}
+		certificates = filterCertsByReadScope(certificates, readScope)
+		readScope.LogSummary()
+	}
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped subtree filter; a boundary-subject root caller is decided by readScope above
 		if s.stewardStore == nil {
 			// Without the steward store, subtree membership cannot be evaluated at
 			// all. Returning the unfiltered list would disclose every tenant's
@@ -548,13 +574,16 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 }
 
 // attachCertTenants sets TenantID on each certificate from its owning steward's
-// record. Rows with no steward, no durable record, or a failed lookup keep an
-// empty tenant (omitted from the response); the scope filter, not this
-// enrichment, decides visibility.
-func (s *Server) attachCertTenants(ctx context.Context, certs []CertificateInfo) {
+// record. Rows with no steward or no durable record (ErrStewardNotFound) are
+// genuinely unattributable and keep an empty tenant. Any other lookup failure
+// also leaves the tenant empty, and the first such failure is returned so a
+// caller whose visibility decision depends on TenantID can fail closed instead
+// of treating the row as unattributable.
+func (s *Server) attachCertTenants(ctx context.Context, certs []CertificateInfo) error {
 	if s.stewardStore == nil {
-		return
+		return nil
 	}
+	var lookupErr error
 	tenants := make(map[string]string)
 	for i := range certs {
 		id := certs[i].StewardID
@@ -568,11 +597,32 @@ func (s *Server) attachCertTenants(ctx context.Context, certs []CertificateInfo)
 			} else if !errors.Is(err, business.ErrStewardNotFound) {
 				s.logger.Warn("Tenant lookup for certificate failed",
 					"error", logging.SanitizeLogValue(err.Error()))
+				if lookupErr == nil {
+					lookupErr = fmt.Errorf("steward lookup for certificate owner failed: %w", err)
+				}
 			}
 			tenants[id] = tenant
 		}
 		certs[i].TenantID = tenant
 	}
+	return lookupErr
+}
+
+// filterCertsByReadScope drops the certificates whose owning tenant a
+// boundary-subject root caller has no crossing for. A certificate with no
+// attributable tenant (controller-internal, or a steward with no durable record)
+// stays visible, as it does for every other caller. The caller must have
+// rejected the request if attachCertTenants reported a lookup failure, so an
+// empty TenantID here only ever means genuinely unattributable.
+func filterCertsByReadScope(certs []CertificateInfo, readScope *tenantReadScope) []CertificateInfo {
+	filtered := make([]CertificateInfo, 0, len(certs))
+	for _, c := range certs {
+		if readScope.Skips(c.TenantID) {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	return filtered
 }
 
 // filterCertsByTenantScope keeps only the certificates a caller scoped to
@@ -684,7 +734,34 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 	// Unscoped admins (callerTenant == "") see everything.
 	// Controller-internal certs (ClientID == "") have no tenant owner and are always visible.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" && certData.ClientID != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if certData.ClientID != "" && s.tenantReadScope(r, "GET /api/v1/certificates/{serial}").boundarySubject() {
+		// A boundary-subject root caller reaches a client tenant's certificate only
+		// through a crossing; the owning tenant is the steward record's tenant.
+		if s.stewardStore == nil {
+			s.logger.Error("certificate get failed: steward store not configured for boundary-subject caller")
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+		owner, ownerErr := s.stewardStore.GetSteward(r.Context(), certData.ClientID)
+		switch {
+		case ownerErr == nil:
+			if !s.authorizeCrossingRead(w, r, owner.TenantID, "GET /api/v1/certificates/{serial}", func() {
+				s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			}) {
+				return
+			}
+		case errors.Is(ownerErr, business.ErrStewardNotFound):
+			// No durable record: unattributable, visible fleet-wide like the list.
+		default:
+			s.logger.Error("Failed to resolve certificate owner for tenant scope",
+				"serial", logging.SanitizeLogValue(serial),
+				"client_id", logging.SanitizeLogValue(certData.ClientID),
+				"error", logging.SanitizeLogValue(ownerErr.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificate", "INTERNAL_ERROR")
+			return
+		}
+	}
+	if callerTenant != "" && certData.ClientID != "" { //architecture:allow-root-scope -- tenant-scoped subtree check; a boundary-subject root caller is decided by the crossing gate above
 		if s.stewardStore == nil {
 			s.logger.Error("certificate get failed: steward store not configured",
 				"caller_tenant", logging.SanitizeLogValue(callerTenant))
@@ -704,7 +781,7 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 			}
 			// ErrStewardNotFound: no durable record — unattributable, visible fleet-wide
 			// (same rule as filterCertsByTenantScope for the list endpoint).
-		} else if !s.isWithinTenantScope(r.Context(), callerTenant, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+		} else if !s.isWithinTenantScope(r.Context(), callerTenant, record.TenantID) { //architecture:allow-root-scope -- tenant-scoped subtree check; a boundary-subject root caller is decided by the crossing gate above
 			// Out-of-scope: return 404 to avoid leaking cross-tenant serial existence.
 			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
 			return

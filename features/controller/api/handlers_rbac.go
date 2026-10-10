@@ -72,7 +72,7 @@ func isControlRune(r rune) bool {
 // with subtree scope and the unscoped ("") admin mTLS path, so a role can never be
 // fetched by ID that the same caller cannot see in the list.
 func (s *Server) roleReadableByTenant(ctx context.Context, role *common.Role, callerTenant string) bool {
-	return role != nil && (role.IsSystemRole || callerTenant == "" || s.isWithinTenantScope(ctx, callerTenant, role.TenantId)) //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	return role != nil && (role.IsSystemRole || callerTenant == "" || s.isWithinTenantScope(ctx, callerTenant, role.TenantId)) //architecture:allow-root-scope -- unrestricted callers keep global scope; a boundary-subject root caller is decided by authorizeCrossingRead at the read site
 }
 
 // loadRoleForWrite loads roleID and confirms callerTenant may act on it, writing the
@@ -222,22 +222,42 @@ func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create gRPC request
-	req := &controller.ListRolesRequest{
-		TenantId: tenantID,
+	// A boundary-subject root caller sees system roles, root's own roles and those
+	// of tenants under a crossing, so each crossing tenant is listed as well.
+	readScope := s.tenantReadScope(r, "GET /api/v1/rbac/roles")
+	defer readScope.LogSummary()
+	listTenants := []string{tenantID}
+	for _, crossed := range readScope.CrossingTenants() {
+		if crossed != tenantID {
+			listTenants = append(listTenants, crossed)
+		}
 	}
 
-	// Call gRPC service
-	resp, err := s.rbacService.ListRoles(r.Context(), req)
-	if err != nil {
-		s.logger.Error("Failed to list roles", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list roles", "INTERNAL_ERROR")
-		return
+	var listed []*common.Role
+	seenRoles := make(map[string]struct{})
+	for _, listTenant := range listTenants {
+		// Call gRPC service
+		resp, err := s.rbacService.ListRoles(r.Context(), &controller.ListRolesRequest{TenantId: listTenant})
+		if err != nil {
+			s.logger.Error("Failed to list roles", "error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list roles", "INTERNAL_ERROR")
+			return
+		}
+		for _, role := range resp.Roles {
+			if _, dup := seenRoles[role.Id]; dup {
+				continue
+			}
+			seenRoles[role.Id] = struct{}{}
+			listed = append(listed, role)
+		}
 	}
 
 	// Convert to API response
 	var roles []RoleInfo
-	for _, role := range resp.Roles {
+	for _, role := range listed {
+		if !role.IsSystemRole && readScope.Skips(role.TenantId) {
+			continue
+		}
 		roles = append(roles, RoleInfo{
 			ID:          role.Id,
 			Name:        role.Name,
@@ -367,6 +387,15 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	// Tenant scoping: a role outside the caller's subtree must not be readable by ID
 	// unless it is a system role (visible to every tenant, matching ListRoles).
 	// Reported as 404 so the response does not confirm that the role exists.
+	// A boundary-subject root caller needs a crossing for a client tenant's role;
+	// system roles belong to no tenant and stay readable.
+	if resp.Role != nil && !resp.Role.IsSystemRole {
+		if !s.authorizeCrossingRead(w, r, resp.Role.TenantId, "GET /api/v1/rbac/roles/{id}", func() {
+			s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		}) {
+			return
+		}
+	}
 	callerTenant := callerTenantFilter(r.Context())
 	if !s.roleReadableByTenant(r.Context(), resp.Role, callerTenant) {
 		s.logger.Warn("Blocked cross-tenant role read",

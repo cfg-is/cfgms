@@ -721,7 +721,8 @@ func (s *Server) handleLodgeCredentialRequest(w http.ResponseWriter, r *http.Req
 }
 
 // handleListCredentialRequests handles GET /api/v1/credential-requests. Lists pending
-// requests scoped to the caller's tenant subtree (unscoped mTLS admins see all).
+// requests scoped to the caller's tenant subtree (unscoped mTLS admins see all; a
+// root-scoped operator sees root's own and crossing-covered tenants' requests).
 func (s *Server) handleListCredentialRequests(w http.ResponseWriter, r *http.Request) {
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
@@ -743,10 +744,15 @@ func (s *Server) handleListCredentialRequests(w http.ResponseWriter, r *http.Req
 
 	// Resolve the caller's subtree once rather than per request.
 	subtree := s.tenantSubtreeIDs(r.Context(), callerTenant)
+	readScope := s.tenantReadScope(r, "GET /api/v1/credential-requests")
+	defer readScope.LogSummary()
 
 	result := make([]PendingCredentialRequestInfo, 0, len(metas))
 	for _, m := range metas {
-		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		if readScope.Skips(m.TenantID) {
+			continue
+		}
+		if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped subtree filter; a boundary-subject root caller is decided by readScope above
 			if !subtree.Contains(m.TenantID) {
 				continue
 			}

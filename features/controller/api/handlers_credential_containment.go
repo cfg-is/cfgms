@@ -474,10 +474,15 @@ func (s *Server) handleListOrphanedCredentials(w http.ResponseWriter, r *http.Re
 	}
 
 	callerTenant := s.callerTenantID(r)
+	readScope := s.tenantReadScope(r, "GET /api/v1/credential-requests/orphaned")
+	defer readScope.LogSummary()
 	result := make([]OrphanedCredentialInfo, 0)
 	for _, m := range metas {
 		req := pendingCredentialRequestFromMetadata(m)
-		if !s.isWithinTenantScope(r.Context(), callerTenant, req.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		if readScope.Skips(req.TenantID) {
+			continue
+		}
+		if !s.isWithinTenantScope(r.Context(), callerTenant, req.TenantID) { //architecture:allow-root-scope -- tenant-scoped subtree filter; a boundary-subject root caller is decided by readScope above
 			continue
 		}
 		if req.CollectedSerial == "" || req.BoundAccountID == "" {
