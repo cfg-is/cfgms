@@ -416,6 +416,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: $/.github/workflows/ci-image-mirror.yml
+    # zizmor suggests '$/' here, but GitHub documents it for step-level uses
+    # only, not for job-level reusable-workflow calls (jobs.<id>.uses); './' is
+    # the documented form, so suppress this one finding rather than the audit.
+    uses: ./.github/workflows/ci-image-mirror.yml # zizmor: ignore[self-repository]
     with:
       upstream_ref: ${{ matrix.upstream_ref }}
