@@ -2301,7 +2301,7 @@ with `400 Bad Request`.
 
 On failure `delivered` is `false` and `failure_reason` carries a sanitized reason that never contains the password.
 
-- `400 Bad Request`: invalid address.
+- `400 Bad Request`: the body names any field (for example `to`, `subject` or `body`), or is not valid JSON.
 - `409 Conflict` (`EMAIL_NOT_CONFIGURED`): email is not configured or no credential has been stored.
 
 ### Webhooks
