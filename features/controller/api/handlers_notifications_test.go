@@ -271,6 +271,28 @@ func TestEmail_TestSend_InvalidRecipientRejected(t *testing.T) {
 	}
 }
 
+func TestEmail_TestSend_RequestSuppliedContentRejected(t *testing.T) {
+	smtp := newEmailTestSMTPServer(t)
+	server := newEmailTestServer(t, smtp)
+	rec := emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPut, "/x", `{"password":"`+testSMTPPassword+`"}`, server.handlePutEmailCredential)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	for _, body := range []string{
+		`{"to":"ops@acme-corp.example","subject":"attacker subject"}`,
+		`{"to":"ops@acme-corp.example","body":"attacker body"}`,
+	} {
+		rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", body, server.handleTestEmail)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, body)
+	}
+	assert.Empty(t, smtp.Messages(), "nothing is sent when content fields are supplied")
+
+	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", `{"to":"ops@acme-corp.example"}`, server.handleTestEmail)
+	require.Equal(t, http.StatusOK, rec.Code)
+	msgs := smtp.Messages()
+	require.Len(t, msgs, 1)
+	assert.Contains(t, msgs[0], emailTestSubject)
+}
+
 func TestEmail_CredentialBodyBoundedAndRequired(t *testing.T) {
 	smtp := newEmailTestSMTPServer(t)
 	server := newEmailTestServer(t, smtp)

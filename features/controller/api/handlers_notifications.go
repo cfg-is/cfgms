@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -227,6 +228,10 @@ func (s *Server) handlePutEmailCredential(w http.ResponseWriter, r *http.Request
 	s.writeSuccessResponse(w, map[string]interface{}{"credential_present": true, "configured": true})
 }
 
+// emailRecipientPattern restricts the test-send recipient to a plain
+// addr-spec with no quoting, comments or control characters.
+var emailRecipientPattern = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}$`)
+
 type emailTestRequest struct {
 	To string `json:"to"`
 }
@@ -251,13 +256,17 @@ func (s *Server) handleTestEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req emailTestRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEmailCredentialBody)).Decode(&req); err != nil {
+	// Unknown fields (e.g. subject, body) are rejected: the message content is
+	// fixed server-side and the caller chooses only the recipient.
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEmailCredentialBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
 	to := strings.TrimSpace(req.To)
 	addr, err := mail.ParseAddress(to)
-	if err != nil || addr.Address != to {
+	if err != nil || addr.Address != to || !emailRecipientPattern.MatchString(to) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "to must be a single valid email address", "INVALID_REQUEST")
 		return
 	}
