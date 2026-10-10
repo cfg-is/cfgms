@@ -1513,9 +1513,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// record. Responses reach only the node holding the steward's stream, so
 		// subscribe on the raw controlPlane (the provider deliveryServer wraps),
 		// never dispatchControlPlane. The command store is shared across nodes.
+		var rejectionRecorder *service.CommandRejectionRecorder
 		if respSub, ok := controlPlane.(controlplaneInterfaces.ResponseSubscriber); ok {
 			if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
-				rejectionRecorder := service.NewCommandRejectionRecorder(cmdStore, logger)
+				rejectionRecorder = service.NewCommandRejectionRecorder(cmdStore, logger)
 				if subErr := rejectionRecorder.Subscribe(context.Background(), respSub); subErr != nil {
 					logger.Warn("Failed to subscribe command rejection recorder",
 						"error", logging.SanitizeLogValue(subErr.Error()))
@@ -1552,6 +1553,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #3757/#3764: wire the publisher into the pending-delivery drain
 		// hook now that it exists (same init-cycle break as above).
 		drainHook.SetPublisher(commandPublisher)
+		// Issue #4866: let the rejection recorder re-send fence-rejected commands.
+		if rejectionRecorder != nil {
+			rejectionRecorder.SetRetrier(commandPublisher)
+		}
 
 		// Issue #2524: Wire DNA hash mismatch detection so that a heartbeat
 		// carrying an unexpected DNA hash automatically triggers a full sync.

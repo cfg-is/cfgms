@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/commands"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -32,6 +31,22 @@ type QuorumChecker interface {
 	Partition(stewards []StewardMeta, batchSize int) [][]string
 }
 
+// CommandPublisher is the slice of the controller command publisher the batch
+// executor needs. It is an interface so this package does not import
+// features/controller/commands, which would close an import cycle through
+// pkg/cache and the storage business interfaces.
+type CommandPublisher interface {
+	PublishCommandWithCallback(
+		ctx context.Context,
+		stewardID string,
+		cmdType controlplaneTypes.CommandType,
+		params map[string]interface{},
+		timeout time.Duration,
+		onComplete func(event *controlplaneTypes.Event),
+		onTimeout func(),
+	) (string, error)
+}
+
 // RollingBatchExecutor dispatches CommandSyncConfig to stewards in sequential batches,
 // advancing to the next batch only when all members of the current batch succeed.
 // On any batch failure the job transitions to rolled_back (when PreviousConfigRef is set,
@@ -39,7 +54,7 @@ type QuorumChecker interface {
 type RollingBatchExecutor struct {
 	store       BatchJobStore
 	fleetQuery  FleetQuery
-	publisher   *commands.Publisher
+	publisher   CommandPublisher
 	quorumCheck QuorumChecker
 	logger      logging.Logger
 }
@@ -49,7 +64,7 @@ type RollingBatchExecutor struct {
 func NewRollingBatchExecutor(
 	store BatchJobStore,
 	fleetQuery FleetQuery,
-	publisher *commands.Publisher,
+	publisher CommandPublisher,
 	quorumCheck QuorumChecker,
 	logger logging.Logger,
 ) *RollingBatchExecutor {
