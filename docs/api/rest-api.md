@@ -2212,6 +2212,18 @@ Every break-glass that becomes active is announced on three channels, for all fo
 
 **Expiry entries.** A crossing that reaches its expiry without being ended also gets a meta-log entry: `tenant.crossing_grant_expired` (high) for a grant and `tenant.crossing_break_glass_expired` (critical) for a break-glass, including a pending break-glass that expired unapproved. Each is written to both the tenant's audit scope and root's audit scope, with actor `system` (user type `system`). The details are the same as the other crossing entries plus `approval_state` (`approved` or `pending`). A background sweep records them within about a minute of expiry, once per crossing, on one controller node of a cluster. A crossing ended early gets no expired entry; its `..._ended` entry stands. Expiry sends no email. Crossings already expired when the controller is upgraded to this version get no entry.
 
+### Audit entries read by a root-scoped caller
+
+`GET /api/v1/audit/entries` returns the audit trail in the caller's scope. A tenant-scoped caller sees its own tenant and an unrestricted certificate administrator sees every tenant. A root-scoped operator session is subject to the tenant-crossing boundary (ADR-025 Decision 4):
+
+- **Without a crossing** it receives (1) every entry in the root tenant's own audit scope, including the crossing meta-log, in full; and (2) from each MSP (a direct child of root) only the entries in the carve-out below. Nothing from a tenant below an MSP is returned, and an MSP's ordinary entries (configuration changes, tenant creation and the like) are not returned.
+- **With an active crossing** on tenant T, every entry recorded in T and its descendants is also returned in full, for the lifetime of the crossing. After the crossing ends or is revoked those entries are no longer returned.
+
+Carve-out categories (a closed list): failed web logins and credential assertions on MSP administrator accounts (`web.passkey.login.failure`; the controller audits no separate lockout action); crossing meta-log actions (`tenant.crossing_*`); platform events (`event_type=system_event`). The controller audits no rate-limit or resource-exhaustion signals today, so there is no category for them. Carve-out rows carry only `actor`, `action`, `result`, `time` and `source_address` in `details`; resource, path, error and change fields are omitted.
+
+Entries from all sources are ordered newest first and `limit`, `offset` and `has_more` apply to the merged list. For a root-scoped caller `offset` is capped at 5000; a larger value returns `400`.
+
+
 #### GET /api/v1/tenant-crossings/active
 
 The active grants and break-glass crossings the caller may see, derived from the store on each call: a crossing is listed exactly while it is approved, unexpired and not ended. A pending break-glass is not listed.
