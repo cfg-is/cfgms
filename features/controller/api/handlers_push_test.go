@@ -1598,6 +1598,8 @@ func TestGetConfigPush_AssuranceBoundary(t *testing.T) {
 			if tc.principal.GlobalScope {
 				// A root admin carries an explicit root scope (Issue #4665).
 				ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+			} else {
+				ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tc.callerTID))
 			}
 			req = req.WithContext(ctx)
 			httpRec := httptest.NewRecorder()

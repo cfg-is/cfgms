@@ -355,7 +355,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Routed through the same assurance and empty-tenant guard as
 	// handleGetJob/handleCreateJob/handlePostRunScript/handlePostRunCommand
 	// (Issue #4335), rather than a separate ad hoc check.
-	_, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -377,8 +377,9 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	if !s.isWithinTenantScope(r.Context(), tenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.authorizeRecordRead(w, r, record.TenantID, "GET /api/v1/config/push/{id}", func() {
 		s.respondError(w, http.StatusNotFound, "push not found")
+	}) {
 		return
 	}
 

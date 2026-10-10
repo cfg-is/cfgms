@@ -85,9 +85,9 @@ func (s *Server) handleGetCommandRecord(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	callerTenant := callerTenantFilter(r.Context())
-	if !s.isWithinTenantScope(r.Context(), callerTenant, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.authorizeRecordRead(w, r, record.TenantID, "GET /api/v1/commands/{id}", func() {
 		s.respondError(w, http.StatusNotFound, "command record not found")
+	}) {
 		return
 	}
 
@@ -141,9 +141,12 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant := callerTenantFilter(r.Context())
-	if !s.isWithinTenantScope(r.Context(), callerTenant, stewardTenant) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	// A root caller subject to the ADR-025 boundary needs a crossing for a client
+	// tenant's steward, and below it sees only records whose owning tenant it can read.
+	readScope := s.tenantReadScope(r, "GET /api/v1/stewards/{id}/pending-deliveries")
+	if !s.authorizeRecordRead(w, r, stewardTenant, "GET /api/v1/stewards/{id}/pending-deliveries", func() {
 		s.respondError(w, http.StatusNotFound, "steward not found")
+	}) {
 		return
 	}
 
@@ -171,6 +174,9 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 				"steward_id", logging.SanitizeLogValue(stewardID),
 				"steward_tenant", logging.SanitizeLogValue(stewardTenant),
 				"record_tenant", logging.SanitizeLogValue(rec.TenantID))
+			continue
+		}
+		if readScope.boundarySubject() && !readScope.Allows(rec.TenantID) {
 			continue
 		}
 		out = append(out, commandRecordToResponse(rec))

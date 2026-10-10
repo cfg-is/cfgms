@@ -210,7 +210,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tenantFilter string
 	switch {
-	case scope.IsRoot(): //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	case scope.IsRoot(): //architecture:allow-root-scope -- selects the unfiltered store read; boundary-subject callers are filtered per record below
 		tenantFilter = ""
 	case scope.IsTenant() && scope.Path() != "":
 		tenantFilter = scope.Path()
@@ -239,7 +239,15 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jobs, err := s.batchJobStore.ListBatchJobs(r.Context(), tenantFilter, limit, offset)
+	readScope := s.tenantReadScope(r, "GET /api/v1/jobs")
+	var jobs []*batchjob.BatchJob
+	var err error
+	if readScope.boundarySubject() {
+		jobs, err = s.listReadableBatchJobs(r.Context(), readScope, limit, offset)
+		readScope.LogSummary()
+	} else {
+		jobs, err = s.batchJobStore.ListBatchJobs(r.Context(), tenantFilter, limit, offset)
+	}
 	if err != nil {
 		s.logger.Error("Failed to list batch jobs",
 			"tenant_id", logging.SanitizeLogValue(tenantFilter),
@@ -268,7 +276,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
-	_, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -288,13 +296,56 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.isWithinTenantScope(r.Context(), tenantID, job.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		// 404 instead of 403 to avoid disclosing job existence across tenants
-		// (Issue #4091) — mirrors the genuine not-found response above so a caller
-		// cannot distinguish "absent" from "exists in another tenant".
+	// 404 instead of 403 to avoid disclosing job existence across tenants
+	// (Issue #4091) — mirrors the genuine not-found response above so a caller
+	// cannot distinguish "absent" from "exists in another tenant". A root caller
+	// with no crossing for a client tenant's job gets the crossing challenge.
+	if !s.authorizeRecordRead(w, r, job.TenantID, "GET /api/v1/jobs/{id}", func() {
 		s.writeErrorResponse(w, http.StatusNotFound, "Job not found", "NOT_FOUND")
+	}) {
 		return
 	}
 
 	s.writeSuccessResponse(w, job)
+}
+
+// listReadableBatchJobs pages through every batch job and keeps those the
+// boundary-subject root caller may read: root's own plus those under a crossing.
+// The filter runs before offset/limit so a page is never short because rows were
+// dropped after the store paged them.
+func (s *Server) listReadableBatchJobs(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*batchjob.BatchJob, error) {
+	const pageSize = 500
+	// Bound the limit here as well as in the caller so a page never exceeds
+	// pageSize. The slice grows by append rather than being pre-sized from the
+	// request-supplied limit, so no allocation size derives from user input.
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > pageSize {
+		limit = pageSize
+	}
+	out := make([]*batchjob.BatchJob, 0)
+	skip := offset
+	for storeOffset := 0; ; storeOffset += pageSize {
+		page, err := s.batchJobStore.ListBatchJobs(ctx, "", pageSize, storeOffset)
+		if err != nil {
+			return nil, err
+		}
+		for _, job := range page {
+			if !readScope.Allows(job.TenantID) {
+				continue
+			}
+			if skip > 0 {
+				skip--
+				continue
+			}
+			out = append(out, job)
+			if len(out) == limit {
+				return out, nil
+			}
+		}
+		if len(page) < pageSize {
+			return out, nil
+		}
+	}
 }
