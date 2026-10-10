@@ -382,9 +382,17 @@ logger.AddSubscriber(func(entry logging.LogEntry) {
         "message":   entry.Message,
         "fields":    entry.Fields,
     }
-    siemProcessor.ProcessLogEntry(ctx, logData)
+    // ctx must carry the authenticated tenant (ctxkeys.TenantID)
+    tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+    siemProcessor.ProcessLogEntry(tenantCtx, logData)
 })
 ```
+
+**Tenant scoping:** the SIEM entry's tenant comes from the caller's authenticated
+context, never from the payload. A `tenant_id` key in the payload is ignored, and a
+call whose context carries no tenant is refused with an error. A SIEM trigger only
+evaluates entries from its own tenant (a trigger with an empty tenant matches
+nothing), so aggregation windows and thresholds never count another tenant's entries.
 
 ## Development
 
