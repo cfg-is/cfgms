@@ -2200,6 +2200,29 @@ Grant create, break-glass create and approve, list, and end all return this snak
 | `created_at`, `expires_at`, `revoked_at` | Timestamps; `revoked_at` is `null` until ended |
 | `status` | Derived: `revoked` if ended, else `expired` if past `expires_at`, else `pending` if awaiting a second approver, else `active` |
 
+#### Loud break-glass
+
+Every break-glass that becomes active is announced on three channels, for all four reason categories. A break-glass becomes active when it is created `approved`, or when it is approved from `pending` (second-approver setting on); a pending break-glass announces nothing. The crossing is persisted first. A failure of any announcement channel never fails or delays the request and never undoes the crossing.
+
+1. **Email.** When the controller's email delivery is configured and the tenant has administrator contacts (see `GET /api/v1/tenants/{id}/admin-contacts`), one email is sent to those contacts. The subject names the tenant. The body states the tenant, reason category, invoking operator (username), start and expiry time, and how to end the elevation. The justification text is not in the email; MSP administrators read it in the console and the audit view. The send is bounded at 20 seconds and runs after the response. Its outcome is recorded as the audit entry `tenant.crossing_break_glass_notified` (critical) with `outcome` set to `sent`, `partial` (some recipients refused), `failed`, `not_configured` or `no_contacts`. An unconfigured email channel does not block the other two.
+2. **Active-elevation feed.** `GET /api/v1/tenant-crossings/active`, below.
+3. **Audit.** The tenant-scoped entry and a root meta-log entry, below.
+
+**Meta-log.** Grant creation, grant or break-glass end, and break-glass request, invocation and approval each write two audit entries with the same action name: the tenant-scoped entry in the target tenant's audit scope, and a second entry in the root tenant's own audit scope. The root entry's details carry `target_tenant`, `kind`, `reason_category`, `actor` and `expires_at`, and not the justification. Grants and their ending send no email.
+
+#### GET /api/v1/tenant-crossings/active
+
+The active grants and break-glass crossings the caller may see, derived from the store on each call: a crossing is listed exactly while it is approved, unexpired and not ended. A pending break-glass is not listed.
+
+**Authentication:** Required  
+**Required permission:** `tenant:crossing-list`
+
+- A caller inside a tenant sees every active grant and break-glass whose tenant is in the caller's own subtree.
+- A root-scoped caller subject to the tenant-crossing boundary sees the active break-glass crossings held by that principal plus every active grant (a grant admits all root support). Another operator's break-glass is not listed.
+- A root caller not subject to the boundary (an unbound bootstrap certificate) sees every active crossing.
+
+**Response (`200 OK`):** an array of the [crossing response](#crossing-response) with two added fields: `tenant_name`, and `principal_name` (the invoking operator, empty for a grant). For a root-scoped caller `tenant_name` is filled only when the tenant is an MSP; for a client tenant it is empty, because root never sees client tenant names.
+
 #### GET /api/v1/tenants/{id}/admin-contacts
 
 Read the tenant's administrator contact addresses: where security notifications for the tenant are sent. The list is MSP-managed and stored in the tenant's metadata under the reserved key `cfgms.admin_contacts`.

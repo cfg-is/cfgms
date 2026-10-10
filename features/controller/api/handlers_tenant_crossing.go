@@ -361,6 +361,9 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 
 	s.recordTenantCrossingAudit(r, existing.ID, principal.ID, crossing, business.AuditSeverityCritical,
 		auditAction, justification)
+	if approvalState == business.TenantCrossingApprovalApproved {
+		s.announceBreakGlassActive(r.Context(), crossing, principal.ID)
+	}
 
 	s.writeResponse(w, http.StatusCreated, s.toTenantCrossingResponse(r.Context(), crossing))
 }
@@ -434,6 +437,7 @@ func (s *Server) handleApproveTenantBreakGlass(w http.ResponseWriter, r *http.Re
 
 	s.recordTenantCrossingAudit(r, crossing.TenantID, principal.ID, crossing, business.AuditSeverityCritical,
 		"tenant.crossing_break_glass_approved", crossing.Justification)
+	s.announceBreakGlassActive(r.Context(), crossing, principal.ID)
 
 	s.writeResponse(w, http.StatusOK, s.toTenantCrossingResponse(r.Context(), crossing))
 }
@@ -496,29 +500,61 @@ func (s *Server) handleListTenantCrossings(w http.ResponseWriter, r *http.Reques
 	s.writeSuccessResponse(w, out)
 }
 
-// recordTenantCrossingAudit records a Decision 2 grant/break-glass event, tenant-scoped
-// so it surfaces through the existing GET /api/v1/audit/entries endpoint — which always
-// scopes to the caller's own context tenant — giving the affected MSP visibility into
-// crossing activity on its tenant without a bespoke activity-view endpoint.
+// recordTenantCrossingAudit records a Decision 2 grant/break-glass event twice
+// (ADR-025 Decision 4): once tenant-scoped, so it surfaces through the existing
+// GET /api/v1/audit/entries endpoint — which always scopes to the caller's own
+// context tenant — giving the affected MSP visibility into crossing activity on its
+// tenant, and once in root's own audit scope as the meta-log of when and why the
+// boundary was crossed.
 func (s *Server) recordTenantCrossingAudit(r *http.Request, tenantID, actorID string, crossing *business.TenantCrossing, severity business.AuditSeverity, action, detail string) {
+	s.recordTenantCrossingAuditCtx(r.Context(), tenantID, actorID, crossing, severity, action, detail, nil)
+}
+
+// recordTenantCrossingAuditCtx is the dual write behind recordTenantCrossingAudit for
+// callers that hold a context rather than a request. extra adds string details
+// (for example the notification outcome). Each write is independent: a failure of one
+// is logged and never suppresses the other.
+func (s *Server) recordTenantCrossingAuditCtx(ctx context.Context, tenantID, actorID string, crossing *business.TenantCrossing, severity business.AuditSeverity, action, detail string, extra map[string]string) {
 	if s.auditManager == nil {
 		return
 	}
-	b := audit.NewEventBuilder().
-		Tenant(tenantID).
-		Type(business.AuditEventSystemAccess).
-		Action(action).
-		User(actorID, business.AuditUserTypeHuman).
-		Resource("tenant_crossing", crossing.ID, "").
-		Result(business.AuditResultSuccess).
-		Severity(severity).
-		Detail("crossing_kind", string(crossing.Kind)).
-		Detail("target_principal_id", logging.SanitizeLogValue(crossing.PrincipalID)).
-		Detail("expires_at", crossing.ExpiresAt.Format(time.RFC3339)).
-		Detail("reason_category", string(crossing.ReasonCategory)).
-		Detail("detail", logging.SanitizeLogValue(detail))
-	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+	build := func(scope string) *audit.AuditEventBuilder {
+		b := audit.NewEventBuilder().
+			Tenant(scope).
+			Type(business.AuditEventSystemAccess).
+			Action(action).
+			User(actorID, business.AuditUserTypeHuman).
+			Resource("tenant_crossing", crossing.ID, "").
+			Result(business.AuditResultSuccess).
+			Severity(severity).
+			Detail("crossing_kind", string(crossing.Kind)).
+			Detail("kind", string(crossing.Kind)).
+			Detail("target_tenant", logging.SanitizeLogValue(tenantID)).
+			Detail("actor", logging.SanitizeLogValue(actorID)).
+			Detail("target_principal_id", logging.SanitizeLogValue(crossing.PrincipalID)).
+			Detail("expires_at", crossing.ExpiresAt.Format(time.RFC3339)).
+			Detail("reason_category", string(crossing.ReasonCategory))
+		for k, v := range extra {
+			b = b.Detail(k, logging.SanitizeLogValue(v))
+		}
+		return b
+	}
+
+	// The justification is the MSP's to read; root's meta-log records the boundary
+	// crossing itself, not the free text.
+	tenantEntry := build(tenantID).Detail("detail", logging.SanitizeLogValue(detail))
+	if err := s.auditManager.RecordEvent(ctx, tenantEntry); err != nil {
 		s.logger.Error("Failed to record tenant crossing audit event",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	root := s.rootTenantID(ctx)
+	if root == "" || root == tenantID {
+		return
+	}
+	if err := s.auditManager.RecordEvent(ctx, build(root)); err != nil {
+		s.logger.Error("Failed to record tenant crossing meta-log event",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}

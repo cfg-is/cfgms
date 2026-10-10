@@ -43,6 +43,8 @@ type emailTestSMTPServer struct {
 	Port     int
 	mu       sync.Mutex
 	messages []string
+	// rejectRcpt makes every RCPT TO fail with a permanent 550.
+	rejectRcpt bool
 }
 
 func (s *emailTestSMTPServer) Messages() []string {
@@ -107,8 +109,14 @@ func (s *emailTestSMTPServer) handle(c net.Conn) {
 			} else {
 				w("535 authentication failed")
 			}
-		case "MAIL", "RCPT":
+		case "MAIL":
 			w("250 ok")
+		case "RCPT":
+			if s.rejectRcpt {
+				w("550 mailbox unavailable")
+			} else {
+				w("250 ok")
+			}
 		case "DATA":
 			w("354 go")
 			var sb strings.Builder
