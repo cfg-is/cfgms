@@ -93,6 +93,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
+	_ "github.com/cfgis/cfgms/pkg/notification/providers/smtp" // register SMTP notification provider (Issue #4710)
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"

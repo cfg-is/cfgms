@@ -324,6 +324,95 @@ func (c *Config) ValidateWebAuthn() error {
 	return nil
 }
 
+// Email TLS modes accepted by NotificationsConfig.Email.TLSMode.
+const (
+	EmailTLSModeStartTLS    = "starttls"
+	EmailTLSModeImplicitTLS = "implicit_tls"
+)
+
+// NotificationsConfig holds outbound notification settings (Issue #4710).
+type NotificationsConfig struct {
+	// Email configures controller-wide email delivery. Absent, or with an empty
+	// host, means email is not configured and the controller starts normally.
+	Email *EmailConfig `yaml:"email,omitempty"`
+}
+
+// EmailConfig holds the non-secret SMTP settings. The SMTP password is never a
+// config field: it is written through PUT /api/v1/notifications/email/credential
+// and held in the controller's secret store under PasswordSecretKey.
+type EmailConfig struct {
+	// Provider names the notification provider. Only "smtp" exists; empty means "smtp".
+	Provider string `yaml:"provider,omitempty"`
+	// Host is the SMTP server host name. Empty means email is not configured.
+	Host string `yaml:"host,omitempty"`
+	// Port defaults from TLSMode (587 starttls, 465 implicit_tls) when zero.
+	Port int `yaml:"port,omitempty"`
+	// From is the sender address. Required when Host is set.
+	From string `yaml:"from,omitempty"`
+	// Username is the SMTP authentication user. Optional.
+	Username string `yaml:"username,omitempty"`
+	// TLSMode is "starttls" (default) or "implicit_tls". There is no plaintext mode.
+	TLSMode string `yaml:"tls_mode,omitempty"`
+	// PasswordSecretKey is the pkg/secrets key holding the SMTP password.
+	// Required when Host is set.
+	PasswordSecretKey string `yaml:"password_secret_key,omitempty"`
+}
+
+// EmailProvider returns the configured provider name, defaulting to "smtp".
+func (e *EmailConfig) EmailProvider() string {
+	if e == nil || e.Provider == "" {
+		return "smtp"
+	}
+	return e.Provider
+}
+
+// EffectiveTLSMode returns TLSMode, defaulting to starttls.
+func (e *EmailConfig) EffectiveTLSMode() string {
+	if e == nil || e.TLSMode == "" {
+		return EmailTLSModeStartTLS
+	}
+	return e.TLSMode
+}
+
+// Configured reports whether the non-secret settings are complete enough to
+// attempt email delivery. It does not say whether a credential is stored.
+func (e *EmailConfig) Configured() bool {
+	return e != nil && e.Host != "" && e.From != "" && e.PasswordSecretKey != ""
+}
+
+// ValidateNotifications enforces the notifications.email contract at startup:
+// an absent block or empty host is valid (email not configured); tls_mode and
+// provider must be known values; a configured host needs from and
+// password_secret_key.
+func (c *Config) ValidateNotifications() error {
+	if c.Notifications == nil || c.Notifications.Email == nil {
+		return nil
+	}
+	e := c.Notifications.Email
+	switch e.TLSMode {
+	case "", EmailTLSModeStartTLS, EmailTLSModeImplicitTLS:
+	default:
+		return fmt.Errorf("notifications.email.tls_mode %q is invalid: must be %q or %q",
+			e.TLSMode, EmailTLSModeStartTLS, EmailTLSModeImplicitTLS)
+	}
+	if e.Provider != "" && e.Provider != "smtp" {
+		return fmt.Errorf("notifications.email.provider %q is invalid: only \"smtp\" is supported", e.Provider)
+	}
+	if e.Port < 0 || e.Port > 65535 {
+		return fmt.Errorf("notifications.email.port %d is out of range", e.Port)
+	}
+	if e.Host == "" {
+		return nil
+	}
+	if e.From == "" {
+		return fmt.Errorf("notifications.email.from must be set when notifications.email.host is set")
+	}
+	if e.PasswordSecretKey == "" {
+		return fmt.Errorf("notifications.email.password_secret_key must be set when notifications.email.host is set")
+	}
+	return nil
+}
+
 // TenantAdminConfig holds global tenant-administration policy settings (ADR-027, Issue #3182).
 type TenantAdminConfig struct {
 	// DeleteHoldPeriod is the minimum time between RequestTenantDeletion and
@@ -458,6 +547,10 @@ type Config struct {
 	// default — browser passkey login and passkey step-up answer 503 until an operator
 	// explicitly sets rp_id and rp_origins.
 	WebAuthn *WebAuthnConfig `yaml:"webauthn,omitempty"`
+
+	// Notifications configures outbound notification delivery (Issue #4710). Absent
+	// by default — email delivery is disabled until an operator sets notifications.email.
+	Notifications *NotificationsConfig `yaml:"notifications,omitempty"`
 
 	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
 	// Decision 3, Issue #3782). Empty by default (self-hosted: no realm concept).
@@ -1470,6 +1563,10 @@ func LoadWithPath(configPath string) (*Config, error) {
 	}
 
 	if err := cfg.ValidateWebAuthn(); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.ValidateNotifications(); err != nil {
 		return nil, err
 	}
 

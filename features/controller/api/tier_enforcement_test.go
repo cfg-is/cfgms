@@ -83,6 +83,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/tenants/test-id/break-glass", "tenant:crossing-break-glass"},                               // ADR-025 Decision 2(b): tenant-crossing break-glass elevation
 	{"POST", "/api/v1/tenants/test-id/break-glass/test-crossing/approve", "tenant:crossing-approve-break-glass"}, // ADR-025: second-approver break-glass approval; RequireUserPresence
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},
+	{"GET", "/api/v1/notifications/email", "notification:configure"},            // Issue #4710: email delivery settings
+	{"PUT", "/api/v1/notifications/email/credential", "notification:configure"}, // Issue #4710: write-only SMTP password
+	{"POST", "/api/v1/notifications/email/test", "notification:configure"},      // Issue #4710: test send
 	{"PUT", "/api/v1/tenants/test-tenant/refresh-policy", "refresh:set-policy"},
 	{"PUT", "/api/v1/tenants/test-tenant/assurance-policy", "assurance-policy:set"}, // Issue #2839: per-tenant assurance override — raises tenant's own posture.
 	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},

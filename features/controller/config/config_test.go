@@ -1395,3 +1395,44 @@ func TestTenantAdminConfig_GetBreakGlassRequiresSecondApprover(t *testing.T) {
 		})
 	}
 }
+
+// TestConfig_ValidateNotifications covers the notifications.email contract (Issue #4710).
+func TestConfig_ValidateNotifications(t *testing.T) {
+	valid := func() *EmailConfig {
+		return &EmailConfig{Host: "smtp.acme-corp.example", From: "cfgms@acme-corp.example", PasswordSecretKey: "notifications.email.password"}
+	}
+	tests := []struct {
+		name    string
+		cfg     *NotificationsConfig
+		wantErr string
+	}{
+		{"absent", nil, ""},
+		{"empty email block", &NotificationsConfig{Email: &EmailConfig{}}, ""},
+		{"valid defaults", &NotificationsConfig{Email: valid()}, ""},
+		{"valid implicit_tls", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.TLSMode = "implicit_tls"; return e }()}, ""},
+		{"invalid tls_mode", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.TLSMode = "plaintext"; return e }()}, "tls_mode"},
+		{"missing from", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.From = ""; return e }()}, "notifications.email.from"},
+		{"missing password_secret_key", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.PasswordSecretKey = ""; return e }()}, "password_secret_key"},
+		{"unknown provider", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.Provider = "carrier-pigeon"; return e }()}, "provider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&Config{Notifications: tt.cfg}).ValidateNotifications()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestEmailConfig_ConfiguredAndDefaults(t *testing.T) {
+	var nilCfg *EmailConfig
+	assert.False(t, nilCfg.Configured())
+	assert.Equal(t, "starttls", nilCfg.EffectiveTLSMode())
+	assert.Equal(t, "smtp", nilCfg.EmailProvider())
+	assert.False(t, (&EmailConfig{Host: "h"}).Configured())
+	assert.True(t, (&EmailConfig{Host: "h", From: "f@x.example", PasswordSecretKey: "k"}).Configured())
+}
