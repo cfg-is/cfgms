@@ -43,7 +43,7 @@ func (s *Server) announceBreakGlassActive(reqCtx context.Context, crossing *busi
 		defer s.crossingNotifyWG.Done()
 		defer cancel()
 		outcome := s.sendBreakGlassEmail(ctx, &snapshot)
-		s.recordTenantCrossingAuditCtx(ctx, snapshot.TenantID, actorID, &snapshot, business.AuditSeverityCritical,
+		s.recordTenantCrossingAuditCtx(ctx, snapshot.TenantID, actorID, business.AuditUserTypeHuman, &snapshot, business.AuditSeverityCritical,
 			"tenant.crossing_break_glass_notified", "", map[string]string{"outcome": outcome})
 	}()
 }

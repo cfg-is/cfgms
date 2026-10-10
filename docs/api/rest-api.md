@@ -2210,6 +2210,8 @@ Every break-glass that becomes active is announced on three channels, for all fo
 
 **Meta-log.** Grant creation, grant or break-glass end, and break-glass request, invocation and approval each write two audit entries with the same action name: the tenant-scoped entry in the target tenant's audit scope, and a second entry in the root tenant's own audit scope. The root entry's details carry `target_tenant`, `kind`, `reason_category`, `actor` and `expires_at`, and not the justification. Grants and their ending send no email.
 
+**Expiry entries.** A crossing that reaches its expiry without being ended also gets a meta-log entry: `tenant.crossing_grant_expired` (high) for a grant and `tenant.crossing_break_glass_expired` (critical) for a break-glass, including a pending break-glass that expired unapproved. Each is written to both the tenant's audit scope and root's audit scope, with actor `system` (user type `system`). The details are the same as the other crossing entries plus `approval_state` (`approved` or `pending`). A background sweep records them within about a minute of expiry, once per crossing, on one controller node of a cluster. A crossing ended early gets no expired entry; its `..._ended` entry stands. Expiry sends no email. Crossings already expired when the controller is upgraded to this version get no entry.
+
 #### GET /api/v1/tenant-crossings/active
 
 The active grants and break-glass crossings the caller may see, derived from the store on each call: a crossing is listed exactly while it is approved, unexpired and not ended. A pending break-glass is not listed.

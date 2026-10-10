@@ -42,9 +42,11 @@ func TestTenantCrossingStore_UpgradeFromOldShape(t *testing.T) {
 	require.NoError(t, err)
 	created := formatTime(nowUTC())
 	expires := formatTime(nowUTC().Add(time.Hour))
+	pastExpires := formatTime(nowUTC().Add(-time.Hour))
 	_, err = raw.Exec(`INSERT INTO tenant_crossings VALUES
 		('old-grant','msp','root-op','grant','admin','',?,?,NULL),
-		('old-bg','msp','root-op','break-glass','root-op','why',?,?,NULL)`, created, expires, created, expires)
+		('old-bg','msp','root-op','break-glass','root-op','why',?,?,NULL),
+		('old-expired','msp','root-op','grant','admin','',?,?,NULL)`, created, expires, created, expires, created, pastExpires)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
 
@@ -66,6 +68,16 @@ func TestTenantCrossingStore_UpgradeFromOldShape(t *testing.T) {
 		require.Equal(t, business.TenantCrossingApprovalApproved, bg.ApprovalState)
 		require.Empty(t, bg.ReasonCategory)
 		require.Equal(t, "root-op", bg.PrincipalID)
+
+		require.Nil(t, grant.ExpiryRecordedAt, "an unexpired row is not marked")
+		require.Nil(t, bg.ExpiryRecordedAt, "an unexpired row is not marked")
+		expired, err := store.GetTenantCrossing(ctx, "old-expired")
+		require.NoError(t, err)
+		require.NotNil(t, expired.ExpiryRecordedAt, "an already-expired row is marked recorded by the upgrade")
+		require.WithinDuration(t, expired.ExpiresAt, *expired.ExpiryRecordedAt, time.Second)
+		unrecorded, err := store.ListUnrecordedExpiredTenantCrossings(ctx, nowUTC())
+		require.NoError(t, err)
+		require.Empty(t, unrecorded, "the first sweep after an upgrade has no history to flood")
 
 		active, err := store.HasActiveTenantCrossing(ctx, "anyone", "msp")
 		require.NoError(t, err)

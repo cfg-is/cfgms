@@ -123,6 +123,10 @@ type TenantCrossing struct {
 	ApprovalState  TenantCrossingApprovalState  `json:"approval_state,omitempty"`  // approved or pending; unset on create is stored as approved
 	ApprovedBy     string                       // approver principal ID; empty until approved via ApproveTenantCrossing
 	ApprovedAt     *time.Time                   // nil until approved via ApproveTenantCrossing
+
+	// ExpiryRecordedAt is nil until the crossing's expiry has been recorded in the crossing
+	// meta-log (ADR-025 Amendment 8 A8.3). It is set by MarkTenantCrossingExpiryRecorded.
+	ExpiryRecordedAt *time.Time
 }
 
 // TenantCrossingStore persists ADR-025 Decision 2 grant and break-glass records. Both
@@ -152,6 +156,16 @@ type TenantCrossingStore interface {
 	// ListActiveTenantCrossings returns every approved, unexpired, unrevoked crossing as of
 	// now. Pending crossings are not included.
 	ListActiveTenantCrossings(ctx context.Context, now time.Time) ([]*TenantCrossing, error)
+	// ListUnrecordedExpiredTenantCrossings returns every crossing with ExpiresAt <= now,
+	// RevokedAt == nil and ExpiryRecordedAt == nil, of either kind and either approval
+	// state (a pending break-glass that expired unapproved is included).
+	ListUnrecordedExpiredTenantCrossings(ctx context.Context, now time.Time) ([]*TenantCrossing, error)
+	// MarkTenantCrossingExpiryRecorded claims the right to record a crossing's expiry in one
+	// conditional UPDATE (expiry not yet recorded, not revoked, ExpiresAt <= at). It returns
+	// true only to the caller whose UPDATE changed the row, and false, nil when the row was
+	// already marked, is revoked or is not yet expired. It returns ErrTenantCrossingNotFound
+	// when the crossing is absent.
+	MarkTenantCrossingExpiryRecorded(ctx context.Context, id string, at time.Time) (bool, error)
 
 	Initialize(ctx context.Context) error
 	Close() error

@@ -507,14 +507,15 @@ func (s *Server) handleListTenantCrossings(w http.ResponseWriter, r *http.Reques
 // tenant, and once in root's own audit scope as the meta-log of when and why the
 // boundary was crossed.
 func (s *Server) recordTenantCrossingAudit(r *http.Request, tenantID, actorID string, crossing *business.TenantCrossing, severity business.AuditSeverity, action, detail string) {
-	s.recordTenantCrossingAuditCtx(r.Context(), tenantID, actorID, crossing, severity, action, detail, nil)
+	s.recordTenantCrossingAuditCtx(r.Context(), tenantID, actorID, business.AuditUserTypeHuman, crossing, severity, action, detail, nil)
 }
 
 // recordTenantCrossingAuditCtx is the dual write behind recordTenantCrossingAudit for
-// callers that hold a context rather than a request. extra adds string details
-// (for example the notification outcome). Each write is independent: a failure of one
+// callers that hold a context rather than a request, and for the system actor of the
+// expiry sweep (actorType). extra adds string details (for example the notification
+// outcome). Each write is independent: a failure of one
 // is logged and never suppresses the other.
-func (s *Server) recordTenantCrossingAuditCtx(ctx context.Context, tenantID, actorID string, crossing *business.TenantCrossing, severity business.AuditSeverity, action, detail string, extra map[string]string) {
+func (s *Server) recordTenantCrossingAuditCtx(ctx context.Context, tenantID, actorID string, actorType business.AuditUserType, crossing *business.TenantCrossing, severity business.AuditSeverity, action, detail string, extra map[string]string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -523,7 +524,7 @@ func (s *Server) recordTenantCrossingAuditCtx(ctx context.Context, tenantID, act
 			Tenant(scope).
 			Type(business.AuditEventSystemAccess).
 			Action(action).
-			User(actorID, business.AuditUserTypeHuman).
+			User(actorID, actorType).
 			Resource("tenant_crossing", crossing.ID, "").
 			Result(business.AuditResultSuccess).
 			Severity(severity).
