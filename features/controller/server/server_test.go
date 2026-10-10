@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,10 +16,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1807,4 +1810,169 @@ func TestLoadExistingCertificateManager_SingleNodeSigningKeyInSecretStore(t *tes
 	// Close releases the attached secret store and is idempotent.
 	closed = true
 	require.NoError(t, manager.Close())
+}
+
+// preUpgradeSigningCfg builds a single-node controller config and cert directory
+// the way a controller from before the signing key store holds them: the CA
+// exists and the signing certificate and key live in the node-local cert
+// directory. It returns the config and the pre-upgrade signing certificate.
+func preUpgradeSigningCfg(t *testing.T) (*config.Config, *cert.Certificate) {
+	t.Helper()
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", "")
+
+	caDir := filepath.Join(root, "ca")
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		CertPath:        caDir,
+		AdminBundlePath: filepath.Join(root, "admin.bundle.yaml"),
+		DataDir:         filepath.Join(root, "data"),
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				DNSNames:     []string{"localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "Test Org",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(root, "flatfile"),
+			SQLitePath:   filepath.Join(root, "cfgms.db"),
+		},
+	}
+	_, err := initialization.Run(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	// No SigningKeyStore: the signing key is generated into the local cert directory.
+	legacy, err := cert.NewManager(&cert.ManagerConfig{StoragePath: root, LoadExistingCA: true})
+	require.NoError(t, err)
+	require.NoError(t, legacy.EnsureSigningCertificate(&cert.SigningCertConfig{CommonName: "signer", ValidityDays: 30, KeySize: 2048}))
+	signing, err := legacy.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	require.NotEmpty(t, signing.PrivateKeyPEM)
+	return cfg, signing
+}
+
+func TestAdoptSingleNodeSigningIdentity_PreUpgradeStewardKeepsVerifying(t *testing.T) {
+	ctx := context.Background()
+	cfg, pre := preUpgradeSigningCfg(t)
+
+	manager, err := loadExistingCertificateManager(cfg, nil, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close() })
+	mode, err := manager.SigningIdentityMode(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cert.SigningIdentityLegacyLocal, mode)
+
+	adoptSingleNodeSigningIdentity(ctx, manager, nil, logging.NewNoopLogger())
+
+	mode, err = manager.SigningIdentityMode(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cert.SigningIdentityShared, mode)
+
+	_, keyPEM, err := manager.ExportCertificate(pre.SerialNumber, true, false)
+	require.NoError(t, err)
+	signer, err := signature.NewSigner(&signature.SignerConfig{PrivateKeyPEM: keyPEM})
+	require.NoError(t, err)
+	payload := []byte("config issued after adoption")
+	sig, err := signer.Sign(payload)
+	require.NoError(t, err)
+
+	// The steward pinned the pre-upgrade certificate and nothing else.
+	verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: pre.CertificatePEM})
+	require.NoError(t, err)
+	require.NoError(t, verifier.Verify(payload, sig))
+
+	cur, err := manager.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	assert.Equal(t, pre.SerialNumber, cur.SerialNumber)
+}
+
+func TestAdoptSingleNodeSigningIdentity_RecordsAudit(t *testing.T) {
+	ctx := context.Background()
+	cfg, pre := preUpgradeSigningCfg(t)
+
+	root := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(filepath.Join(root, "flatfile"), filepath.Join(root, "cfgms.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+	auditManager, err := audit.NewManager(storageManager.GetAuditStore(), "controller-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditManager.Stop(stopCtx)
+	})
+
+	queryActions := func() map[string]*business.AuditEntry {
+		require.NoError(t, auditManager.Flush(ctx))
+		entries, qerr := auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: audit.SystemTenantID})
+		require.NoError(t, qerr)
+		byAction := make(map[string]*business.AuditEntry)
+		for _, e := range entries {
+			byAction[e.Action] = e
+			raw, merr := json.Marshal(e)
+			require.NoError(t, merr)
+			assert.NotContains(t, string(raw), "PRIVATE KEY")
+			assert.NotContains(t, string(raw), "BEGIN CERTIFICATE")
+		}
+		return byAction
+	}
+
+	t.Run("success records adopted and removed serials", func(t *testing.T) {
+		manager, err := loadExistingCertificateManager(cfg, nil, logging.NewNoopLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = manager.Close() })
+
+		adoptSingleNodeSigningIdentity(ctx, manager, auditManager, logging.NewNoopLogger())
+
+		got := queryActions()
+		require.Contains(t, got, auditSigningIdentityAdopted)
+		require.Contains(t, got, auditSigningIdentityKeyRemoved)
+		assert.Equal(t, pre.SerialNumber, got[auditSigningIdentityAdopted].ResourceID)
+		assert.Equal(t, pre.SerialNumber, got[auditSigningIdentityKeyRemoved].Details["serial"])
+	})
+
+	t.Run("refusal records the serial and reason", func(t *testing.T) {
+		refusedCfg, refusedPre := preUpgradeSigningCfg(t)
+		// Revoke the current signing certificate: adoption must refuse it.
+		legacy, err := cert.NewManager(&cert.ManagerConfig{
+			StoragePath: filepath.Dir(filepath.Clean(refusedCfg.Certificate.CAPath)), LoadExistingCA: true,
+		})
+		require.NoError(t, err)
+		require.NoError(t, legacy.Revoke(refusedPre.SerialNumber))
+
+		manager, err := loadExistingCertificateManager(refusedCfg, nil, logging.NewNoopLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = manager.Close() })
+
+		adoptSingleNodeSigningIdentity(ctx, manager, auditManager, logging.NewNoopLogger())
+
+		got := queryActions()
+		require.Contains(t, got, auditSigningIdentityAdoptionRefuse)
+		refused := got[auditSigningIdentityAdoptionRefuse]
+		assert.Equal(t, refusedPre.SerialNumber, refused.ResourceID)
+		assert.NotEmpty(t, refused.Details["reason"])
+		mode, err := manager.SigningIdentityMode(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, cert.SigningIdentityLegacyLocal, mode)
+	})
+
+	t.Run("nil audit manager does not panic", func(t *testing.T) {
+		nilCfg, _ := preUpgradeSigningCfg(t)
+		manager, err := loadExistingCertificateManager(nilCfg, nil, logging.NewNoopLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = manager.Close() })
+		assert.NotPanics(t, func() {
+			adoptSingleNodeSigningIdentity(ctx, manager, nil, logging.NewNoopLogger())
+		})
+	})
 }

@@ -852,6 +852,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
 		}
+		// Issue #4864: a single-node controller that predates the signing key store
+		// moves its existing signing certificate and key into the store under the
+		// same serial, before anything provisions a signing certificate. A cluster
+		// uses the signing migration service instead. A failure is not fatal: the
+		// controller keeps signing with its local key and retries on the next start.
+		if !cfg.HA.IsClusterMode() {
+			adoptSingleNodeSigningIdentity(context.Background(), certManager, auditManager, logger)
+		}
 		if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
 			if err := validatePublicBetaControllerRoots(certManager, time.Now()); err != nil {
 				return nil, fmt.Errorf("public-beta signing roots are invalid: %w", err)
@@ -3594,6 +3602,69 @@ func loadExistingCertificateManager(cfg *config.Config, storageManager *interfac
 	logger.Info("Loaded existing Certificate Authority", "ca_path", cfg.Certificate.CAPath)
 
 	return manager, nil
+}
+
+// Signing identity adoption audit actions.
+const (
+	auditSigningIdentityAdopted        = "signing_identity_adopted"
+	auditSigningIdentityAdoptionRefuse = "signing_identity_adoption_refused"
+	auditSigningIdentityKeyRemoved     = "signing_identity_local_key_removed"
+)
+
+// adoptSingleNodeSigningIdentity runs cert.Manager.AdoptLocalSigningIdentity,
+// logs the outcome and records an audit event per adopted, refused and removed
+// serial. Serials and reasons only: never PEM or key bytes. A nil auditManager
+// skips the audit events. Failure is logged, never returned: the controller keeps
+// signing with its local key and tries again on the next start.
+func adoptSingleNodeSigningIdentity(ctx context.Context, certManager *cert.Manager, auditManager *audit.Manager, logger logging.Logger) {
+	if certManager == nil {
+		return
+	}
+	result, err := certManager.AdoptLocalSigningIdentity(ctx)
+	if err != nil {
+		logger.Warn("Signing identity adoption failed; continuing with the local signing key",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	if result == nil {
+		return
+	}
+	for _, serial := range result.AdoptedSerials {
+		logger.Info("Adopted local signing identity into the secret store", "serial", logging.SanitizeLogValue(serial))
+		recordSigningAdoptionAudit(ctx, auditManager, logger, auditSigningIdentityAdopted, serial, "", business.AuditResultSuccess)
+	}
+	for _, refusal := range result.RefusedSerials {
+		logger.Warn("Refused to adopt local signing certificate; the local key is kept",
+			"serial", logging.SanitizeLogValue(refusal.Serial),
+			"reason", logging.SanitizeLogValue(refusal.Reason))
+		recordSigningAdoptionAudit(ctx, auditManager, logger, auditSigningIdentityAdoptionRefuse, refusal.Serial, refusal.Reason, business.AuditResultFailure)
+	}
+	for _, serial := range result.RemovedKeySerials {
+		logger.Info("Removed local signing key after verified adoption", "serial", logging.SanitizeLogValue(serial))
+		recordSigningAdoptionAudit(ctx, auditManager, logger, auditSigningIdentityKeyRemoved, serial, "", business.AuditResultSuccess)
+	}
+}
+
+func recordSigningAdoptionAudit(ctx context.Context, auditManager *audit.Manager, logger logging.Logger, action, serial, reason string, result business.AuditResult) {
+	if auditManager == nil {
+		return
+	}
+	details := map[string]interface{}{"serial": logging.SanitizeLogValue(serial)}
+	if reason != "" {
+		details["reason"] = logging.SanitizeLogValue(reason)
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action(action).
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("signing_certificate", logging.SanitizeLogValue(serial), "").
+		Result(result).
+		Severity(business.AuditSeverityHigh).
+		Details(details)
+	if err := auditManager.RecordEvent(ctx, b); err != nil {
+		logger.Warn("Failed to record signing adoption audit event",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) error {
