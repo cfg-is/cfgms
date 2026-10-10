@@ -510,7 +510,7 @@ func TestResolveConfiguration_ClusterCascade_MemberReceivesResources(t *testing.
 
 	registry := buildClusterRegistry(t, "steward-1", "cfg-lab")
 	router := &cfgStoreAsRouter{ConfigStore: cs}
-	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+	ir := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), registry)
 
 	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
@@ -569,13 +569,13 @@ func TestResolveConfiguration_NoMembership_Unchanged(t *testing.T) {
 	router := &cfgStoreAsRouter{ConfigStore: cs}
 
 	// Resolve with no registry wired
-	irNoRegistry := NewInheritanceResolver(router, sm.GetClientTenantStore(), sm.GetTenantStore())
+	irNoRegistry := NewInheritanceResolver(router, sm.GetTenantStore())
 	effectiveNoRegistry, err := irNoRegistry.ResolveConfiguration(ctx, "client", "steward-2")
 	require.NoError(t, err)
 
 	// Resolve with registry wired but steward has no membership
 	emptyRegistry := buildClusterRegistry(t, "other-steward", "cfg-lab")
-	irWithRegistry := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), emptyRegistry)
+	irWithRegistry := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), emptyRegistry)
 	effectiveWithRegistry, err := irWithRegistry.ResolveConfiguration(ctx, "client", "steward-2")
 	require.NoError(t, err)
 
@@ -615,7 +615,7 @@ func TestResolveConfiguration_ClusterLeave_DropsResources(t *testing.T) {
 
 	// First call: steward IS a member — cluster-vm must appear
 	memberRegistry := buildClusterRegistry(t, "steward-1", "cfg-lab")
-	irMember := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), memberRegistry)
+	irMember := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), memberRegistry)
 	effectiveMember, err := irMember.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
 
@@ -628,7 +628,7 @@ func TestResolveConfiguration_ClusterLeave_DropsResources(t *testing.T) {
 
 	// Second call: steward has LEFT the cluster (registry returns nil) — cluster-vm must be gone
 	leftRegistry := buildClusterRegistry(t, "other-steward", "cfg-lab")
-	irLeft := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), leftRegistry)
+	irLeft := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), leftRegistry)
 	effectiveLeft, err := irLeft.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
 
@@ -669,7 +669,7 @@ func TestResolveConfiguration_CorruptClusterConfig_DoesNotFailResolution(t *test
 
 	registry := buildClusterRegistry(t, "steward-1", "bad-cluster")
 	router := &cfgStoreAsRouter{ConfigStore: cs}
-	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+	ir := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), registry)
 
 	// Resolution must succeed despite the corrupt cluster config document.
 	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
@@ -738,7 +738,7 @@ func TestResolveConfiguration_ClusterConfigError_LogValueSanitized(t *testing.T)
 	router := &cfgStoreAsRouter{ConfigStore: cs}
 
 	capture := logging.NewCapturingLogger()
-	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+	ir := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), registry)
 	ir.WithLogger(capture)
 
 	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
@@ -758,7 +758,7 @@ func TestResolveConfiguration_ClusterConfigError_LogValueSanitized(t *testing.T)
 	cleanStewardID := "clean-steward-456"
 	cleanRegistry := buildClusterRegistry(t, cleanStewardID, "bad-cluster")
 	cleanCapture := logging.NewCapturingLogger()
-	irClean := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), cleanRegistry)
+	irClean := NewInheritanceResolverWithClusters(router, sm.GetTenantStore(), cleanRegistry)
 	irClean.WithLogger(cleanCapture)
 
 	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)
@@ -794,7 +794,7 @@ func TestNewInheritanceResolverWithRoles_WiresClusterAndRoleProviders(t *testing
 	registry := buildClusterRegistry(t, "steward-1", "cluster-a")
 	roles := &fixedRoleProvider{}
 
-	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry, roles)
+	ir := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), registry, roles)
 
 	require.NotNil(t, ir, "constructor must return a non-nil resolver")
 	assert.Same(t, registry, ir.clusterRegistry, "clusterRegistry must be wired by the constructor")
@@ -837,7 +837,7 @@ func TestResolveConfiguration_RoleCascade_FragmentsApplied(t *testing.T) {
 	}))
 
 	router := &cfgStoreAsRouter{ConfigStore: cs}
-	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, &fixedRoleProvider{fragments: roleFrags})
+	ir := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, &fixedRoleProvider{fragments: roleFrags})
 
 	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
@@ -878,7 +878,7 @@ func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) 
 
 	injectedStewardID := "steward\n456\rinjected"
 	capture := logging.NewCapturingLogger()
-	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, brokenRoles)
+	ir := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, brokenRoles)
 	ir.WithLogger(capture)
 
 	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
@@ -897,7 +897,7 @@ func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) 
 	// A clean value must pass through unchanged.
 	cleanStewardID := "clean-steward-789"
 	cleanCapture := logging.NewCapturingLogger()
-	irClean := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, brokenRoles)
+	irClean := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, brokenRoles)
 	irClean.WithLogger(cleanCapture)
 
 	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)

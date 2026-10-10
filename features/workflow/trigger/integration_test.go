@@ -117,10 +117,6 @@ func (t *TestStorageProvider) Description() string {
 	return "Test storage provider for integration tests"
 }
 
-func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
-	return nil, fmt.Errorf("not implemented in test provider")
-}
-
 func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }

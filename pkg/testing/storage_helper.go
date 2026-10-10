@@ -76,7 +76,6 @@ func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 
 	manager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 

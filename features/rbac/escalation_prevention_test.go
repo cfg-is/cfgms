@@ -41,7 +41,6 @@ func TestNewEscalationPreventionManager_AcceptsStoreAccessor(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -70,7 +69,6 @@ func TestValidateAndSetRoleParent_NoTypeAssertion(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -124,7 +122,6 @@ func TestOperationLog_UsesEscalationOperationType(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

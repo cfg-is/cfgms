@@ -159,7 +159,6 @@ func withRealTenantManager(t *testing.T, server *Server) {
 	storageManager := pkgtesting.SetupTestStorage(t)
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

@@ -48,7 +48,6 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	err := rbacManager.Initialize(context.Background())

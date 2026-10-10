@@ -185,7 +185,6 @@ func TestAuditSensitiveOperationValidationErrorSeverity(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
@@ -234,7 +233,6 @@ func TestManagerSensitiveGates(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {

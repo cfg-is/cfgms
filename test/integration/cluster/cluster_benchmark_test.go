@@ -86,7 +86,6 @@ func newBenchControllerNode(b *testing.B, storageManager *interfaces.StorageMana
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(b, rbacManager.Initialize(ctx))

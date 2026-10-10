@@ -55,7 +55,7 @@
 //
 // This provider implements ConfigStore, AuditStore, StewardStore, and
 // IPTrustStore (Issue #1900). All other store factory methods (CreateRBACStore,
-// CreateTenantStore, CreateRegistrationTokenStore, CreateClientTenantStore)
+// CreateTenantStore, CreateRegistrationTokenStore)
 // return ErrNotSupported, as these belong to the business-data tier (SQLite,
 // sub-story C).
 package flatfile
@@ -186,12 +186,6 @@ func (p *FlatFileProvider) CreateAuditStore(config map[string]interface{}) (busi
 		return nil, fmt.Errorf("flatfile: failed to create audit store: %w", err)
 	}
 	return store, nil
-}
-
-// CreateClientTenantStore returns ErrNotSupported.
-// Client tenant data belongs in the business-data tier (SQLite / PostgreSQL).
-func (p *FlatFileProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
-	return nil, ErrNotSupported
 }
 
 // CreateRBACStore returns ErrNotSupported.

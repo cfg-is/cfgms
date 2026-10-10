@@ -238,7 +238,6 @@ func newRollbackStack(t *testing.T) *rollbackStack {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {

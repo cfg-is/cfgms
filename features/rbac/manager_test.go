@@ -26,7 +26,6 @@ func TestManager_Initialize(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -71,7 +70,6 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -115,7 +113,6 @@ func TestManager_SubjectManagement(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -183,7 +180,6 @@ func TestManager_RoleAssignment(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -255,7 +251,6 @@ func TestManager_PermissionChecking(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -349,7 +344,6 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -422,7 +416,6 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -485,7 +478,6 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -548,7 +540,6 @@ func TestManager_ListAllSubjects(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -591,7 +582,6 @@ func TestManager_DeleteSubjectsByTenant(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -635,7 +625,6 @@ func TestManager_DeleteRolesByTenant(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -695,7 +684,6 @@ func newTestManagerWithCache(t *testing.T) (*Manager, *continuous.CacheManager) 
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -786,7 +774,6 @@ func TestManager_CreateTenantDefaultRoles_PersistsAcrossRestart(t *testing.T) {
 	// First manager instance: create default roles for the tenant.
 	m1 := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -804,7 +791,6 @@ func TestManager_CreateTenantDefaultRoles_PersistsAcrossRestart(t *testing.T) {
 	// Second manager instance using the same storage — simulates a restart.
 	m2 := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -839,7 +825,6 @@ func TestManager_CheckPermission_DbError_RecordsAuditEvent(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -961,7 +946,6 @@ func newInheritanceTestManager(t *testing.T) *Manager {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {

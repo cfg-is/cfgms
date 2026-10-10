@@ -48,7 +48,6 @@ func TestNewManagerWithStorage(t *testing.T) {
 			// Test creating manager with storage interfaces
 			manager := NewManagerWithStorage(
 				storageManager.GetAuditStore(),
-				storageManager.GetClientTenantStore(),
 				storageManager.GetRBACStore(),
 			)
 			t.Cleanup(func() {
@@ -146,12 +145,23 @@ func TestNewManagerWithStorage(t *testing.T) {
 // All RBAC managers now require explicit storage configuration via NewManagerWithStorage()
 
 // TestNewManagerWithStorage_NilStorageHandling verifies that NewManagerWithStorage
-// panics when any required store is nil. All three stores (audit, clientTenant,
-// rbac) are required — passing nil for any of them is a programmer error.
+// panics when either required store (audit, rbac) is nil — passing nil for
+// any of them is a programmer error.
 func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
 	assert.Panics(t, func() {
-		NewManagerWithStorage(nil, nil, nil)
+		NewManagerWithStorage(nil, nil)
 	}, "NewManagerWithStorage must panic when all stores are nil")
+	assert.Panics(t, func() {
+		NewManagerWithStorage(nil, storageManager.GetRBACStore())
+	}, "NewManagerWithStorage must panic when the audit store is nil")
+	assert.Panics(t, func() {
+		NewManagerWithStorage(storageManager.GetAuditStore(), nil)
+	}, "NewManagerWithStorage must panic when the RBAC store is nil")
 }
 
 // TestManagerWithStorage_TenantIsolation tests that tenant isolation works correctly with pluggable storage
@@ -164,7 +174,6 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -240,7 +249,6 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {

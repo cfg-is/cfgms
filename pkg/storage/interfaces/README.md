@@ -34,7 +34,6 @@ pkg/storage/interfaces/
 | File | Interface(s) | Purpose |
 |------|--------------|---------|
 | `tenant_store.go` | `TenantStore`, `TenantData`, `TenantHierarchy` | Recursive tenant hierarchy |
-| `client_tenant_store.go` | `ClientTenantStore`, `ClientTenant`, `ClientTenantStatus`, `AdminConsentRequest` | MSP client tenant data (absorbs M365 consent state) |
 | `audit_store.go` | `AuditStore`, `AuditEntry`, `AuditFilter`, `AuditStats` | Immutable audit events |
 | `rbac_store.go` | `RBACStore` | RBAC policy and role data |
 | `registration_store.go` | `RegistrationTokenStore`, `RegistrationTokenData` | Steward registration tokens |
@@ -205,7 +204,6 @@ providers per the ADR-003 mapping:
 | `business.AuditStore` | flatfile |
 | `business.StewardStore` | flatfile |
 | `business.TenantStore` | SQLite |
-| `business.ClientTenantStore` | SQLite |
 | `business.RBACStore` | SQLite |
 | `business.RegistrationTokenStore` | SQLite |
 | `business.SessionStore` | SQLite |
@@ -228,7 +226,6 @@ func NewStorageManagerFromStores(
     auditStore business.AuditStore,
     rbacStore business.RBACStore,
     tenantStore business.TenantStore,
-    clientTenantStore business.ClientTenantStore,
     registrationTokenStore business.RegistrationTokenStore,
     sessionStore business.SessionStore,
     stewardStore business.StewardStore,

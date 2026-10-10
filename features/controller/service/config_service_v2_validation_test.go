@@ -50,7 +50,6 @@ func newServiceWithFailingTenantLookup(t *testing.T) *ConfigurationServiceV2 {
 		sm.GetAuditStore(),
 		sm.GetRBACStore(),
 		&tenantLookupFailingStore{TenantStore: sm.GetTenantStore()},
-		sm.GetClientTenantStore(),
 		sm.GetRegistrationTokenStore(),
 		sm.GetSessionStore(),
 		sm.GetStewardStore(),

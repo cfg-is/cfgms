@@ -158,7 +158,7 @@ type stubAuditStore struct{ business.AuditStore }
 func TestStorageManager_SetAuditStore_RoundTrips(t *testing.T) {
 	original := &stubAuditStore{}
 	sm := interfaces.NewStorageManagerFromStores(
-		nil, original, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, original, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	require.Same(t, original, sm.GetAuditStore(),
 		"precondition: the manager must start with the original store")

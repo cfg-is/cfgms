@@ -68,7 +68,6 @@ func setupDeploymentServerWithPushStore(t *testing.T, wrap func(business.PushSto
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

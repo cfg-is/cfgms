@@ -698,40 +698,6 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_principal_id ON tenant_crossings(principal_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_active_lookup ON tenant_crossings(principal_id, tenant_id, expires_at, revoked_at)`,
 
-		// Client tenants (with M365 extension columns per ADR-003 §2)
-		`CREATE TABLE IF NOT EXISTS client_tenants (
-			id                TEXT PRIMARY KEY,
-			tenant_id         TEXT UNIQUE NOT NULL,
-			tenant_name       TEXT NOT NULL,
-			domain_name       TEXT NOT NULL,
-			admin_email       TEXT NOT NULL,
-			consented_at      TEXT NOT NULL,
-			status            TEXT NOT NULL DEFAULT 'pending',
-			client_identifier TEXT NOT NULL,
-			metadata          TEXT NOT NULL DEFAULT '{}',
-			m365_tenant_id    TEXT,
-			m365_admin_email  TEXT,
-			m365_consented_at TEXT,
-			m365_status       TEXT,
-			created_at        TEXT NOT NULL,
-			updated_at        TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_client_tenants_client_identifier ON client_tenants(client_identifier)`,
-		`CREATE INDEX IF NOT EXISTS idx_client_tenants_status            ON client_tenants(status)`,
-
-		// Admin consent requests
-		`CREATE TABLE IF NOT EXISTS admin_consent_requests (
-			state             TEXT PRIMARY KEY,
-			client_identifier TEXT NOT NULL,
-			client_name       TEXT NOT NULL,
-			requested_by      TEXT NOT NULL,
-			expires_at        TEXT NOT NULL,
-			created_at        TEXT NOT NULL,
-			metadata          TEXT NOT NULL DEFAULT '{}'
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_client_identifier ON admin_consent_requests(client_identifier)`,
-		`CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_expires_at        ON admin_consent_requests(expires_at)`,
-
 		// Audit entries (append-only, no UPDATE/DELETE)
 		`CREATE TABLE IF NOT EXISTS audit_entries (
 			id               TEXT PRIMARY KEY,

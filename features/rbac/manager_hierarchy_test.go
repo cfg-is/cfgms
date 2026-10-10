@@ -23,7 +23,6 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -168,7 +167,6 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -263,7 +261,6 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -341,7 +338,6 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -415,7 +411,6 @@ func TestManager_ValidateHierarchyOperation(t *testing.T) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {

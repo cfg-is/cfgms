@@ -37,7 +37,6 @@ func TestDatabaseProvider_Integration(t *testing.T) {
 	require.NotNil(t, storageManager)
 
 	assert.Equal(t, "database", storageManager.GetProviderName())
-	assert.NotNil(t, storageManager.GetClientTenantStore())
 	assert.NotNil(t, storageManager.GetConfigStore())
 	assert.NotNil(t, storageManager.GetAuditStore())
 

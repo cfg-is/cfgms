@@ -42,7 +42,6 @@ func getRegistryLogger() logging.Logger {
 type BusinessStoreBundle struct {
 	RBAC                business.RBACStore
 	Tenant              business.TenantStore
-	ClientTenant        business.ClientTenantStore
 	RegistrationToken   business.RegistrationTokenStore
 	Session             business.SessionStore
 	Command             business.CommandStore
@@ -220,7 +219,6 @@ type StorageProvider interface {
 	Available() (bool, error) // Check dependencies, connectivity, etc.
 
 	// Storage interface creation - providers return sub-package types.
-	CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error)
 	CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error)
 	CreateAuditStore(config map[string]interface{}) (business.AuditStore, error)
 	CreateRBACStore(config map[string]interface{}) (business.RBACStore, error)
@@ -363,10 +361,6 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 	}
 
 	if available, _ := provider.Available(); available {
-		if err := validateStoreCreation("ClientTenantStore", testConfig, provider.CreateClientTenantStore); err != nil {
-			return err
-		}
-
 		if _, err := provider.CreateConfigStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return fmt.Errorf("failed to create ConfigStore: %w", err)
 		}
@@ -516,16 +510,6 @@ type ProviderInfoV2 struct {
 	ProviderInfo
 	Capabilities ProviderCapabilities `json:"capabilities"`
 	Version      string               `json:"version"`
-}
-
-// CreateClientTenantStoreFromConfig creates a ClientTenantStore from configuration.
-func CreateClientTenantStoreFromConfig(providerName string, config map[string]interface{}) (business.ClientTenantStore, error) {
-	provider, err := GetStorageProvider(providerName)
-	if err != nil {
-		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
-	}
-
-	return provider.CreateClientTenantStore(config)
 }
 
 // CreateConfigStoreFromConfig creates a ConfigStore from configuration.
@@ -687,12 +671,6 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		}
 	}()
 
-	clientTenantStore, err := provider.CreateClientTenantStore(config)
-	if err != nil && !errors.Is(err, business.ErrNotSupported) {
-		return nil, fmt.Errorf("failed to create client tenant store: %w", err)
-	}
-	appendIfCloser(&openedStores, clientTenantStore)
-
 	configStore, err := provider.CreateConfigStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create config store: %w", err)
@@ -838,7 +816,6 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
-		clientTenantStore:      clientTenantStore,
 		configStore:            configStore,
 		auditStore:             auditStore,
 		rbacStore:              rbacStore,
@@ -864,7 +841,6 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 type StorageManager struct {
 	providerName             string
 	provider                 StorageProvider
-	clientTenantStore        business.ClientTenantStore
 	configStore              cfgconfig.ConfigStore
 	auditStore               business.AuditStore
 	rbacStore                business.RBACStore
@@ -907,11 +883,6 @@ func (sm *StorageManager) GetProviderName() string {
 // GetProvider returns the underlying storage provider.
 func (sm *StorageManager) GetProvider() StorageProvider {
 	return sm.provider
-}
-
-// GetClientTenantStore returns the client tenant storage interface.
-func (sm *StorageManager) GetClientTenantStore() business.ClientTenantStore {
-	return sm.clientTenantStore
 }
 
 // GetConfigStore returns the configuration storage interface.
@@ -1274,7 +1245,6 @@ func (sm *StorageManager) GetVersion() string {
 // "file in use by another process" when tests exit.
 func (sm *StorageManager) Close() error {
 	slots := []interface{}{
-		sm.clientTenantStore,
 		sm.configStore,
 		sm.auditStore,
 		sm.rbacStore,
@@ -1372,7 +1342,6 @@ func NewStorageManagerFromStores(
 	auditStore business.AuditStore,
 	rbacStore business.RBACStore,
 	tenantStore business.TenantStore,
-	clientTenantStore business.ClientTenantStore,
 	registrationTokenStore business.RegistrationTokenStore,
 	sessionStore business.SessionStore,
 	stewardStore business.StewardStore,
@@ -1387,7 +1356,6 @@ func NewStorageManagerFromStores(
 		auditStore:             auditStore,
 		rbacStore:              rbacStore,
 		tenantStore:            tenantStore,
-		clientTenantStore:      clientTenantStore,
 		registrationTokenStore: registrationTokenStore,
 		sessionStore:           sessionStore,
 		stewardStore:           stewardStore,
@@ -1452,11 +1420,6 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 	}()
 
-	clientTenantStore, err := provider.CreateClientTenantStore(dbCfg)
-	if err != nil {
-		return nil, fmt.Errorf("cluster storage: failed to create client tenant store: %w", err)
-	}
-	appendIfCloser(&openedStores, clientTenantStore)
 	configStore, err := provider.CreateConfigStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create config store: %w", err)
@@ -1536,7 +1499,6 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 	sm := &StorageManager{
 		providerName:           "database",
 		provider:               provider,
-		clientTenantStore:      clientTenantStore,
 		configStore:            configStore,
 		auditStore:             auditStore,
 		rbacStore:              rbacStore,
@@ -1866,7 +1828,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		}
 		sm := NewStorageManagerFromStores(
 			configStore, auditStore,
-			bundle.RBAC, bundle.Tenant, bundle.ClientTenant,
+			bundle.RBAC, bundle.Tenant,
 			bundle.RegistrationToken, bundle.Session,
 			stewardStore, bundle.Command, bundle.Trigger, bundle.Push,
 		)
@@ -1903,11 +1865,6 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		return nil, fmt.Errorf("failed to create tenant store (sqlite): %w", err)
 	}
 	appendIfCloser(&openedStores, tenantStore)
-	clientTenantStore, err := sqProvider.CreateClientTenantStore(sqliteCfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client tenant store (sqlite): %w", err)
-	}
-	appendIfCloser(&openedStores, clientTenantStore)
 	registrationTokenStore, err := sqProvider.CreateRegistrationTokenStore(sqliteCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create registration token store (sqlite): %w", err)
@@ -1941,7 +1898,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 
 	sm := NewStorageManagerFromStores(
 		configStore, auditStore, rbacStore,
-		tenantStore, clientTenantStore, registrationTokenStore,
+		tenantStore, registrationTokenStore,
 		sessionStore, stewardStore, commandStore, triggerStore, pushStore,
 	)
 	sm.SetPendingRegistrationStore(pendingRegStore)

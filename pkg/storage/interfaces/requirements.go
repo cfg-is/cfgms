@@ -29,7 +29,6 @@ type AbsentCapability struct {
 type StoreName string
 
 const (
-	StoreNameClientTenant        StoreName = "ClientTenantStore"
 	StoreNameConfig              StoreName = "ConfigStore"
 	StoreNameAudit               StoreName = "AuditStore"
 	StoreNameRBAC                StoreName = "RBACStore"
@@ -106,8 +105,6 @@ type StoreRequirement struct {
 // boxing it into interface{} and comparing against nil.
 func (sm *StorageManager) HasStore(name StoreName) bool {
 	switch name {
-	case StoreNameClientTenant:
-		return sm.clientTenantStore != nil
 	case StoreNameConfig:
 		return sm.configStore != nil
 	case StoreNameAudit:

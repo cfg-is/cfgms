@@ -82,13 +82,12 @@ func (s *cfgStoreAsRouter) SnapshotSources(_ context.Context, tenantPath []strin
 
 // InheritanceResolver handles configuration inheritance across tenant hierarchy
 type InheritanceResolver struct {
-	configStore       configSourceRouter
-	clientTenantStore business.ClientTenantStore
-	tenantStore       business.TenantStore
-	clusterRegistry   clusterMembership  // optional; nil means no cluster-policies cascade
-	roleProvider      roleConfigProvider // optional; nil means no role-policies cascade
-	logger            logging.Logger     // never nil after construction; see log()
-	auditManager      *audit.Manager     // optional; nil means posture-downgrade refusals are logged but not audited
+	configStore     configSourceRouter
+	tenantStore     business.TenantStore
+	clusterRegistry clusterMembership  // optional; nil means no cluster-policies cascade
+	roleProvider    roleConfigProvider // optional; nil means no role-policies cascade
+	logger          logging.Logger     // never nil after construction; see log()
+	auditManager    *audit.Manager     // optional; nil means posture-downgrade refusals are logged but not audited
 }
 
 // log returns the resolver's logger, defaulting to a NoopLogger when the resolver
@@ -128,12 +127,11 @@ func (ir *InheritanceResolver) WithAuditManager(m *audit.Manager) *InheritanceRe
 // NewInheritanceResolver creates an InheritanceResolver backed by a ConfigSourceRouter.
 // Pass a *controllerRouter (or any configSourceRouter implementation) so that
 // SnapshotSources is called once per cascade for atomic source resolution.
-func NewInheritanceResolver(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore) *InheritanceResolver {
+func NewInheritanceResolver(configStore configSourceRouter, tenantStore business.TenantStore) *InheritanceResolver {
 	return &InheritanceResolver{
-		configStore:       configStore,
-		clientTenantStore: clientTenantStore,
-		tenantStore:       tenantStore,
-		logger:            logging.NewLogger("info"),
+		configStore: configStore,
+		tenantStore: tenantStore,
+		logger:      logging.NewLogger("info"),
 	}
 }
 
@@ -143,10 +141,9 @@ func NewInheritanceResolver(configStore configSourceRouter, clientTenantStore bu
 // Prefer NewInheritanceResolver with a real ConfigSourceRouter for production deployments.
 func NewInheritanceResolverWithStorageManager(storageManager *interfaces.StorageManager) *InheritanceResolver {
 	return &InheritanceResolver{
-		configStore:       &cfgStoreAsRouter{ConfigStore: storageManager.GetConfigStore()},
-		clientTenantStore: storageManager.GetClientTenantStore(),
-		tenantStore:       storageManager.GetTenantStore(),
-		logger:            logging.NewLogger("info"),
+		configStore: &cfgStoreAsRouter{ConfigStore: storageManager.GetConfigStore()},
+		tenantStore: storageManager.GetTenantStore(),
+		logger:      logging.NewLogger("info"),
 	}
 }
 
@@ -154,13 +151,12 @@ func NewInheritanceResolverWithStorageManager(storageManager *interfaces.Storage
 // membership provider wired in. When registry is non-nil, ResolveConfiguration applies
 // cluster-policies configs after the tenant hierarchy and before device-level config.
 // Pass nil for registry to get byte-identical behavior to NewInheritanceResolver.
-func NewInheritanceResolverWithClusters(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership) *InheritanceResolver {
+func NewInheritanceResolverWithClusters(configStore configSourceRouter, tenantStore business.TenantStore, registry clusterMembership) *InheritanceResolver {
 	return &InheritanceResolver{
-		configStore:       configStore,
-		clientTenantStore: clientTenantStore,
-		tenantStore:       tenantStore,
-		clusterRegistry:   registry,
-		logger:            logging.NewLogger("info"),
+		configStore:     configStore,
+		tenantStore:     tenantStore,
+		clusterRegistry: registry,
+		logger:          logging.NewLogger("info"),
 	}
 }
 
@@ -168,14 +164,13 @@ func NewInheritanceResolverWithClusters(configStore configSourceRouter, clientTe
 // membership provider and a role config provider wired in. Pass nil for either to
 // disable that cascade layer. Role fragments are applied after cluster-policies and
 // before device-level config (precedence order: cluster < role < device).
-func NewInheritanceResolverWithRoles(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership, roles roleConfigProvider) *InheritanceResolver {
+func NewInheritanceResolverWithRoles(configStore configSourceRouter, tenantStore business.TenantStore, registry clusterMembership, roles roleConfigProvider) *InheritanceResolver {
 	return &InheritanceResolver{
-		configStore:       configStore,
-		clientTenantStore: clientTenantStore,
-		tenantStore:       tenantStore,
-		clusterRegistry:   registry,
-		roleProvider:      roles,
-		logger:            logging.NewLogger("info"),
+		configStore:     configStore,
+		tenantStore:     tenantStore,
+		clusterRegistry: registry,
+		roleProvider:    roles,
+		logger:          logging.NewLogger("info"),
 	}
 }
 

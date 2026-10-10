@@ -219,7 +219,6 @@ const (
 	kindRBACSubject         = "rbac_subject"
 	kindRBACAssignment      = "rbac_role_assignment"
 	kindTenant              = "tenant"
-	kindClientTenant        = "client_tenant"
 	kindRegistrationToken   = "registration_token"
 	kindSession             = "session"
 	kindSteward             = "steward"
@@ -264,12 +263,6 @@ func exportAll(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.R
 		return nil, err
 	}
 	out = append(out, rbacRecs...)
-
-	ctRecs, err := exportClientTenants(ctx, mgr)
-	if err != nil {
-		return nil, err
-	}
-	out = append(out, ctRecs...)
 
 	tokenRecs, err := exportRegistrationTokens(ctx, mgr)
 	if err != nil {
@@ -528,26 +521,6 @@ func exportRBAC(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.
 		recs = append(recs, migrate.Record{Kind: kindRBACAssignment, ID: a.Id, Data: data})
 	}
 
-	return recs, nil
-}
-
-func exportClientTenants(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
-	store := mgr.GetClientTenantStore()
-	if store == nil {
-		return nil, nil
-	}
-	tenants, err := store.ListClientTenants("")
-	if err != nil {
-		return nil, fmt.Errorf("list client tenants: %w", err)
-	}
-	recs := make([]migrate.Record, 0, len(tenants))
-	for _, ct := range tenants {
-		data, err := marshal(ct)
-		if err != nil {
-			return nil, err
-		}
-		recs = append(recs, migrate.Record{Kind: kindClientTenant, ID: ct.TenantID, Data: data})
-	}
 	return recs, nil
 }
 
@@ -815,8 +788,8 @@ func importRecord(ctx context.Context, mgr *interfaces.StorageManager, rec migra
 		return importRBACAssignment(ctx, mgr, rec)
 	case kindTenant:
 		return importTenant(ctx, mgr, rec)
-	case kindClientTenant:
-		return importClientTenant(ctx, mgr, rec)
+	case "client_tenant":
+		return fmt.Errorf("record kind %q was removed and cannot be imported", rec.Kind)
 	case kindRegistrationToken:
 		return importRegistrationToken(ctx, mgr, rec)
 	case kindSession:
@@ -1003,18 +976,6 @@ func importTenant(ctx context.Context, mgr *interfaces.StorageManager, rec migra
 		return err
 	}
 	return nil
-}
-
-func importClientTenant(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
-	store := mgr.GetClientTenantStore()
-	if store == nil {
-		return fmt.Errorf("client tenant store not available")
-	}
-	var ct business.ClientTenant
-	if err := json.Unmarshal(rec.Data, &ct); err != nil {
-		return fmt.Errorf("unmarshal client tenant: %w", err)
-	}
-	return store.StoreClientTenant(&ct)
 }
 
 func importRegistrationToken(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
@@ -1387,7 +1348,6 @@ func supportedKindsByManager(mgr *interfaces.StorageManager) map[string]bool {
 		kindRBACSubject:         rbac,
 		kindRBACAssignment:      rbac,
 		kindTenant:              mgr.GetTenantStore() != nil,
-		kindClientTenant:        mgr.GetClientTenantStore() != nil,
 		kindRegistrationToken:   mgr.GetRegistrationTokenStore() != nil,
 		kindSession:             mgr.GetSessionStore() != nil,
 		kindSteward:             mgr.GetStewardStore() != nil,

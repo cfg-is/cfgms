@@ -44,7 +44,7 @@ func TestStorageManagerClose_ClosesStoreOwningItsOwnHandle(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, bundle.BlastRadiusPolicy)
 
-	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	sm.SetBlastRadiusPolicyStore(bundle.BlastRadiusPolicy)
 
 	ctx := context.Background()

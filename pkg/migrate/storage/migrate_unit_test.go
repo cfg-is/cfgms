@@ -111,11 +111,10 @@ func TestStorageMigrator_OSStoOSSRoundTrip(t *testing.T) {
 	report, err := m.Run(ctx)
 	require.NoError(t, err, "OSS→OSS migration must succeed")
 
-	// Verify counts for all seeded store kinds, including RBAC and client_tenant.
+	// Verify counts for all seeded store kinds, including RBAC.
 	wantKinds := []string{
 		"tenant", "config", "audit",
 		"rbac_permission", "rbac_role", "rbac_subject", "rbac_role_assignment",
-		"client_tenant",
 		"registration_token", "session", "steward", "command",
 		"trigger", "push",
 		"ip_trust", "refresh_policy", "pending_refresh", "pending_registration",
@@ -139,9 +138,8 @@ func TestStorageMigrator_OSStoOSSRoundTrip(t *testing.T) {
 	assert.True(t, srcPending.ExpiresAt.Equal(dstPending.ExpiresAt), "pending-reg-seed-1 ExpiresAt")
 	assert.Nil(t, dstPending.ClaimedAt, "pending-reg-seed-1 ClaimedAt")
 
-	// RBAC and client-tenant records must arrive field-for-field, not just as counts.
+	// RBAC records must arrive field-for-field, not just as counts.
 	assertRBACMatches(ctx, t, src, dst)
-	assertClientTenantMatches(t, src, dst, "ct-tenant-seed-1")
 
 	dstClaimed, err := dst.GetPendingRegistrationStore().GetPendingByID(ctx, "pending-reg-seed-2")
 	require.NoError(t, err, "read back destination pending-reg-seed-2")
@@ -270,11 +268,11 @@ func TestStorageMigrator_OSStoOSS_Idempotent(t *testing.T) {
 	}
 }
 
-// TestStorageMigrator_RBACAndClientTenantUpsertOnRerun verifies the update half of
-// the RBAC and client-tenant upserts: after a first migration the destination
+// TestStorageMigrator_RBACUpsertOnRerun verifies the update half of
+// the RBAC upserts: after a first migration the destination
 // already holds every record, so a re-run must overwrite the existing rows with
 // the current source values instead of failing or duplicating them.
-func TestStorageMigrator_RBACAndClientTenantUpsertOnRerun(t *testing.T) {
+func TestStorageMigrator_RBACUpsertOnRerun(t *testing.T) {
 	ctx := context.Background()
 
 	src := newOSSManager(t)
@@ -285,7 +283,7 @@ func TestStorageMigrator_RBACAndClientTenantUpsertOnRerun(t *testing.T) {
 	_, err := m.Run(ctx)
 	require.NoError(t, err, "first run must succeed")
 
-	// Mutate every RBAC record and the client tenant at the source.
+	// Mutate every RBAC record at the source.
 	rbac := src.GetRBACStore()
 	require.NoError(t, rbac.StorePermission(ctx, &common.Permission{
 		Id:           "perm-seed-1",
@@ -307,18 +305,12 @@ func TestStorageMigrator_RBACAndClientTenantUpsertOnRerun(t *testing.T) {
 		TenantId:    "tenant-seed-1",
 		IsActive:    false,
 	}))
-	srcCT, err := src.GetClientTenantStore().GetClientTenant("ct-tenant-seed-1")
-	require.NoError(t, err)
-	srcCT.TenantName = "Seed Client Org (revised)"
-	srcCT.Status = business.ClientTenantStatusSuspended
-	require.NoError(t, src.GetClientTenantStore().StoreClientTenant(srcCT))
 
 	report, err := m.Run(ctx)
 	require.NoError(t, err, "re-run against a populated destination must succeed")
 
 	// The destination now reflects the revised source values, with no duplicates.
 	assertRBACMatches(ctx, t, src, dst)
-	assertClientTenantMatches(t, src, dst, "ct-tenant-seed-1")
 
 	dstRole, err := dst.GetRBACStore().GetRole(ctx, "role-seed-1")
 	require.NoError(t, err)
@@ -329,11 +321,8 @@ func TestStorageMigrator_RBACAndClientTenantUpsertOnRerun(t *testing.T) {
 	dstPerm, err := dst.GetRBACStore().GetPermission(ctx, "perm-seed-1")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"create", "update"}, dstPerm.Actions, "permission update must reach the destination")
-	dstCT, err := dst.GetClientTenantStore().GetClientTenant("ct-tenant-seed-1")
-	require.NoError(t, err)
-	assert.Equal(t, business.ClientTenantStatusSuspended, dstCT.Status, "client tenant update must reach the destination")
 
-	for _, kind := range []string{"rbac_permission", "rbac_role", "rbac_subject", "rbac_role_assignment", "client_tenant"} {
+	for _, kind := range []string{"rbac_permission", "rbac_role", "rbac_subject", "rbac_role_assignment"} {
 		assert.Equal(t, 1, report.Counts[kind], "re-run must migrate exactly one %q record", kind)
 	}
 
@@ -343,9 +332,6 @@ func TestStorageMigrator_RBACAndClientTenantUpsertOnRerun(t *testing.T) {
 	perms, err := dst.GetRBACStore().ListPermissions(ctx, "")
 	require.NoError(t, err)
 	assert.Len(t, perms, 1, "re-run must not duplicate permissions in the destination")
-	cts, err := dst.GetClientTenantStore().ListClientTenants("")
-	require.NoError(t, err)
-	assert.Len(t, cts, 1, "re-run must not duplicate client tenants in the destination")
 }
 
 // TestStorageMigrator_UnsupportedKind_DefaultFails verifies that migrating a kind
@@ -547,4 +533,25 @@ func TestStorageMigrator_AcknowledgedSkip_IdempotentRerun(t *testing.T) {
 		assert.True(t, ok, "second run must report kind %q", kind)
 		assert.Equal(t, c1, c2, "second run count for %q must match first", kind)
 	}
+}
+
+// TestImportRecord_ClientTenantKindRemoved verifies that an import stream
+// carrying a record of the removed client_tenant kind fails loudly, names the
+// kind as removed, and writes nothing to the target manager.
+func TestImportRecord_ClientTenantKindRemoved(t *testing.T) {
+	ctx := context.Background()
+	dst := newOSSManager(t)
+
+	err := migratestorage.ImportRecordForTest(ctx, dst, migrate.Record{
+		Kind: "client_tenant",
+		ID:   "ct-removed-1",
+		Data: []byte(`{"id":"ct-removed-1","tenant_id":"ct-tenant-removed-1"}`),
+	})
+	require.Error(t, err, "a client_tenant record must not be silently skipped")
+	assert.Contains(t, err.Error(), "client_tenant")
+	assert.Contains(t, err.Error(), "removed")
+
+	tenants, err := dst.GetTenantStore().ListTenants(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, tenants, "the target manager must hold no record from the rejected stream")
 }

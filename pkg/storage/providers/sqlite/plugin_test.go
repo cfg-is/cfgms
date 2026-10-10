@@ -3,6 +3,7 @@
 package sqlite_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite" // driver for the raw sqlite_master inspection below
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -131,4 +133,31 @@ func TestSQLiteProvider_ClusterCapable_False(t *testing.T) {
 	p, err := interfaces.GetStorageProvider("sqlite")
 	require.NoError(t, err)
 	assert.False(t, p.ClusterCapable(), "SQLiteProvider must not be cluster-capable (single-file DB cannot serve as shared state across controller nodes)")
+}
+
+// TestSQLiteSchema_NoClientTenantTables verifies that a fresh store, opened with
+// the provider's real schema, creates neither the client_tenants nor the
+// admin_consent_requests table.
+func TestSQLiteSchema_NoClientTenantTables(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "schema.db")
+
+	p, err := interfaces.GetStorageProvider("sqlite")
+	require.NoError(t, err)
+	store, err := p.CreateTenantStore(map[string]interface{}{"path": dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	var tableCount int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tableCount))
+	require.Greater(t, tableCount, 0, "precondition: the provider schema must have been applied")
+
+	for _, table := range []string{"client_tenants", "admin_consent_requests"} {
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, table).Scan(&n))
+		assert.Zero(t, n, "table %s must not be created", table)
+	}
 }

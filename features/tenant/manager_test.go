@@ -892,7 +892,6 @@ func TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant(t *testing.T) {
 	failingRBACStore := &failBulkRolesRBACStore{RBACStore: storageManager.GetRBACStore()}
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		failingRBACStore,
 	)
 	require.NoError(t, rbacManager.Initialize(ctx))
