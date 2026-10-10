@@ -70,6 +70,12 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
 
+  it('renders the Support access entry beside Tenants as a link to /support-access', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /support access/i })).toHaveAttribute('href', '/support-access')
+    expect(screen.getByRole('link', { name: /^tenants$/i })).toHaveAttribute('href', '/tenants')
+  })
+
   it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934, #2935)', () => {
     renderShell()
     expect(screen.queryAllByText(/soon/i)).toHaveLength(0)

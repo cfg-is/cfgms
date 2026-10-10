@@ -11,9 +11,8 @@
  *   GET    /api/v1/tenant-crossings/active                     → fetchActiveCrossings
  *   DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}    → endCrossing
  *
- * The controller serialises business.TenantCrossing without JSON tags, so a
- * crossing arrives with Go field names (`ExpiresAt`); the parser also accepts
- * snake_case so a future tagged response keeps working.
+ * The controller serialises a crossing with snake_case keys (`expires_at`); the
+ * parser also accepts the Go field names (`ExpiresAt`) and coerces every string.
  *
  * Banner persistence: a root operator cannot enumerate its own crossings (GET
  * access-grants on a walled tenant returns the crossing challenge), so the
@@ -32,11 +31,7 @@ import { TenantApiError } from './useTenants.ts'
 export const justificationMinLen = 10
 export const justificationMaxLen = 1000
 export const breakGlassWindowMinutes = 30
-export const grantMinMinutes = 1
-export const grantMaxMinutes = 1440
 
-/** Machine code of the 400 the controller returns for an empty principal_id. */
-export const errCodeMissingPrincipalID = 'MISSING_PRINCIPAL_ID'
 /** `error` value of the 401 crossing challenge body. */
 export const crossingChallengeError = 'tenant_crossing_required'
 
@@ -49,6 +44,8 @@ export interface Crossing {
   tenantId: string
   principalId: string
   kind: CrossingKind
+  /** Break-glass invoker's display name (best effort); empty for a grant. */
+  principalName: string
   grantedBy: string
   justification: string
   createdAt: string
@@ -58,6 +55,8 @@ export interface Crossing {
   reasonCategory: string
   /** `approved` or `pending` (awaiting a second approver); empty when the server omits it. */
   approvalState: string
+  /** Server-derived: `active`, `pending`, `expired` or `revoked`; empty when the server omits it. */
+  status: string
 }
 
 /** Break-glass reason categories with the plain-words labels the prompt shows. */
@@ -89,6 +88,7 @@ export function parseCrossing(value: unknown): Crossing | null {
     id,
     tenantId: s(pick(r.tenant_id, r.TenantID)),
     principalId: s(pick(r.principal_id, r.PrincipalID)),
+    principalName: s(pick(r.principal_name, r.PrincipalName)),
     kind: s(pick(r.kind, r.Kind)),
     grantedBy: s(pick(r.granted_by, r.GrantedBy)),
     justification: s(pick(r.justification, r.Justification)),
@@ -97,6 +97,7 @@ export function parseCrossing(value: unknown): Crossing | null {
     revokedAt: typeof revoked === 'string' && revoked !== '' ? revoked : null,
     reasonCategory: s(pick(r.reason_category, r.ReasonCategory)),
     approvalState: s(pick(r.approval_state, r.ApprovalState)),
+    status: s(pick(r.status, r.Status)),
   }
 }
 
@@ -198,22 +199,16 @@ export async function fetchActiveCrossings(): Promise<ActiveCrossing[]> {
   return parseActiveCrossingList(unwrap(await response.json()))
 }
 
+/** A grant names no person: it opens the tenant to all root support for the duration. */
 export interface CreateGrantRequest {
-  principalId: string
   durationMinutes: number
-  justification?: string
 }
 
 export async function createAccessGrant(tenantId: string, req: CreateGrantRequest): Promise<Crossing> {
-  const body: Record<string, unknown> = {
-    principal_id: req.principalId,
-    duration_minutes: req.durationMinutes,
-  }
-  if (req.justification) body.justification = req.justification
   const response = await apiFetch(crossingsPath(tenantId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ duration_minutes: req.durationMinutes }),
   })
   if (!response.ok) throw await crossingError(response, 'Grant support access failed')
   const crossing = parseCrossing(unwrap(await response.json()))

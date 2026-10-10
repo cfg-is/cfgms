@@ -1237,28 +1237,15 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     expect(window.sessionStorage.getItem('cfgms.tenants.crossingBanner')).toBeNull()
   })
 
-  it('shows Allow support access for an MSP admin and lists the new grant', async () => {
-    let granted = false
-    renderSession({ username: 'msp-owner', tenant_id: 'msp-a', root_scope: false }, (url, init) => {
-      if (url.endsWith('/api/v1/tenants')) return makeTenantsResponse([makeTenant()])
-      if (url.endsWith('/api/v1/tenants/msp-a/access-grants') && init?.method === 'POST') {
-        granted = true
-        expect(JSON.parse(String(init.body))).toMatchObject({ principal_id: 'root-op', duration_minutes: 60 })
-        return jsonResponse(201, { data: crossingBody({ ID: 'g-1', Kind: 'grant' }) })
-      }
-      if (url.endsWith('/api/v1/tenants/msp-a/access-grants')) {
-        return jsonResponse(200, { data: granted ? [crossingBody({ ID: 'g-1', Kind: 'grant' })] : [] })
-      }
-      return jsonResponse(404, {})
-    })
+  it('links the MSP row action to the Support access page', async () => {
+    renderSession({ username: 'msp-owner', tenant_id: 'msp-a', root_scope: false }, (url) =>
+      url.endsWith('/api/v1/tenants') ? makeTenantsResponse([makeTenant()]) : jsonResponse(404, {}),
+    )
     await signIn()
     await waitFor(() => screen.getByTestId('tenants-table'))
-    fireEvent.click(screen.getByTestId('allow-support-btn'))
-    fireEvent.change(screen.getByTestId('support-principal-input'), { target: { value: 'root-op' } })
-    fireEvent.click(screen.getByTestId('support-submit-btn'))
-    const row = await screen.findByTestId('crossing-row')
-    expect(row).toHaveAttribute('data-crossing-id', 'g-1')
-    expect(row).toHaveTextContent('root-op')
+    const link = screen.getByTestId('allow-support-btn')
+    expect(link.tagName).toBe('A')
+    expect(link).toHaveAttribute('href', '/support-access')
     expect(screen.queryByTestId('support-access-dialog')).not.toBeInTheDocument()
   })
 
