@@ -118,9 +118,9 @@ func (s *Server) toTenantCrossingResponse(ctx context.Context, c *business.Tenan
 }
 
 // handleCreateTenantCrossingGrant implements POST /api/v1/tenants/{id}/access-grants.
-// An MSP administrator (or unscoped admin) already authorized for tenantID explicitly
-// grants a root-scoped support principal time-boxed, revocable access into their own
-// tenant subtree (ADR-025 Decision 2(a)). No justification is required — this is
+// An MSP administrator (or unscoped admin) already authorized for tenantID opens their
+// own tenant subtree to all root support for a time-boxed, revocable duration; the grant
+// names no individual principal (ADR-025 Decision 2(a)). No justification is required — this is
 // opt-in, client-initiated trust, not an emergency override. Returns 404 for an unknown
 // or out-of-scope target tenant (existence-oracle prevention, matching handleGetTenant).
 func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.Request) {
@@ -149,8 +149,8 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 			"access grants cannot be created on the root tenant", "ROOT_TENANT_NOT_GRANTABLE")
 		return
 	}
-	// A grant is client-initiated consent flowing from an MSP to a root-scoped support
-	// principal. A root-scoped caller minting one would be consenting on the MSP's behalf
+	// A grant is client-initiated consent flowing from an MSP to all root-scoped
+	// support. A root-scoped caller minting one would be consenting on the MSP's behalf
 	// — self-dealing that bypasses Decision 2(b)'s justification, 30-minute cap, and
 	// critical-severity audit trail. Break-glass is the root-scoped caller's only path.
 	// "Root-scoped" is the tenant boundary's own predicate, so an account-bound
