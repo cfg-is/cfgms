@@ -268,7 +268,14 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// independent of commandStore — deployments without a durable command store
 	// still get best-effort fan-out, same as before this story.
 	if s.commandPublisher != nil {
-		result := push.Fanout(r.Context(), &cfg, targeted, s.commandPublisher, s.logger)
+		var commandIDs map[string]string
+		if recordsByStewardID != nil {
+			commandIDs = make(map[string]string, len(recordsByStewardID))
+			for id, rec := range recordsByStewardID {
+				commandIDs[id] = rec.ID
+			}
+		}
+		result := push.FanoutWithCommandIDs(r.Context(), &cfg, targeted, s.commandPublisher, commandIDs, s.logger)
 		s.logger.Info("Config push fan-out complete",
 			"push_id", pushID,
 			"succeeded", len(result.Succeeded),

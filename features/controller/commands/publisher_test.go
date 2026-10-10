@@ -263,3 +263,54 @@ func TestPublishCommandWithSignerAndCallback_TimesOutWithoutCompletion(t *testin
 	}
 	assert.Empty(t, pub.GetPendingCommands())
 }
+
+// TestPublishCommandWithID_SendsCallerID verifies the caller's ID reaches the
+// steward unchanged, with the term stamped, and that an empty ID sends nothing.
+func TestPublishCommandWithID_SendsCallerID(t *testing.T) {
+	const wantTerm uint64 = 7
+
+	setup := func(t *testing.T) (*commands.Publisher, chan *types.SignedCommand) {
+		pub, client := newTestPublisher(t, &staticTermSource{term: wantTerm})
+		received := make(chan *types.SignedCommand, 2)
+		require.NoError(t, client.SubscribeCommands(context.Background(), "steward-test", cpinterfaces.CommandHandler(func(_ context.Context, cmd *types.SignedCommand) error {
+			received <- cmd
+			return nil
+		})))
+		return pub, received
+	}
+
+	t.Run("sends caller ID and term", func(t *testing.T) {
+		pub, received := setup(t)
+		require.NoError(t, pub.PublishCommandWithID(context.Background(), "rec-1", "steward-test", types.CommandSyncConfig, nil))
+		select {
+		case cmd := <-received:
+			assert.Equal(t, "rec-1", cmd.Command.ID)
+			assert.Equal(t, wantTerm, cmd.Command.Term)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for command")
+		}
+	})
+
+	t.Run("empty ID is rejected and nothing is sent", func(t *testing.T) {
+		pub, received := setup(t)
+		require.Error(t, pub.PublishCommandWithID(context.Background(), "", "steward-test", types.CommandSyncConfig, nil))
+		require.Error(t, pub.TriggerConfigSyncWithID(context.Background(), "", "steward-test"))
+		select {
+		case <-received:
+			t.Fatal("no command may be sent for an empty ID")
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+
+	t.Run("TriggerConfigSyncWithID sends sync_config under the ID", func(t *testing.T) {
+		pub, received := setup(t)
+		require.NoError(t, pub.TriggerConfigSyncWithID(context.Background(), "rec-2", "steward-test"))
+		select {
+		case cmd := <-received:
+			assert.Equal(t, "rec-2", cmd.Command.ID)
+			assert.Equal(t, types.CommandSyncConfig, cmd.Command.Type)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for command")
+		}
+	})
+}

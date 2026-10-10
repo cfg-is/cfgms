@@ -904,6 +904,15 @@ on-connect hook, calls `CommandStore.ListPendingDeliveries` keyed by the
 mTLS-authenticated connecting steward's own identity (never a caller-supplied
 ID) and republishes each pending row through the normal publish path.
 
+A record-backed command is sent to the steward under its delivery record ID
+(`Publisher.PublishCommandWithID` / `TriggerConfigSyncWithID`): the `command_id`
+an operator sees in the API is the `Command.ID` the steward receives. A drained
+re-send of a `pending` record reuses that same ID, so a steward that already
+accepted it inside its replay window (`ErrCommandReplay`, 5 minutes) drops the
+re-send instead of running the command a second time. A re-send after the window,
+or after a steward restart, still runs; `sync_config` is idempotent. Send paths
+with no delivery record keep generated IDs.
+
 On-connect hooks run as soon as the ControlChannel stream registers, which is
 before the steward has subscribed its command handler: the steward opens the
 stream first and builds its handler after. The steward-side control-plane

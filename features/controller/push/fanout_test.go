@@ -24,6 +24,7 @@ import (
 type recordingControlPlane struct {
 	mu       sync.Mutex
 	received []string
+	cmdIDs   map[string]string
 	failFor  map[string]error
 }
 
@@ -43,6 +44,13 @@ func (r *recordingControlPlane) ReceivedIDs() []string {
 	return out
 }
 
+// CommandIDFor returns the Command.ID the given steward received.
+func (r *recordingControlPlane) CommandIDFor(stewardID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cmdIDs[stewardID]
+}
+
 func (r *recordingControlPlane) Name() string      { return "recording" }
 func (r *recordingControlPlane) IsConnected() bool { return true }
 
@@ -60,6 +68,10 @@ func (r *recordingControlPlane) SendCommand(_ context.Context, cmd *controlplane
 		return err
 	}
 	r.received = append(r.received, id)
+	if r.cmdIDs == nil {
+		r.cmdIDs = make(map[string]string)
+	}
+	r.cmdIDs[id] = cmd.Command.ID
 	return nil
 }
 
@@ -196,4 +208,20 @@ func TestFanout_PartialFailure(t *testing.T) {
 	require.Contains(t, result.Failed, "steward-fail")
 	assert.ErrorContains(t, result.Failed["steward-fail"], "connection refused")
 	assert.ElementsMatch(t, []string{"steward-ok"}, cp.ReceivedIDs())
+}
+
+// TestFanoutWithCommandIDs_UsesRecordID verifies a mapped steward is sent its
+// command under the mapped ID and an unmapped steward gets a generated one.
+func TestFanoutWithCommandIDs_UsesRecordID(t *testing.T) {
+	cp := newRecordingControlPlane(nil)
+	pub := makePublisher(t, cp)
+
+	stewards := []*service.StewardInfo{activeSteward("s-a"), activeSteward("s-b")}
+	result := push.FanoutWithCommandIDs(context.Background(), validFanoutCfg(), stewards, pub,
+		map[string]string{"s-a": "rec-a"}, logging.NewNoopLogger())
+
+	assert.ElementsMatch(t, []string{"s-a", "s-b"}, result.Succeeded)
+	assert.Equal(t, "rec-a", cp.CommandIDFor("s-a"))
+	assert.NotEmpty(t, cp.CommandIDFor("s-b"))
+	assert.NotEqual(t, "rec-a", cp.CommandIDFor("s-b"))
 }

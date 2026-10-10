@@ -95,7 +95,7 @@ func (h *PendingDeliveryDrainHook) OnConnect(ctx context.Context, stewardID stri
 		if rec == nil {
 			continue
 		}
-		if _, pubErr := publisher.PublishCommand(ctx, stewardID, controlplaneTypes.CommandType(rec.Type), rec.Payload); pubErr != nil {
+		if pubErr := publisher.PublishCommandWithID(ctx, rec.ID, stewardID, controlplaneTypes.CommandType(rec.Type), rec.Payload); pubErr != nil {
 			if h.logger != nil {
 				h.logger.Warn("pending-delivery drain: redelivery attempt failed, leaving pending",
 					"steward_id", logging.SanitizeLogValue(stewardID),

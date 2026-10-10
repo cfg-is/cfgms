@@ -171,6 +171,20 @@ func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID stri
 // Story #919: Signs the command before transmission.
 func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) (string, error) {
 	commandID := uuid.New().String()
+	if err := p.PublishCommandWithID(ctx, commandID, stewardID, cmdType, params); err != nil {
+		return "", err
+	}
+	return commandID, nil
+}
+
+// PublishCommandWithID publishes a command under a caller-supplied ID, so a
+// delivery record and the command the steward receives share one identifier.
+// A re-send under the same ID is dropped by the steward's replay cache.
+// An empty commandID is an error and nothing is sent.
+func (p *Publisher) PublishCommandWithID(ctx context.Context, commandID, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) error {
+	if commandID == "" {
+		return fmt.Errorf("command ID must not be empty")
+	}
 
 	cmd := &controlplaneTypes.Command{
 		ID:        commandID,
@@ -183,20 +197,20 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 
 	sc, err := p.signCommand(cmd)
 	if err != nil {
-		return "", fmt.Errorf("failed to sign command: %w", err)
+		return fmt.Errorf("failed to sign command: %w", err)
 	}
 
 	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
-		return "", fmt.Errorf("failed to send command: %w", err)
+		return fmt.Errorf("failed to send command: %w", err)
 	}
 
 	p.logger.Info("Sent command to steward",
-		"command_id", commandID,
+		"command_id", logging.SanitizeLogValue(commandID),
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"type", cmdType,
 		"signed", sc.Signature != nil)
 
-	return commandID, nil
+	return nil
 }
 
 // PublishCommandWithCallback publishes a command and waits for completion event.
@@ -426,6 +440,20 @@ func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (st
 		"command_id", commandID)
 
 	return commandID, nil
+}
+
+// TriggerConfigSyncWithID sends a sync_config command under a caller-supplied
+// command ID (the delivery record ID).
+func (p *Publisher) TriggerConfigSyncWithID(ctx context.Context, commandID, stewardID string) error {
+	if err := p.PublishCommandWithID(ctx, commandID, stewardID, controlplaneTypes.CommandSyncConfig, nil); err != nil {
+		return fmt.Errorf("failed to trigger config sync: %w", err)
+	}
+
+	p.logger.Info("Triggered config sync",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"command_id", logging.SanitizeLogValue(commandID))
+
+	return nil
 }
 
 // TriggerDNASync sends a sync_dna command to a steward.

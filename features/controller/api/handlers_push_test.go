@@ -300,7 +300,23 @@ func TestHandleConfigPush_AuditEventEmitted(t *testing.T) {
 type syncedControlPlane struct {
 	mu       sync.Mutex
 	received []string
+	cmdIDs   map[string]string // steward ID -> Command.ID last received
+	allIDs   map[string][]string
 	wg       sync.WaitGroup
+}
+
+// CommandIDsFor returns every Command.ID the given steward received.
+func (c *syncedControlPlane) CommandIDsFor(stewardID string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.allIDs[stewardID]...)
+}
+
+// CommandIDFor returns the Command.ID the given steward last received.
+func (c *syncedControlPlane) CommandIDFor(stewardID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cmdIDs[stewardID]
 }
 
 func (c *syncedControlPlane) ReceivedIDs() []string {
@@ -324,6 +340,14 @@ func (c *syncedControlPlane) SendCommand(_ context.Context, cmd *controlplaneTyp
 	defer c.wg.Done()
 	c.mu.Lock()
 	c.received = append(c.received, cmd.Command.StewardID)
+	if c.cmdIDs == nil {
+		c.cmdIDs = make(map[string]string)
+	}
+	c.cmdIDs[cmd.Command.StewardID] = cmd.Command.ID
+	if c.allIDs == nil {
+		c.allIDs = make(map[string][]string)
+	}
+	c.allIDs[cmd.Command.StewardID] = append(c.allIDs[cmd.Command.StewardID], cmd.Command.ID)
 	c.mu.Unlock()
 	return nil
 }
@@ -1609,5 +1633,32 @@ func TestGetConfigPush_AssuranceBoundary(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, httpRec.Code,
 				"principal %+v accessing record in %q", tc.principal, recordTenant)
 		})
+	}
+}
+
+// TestHandleConfigPush_CommandIDMatchesDeliveryRecord proves each steward
+// receives its command under the ID of the delivery record the response
+// returns (Issue #4865).
+func TestHandleConfigPush_CommandIDMatchesDeliveryRecord(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, _ := makePushServerWithCommandStore(t, cp)
+
+	payload := validPushPayload()
+	registerActiveSteward(t, server.controllerService, "cmdid-dna-1", payload.TenantID)
+	registerActiveSteward(t, server.controllerService, "cmdid-dna-2", payload.TenantID)
+	cp.wg.Add(2)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 2)
+	for _, d := range resp.Deliveries {
+		require.NotEmpty(t, d.CommandID)
+		assert.Equal(t, d.CommandID, cp.CommandIDFor(d.StewardID),
+			"steward %s must receive the command under its delivery record ID", d.StewardID)
 	}
 }

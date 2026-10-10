@@ -43,7 +43,7 @@ func (s *Server) syncStewardConfig(ctx context.Context, stewardID, tenantID, iss
 			"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		return
 	}
-	if _, err := s.commandPublisher.TriggerConfigSync(ctx, stewardID); err != nil {
+	if err := s.commandPublisher.TriggerConfigSyncWithID(ctx, rec.ID, stewardID); err != nil {
 		s.logger.Warn("Failed to trigger config sync after effective-config change",
 			"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		if updErr := store.UpdateDeliveryStatus(ctx, rec.ID, business.DeliveryStatusPending, logging.SanitizeLogValue(err.Error())); updErr != nil {

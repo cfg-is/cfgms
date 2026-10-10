@@ -1033,7 +1033,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		} else {
 			deliveryStatus := rec.DeliveryStatus
 			if s.commandPublisher != nil {
-				if _, pubErr := s.commandPublisher.TriggerConfigSync(r.Context(), stewardID); pubErr != nil {
+				if pubErr := s.commandPublisher.TriggerConfigSyncWithID(r.Context(), rec.ID, stewardID); pubErr != nil {
 					s.logger.Warn("Failed to trigger config sync after config update",
 						"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(pubErr.Error()))
 					if updErr := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusPending, logging.SanitizeLogValue(pubErr.Error())); updErr != nil {
