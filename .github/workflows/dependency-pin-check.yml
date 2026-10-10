@@ -155,11 +155,16 @@ jobs:
     permissions:
       contents: read
       issues: write
+    outputs:
+      # JSON array of <image>:<tag>@sha256:<digest> refs whose tag now resolves
+      # to a digest that differs from the one pinned in the repo.
+      drifted_refs: ${{ steps.pins.outputs.drifted_refs }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
     - name: Check for outdated pinned tools
+      id: pins
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -279,6 +284,7 @@ jobs:
         # else in the repo notices that, so compare each pinned digest against
         # the tag's current digest and surface drift in this weekly issue.
         echo "Checking Docker base-image digest drift..."
+        drifted_refs=""
         while IFS= read -r from_line; do
           [ -n "$from_line" ] || continue
           ref=${from_line#FROM }
@@ -287,16 +293,20 @@ jobs:
           pinned_digest=${ref#*@}
           repo=${image%:*}
           tag=${image##*:}
-          # Official Docker Hub images only (no slash). Anything else is not
-          # resolvable with this token flow — report it rather than skip silently.
+          # Docker Hub only. Official images live under library/<name>; others
+          # under <namespace>/<name>. A registry host (first segment has a dot
+          # or colon) is not resolvable with this token flow — report it rather
+          # than skip silently.
           case "$repo" in
-            */*)
-              echo "  SKIP: $image (not a Docker Hub official image)"
-              warnings="${warnings}- **Base image \`${image}\`**: digest drift not checked — only Docker Hub official images are resolvable by this job.\n"
+            *.*/*|*:*/*)
+              echo "  SKIP: $image (not a Docker Hub image)"
+              warnings="${warnings}- **Base image \`${image}\`**: digest drift not checked — only Docker Hub images are resolvable by this job.\n"
               continue
               ;;
+            */*) hub_repo="$repo" ;;
+            *) hub_repo="library/${repo}" ;;
           esac
-          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/${repo}:pull" \
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${hub_repo}:pull" \
             | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null || echo "")
           if [ -z "$token" ]; then
             echo "  WARN: could not obtain registry token for ${image}"
@@ -308,7 +318,7 @@ jobs:
             -H "Accept: application/vnd.oci.image.index.v1+json" \
             -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
             -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-            "https://registry-1.docker.io/v2/library/${repo}/manifests/${tag}" \
+            "https://registry-1.docker.io/v2/${hub_repo}/manifests/${tag}" \
             | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2}' || echo "")
           if [ -z "$current_digest" ]; then
             echo "  WARN: could not resolve current digest for ${image}"
@@ -316,11 +326,24 @@ jobs:
           elif [ "$current_digest" != "$pinned_digest" ]; then
             echo "  DRIFT: ${image} pinned=${pinned_digest} current=${current_digest}"
             outdated="${outdated}- **Base image \`${image}\`**: pinned \`${pinned_digest}\`, tag now resolves to \`${current_digest}\`. The tag was re-pushed (usually a patched base). Update the \`FROM\` digest.\n"
+            drifted_refs="${drifted_refs}${image}@${current_digest}"$'\n'
           else
             echo "  OK: ${image} digest current"
           fi
-        done < <(grep -hoE '^FROM [^[:space:]]+@sha256:[0-9a-f]{64}' \
-          .devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null | sort -u)
+        done < <(
+          {
+            grep -hoE '^FROM [^[:space:]]+@sha256:[0-9a-f]{64}' \
+              .devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null
+            # The CI image list (.github/ci-images.yml) also covers the compose
+            # test services and the workflow pre-pull refs.
+            sed -nE 's/^- upstream:[[:space:]]+([^[:space:]]+@sha256:[0-9a-f]{64}).*/FROM \1/p' .github/ci-images.yml
+          } | sort -u
+        )
+
+        # Hand each drifted ref to the mirror job so the new digest is in
+        # ghcr.io before any bump story exists.
+        drifted_json=$(printf '%s' "$drifted_refs" | jq -R . | jq -sc 'map(select(. != ""))')
+        echo "drifted_refs=${drifted_json}" >> "$GITHUB_OUTPUT"
 
         if [ -z "$outdated" ] && [ -z "$warnings" ]; then
           echo ""
@@ -375,3 +398,27 @@ jobs:
         new_issue_number=${new_issue_url##*/}
         printf "${header}\n\n${body}" \
           | gh issue comment "$new_issue_number" --repo "$GITHUB_REPOSITORY" --body-file -
+
+  # Mirror each newly found upstream digest into ghcr.io/cfg-is/ci-mirror in the
+  # same run, so a pin-bump PR always points at a digest that is already
+  # mirrored (founder decision 2026-10-09, Issue #4858). Schedule/dispatch only:
+  # this job holds packages: write and must never be reachable from the
+  # pull_request trigger.
+  mirror-new-digests:
+    name: Mirror New Upstream Digests
+    needs: check-tool-versions
+    if: github.event_name != 'pull_request' && needs.check-tool-versions.outputs.drifted_refs != '' && needs.check-tool-versions.outputs.drifted_refs != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        upstream_ref: ${{ fromJSON(needs.check-tool-versions.outputs.drifted_refs) }}
+    permissions:
+      contents: read
+      packages: write
+    # zizmor suggests '$/' here, but GitHub documents it for step-level uses
+    # only, not for job-level reusable-workflow calls (jobs.<id>.uses); './' is
+    # the documented form, so suppress this one finding rather than the audit.
+    uses: ./.github/workflows/ci-image-mirror.yml # zizmor: ignore[self-repository]
+    with:
+      upstream_ref: ${{ matrix.upstream_ref }}

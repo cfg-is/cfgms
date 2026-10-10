@@ -204,6 +204,46 @@ make test-with-real-storage  # Tests storage providers with real infrastructure
 4. **Speed**: Infrastructure validation happens once at the beginning, not per test
 5. **Flexibility**: Development mode allows local work without full infrastructure
 
+## CI Image Mirror
+
+CI pulls container images from Docker Hub, which limits unauthenticated pulls per IP address; GitHub-hosted runners share addresses, so a busy hour can fail the Docker test-infrastructure step with `toomanyrequests`. Every third-party image CI pulls is therefore mirrored to `ghcr.io/cfg-is/ci-mirror/`.
+
+> Status: the mirror is built and filled by this mechanism, but CI still pulls the upstream images. A follow-up story switches every CI image reference to the mirror.
+
+### The image list
+
+`.github/ci-images.yml` is the single list. Each entry is two lines:
+
+```yaml
+- upstream: redis:7-alpine@sha256:<64 hex>
+  mirror: redis
+```
+
+It covers the `docker-compose.test.yml` services, every Dockerfile `FROM` image, and the workflow `pull_with_retry` pre-pulls. Every entry is digest-pinned; the destination is `ghcr.io/cfg-is/ci-mirror/<mirror>:<tag>`. Two tags of one image (`gitea/gitea:1.21.0`, `gitea/gitea:1.21`) are two entries sharing a mirror name.
+
+`scripts/mirror-ci-images.sh --check` fails when an image reference in the compose file, a Dockerfile or a workflow step is missing from the list or has a different digest, so the list cannot drift from what CI pulls. It runs in `ci-image-mirror.yml` before any copy, and `scripts/mirror-ci-images_test.sh` covers it.
+
+Out of the list on purpose: images CI pulls from a registry other than Docker Hub (the ZAP image behind `zaproxy/action-baseline` comes from `ghcr.io`), user-facing example compose files, and images CFGMS publishes.
+
+### Filling and refreshing the mirror
+
+`.github/workflows/ci-image-mirror.yml` runs `scripts/mirror-ci-images.sh`, which copies each `<image>:<tag>@<digest>` with `docker buildx imagetools create`. The copy keeps the manifest digest and the full multi-arch index, so the Trivy image scan stays valid, and an entry whose digest is already in the mirror is skipped. `--dry-run` prints each copy without credentials.
+
+Triggers: `push` to `develop` touching `.github/ci-images.yml` or the workflow file; `workflow_call`; `workflow_dispatch`. It never runs from `pull_request`, and `packages: write` is granted to the mirror job only.
+
+The weekly `dependency-pin-check.yml` compares each listed digest with its tag's current digest. For every drift it calls the mirror workflow with `upstream_ref` (`--only <ref>`) in the same run, so a pin-bump PR always points at a digest that is already mirrored. There is no separate mirror schedule.
+
+### Adding a CI image
+
+1. Resolve the digest: `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`.
+2. Reference it as `<image>:<tag>@sha256:...` in the compose file, Dockerfile or workflow step.
+3. Add the two-line entry to `.github/ci-images.yml`.
+4. Run `scripts/mirror-ci-images.sh --check`. Merging to `develop` fills the mirror.
+
+### One-time step after first publish
+
+New `ghcr.io` packages are private. After the first mirror run, a person must open each `ci-mirror/*` package in the GitHub web UI (Package settings → Change visibility) and set it to public, so unauthenticated and fork-PR pulls work. Package creation and visibility cannot be done from the workflow.
+
 ## Future Enhancements
 
 - GitHub Actions integration for automatic infrastructure setup

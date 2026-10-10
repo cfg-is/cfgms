@@ -81,6 +81,17 @@ def make_repo(tmp: Path) -> Path:
         "      run: |\n"
         "        pull_with_retry golang:1.26.5@sha256:" + "0" * 64 + "\n"
     )
+    # The CI image list: a compose-only image, an image that is also a
+    # Dockerfile FROM base, and a golang: entry that must join the toolchain.
+    (root / ".github/ci-images.yml").write_text(
+        "# header\n"
+        "- upstream: acme/db:latest-pg15@sha256:" + "e" * 64 + "\n"
+        "  mirror: db\n"
+        "- upstream: alpine:3.23@sha256:" + "c" * 64 + "\n"
+        "  mirror: alpine\n"
+        "- upstream: golang:1.26.5-alpine3.23@sha256:" + "b" * 64 + "\n"
+        "  mirror: golang\n"
+    )
     (root / "web/package.json").write_text(json.dumps({
         "dependencies": {"react": "^19.0.0"},
         "devDependencies": {"vitest": "^3.0.0"},
@@ -241,6 +252,40 @@ def main() -> int:
         check(("windows-setup.ps1", 6) in tool_files,
               "pairs the Url match with its Sha256 line, which carries no version string of its own",
               f"saw {sorted(tool_files)}")
+
+        print("CI image list (#4858)")
+        by_name = {p["name"]: p for p in images}
+        db = by_name.get("docker:acme/db:latest-pg15")
+        check(db is not None and db["kind"] == "docker",
+              "a compose-only list entry is emitted as a docker pin",
+              f"saw {sorted(by_name)}")
+        if db:
+            check(db["tag"] == "latest-pg15" and db["digest"] == "sha256:" + "e" * 64,
+                  "list pin carries tag and digest")
+            check(db["upstream_ref"] == "acme/db:latest-pg15@sha256:" + "e" * 64,
+                  "list pin carries the upstream reference")
+            check(db["mirror_name"] == "db"
+                  and db["mirror"] == "ghcr.io/cfg-is/ci-mirror/db:latest-pg15",
+                  "list pin carries the mirror name and mirror reference",
+                  f"saw {db.get('mirror_name')} {db.get('mirror')}")
+            check(db["release_source"] == "https://hub.docker.com/r/acme/db",
+                  "namespaced image points at its Docker Hub repository page")
+            check([l["file"] for l in db["locations"]] == [".github/ci-images.yml"],
+                  "list pin location is the list file")
+        alp = by_name.get("docker:alpine:3.23")
+        check(alp is not None and {l["file"] for l in alp["locations"]}
+              == {"cmd/controller/Dockerfile", ".github/ci-images.yml"},
+              "an image in both a Dockerfile and the list is one pin with both locations",
+              f"saw {alp and alp['locations']}")
+        check(alp is not None and alp.get("mirror_name") == "alpine",
+              "Dockerfile pin also present in the list gains the mirror name")
+        check(not any(p["package"] == "golang" for p in images),
+              "golang: list entries are not emitted as docker pins")
+        check(any(l["file"] == ".github/ci-images.yml"
+                  and "golang:1.26.5-alpine3.23" in l["match"]
+                  for l in toolchain["locations"]),
+              "golang: list entry joins the go-toolchain lockstep locations[]",
+              f"saw {[l for l in toolchain['locations'] if 'ci-images' in l['file']]}")
 
         print("claude-code-cli exemption (#4473)")
         check(not hasattr(dp, "discover_claude_code_cli"),

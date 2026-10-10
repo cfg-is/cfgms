@@ -156,6 +156,12 @@ docker buildx imagetools inspect alpine:3.23 --format '{{.Manifest.Digest}}'
 
 Vulnerability comes from the image scan in 2b, not from GHSA.
 
+Images listed in `.github/ci-images.yml` (compose test services as well as
+Dockerfile bases) are `docker` pins too, with `upstream_ref`, `mirror_name` and
+`mirror` fields. The weekly pin check already mirrors a newly found digest to
+`ghcr.io/cfg-is/ci-mirror` before any bump story exists; the bump story edits
+the list line and every consumer of that ref together.
+
 ### 2d. Per-pin research (kinds `lockstep`, `tool`, `mcp`)
 
 For each of these pins (run in parallel where independent — separate Bash calls in one assistant turn):
