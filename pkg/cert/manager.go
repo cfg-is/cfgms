@@ -127,6 +127,10 @@ type Manager struct {
 	closeOnce sync.Once
 	// signingCacheTTLOverride replaces signingResolveCacheTTL in tests.
 	signingCacheTTLOverride *time.Duration
+	// signingCacheNowOverride replaces time.Now for signing-cache expiry in
+	// tests, so cache-bound behaviour does not depend on how long unrelated
+	// work (key generation under -race) takes on the wall clock.
+	signingCacheNowOverride func() time.Time
 	// migrationAudit receives signing-identity migration events (import, refusal,
 	// promotion, local-key removal). Set by SetSigningMigrationAuditSink.
 	migrationAuditMu sync.RWMutex
