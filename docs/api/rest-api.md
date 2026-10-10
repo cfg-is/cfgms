@@ -2291,11 +2291,12 @@ Returns `{"credential_present": true, "configured": true}` and never the passwor
 
 #### `POST /api/v1/notifications/email/test`
 
-Sends a fixed test message to one address. Body: `{"to": "ops@acme-corp.example"}`. The address must be a single
-bare address (validated with `net/mail`) and is not stored.
+Sends a fixed test message to the configured `from` address. The request body must be empty: the recipient and
+the message content are fixed server-side, and any field in the body (`to`, `subject`, `body`, ...) is rejected
+with `400 Bad Request`.
 
 ```json
-{"data": {"delivered": true, "recipients": [{"address": "ops@acme-corp.example", "accepted": true}]}}
+{"data": {"delivered": true, "recipients": [{"address": "cfgms@acme-corp.example", "accepted": true}]}}
 ```
 
 On failure `delivered` is `false` and `failure_reason` carries a sanitized reason that never contains the password.

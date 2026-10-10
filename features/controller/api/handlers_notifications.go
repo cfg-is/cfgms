@@ -8,9 +8,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/mail"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -228,13 +225,9 @@ func (s *Server) handlePutEmailCredential(w http.ResponseWriter, r *http.Request
 	s.writeSuccessResponse(w, map[string]interface{}{"credential_present": true, "configured": true})
 }
 
-// emailRecipientPattern restricts the test-send recipient to a plain
-// addr-spec with no quoting, comments or control characters.
-var emailRecipientPattern = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}$`)
-
-type emailTestRequest struct {
-	To string `json:"to"`
-}
+// emailTestRequest carries no fields: the recipient and the message content are
+// both server-side. Any field in the request body is rejected.
+type emailTestRequest struct{}
 
 type emailTestRecipient struct {
 	Address  string `json:"address"`
@@ -249,27 +242,28 @@ type emailTestResponse struct {
 }
 
 // handleTestEmail handles POST /api/v1/notifications/email/test. It sends a
-// fixed message to one validated address; the address is not stored.
+// fixed message to the configured from-address. Neither the recipient nor any
+// content comes from the request, so no request value reaches the message.
 func (s *Server) handleTestEmail(w http.ResponseWriter, r *http.Request) {
 	if !emailScopeAllowed(r) {
 		s.writeErrorResponse(w, http.StatusForbidden, "email settings require a root-scoped principal", "FORBIDDEN")
 		return
 	}
 	var req emailTestRequest
-	// Unknown fields (e.g. subject, body) are rejected: the message content is
-	// fixed server-side and the caller chooses only the recipient.
+	// An empty body is accepted; unknown fields (to, subject, body, ...) are rejected.
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEmailCredentialBody))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+	if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "request body must be empty: the recipient and content are fixed", "INVALID_REQUEST")
 		return
 	}
-	to := strings.TrimSpace(req.To)
-	addr, err := mail.ParseAddress(to)
-	if err != nil || addr.Address != to || !emailRecipientPattern.MatchString(to) {
-		s.writeErrorResponse(w, http.StatusBadRequest, "to must be a single valid email address", "INVALID_REQUEST")
+	ec := s.emailConfig()
+	if !ec.Configured() {
+		s.writeErrorResponse(w, http.StatusConflict, "email delivery is not configured or its credential has not been stored", "EMAIL_NOT_CONFIGURED")
 		return
 	}
+	// The recipient is the controller's own configured from-address.
+	recipient := ec.From
 
 	n := s.EmailNotifier()
 	if n == nil {
@@ -279,7 +273,7 @@ func (s *Server) handleTestEmail(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), emailTestSendTimeout)
 	defer cancel()
-	res, err := n.Send(ctx, notifif.Message{To: []string{addr.Address}, Subject: emailTestSubject, Body: emailTestBody})
+	res, err := n.Send(ctx, notifif.Message{To: []string{recipient}, Subject: emailTestSubject, Body: emailTestBody})
 	resp := emailTestResponse{Recipients: []emailTestRecipient{}}
 	if err != nil {
 		s.logger.Warn("Email test send failed", "error", logging.SanitizeLogValue(err.Error()))

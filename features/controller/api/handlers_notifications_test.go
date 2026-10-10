@@ -188,7 +188,7 @@ func TestEmail_NotConfigured_ReportsFalseAndNilAccessor(t *testing.T) {
 	// Credential and test-send both refuse cleanly rather than panic.
 	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPut, "/x", `{"password":"p"}`, server.handlePutEmailCredential)
 	assert.Equal(t, http.StatusConflict, rec.Code)
-	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", `{"to":"a@acme-corp.example"}`, server.handleTestEmail)
+	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", ``, server.handleTestEmail)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
@@ -234,13 +234,13 @@ func TestEmail_CredentialStoredOnlyInSecretStore_ThenTestSendDelivers(t *testing
 	assert.Positive(t, scanned)
 
 	// Test send delivers over TLS.
-	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", `{"to":"ops@acme-corp.example"}`, server.handleTestEmail)
+	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", ``, server.handleTestEmail)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	data = decodeEmailData(t, rec)
 	assert.Equal(t, true, data["delivered"])
 	recips := data["recipients"].([]interface{})
 	require.Len(t, recips, 1)
-	assert.Equal(t, "ops@acme-corp.example", recips[0].(map[string]interface{})["address"])
+	assert.Equal(t, "cfgms@acme-corp.example", recips[0].(map[string]interface{})["address"])
 	require.Len(t, smtp.Messages(), 1)
 }
 
@@ -251,7 +251,7 @@ func TestEmail_TestSend_WrongPassword_SanitizedFailure(t *testing.T) {
 	rec := emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPut, "/x", `{"password":"`+wrong+`"}`, server.handlePutEmailCredential)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", `{"to":"ops@acme-corp.example"}`, server.handleTestEmail)
+	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", ``, server.handleTestEmail)
 	require.Equal(t, http.StatusOK, rec.Code)
 	data := decodeEmailData(t, rec)
 	assert.Equal(t, false, data["delivered"])
@@ -261,14 +261,16 @@ func TestEmail_TestSend_WrongPassword_SanitizedFailure(t *testing.T) {
 	assert.Empty(t, smtp.Messages())
 }
 
-func TestEmail_TestSend_InvalidRecipientRejected(t *testing.T) {
+func TestEmail_TestSend_RequestRecipientRejected(t *testing.T) {
 	smtp := newEmailTestSMTPServer(t)
 	server := newEmailTestServer(t, smtp)
-	for _, to := range []string{``, `not-an-address`, `Ops <ops@acme-corp.example>`, "a@acme-corp.example\r\nBcc: b@acme-corp.example", `a@x.example, b@x.example`} {
-		body, _ := json.Marshal(map[string]string{"to": to})
-		rec := emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", string(body), server.handleTestEmail)
-		assert.Equal(t, http.StatusBadRequest, rec.Code, "to=%q", to)
+	rec := emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPut, "/x", `{"password":"`+testSMTPPassword+`"}`, server.handlePutEmailCredential)
+	require.Equal(t, http.StatusOK, rec.Code)
+	for _, body := range []string{`{"to":"ops@acme-corp.example"}`, `{"to":""}`, `{"recipient":"a@acme-corp.example"}`} {
+		rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", body, server.handleTestEmail)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, body)
 	}
+	assert.Empty(t, smtp.Messages())
 }
 
 func TestEmail_TestSend_RequestSuppliedContentRejected(t *testing.T) {
@@ -278,19 +280,20 @@ func TestEmail_TestSend_RequestSuppliedContentRejected(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	for _, body := range []string{
-		`{"to":"ops@acme-corp.example","subject":"attacker subject"}`,
-		`{"to":"ops@acme-corp.example","body":"attacker body"}`,
+		`{"subject":"attacker subject"}`,
+		`{"body":"attacker body"}`,
 	} {
 		rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", body, server.handleTestEmail)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, body)
 	}
 	assert.Empty(t, smtp.Messages(), "nothing is sent when content fields are supplied")
 
-	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", `{"to":"ops@acme-corp.example"}`, server.handleTestEmail)
+	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPost, "/x", ``, server.handleTestEmail)
 	require.Equal(t, http.StatusOK, rec.Code)
 	msgs := smtp.Messages()
 	require.Len(t, msgs, 1)
 	assert.Contains(t, msgs[0], emailTestSubject)
+	assert.Contains(t, msgs[0], "cfgms@acme-corp.example")
 }
 
 func TestEmail_CredentialBodyBoundedAndRequired(t *testing.T) {
@@ -319,7 +322,7 @@ func TestEmail_RefusedWithoutPermissionOrBelowStrong(t *testing.T) {
 	routes := []struct{ method, path, body string }{
 		{http.MethodGet, "/api/v1/notifications/email", ""},
 		{http.MethodPut, "/api/v1/notifications/email/credential", `{"password":"p"}`},
-		{http.MethodPost, "/api/v1/notifications/email/test", `{"to":"a@acme-corp.example"}`},
+		{http.MethodPost, "/api/v1/notifications/email/test", ``},
 	}
 	noPerm := NewTestKey(t, server, []string{"steward:list"})
 	machine := NewTestKey(t, server, []string{"notification:configure"}) // holds the permission, but API keys are below AssuranceStrong
