@@ -131,7 +131,17 @@ a node's local disk.
 
 If the cluster has not yet moved to the shared signing identity (nodes still sign with
 local keys), rotation is refused with HTTP 409 `SIGNING_MIGRATION_PENDING` and nothing
-changes.
+changes. The move is described in
+[Cluster Signing Identity Migration](../operations/cluster-signing-migration.md), including
+the transition window in which a steward that trusts only a legacy node key rejects what the
+cluster signs.
+
+The cluster behaviour in this section, retirement at overlap end and emergency revoke are
+exercised end to end by `features/steward/client/signing_identity_cluster_test.go` (three
+controller nodes, shared stores, real steward handlers) and by the fleet suite
+(`TestFleetRotation`, legs `RetirementAtOverlapEnd` and `EmergencyRevoke`). The design is
+recorded in the cluster signing identity amendment of
+[ADR-031](../architecture/decisions/031-controller-cluster-service-model.md).
 
 A node that crashes between step 2 and step 3 leaves a stored key that no cursor
 references. It is harmless — nothing signs with it and a later rotation generates a
