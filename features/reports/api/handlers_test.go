@@ -58,6 +58,9 @@ func newReportsStack(t *testing.T) *reportsStack {
 
 	handler := New(newEngine(t, egProvider, logger), exporters.New(logger), registry, alertStore, logger)
 	handler.SetTenantAncestry(newTestTenantAncestry(t))
+	// Root callers in these tests model an unrestricted certificate admin; the
+	// crossing boundary has its own tests (reports_crossing_test.go).
+	handler.SetTenantReadScope(func(*http.Request, string) TenantReadScope { return crossingTestScope{unrestricted: true} })
 
 	return &reportsStack{
 		handler:    handler,
@@ -310,28 +313,33 @@ func TestParseTenantIDs(t *testing.T) {
 	h := newReportsStack(t).handler
 
 	t.Run("scoped caller ignores tenant_id query param", func(t *testing.T) {
-		ids := h.parseTenantIDs(request("GET", "/?tenant_id=tenant-b", "tenant-a", nil))
+		ids, err := h.parseTenantIDs(request("GET", "/?tenant_id=tenant-b", "tenant-a", nil), crossingTestScope{})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"tenant-a"}, ids,
 			"scoped caller must receive only their own tenant, not the query param")
 	})
 
 	t.Run("scoped caller with no param returns own tenant", func(t *testing.T) {
-		ids := h.parseTenantIDs(request("GET", "/", "tenant-a", nil))
+		ids, err := h.parseTenantIDs(request("GET", "/", "tenant-a", nil), crossingTestScope{})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"tenant-a"}, ids)
 	})
 
 	t.Run("root caller passes through single tenant_id query param", func(t *testing.T) {
-		ids := h.parseTenantIDs(request("GET", "/?tenant_id=tenant-b", "", nil))
+		ids, err := h.parseTenantIDs(request("GET", "/?tenant_id=tenant-b", "", nil), crossingTestScope{unrestricted: true})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"tenant-b"}, ids)
 	})
 
 	t.Run("root caller with no param returns nil", func(t *testing.T) {
-		ids := h.parseTenantIDs(request("GET", "/", "", nil))
+		ids, err := h.parseTenantIDs(request("GET", "/", "", nil), crossingTestScope{unrestricted: true})
+		require.NoError(t, err)
 		assert.Nil(t, ids)
 	})
 
 	t.Run("root caller honors multiple tenant_id params", func(t *testing.T) {
-		ids := h.parseTenantIDs(request("GET", "/?tenant_id=tenant-b&tenant_id=tenant-c", "", nil))
+		ids, err := h.parseTenantIDs(request("GET", "/?tenant_id=tenant-b&tenant_id=tenant-c", "", nil), crossingTestScope{unrestricted: true})
+		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{"tenant-b", "tenant-c"}, ids)
 	})
 }
@@ -483,24 +491,25 @@ func TestGenerateReport(t *testing.T) {
 	})
 }
 
+// generateBody builds a POST /reports/generate body.
+func generateBody(t *testing.T, tenantIDs, deviceIDs []string) []byte {
+	t.Helper()
+	body, err := json.Marshal(interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeCompliance,
+		Template:  "compliance-summary",
+		TimeRange: testTimeRange(),
+		DeviceIDs: deviceIDs,
+		TenantIDs: tenantIDs,
+		Format:    interfaces.FormatJSON,
+	})
+	require.NoError(t, err)
+	return body
+}
+
 // TestGenerateReport_TenantScope proves POST /reports/generate cannot be used to
 // escape the tenant boundary enforced on the GET endpoints: body-supplied
 // TenantIDs are overridden and body-supplied DeviceIDs are authorized.
 func TestGenerateReport_TenantScope(t *testing.T) {
-	generateBody := func(t *testing.T, tenantIDs, deviceIDs []string) []byte {
-		t.Helper()
-		body, err := json.Marshal(interfaces.ReportRequest{
-			Type:      interfaces.ReportTypeCompliance,
-			Template:  "compliance-summary",
-			TimeRange: testTimeRange(),
-			DeviceIDs: deviceIDs,
-			TenantIDs: tenantIDs,
-			Format:    interfaces.FormatJSON,
-		})
-		require.NoError(t, err)
-		return body
-	}
-
 	t.Run("scoped caller cannot request another tenant's device", func(t *testing.T) {
 		stack := newReportsStack(t)
 		stack.addDevice(t, "steward-a1", "tenant-a")

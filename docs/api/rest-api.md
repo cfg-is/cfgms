@@ -2341,6 +2341,14 @@ Reports endpoints are registered only when a `ReportsHandler` is wired in (`SetR
 
 Device selectors (`device_id`, `device_ids`, and `device_ids` in the generate request body) are the selector the report data path actually resolves, so they are authorized against the steward registry before reaching the report engine. A handler wired without a device→tenant authority fails closed: a tenant-scoped caller supplying a device selector receives 503, never unauthorized data.
 
+**Root callers and tenant crossings:** a root-scoped operator subject to the ADR-025 crossing boundary needs a crossing to read a client tenant's report data. This applies to `POST /reports/generate`, `GET /reports/compliance/status`, `GET /reports/drift/summary` and the three `GET /reports/dashboard/*` endpoints:
+
+- **Tenant selection.** `tenant_id` / `tenant_ids` (or `tenant_ids` in the generate body) naming a client tenant without a crossing answers `401` with the tenant-crossing challenge (`WWW-Authenticate: CFGMS-StepUp ... required="tenant-crossing"`). With no tenant named, the report covers the root tenant plus crossing-covered tenants only, never all tenants.
+- **Device selection.** Each named device is authorized through its owning tenant. A device in a client tenant without a crossing answers the same challenge; an unknown device answers `404`.
+- **Anonymized aggregates.** `GET /reports/dashboard/overview` and `/trends` add an `anonymized_fleet` object to the response for such callers: online and offline steward counts, operating-system platform mix and steward version mix over the stewards of tenants the caller holds no crossing for (ADR-025 Amendment 6 A6.1). It contains counts only — no host names, device identifiers or per-device rows. `GET /reports/dashboard/alerts` is per-device and is restricted to readable tenants.
+- With an active crossing the same requests succeed as before. Tenant-scoped callers and unrestricted certificate admins are unchanged.
+- `GET /api/v1/health/*` and `GET /api/v1/monitoring/*` describe the controller platform (ADR-025 Decision 4, system and platform logs and metrics) and stay reachable to a root caller without a crossing.
+
 #### POST /api/v1/reports/generate
 
 Generate a report on demand.
