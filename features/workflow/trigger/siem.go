@@ -227,11 +227,23 @@ func (sp *SIEMProcessor) ProcessLogEntry(ctx context.Context, logEntry map[strin
 		return fmt.Errorf("SIEM processor is not running")
 	}
 
+	// The entry's tenant is the caller's authenticated tenant and nothing else.
+	// An empty tenant never means "all tenants", so a tenantless call is refused.
+	tenantID := extractTenantFromContext(ctx)
+	if tenantID == "" {
+		sp.logger.WarnCtx(ctx, "Refusing SIEM log entry with no tenant in context")
+		return fmt.Errorf("log entry refused: no tenant in context")
+	}
+
 	// Convert map to LogEntry struct
 	entry, err := sp.mapToLogEntry(logEntry)
 	if err != nil {
 		return fmt.Errorf("failed to convert log entry: %w", err)
 	}
+
+	// Stamp the tenant before the entry crosses the buffer: processLogEntry runs
+	// later under the Start context, not the caller's.
+	entry.TenantID = tenantID
 
 	// Send to buffer for processing
 	select {
@@ -239,7 +251,6 @@ func (sp *SIEMProcessor) ProcessLogEntry(ctx context.Context, logEntry map[strin
 		return nil
 	default:
 		// Buffer is full, drop the log entry
-		tenantID := extractTenantFromContext(ctx)
 		logger := sp.logger.WithTenant(tenantID)
 		logger.WarnCtx(ctx, "Log buffer full, dropping log entry",
 			"source", entry.Source,
@@ -285,6 +296,12 @@ func (sp *SIEMProcessor) processLogEntry(ctx context.Context, entry LogEntry) {
 	sp.mutex.RUnlock()
 
 	for triggerID, trigger := range triggers {
+		// Tenant scoping comes first: a trigger only ever sees its own tenant's
+		// entries. An empty trigger tenant matches nothing.
+		if trigger.TenantID == "" || trigger.TenantID != entry.TenantID {
+			continue
+		}
+
 		if !trigger.SIEM.Enabled {
 			continue
 		}
@@ -883,9 +900,8 @@ func (sp *SIEMProcessor) mapToLogEntry(logEntry map[string]interface{}) (LogEntr
 		entry.Source = sp.toString(source)
 	}
 
-	if tenantID, exists := logEntry["tenant_id"]; exists {
-		entry.TenantID = sp.toString(tenantID)
-	}
+	// A payload "tenant_id" is deliberately ignored: ProcessLogEntry stamps the
+	// caller's authenticated tenant.
 
 	// Copy all other fields
 	for k, v := range logEntry {

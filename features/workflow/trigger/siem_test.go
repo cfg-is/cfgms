@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 func TestSIEMProcessor_NewSIEMProcessor(t *testing.T) {
@@ -281,7 +282,7 @@ func TestSIEMProcessor_ProcessLogEntry(t *testing.T) {
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
 	processor := NewSIEMProcessor(mockTriggerManager, mockWorkflowTrigger)
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-123")
 
 	tests := []struct {
 		name        string
@@ -961,7 +962,7 @@ func TestSIEMProcessor_MapToLogEntry(t *testing.T) {
 				Level:    "error",
 				Message:  "Authentication failed",
 				Source:   "auth-service",
-				TenantID: "tenant-123",
+				TenantID: "",
 				Fields: map[string]interface{}{
 					"user_id":    "user-456",
 					"ip_address": "192.168.1.100",
@@ -1023,4 +1024,165 @@ func TestSIEMProcessor_MapToLogEntry(t *testing.T) {
 			}
 		})
 	}
+}
+
+const (
+	siemSentinelTenant   = "tenant-sentinel"
+	siemSentinelWorkflow = "sentinel-workflow"
+)
+
+// newTenantScopedSIEMFixture starts a real SIEMProcessor with a threshold-1 SIEM
+// trigger owned by triggerTenant, plus a threshold-1 sentinel trigger owned by a
+// separate sentinel tenant. The processor has a single consumer goroutine reading a
+// FIFO buffer, so once a sentinel entry sent after the entry under test has fired
+// its workflow, the entry under test has been fully processed.
+func newTenantScopedSIEMFixture(t *testing.T, triggerTenant string) (*SIEMProcessor, *TestWorkflowTrigger, *Trigger) {
+	t.Helper()
+
+	wf := NewTestWorkflowTrigger()
+	// A real TriggerManagerImpl (no storage/scheduler/secrets needed): the SIEM
+	// processing path under test does not call back into the manager.
+	processor := NewSIEMProcessor(NewTriggerManager(nil, nil, nil, nil, wf, nil), wf)
+	require.NoError(t, processor.Start(context.Background()))
+	t.Cleanup(func() { _ = processor.Stop(context.Background()) })
+
+	trigger := &Trigger{
+		ID:           "siem-tenant-b",
+		Name:         "tenant b trigger",
+		Type:         TriggerTypeSIEM,
+		Status:       TriggerStatusActive,
+		TenantID:     triggerTenant,
+		WorkflowName: "tenant-b-workflow",
+		SIEM: &SIEMConfig{
+			EventTypes: []string{"error"},
+			Threshold:  &SIEMThreshold{Count: 1},
+			WindowSize: time.Minute,
+			Enabled:    true,
+		},
+	}
+	require.NoError(t, processor.RegisterSIEMTrigger(context.Background(), trigger))
+
+	sentinel := &Trigger{
+		ID:           "siem-sentinel",
+		Name:         "sentinel trigger",
+		Type:         TriggerTypeSIEM,
+		Status:       TriggerStatusActive,
+		TenantID:     siemSentinelTenant,
+		WorkflowName: siemSentinelWorkflow,
+		SIEM: &SIEMConfig{
+			EventTypes: []string{"error"},
+			Threshold:  &SIEMThreshold{Count: 1},
+			WindowSize: time.Minute,
+			Enabled:    true,
+		},
+	}
+	require.NoError(t, processor.RegisterSIEMTrigger(context.Background(), sentinel))
+	return processor, wf, trigger
+}
+
+func siemTestPayload(tenantClaim string) map[string]interface{} {
+	return map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"level":     "error",
+		"message":   "tenant scoping probe",
+		"source":    "test-service",
+		"tenant_id": tenantClaim,
+	}
+}
+
+// siemAggregationState returns the trigger's aggregation count and LastUpdated time.
+// Any entry that reaches a trigger's aggregation updates LastUpdated synchronously in
+// the consumer goroutine, and firing resets it again, so an unchanged LastUpdated
+// proves the trigger never saw the entry.
+func siemAggregationState(sp *SIEMProcessor, triggerID string) (int, time.Time) {
+	sp.mutex.RLock()
+	defer sp.mutex.RUnlock()
+	if agg, ok := sp.aggregationData[triggerID]; ok {
+		return agg.Count, agg.LastUpdated
+	}
+	return 0, time.Time{}
+}
+
+func siemExecutionsFor(wf *TestWorkflowTrigger, workflowName string) int {
+	n := 0
+	for _, exec := range wf.GetExecutions() {
+		if exec.WorkflowName == workflowName {
+			n++
+		}
+	}
+	return n
+}
+
+// awaitSIEMSentinel sends a sentinel entry under the sentinel tenant and waits for
+// its workflow to fire. Because the buffer is FIFO with a single consumer, every
+// entry buffered before the sentinel has been processed once this returns.
+func awaitSIEMSentinel(t *testing.T, sp *SIEMProcessor, wf *TestWorkflowTrigger) {
+	t.Helper()
+	before := siemExecutionsFor(wf, siemSentinelWorkflow)
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, siemSentinelTenant)
+	require.NoError(t, sp.ProcessLogEntry(ctx, siemTestPayload(siemSentinelTenant)))
+	require.Eventually(t, func() bool {
+		return siemExecutionsFor(wf, siemSentinelWorkflow) >= before+1
+	}, 2*time.Second, 5*time.Millisecond, "sentinel entry was never processed")
+}
+
+func TestSIEMProcessor_ProcessLogEntry_PayloadTenantIgnored(t *testing.T) {
+	processor, wf, trigger := newTenantScopedSIEMFixture(t, "tenant-b")
+	_, lastUpdated := siemAggregationState(processor, trigger.ID)
+
+	ctxA := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-a")
+	require.NoError(t, processor.ProcessLogEntry(ctxA, siemTestPayload("tenant-b")))
+	awaitSIEMSentinel(t, processor, wf)
+
+	count, after := siemAggregationState(processor, trigger.ID)
+	assert.Equal(t, 0, count)
+	assert.True(t, lastUpdated.Equal(after), "tenant B's trigger must not see tenant A's entry")
+	assert.Equal(t, 0, siemExecutionsFor(wf, trigger.WorkflowName), "tenant B's trigger must not fire for tenant A's entry")
+}
+
+func TestSIEMProcessor_ProcessLogEntry_SameTenantFires(t *testing.T) {
+	processor, wf, trigger := newTenantScopedSIEMFixture(t, "tenant-b")
+
+	ctxB := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-b")
+	require.NoError(t, processor.ProcessLogEntry(ctxB, siemTestPayload("tenant-a")))
+	require.Eventually(t, func() bool {
+		return siemExecutionsFor(wf, trigger.WorkflowName) == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// The sentinel is processed after the entry under test, so any further firing
+	// caused by that entry has already been dispatched by the time it returns.
+	awaitSIEMSentinel(t, processor, wf)
+
+	count, _ := siemAggregationState(processor, trigger.ID)
+	assert.Equal(t, 0, count, "aggregation window must be reset after firing")
+	assert.Equal(t, 1, siemExecutionsFor(wf, trigger.WorkflowName), "trigger must fire exactly once")
+}
+
+func TestSIEMProcessor_ProcessLogEntry_NoTenantRefused(t *testing.T) {
+	processor, wf, trigger := newTenantScopedSIEMFixture(t, "tenant-b")
+	_, lastUpdated := siemAggregationState(processor, trigger.ID)
+
+	err := processor.ProcessLogEntry(context.Background(), siemTestPayload("tenant-b"))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "tenant-b")
+	assert.Equal(t, 0, len(processor.logBuffer), "refused entry must not be buffered")
+
+	count, after := siemAggregationState(processor, trigger.ID)
+	assert.Equal(t, 0, count)
+	assert.True(t, lastUpdated.Equal(after), "refused entry must never reach a trigger")
+	assert.Empty(t, wf.GetExecutions())
+}
+
+func TestSIEMProcessor_ProcessLogEntry_EmptyTriggerTenantMatchesNothing(t *testing.T) {
+	processor, wf, trigger := newTenantScopedSIEMFixture(t, "")
+	_, lastUpdated := siemAggregationState(processor, trigger.ID)
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-b")
+	require.NoError(t, processor.ProcessLogEntry(ctx, siemTestPayload("")))
+	awaitSIEMSentinel(t, processor, wf)
+
+	count, after := siemAggregationState(processor, trigger.ID)
+	assert.Equal(t, 0, count)
+	assert.True(t, lastUpdated.Equal(after), "a trigger with no tenant must match nothing")
+	assert.Equal(t, 0, siemExecutionsFor(wf, trigger.WorkflowName))
 }

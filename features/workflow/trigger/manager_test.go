@@ -119,7 +119,8 @@ func TestTriggerManagerImpl_StartStop(t *testing.T) {
 	assert.Error(t, h.siemProcessor.Start(ctx), "SIEM processor must already be running")
 
 	// The running SIEM processor accepts log entries; a stopped one rejects them.
-	require.NoError(t, h.siemProcessor.ProcessLogEntry(ctx, map[string]interface{}{
+	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "manager-test-tenant")
+	require.NoError(t, h.siemProcessor.ProcessLogEntry(tenantCtx, map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
 		"level":     "info",
 		"message":   "startup probe",
@@ -138,7 +139,7 @@ func TestTriggerManagerImpl_StartStop(t *testing.T) {
 	assert.Error(t, h.scheduler.Stop(ctx), "scheduler must already be stopped")
 	assert.Error(t, h.webhookHandler.Stop(ctx), "webhook handler must already be stopped")
 	assert.Error(t, h.siemProcessor.Stop(ctx), "SIEM processor must already be stopped")
-	assert.Error(t, h.siemProcessor.ProcessLogEntry(ctx, map[string]interface{}{
+	assert.Error(t, h.siemProcessor.ProcessLogEntry(tenantCtx, map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
 		"level":     "info",
 		"message":   "shutdown probe",
