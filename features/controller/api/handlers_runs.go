@@ -644,7 +644,15 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runs, err := s.runManager.ListRuns(r.Context(), tenantID, limit, offset)
+	readScope := s.tenantReadScope(r, "GET /api/v1/runs")
+	var runs []*controllerrun.RunRecord
+	var err error
+	if readScope.boundarySubject() {
+		runs, err = s.listReadableRuns(r.Context(), readScope, limit, offset)
+		readScope.LogSummary()
+	} else {
+		runs, err = s.runManager.ListRuns(r.Context(), tenantID, limit, offset)
+	}
 	if err != nil {
 		s.logger.Error("Failed to list runs",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
@@ -756,11 +764,55 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A run can fan out across tenants. A boundary-subject root caller sees only
+	// the per-target rows whose steward sits in a tenant it can read; rows for
+	// other tenants are omitted, not challenged (ADR-025 A2.5). A steward whose
+	// tenant cannot be resolved is omitted too.
+	readScope := s.tenantReadScope(r, "GET /api/v1/runs/{run_id}/jobs")
+	boundary := readScope.boundarySubject()
 	views := make([]runJobView, 0, len(jobs))
 	for _, job := range jobs {
+		if boundary {
+			deviceTenant, found := s.resolveStewardTenant(job.DeviceID)
+			if !found || !readScope.Allows(deviceTenant) {
+				continue
+			}
+		}
 		views = append(views, runJobView{JobRecord: job, ResultDetail: controllerrun.ResultCodeDetail(job.ResultCode)})
 	}
 	s.writeSuccessResponse(w, views)
+}
+
+// listReadableRuns pages through every run and keeps those the boundary-subject
+// root caller may read: root's own plus those under a crossing. The filter runs
+// before offset/limit so a page is never short because rows were dropped after the
+// store paged them.
+func (s *Server) listReadableRuns(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*controllerrun.RunRecord, error) {
+	const pageSize = 500
+	out := make([]*controllerrun.RunRecord, 0, limit)
+	skip := offset
+	for storeOffset := 0; ; storeOffset += pageSize {
+		page, err := s.runManager.ListRuns(ctx, "", pageSize, storeOffset)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range page {
+			if !readScope.Allows(run.TenantID) {
+				continue
+			}
+			if skip > 0 {
+				skip--
+				continue
+			}
+			out = append(out, run)
+			if len(out) == limit {
+				return out, nil
+			}
+		}
+		if len(page) < pageSize {
+			return out, nil
+		}
+	}
 }
 
 // handleDeleteRun handles DELETE /api/v1/runs/{run_id}.

@@ -402,7 +402,7 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 
 	// An empty callerTenantID (mTLS admin) has unrestricted access; only a NON-admin
 	// caller with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -427,11 +427,13 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant isolation: callers scoped to a tenant can only view records within their
-	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
-	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
-	// (Issue #4091) — mirrors the genuine not-found response above.
-	if !s.isWithinTenantScope(r.Context(), callerTenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	// authorized subtree; a root caller subject to the ADR-025 boundary needs a
+	// crossing for a client tenant's record. 404 instead of 403 to avoid disclosing
+	// upgrade record existence across tenants (Issue #4091) — mirrors the genuine
+	// not-found response above.
+	if !s.authorizeRecordRead(w, r, record.TenantID, "GET /api/v1/stewards/upgrade/{upgrade_id}", func() {
 		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
+	}) {
 		return
 	}
 

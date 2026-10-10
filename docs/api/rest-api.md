@@ -44,7 +44,7 @@ Each endpoint requires a specific permission scope. Scopes follow the format `re
 
 Every authenticated caller is either **root** (a `root_scope` account, or the bootstrap admin certificate) or **bound to one tenant**. A root caller's identity carries the deployment's root tenant; its reach comes from the root flag, never from an empty tenant. A credential that is neither root nor bound to a tenant is refused with `403 NO_TENANT_SCOPE` before any handler runs.
 
-A tenant-scoped caller reaches its own tenant's records. A root caller's lists, and its by-ID reads of records those lists show, span every tenant. For a root caller subject to the tenant-crossing boundary (ADR-025), an action on a record owned by a tenant below root — whether the route names that tenant, names the record by ID (an account, a certificate or cert binding, a token, a registration or credential request, a rollout, a run, a rollback, an API key, a role), or selects stewards with a fleet selector (a batch job, an upgrade, an osquery query, a signed operator payload) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
+A tenant-scoped caller reaches its own tenant's records. A root caller's lists and by-ID reads span every tenant, except for the operational records below, which a root caller subject to the tenant-crossing boundary reads for a client tenant only under a crossing. For a root caller subject to the tenant-crossing boundary (ADR-025), an action on a record owned by a tenant below root — whether the route names that tenant, names the record by ID (an account, a certificate or cert binding, a token, a registration or credential request, a rollout, a run, a rollback, an API key, a role), or selects stewards with a fleet selector (a batch job, an upgrade, an osquery query, a signed operator payload) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
 
 ```json
 {
@@ -658,6 +658,8 @@ Use `GET /api/v1/config/push/{push_id}` to poll delivery status after receiving 
 
 Retrieve the status of a single push operation by its `push_id` (returned in the `202` response from `POST /api/v1/config/push`).
 
+A root caller subject to the tenant-crossing boundary receives the tenant-crossing challenge for a push owned by a client tenant, and the push once it holds an active grant or break-glass crossing (see [Tenant Scope](#tenant-scope)).
+
 **Authentication:** Required  
 **Required permission:** `config:push`
 
@@ -691,6 +693,17 @@ Retrieve the status of a single push operation by its `push_id` (returned in the
 ```
 
 `status` values: `pending`, `in_progress`, `completed`, `failed`.
+
+
+##### Operational record reads and the root crossing rule
+
+What was run against a client tenant's endpoints, and with what output, is that tenant's business data. A root caller subject to the tenant-crossing boundary reads a client tenant's command, config push, batch job, run, rollout and upgrade records only under an active grant or break-glass crossing for the owning tenant:
+
+- **Lists** (`GET /api/v1/jobs`, `GET /api/v1/runs`, `GET /api/v1/stewards/{id}/pending-deliveries`) return only records owned by the root tenant plus tenants covered by a crossing. Records of other tenants are omitted silently; `limit` and `offset` count only the records the caller may read.
+- **By-ID reads** (`GET /api/v1/commands/{id}`, `GET /api/v1/config/push/{id}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/runs/{run_id}`, `GET /api/v1/runs/{run_id}/jobs`, `GET /api/v1/rollout/{rollout_id}`, `GET /api/v1/stewards/upgrade/{upgrade_id}`) of a client tenant's record return `401` with the tenant-crossing challenge. An unknown ID is still `404`.
+- A run that fanned out across tenants lists, in `GET /api/v1/runs/{run_id}/jobs`, only the per-target rows whose steward is in a tenant the caller can read. A row whose steward's tenant cannot be resolved is omitted.
+
+With an active crossing the same requests succeed as before. Tenant-scoped callers and unrestricted certificate administrators are unchanged.
 
 ### Script Management
 
