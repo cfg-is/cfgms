@@ -2134,7 +2134,7 @@ Approve a pending break-glass crossing. The caller must be a root-scoped princip
 **Authentication:** Required  
 **Required permission:** `tenant:crossing-approve-break-glass` (Strong assurance with user presence)
 
-**Response (`200 OK`):** the approved crossing record, with `approval_state: "approved"` and `ApprovedBy` set.
+**Response (`200 OK`):** the approved crossing record, in the crossing response shape (see [Crossing response](#crossing-response)), with `approval_state: "approved"`.
 
 **Errors:**
 
@@ -2145,7 +2145,37 @@ Approve a pending break-glass crossing. The caller must be a root-scoped princip
 
 #### GET /api/v1/tenants/{id}/access-grants
 
-List every grant and break-glass crossing (active, expired and revoked) for the tenant. Break-glass rows carry `reason_category`; grant rows omit it.
+List every grant and break-glass crossing (active, expired, pending and revoked) for the tenant, as an array of the [crossing response](#crossing-response). Break-glass rows carry `reason_category`; for grants it is empty.
+
+#### POST /api/v1/tenants/{id}/access-grants
+
+Create an MSP access grant: it admits all root support principals into the tenant for a duration and names no person. The grant is stored with an empty principal.
+
+**Request body:** `{"duration_minutes": 60}` — between 1 and 1440. Nothing else is accepted.
+
+**Response (`201 Created`):** the [crossing response](#crossing-response) with `kind: "grant"` and empty `principal_id` / `principal_name`.
+
+**Errors:**
+
+- `400 GRANT_PRINCIPAL_NOT_ALLOWED`: the body carries `principal_id` (even an empty string). No crossing is created.
+- `400 INVALID_DURATION`: `duration_minutes` outside 1-1440.
+- `403 ROOT_SCOPED_CANNOT_GRANT`, `403 ROOT_TENANT_NOT_GRANTABLE`, `404 TENANT_NOT_FOUND`.
+
+#### Crossing response
+
+Grant create, break-glass create and approve, list, and end all return this snake_case shape:
+
+| Field | Description |
+|-------|-------------|
+| `id`, `tenant_id` | Crossing and owning tenant |
+| `principal_id` | Break-glass invoker; empty for a grant |
+| `principal_name` | Best-effort invoker account name; may be empty, always empty for a grant |
+| `kind` | `grant` or `break-glass` |
+| `granted_by` | Principal that created the record |
+| `justification`, `reason_category` | Break-glass only; empty for a grant |
+| `approval_state` | `approved` or `pending` |
+| `created_at`, `expires_at`, `revoked_at` | Timestamps; `revoked_at` is `null` until ended |
+| `status` | Derived: `revoked` if ended, else `expired` if past `expires_at`, else `pending` if awaiting a second approver, else `active` |
 
 #### DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}
 

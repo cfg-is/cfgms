@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,10 +47,80 @@ const (
 	tenantCrossingMaxBodyBytes = 16 * 1024
 )
 
+// Derived crossing statuses reported by TenantCrossingResponse.Status.
+const (
+	tenantCrossingStatusActive  = "active"
+	tenantCrossingStatusPending = "pending"
+	tenantCrossingStatusExpired = "expired"
+	tenantCrossingStatusRevoked = "revoked"
+)
+
+// TenantCrossingResponse is the snake_case wire shape of a grant or break-glass record.
+type TenantCrossingResponse struct {
+	ID             string     `json:"id"`
+	TenantID       string     `json:"tenant_id"`
+	PrincipalID    string     `json:"principal_id"`   // break-glass invoker; empty for a grant
+	PrincipalName  string     `json:"principal_name"` // best effort; always empty for a grant
+	Kind           string     `json:"kind"`
+	GrantedBy      string     `json:"granted_by"`
+	Justification  string     `json:"justification"`
+	ReasonCategory string     `json:"reason_category"`
+	ApprovalState  string     `json:"approval_state"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	RevokedAt      *time.Time `json:"revoked_at"`
+	// Status is derived: revoked, then expired, then pending (awaiting a second
+	// approver), otherwise active.
+	Status string `json:"status"`
+}
+
+// tenantCrossingStatus derives the status of c at now.
+func tenantCrossingStatus(c *business.TenantCrossing, now time.Time) string {
+	switch {
+	case c.RevokedAt != nil:
+		return tenantCrossingStatusRevoked
+	case !c.ExpiresAt.After(now):
+		return tenantCrossingStatusExpired
+	case c.ApprovalState == business.TenantCrossingApprovalPending:
+		return tenantCrossingStatusPending
+	default:
+		return tenantCrossingStatusActive
+	}
+}
+
+// toTenantCrossingResponse converts a stored crossing to its wire shape. The principal
+// name is a best-effort account lookup; a failure leaves it empty.
+func (s *Server) toTenantCrossingResponse(ctx context.Context, c *business.TenantCrossing) TenantCrossingResponse {
+	approval := string(c.ApprovalState)
+	if approval == "" {
+		approval = string(business.TenantCrossingApprovalApproved)
+	}
+	resp := TenantCrossingResponse{
+		ID:             c.ID,
+		TenantID:       c.TenantID,
+		PrincipalID:    c.PrincipalID,
+		Kind:           string(c.Kind),
+		GrantedBy:      c.GrantedBy,
+		Justification:  c.Justification,
+		ReasonCategory: string(c.ReasonCategory),
+		ApprovalState:  approval,
+		CreatedAt:      c.CreatedAt,
+		ExpiresAt:      c.ExpiresAt,
+		RevokedAt:      c.RevokedAt,
+		Status:         tenantCrossingStatus(c, time.Now()),
+	}
+	if c.Kind == business.TenantCrossingKindBreakGlass && c.PrincipalID != "" {
+		if acct, err := s.getAccountByID(ctx, c.PrincipalID); err == nil && acct != nil {
+			resp.PrincipalName = acct.Username
+		}
+	}
+	return resp
+}
+
 // handleCreateTenantCrossingGrant implements POST /api/v1/tenants/{id}/access-grants.
-// An MSP administrator (or unscoped admin) already authorized for tenantID explicitly
-// grants a root-scoped support principal time-boxed, revocable access into their own
-// tenant subtree (ADR-025 Decision 2(a)). No justification is required — this is
+// An MSP administrator (or unscoped admin) already authorized for tenantID opens their
+// own tenant subtree to all root support for a time-boxed, revocable duration; the grant
+// names no individual principal (ADR-025 Decision 2(a)). No justification is required — this is
 // opt-in, client-initiated trust, not an emergency override. Returns 404 for an unknown
 // or out-of-scope target tenant (existence-oracle prevention, matching handleGetTenant).
 func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +149,8 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 			"access grants cannot be created on the root tenant", "ROOT_TENANT_NOT_GRANTABLE")
 		return
 	}
-	// A grant is client-initiated consent flowing from an MSP to a root-scoped support
-	// principal. A root-scoped caller minting one would be consenting on the MSP's behalf
+	// A grant is client-initiated consent flowing from an MSP to all root-scoped
+	// support. A root-scoped caller minting one would be consenting on the MSP's behalf
 	// — self-dealing that bypasses Decision 2(b)'s justification, 30-minute cap, and
 	// critical-severity audit trail. Break-glass is the root-scoped caller's only path.
 	// "Root-scoped" is the tenant boundary's own predicate, so an account-bound
@@ -117,16 +188,20 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// A grant names no person: it opens the MSP to all root support for a duration. A
+	// body that carries principal_id (even an empty one) is refused rather than ignored,
+	// so a client written for the old per-principal model fails loudly.
 	var req struct {
-		PrincipalID     string `json:"principal_id"`
-		DurationMinutes int    `json:"duration_minutes"`
+		PrincipalID     *string `json:"principal_id"`
+		DurationMinutes int     `json:"duration_minutes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, tenantCrossingMaxBodyBytes)).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
-	if req.PrincipalID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "principal_id is required", "MISSING_PRINCIPAL_ID")
+	if req.PrincipalID != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"an access grant names no principal; send duration_minutes only", "GRANT_PRINCIPAL_NOT_ALLOWED")
 		return
 	}
 	duration := time.Duration(req.DurationMinutes) * time.Minute
@@ -140,15 +215,6 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 	var callerID string
 	if principal != nil {
 		callerID = principal.ID
-	}
-	// A grant names a *different* principal as its beneficiary: the MSP admin authorises
-	// support staff, it never authorises itself. A self-grant is only ever an attempt to
-	// convert whatever access the caller already holds into a longer-lived, differently
-	// gated crossing record, so it is refused regardless of the caller's scope.
-	if callerID != "" && req.PrincipalID == callerID {
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"an access grant cannot name its own creator as the granted principal", "SELF_GRANT_FORBIDDEN")
-		return
 	}
 	now := time.Now().UTC()
 	crossing := &business.TenantCrossing{
@@ -169,9 +235,9 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 	}
 
 	s.recordTenantCrossingAudit(r, existing.ID, callerID, crossing, business.AuditSeverityHigh,
-		"tenant.crossing_grant_created", req.PrincipalID)
+		"tenant.crossing_grant_created", "")
 
-	s.writeResponse(w, http.StatusCreated, crossing)
+	s.writeResponse(w, http.StatusCreated, s.toTenantCrossingResponse(r.Context(), crossing))
 }
 
 // handleTenantBreakGlass implements POST /api/v1/tenants/{id}/break-glass.
@@ -296,7 +362,7 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 	s.recordTenantCrossingAudit(r, existing.ID, principal.ID, crossing, business.AuditSeverityCritical,
 		auditAction, justification)
 
-	s.writeResponse(w, http.StatusCreated, crossing)
+	s.writeResponse(w, http.StatusCreated, s.toTenantCrossingResponse(r.Context(), crossing))
 }
 
 // handleApproveTenantBreakGlass implements
@@ -369,7 +435,7 @@ func (s *Server) handleApproveTenantBreakGlass(w http.ResponseWriter, r *http.Re
 	s.recordTenantCrossingAudit(r, crossing.TenantID, principal.ID, crossing, business.AuditSeverityCritical,
 		"tenant.crossing_break_glass_approved", crossing.Justification)
 
-	s.writeResponse(w, http.StatusOK, crossing)
+	s.writeResponse(w, http.StatusOK, s.toTenantCrossingResponse(r.Context(), crossing))
 }
 
 // handleListTenantCrossings implements GET /api/v1/tenants/{id}/access-grants.
@@ -423,7 +489,11 @@ func (s *Server) handleListTenantCrossings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.writeSuccessResponse(w, crossings)
+	out := make([]TenantCrossingResponse, 0, len(crossings))
+	for _, c := range crossings {
+		out = append(out, s.toTenantCrossingResponse(r.Context(), c))
+	}
+	s.writeSuccessResponse(w, out)
 }
 
 // recordTenantCrossingAudit records a Decision 2 grant/break-glass event, tenant-scoped
@@ -537,7 +607,7 @@ func (s *Server) handleEndTenantCrossing(w http.ResponseWriter, r *http.Request)
 	}
 
 	if crossing.RevokedAt != nil || !crossing.ExpiresAt.After(time.Now()) {
-		s.writeResponse(w, http.StatusOK, crossing)
+		s.writeResponse(w, http.StatusOK, s.toTenantCrossingResponse(r.Context(), crossing))
 		return
 	}
 
@@ -558,5 +628,5 @@ func (s *Server) handleEndTenantCrossing(w http.ResponseWriter, r *http.Request)
 	}
 	s.recordTenantCrossingAudit(r, existing.ID, callerID, crossing, severity, action, "ended early")
 
-	s.writeResponse(w, http.StatusOK, crossing)
+	s.writeResponse(w, http.StatusOK, s.toTenantCrossingResponse(r.Context(), crossing))
 }

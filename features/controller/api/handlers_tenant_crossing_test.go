@@ -401,7 +401,7 @@ func TestHandleCreateTenantCrossingGrant_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
-	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-1", "duration_minutes": 60})
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 60})
 	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, body)
 	rec := httptest.NewRecorder()
 	server.handleCreateTenantCrossingGrant(rec, req)
@@ -429,7 +429,7 @@ func TestHandleCreateTenantCrossingGrant_CrossTenantRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	mspAAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
-	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-1", "duration_minutes": 60})
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 60})
 	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-b/access-grants", "msp-b", mspAAdmin, body)
 	rec := httptest.NewRecorder()
 	server.handleCreateTenantCrossingGrant(rec, req)
@@ -454,7 +454,7 @@ func TestHandleCreateTenantCrossingGrant_RootTenantRefused(t *testing.T) {
 	// The most privileged caller shape that reaches this handler: an unscoped superadmin,
 	// which authorizeTenantAccess admits for every tenant unconditionally.
 	unscopedAdmin := &Principal{ID: "admin-1", TenantID: "", GlobalScope: true, Assurance: session.AssuranceStrong}
-	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-1", "duration_minutes": 1440})
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 1440})
 	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/root/access-grants", "root", unscopedAdmin, body)
 	rec := httptest.NewRecorder()
 	server.handleCreateTenantCrossingGrant(rec, req)
@@ -479,9 +479,7 @@ func TestHandleCreateTenantCrossingGrant_RootScopedCallerRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	caller := rootScopedPrincipal("root-operator-1")
-	// Grant an unrelated principal, so the refusal is attributable to the caller's scope
-	// rather than to the self-grant guard.
-	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-2", "duration_minutes": 1440})
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 1440})
 	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", caller, body)
 	rec := httptest.NewRecorder()
 	server.handleCreateTenantCrossingGrant(rec, req)
@@ -491,28 +489,6 @@ func TestHandleCreateTenantCrossingGrant_RootScopedCallerRefused(t *testing.T) {
 	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-2", "msp-a")
 	require.NoError(t, err)
 	assert.False(t, active, "a root-scoped caller must not be able to create a grant")
-}
-
-// TestHandleCreateTenantCrossingGrant_SelfGrantRefused verifies a caller cannot name
-// itself as the granted principal — the only use for which is laundering the access it
-// already holds into a longer-lived, differently gated crossing record.
-func TestHandleCreateTenantCrossingGrant_SelfGrantRefused(t *testing.T) {
-	server := setupCrossingTestServer(t)
-	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
-	require.NoError(t, err)
-
-	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
-	body, _ := json.Marshal(map[string]interface{}{"principal_id": mspAdmin.ID, "duration_minutes": 60})
-	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, body)
-	rec := httptest.NewRecorder()
-	server.handleCreateTenantCrossingGrant(rec, req)
-
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-
-	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, mspAdmin.ID, "msp-a")
-	require.NoError(t, err)
-	assert.False(t, active, "a self-grant must not be recorded")
 }
 
 // TestCrossingOnRootDoesNotCoverDescendants is the defense-in-depth half of the
@@ -738,8 +714,8 @@ func TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused(t *testin
 	require.Equal(t, tenantAuthAllowed, server.authorizeTenantAccess(ctx, caller, "msp-a"),
 		"precondition: the break-glass crossing admits the caller")
 
-	// Grant a colleague, not itself: SELF_GRANT_FORBIDDEN already covers self-grants.
-	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-2", "duration_minutes": 60})
+	// Grant a colleague, not itself: a grant names no principal.
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 60})
 	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", caller, body)
 	rec := httptest.NewRecorder()
 	server.handleCreateTenantCrossingGrant(rec, req)
@@ -1041,10 +1017,10 @@ func TestHandleListTenantCrossings_ReasonCategoryOnlyOnBreakGlass(t *testing.T) 
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Data, 2)
 	for _, row := range resp.Data {
-		if row["ID"] == "bg-1" {
+		if row["id"] == "bg-1" {
 			assert.Equal(t, "security_incident", row["reason_category"])
 		} else {
-			assert.NotContains(t, row, "reason_category")
+			assert.Empty(t, row["reason_category"])
 		}
 	}
 }
@@ -1076,17 +1052,17 @@ func approveBreakGlass(t *testing.T, server *Server, crossingID string, approver
 	return rec
 }
 
-func decodeCrossing(t *testing.T, rec *httptest.ResponseRecorder) *business.TenantCrossing {
+func decodeCrossing(t *testing.T, rec *httptest.ResponseRecorder) *TenantCrossingResponse {
 	t.Helper()
 	var resp struct {
-		Data business.TenantCrossing `json:"data"`
+		Data TenantCrossingResponse `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	return &resp.Data
 }
 
 // invokePending invokes break-glass as root-operator-1 and returns the created crossing.
-func invokePending(t *testing.T, server *Server) *business.TenantCrossing {
+func invokePending(t *testing.T, server *Server) *TenantCrossingResponse {
 	t.Helper()
 	rec := invokeBreakGlass(t, server, breakGlassBody(t, "account_recovery", "Client lost all admin passkeys, INC-4821"), "")
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -1103,7 +1079,7 @@ func invokerGetsTenant(t *testing.T, server *Server) int {
 func TestBreakGlassSecondApprover_SettingOff_ActiveImmediately(t *testing.T) {
 	server := secondApproverServer(t, false)
 	c := invokePending(t, server)
-	assert.Equal(t, business.TenantCrossingApprovalApproved, c.ApprovalState)
+	assert.Equal(t, string(business.TenantCrossingApprovalApproved), c.ApprovalState)
 	assert.Equal(t, http.StatusOK, invokerGetsTenant(t, server))
 	require.NoError(t, server.auditManager.Flush(context.Background()))
 	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "msp-a"})
@@ -1115,13 +1091,13 @@ func TestBreakGlassSecondApprover_NilConfigDefaultsOff(t *testing.T) {
 	server := breakGlassServer(t)
 	server.cfg.TenantAdmin = nil
 	c := invokePending(t, server)
-	assert.Equal(t, business.TenantCrossingApprovalApproved, c.ApprovalState)
+	assert.Equal(t, string(business.TenantCrossingApprovalApproved), c.ApprovalState)
 }
 
 func TestBreakGlassSecondApprover_PendingDoesNotAdmit(t *testing.T) {
 	server := secondApproverServer(t, true)
 	c := invokePending(t, server)
-	assert.Equal(t, business.TenantCrossingApprovalPending, c.ApprovalState)
+	assert.Equal(t, string(business.TenantCrossingApprovalPending), c.ApprovalState)
 	assert.Equal(t, http.StatusUnauthorized, invokerGetsTenant(t, server), "a pending crossing must still get the crossing challenge")
 	require.NoError(t, server.auditManager.Flush(context.Background()))
 	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "msp-a"})
@@ -1138,8 +1114,10 @@ func TestBreakGlassSecondApprover_ApproveActivatesAndRestartsWindow(t *testing.T
 	rec := approveBreakGlass(t, server, c.ID, rootScopedPrincipal("root-operator-2"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	got := decodeCrossing(t, rec)
-	assert.Equal(t, business.TenantCrossingApprovalApproved, got.ApprovalState)
-	assert.Equal(t, "root-operator-2", got.ApprovedBy)
+	assert.Equal(t, string(business.TenantCrossingApprovalApproved), got.ApprovalState)
+	stored, serr := server.tenantCrossingStore.GetTenantCrossing(context.Background(), c.ID)
+	require.NoError(t, serr)
+	assert.Equal(t, "root-operator-2", stored.ApprovedBy)
 	assert.False(t, got.ExpiresAt.Before(before.Add(tenantCrossingBreakGlassDuration)), "window must restart at approval time")
 	assert.Equal(t, http.StatusOK, invokerGetsTenant(t, server))
 
@@ -1193,4 +1171,123 @@ func TestBreakGlassSecondApprover_ExpiredPendingNotApprovable(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Equal(t, "NOT_PENDING", crossingErrorCode(t, rec))
 	assert.Equal(t, http.StatusUnauthorized, invokerGetsTenant(t, server))
+}
+
+// TestHandleCreateTenantCrossingGrant_PrincipalIDRefused: a grant body naming a
+// principal (even an empty string) is refused and nothing is stored.
+func TestHandleCreateTenantCrossingGrant_PrincipalIDRefused(t *testing.T) {
+	for name, pid := range map[string]string{"named": "root-operator-1", "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			server := breakGlassServer(t)
+			mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+			body, _ := json.Marshal(map[string]interface{}{"principal_id": pid, "duration_minutes": 60})
+			req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, body)
+			rec := httptest.NewRecorder()
+			server.handleCreateTenantCrossingGrant(rec, req)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Equal(t, "GRANT_PRINCIPAL_NOT_ALLOWED", crossingErrorCode(t, rec))
+			list, err := server.tenantCrossingStore.ListTenantCrossings(context.Background(), "msp-a")
+			require.NoError(t, err)
+			assert.Empty(t, list)
+		})
+	}
+}
+
+// TestTenantCrossingResponses_SnakeCaseAndStatus covers the response shape of grant
+// create, break-glass create, list and end, and the derived status values.
+func TestTenantCrossingResponses_SnakeCaseAndStatus(t *testing.T) {
+	server := secondApproverServer(t, true)
+	ctx := context.Background()
+	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+
+	raw := func(rec *httptest.ResponseRecorder) map[string]interface{} {
+		var resp struct {
+			Data map[string]interface{} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.Data
+	}
+	keys := []string{"id", "tenant_id", "principal_id", "principal_name", "kind", "granted_by",
+		"justification", "reason_category", "approval_state", "created_at", "expires_at", "revoked_at", "status"}
+
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 60})
+	rec := httptest.NewRecorder()
+	server.handleCreateTenantCrossingGrant(rec, requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, body))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	grant := raw(rec)
+	for _, k := range keys {
+		assert.Contains(t, grant, k)
+	}
+	assert.Equal(t, "active", grant["status"])
+	assert.Equal(t, "", grant["principal_id"])
+	assert.Equal(t, "", grant["principal_name"])
+	assert.NotContains(t, grant, "ID")
+
+	bgRec := invokeBreakGlass(t, server, breakGlassBody(t, "account_recovery", "Customer locked out, ticket INC-4821"), "")
+	require.Equal(t, http.StatusCreated, bgRec.Code, bgRec.Body.String())
+	bg := raw(bgRec)
+	for _, k := range keys {
+		assert.Contains(t, bg, k)
+	}
+	assert.Equal(t, "pending", bg["status"])
+	assert.Equal(t, "pending", bg["approval_state"])
+
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID: "expired-1", TenantID: "msp-a", Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-a-admin",
+		CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour),
+	}))
+
+	listRec := httptest.NewRecorder()
+	server.handleListTenantCrossings(listRec, requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, nil))
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	var list struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
+	statuses := map[string]string{}
+	for _, row := range list.Data {
+		statuses[row["id"].(string)] = row["status"].(string)
+	}
+	assert.Equal(t, "expired", statuses["expired-1"])
+	assert.Equal(t, "pending", statuses[bg["id"].(string)])
+	assert.Equal(t, "active", statuses[grant["id"].(string)])
+
+	endRec := httptest.NewRecorder()
+	server.handleEndTenantCrossing(endRec, endCrossingRequest(t, "msp-a", grant["id"].(string), mspAdmin))
+	require.Equal(t, http.StatusOK, endRec.Code, endRec.Body.String())
+	ended := raw(endRec)
+	assert.Equal(t, "revoked", ended["status"])
+	assert.NotNil(t, ended["revoked_at"])
+}
+
+// TestHandleEndTenantCrossing_GrantEndChallengesAllRootPrincipals: a principal-free
+// grant admits every root principal, and ending it challenges all of them again.
+func TestHandleEndTenantCrossing_GrantEndChallengesAllRootPrincipals(t *testing.T) {
+	server := breakGlassServer(t)
+	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+	body, _ := json.Marshal(map[string]interface{}{"duration_minutes": 60})
+	rec := httptest.NewRecorder()
+	server.handleCreateTenantCrossingGrant(rec, requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", mspAdmin, body))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeCrossing(t, rec).ID
+
+	callers := []*Principal{rootScopedPrincipal("root-operator-1"), rootScopedPrincipal("root-operator-2")}
+	get := func(p *Principal) int {
+		r := httptest.NewRecorder()
+		server.handleGetTenant(r, requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", p, nil))
+		return r.Code
+	}
+	for _, p := range callers {
+		assert.Equal(t, http.StatusOK, get(p), "grant admits %s", p.ID)
+	}
+
+	endRec := httptest.NewRecorder()
+	server.handleEndTenantCrossing(endRec, endCrossingRequest(t, "msp-a", id, mspAdmin))
+	require.Equal(t, http.StatusOK, endRec.Code, endRec.Body.String())
+
+	for _, p := range callers {
+		assert.Equal(t, http.StatusUnauthorized, get(p), "ended grant must re-challenge %s", p.ID)
+	}
 }
