@@ -140,6 +140,15 @@ var DefaultPermissions = []*common.Permission{
 		Actions:      []string{"delete"},
 	},
 
+	// Notification settings (Issue #4710)
+	{
+		Id:           "notification.configure",
+		Name:         "Configure Email Delivery",
+		Description:  "Read email delivery settings, set the SMTP credential and send a test message (controller-wide, root-scoped, AssuranceStrong)",
+		ResourceType: "notification",
+		Actions:      []string{"configure"},
+	},
+
 	// RBAC Management Permissions
 	{
 		Id:           "rbac.role.read",

@@ -38,19 +38,6 @@
 
 packages:
   # --- Confirmed contracts with no implementation yet -----------------------
-  - path: pkg/notification/interfaces
-    reason: >
-      New central provider (Issue #4708, epic #4701) awaiting its controller
-      wiring story; no main package imports it yet. Delete this entry when
-      the wiring story lands.
-  - path: pkg/notification/interfaces/contracttest
-    reason: >
-      Provider-neutral contract helper imported only by notification
-      provider tests; unreachable from main by design.
-  - path: pkg/notification/providers/smtp
-    reason: >
-      First notification provider (Issue #4708); the controller wiring story
-      adds the blank import. Delete this entry when that story lands.
   - path: pkg/storage/interfaces/secrets
     reason: >
       Confirmed contract with no implementation yet — no secrets storage

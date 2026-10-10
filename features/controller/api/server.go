@@ -53,6 +53,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	notifif "github.com/cfgis/cfgms/pkg/notification/interfaces"
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
@@ -97,6 +98,9 @@ type Server struct {
 	apiKeyIdx                       *apiKeyIndex                             // Issue #4574: key hash → tenant locator for the durable API-key records
 	apiKeyIndexWG                   sync.WaitGroup                           // Issue #4574: tracks detached API-key index scans so Close() can wait for them before secretStore.Close()
 	apiKeyTombstones                map[string]time.Time                     // Issue #4574: key hash → deletion time for keys deleted on this node (guarded by mu, lazily made); blocks a racing load from re-caching a deleted key
+	emailMu                         sync.RWMutex                             // Issue #4710: guards emailNotifier and emailExtra
+	emailNotifier                   notifif.Notifier                         // Issue #4710: nil when email is not configured or the credential is absent
+	emailExtra                      map[string]interface{}                   // Issue #4710: extra provider keys (tests only, e.g. root_ca_pem for an in-process SMTP server)
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore          registration.Store                       // Registration token store for steward registration
@@ -641,6 +645,9 @@ func New(
 		})
 		logger.Info("Save=deploy fanout callback registered on config service")
 	}
+
+	// Issue #4710: build the email notifier from config plus the stored credential.
+	server.initEmailNotifier(context.Background())
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
@@ -1592,6 +1599,15 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 // GetRouter returns the HTTP router for testing purposes.
 func (s *Server) GetRouter() http.Handler {
 	return s.router
+}
+
+// EmailNotifier returns the configured email sender, or nil when email delivery
+// is not configured or the SMTP credential has not been stored. Callers must
+// treat nil as "skip this channel", never as an error (Issue #4710).
+func (s *Server) EmailNotifier() notifif.Notifier {
+	s.emailMu.RLock()
+	defer s.emailMu.RUnlock()
+	return s.emailNotifier
 }
 
 // GetSecretStore returns the central secrets provider so callers outside the api

@@ -2265,6 +2265,52 @@ End an active tenant crossing (a client-granted access grant or a break-glass el
 
 An audit event is recorded with the actor, crossing ID and kind (High severity for a grant, Critical for break-glass).
 
+### Email Delivery
+
+Controller-wide email delivery (one SMTP configuration for the whole controller). The non-secret settings
+live in the controller config under `notifications.email` (see
+[config schema](../reference/config-schema.md#notifications)); the SMTP password is written through the
+credential endpoint and held in the controller's secret store under `password_secret_key`.
+
+All three endpoints require the `notification:configure` permission, a **root-scoped** principal, and
+`AssuranceStrong` (API keys are refused). A tenant-scoped caller receives `403`.
+
+#### `GET /api/v1/notifications/email`
+
+Returns the non-secret settings. The password is never returned.
+
+```json
+{"data": {"provider": "smtp", "host": "smtp.acme-corp.example", "port": 465, "from": "cfgms@acme-corp.example",
+          "username": "mailer", "tls_mode": "implicit_tls", "password_secret_key": "notifications.email.password",
+          "configured": true, "credential_present": false}}
+```
+
+`configured` is true when `host`, `from` and `password_secret_key` are set; `credential_present` is true when a
+password is stored.
+
+#### `PUT /api/v1/notifications/email/credential`
+
+Write-only. Body (limited to 4 KiB): `{"password": "..."}`. Stores the password and rebuilds the email sender.
+Returns `{"credential_present": true, "configured": true}` and never the password.
+
+- `400 Bad Request`: missing or empty password, or oversized body.
+- `409 Conflict` (`EMAIL_NOT_CONFIGURED`): `notifications.email` is not configured.
+
+#### `POST /api/v1/notifications/email/test`
+
+Sends a fixed test message to the configured `from` address. The request body must be empty: the recipient and
+the message content are fixed server-side, and any field in the body (`to`, `subject`, `body`, ...) is rejected
+with `400 Bad Request`.
+
+```json
+{"data": {"delivered": true, "recipients": [{"address": "cfgms@acme-corp.example", "accepted": true}]}}
+```
+
+On failure `delivered` is `false` and `failure_reason` carries a sanitized reason that never contains the password.
+
+- `400 Bad Request`: the body names any field (for example `to`, `subject` or `body`), or is not valid JSON.
+- `409 Conflict` (`EMAIL_NOT_CONFIGURED`): email is not configured or no credential has been stored.
+
 ### Webhooks
 
 #### POST /api/v1/webhooks/git-push

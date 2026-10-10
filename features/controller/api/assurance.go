@@ -49,6 +49,7 @@ var permissionAssurance = map[string]Requirement{
 	"tenant:create":                       {Min: session.AssuranceStrong},                            // POST /tenants
 	"tenant:delete":                       {Min: session.AssuranceStrong},                            // POST /tenants/{id}/delete, DELETE /tenants/{id}/delete (Issue #3182)
 	"tenant:approve-delete":               {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/delete/approve (Issue #3182)
+	"notification:configure":              {Min: session.AssuranceStrong},                            // GET/PUT/POST /notifications/email... (Issue #4710)
 	"tenant:update":                       {Min: session.AssuranceStrong},                            // PUT  /tenants/{id}
 	"tenant:manage":                       {Min: session.AssuranceStrong},                            // POST /tenants/{id}/suspend, POST /tenants/{id}/config-source/test
 	"tenant:crossing-grant":               {Min: session.AssuranceStrong},                            // POST /tenants/{id}/access-grants

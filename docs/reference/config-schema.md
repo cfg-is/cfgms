@@ -64,6 +64,7 @@ The controller decoder does not reject unknown keys: a misspelled key is silentl
 | `deployment_rings` | object | see [`deployment_rings`](#deployment_rings) | optional | Ordered deployment ring set for fleet version management. Absent applies the built-in four-ring set. |
 | `tenant_admin` | object | see [`tenant_admin`](#tenant_admin) | optional | Global tenant-administration policy (ADR-027) |
 | `webauthn` | object | see [`webauthn`](#webauthn) | optional | Browser passkey relying party. Absent leaves the passkey endpoints answering 503. |
+| `notifications` | object | see [`notifications`](#notifications) | optional | Outbound notification delivery. Absent leaves email delivery disabled. |
 | `realm_id` | string | `""` | required for `ha.mode: cluster` in production | Deployment-wide realm qualifier naming this cell (ADR-032 Decision 3). Must be a single DNS label (lowercase alphanumeric and hyphens, no leading/trailing hyphen, at most 63 chars). A malformed value refuses to start on any deployment shape; a `CFGMS_TELEMETRY_ENVIRONMENT=production` controller with `ha.mode: cluster` also refuses to start when unset (`tenant.EnforceRealmGuard`). |
 
 **Environment overrides for top-level fields** (applied in `LoadWithPath` after the file is read):
@@ -84,7 +85,7 @@ The controller decoder does not reject unknown keys: a misspelled key is silentl
 | `CFGMS_AUDIT_SINK` | `audit.sink` (lower-cased) |
 
 `internal_listen_addr`, `internal_delivery_listen_addr`, `admin_bundle_path`, `blob_storage`,
-`deployment_rings`, `tenant_admin`, `webauthn` and `realm_id` have no environment override.
+`deployment_rings`, `tenant_admin`, `webauthn`, `notifications` and `realm_id` have no environment override.
 
 > **`cert_path` resolution (Issue #3197).** A relative `cert_path` read *from a config
 > file* is anchored to that file's directory as the file is loaded, which is what makes it
@@ -442,6 +443,35 @@ and passkey step-up answer 503.
 | `rp_id` | string | `""` | optional | Relying-party identifier: the controller's effective domain (e.g. `cfgms.acme-corp.example`). No scheme, no port. |
 | `rp_display_name` | string | `rp_id` | optional | Human-readable name shown by the authenticator during the ceremony |
 | `rp_origins` | list[string] | `[]` | required when `rp_id` is set | Fully qualified origins allowed to complete a ceremony (e.g. `https://cfgms.acme-corp.example`). Every entry must start with `https://`. Setting origins without `rp_id` is rejected. |
+
+---
+
+### `notifications`
+
+`features/controller/config/config.go` `NotificationsConfig`. Validated at load by `Config.ValidateNotifications`.
+
+| YAML field | Type | Default | Req | Description |
+|---|---|---|---|---|
+| `email` | object | absent | optional | Controller-wide email delivery. Absent, or with an empty `host`, means email is not configured: the controller starts normally and logs once at INFO that email delivery is disabled. |
+
+#### `notifications.email`
+
+`EmailConfig`. Holds the non-secret SMTP settings only.
+
+| YAML field | Type | Default | Req | Description |
+|---|---|---|---|---|
+| `provider` | string | `"smtp"` | optional | Notification provider. Only `smtp` exists. |
+| `host` | string | `""` | optional | SMTP server host. Empty means email is not configured. Setting it requires `from` and `password_secret_key`. |
+| `port` | integer | `587` for `starttls`, `465` for `implicit_tls` | optional | SMTP server port |
+| `from` | string | `""` | required when `host` is set | Sender address |
+| `username` | string | `""` | optional | SMTP authentication user. The stored password is only used when a username is set. |
+| `tls_mode` | string | `"starttls"` | optional | `starttls` or `implicit_tls`. Any other value fails config validation. There is no plaintext mode and certificate verification cannot be disabled. |
+| `password_secret_key` | string | `""` | required when `host` is set | The `pkg/secrets` key under which the SMTP password is held |
+
+**Secret handling.** The SMTP password is not a config field, has no environment override, and is never written
+to the config file or any log. Store it with `PUT /api/v1/notifications/email/credential`
+(see [REST API](../api/rest-api.md#email-delivery)); it is held in the controller's secret store under
+`password_secret_key`. Email delivery stays off until both the settings and the credential are present.
 
 ---
 
