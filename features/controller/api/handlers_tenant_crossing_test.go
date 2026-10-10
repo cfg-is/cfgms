@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -1056,4 +1057,140 @@ func TestWriteTenantCrossingChallenge_ReasonCategories(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, []string{"account_recovery", "security_incident", "legal_request", "billing_dispute"}, body.ReasonCategories)
+}
+
+// secondApproverServer is breakGlassServer with the second-approver setting applied.
+func secondApproverServer(t *testing.T, on bool) *Server {
+	t.Helper()
+	server := breakGlassServer(t)
+	server.cfg.TenantAdmin = &config.TenantAdminConfig{BreakGlassRequiresSecondApprover: &on}
+	return server
+}
+
+func approveBreakGlass(t *testing.T, server *Server, crossingID string, approver *Principal) *httptest.ResponseRecorder {
+	t.Helper()
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass/"+crossingID+"/approve", "msp-a", approver, nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "msp-a", "crossing_id": crossingID})
+	rec := httptest.NewRecorder()
+	server.handleApproveTenantBreakGlass(rec, req)
+	return rec
+}
+
+func decodeCrossing(t *testing.T, rec *httptest.ResponseRecorder) *business.TenantCrossing {
+	t.Helper()
+	var resp struct {
+		Data business.TenantCrossing `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return &resp.Data
+}
+
+// invokePending invokes break-glass as root-operator-1 and returns the created crossing.
+func invokePending(t *testing.T, server *Server) *business.TenantCrossing {
+	t.Helper()
+	rec := invokeBreakGlass(t, server, breakGlassBody(t, "account_recovery", "Client lost all admin passkeys, INC-4821"), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	return decodeCrossing(t, rec)
+}
+
+func invokerGetsTenant(t *testing.T, server *Server) int {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	server.handleGetTenant(rec, requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", rootScopedPrincipal("root-operator-1"), nil))
+	return rec.Code
+}
+
+func TestBreakGlassSecondApprover_SettingOff_ActiveImmediately(t *testing.T) {
+	server := secondApproverServer(t, false)
+	c := invokePending(t, server)
+	assert.Equal(t, business.TenantCrossingApprovalApproved, c.ApprovalState)
+	assert.Equal(t, http.StatusOK, invokerGetsTenant(t, server))
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "msp-a"})
+	require.NoError(t, err)
+	findAuditEntryByAction(t, entries, "tenant.crossing_break_glass_invoked")
+}
+
+func TestBreakGlassSecondApprover_NilConfigDefaultsOff(t *testing.T) {
+	server := breakGlassServer(t)
+	server.cfg.TenantAdmin = nil
+	c := invokePending(t, server)
+	assert.Equal(t, business.TenantCrossingApprovalApproved, c.ApprovalState)
+}
+
+func TestBreakGlassSecondApprover_PendingDoesNotAdmit(t *testing.T) {
+	server := secondApproverServer(t, true)
+	c := invokePending(t, server)
+	assert.Equal(t, business.TenantCrossingApprovalPending, c.ApprovalState)
+	assert.Equal(t, http.StatusUnauthorized, invokerGetsTenant(t, server), "a pending crossing must still get the crossing challenge")
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "msp-a"})
+	require.NoError(t, err)
+	e := findAuditEntryByAction(t, entries, "tenant.crossing_break_glass_requested")
+	assert.Equal(t, business.AuditSeverityCritical, e.Severity)
+}
+
+func TestBreakGlassSecondApprover_ApproveActivatesAndRestartsWindow(t *testing.T) {
+	server := secondApproverServer(t, true)
+	c := invokePending(t, server)
+
+	before := time.Now()
+	rec := approveBreakGlass(t, server, c.ID, rootScopedPrincipal("root-operator-2"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := decodeCrossing(t, rec)
+	assert.Equal(t, business.TenantCrossingApprovalApproved, got.ApprovalState)
+	assert.Equal(t, "root-operator-2", got.ApprovedBy)
+	assert.False(t, got.ExpiresAt.Before(before.Add(tenantCrossingBreakGlassDuration)), "window must restart at approval time")
+	assert.Equal(t, http.StatusOK, invokerGetsTenant(t, server))
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "msp-a"})
+	require.NoError(t, err)
+	e := findAuditEntryByAction(t, entries, "tenant.crossing_break_glass_approved")
+	assert.Equal(t, business.AuditSeverityCritical, e.Severity)
+
+	// Approving again is not pending any more.
+	rec = approveBreakGlass(t, server, c.ID, rootScopedPrincipal("root-operator-3"))
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, "NOT_PENDING", crossingErrorCode(t, rec))
+}
+
+func TestBreakGlassSecondApprover_SameApproverRefused(t *testing.T) {
+	server := secondApproverServer(t, true)
+	c := invokePending(t, server)
+	rec := approveBreakGlass(t, server, c.ID, rootScopedPrincipal("root-operator-1"))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "SAME_APPROVER", crossingErrorCode(t, rec))
+	assert.Equal(t, http.StatusUnauthorized, invokerGetsTenant(t, server))
+}
+
+func TestBreakGlassSecondApprover_UnknownCrossing404(t *testing.T) {
+	server := secondApproverServer(t, true)
+	rec := approveBreakGlass(t, server, "no-such-crossing", rootScopedPrincipal("root-operator-2"))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestBreakGlassSecondApprover_NonRootScopedCannotApprove(t *testing.T) {
+	server := secondApproverServer(t, true)
+	c := invokePending(t, server)
+	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+	rec := approveBreakGlass(t, server, c.ID, mspAdmin)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "NOT_ROOT_SCOPED", crossingErrorCode(t, rec))
+	assert.Equal(t, http.StatusUnauthorized, invokerGetsTenant(t, server))
+}
+
+func TestBreakGlassSecondApprover_ExpiredPendingNotApprovable(t *testing.T) {
+	server := secondApproverServer(t, true)
+	past := time.Now().UTC().Add(-time.Hour)
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+		ID: "expired-pending", TenantID: "msp-a", PrincipalID: "root-operator-1", Kind: business.TenantCrossingKindBreakGlass,
+		GrantedBy: "root-operator-1", Justification: "expired while pending", ReasonCategory: business.TenantCrossingReasonCategory("account_recovery"),
+		ApprovalState: business.TenantCrossingApprovalPending,
+		CreatedAt:     past.Add(-time.Minute), ExpiresAt: past,
+	}))
+	rec := approveBreakGlass(t, server, "expired-pending", rootScopedPrincipal("root-operator-2"))
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, "NOT_PENDING", crossingErrorCode(t, rec))
+	assert.Equal(t, http.StatusUnauthorized, invokerGetsTenant(t, server))
 }

@@ -263,6 +263,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "tenant",
 		Actions:      []string{"crossing.break-glass"},
 	},
+	{
+		Id:           "tenant.crossing-approve-break-glass",
+		Name:         "Tenant-Crossing Break-Glass Approval",
+		Description:  "Authorises approving another root-scoped operator's pending break-glass invocation across the ADR-025 root<->MSP tenant boundary.",
+		ResourceType: "tenant",
+		Actions:      []string{"crossing.approve-break-glass"},
+	},
 
 	// Reboot Window Permissions (ADR-026 decision 3: distinct from config.update)
 	{

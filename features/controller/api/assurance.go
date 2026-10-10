@@ -30,38 +30,39 @@ type Requirement struct {
 // same tier as tenant:read.
 var permissionAssurance = map[string]Requirement{
 	// Former tier3Permissions set — 20 entries, all migrated to Min: AssuranceStrong.
-	"certificate:provision":          {Min: session.AssuranceStrong},                            // POST /certificates/provision
-	"certificate:rotate":             {Min: session.AssuranceStrong},                            // POST /certificates/signing/rotate, /signing/revoke and /signing/elect
-	"certificate:revoke":             {Min: session.AssuranceStrong},                            // POST /certificates/{serial}/revoke (Issue #3129)
-	"rbac:create-role":               {Min: session.AssuranceStrong},                            // POST /rbac/roles
-	"rbac:update-role":               {Min: session.AssuranceStrong},                            // PUT  /rbac/roles/{id}
-	"rbac:delete-role":               {Min: session.AssuranceStrong},                            // DELETE /rbac/roles/{id}
-	"rbac:assign-role":               {Min: session.AssuranceStrong},                            // POST /rbac/subjects/{id}/roles
-	"rbac:revoke-role":               {Min: session.AssuranceStrong},                            // DELETE /rbac/subjects/{id}/roles/{role_id}
-	"api-key:create":                 {Min: session.AssuranceStrong},                            // POST /api-keys
-	"api-key:delete":                 {Min: session.AssuranceStrong},                            // DELETE /api-keys/{id}
-	"registration:create-token":      {Min: session.AssuranceStrong},                            // POST /registration/tokens
-	"registration:delete-token":      {Min: session.AssuranceStrong},                            // DELETE /registration/tokens/{token}
-	"registration:revoke-token":      {Min: session.AssuranceStrong},                            // POST /registration/tokens/{token}/revoke
-	"registration:rotate-token":      {Min: session.AssuranceStrong},                            // POST /registration/tokens/{tenant_id}/rotate
-	"registration:approve":           {Min: session.AssuranceStrong},                            // POST /registration/{id}/approve + approve-all
-	"registration:manage-ip-trust":   {Min: session.AssuranceStrong},                            // POST + DELETE /registration/ip-trust
-	"tenant:create":                  {Min: session.AssuranceStrong},                            // POST /tenants
-	"tenant:delete":                  {Min: session.AssuranceStrong},                            // POST /tenants/{id}/delete, DELETE /tenants/{id}/delete (Issue #3182)
-	"tenant:approve-delete":          {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/delete/approve (Issue #3182)
-	"tenant:update":                  {Min: session.AssuranceStrong},                            // PUT  /tenants/{id}
-	"tenant:manage":                  {Min: session.AssuranceStrong},                            // POST /tenants/{id}/suspend, POST /tenants/{id}/config-source/test
-	"tenant:crossing-grant":          {Min: session.AssuranceStrong},                            // POST /tenants/{id}/access-grants
-	"tenant:crossing-end":            {Min: session.AssuranceStrong},                            // DELETE /tenants/{id}/access-grants/{crossing_id}
-	"tenant:crossing-break-glass":    {Min: session.AssuranceStrong},                            // POST /tenants/{id}/break-glass
-	"refresh:approve":                {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/approve
-	"refresh:set-policy":             {Min: session.AssuranceStrong},                            // PUT /tenants/{tenant_path}/refresh-policy
-	"steward:move":                   {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
-	"steward:decommission":           {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
-	"account:create":                 {Min: session.AssuranceStrong},                            // POST /accounts (Issue #3574)
-	"account:update":                 {Min: session.AssuranceStrong},                            // PUT  /accounts/{username} (Issue #3126: can reset password or disable; Issue #3574)
-	"account:delete":                 {Min: session.AssuranceStrong},                            // DELETE /accounts/{username} (Issue #3574)
-	"account:revoke-enrollment-link": {Min: session.AssuranceStrong},                            // POST /accounts/{username}/enrollment-link/revoke (Issue #3574)
+	"certificate:provision":               {Min: session.AssuranceStrong},                            // POST /certificates/provision
+	"certificate:rotate":                  {Min: session.AssuranceStrong},                            // POST /certificates/signing/rotate, /signing/revoke and /signing/elect
+	"certificate:revoke":                  {Min: session.AssuranceStrong},                            // POST /certificates/{serial}/revoke (Issue #3129)
+	"rbac:create-role":                    {Min: session.AssuranceStrong},                            // POST /rbac/roles
+	"rbac:update-role":                    {Min: session.AssuranceStrong},                            // PUT  /rbac/roles/{id}
+	"rbac:delete-role":                    {Min: session.AssuranceStrong},                            // DELETE /rbac/roles/{id}
+	"rbac:assign-role":                    {Min: session.AssuranceStrong},                            // POST /rbac/subjects/{id}/roles
+	"rbac:revoke-role":                    {Min: session.AssuranceStrong},                            // DELETE /rbac/subjects/{id}/roles/{role_id}
+	"api-key:create":                      {Min: session.AssuranceStrong},                            // POST /api-keys
+	"api-key:delete":                      {Min: session.AssuranceStrong},                            // DELETE /api-keys/{id}
+	"registration:create-token":           {Min: session.AssuranceStrong},                            // POST /registration/tokens
+	"registration:delete-token":           {Min: session.AssuranceStrong},                            // DELETE /registration/tokens/{token}
+	"registration:revoke-token":           {Min: session.AssuranceStrong},                            // POST /registration/tokens/{token}/revoke
+	"registration:rotate-token":           {Min: session.AssuranceStrong},                            // POST /registration/tokens/{tenant_id}/rotate
+	"registration:approve":                {Min: session.AssuranceStrong},                            // POST /registration/{id}/approve + approve-all
+	"registration:manage-ip-trust":        {Min: session.AssuranceStrong},                            // POST + DELETE /registration/ip-trust
+	"tenant:create":                       {Min: session.AssuranceStrong},                            // POST /tenants
+	"tenant:delete":                       {Min: session.AssuranceStrong},                            // POST /tenants/{id}/delete, DELETE /tenants/{id}/delete (Issue #3182)
+	"tenant:approve-delete":               {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/delete/approve (Issue #3182)
+	"tenant:update":                       {Min: session.AssuranceStrong},                            // PUT  /tenants/{id}
+	"tenant:manage":                       {Min: session.AssuranceStrong},                            // POST /tenants/{id}/suspend, POST /tenants/{id}/config-source/test
+	"tenant:crossing-grant":               {Min: session.AssuranceStrong},                            // POST /tenants/{id}/access-grants
+	"tenant:crossing-end":                 {Min: session.AssuranceStrong},                            // DELETE /tenants/{id}/access-grants/{crossing_id}
+	"tenant:crossing-break-glass":         {Min: session.AssuranceStrong},                            // POST /tenants/{id}/break-glass
+	"tenant:crossing-approve-break-glass": {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/break-glass/{crossing_id}/approve
+	"refresh:approve":                     {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/approve
+	"refresh:set-policy":                  {Min: session.AssuranceStrong},                            // PUT /tenants/{tenant_path}/refresh-policy
+	"steward:move":                        {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
+	"steward:decommission":                {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
+	"account:create":                      {Min: session.AssuranceStrong},                            // POST /accounts (Issue #3574)
+	"account:update":                      {Min: session.AssuranceStrong},                            // PUT  /accounts/{username} (Issue #3126: can reset password or disable; Issue #3574)
+	"account:delete":                      {Min: session.AssuranceStrong},                            // DELETE /accounts/{username} (Issue #3574)
+	"account:revoke-enrollment-link":      {Min: session.AssuranceStrong},                            // POST /accounts/{username}/enrollment-link/revoke (Issue #3574)
 
 	// Cluster node lifecycle permissions — new in Issue #2780.
 	"cluster:drain-node":        {Min: session.AssuranceStrong}, // POST /cluster/nodes/{id}/drain

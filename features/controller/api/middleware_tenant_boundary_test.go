@@ -59,6 +59,7 @@ var tenantBoundaryRouteTable = []tenantBoundaryRoute{
 	{http.MethodPut, "/api/v1/tenants/{tenant_id}/reboot-window", "tenant_id", "reboot_window:override", false},
 	{http.MethodPost, "/api/v1/tenants/{id}/access-grants", "id", "tenant:crossing-grant", true},
 	{http.MethodPost, "/api/v1/tenants/{id}/break-glass", "id", "tenant:crossing-break-glass", true},
+	{http.MethodPost, "/api/v1/tenants/{id}/break-glass/{crossing_id}/approve", "id", "tenant:crossing-approve-break-glass", true},
 	{http.MethodGet, "/api/v1/tenants/{tenant_path:.+}/refresh-policy", "tenant_path", "refresh:get-policy", false},
 	{http.MethodPut, "/api/v1/tenants/{tenant_path:.+}/refresh-policy", "tenant_path", "refresh:set-policy", false},
 	{http.MethodGet, "/api/v1/tenants/{tenant_path:.+}/assurance-policy", "tenant_path", "assurance-policy:get", false},

@@ -1376,3 +1376,22 @@ func TestAuditSinkConfig_EnvVarOverridesYAML(t *testing.T) {
 	assert.Equal(t, "local", cfg.Audit.Sink,
 		"CFGMS_AUDIT_SINK must override a config-file audit.sink value")
 }
+
+func TestTenantAdminConfig_GetBreakGlassRequiresSecondApprover(t *testing.T) {
+	on, off := true, false
+	tests := []struct {
+		name string
+		cfg  *TenantAdminConfig
+		want bool
+	}{
+		{"nil config defaults false", nil, false},
+		{"unset defaults false", &TenantAdminConfig{}, false},
+		{"explicit true", &TenantAdminConfig{BreakGlassRequiresSecondApprover: &on}, true},
+		{"explicit false", &TenantAdminConfig{BreakGlassRequiresSecondApprover: &off}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.GetBreakGlassRequiresSecondApprover())
+		})
+	}
+}

@@ -262,10 +262,21 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// With the second-approver setting on, the crossing is born pending and admits
+	// nothing until a different root-scoped principal approves it; its unapproved
+	// lifetime is the same window it would have had if active.
+	approvalState := business.TenantCrossingApprovalApproved
+	auditAction := "tenant.crossing_break_glass_invoked"
+	if s.cfg.TenantAdmin.GetBreakGlassRequiresSecondApprover() {
+		approvalState = business.TenantCrossingApprovalPending
+		auditAction = "tenant.crossing_break_glass_requested"
+	}
+
 	now := time.Now().UTC()
 	crossing := &business.TenantCrossing{
 		ID:             uuid.New().String(),
 		TenantID:       existing.ID,
+		ApprovalState:  approvalState,
 		PrincipalID:    principal.ID,
 		Kind:           business.TenantCrossingKindBreakGlass,
 		GrantedBy:      principal.ID,
@@ -283,9 +294,82 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.recordTenantCrossingAudit(r, existing.ID, principal.ID, crossing, business.AuditSeverityCritical,
-		"tenant.crossing_break_glass_invoked", justification)
+		auditAction, justification)
 
 	s.writeResponse(w, http.StatusCreated, crossing)
+}
+
+// handleApproveTenantBreakGlass implements
+// POST /api/v1/tenants/{id}/break-glass/{crossing_id}/approve. A root-scoped principal
+// other than the invoker approves a pending break-glass crossing; the crossing becomes
+// approved and its window restarts at approval time. The state transition is a single
+// atomic store call, so a crossing that expired or was revoked while pending is never
+// approvable.
+func (s *Server) handleApproveTenantBreakGlass(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	crossingID := vars["crossing_id"]
+	if tenantID == "" || crossingID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id and crossing id are required", "MISSING_PARAMETER")
+		return
+	}
+	if s.tenantCrossingStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "tenant crossing store not available", "TENANT_CROSSING_UNAVAILABLE")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if !subjectToTenantCrossingBoundary(principal) || principal.ID == "" {
+		s.writeErrorResponse(w, http.StatusForbidden, "break-glass approval is only available to root-scoped callers", "NOT_ROOT_SCOPED")
+		return
+	}
+
+	crossing, err := s.tenantCrossingStore.GetTenantCrossing(r.Context(), crossingID)
+	if err != nil && !errors.Is(err, business.ErrTenantCrossingNotFound) {
+		s.logger.Error("Failed to get tenant crossing",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get crossing", "GET_FAILED")
+		return
+	}
+	if err != nil || crossing == nil || crossing.TenantID != tenantID || crossing.Kind != business.TenantCrossingKindBreakGlass {
+		s.writeErrorResponse(w, http.StatusNotFound, "crossing not found", "CROSSING_NOT_FOUND")
+		return
+	}
+	if crossing.ApprovalState != business.TenantCrossingApprovalPending {
+		s.writeErrorResponse(w, http.StatusConflict, "crossing is not pending approval", "NOT_PENDING")
+		return
+	}
+	if crossing.GrantedBy == principal.ID {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"approver must differ from the principal who invoked this break-glass", "SAME_APPROVER")
+		return
+	}
+
+	now := time.Now().UTC()
+	if err := s.tenantCrossingStore.ApproveTenantCrossing(r.Context(), crossing.ID, principal.ID, now, now.Add(tenantCrossingBreakGlassDuration)); err != nil {
+		if errors.Is(err, business.ErrTenantCrossingNotPending) {
+			s.writeErrorResponse(w, http.StatusConflict, "crossing is not pending approval", "NOT_PENDING")
+			return
+		}
+		if errors.Is(err, business.ErrTenantCrossingNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "crossing not found", "CROSSING_NOT_FOUND")
+			return
+		}
+		s.logger.Error("Failed to approve tenant crossing",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to approve break-glass", "APPROVE_FAILED")
+		return
+	}
+	if updated, gerr := s.tenantCrossingStore.GetTenantCrossing(r.Context(), crossing.ID); gerr == nil && updated != nil {
+		crossing = updated
+	}
+
+	s.recordTenantCrossingAudit(r, crossing.TenantID, principal.ID, crossing, business.AuditSeverityCritical,
+		"tenant.crossing_break_glass_approved", crossing.Justification)
+
+	s.writeResponse(w, http.StatusOK, crossing)
 }
 
 // handleListTenantCrossings implements GET /api/v1/tenants/{id}/access-grants.

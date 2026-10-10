@@ -357,7 +357,7 @@ func (t *TemplateManager) getSystemTemplates() []*common.PermissionTemplate {
 			Name:          "Tenant-Crossing Break-Glass Access",
 			Description:   "ADR-025 Decision 2(b) template for root-scoped SaaS-operator break-glass access across the root<->MSP tenant boundary. Assignments expire after 30 minutes and must be renewed explicitly via a fresh, justified invocation. Grants tenant.crossing-break-glass only — not a reuse of emergency.break-glass, which is scoped to system resources.",
 			Category:      "emergency",
-			PermissionIds: []string{"tenant.crossing-break-glass"},
+			PermissionIds: []string{"tenant.crossing-break-glass", "tenant.crossing-approve-break-glass"},
 			ConditionalPermissions: []*common.ConditionalPermission{
 				{
 					Id:           "tenant-crossing-time-limited",

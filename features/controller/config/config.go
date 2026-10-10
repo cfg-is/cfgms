@@ -333,6 +333,11 @@ type TenantAdminConfig struct {
 	// DeleteRequiresDualControl controls whether the operator who requested a
 	// tenant deletion may also approve it. Defaults to true (dual-control required).
 	DeleteRequiresDualControl *bool `yaml:"delete_requires_dual_control,omitempty"`
+
+	// BreakGlassRequiresSecondApprover controls whether a tenant-crossing break-glass
+	// invocation is created pending until a different root-scoped principal approves it
+	// (ADR-025). Defaults to false (the invocation is active at once).
+	BreakGlassRequiresSecondApprover *bool `yaml:"break_glass_requires_second_approver,omitempty"`
 }
 
 // GetDeleteHoldPeriod returns the configured hold period, defaulting to 30 days.
@@ -349,6 +354,15 @@ func (c *TenantAdminConfig) GetDeleteRequiresDualControl() bool {
 		return true
 	}
 	return *c.DeleteRequiresDualControl
+}
+
+// GetBreakGlassRequiresSecondApprover returns whether break-glass needs a second approver,
+// defaulting to false.
+func (c *TenantAdminConfig) GetBreakGlassRequiresSecondApprover() bool {
+	if c == nil || c.BreakGlassRequiresSecondApprover == nil {
+		return false
+	}
+	return *c.BreakGlassRequiresSecondApprover
 }
 
 // Config holds the controller configuration
