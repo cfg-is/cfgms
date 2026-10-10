@@ -450,3 +450,36 @@ func TestConcurrentSendAndPublish(t *testing.T) {
 		return commands.Load() == n && events.Load() == n
 	}, 5*time.Second, 10*time.Millisecond, "all concurrent messages should be delivered")
 }
+
+func TestMemoryProvider_ResponseRoundTrip(t *testing.T) {
+	bus := memory.NewBus()
+	server := startServer(t, bus)
+	client := startClient(t, bus, "steward-resp")
+
+	received := make(chan *types.Response, 1)
+	require.NoError(t, server.SubscribeResponses(context.Background(), func(_ context.Context, resp *types.Response) error {
+		received <- resp
+		return nil
+	}))
+
+	require.NoError(t, client.SendResponse(context.Background(), &types.Response{
+		CommandID: "cmd-1",
+		Message:   "term_fenced",
+		Timestamp: time.Now(),
+		Details:   map[string]interface{}{"reason": "term_fenced", "retryable": true},
+	}))
+
+	select {
+	case got := <-received:
+		assert.Equal(t, "cmd-1", got.CommandID)
+		assert.Equal(t, "steward-resp", got.StewardID)
+		assert.False(t, got.Success)
+		assert.Equal(t, true, got.Details["retryable"])
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for response")
+	}
+
+	assert.Error(t, client.SubscribeResponses(context.Background(), func(context.Context, *types.Response) error { return nil }))
+	assert.Error(t, server.SendResponse(context.Background(), &types.Response{CommandID: "cmd-2"}))
+	assert.Error(t, client.SendResponse(context.Background(), &types.Response{CommandID: "cmd-3", StewardID: "someone-else"}))
+}

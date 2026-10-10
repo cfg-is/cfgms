@@ -5,6 +5,7 @@ package grpc
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -453,4 +454,39 @@ func TestControlChannel_StreamRemainsOpenAfterMismatch(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out — stream should remain open after a single mismatch")
 	}
+}
+
+// TestControlChannel_Response_MismatchedStewardID_NotDispatched verifies that a
+// Response whose payload StewardID disagrees with the CN never reaches a subscriber.
+func TestControlChannel_Response_MismatchedStewardID_NotDispatched(t *testing.T) {
+	t.Parallel()
+	env := newMultiStewardEnv(t)
+
+	var delivered atomic.Int64
+	require.NoError(t, env.server.SubscribeResponses(context.Background(), func(context.Context, *types.Response) error {
+		delivered.Add(1)
+		return nil
+	}))
+
+	require.NoError(t, env.clientA.SubscribeCommands(context.Background(), "steward-a", func(ctx context.Context, sc *types.SignedCommand) error {
+		return env.clientA.SendResponse(ctx, &types.Response{
+			CommandID: sc.Command.ID,
+			StewardID: "steward-b", // CN is steward-a — mismatch
+			Success:   false,
+			Timestamp: time.Now(),
+		})
+	}))
+
+	require.NoError(t, env.server.SendCommand(context.Background(), &types.SignedCommand{Command: types.Command{
+		ID:        "resp-mismatch-dispatch-cmd",
+		Type:      types.CommandSyncConfig,
+		StewardID: "steward-a",
+		Timestamp: time.Now(),
+	}}))
+
+	require.Eventually(t, func() bool {
+		stats, err := env.server.GetStats(context.Background())
+		return err == nil && stats.IdentityMismatches == 1
+	}, 3*time.Second, 50*time.Millisecond, "IdentityMismatches should be 1")
+	assert.Equal(t, int64(0), delivered.Load(), "mismatched response must not reach a subscriber")
 }

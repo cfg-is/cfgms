@@ -367,8 +367,8 @@ func (s *DatabaseCommandStore) UpdateDeliveryStatus(
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE command_records SET delivery_status = $2, delivery_detail = $3
-		WHERE id = $1`,
-		id, string(status), detail)
+		WHERE id = $1 AND delivery_status <> $4`,
+		id, string(status), detail, string(business.DeliveryStatusRejected))
 	if err != nil {
 		return fmt.Errorf("database: failed to update delivery status for %s: %w", id, err)
 	}
@@ -377,7 +377,8 @@ func (s *DatabaseCommandStore) UpdateDeliveryStatus(
 		return fmt.Errorf("database: failed to read rows affected for %s: %w", id, err)
 	}
 	if n == 0 {
-		return business.ErrCommandNotFound
+		// The row was found above, so zero rows means the terminal guard held.
+		return business.ErrDeliveryStatusTerminal
 	}
 	return tx.Commit()
 }

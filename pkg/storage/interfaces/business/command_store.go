@@ -41,6 +41,10 @@ const (
 	// DeliveryStatusFailed means delivery terminally failed (e.g. steward
 	// deregistered) and will not be retried.
 	DeliveryStatusFailed DeliveryStatus = "failed"
+	// DeliveryStatusRejected means the steward received the command and refused it
+	// on its receive path (Issue #4569). DeliveryDetail carries the reason code.
+	// It is terminal: UpdateDeliveryStatus never moves a record out of it.
+	DeliveryStatusRejected DeliveryStatus = "rejected"
 )
 
 // CommandRecord persists the full lifecycle of a command dispatched to a steward.
@@ -132,6 +136,10 @@ type CommandStore interface {
 	// (e.g. a sanitized transport error) and is stored verbatim in DeliveryDetail;
 	// callers must sanitize any error-derived value before passing it here
 	// (logging.SanitizeLogValue) since detail is also written to logs by callers.
+	// DeliveryStatusRejected is terminal: a record already in that state is left
+	// unchanged and ErrDeliveryStatusTerminal is returned (Issue #4569). This closes
+	// the race where a steward's rejection arrives before the publisher's own
+	// "delivered" write.
 	// Returns ErrCommandNotFound if no record exists for id.
 	UpdateDeliveryStatus(ctx context.Context, id string, status DeliveryStatus, detail string) error
 
@@ -190,6 +198,13 @@ type CommandStore interface {
 
 // Common CommandStore errors.
 var (
+	// ErrDeliveryStatusTerminal is returned by UpdateDeliveryStatus when the record
+	// exists but is already DeliveryStatusRejected and so was not changed.
+	ErrDeliveryStatusTerminal = &CommandValidationError{
+		Field:   "delivery_status",
+		Message: "delivery status is terminal (rejected)",
+		Code:    "DELIVERY_STATUS_TERMINAL",
+	}
 	ErrCommandNotFound = &CommandValidationError{
 		Field:   "id",
 		Message: "command record not found",

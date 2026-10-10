@@ -6,6 +6,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -279,8 +280,8 @@ func (s *SQLiteCommandStore) UpdateDeliveryStatus(
 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE commands SET delivery_status = ?, delivery_detail = ?
-		WHERE id = ?`,
-		string(status), detail, id)
+		WHERE id = ? AND delivery_status <> ?`,
+		string(status), detail, id, string(business.DeliveryStatusRejected))
 	if err != nil {
 		return fmt.Errorf("sqlite: failed to update delivery status for %s: %w", id, err)
 	}
@@ -289,7 +290,15 @@ func (s *SQLiteCommandStore) UpdateDeliveryStatus(
 		return fmt.Errorf("sqlite: failed to read rows affected for %s: %w", id, err)
 	}
 	if n == 0 {
-		return business.ErrCommandNotFound
+		var exists int
+		qerr := s.db.QueryRowContext(ctx, `SELECT 1 FROM commands WHERE id = ?`, id).Scan(&exists)
+		if qerr == nil {
+			return business.ErrDeliveryStatusTerminal
+		}
+		if errors.Is(qerr, sql.ErrNoRows) {
+			return business.ErrCommandNotFound
+		}
+		return fmt.Errorf("sqlite: failed to check command existence for %s: %w", id, qerr)
 	}
 	return nil
 }

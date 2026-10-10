@@ -162,3 +162,24 @@ type EventHandler func(ctx context.Context, event *types.Event) error
 //
 // Heartbeats allow monitoring of steward connectivity and health status.
 type HeartbeatHandler func(ctx context.Context, heartbeat *types.Heartbeat) error
+
+// ResponseHandler is called when a steward response is received (controller-side).
+//
+// The provider guarantees resp.StewardID is the authenticated identity of the
+// sending steward before the handler runs (Issue #4569).
+type ResponseHandler func(ctx context.Context, resp *types.Response) error
+
+// ResponseSender is an optional capability of a client-mode provider: it sends a
+// steward-originated Response (for example a receive-path rejection) to the
+// controller. It is deliberately not part of ControlPlaneProvider (epic #747);
+// callers type-assert for it. Only client-mode providers may send.
+type ResponseSender interface {
+	SendResponse(ctx context.Context, response *types.Response) error
+}
+
+// ResponseSubscriber is an optional capability of a server-mode provider: it
+// delivers every response received from a connected steward to the handler.
+// Only server-mode providers may subscribe.
+type ResponseSubscriber interface {
+	SubscribeResponses(ctx context.Context, handler ResponseHandler) error
+}

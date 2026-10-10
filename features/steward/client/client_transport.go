@@ -1120,9 +1120,89 @@ func (c *TransportClient) receiveCommand(
 	dispatch func(context.Context, *cpTypes.SignedCommand) error,
 ) error {
 	if err := c.checkTermFence(sc); err != nil {
+		c.reportRejection(ctx, sc, err)
 		return err
 	}
-	return dispatch(ctx, sc)
+	if err := dispatch(ctx, sc); err != nil {
+		c.reportRejection(ctx, sc, err)
+		return err
+	}
+	return nil
+}
+
+// Rejection reason codes carried in the rejection Response (Issue #4569). The
+// controller's CommandRejectionRecorder accepts exactly this set.
+const (
+	rejectionTermFenced      = "term_fenced"
+	rejectionUnauthenticated = "unauthenticated"
+	rejectionWrongSteward    = "wrong_steward"
+	rejectionStaleTimestamp  = "stale_timestamp"
+	rejectionDuplicateID     = "duplicate_id"
+	rejectionParamsTooLarge  = "params_too_large"
+	rejectionInvalidCommand  = "invalid_command"
+)
+
+// rejectionSendTimeout bounds the rejection report so a slow control channel
+// cannot hold a receive goroutine.
+const rejectionSendTimeout = 5 * time.Second
+
+// rejectionReason maps a receive-path error to its reason code and whether the
+// controller may retry the command. The first matching row wins. Only a
+// term_fenced rejection is retryable.
+func rejectionReason(err error) (reason string, retryable bool) {
+	switch {
+	case errors.Is(err, ErrCommandTermFenced):
+		return rejectionTermFenced, true
+	case errors.Is(err, commands.ErrUnauthenticatedCommand):
+		return rejectionUnauthenticated, false
+	case errors.Is(err, commands.ErrWrongSteward):
+		return rejectionWrongSteward, false
+	case errors.Is(err, commands.ErrCommandStale):
+		return rejectionStaleTimestamp, false
+	case errors.Is(err, commands.ErrCommandDuplicate):
+		return rejectionDuplicateID, false
+	case errors.Is(err, commands.ErrParamsTooLarge):
+		return rejectionParamsTooLarge, false
+	default:
+		return rejectionInvalidCommand, false
+	}
+}
+
+// reportRejection tells the controller that this steward refused an inbound
+// command. The Response carries only the reason code — never err.Error(), whose
+// fence text includes the steward's highest seen term. A send failure is logged
+// and otherwise ignored: the caller still returns the original rejection error.
+func (c *TransportClient) reportRejection(ctx context.Context, sc *cpTypes.SignedCommand, cause error) {
+	if sc == nil || sc.Command.ID == "" {
+		return
+	}
+
+	c.mu.RLock()
+	cp := c.controlPlane
+	stewardID := c.stewardID
+	c.mu.RUnlock()
+
+	sender, ok := cp.(controlplaneInterfaces.ResponseSender)
+	if !ok {
+		return
+	}
+
+	reason, retryable := rejectionReason(cause)
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rejectionSendTimeout)
+	defer cancel()
+	if err := sender.SendResponse(sendCtx, &cpTypes.Response{
+		CommandID: sc.Command.ID,
+		StewardID: stewardID,
+		Success:   false,
+		Message:   reason,
+		Timestamp: time.Now(),
+		Details:   map[string]interface{}{"reason": reason, "retryable": retryable},
+	}); err != nil {
+		c.logger.Warn("Failed to report command rejection to controller",
+			"command_id", logging.SanitizeLogValue(sc.Command.ID),
+			"reason", reason,
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // checkTermFence enforces ADR-029 Decision 6's three-state ratchet (Story #3436

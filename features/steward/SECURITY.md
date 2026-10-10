@@ -21,9 +21,9 @@ The steward handler (`features/steward/commands/handler.go`) applies the followi
 
 2. **StewardID match** — `Command.StewardID` must equal the handler's own steward identity. Mismatches are rejected with `ErrWrongSteward` to prevent cross-steward command injection.
 
-3. **Timestamp freshness** — `Command.Timestamp` must be within the configured replay window (default: 5 minutes). Stale commands are rejected with `ErrCommandReplay`. The window is configurable via `SignedCommandReplayWindow` in the steward config.
+3. **Timestamp freshness** — `Command.Timestamp` must be within the configured replay window (default: 5 minutes). Stale commands are rejected with `ErrCommandStale`, which wraps `ErrCommandReplay`. The window is configurable via `SignedCommandReplayWindow` in the steward config.
 
-4. **Replay deduplication** — `Command.ID` is recorded in a bounded in-memory TTL cache. A second delivery of the same ID within the replay window is rejected with `ErrCommandReplay`. This catches duplicate delivery even when the timestamp is still fresh.
+4. **Replay deduplication** — `Command.ID` is recorded in a bounded in-memory TTL cache. A second delivery of the same ID within the replay window is rejected with `ErrCommandDuplicate`, which wraps `ErrCommandReplay`. This catches duplicate delivery even when the timestamp is still fresh.
 
 5. **Params size bound** — `Command.Params` serialised as JSON must not exceed `maxParamsBytes` (default: 64 KiB). Oversized params are rejected with `ErrParamsTooLarge`. The limit is configurable via `SignedCommandMaxParamsBytes` in the steward config.
 
