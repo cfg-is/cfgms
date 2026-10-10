@@ -314,7 +314,13 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Tenant isolation: an out-of-subtree caller receives 403 regardless of binding state.
-	if !s.isWithinTenantScope(r.Context(), s.callerTenantID(r), acct.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+	// A boundary-subject root caller needs a crossing for a client tenant's account.
+	if !s.authorizeCrossingRead(w, r, s.accountPrincipalTenant(r.Context(), acct), "GET /api/v1/accounts/{username}/certs", func() {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	}) {
+		return
+	}
+	if !s.isWithinTenantScope(r.Context(), s.callerTenantID(r), acct.TenantID) { //architecture:allow-root-scope -- tenant-scoped subtree check; a boundary-subject root caller is decided by authorizeCrossingRead above
 		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
 		return
 	}

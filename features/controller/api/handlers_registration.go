@@ -162,7 +162,8 @@ type denyRegistrationRequest struct {
 }
 
 // handleListPendingRegistrations handles GET /api/v1/registration/pending.
-// Returns all quarantined stewards awaiting operator approval.
+// Returns all quarantined stewards awaiting operator approval. A root-scoped
+// operator sees root's own entries, and a client tenant's only under a crossing.
 // Scoped callers (API-key principals) see only their own tenant's entries; unscoped
 // (mTLS admin, callerTenant == "") retain global visibility.
 func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.Request) {
@@ -178,8 +179,15 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// A boundary-subject root caller sees root's own pending registrations and
+	// those of tenants under a crossing; the store lists every tenant for root.
+	readScope := s.tenantReadScope(r, "GET /api/v1/registration/pending")
+	defer readScope.LogSummary()
 	pending := make([]PendingRegistration, 0, len(entries))
 	for _, e := range entries {
+		if readScope.Skips(e.TenantID) {
+			continue
+		}
 		pending = append(pending, PendingRegistration{
 			PendingID:      e.PendingID,
 			StewardID:      e.StewardID,
@@ -661,7 +669,7 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 func (s *Server) tenantListFilterForScope(r *http.Request) (tenantFilter string, ok bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
-	case scope.IsRoot(): //architecture:allow-root-scope -- list breadth; the bulk approvals apply tenantAccessFilter per entry
+	case scope.IsRoot(): //architecture:allow-root-scope -- bulk approval selection; each entry passes tenantAccessFilter
 		return "", true
 	case scope.IsTenant() && scope.Path() != "":
 		return scope.Path(), true

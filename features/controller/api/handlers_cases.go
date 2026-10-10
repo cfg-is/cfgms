@@ -39,11 +39,12 @@ func (s *Server) CasesStore() business.CaseStore {
 
 // caseInCallerSubtree reports whether a case's tenant falls within the caller's
 // tenant subtree, for reading cases. An empty callerTenant means the caller has
-// global scope and all cases are visible. Writes go through tenantAccessForScope
+// global scope; a boundary-subject root caller is first held to the crossing
+// decision by authorizeCrossingRead at each read site. Writes go through tenantAccessForScope
 // instead (Issue #4665).
 // Containment resolves through the tenant manager's ParentID ancestry.
 func (s *Server) caseInCallerSubtree(ctx context.Context, caseTenantID, callerTenant string) bool {
-	if callerTenant == "" { //architecture:allow-root-scope -- read breadth for cases, used only by read paths
+	if callerTenant == "" { //architecture:allow-root-scope -- unrestricted callers keep global scope; a boundary-subject root caller is decided by authorizeCrossingRead at each read site
 		return true
 	}
 	return s.tenantSubtreeContains(ctx, callerTenant, caseTenantID)
@@ -214,6 +215,11 @@ func (s *Server) handleListCases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	callerTenant := callerTenantSubtree(r)
+	readScope := s.tenantReadScope(r, "GET /api/v1/cases")
+	if readScope.boundarySubject() {
+		s.listBoundaryCases(w, r, readScope)
+		return
+	}
 	if callerTenant == "" {
 		// Global-scope callers: no tenant to filter by. ListCases requires a
 		// non-empty tenant ID. Return empty list — global admins do not have a
@@ -260,6 +266,59 @@ func (s *Server) handleListCases(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, http.StatusOK, resp)
 }
 
+// listBoundaryCases answers GET /api/v1/cases for a root caller subject to the
+// ADR-025 crossing boundary: the root tenant's own cases plus those of every
+// tenant under an active crossing. The store lists one tenant at a time, so the
+// root tenant and each crossing tenant's subtree are listed and merged by case
+// ID; every case is then re-checked against the read decision.
+func (s *Server) listBoundaryCases(w http.ResponseWriter, r *http.Request, readScope *tenantReadScope) {
+	defer readScope.LogSummary()
+	seenTenant := make(map[string]struct{})
+	tenantIDs := make([]string, 0, 8)
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, dup := seenTenant[id]; dup {
+			return
+		}
+		seenTenant[id] = struct{}{}
+		tenantIDs = append(tenantIDs, id)
+	}
+	add(s.rootTenantID(r.Context()))
+	for _, crossed := range readScope.CrossingTenants() {
+		add(crossed)
+		descendants := make([]string, 0)
+		for id := range s.tenantSubtreeIDs(r.Context(), crossed) {
+			descendants = append(descendants, id)
+		}
+		sort.Strings(descendants)
+		for _, id := range descendants {
+			add(id)
+		}
+	}
+	resp := make([]caseResponse, 0)
+	seen := make(map[string]struct{})
+	for _, tid := range tenantIDs {
+		tenantCases, err := s.casesStore.ListCases(r.Context(), tid)
+		if err != nil {
+			s.logger.Error("handleListCases: store failed",
+				"tenant_id", logging.SanitizeLogValue(tid),
+				"error", logging.SanitizeLogValue(err.Error()))
+			http.Error(w, "failed to list cases", http.StatusInternalServerError)
+			return
+		}
+		for _, c := range tenantCases {
+			if _, dup := seen[c.ID]; dup || readScope.Skips(c.TenantID) {
+				continue
+			}
+			seen[c.ID] = struct{}{}
+			resp = append(resp, caseToResponse(c))
+		}
+	}
+	s.writeResponse(w, http.StatusOK, resp)
+}
+
 // handleGetCase handles GET /api/v1/cases/{id}.
 // Returns 404 for both a nonexistent id and an id belonging to another tenant —
 // indistinguishable responses (existence-oracle prevention, ADR-022 §7).
@@ -290,6 +349,11 @@ func (s *Server) handleGetCase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant check: same 404 as not-found (existence-oracle prevention).
+	if !s.authorizeCrossingRead(w, r, c.TenantID, "GET /api/v1/cases/{id}", func() {
+		http.Error(w, "not found", http.StatusNotFound)
+	}) {
+		return
+	}
 	callerTenant := callerTenantSubtree(r)
 	if !s.caseInCallerSubtree(r.Context(), c.TenantID, callerTenant) {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -405,6 +469,11 @@ func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id, rout
 			return nil
 		}
 		return c
+	}
+	if !s.authorizeCrossingRead(w, r, c.TenantID, route, func() {
+		http.Error(w, "not found", http.StatusNotFound)
+	}) {
+		return nil
 	}
 	if !s.caseInCallerSubtree(r.Context(), c.TenantID, callerTenantSubtree(r)) {
 		http.Error(w, "not found", http.StatusNotFound)

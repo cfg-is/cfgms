@@ -1091,6 +1091,8 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the caller's subtree once rather than per account.
 	subtree := s.tenantSubtreeIDs(r.Context(), callerTenant)
+	readScope := s.tenantReadScope(r, "GET /api/v1/accounts")
+	defer readScope.LogSummary()
 
 	// Issue #4602: role names are resolved per account only for callers who may
 	// read subject roles; everyone else gets the list without the field.
@@ -1101,7 +1103,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	for _, meta := range metas {
 		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
 		// caller's subtree. Unscoped admins (callerTenant == "") see everything.
-		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped subtree filter; a boundary-subject root caller is decided by readScope below
 			if !subtree.Contains(meta.TenantID) {
 				continue
 			}
@@ -1119,6 +1121,11 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		tenantID := meta.TenantID
 		if rootScope {
 			tenantID = s.rootTenantID(r.Context())
+		}
+		// A root-scope account belongs to the root tenant, so it stays listed; a
+		// client tenant's account needs a crossing for a boundary-subject root caller.
+		if readScope.Skips(tenantID) {
+			continue
 		}
 		// Issue #2974: determine whether an outstanding enrollment link exists.
 		// Check hash, expiry, and revoked flag from stored metadata.
@@ -1289,7 +1296,14 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	// Issue #3126: enforce tenant-subtree scope. A cross-tenant caller gets 404 —
 	// not 403 — to avoid disclosing that the account exists in another tenant.
 	callerTenant := callerTenantFilter(r.Context())
-	if !s.isWithinTenantScope(r.Context(), callerTenant, acct.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	// A boundary-subject root caller reaches a client tenant's account only through
+	// a crossing; a root-scope account belongs to the root tenant.
+	if !s.authorizeCrossingRead(w, r, s.accountPrincipalTenant(r.Context(), acct), "GET /api/v1/accounts/{username}", func() {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	}) {
+		return
+	}
+	if !s.isWithinTenantScope(r.Context(), callerTenant, acct.TenantID) { //architecture:allow-root-scope -- tenant-scoped subtree check; a boundary-subject root caller is decided by authorizeCrossingRead above
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}

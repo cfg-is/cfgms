@@ -331,6 +331,14 @@ func (s *Server) webAuthnRelyingPartyBinding() *WebAuthnRelyingParty {
 // operator certs despite RevocationManifestKind — handleRevokeCertificate writes
 // steward-cert serials into the same store, so serving it unfiltered to a scoped
 // caller would disclose other tenants' steward certificates.
+//
+// Crossing classification (Issue #4716): an unrestricted root caller, including a
+// boundary-subject root operator, is served this manifest with no crossing. It is
+// a signed, fleet-wide platform trust artifact that lists revoked serials with no
+// tenant attribution, not a client tenant's business data, so it is deliberately
+// outside the ADR-025 read crossing that the account, certificate and token reads
+// require. Growing the always-visible set beyond ADR-025 Decision 4 is a founder
+// decision; this classification is recorded here for the product owner to confirm.
 func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Request) {
 	// Authorization before resource state: a scoped caller learns nothing about
 	// controller configuration from this endpoint.

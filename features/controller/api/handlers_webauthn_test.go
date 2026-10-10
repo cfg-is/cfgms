@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -2090,4 +2091,68 @@ func TestWebAuthnListCredentials_CurrentMarksSessionCredential(t *testing.T) {
 	for id, info := range list("unknown-session") {
 		assert.False(t, info.Current, "unknown session => current false for %s", id)
 	}
+}
+
+// TestWebAuthnAdminPath_RootTenantBoundCaller_CannotReachRootScopeAccount verifies
+// that a tenant-scoped principal bound to the root tenant itself — for example an
+// API key created by a root caller without tenant_id, which is scoped as a tenant,
+// not root — cannot register, list or otherwise touch the passkeys of a root_scope
+// operator account. Enrolling a passkey there would let it sign in as the root
+// operator. Only a root-scope caller reaches a root-scope account's passkeys.
+func TestWebAuthnAdminPath_RootTenantBoundCaller_CannotReachRootScopeAccount(t *testing.T) {
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	const rootOperator = "root-operator-webauthn"
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username:  rootOperator,
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create root-scope account: %s", rec.Body.String())
+	require.Equal(t, testRootTenantID, server.rootTenantID(context.Background()),
+		"precondition: the root tenant resolves")
+
+	// withRootTenantKey injects the context authenticationMiddleware builds for a
+	// root-tenant-bound API key: tenant ID = root tenant, scope = tenant (not root).
+	withRootTenantKey := func(req *http.Request) *http.Request {
+		p := &Principal{
+			ID: "root-tenant-api-key", TenantID: testRootTenantID,
+			Assurance: session.AssuranceStrong, ImplicitAdmin: true,
+		}
+		ctx := context.WithValue(req.Context(), principalContextKey, p)
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, testRootTenantID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(testRootTenantID))
+		return req.WithContext(ctx)
+	}
+
+	t.Run("register begin returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost,
+			fmt.Sprintf("/api/v1/accounts/%s/webauthn/register/begin", rootOperator), nil)
+		req = withVars(req, map[string]string{"username": rootOperator})
+		req = withRootTenantKey(req)
+		rec := httptest.NewRecorder()
+		server.handleWebAuthnRegisterBegin(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("list credentials returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/api/v1/accounts/%s/webauthn/credentials", rootOperator), nil)
+		req = withVars(req, map[string]string{"username": rootOperator})
+		req = withRootTenantKey(req)
+		rec := httptest.NewRecorder()
+		server.handleWebAuthnListCredentials(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("root-scope caller still reaches the account", func(t *testing.T) {
+		rec := doListCredentials(t, server, rootOperator)
+		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		rec = doBegin(t, server, rootOperator)
+		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
 }

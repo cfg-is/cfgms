@@ -194,8 +194,21 @@ func (s *Server) resolveAccountForCredentials(w http.ResponseWriter, r *http.Req
 	// found and out-of-scope return the same response so this surface cannot be used
 	// to probe for account existence across tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "/api/v1/accounts/{username}/webauthn/*"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+	// A root-scope operator account is reachable only by a root-scope caller. A
+	// tenant-scoped caller — including one bound to the root tenant itself, such as
+	// an API key created without tenant_id — must never register, list, rename or
+	// revoke a root operator's passkeys: doing so would let it enroll a credential
+	// and sign in as the root operator. Same response as not-found.
+	if acct.RootScope && !scope.IsRoot() { //architecture:allow-root-scope -- denies non-root callers a root-scope account; a root caller still goes through tenantAccessForScope below
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Account not found", "ACCOUNT_NOT_FOUND")
+		return nil, nil, false
+	}
+	// A root-scope account is stored under a system sentinel but belongs to the root
+	// tenant, so a root operator reaches its own passkeys without a crossing.
+	ownerTenant := s.accountPrincipalTenant(r.Context(), acct)
+	if access := s.tenantAccessForScope(r.Context(), scope, ownerTenant, "/api/v1/accounts/{username}/webauthn/*"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, ownerTenant) {
 			s.writeErrorResponse(w, http.StatusNotFound,
 				"Account not found", "ACCOUNT_NOT_FOUND")
 		}

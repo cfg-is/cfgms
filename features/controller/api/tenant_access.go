@@ -205,6 +205,13 @@ func (t *tenantReadScope) Allows(tenantID string) bool {
 	return t.decide(tenantID) == tenantAuthAllowed
 }
 
+// Skips reports whether a list filter must drop a record owned by tenantID: true
+// only for a boundary-subject root caller with no crossing for that tenant. Every
+// other caller is never skipped here and keeps the scope filter its handler applies.
+func (t *tenantReadScope) Skips(tenantID string) bool {
+	return t.boundarySubject() && !t.Allows(tenantID)
+}
+
 // RootTenantOnly reports whether the caller is a boundary-subject root caller
 // with no crossing, so only root's own records are readable.
 func (t *tenantReadScope) RootTenantOnly() bool {
@@ -400,4 +407,16 @@ func (s *Server) authorizeRecordRead(w http.ResponseWriter, r *http.Request, rec
 		notFound()
 	}
 	return false
+}
+
+// authorizeCrossingRead gates a by-ID read of a record owned by recordTenant on
+// the ADR-025 crossing boundary. A caller that is not a boundary-subject root
+// passes straight through, because the handler's own tenant-scope check decides
+// for it; a boundary-subject root caller with no crossing for recordTenant gets
+// the crossing challenge, or notFound for a tenant outside the root hierarchy.
+func (s *Server) authorizeCrossingRead(w http.ResponseWriter, r *http.Request, recordTenant, route string, notFound func()) bool {
+	if !s.tenantReadScope(r, route).boundarySubject() {
+		return true
+	}
+	return s.authorizeRecordRead(w, r, recordTenant, route, notFound)
 }

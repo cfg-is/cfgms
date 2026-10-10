@@ -111,7 +111,8 @@ type sessionListResponse struct {
 // handleSessionList handles GET /api/v1/sessions.
 // Authorization is enforced at the router level via requirePermission("session", "list").
 // Tenant-scoped admins see only sessions whose TenantID matches their own;
-// global admins (TenantID == "") see every tenant's sessions.
+// unrestricted admins see every tenant's sessions. A root-scoped operator sees
+// its own root-tenant sessions, and a client tenant's only under a crossing.
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
@@ -133,9 +134,14 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	callerTenant := callerTenantFilter(r.Context())
+	readScope := s.tenantReadScope(r, "GET /api/v1/sessions")
+	defer readScope.LogSummary()
 	items := make([]sessionListItem, 0, len(all))
 	for _, sess := range all {
-		if callerTenant != "" && sess.TenantID != callerTenant { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		if readScope.Skips(sess.TenantID) {
+			continue
+		}
+		if callerTenant != "" && sess.TenantID != callerTenant { //architecture:allow-root-scope -- tenant-scoped exact-tenant filter; a boundary-subject root caller is decided by readScope above
 			continue
 		}
 		items = append(items, sessionListItem{
