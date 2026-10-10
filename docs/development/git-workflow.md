@@ -262,6 +262,9 @@ git checkout main
 git pull origin main
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push origin vX.Y.Z
+# The release is a DRAFT unless the repository variable CFGMS_PUBLIC_RELEASE_BINARIES
+# is exactly "true". Review the draft, then publish it by hand if intended.
+# If the tag already has a published release, the workflow fails and changes nothing.
 # Re-running the workflow on the same tag is idempotent (edits notes, replaces assets).
 
 # 8. Back-sync main to develop (brings release merge + any hotfixes)

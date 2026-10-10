@@ -847,6 +847,126 @@ fi
 [[ "$T9_PASS" == "true" ]] && pass "test9: an existing env-file node migrates to sealed credentials in place"
 rm -rf "$T9_PREFIX"
 
+# ── Download tests: gh release download (stub gh and uname on PATH) ───────────
+#
+# The download branch runs under a test prefix. A stub `gh` stands in for the
+# GitHub CLI and a stub `uname` reports x86_64 so arm64 CI hosts take the same
+# path. Stub behaviour is chosen with STUB_GH_* variables; every gh call is
+# appended to $STUB_GH_LOG.
+
+DL_STUB_DIR="$(mktemp -d)"
+DL_SRC_PREFIX="$(mktemp -d)"
+DL_GH_LOG="${DL_STUB_DIR}/gh.log"
+make_mock_controller "$DL_SRC_PREFIX"
+cat > "${DL_STUB_DIR}/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_GH_LOG"
+if [[ "$1 $2" == "release view" ]]; then
+    if [[ -n "${STUB_GH_LATEST:-}" ]]; then echo "$STUB_GH_LATEST"; exit 0; fi
+    exit 1
+fi
+if [[ "$1 $2" == "release download" ]]; then
+    [[ "${STUB_GH_DOWNLOAD_FAIL:-}" == "true" ]] && { echo "release not found" >&2; exit 1; }
+    dir=""
+    prev=""
+    for a in "$@"; do
+        [[ "$prev" == "--dir" ]] && dir="$a"
+        prev="$a"
+    done
+    cp "$STUB_GH_ASSET_SRC" "$dir/cfgms-controller-linux-amd64"
+    if [[ "${STUB_GH_BAD_SUM:-}" == "true" ]]; then
+        printf '%s  cfgms-controller-linux-amd64\n' "$(printf 'x%.0s' {1..64})" > "$dir/SHA256SUMS"
+    else
+        (cd "$dir" && sha256sum cfgms-controller-linux-amd64 > SHA256SUMS)
+    fi
+    exit 0
+fi
+exit 1
+STUB
+cat > "${DL_STUB_DIR}/uname" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-m" ]]; then echo x86_64; else exec /usr/bin/env -i /bin/uname "$@"; fi
+STUB
+chmod +x "${DL_STUB_DIR}/gh" "${DL_STUB_DIR}/uname"
+
+# run_download_bootstrap PREFIX ARGS... runs the bootstrap with the stubs first on PATH.
+run_download_bootstrap() {
+    local prefix="$1"
+    shift
+    PATH="${DL_STUB_DIR}:${PATH}" \
+        STUB_GH_LOG="$DL_GH_LOG" \
+        STUB_GH_ASSET_SRC="${DL_SRC_PREFIX}/usr/local/bin/cfgms-controller" \
+        run_bootstrap "$prefix" "$@"
+}
+
+# explicit --version downloads through gh release download
+: > "$DL_GH_LOG"
+DL1_PREFIX="$(mktemp -d)"
+mkdir -p "$DL1_PREFIX/usr/local/bin" "$DL1_PREFIX/etc/systemd/system"
+run_download_bootstrap "$DL1_PREFIX" "${STD_FLAGS[@]}" --skip-smoke --version=v1.2.3
+if [[ $LAST_EXIT -eq 0 && -x "${DL1_PREFIX}/usr/local/bin/cfgms-controller" ]] \
+    && grep -q -- 'release download v1.2.3 --repo cfg-is/cfgms --pattern cfgms-controller-linux-amd64 --pattern SHA256SUMS --dir ' "$DL_GH_LOG" \
+    && ! grep -q 'release view' "$DL_GH_LOG"; then
+    pass "download: --version installs through gh release download"
+else
+    fail "download: expected exit 0, installed binary and a gh release download call (exit=${LAST_EXIT} log='$(cat "$DL_GH_LOG")' output='${LAST_OUTPUT}')"
+fi
+rm -rf "$DL1_PREFIX"
+
+# no --version and no public release: error names --version and --binary-path
+: > "$DL_GH_LOG"
+DL2_PREFIX="$(mktemp -d)"
+mkdir -p "$DL2_PREFIX/usr/local/bin" "$DL2_PREFIX/etc/systemd/system"
+run_download_bootstrap "$DL2_PREFIX" "${STD_FLAGS[@]}" --skip-smoke
+if [[ $LAST_EXIT -ne 0 ]] && echo "$LAST_OUTPUT" | grep -q -- '--version <tag>' \
+    && echo "$LAST_OUTPUT" | grep -q -- '--binary-path' \
+    && echo "$LAST_OUTPUT" | grep -q 'draft' \
+    && ! grep -q 'release download' "$DL_GH_LOG"; then
+    pass "download: unresolved version names --version and --binary-path"
+else
+    fail "download: expected non-zero exit naming --version and --binary-path (exit=${LAST_EXIT} output='${LAST_OUTPUT}')"
+fi
+rm -rf "$DL2_PREFIX"
+
+# latest resolves from the public release view when --version is omitted
+: > "$DL_GH_LOG"
+DL3_PREFIX="$(mktemp -d)"
+mkdir -p "$DL3_PREFIX/usr/local/bin" "$DL3_PREFIX/etc/systemd/system"
+STUB_GH_LATEST="v2.0.0" run_download_bootstrap "$DL3_PREFIX" "${STD_FLAGS[@]}" --skip-smoke
+if [[ $LAST_EXIT -eq 0 ]] && grep -q 'release download v2.0.0 ' "$DL_GH_LOG"; then
+    pass "download: latest public release tag is resolved through gh release view"
+else
+    fail "download: expected download of v2.0.0 (exit=${LAST_EXIT} log='$(cat "$DL_GH_LOG")')"
+fi
+rm -rf "$DL3_PREFIX"
+
+# failed download names --version and --binary-path
+: > "$DL_GH_LOG"
+DL4_PREFIX="$(mktemp -d)"
+mkdir -p "$DL4_PREFIX/usr/local/bin" "$DL4_PREFIX/etc/systemd/system"
+STUB_GH_DOWNLOAD_FAIL=true run_download_bootstrap "$DL4_PREFIX" "${STD_FLAGS[@]}" --skip-smoke --version=v1.2.3
+if [[ $LAST_EXIT -ne 0 && ! -e "${DL4_PREFIX}/usr/local/bin/cfgms-controller" ]] \
+    && echo "$LAST_OUTPUT" | grep -q -- '--version <tag>' \
+    && echo "$LAST_OUTPUT" | grep -q -- '--binary-path'; then
+    pass "download: a failed gh download names --version and --binary-path"
+else
+    fail "download: expected failure naming --version and --binary-path (exit=${LAST_EXIT} output='${LAST_OUTPUT}')"
+fi
+rm -rf "$DL4_PREFIX"
+
+# checksum mismatch still fails and installs nothing
+: > "$DL_GH_LOG"
+DL5_PREFIX="$(mktemp -d)"
+mkdir -p "$DL5_PREFIX/usr/local/bin" "$DL5_PREFIX/etc/systemd/system"
+STUB_GH_BAD_SUM=true run_download_bootstrap "$DL5_PREFIX" "${STD_FLAGS[@]}" --skip-smoke --version=v1.2.3
+if [[ $LAST_EXIT -ne 0 && ! -e "${DL5_PREFIX}/usr/local/bin/cfgms-controller" ]] \
+    && echo "$LAST_OUTPUT" | grep -q 'checksum verification failed for cfgms-controller-linux-amd64'; then
+    pass "download: checksum mismatch fails and installs nothing"
+else
+    fail "download: expected checksum failure (exit=${LAST_EXIT} output='${LAST_OUTPUT}')"
+fi
+rm -rf "$DL5_PREFIX" "$DL_STUB_DIR" "$DL_SRC_PREFIX"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

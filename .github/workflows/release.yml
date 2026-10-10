@@ -167,20 +167,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          # Exactly "true" publishes publicly; anything else leaves a draft.
+          PUBLIC_BINARIES: ${{ vars.CFGMS_PUBLIC_RELEASE_BINARIES }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release edit "$RELEASE_VERSION" \
-              --repo "$GITHUB_REPOSITORY" \
-              --notes-file release-notes.md
-            gh release upload "$RELEASE_VERSION" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
-          else
-            gh release create "$RELEASE_VERSION" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --title "CFGMS $RELEASE_VERSION" \
-              --notes-file release-notes.md
-          fi
+          bash scripts/release/publish-release.sh \
+            "$RELEASE_VERSION" "$PUBLIC_BINARIES" release-assets release-notes.md

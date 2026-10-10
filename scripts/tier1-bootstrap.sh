@@ -360,9 +360,6 @@ elif [[ -n "$BINARY_PATH" ]]; then
     cp "$BINARY_PATH" "$CONTROLLER_BIN"
     chmod 0755 "$CONTROLLER_BIN"
     log "Installed binary from $BINARY_PATH"
-elif [[ -n "$INSTALL_PREFIX" ]]; then
-    echo "Error: test isolation requires cfgms-controller pre-populated at $CONTROLLER_BIN" >&2
-    exit 1
 else
     # Resolve version from latest tagged release (never develop tip).
     if [[ -z "$VERSION_FLAG" ]]; then
@@ -370,12 +367,10 @@ else
             VERSION_FLAG="$(gh release view --repo cfg-is/cfgms --json tagName -q .tagName 2>/dev/null || true)"
         fi
         if [[ -z "$VERSION_FLAG" ]]; then
-            VERSION_FLAG="$(curl -fsSL https://api.github.com/repos/cfg-is/cfgms/releases/latest \
-                | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' 2>/dev/null | head -1 || true)"
-        fi
-        if [[ -z "$VERSION_FLAG" ]]; then
-            echo "Error: could not determine latest release tag." >&2
-            echo "  Pass --version <tag> or check network connectivity." >&2
+            echo "Error: could not determine a public release tag." >&2
+            echo "  Pass --version <tag>. A draft release is never 'latest', so --version is required for one;" >&2
+            echo "  the account also needs write access to cfg-is/cfgms and 'gh auth login'." >&2
+            echo "  For an air-gapped or no-access install, pass --binary-path <file> instead." >&2
             exit 1
         fi
     fi
@@ -403,14 +398,20 @@ else
         exit 1
     fi
     ASSET="cfgms-controller-linux-${ARCH}"
-    BASE_URL="https://github.com/cfg-is/cfgms/releases/download/${VERSION_FLAG}"
 
     TMPDL="$(mktemp -d /tmp/cfgms-XXXXXX)"
     cleanup_dl() { rm -rf "$TMPDL"; }
     trap cleanup_dl EXIT INT TERM
 
-    curl -fsSL "${BASE_URL}/${ASSET}" -o "$TMPDL/$ASSET"
-    curl -fsSL "${BASE_URL}/SHA256SUMS" -o "$TMPDL/SHA256SUMS"
+    if ! command -v gh &>/dev/null \
+        || ! gh release download "$VERSION_FLAG" --repo cfg-is/cfgms \
+            --pattern "$ASSET" --pattern SHA256SUMS --dir "$TMPDL"; then
+        echo "Error: could not download $ASSET for $VERSION_FLAG with gh." >&2
+        echo "  Pass --version <tag> naming a release you can read. A draft release needs" >&2
+        echo "  write access to cfg-is/cfgms and 'gh auth login'." >&2
+        echo "  For an air-gapped or no-access install, pass --binary-path <file> instead." >&2
+        exit 1
+    fi
 
     # Releases are unsigned; integrity is the published checksum only.
     if ! (cd "$TMPDL" && grep -F -- " $ASSET" SHA256SUMS | sha256sum -c - >/dev/null 2>&1); then
