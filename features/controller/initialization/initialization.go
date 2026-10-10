@@ -214,7 +214,15 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
 	}
 
-	if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+	// A single node keeps its signing identity in the configured secret store,
+	// which Run cannot open; the first server start creates it there.
+	var ensureErr error
+	if cfg.HA.IsClusterMode() {
+		ensureErr = certManager.EnsureSeparatedCertificates(internalCfg, signingCfg)
+	} else {
+		ensureErr = certManager.EnsureInternalServerCertificate(internalCfg)
+	}
+	if err := ensureErr; err != nil {
 		if rbErr := rollback.Execute(); rbErr != nil {
 			logger.Error("Rollback failed after separated cert error", "rollback_error", rbErr.Error())
 		}
@@ -632,6 +640,33 @@ func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.Man
 	return manager, nil
 }
 
+// singleNodeSigningKeyTenant is the system tenant a single-node controller keeps
+// its config-signing identity under, the same one controller-owned secrets use.
+const singleNodeSigningKeyTenant = "controller"
+
+// WireSingleNodeSigningKeyStore attaches a SigningKeyStore over store to
+// managerCfg for a single-node controller, so the signing key is held through
+// the pkg/secrets abstraction and never written to node-local disk. It refuses
+// cluster mode, where cert.NewSecretStoreSigningKeyStore's cluster-atomic
+// requirement applies.
+func WireSingleNodeSigningKeyStore(managerCfg *cert.ManagerConfig, cfg *config.Config, store secretsinterfaces.SecretStore) error {
+	if managerCfg == nil || cfg == nil {
+		return fmt.Errorf("manager config and controller config are required")
+	}
+	if cfg.HA.IsClusterMode() {
+		return fmt.Errorf("single-node signing key store cannot be used in cluster mode")
+	}
+	if store == nil {
+		return fmt.Errorf("secret store is required")
+	}
+	keys, err := cert.NewSingleNodeSigningKeyStore(store, singleNodeSigningKeyTenant, "")
+	if err != nil {
+		return fmt.Errorf("failed to build single-node signing key store: %w", err)
+	}
+	managerCfg.SigningKeyStore = keys
+	return nil
+}
+
 // initClusterCAWithStore is InitClusterCA's body once a SecretStore is open: it
 // splits the configured vault key path into its tenant and key components and
 // either imports externally-issued regional intermediate material or delegates
@@ -655,6 +690,9 @@ func initClusterCAWithStore(ctx context.Context, cfg *config.Config, managerCfg 
 	// import path receives it too. Agreeing on one identity also needs a
 	// cluster-visible signing cursor store, which wireClusterCertStores supplies
 	// from the cluster storage provider.
+	if managerCfg.SigningKeyStore != nil && !cert.SigningKeyStoreIsClusterAtomic(managerCfg.SigningKeyStore) {
+		return nil, fmt.Errorf("cluster mode requires a cluster-atomic signing key store; refusing a single-node signing key store")
+	}
 	if managerCfg.SigningKeyStore == nil {
 		signingKeys, err := cert.NewSecretStoreSigningKeyStore(store, tenantID, "")
 		if err != nil {

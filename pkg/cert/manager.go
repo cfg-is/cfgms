@@ -477,15 +477,13 @@ func (m *Manager) GenerateInternalServerCertificate(config *ServerCertConfig) (*
 	return cert, nil
 }
 
-// EnsureSeparatedCertificates generates missing separated-mode certificates.
-// Idempotent: safe to call on every startup. Only generates certs that don't exist yet.
-func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, signingCfg *SigningCertConfig) error {
-	// Check for existing internal server certificate
+// EnsureInternalServerCertificate generates the internal mTLS server
+// certificate if none exists. Idempotent. A nil internalCfg uses the defaults.
+func (m *Manager) EnsureInternalServerCertificate(internalCfg *ServerCertConfig) error {
 	internalCerts, err := m.store.getCertificatesByType(CertificateTypeInternalServer)
 	if err != nil {
 		return fmt.Errorf("failed to check for internal server certificates: %w", err)
 	}
-
 	if len(internalCerts) == 0 {
 		if internalCfg == nil {
 			internalCfg = &ServerCertConfig{
@@ -498,6 +496,15 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 		if _, err := m.GenerateInternalServerCertificate(internalCfg); err != nil {
 			return fmt.Errorf("failed to generate internal server certificate: %w", err)
 		}
+	}
+	return nil
+}
+
+// EnsureSeparatedCertificates generates missing separated-mode certificates.
+// Idempotent: safe to call on every startup. Only generates certs that don't exist yet.
+func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, signingCfg *SigningCertConfig) error {
+	if err := m.EnsureInternalServerCertificate(internalCfg); err != nil {
+		return err
 	}
 
 	// A shared signing identity is bootstrapped through the key store, never

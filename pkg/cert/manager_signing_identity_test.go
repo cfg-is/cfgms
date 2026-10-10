@@ -335,3 +335,125 @@ func TestSigningIdentity_RenewalRefusesSigningCertsWithKeyStore(t *testing.T) {
 	_, err = m.GenerateSigningCertificate(fastSigningCfg)
 	assert.True(t, errors.Is(err, ErrSigningMigrationPending))
 }
+
+// newSingleNodeManager builds a single-node Manager over store with the default
+// file cursor store, as the controller does.
+func newSingleNodeManager(t *testing.T, dir string, store secretsinterfaces.SecretStore) *Manager {
+	t.Helper()
+	ks, err := NewSingleNodeSigningKeyStore(store, testSigningTenant, "")
+	require.NoError(t, err)
+	m, err := NewManager(&ManagerConfig{
+		StoragePath:     dir,
+		CAConfig:        &CAConfig{Organization: "Test", Country: "US", ValidityDays: 365, KeySize: 2048},
+		SigningKeyStore: ks,
+	})
+	require.NoError(t, err)
+	return m
+}
+
+func TestSingleNodeManager_BootstrapsSigningIdentityInStore(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	secrets := newInMemSecretStore()
+	m := newSingleNodeManager(t, dir, secrets)
+
+	require.NoError(t, m.EnsureSeparatedCertificates(nil, fastSigningCfg))
+
+	mode, err := m.SigningIdentityMode(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, SigningIdentityShared, mode)
+
+	cur, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+	ks, err := NewSingleNodeSigningKeyStore(secrets, testSigningTenant, "")
+	require.NoError(t, err)
+	serials, err := ks.ListSigningSerials(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{cur.SerialNumber}, serials)
+	for _, f := range signingKeyFiles(t, dir) {
+		assert.NotContains(t, f, cur.SerialNumber, "no signing key.pem on the node")
+	}
+}
+
+func TestSingleNodeManager_RotationStoresNewKeyInStore(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	secrets := newInMemSecretStore()
+	m := newSingleNodeManager(t, dir, secrets)
+	require.NoError(t, m.EnsureSigningCertificate(fastSigningCfg))
+	old, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+
+	rotated, err := m.RotateSigningCertificate(7)
+	require.NoError(t, err)
+	require.NotEqual(t, old.SerialNumber, rotated.SerialNumber)
+
+	ks, err := NewSingleNodeSigningKeyStore(secrets, testSigningTenant, "")
+	require.NoError(t, err)
+	got, err := ks.GetSigningKey(ctx, rotated.SerialNumber)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+
+	cursor, err := m.cursor.LoadCursor(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	assert.Equal(t, rotated.SerialNumber, cursor.CurrentSerial)
+	assert.Equal(t, old.SerialNumber, cursor.RotatingSerial)
+
+	assert.Empty(t, signingKeyFiles(t, dir))
+	_, key, err := m.ExportCertificate(old.SerialNumber, true, false)
+	require.NoError(t, err)
+	assert.NotEmpty(t, key)
+}
+
+func TestSingleNodeManager_SigningFailsClosedWhenStoreUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	faulty := newFaultySecretStore(newInMemSecretStore())
+	m := newSingleNodeManager(t, dir, faulty)
+	require.NoError(t, m.EnsureSigningCertificate(fastSigningCfg))
+	ttl := time.Duration(0)
+	m.signingCacheTTLOverride = &ttl
+
+	cur, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+	faulty.failReads(testSigningTenant+"/config-signing/shared/"+cur.SerialNumber, fmt.Errorf("store unreadable"))
+
+	got, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Empty(t, signingKeyFiles(t, dir))
+}
+
+func TestSingleNodeManager_ExistingLocalKeyKeepsSigning(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	secrets := newInMemSecretStore()
+
+	legacy, err := NewManager(&ManagerConfig{
+		StoragePath: dir,
+		CAConfig:    &CAConfig{Organization: "Test", Country: "US", ValidityDays: 365, KeySize: 2048},
+	})
+	require.NoError(t, err)
+	require.NoError(t, legacy.EnsureSigningCertificate(fastSigningCfg))
+	local, err := legacy.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+
+	ks, err := NewSingleNodeSigningKeyStore(secrets, testSigningTenant, "")
+	require.NoError(t, err)
+	m, err := NewManager(&ManagerConfig{StoragePath: dir, LoadExistingCA: true, SigningKeyStore: ks})
+	require.NoError(t, err)
+
+	mode, err := m.SigningIdentityMode(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, SigningIdentityLegacyLocal, mode)
+
+	require.NoError(t, m.EnsureSigningCertificate(fastSigningCfg))
+	got, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+	assert.Equal(t, local.SerialNumber, got.SerialNumber)
+	assert.NotEmpty(t, got.PrivateKeyPEM)
+
+	serials, err := ks.ListSigningSerials(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, serials)
+}

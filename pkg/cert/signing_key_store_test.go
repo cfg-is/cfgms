@@ -225,3 +225,24 @@ func TestSigningKeyStore_MigrationNamespaceIsSeparate(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "PRIVATE KEY")
 }
+
+func TestNewSingleNodeSigningKeyStore_AcceptsNonClusterAtomicStore(t *testing.T) {
+	store := &nonAtomicStore{newInMemSecretStore()}
+
+	single, err := NewSingleNodeSigningKeyStore(store, testSigningTenant, "")
+	require.NoError(t, err)
+	require.NotNil(t, single)
+
+	_, err = NewSecretStoreSigningKeyStore(store, testSigningTenant, "")
+	require.Error(t, err, "the cluster constructor must still refuse a non-atomic store")
+
+	cluster := newTestSigningKeyStore(t, newInMemSecretStore())
+	assert.False(t, SigningKeyStoreIsClusterAtomic(single))
+	assert.True(t, SigningKeyStoreIsClusterAtomic(cluster))
+	assert.False(t, SigningKeyStoreIsClusterAtomic(nil))
+
+	_, err = NewSingleNodeSigningKeyStore(nil, testSigningTenant, "")
+	require.Error(t, err)
+	_, err = NewSingleNodeSigningKeyStore(store, "", "")
+	require.Error(t, err)
+}

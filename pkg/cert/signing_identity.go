@@ -387,6 +387,15 @@ func (m *Manager) generateSharedIdentity(ctx context.Context, signingCfg *Signin
 		return fmt.Errorf("transition signing cursor: %w", err)
 	}
 	certLog().Info("Provisioned cluster signing identity", "serial", logging.SanitizeLogValue(c.SerialNumber))
+	// The cursor now names the identity, so the claim has done its job. Holding it
+	// for the rest of its TTL would only stall a restart that finds a fresh cursor.
+	if releaser, ok := m.signingKeys.(interface {
+		ReleaseSigningBootstrap(ctx context.Context) error
+	}); ok {
+		if err := releaser.ReleaseSigningBootstrap(ctx); err != nil {
+			certLog().Warn("Could not release signing bootstrap claim", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
 	if err := m.persistSharedCertificate(c); err != nil {
 		return err
 	}

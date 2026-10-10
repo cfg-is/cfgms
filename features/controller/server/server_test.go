@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/workflow"
@@ -1738,4 +1739,72 @@ func TestInstallerS3Config_YAMLWithEnvOverrides(t *testing.T) {
 		require.NoError(t, err)
 		assert.NoError(t, assertClusterBackendsReady(cfg, sm), "a bucket in storage.cluster.s3 satisfies cluster startup")
 	})
+}
+
+func TestLoadExistingCertificateManager_SingleNodeSigningKeyInSecretStore(t *testing.T) {
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", "")
+
+	caDir := filepath.Join(root, "ca")
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		CertPath:        caDir,
+		AdminBundlePath: filepath.Join(root, "admin.bundle.yaml"),
+		DataDir:         filepath.Join(root, "data"),
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				DNSNames:     []string{"localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "Test Org",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(root, "flatfile"),
+			SQLitePath:   filepath.Join(root, "cfgms.db"),
+		},
+	}
+	logger := logging.NewNoopLogger()
+	_, err := initialization.Run(cfg, logger)
+	require.NoError(t, err)
+
+	manager, err := loadExistingCertificateManager(cfg, nil, logger)
+	require.NoError(t, err)
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = manager.Close()
+		}
+	})
+	require.NoError(t, manager.EnsureSeparatedCertificates(nil, &cert.SigningCertConfig{CommonName: "signer", ValidityDays: 30, KeySize: 2048}))
+
+	signing, err := manager.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+
+	// A second secret store over the same data directory resolves the serial.
+	second, err := api.NewSecretStore(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = second.Close() })
+	secret, err := second.GetSecret(context.Background(), "controller/config-signing/shared/"+signing.SerialNumber)
+	require.NoError(t, err)
+	assert.Contains(t, secret.Value, signing.SerialNumber)
+
+	require.NoError(t, filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
+		if werr == nil && !d.IsDir() && d.Name() == "key.pem" {
+			assert.NotContains(t, p, signing.SerialNumber, "no signing key.pem on the node")
+		}
+		return werr
+	}))
+
+	// Close releases the attached secret store and is idempotent.
+	closed = true
+	require.NoError(t, manager.Close())
 }
