@@ -48,6 +48,8 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("tenant", "crossing-end")(http.HandlerFunc(s.handleEndTenantCrossing))).Methods("DELETE")
 	tenants.Handle("/{id}/break-glass",
 		s.requirePermission("tenant", "crossing-break-glass")(http.HandlerFunc(s.handleTenantBreakGlass))).Methods("POST")
+	tenants.Handle("/{id}/break-glass/{crossing_id}/approve",
+		s.requirePermission("tenant", "crossing-approve-break-glass")(http.HandlerFunc(s.handleApproveTenantBreakGlass))).Methods("POST")
 
 	// Per-tenant refresh policy endpoints (Issue #2097).
 	// {tenant_path:.+} allows '/' in the path variable for hierarchical tenant IDs.

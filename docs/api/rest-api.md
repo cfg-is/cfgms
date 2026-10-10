@@ -2063,6 +2063,24 @@ Invoke a justified, 30-minute break-glass elevation into a tenant. Only a root-s
 
 No crossing is created on any `400`.
 
+**Second approver:** when the controller setting `tenant_admin.break_glass_requires_second_approver` is `true` (default `false`), the crossing is created with `approval_state: "pending"` and admits nothing until approved; the audit entry is `tenant.crossing_break_glass_requested` instead of `tenant.crossing_break_glass_invoked`. A pending crossing expires unapproved after the same 30-minute window. With the setting off the crossing is created `approved` and active at once.
+
+#### POST /api/v1/tenants/{id}/break-glass/{crossing_id}/approve
+
+Approve a pending break-glass crossing. The caller must be a root-scoped principal other than the invoker. The crossing becomes `approved` and its 30-minute window restarts at approval time. The audit entry is `tenant.crossing_break_glass_approved` (critical severity).
+
+**Authentication:** Required  
+**Required permission:** `tenant:crossing-approve-break-glass` (Strong assurance with user presence)
+
+**Response (`200 OK`):** the approved crossing record, with `approval_state: "approved"` and `ApprovedBy` set.
+
+**Errors:**
+
+- `403 NOT_ROOT_SCOPED`: the caller is not a root-scoped principal.
+- `403 SAME_APPROVER`: the caller is the principal that invoked the break-glass.
+- `404 CROSSING_NOT_FOUND`: no break-glass crossing with that ID on the tenant.
+- `409 NOT_PENDING`: the crossing is already approved, revoked, or expired while pending.
+
 #### GET /api/v1/tenants/{id}/access-grants
 
 List every grant and break-glass crossing (active, expired and revoked) for the tenant. Break-glass rows carry `reason_category`; grant rows omit it.

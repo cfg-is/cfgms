@@ -1594,6 +1594,9 @@ type AuthorizationDecision struct {
 //   - tenant:crossing-break-glass is the remedy for lacking a crossing. Gating it on
 //     already holding one would make the boundary unopenable — a root-scoped operator
 //     could never obtain a first crossing, and ADR-025 Decision 2(b) would be dead code.
+//   - tenant:crossing-approve-break-glass is the second half of that remedy: the approving
+//     root-scoped operator holds no crossing into the tenant either, so the boundary gate
+//     would make a pending break-glass unapprovable.
 //   - tenant:crossing-grant refuses every root-scoped caller outright
 //     (handlers_tenant_crossing.go, ROOT_SCOPED_CANNOT_GRANT) because a grant is the MSP's
 //     consent, never the operator's self-dealing. That refusal is strictly stricter than a
@@ -1603,8 +1606,9 @@ type AuthorizationDecision struct {
 // tenant:crossing-list is deliberately absent: reading an MSP's crossing history is
 // ordinary tenant-scoped data and its handler already applies authorizeTenantAccess.
 var tenantCrossingRemedyPermissions = map[string]bool{
-	"tenant:crossing-break-glass": true,
-	"tenant:crossing-grant":       true,
+	"tenant:crossing-break-glass":         true,
+	"tenant:crossing-approve-break-glass": true,
+	"tenant:crossing-grant":               true,
 }
 
 // enrollmentConfinementMiddleware blocks cookie-authenticated web sessions whose

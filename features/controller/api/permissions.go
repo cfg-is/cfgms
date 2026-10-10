@@ -104,10 +104,11 @@ var knownPermissions = map[string]bool{
 	"tenant:delete":         true,
 	"tenant:approve-delete": true,
 	// Tenant-crossing grant and break-glass (ADR-025 Decision 2, Issue #3125)
-	"tenant:crossing-grant":       true,
-	"tenant:crossing-end":         true,
-	"tenant:crossing-list":        true,
-	"tenant:crossing-break-glass": true,
+	"tenant:crossing-grant":               true,
+	"tenant:crossing-end":                 true,
+	"tenant:crossing-list":                true,
+	"tenant:crossing-break-glass":         true,
+	"tenant:crossing-approve-break-glass": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,
 	// Installer artifact management (Issue #1702)

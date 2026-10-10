@@ -427,6 +427,7 @@ startup otherwise.
 |---|---|---|---|---|
 | `delete_hold_period` | duration | `"720h"` (30 days, `GetDeleteHoldPeriod`) | optional | Minimum time between a tenant deletion request and its approval |
 | `delete_requires_dual_control` | boolean | `true` (`GetDeleteRequiresDualControl`) | optional | Whether the operator who requested a tenant deletion may also approve it (`true` means they may not) |
+| `break_glass_requires_second_approver` | boolean | `false` (`GetBreakGlassRequiresSecondApprover`) | optional | Whether a tenant-crossing break-glass invocation is created `pending` until a different root-scoped principal approves it (read at startup) |
 
 ---
 

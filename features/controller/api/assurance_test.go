@@ -361,16 +361,17 @@ func TestPermissionAssurance_Issue3687_StrongCredentialFloor(t *testing.T) {
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 	catastrophic := map[string]bool{
-		"module:approve":               true,
-		"module:reject":                true,
-		"publisher-trust:add":          true,
-		"registration:approve-by-cidr": true, // Issue #2969
-		"tenant:approve-delete":        true, // Issue #3182: ADR-027 dual-control deletion approval
-		"osquery:execute":              true, // Issue #3569
-		"signing-credential:request":   true, // Issue #3687: mints a CSR-signing credential
-		"credential-request:approve":   true, // Issue #3718: decides the marker set/account binding for a credential
-		"hyperv-profile:create":        true, // Issue #3785: rendered and executed as root at guest first boot
-		"hyperv-profile:delete":        true, // Issue #3785: mirrors module:approve/module:reject
+		"module:approve":                      true,
+		"module:reject":                       true,
+		"publisher-trust:add":                 true,
+		"registration:approve-by-cidr":        true, // Issue #2969
+		"tenant:approve-delete":               true, // Issue #3182: ADR-027 dual-control deletion approval
+		"tenant:crossing-approve-break-glass": true, // Issue #4707: mirrors tenant:approve-delete
+		"osquery:execute":                     true, // Issue #3569
+		"signing-credential:request":          true, // Issue #3687: mints a CSR-signing credential
+		"credential-request:approve":          true, // Issue #3718: decides the marker set/account binding for a credential
+		"hyperv-profile:create":               true, // Issue #3785: rendered and executed as root at guest first boot
+		"hyperv-profile:delete":               true, // Issue #3785: mirrors module:approve/module:reject
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {
