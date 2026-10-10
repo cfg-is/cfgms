@@ -35,6 +35,20 @@ func Fanout(
 	publisher *commands.Publisher,
 	logger logging.Logger,
 ) FanoutResult {
+	return FanoutWithCommandIDs(ctx, cfg, stewards, publisher, nil, logger)
+}
+
+// FanoutWithCommandIDs is Fanout, except a steward with an entry in commandIDs
+// is sent its command under that ID (its delivery record ID). A steward with no
+// entry, or a nil map, gets a generated ID.
+func FanoutWithCommandIDs(
+	ctx context.Context,
+	cfg *StewardConfiguration,
+	stewards []*service.StewardInfo,
+	publisher *commands.Publisher,
+	commandIDs map[string]string,
+	logger logging.Logger,
+) FanoutResult {
 	result := FanoutResult{
 		Succeeded: []string{},
 		Failed:    make(map[string]error),
@@ -45,7 +59,12 @@ func Fanout(
 			continue
 		}
 
-		_, err := publisher.TriggerConfigSync(ctx, steward.ID)
+		var err error
+		if id, ok := commandIDs[steward.ID]; ok {
+			err = publisher.TriggerConfigSyncWithID(ctx, id, steward.ID)
+		} else {
+			_, err = publisher.TriggerConfigSync(ctx, steward.ID)
+		}
 		if err != nil {
 			logger.Error("Failed to trigger config sync for steward",
 				"steward_id", logging.SanitizeLogValue(steward.ID),
