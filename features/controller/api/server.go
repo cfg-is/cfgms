@@ -214,6 +214,9 @@ type Server struct {
 	credentialRequestLodgeLimiter   *sourceRateLimiter                       // Issue #3717: per-source rate limit on credential-request lodge
 	stopCredentialRequestSweep      chan struct{}                            // Issue #3717: signals runCredentialRequestExpirySweep to exit
 	credentialRequestSweepDone      chan struct{}                            // Issue #3717: closed when the sweep goroutine exits
+	stopTenantCrossingExpirySweep   chan struct{}                            // Issue #4874: signals the tenant-crossing expiry sweep goroutine to exit
+	tenantCrossingExpirySweepDone   chan struct{}                            // Issue #4874: closed when the tenant-crossing expiry sweep goroutine exits
+	tenantCrossingExpirySweepLease  lease.SingletonJob                       // Issue #4874: cluster-singleton claim for the tenant-crossing expiry sweep
 	credentialRequestSweepLease     lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the credential-request/enrolment-token expiry sweep
 	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
 	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
@@ -371,6 +374,10 @@ func New(
 	// sweeps below. NewBackgroundLoopLease is nil-receiver-safe — a nil
 	// haManager (OSS single-node) yields a SingletonJob that always runs,
 	// matching this sweep's pre-#3762 unconditional behavior.
+	tenantCrossingExpirySweepLease, err := haManager.NewBackgroundLoopLease("controller-tenant-crossing-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tenant-crossing expiry sweep lease: %w", err)
+	}
 	credentialRequestSweepLease, err := haManager.NewBackgroundLoopLease("controller-credential-request-expiry", logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to construct credential-request expiry lease job: %w", err)
@@ -438,6 +445,10 @@ func New(
 		stopCredentialRequestSweep:    make(chan struct{}),
 		credentialRequestSweepDone:    make(chan struct{}),
 		credentialRequestSweepLease:   credentialRequestSweepLease,
+
+		stopTenantCrossingExpirySweep:  make(chan struct{}),
+		tenantCrossingExpirySweepDone:  make(chan struct{}),
+		tenantCrossingExpirySweepLease: tenantCrossingExpirySweepLease,
 		// Issue #3719: collect is polled by a waiting machine, so its budget is more
 		// generous than lodge's one-shot allowance.
 		credentialRequestCollectLimiter: newSourceRateLimiter(30, time.Minute),
@@ -656,6 +667,9 @@ func New(
 	// Issue #3717: background sweep for expired enrolment tokens and pending
 	// credential requests — reaped on a timer, not only lazily on read.
 	server.startCredentialRequestSweep()
+
+	// Issue #4874: records the expired crossing meta-log entry once per crossing.
+	server.startTenantCrossingExpirySweep()
 
 	// Issue #3721: background sweep for expired cli-login requests — reaped on a
 	// timer, not only lazily on read, so an "expiry" audit event fires even when
@@ -1282,6 +1296,19 @@ func (s *Server) Close(ctx context.Context) error {
 			case <-ctx.Done():
 				if firstErr == nil {
 					firstErr = fmt.Errorf("api server close: timed out waiting for credential-request sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
+		// Issue #4874: stop the tenant-crossing expiry sweep. Nil-guarded for tests that
+		// build a *Server literal without New().
+		if s.stopTenantCrossingExpirySweep != nil {
+			close(s.stopTenantCrossingExpirySweep)
+			select {
+			case <-s.tenantCrossingExpirySweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for tenant-crossing expiry sweep goroutine: %w", ctx.Err())
 				}
 			}
 		}

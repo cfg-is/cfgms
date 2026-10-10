@@ -37,8 +37,8 @@ func (s *SQLiteTenantCrossingStore) CreateTenantCrossing(ctx context.Context, c 
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tenant_crossings (id, tenant_id, principal_id, kind, granted_by, justification, created_at, expires_at, revoked_at,
-			reason_category, approval_state, approved_by, approved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			reason_category, approval_state, approved_by, approved_at, expiry_recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID,
 		c.TenantID,
 		c.PrincipalID,
@@ -52,6 +52,7 @@ func (s *SQLiteTenantCrossingStore) CreateTenantCrossing(ctx context.Context, c 
 		string(state),
 		c.ApprovedBy,
 		nullTime(c.ApprovedAt),
+		nullTime(c.ExpiryRecordedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tenant crossing %s: %w", c.ID, err)
@@ -66,7 +67,7 @@ func (s *SQLiteTenantCrossingStore) GetTenantCrossing(ctx context.Context, id st
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, principal_id, kind, granted_by, justification, created_at, expires_at, revoked_at,
-			reason_category, approval_state, approved_by, approved_at
+			reason_category, approval_state, approved_by, approved_at, expiry_recorded_at
 		FROM tenant_crossings WHERE id = ?`, id)
 	return scanTenantCrossing(row)
 }
@@ -78,7 +79,7 @@ func (s *SQLiteTenantCrossingStore) ListTenantCrossings(ctx context.Context, ten
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, principal_id, kind, granted_by, justification, created_at, expires_at, revoked_at,
-			reason_category, approval_state, approved_by, approved_at
+			reason_category, approval_state, approved_by, approved_at, expiry_recorded_at
 		FROM tenant_crossings WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tenant crossings: %w", err)
@@ -172,7 +173,7 @@ func (s *SQLiteTenantCrossingStore) ApproveTenantCrossing(ctx context.Context, i
 func (s *SQLiteTenantCrossingStore) ListActiveTenantCrossings(ctx context.Context, now time.Time) ([]*business.TenantCrossing, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, principal_id, kind, granted_by, justification, created_at, expires_at, revoked_at,
-			reason_category, approval_state, approved_by, approved_at
+			reason_category, approval_state, approved_by, approved_at, expiry_recorded_at
 		FROM tenant_crossings
 		WHERE approval_state = 'approved' AND revoked_at IS NULL AND expires_at > ?
 		ORDER BY created_at DESC`, formatTime(now))
@@ -192,37 +193,88 @@ func (s *SQLiteTenantCrossingStore) ListActiveTenantCrossings(ctx context.Contex
 	return out, rows.Err()
 }
 
+// ListUnrecordedExpiredTenantCrossings returns every unrevoked crossing that expired at or
+// before now and whose expiry has not yet been recorded.
+func (s *SQLiteTenantCrossingStore) ListUnrecordedExpiredTenantCrossings(ctx context.Context, now time.Time) ([]*business.TenantCrossing, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, tenant_id, principal_id, kind, granted_by, justification, created_at, expires_at, revoked_at,
+			reason_category, approval_state, approved_by, approved_at, expiry_recorded_at
+		FROM tenant_crossings
+		WHERE expires_at <= ? AND revoked_at IS NULL AND expiry_recorded_at IS NULL
+		ORDER BY expires_at ASC`, formatTime(now))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list unrecorded expired tenant crossings: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []*business.TenantCrossing
+	for rows.Next() {
+		c, err := scanTenantCrossingRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// MarkTenantCrossingExpiryRecorded claims a crossing's expiry record in a single
+// conditional UPDATE, so exactly one concurrent caller observes true.
+func (s *SQLiteTenantCrossingStore) MarkTenantCrossingExpiryRecorded(ctx context.Context, id string, at time.Time) (bool, error) {
+	if id == "" {
+		return false, fmt.Errorf("tenant crossing ID cannot be empty")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tenant_crossings SET expiry_recorded_at = ?
+		WHERE id = ? AND expiry_recorded_at IS NULL AND revoked_at IS NULL AND expires_at <= ?`,
+		formatTime(at), id, formatTime(at))
+	if err != nil {
+		return false, fmt.Errorf("failed to mark tenant crossing %s expiry recorded: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if n == 1 {
+		return true, nil
+	}
+	if _, getErr := s.GetTenantCrossing(ctx, id); getErr != nil {
+		return false, getErr
+	}
+	return false, nil
+}
+
 func scanTenantCrossing(row *sql.Row) (*business.TenantCrossing, error) {
 	var c business.TenantCrossing
 	var kind, createdStr, expiresStr string
-	var revokedStr, approvedAtStr sql.NullString
+	var revokedStr, approvedAtStr, expiryRecordedStr sql.NullString
 	var reason, state string
 
 	err := row.Scan(&c.ID, &c.TenantID, &c.PrincipalID, &kind, &c.GrantedBy, &c.Justification, &createdStr, &expiresStr, &revokedStr,
-		&reason, &state, &c.ApprovedBy, &approvedAtStr)
+		&reason, &state, &c.ApprovedBy, &approvedAtStr, &expiryRecordedStr)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrTenantCrossingNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan tenant crossing: %w", err)
 	}
-	return populateTenantCrossing(&c, kind, createdStr, expiresStr, revokedStr, reason, state, approvedAtStr), nil
+	return populateTenantCrossing(&c, kind, createdStr, expiresStr, revokedStr, reason, state, approvedAtStr, expiryRecordedStr), nil
 }
 
 func scanTenantCrossingRow(rows *sql.Rows) (*business.TenantCrossing, error) {
 	var c business.TenantCrossing
 	var kind, createdStr, expiresStr string
-	var revokedStr, approvedAtStr sql.NullString
+	var revokedStr, approvedAtStr, expiryRecordedStr sql.NullString
 	var reason, state string
 
 	if err := rows.Scan(&c.ID, &c.TenantID, &c.PrincipalID, &kind, &c.GrantedBy, &c.Justification, &createdStr, &expiresStr, &revokedStr,
-		&reason, &state, &c.ApprovedBy, &approvedAtStr); err != nil {
+		&reason, &state, &c.ApprovedBy, &approvedAtStr, &expiryRecordedStr); err != nil {
 		return nil, fmt.Errorf("failed to scan tenant crossing row: %w", err)
 	}
-	return populateTenantCrossing(&c, kind, createdStr, expiresStr, revokedStr, reason, state, approvedAtStr), nil
+	return populateTenantCrossing(&c, kind, createdStr, expiresStr, revokedStr, reason, state, approvedAtStr, expiryRecordedStr), nil
 }
 
-func populateTenantCrossing(c *business.TenantCrossing, kind, createdStr, expiresStr string, revokedStr sql.NullString, reason, state string, approvedAtStr sql.NullString) *business.TenantCrossing {
+func populateTenantCrossing(c *business.TenantCrossing, kind, createdStr, expiresStr string, revokedStr sql.NullString, reason, state string, approvedAtStr, expiryRecordedStr sql.NullString) *business.TenantCrossing {
 	c.Kind = business.TenantCrossingKind(kind)
 	c.CreatedAt = parseTime(createdStr)
 	c.ExpiresAt = parseTime(expiresStr)
@@ -235,6 +287,10 @@ func populateTenantCrossing(c *business.TenantCrossing, kind, createdStr, expire
 	if approvedAtStr.Valid {
 		t := parseTime(approvedAtStr.String)
 		c.ApprovedAt = &t
+	}
+	if expiryRecordedStr.Valid {
+		t := parseTime(expiryRecordedStr.String)
+		c.ExpiryRecordedAt = &t
 	}
 	return c
 }

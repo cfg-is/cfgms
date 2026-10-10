@@ -106,6 +106,7 @@ func backfillTenantCrossings(ctx context.Context, db *sql.DB) error {
 		{"approval_state", `ALTER TABLE tenant_crossings ADD COLUMN approval_state TEXT NOT NULL DEFAULT 'approved'`},
 		{"approved_by", `ALTER TABLE tenant_crossings ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`},
 		{"approved_at", `ALTER TABLE tenant_crossings ADD COLUMN approved_at TEXT`},
+		{"expiry_recorded_at", `ALTER TABLE tenant_crossings ADD COLUMN expiry_recorded_at TEXT`},
 	} {
 		present, err := columnExists(ctx, db, "tenant_crossings", c.name)
 		if err != nil {
@@ -116,6 +117,13 @@ func backfillTenantCrossings(ctx context.Context, db *sql.DB) error {
 		}
 		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
 			return fmt.Errorf("sqlite: tenant_crossings back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+		if c.name == "expiry_recorded_at" {
+			// Clean break: crossings already expired when the column is added are marked
+			// recorded so the first expiry sweep does not flood the audit log with history.
+			if _, err := db.ExecContext(ctx, `UPDATE tenant_crossings SET expiry_recorded_at = expires_at WHERE revoked_at IS NULL AND expires_at <= ?`, formatTime(nowUTC())); err != nil {
+				return fmt.Errorf("sqlite: tenant_crossings expiry mark failed: %w", err)
+			}
 		}
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tenant_crossings SET principal_id = '' WHERE kind = 'grant' AND principal_id <> ''`); err != nil {
@@ -683,7 +691,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			reason_category TEXT NOT NULL DEFAULT '',
 			approval_state  TEXT NOT NULL DEFAULT 'approved',
 			approved_by     TEXT NOT NULL DEFAULT '',
-			approved_at     TEXT
+			approved_at     TEXT,
+			expiry_recorded_at TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_tenant_id    ON tenant_crossings(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_principal_id ON tenant_crossings(principal_id)`,

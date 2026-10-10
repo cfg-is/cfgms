@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -588,6 +589,116 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 		assert.True(t, ids[activeBG.ID])
 		assert.False(t, ids[expiredGrant.ID])
 		assert.False(t, ids[revokedGrant.ID])
+	})
+
+	t.Run("ListUnrecordedExpiredTenantCrossings lists expired crossings until they are marked", func(t *testing.T) {
+		const expTenant = "contract-probe-expiry-msp"
+		past := now.Add(-time.Hour)
+		expGrant := &TenantCrossing{ID: "contract-probe-exp-grant", TenantID: expTenant, Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: past.Add(-time.Hour), ExpiresAt: past}
+		expBG := &TenantCrossing{ID: "contract-probe-exp-bg", TenantID: expTenant, PrincipalID: "op", Kind: TenantCrossingKindBreakGlass,
+			GrantedBy: "op", Justification: "j", ReasonCategory: TenantCrossingReasonSecurityIncident, CreatedAt: past.Add(-time.Hour), ExpiresAt: past}
+		expPending := &TenantCrossing{ID: "contract-probe-exp-pending", TenantID: expTenant, PrincipalID: "op", Kind: TenantCrossingKindBreakGlass,
+			GrantedBy: "op", Justification: "j", ReasonCategory: TenantCrossingReasonAccountRecovery, ApprovalState: TenantCrossingApprovalPending,
+			CreatedAt: past.Add(-time.Hour), ExpiresAt: past}
+		live := &TenantCrossing{ID: "contract-probe-exp-live", TenantID: expTenant, Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		revoked := &TenantCrossing{ID: "contract-probe-exp-revoked", TenantID: expTenant, Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: past.Add(-time.Hour), ExpiresAt: past}
+		for _, c := range []*TenantCrossing{expGrant, expBG, expPending, live, revoked} {
+			require.NoError(t, store.CreateTenantCrossing(ctx, c))
+		}
+		require.NoError(t, store.RevokeTenantCrossing(ctx, revoked.ID))
+
+		listIDs := func() map[string]bool {
+			list, err := store.ListUnrecordedExpiredTenantCrossings(ctx, now)
+			require.NoError(t, err)
+			ids := map[string]bool{}
+			for _, c := range list {
+				assert.Nil(t, c.ExpiryRecordedAt)
+				ids[c.ID] = true
+			}
+			return ids
+		}
+		ids := listIDs()
+		assert.True(t, ids[expGrant.ID])
+		assert.True(t, ids[expBG.ID])
+		assert.True(t, ids[expPending.ID], "a pending break-glass that expired unapproved is listed")
+		assert.False(t, ids[live.ID])
+		assert.False(t, ids[revoked.ID])
+
+		marked, err := store.MarkTenantCrossingExpiryRecorded(ctx, expGrant.ID, now)
+		require.NoError(t, err)
+		require.True(t, marked)
+		ids = listIDs()
+		assert.False(t, ids[expGrant.ID], "a marked crossing is not listed again")
+		assert.True(t, ids[expBG.ID])
+
+		got, err := store.GetTenantCrossing(ctx, expGrant.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.ExpiryRecordedAt)
+		assert.Nil(t, got.RevokedAt, "marking does not revoke")
+	})
+
+	t.Run("MarkTenantCrossingExpiryRecorded succeeds for exactly one concurrent caller", func(t *testing.T) {
+		past := now.Add(-time.Hour)
+		c := &TenantCrossing{ID: "contract-probe-mark-race", TenantID: "contract-probe-mark-msp", Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: past.Add(-time.Hour), ExpiresAt: past}
+		require.NoError(t, store.CreateTenantCrossing(ctx, c))
+
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				ok, err := store.MarkTenantCrossingExpiryRecorded(ctx, c.ID, now)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if ok {
+					wins.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+		assert.Equal(t, int32(1), wins.Load(), "exactly one concurrent caller claims the crossing")
+
+		ok, err := store.MarkTenantCrossingExpiryRecorded(ctx, c.ID, now)
+		require.NoError(t, err)
+		assert.False(t, ok, "a third call finds it already marked")
+	})
+
+	t.Run("MarkTenantCrossingExpiryRecorded refuses unexpired, revoked and absent crossings", func(t *testing.T) {
+		live := &TenantCrossing{ID: "contract-probe-mark-live", TenantID: "contract-probe-mark-msp", Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		revoked := &TenantCrossing{ID: "contract-probe-mark-revoked", TenantID: "contract-probe-mark-msp", Kind: TenantCrossingKindGrant,
+			GrantedBy: "admin", CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}
+		require.NoError(t, store.CreateTenantCrossing(ctx, live))
+		require.NoError(t, store.CreateTenantCrossing(ctx, revoked))
+		require.NoError(t, store.RevokeTenantCrossing(ctx, revoked.ID))
+
+		for _, c := range []*TenantCrossing{live, revoked} {
+			ok, err := store.MarkTenantCrossingExpiryRecorded(ctx, c.ID, now)
+			require.NoError(t, err)
+			assert.False(t, ok)
+			got, err := store.GetTenantCrossing(ctx, c.ID)
+			require.NoError(t, err)
+			assert.Nil(t, got.ExpiryRecordedAt, "a refused mark changes nothing")
+		}
+
+		ok, err := store.MarkTenantCrossingExpiryRecorded(ctx, "contract-probe-crossing-absent", now)
+		assert.ErrorIs(t, err, ErrTenantCrossingNotFound)
+		assert.False(t, ok)
 	})
 }
 

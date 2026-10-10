@@ -1424,10 +1424,21 @@ func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql
 			reason_category TEXT NOT NULL DEFAULT '',
 			approval_state  TEXT NOT NULL DEFAULT 'approved',
 			approved_by     TEXT NOT NULL DEFAULT '',
-			approved_at     TIMESTAMPTZ
+			approved_at     TIMESTAMPTZ,
+			expiry_recorded_at TIMESTAMPTZ
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create tenant_crossings table: %w", err)
+	}
+	// A table that predates expiry_recorded_at gets the column and, as a clean break, has
+	// its already-expired rows marked so the first expiry sweep does not flood the audit
+	// log with history. A fresh table already has the column, so nothing is marked.
+	var hasExpiryColumn bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = 'tenant_crossings' AND column_name = 'expiry_recorded_at')`,
+	).Scan(&hasExpiryColumn); err != nil {
+		return fmt.Errorf("failed to probe tenant_crossings expiry column: %w", err)
 	}
 	// Idempotent upgrade for tables created before the approval columns existed; a grant
 	// names no principal, so clear it on existing grant rows.
@@ -1436,6 +1447,7 @@ func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql
 		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS approval_state TEXT NOT NULL DEFAULT 'approved'`,
 		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`,
+		`ALTER TABLE tenant_crossings ADD COLUMN IF NOT EXISTS expiry_recorded_at TIMESTAMPTZ`,
 		`UPDATE tenant_crossings SET principal_id = '' WHERE kind = 'grant' AND principal_id <> ''`,
 	}
 	for _, up := range upgrades {
@@ -1443,9 +1455,15 @@ func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql
 			return fmt.Errorf("failed to upgrade tenant_crossings table: %w", err)
 		}
 	}
+	if !hasExpiryColumn {
+		if _, err := db.ExecContext(ctx, `UPDATE tenant_crossings SET expiry_recorded_at = expires_at WHERE revoked_at IS NULL AND expires_at <= now()`); err != nil {
+			return fmt.Errorf("failed to mark historic tenant_crossings expiries: %w", err)
+		}
+	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_tenant_crossings_tenant_id ON tenant_crossings(tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_tenant_crossings_active_lookup ON tenant_crossings(principal_id, tenant_id, expires_at, revoked_at);",
+		"CREATE INDEX IF NOT EXISTS idx_tenant_crossings_unrecorded_expiry ON tenant_crossings(expires_at) WHERE expiry_recorded_at IS NULL AND revoked_at IS NULL;",
 	}
 	for _, idx := range indexes {
 		if _, err := db.ExecContext(ctx, idx); err != nil {
