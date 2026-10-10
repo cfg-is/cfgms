@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"github.com/gorilla/mux"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
