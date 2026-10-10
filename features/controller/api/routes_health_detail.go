@@ -25,6 +25,12 @@ func init() { RegisterRoutes(registerHealthDetailRoutes) }
 //
 // health.Handler.HandlePrometheusMetrics is deliberately not registered
 // anywhere: no cfg subcommand consumes a Prometheus-format export today.
+//
+// Tenant-crossing classification (Issue #4720): these routes describe the
+// controller platform itself — system and component health, alerts and traces —
+// which is ADR-025 Decision 4 "system and platform logs and metrics". They are
+// platform signals, not client-tenant data, and stay reachable to a root caller
+// without a crossing.
 func registerHealthDetailRoutes(s *Server, api *mux.Router) {
 	health := api.PathPrefix("/health").Subrouter()
 	health.Handle("/detailed", s.requirePermission("monitoring", "read-detailed-health")(http.HandlerFunc(s.handleHealthDetailed))).Methods("GET")

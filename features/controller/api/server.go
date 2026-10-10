@@ -1534,6 +1534,7 @@ func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 		return
 	}
 	h.SetRequirePermFn(s.requirePermission)
+	h.SetTenantReadScope(s.reportsTenantReadScope)
 	reportsRouter := s.apiRouter.PathPrefix("/reports").Subrouter()
 	h.RegisterRoutes(reportsRouter)
 	s.logger.Info("Reports API routes registered")

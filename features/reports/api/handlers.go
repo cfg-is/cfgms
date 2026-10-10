@@ -41,7 +41,82 @@ var (
 	// errDeviceScopeUnverifiable means no DeviceTenantResolver is wired, so
 	// device ownership cannot be checked. Requests fail closed.
 	errDeviceScopeUnverifiable = errors.New("device tenant ownership cannot be verified")
+	// errTenantOutsideScope means a root caller named a tenant it cannot reach
+	// at all (not below the root tenant).
+	errTenantOutsideScope = errors.New("tenant is not within the caller's scope")
 )
+
+// ReadDecision is the tenant read decision for one tenant.
+type ReadDecision int
+
+const (
+	// ReadAllowed means the caller may read the tenant's data.
+	ReadAllowed ReadDecision = iota
+	// ReadNeedsCrossing means only an ADR-025 tenant crossing is missing: the
+	// caller is answered with the crossing challenge.
+	ReadNeedsCrossing
+	// ReadDenied means the tenant is not reachable by the caller at all.
+	ReadDenied
+)
+
+// TenantReadScope is the controller's per-request tenant read decision for a
+// root caller (ADR-025, Issue #4720), injected so the reports package makes the
+// same decision every controller handler makes without importing the controller.
+type TenantReadScope interface {
+	// Unrestricted reports that the caller is not subject to the crossing
+	// boundary (an unrestricted certificate admin): no tenant needs a crossing.
+	Unrestricted() bool
+	// Decide is the read decision for one tenant.
+	Decide(tenantID string) ReadDecision
+	// ReadableTenants returns the tenants a report covers when the caller names
+	// none: the root tenant plus every crossing-covered tenant, never all tenants.
+	ReadableTenants() []string
+	// AnonymizedFleet returns the ADR-025 Amendment 6 A6.1 anonymized aggregate
+	// (steward online/offline counts, platform mix, version mix) over the
+	// stewards of tenants the caller may not read. It carries no host name,
+	// device identifier or per-device row.
+	AnonymizedFleet() any
+	// WriteCrossingChallenge answers the request with the crossing challenge for
+	// the given tenant.
+	WriteCrossingChallenge(w http.ResponseWriter, tenantID string)
+}
+
+// TenantReadScopeFunc builds the TenantReadScope for one request. route names
+// the endpoint for the decision's logging.
+type TenantReadScopeFunc func(r *http.Request, route string) TenantReadScope
+
+// failClosedScope is the read decision used when none is injected: a root caller
+// is treated as holding no crossing, so only the root tenant (the tenant the
+// caller authenticated into) is readable.
+type failClosedScope struct{ rootTenant string }
+
+func (f failClosedScope) Unrestricted() bool { return false }
+func (f failClosedScope) Decide(tenantID string) ReadDecision {
+	if tenantID != "" && tenantID == f.rootTenant {
+		return ReadAllowed
+	}
+	return ReadNeedsCrossing
+}
+func (f failClosedScope) ReadableTenants() []string {
+	if f.rootTenant == "" {
+		return []string{reportNoTenantScope}
+	}
+	return []string{f.rootTenant}
+}
+func (f failClosedScope) AnonymizedFleet() any { return nil }
+func (f failClosedScope) WriteCrossingChallenge(w http.ResponseWriter, _ string) {
+	w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="tenant-crossing"`)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"error":"tenant_crossing_required","required_assurance":"tenant-crossing"}`))
+}
+
+// crossingRequiredError means a requested tenant or device needs a tenant
+// crossing the caller does not hold. It carries the owning tenant for the
+// challenge, never rendered as error text.
+type crossingRequiredError struct{ tenant string }
+
+func (e *crossingRequiredError) Error() string { return "tenant crossing required" }
 
 // Handler implements HTTP handlers for the reports API
 type Handler struct {
@@ -55,6 +130,9 @@ type Handler struct {
 	// caller's tenant through the tenant store's ParentID ancestry. Nil denies
 	// every non-identical tenant (fail closed).
 	tenantAncestry TenantAncestryFunc
+	// readScope is the controller's tenant read decision for root callers. Nil
+	// fails closed (failClosedScope).
+	readScope TenantReadScopeFunc
 }
 
 // TenantAncestryFunc reports whether descendant is a descendant of ancestor in
@@ -65,6 +143,23 @@ type TenantAncestryFunc func(ctx context.Context, ancestor, descendant string) (
 // SetTenantAncestry wires the ancestry lookup behind the device tenant boundary.
 func (h *Handler) SetTenantAncestry(fn TenantAncestryFunc) {
 	h.tenantAncestry = fn
+}
+
+// SetTenantReadScope wires the controller's tenant read decision (ADR-025
+// crossing boundary) for root callers.
+func (h *Handler) SetTenantReadScope(fn TenantReadScopeFunc) {
+	h.readScope = fn
+}
+
+// scopeFor returns the tenant read decision for the request.
+func (h *Handler) scopeFor(r *http.Request, route string) TenantReadScope {
+	if h.readScope != nil {
+		if sc := h.readScope(r, route); sc != nil {
+			return sc
+		}
+	}
+	root, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	return failClosedScope{rootTenant: root}
 }
 
 // New creates a new reports API handler. devices resolves device ownership for
@@ -149,11 +244,19 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// DeviceIDs are authorized against that tenant before reaching the engine.
 	// Without this, generate would bypass the scoping enforced on the GET
 	// endpoints, since the exported report carries per-device rows.
+	scope := h.scopeFor(r, "POST /api/v1/reports/generate")
 	if callerTenant := reportCallerTenant(r.Context()); callerTenant != "" {
 		req.TenantIDs = []string{callerTenant}
+	} else {
+		tenantIDs, err := selectRootTenants(scope, req.TenantIDs)
+		if err != nil {
+			h.writeScopeError(w, scope, err)
+			return
+		}
+		req.TenantIDs = tenantIDs
 	}
-	if _, err := h.enforceDeviceTenant(r.Context(), req.DeviceIDs); err != nil {
-		h.writeDeviceScopeError(w, err)
+	if _, err := h.enforceDeviceTenant(r.Context(), scope, req.DeviceIDs); err != nil {
+		h.writeScopeError(w, scope, err)
 		return
 	}
 
@@ -249,12 +352,17 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs, err := h.scopedDeviceIDs(r)
+	scope := h.scopeFor(r, "GET /api/v1/reports/dashboard/overview")
+	deviceIDs, err := h.scopedDeviceIDs(r, scope)
 	if err != nil {
-		h.writeDeviceScopeError(w, err)
+		h.writeScopeError(w, scope, err)
 		return
 	}
-	tenantIDs := h.parseTenantIDs(r)
+	tenantIDs, err := h.parseTenantIDs(r, scope)
+	if err != nil {
+		h.writeScopeError(w, scope, err)
+		return
+	}
 
 	// Generate executive dashboard report
 	req := interfaces.ReportRequest{
@@ -292,6 +400,7 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	addAnonymizedFleet(r.Context(), response, scope)
 	h.writeJSON(w, http.StatusOK, response)
 }
 
@@ -307,12 +416,17 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs, err := h.scopedDeviceIDs(r)
+	scope := h.scopeFor(r, "GET /api/v1/reports/dashboard/trends")
+	deviceIDs, err := h.scopedDeviceIDs(r, scope)
 	if err != nil {
-		h.writeDeviceScopeError(w, err)
+		h.writeScopeError(w, scope, err)
 		return
 	}
-	tenantIDs := h.parseTenantIDs(r)
+	tenantIDs, err := h.parseTenantIDs(r, scope)
+	if err != nil {
+		h.writeScopeError(w, scope, err)
+		return
+	}
 
 	// Generate executive dashboard with charts
 	req := interfaces.ReportRequest{
@@ -349,6 +463,7 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	addAnonymizedFleet(r.Context(), response, scope)
 	h.writeJSON(w, http.StatusOK, response)
 }
 
@@ -382,12 +497,17 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 		timeRange.End = timeRange.End.Add(time.Minute)
 	}
 
-	deviceIDs, err := h.scopedDeviceIDs(r)
+	scope := h.scopeFor(r, "GET /api/v1/reports/dashboard/alerts")
+	deviceIDs, err := h.scopedDeviceIDs(r, scope)
 	if err != nil {
-		h.writeDeviceScopeError(w, err)
+		h.writeScopeError(w, scope, err)
 		return
 	}
-	tenantIDs := h.parseTenantIDs(r)
+	tenantIDs, err := h.parseTenantIDs(r, scope)
+	if err != nil {
+		h.writeScopeError(w, scope, err)
+		return
+	}
 
 	// severity query param; default to warning+critical for the alert center.
 	severity := r.URL.Query().Get("severity")
@@ -511,12 +631,17 @@ func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs, err := h.scopedDeviceIDs(r)
+	scope := h.scopeFor(r, "GET /api/v1/reports/compliance/status")
+	deviceIDs, err := h.scopedDeviceIDs(r, scope)
 	if err != nil {
-		h.writeDeviceScopeError(w, err)
+		h.writeScopeError(w, scope, err)
 		return
 	}
-	tenantIDs := h.parseTenantIDs(r)
+	tenantIDs, err := h.parseTenantIDs(r, scope)
+	if err != nil {
+		h.writeScopeError(w, scope, err)
+		return
+	}
 
 	// Generate compliance summary report
 	req := interfaces.ReportRequest{
@@ -578,12 +703,17 @@ func (h *Handler) getDriftSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs, err := h.scopedDeviceIDs(r)
+	scope := h.scopeFor(r, "GET /api/v1/reports/drift/summary")
+	deviceIDs, err := h.scopedDeviceIDs(r, scope)
 	if err != nil {
-		h.writeDeviceScopeError(w, err)
+		h.writeScopeError(w, scope, err)
 		return
 	}
-	tenantIDs := h.parseTenantIDs(r)
+	tenantIDs, err := h.parseTenantIDs(r, scope)
+	if err != nil {
+		h.writeScopeError(w, scope, err)
+		return
+	}
 
 	// Generate drift analysis report
 	req := interfaces.ReportRequest{
@@ -683,8 +813,8 @@ func (h *Handler) parseDeviceIDs(r *http.Request) []string {
 
 // scopedDeviceIDs parses the requested device IDs and enforces the caller's
 // tenant boundary on them.
-func (h *Handler) scopedDeviceIDs(r *http.Request) ([]string, error) {
-	return h.enforceDeviceTenant(r.Context(), h.parseDeviceIDs(r))
+func (h *Handler) scopedDeviceIDs(r *http.Request, scope TenantReadScope) ([]string, error) {
+	return h.enforceDeviceTenant(r.Context(), scope, h.parseDeviceIDs(r))
 }
 
 // enforceDeviceTenant verifies that every requested device belongs to the
@@ -692,10 +822,35 @@ func (h *Handler) scopedDeviceIDs(r *http.Request) ([]string, error) {
 // DataProvider.GetDNAData and storage.GetHistory select purely on device ID —
 // so device IDs are the actual cross-tenant selector and must be authorized
 // here, at the boundary, before they reach the engine.
-func (h *Handler) enforceDeviceTenant(ctx context.Context, deviceIDs []string) ([]string, error) {
+//
+// A root caller subject to the crossing boundary has each device authorized
+// through its owning tenant: a device in a client tenant without a crossing
+// yields a crossingRequiredError, an unknown device the not-found answer.
+func (h *Handler) enforceDeviceTenant(ctx context.Context, scope TenantReadScope, deviceIDs []string) ([]string, error) {
 	callerTenant := reportCallerTenant(ctx)
-	if callerTenant == "" || len(deviceIDs) == 0 {
-		// Root/unscoped caller, or no device selector to authorize.
+	if len(deviceIDs) == 0 {
+		return deviceIDs, nil
+	}
+	if callerTenant == "" {
+		if scope.Unrestricted() {
+			return deviceIDs, nil
+		}
+		if h.devices == nil {
+			return nil, errDeviceScopeUnverifiable
+		}
+		for _, deviceID := range deviceIDs {
+			owner, known := h.devices.TenantForDevice(deviceID)
+			if !known || owner == "" {
+				return nil, errDeviceOutsideTenant
+			}
+			switch scope.Decide(owner) {
+			case ReadAllowed:
+			case ReadNeedsCrossing:
+				return nil, &crossingRequiredError{tenant: owner}
+			default:
+				return nil, errDeviceOutsideTenant
+			}
+		}
 		return deviceIDs, nil
 	}
 
@@ -737,29 +892,37 @@ func tenantWithinSubtree(ctx context.Context, ancestry TenantAncestryFunc, logge
 	return ok
 }
 
-// writeDeviceScopeError renders a device-scope failure. An unknown or
-// out-of-tenant device returns 404 rather than 403 so the response does not
-// disclose the existence of another tenant's device — matching the steward
-// compliance endpoints.
-func (h *Handler) writeDeviceScopeError(w http.ResponseWriter, err error) {
+// writeScopeError renders a tenant- or device-scope failure. A missing crossing
+// is answered with the crossing challenge. An unknown or out-of-tenant device
+// returns 404 rather than 403 so the response does not disclose the existence
+// of another tenant's device — matching the steward compliance endpoints.
+func (h *Handler) writeScopeError(w http.ResponseWriter, scope TenantReadScope, err error) {
+	var crossing *crossingRequiredError
+	if errors.As(err, &crossing) {
+		scope.WriteCrossingChallenge(w, crossing.tenant)
+		return
+	}
 	if errors.Is(err, errDeviceScopeUnverifiable) {
 		h.logger.Error("refusing device-scoped report request: no device tenant resolver wired")
 		h.writeError(w, http.StatusServiceUnavailable, "Device tenant verification unavailable", nil)
+		return
+	}
+	if errors.Is(err, errTenantOutsideScope) {
+		h.writeError(w, http.StatusNotFound, "Tenant not found", nil)
 		return
 	}
 
 	h.writeError(w, http.StatusNotFound, "Device not found", nil)
 }
 
-func (h *Handler) parseTenantIDs(r *http.Request) []string {
-	// A tenant-scoped caller may only see their own tenant's data. The caller's
-	// tenant is authoritative; any query param is ignored to prevent cross-tenant
-	// data access. Root/unscoped callers retain query-param-driven filtering.
+// parseTenantIDs resolves the tenants a report covers. A tenant-scoped caller is
+// pinned to its own tenant and any query parameter is ignored. A root caller
+// goes through the injected tenant read decision (selectRootTenants).
+func (h *Handler) parseTenantIDs(r *http.Request, scope TenantReadScope) ([]string, error) {
 	callerTenant := reportCallerTenant(r.Context())
 	if callerTenant != "" {
-		return []string{callerTenant}
+		return []string{callerTenant}, nil
 	}
-	// Root/unscoped caller: honor query params.
 	tenantIDs := r.URL.Query()["tenant_id"]
 	if tenantIDsStr := r.URL.Query().Get("tenant_ids"); tenantIDsStr != "" {
 		var ids []string
@@ -767,7 +930,48 @@ func (h *Handler) parseTenantIDs(r *http.Request) []string {
 			tenantIDs = append(tenantIDs, ids...)
 		}
 	}
-	return tenantIDs
+	return selectRootTenants(scope, tenantIDs)
+}
+
+// selectRootTenants applies the tenant read decision to the tenants a root
+// caller named. Every named tenant must be readable; one that needs a crossing
+// the caller lacks yields a crossingRequiredError. With no tenant named the
+// report covers the tenants the caller may read, never all tenants. A caller not
+// subject to the crossing boundary keeps its named tenants unchanged.
+func selectRootTenants(scope TenantReadScope, named []string) ([]string, error) {
+	if scope.Unrestricted() {
+		return named, nil
+	}
+	if len(named) == 0 {
+		readable := scope.ReadableTenants()
+		if len(readable) == 0 {
+			// Nothing readable: name a tenant that matches no data rather than
+			// an empty list the data layer would refuse.
+			readable = []string{reportNoTenantScope}
+		}
+		return readable, nil
+	}
+	for _, id := range named {
+		switch scope.Decide(id) {
+		case ReadAllowed:
+		case ReadNeedsCrossing:
+			return nil, &crossingRequiredError{tenant: id}
+		default:
+			return nil, errTenantOutsideScope
+		}
+	}
+	return named, nil
+}
+
+// addAnonymizedFleet adds the A6.1 anonymized aggregate of the stewards the
+// caller may not read to a dashboard response.
+func addAnonymizedFleet(ctx context.Context, response map[string]interface{}, scope TenantReadScope) {
+	if reportCallerTenant(ctx) != "" || scope.Unrestricted() {
+		return
+	}
+	if agg := scope.AnonymizedFleet(); agg != nil {
+		response["anonymized_fleet"] = agg
+	}
 }
 
 func (h *Handler) setExportHeaders(w http.ResponseWriter, format interfaces.ExportFormat, reportID string) {

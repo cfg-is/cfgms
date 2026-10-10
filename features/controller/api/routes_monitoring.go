@@ -10,6 +10,11 @@ import (
 
 func init() { RegisterRoutes(registerMonitoringRoutes) }
 
+// Tenant-crossing classification (Issue #4720): every /monitoring route
+// (system health, component health, metrics, traces, alerts) describes the
+// controller platform, which is ADR-025 Decision 4 "system and platform logs and
+// metrics". These are platform signals, not client-tenant data, and stay
+// reachable to a root caller without a crossing.
 func registerMonitoringRoutes(s *Server, api *mux.Router) {
 	// Public product monitoring endpoints. Metrics are deliberately absent:
 	// they are registered only on the dedicated private metrics router below.
