@@ -21,3 +21,8 @@ platforms:
 interfaces:
   - Get
   - Set
+
+env:
+  - HTTP_PROXY
+  - HTTPS_PROXY
+  - NO_PROXY

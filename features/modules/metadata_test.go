@@ -1540,3 +1540,88 @@ func BenchmarkModuleMetadata_Clone(b *testing.B) {
 		_ = metadata.Clone()
 	}
 }
+
+func envTestYAML(env string) string {
+	return "name: env-mod\nversion: 1.0.0\npublisher: acme-corp\nexecutors:\n  - steward\n" + env
+}
+
+func TestModuleMetadata_EnvDeclarationValidation(t *testing.T) {
+	t.Run("valid list parses and validates", func(t *testing.T) {
+		m, err := ParseModuleMetadata(strings.NewReader(envTestYAML("env:\n  - VENDOR_A_API_REGION\n  - _x1\n")))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if len(m.Env) != 2 || m.Env[0] != "VENDOR_A_API_REGION" {
+			t.Fatalf("Env = %v", m.Env)
+		}
+		if err := m.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	t.Run("absent or empty list is valid", func(t *testing.T) {
+		for _, y := range []string{envTestYAML(""), envTestYAML("env: []\n")} {
+			m, err := ParseModuleMetadata(strings.NewReader(y))
+			if err != nil || len(m.Env) != 0 {
+				t.Fatalf("err=%v env=%v", err, m.Env)
+			}
+		}
+	})
+
+	many := make([]string, 65)
+	for i := range many {
+		many[i] = "V" + strings.Repeat("A", i)
+	}
+	bad := map[string][]string{
+		"wildcard":    {"OK", "*"},
+		"prefix":      {"OK", "CFGMS_*"},
+		"empty":       {"OK", ""},
+		"equals":      {"OK", "A=B"},
+		"digit start": {"OK", "1ABC"},
+		"duplicate":   {"OK", "OK"},
+		"reserved":    {"OK", "CFGMS_MODULE_SOCKET"},
+		"65 names":    many,
+	}
+	for name, env := range bad {
+		t.Run(name, func(t *testing.T) {
+			y := "env:\n"
+			for _, e := range env {
+				y += "  - '" + e + "'\n"
+			}
+			_, err := ParseModuleMetadata(strings.NewReader(envTestYAML(y)))
+			if err == nil {
+				t.Fatal("ParseModuleMetadata accepted invalid env")
+			}
+			m := &ModuleMetadata{Name: "n", Version: "1.0.0", Publisher: "p", Executors: []string{"steward"}, Env: env}
+			vErr := m.Validate()
+			if vErr == nil {
+				t.Fatal("Validate accepted invalid env")
+			}
+			if name != "65 names" && !strings.Contains(vErr.Error(), "env[1]") {
+				t.Fatalf("error does not name entry by index: %v", vErr)
+			}
+		})
+	}
+
+	t.Run("Clone deep-copies Env", func(t *testing.T) {
+		m := &ModuleMetadata{Name: "n", Version: "1.0.0", Env: []string{"A", "B"}}
+		c := m.Clone()
+		c.Env[0] = "CHANGED"
+		if m.Env[0] != "A" || len(c.Env) != 2 {
+			t.Fatalf("Clone shares Env: orig=%v clone=%v", m.Env, c.Env)
+		}
+	})
+}
+
+func TestM365ModuleManifests_DeclareProxyEnv(t *testing.T) {
+	for _, name := range []string{"conditional_access", "entra_admin_unit", "entra_application", "entra_group", "entra_user", "intune_policy"} {
+		m, err := LoadModuleMetadata(filepath.Join("..", "workflow", "modules", "m365", name, "module.yaml"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+		if strings.Join(m.Env, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s: Env = %v, want %v", name, m.Env, want)
+		}
+	}
+}
