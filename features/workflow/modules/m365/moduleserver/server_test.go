@@ -34,7 +34,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/contract"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/testing" // registers the flatfile storage provider the sops store opens
 )
 
 // newControllerSecretStore opens a real sops secret store over a flatfile root
