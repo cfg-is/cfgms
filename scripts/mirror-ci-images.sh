@@ -60,6 +60,11 @@ done
 [ -n "$LIST" ] || LIST="$ROOT/.github/ci-images.yml"
 [ -f "$LIST" ] || { echo "image list not found: $LIST" >&2; exit 2; }
 
+# The one named exception to --check: minio/minio cannot be pulled from any
+# reachable registry, so it cannot be pinned until it is replaced (#4910).
+# Exact string match only — not a pattern, not a general allow-list.
+MINIO_EXCEPTION_REF="minio/minio:latest"
+
 DIGEST_RE='@sha256:[0-9a-f]{64}$'
 
 # list_entries prints "<upstream>\t<mirror>" for each list entry.
@@ -129,6 +134,10 @@ run_check() {
         [ -n "$ref" ] || continue
         if printf '%s\n' "$upstreams" | grep -qxF -- "$ref"; then
             seen="$seen$ref"$'\n'
+            continue
+        fi
+        if [ "$ref" = "$MINIO_EXCEPTION_REF" ]; then
+            echo "ci-images: $loc: $ref left unpinned (known exception, see #4910)" >&2
             continue
         fi
         it="$(ref_image_tag "$ref")"
