@@ -27,6 +27,10 @@ The four upgrade documents cover distinct scopes; start here to pick the right o
 - [Hyper-V Host Role](../deployment/hyperv-host-role.md) - Targeting Hyper-V hosts by tag with the `hyperv-host` role
 - [Hyper-V live-validation runbooks](../testing/README.md#hyper-v-live-validation) - Cascade and role-promotion runbooks under testing
 
+## Tenant Access
+
+- [Tenant Support Access, Break-Glass and Account Recovery](tenant-support-access.md) - MSP support-access grants, root break-glass, the account-recovery procedure, email notification setup and the crossing audit trail
+
 ## Pipeline and Automation
 
 - [Agent Dispatch](agent-dispatch.md) - Operational reference for the `agent-dispatch.sh` lifecycle: environment, containers, credentials

@@ -428,7 +428,7 @@ startup otherwise.
 |---|---|---|---|---|
 | `delete_hold_period` | duration | `"720h"` (30 days, `GetDeleteHoldPeriod`) | optional | Minimum time between a tenant deletion request and its approval |
 | `delete_requires_dual_control` | boolean | `true` (`GetDeleteRequiresDualControl`) | optional | Whether the operator who requested a tenant deletion may also approve it (`true` means they may not) |
-| `break_glass_requires_second_approver` | boolean | `false` (`GetBreakGlassRequiresSecondApprover`) | optional | Whether a tenant-crossing break-glass invocation is created `pending` until a different root-scoped principal approves it (read at startup) |
+| `break_glass_requires_second_approver` | boolean | `false` (`GetBreakGlassRequiresSecondApprover`) | optional | Whether a tenant-crossing break-glass invocation is created `pending` until a different root-scoped principal approves it (read at startup). See the [tenant support access guide](../operations/tenant-support-access.md#second-approver) |
 
 ---
 
@@ -472,6 +472,8 @@ and passkey step-up answer 503.
 to the config file or any log. Store it with `PUT /api/v1/notifications/email/credential`
 (see [REST API](../api/rest-api.md#email-delivery)); it is held in the controller's secret store under
 `password_secret_key`. Email delivery stays off until both the settings and the credential are present.
+
+Break-glass email to MSP administrator contacts uses this channel; see the [tenant support access guide](../operations/tenant-support-access.md#email-delivery).
 
 ---
 
