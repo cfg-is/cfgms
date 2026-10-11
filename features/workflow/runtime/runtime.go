@@ -21,7 +21,9 @@ import (
 	"unicode"
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/contract"
 )
 
 // ErrWrongModuleKind is returned by Start when the bundle's manifest kind is not
@@ -35,12 +37,21 @@ var handleSeq atomic.Int64
 // module binaries. Create one per controller instance with NewModuleRuntime.
 type ModuleRuntime struct {
 	runtimeDir string
+	logger     logging.Logger
 }
 
 // NewModuleRuntime returns a ModuleRuntime that creates sockets under runtimeDir.
 // runtimeDir must be a writable directory; use t.TempDir() in tests.
 func NewModuleRuntime(runtimeDir string) *ModuleRuntime {
-	return &ModuleRuntime{runtimeDir: runtimeDir}
+	return &ModuleRuntime{runtimeDir: runtimeDir, logger: logging.ForComponent("module-runtime")}
+}
+
+// SetLogger replaces the logger the runtime reports module starts to. Call it
+// before Start; it is not safe to call concurrently with Start.
+func (r *ModuleRuntime) SetLogger(l logging.Logger) {
+	if l != nil {
+		r.logger = l
+	}
 }
 
 // Start fork/execs the module binary for the current OS/arch, waits for it to
@@ -65,6 +76,12 @@ func (r *ModuleRuntime) Start(b *bundle.Bundle, tenantID, authToken string) (*Mo
 		return nil, fmt.Errorf("%w: got %q", ErrWrongModuleKind, got)
 	}
 
+	// Declared env names are validated before anything is created: an invalid
+	// name must leave no socket directory entry and no process behind.
+	if err := contract.ValidateEnvNames(b.Manifest.Env); err != nil {
+		return nil, fmt.Errorf("module %q: %w", b.Manifest.Name, err)
+	}
+
 	// 2. Locate the binary for the current platform.
 	osArch := goruntime.GOOS + "-" + goruntime.GOARCH
 	binPath, ok := b.Binaries[osArch]
@@ -81,14 +98,25 @@ func (r *ModuleRuntime) Start(b *bundle.Bundle, tenantID, authToken string) (*Mo
 		return nil, fmt.Errorf("socket path for module %q: %w", b.Manifest.Name, err)
 	}
 
-	// 4. Fork/exec the module binary with the socket path in its environment.
+	// 4. Fork/exec the module binary with the baseline, its declared env and the
+	// socket path — never the parent's full environment.
+	modEnv, err := contract.BuildModuleEnvFromProcess(b.Manifest.Env, socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("module %q: %w", b.Manifest.Name, err)
+	}
 	// #nosec G204 — binPath comes from the bundle manifest, not user-supplied input.
 	cmd := exec.Command(binPath)
-	cmd.Env = append(os.Environ(), "CFGMS_MODULE_SOCKET="+socketPath)
+	cmd.Env = modEnv.Env
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("fork/exec module %q (%s): %w", b.Manifest.Name, binPath, err)
 	}
+
+	// Names only — an environment value is never logged.
+	for _, name := range modEnv.MissingDeclared {
+		r.logger.Warn("declared module env variable is not set in the parent", "module", logging.SanitizeLogValue(b.Manifest.Name), "env_name", name)
+	}
+	r.logger.Info("module process started", "module", logging.SanitizeLogValue(b.Manifest.Name), "env_names", modEnv.PassedNames)
 
 	// 5. Reap the child from the moment it exists — not after the handshake — so
 	// every later step can tell "not listening yet" from "already dead". A module

@@ -10,6 +10,40 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// Clock is the time source SingletonJob's renewal loop draws on: the renewal
+// ticker, the remaining-authority computation and the retry backoff wait. The
+// zero SingletonJob uses the real clock; tests substitute a clock they advance
+// explicitly so the outcome does not depend on how quickly the host schedules
+// goroutines.
+type Clock interface {
+	// Until returns the duration from now until t.
+	Until(t time.Time) time.Duration
+	// NewTicker returns a Ticker firing every d.
+	NewTicker(d time.Duration) Ticker
+	// After returns a channel that receives once d has elapsed.
+	After(d time.Duration) <-chan time.Time
+}
+
+// Ticker is the subset of *time.Ticker that SingletonJob uses.
+type Ticker interface {
+	// C returns the channel on which ticks are delivered.
+	C() <-chan time.Time
+	// Stop turns the ticker off.
+	Stop()
+}
+
+type realClock struct{}
+
+func (realClock) Until(t time.Time) time.Duration { return time.Until(t) }
+
+func (realClock) NewTicker(d time.Duration) Ticker { return realTicker{time.NewTicker(d)} }
+
+func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
+type realTicker struct{ *time.Ticker }
+
+func (t realTicker) C() <-chan time.Time { return t.Ticker.C }
+
 // SingletonJob wraps a cluster background loop's per-cycle execution so it
 // runs on at most one node at a time, using this package's fenced lease as
 // the singleton claim (ADR-031 Decision 4). A loop constructs one
@@ -41,6 +75,17 @@ type SingletonJob struct {
 
 	// Logger receives acquire/renew diagnostics. May be nil.
 	Logger logging.Logger
+
+	// Clock supplies the renewal ticker, the remaining-authority computation
+	// and the retry backoff wait. Nil means the real clock.
+	Clock Clock
+}
+
+func (j SingletonJob) clock() Clock {
+	if j.Clock == nil {
+		return realClock{}
+	}
+	return j.Clock
 }
 
 // NewSingletonJob constructs a SingletonJob, validating name/holderID are
@@ -126,7 +171,7 @@ const renewRetryBaseBackoff = 10 * time.Millisecond
 // A renewal that is still failing once renewWithRetry's budget is exhausted
 // invokes onLost (cancelling fn's context) and returns.
 func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.CancelFunc, token uint64) {
-	ticker := time.NewTicker(j.RenewInterval)
+	ticker := j.clock().NewTicker(j.RenewInterval)
 	defer ticker.Stop()
 
 	current := token
@@ -134,7 +179,7 @@ func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.Canc
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.C():
 			newToken, err := j.renewWithRetry(ctx, current)
 			if err != nil {
 				j.logWarn("lease: renew failed mid-cycle; cancelling remaining work to avoid a duplicate run", err)
@@ -179,7 +224,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		if !ok {
 			return 0, err
 		}
-		remaining := time.Until(deadline)
+		remaining := j.clock().Until(deadline)
 		if remaining <= 0 {
 			return 0, err
 		}
@@ -192,7 +237,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		select {
 		case <-ctx.Done():
 			return 0, ctx.Err()
-		case <-time.After(backoff):
+		case <-j.clock().After(backoff):
 		}
 		backoff *= 2
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cfgis/cfgms/pkg/modules/contract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -102,6 +103,13 @@ type ModuleMetadata struct {
 	// observe_when-only semantics — backward-compatible with all existing
 	// module.yaml files that predate this field.
 	AlwaysPull bool `yaml:"always_pull,omitempty" json:"always_pull,omitempty"`
+
+	// Env lists the NAMES of parent-process environment variables the module
+	// process receives in addition to the runtime's fixed baseline. Values always
+	// come from the parent at start time; the manifest never carries a value.
+	// Names are validated by contract.ValidateEnvNames. The field is part of the
+	// manifest bytes, so it is covered by the bundle ContentHash and signature.
+	Env []string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 // BehavioralEnvelope documents the runtime behavior of a module for security auditing
@@ -206,6 +214,11 @@ func ParseModuleMetadata(reader io.Reader) (*ModuleMetadata, error) {
 		return nil, err
 	}
 
+	// Validate declared environment variable names
+	if err := contract.ValidateEnvNames(metadata.Env); err != nil {
+		return nil, err
+	}
+
 	return &metadata, nil
 }
 
@@ -305,6 +318,11 @@ func (m *ModuleMetadata) Validate() error {
 
 	// Validate observe_when predicates
 	if err := validateObserveWhen(m.ObserveWhen); err != nil {
+		return err
+	}
+
+	// Validate declared environment variable names
+	if err := contract.ValidateEnvNames(m.Env); err != nil {
 		return err
 	}
 
@@ -415,6 +433,12 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 	if m.ModuleDependencies != nil {
 		clone.ModuleDependencies = make([]ModuleDependency, len(m.ModuleDependencies))
 		copy(clone.ModuleDependencies, m.ModuleDependencies)
+	}
+
+	// Deep copy declared environment variable names
+	if m.Env != nil {
+		clone.Env = make([]string, len(m.Env))
+		copy(clone.Env, m.Env)
 	}
 
 	// Deep copy platforms
