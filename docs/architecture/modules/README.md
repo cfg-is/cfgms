@@ -54,6 +54,34 @@ Every `module.yaml` must include the following fields:
 | `behavioral_envelope` | object | no | Runtime behavior declaration for security auditing |
 | `observe_when` | list | no | Activation predicate for read-only DNA observation (ADR-024). Absent = never auto-pulled for DNA. |
 | `always_pull` | bool | no | Pull this module on every steward unconditionally, without a DNA predicate match (ADR-024 Amendment 2). Use only for universal baseline modules (e.g. `osquery`). Absent or `false` = predicate-gated only. |
+| `env` | list | no | Names of parent-process environment variables the module process receives in addition to the baseline (see [Module process environment](#module-process-environment)). Absent or empty = baseline only. |
+
+### Module process environment
+
+A module process never inherits the full environment of the controller or steward that starts it. Both runtimes build the child environment with one shared function (`contract.BuildModuleEnv`), and the child receives only:
+
+1. the baseline for the host OS (below), each name only when the parent has it set;
+2. the variables named in the module's signed `env:` list, each only when the parent has it set;
+3. `CFGMS_MODULE_SOCKET`, the contract variable the runtime sets itself. It always replaces any parent value.
+
+| OS | Baseline |
+|----|----------|
+| Linux, macOS | `PATH`, `HOME`, `TMPDIR`, `LANG` |
+| Windows | `PATH`, `PATHEXT`, `SystemRoot`, `windir`, `SystemDrive`, `TEMP`, `TMP`, `ProgramData`, `ProgramFiles`, `ProgramFiles(x86)`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `PSModulePath`, `COMPUTERNAME`, `PROCESSOR_ARCHITECTURE` |
+
+Proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) and TLS trust overrides are not in the baseline, because a proxy URL can carry credentials. A module that needs one declares it; the M365 workflow modules declare the three proxy variables.
+
+**`env:` rules.** The list holds variable names only; values always come from the parent process at start time and the manifest never carries one.
+
+- Each name matches `^[A-Za-z_][A-Za-z0-9_]*$`. Wildcards, prefix patterns, empty names and names containing `=` are parse errors.
+- `CFGMS_MODULE_SOCKET` is reserved; declaring it is a parse error.
+- At most 64 names; a duplicate is a parse error.
+- The field is part of the manifest bytes, so the bundle `ContentHash` and the publisher signature cover it.
+- The runtimes re-validate the names before starting a process. An invalid name makes `Start` return an error before any socket or process is created.
+
+**Matching.** On Windows, names match case-insensitively and the child receives the parent's spelling; hidden `=C:`-style entries are never passed. On Linux and macOS, names match exactly. A baseline or declared name that the parent does not have set is left out, not passed empty.
+
+**Logging.** Each runtime logs one Info line when a module starts with the module name and the sorted variable names passed. A declared name the parent does not have set is logged as a name only, at Warn. A variable value is never logged and never appears in an error message.
 
 ### Executor values and derived `kind`
 

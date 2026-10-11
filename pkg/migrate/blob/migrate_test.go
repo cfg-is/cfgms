@@ -6,12 +6,12 @@
 //
 // Prerequisites:
 //
-//	docker compose --profile blob-migrate -f docker-compose.test.yml up -d minio-test
+//	docker compose --profile blob-migrate -f docker-compose.test.yml up -d s3-test
 //
 // Environment variables (defaults match the docker-compose service):
 //
 //	CFGMS_S3_TEST_BUCKET       – S3 bucket name (default: "cfgms-test-blobs")
-//	CFGMS_S3_TEST_ENDPOINT_URL – MinIO endpoint URL (default: "http://localhost:9002")
+//	CFGMS_S3_TEST_ENDPOINT_URL – S3-compatible endpoint URL (default: "http://localhost:9002")
 package blob_test
 
 import (
@@ -36,7 +36,7 @@ import (
 	blobstore "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
-// testS3Config holds MinIO connection parameters for the integration test.
+// testS3Config holds S3-compatible connection parameters for the integration test.
 type testS3Config struct {
 	bucket      string
 	endpointURL string
@@ -44,11 +44,11 @@ type testS3Config struct {
 	secretKey   string
 }
 
-// minioConfig reads MinIO connection parameters from environment variables.
-// Defaults match the docker-compose.test.yml minio-test service.
+// s3TestConfig reads S3-compatible connection parameters from environment variables.
+// Defaults match the docker-compose.test.yml s3-test service.
 // Variables: CFGMS_S3_TEST_BUCKET, CFGMS_S3_TEST_ENDPOINT_URL,
 // CFGMS_S3_TEST_ACCESS_KEY, CFGMS_S3_TEST_SECRET_KEY.
-func minioConfig() testS3Config {
+func s3TestConfig() testS3Config {
 	bucket := os.Getenv("CFGMS_S3_TEST_BUCKET")
 	if bucket == "" {
 		bucket = "cfgms-test-blobs"
@@ -59,11 +59,11 @@ func minioConfig() testS3Config {
 	}
 	accessKey := os.Getenv("CFGMS_S3_TEST_ACCESS_KEY")
 	if accessKey == "" {
-		accessKey = "minioadmin"
+		accessKey = "s3admin"
 	}
 	secretKey := os.Getenv("CFGMS_S3_TEST_SECRET_KEY")
 	if secretKey == "" {
-		secretKey = "minioadmin"
+		secretKey = "s3admin"
 	}
 	return testS3Config{
 		bucket:      bucket,
@@ -96,12 +96,12 @@ func ensureTestBucket(t *testing.T, cfg testS3Config) {
 		var owned *s3types.BucketAlreadyOwnedByYou
 		var exists *s3types.BucketAlreadyExists
 		if !errors.As(err, &owned) && !errors.As(err, &exists) {
-			t.Fatalf("failed to create test bucket %q: %v — is minio-test running?", cfg.bucket, err)
+			t.Fatalf("failed to create test bucket %q: %v — is s3-test running?", cfg.bucket, err)
 		}
 	}
 }
 
-// newS3Store creates a BlobStore backed by the docker-compose MinIO instance.
+// newS3Store creates a BlobStore backed by the docker-compose S3-compatible instance.
 func newS3Store(t *testing.T, cfg testS3Config) blobstore.BlobStore {
 	t.Helper()
 
@@ -116,17 +116,17 @@ func newS3Store(t *testing.T, cfg testS3Config) blobstore.BlobStore {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, store.HealthCheck(ctx),
-		"S3 health check failed — is minio-test running? "+
-			"Start with: docker compose --profile blob-migrate -f docker-compose.test.yml up -d minio-test")
+		"S3 health check failed — is s3-test running? "+
+			"Start with: docker compose --profile blob-migrate -f docker-compose.test.yml up -d s3-test")
 
 	return store
 }
 
 // TestBlobMigrate_FilesystemToS3RoundTrip verifies a full filesystem → S3 → filesystem
-// round-trip using a real filesystem store and a real MinIO-backed S3 store.
+// round-trip using a real filesystem store and a real S3-compatible-backed S3 store.
 // Asserts that installer artifacts are preserved with matching checksums and keys.
 func TestBlobMigrate_FilesystemToS3RoundTrip(t *testing.T) {
-	cfg := minioConfig()
+	cfg := s3TestConfig()
 	ensureTestBucket(t, cfg)
 
 	ctx := context.Background()
@@ -140,7 +140,7 @@ func TestBlobMigrate_FilesystemToS3RoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Destination: real S3 store backed by MinIO.
+	// Destination: real S3 store backed by S3-compatible.
 	s3Dst := newS3Store(t, cfg)
 
 	// Populate source with installer artifacts.

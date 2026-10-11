@@ -1494,9 +1494,16 @@ func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
 	require.Greater(t, newTerm, oldTerm, "a new holder gets a strictly higher token")
 
 	assert.Zero(t, managerA.GetTerm(), "the former holder no longer has local authority")
-	assert.Eventually(t, func() bool { return managerA.CommandTerm() == newTerm },
+	// B's token is not frozen at newTerm: on a loaded runner a renewal can miss
+	// the short FastElectionConfig lease TTL, and B's re-acquisition of the
+	// expired lease legitimately gets a strictly higher token. The guarded
+	// property is that A stamps B's generation (at or above the takeover token),
+	// never its own old term — so compare against newTerm as a floor.
+	assert.Eventually(t, func() bool { return managerA.CommandTerm() >= newTerm },
 		leaseWait, 50*time.Millisecond, "the former holder stamps the new token once its cache refreshes")
-	assert.Equal(t, newTerm, managerA.CommandTerm(), "the former holder must not keep stamping its old term")
+	stamped := managerA.CommandTerm()
+	assert.GreaterOrEqual(t, stamped, newTerm, "the former holder stamps at least the takeover token")
+	assert.Greater(t, stamped, oldTerm, "the former holder must not keep stamping its old term")
 }
 
 // erroringLeaseStore is a real business.LeaseStore whose reads fail on demand, for
