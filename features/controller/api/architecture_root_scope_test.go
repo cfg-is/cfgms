@@ -36,15 +36,23 @@ var rootScopeExemptFuncs = map[string]bool{
 var funcNamePattern = regexp.MustCompile(`^func (?:\([^)]*\) )?(\w+)`)
 
 // callerTenantAssign matches a variable assigned the caller's tenant filter —
-// "" for a root caller — from callerTenantFilter, callerTenantID or
-// authRunAccess (whose second result is that filter).
+// "" for a root caller — from callerTenantFilter, callerTenantID, the
+// callerTenantSubtree wrapper, or the first result of stewardsInTenantScope and
+// tenantListFilterForScope, or authRunAccess (whose second result is that filter).
 var callerTenantAssign = regexp.MustCompile(
-	`(?:^|[\s(])(\w+)\s*:?=\s*(?:s\.)?(?:callerTenantFilter|callerTenantID)\(` +
+	`(?:^|[\s(])(\w+)\s*:?=\s*(?:s\.)?(?:callerTenantFilter|callerTenantID|callerTenantSubtree)\(` +
+		`|(?:^|[\s(])(\w+)(?:,\s*\w+)*\s*:?=\s*(?:s\.)?(?:stewardsInTenantScope|tenantListFilterForScope)\(` +
 		`|(?:^|\s)\w+,\s*(\w+),\s*\w+\s*:?=\s*s\.authRunAccess\(`)
 
 // inlineCallerTenantCompare matches the filter compared with "" without a
 // variable in between.
-var inlineCallerTenantCompare = regexp.MustCompile(`(?:callerTenantFilter|callerTenantID)\([^)]*\)\s*[!=]=\s*""`)
+var inlineCallerTenantCompare = regexp.MustCompile(
+	`(?:callerTenantFilter|callerTenantID|callerTenantSubtree|stewardsInTenantScope|tenantListFilterForScope)\([^)]*\)\s*[!=]=\s*""`)
+
+// readBreadthReason matches an annotation reason that states read breadth: since
+// ADR-025 a root read of a client tenant's records is decided by the crossing, so
+// "root keeps breadth for reads" is no longer a reason a root-allow may give.
+var readBreadthReason = regexp.MustCompile(`(?i)list breadth|by-ID read|read breadth|A7\.2`)
 
 // comparesCallerTenant reports whether line compares the caller's tenant filter
 // with "" — the hand-written form of "is this caller root" — either inline or
@@ -90,8 +98,11 @@ func checkRootAllowCalls(path string, src []byte) []string {
 			continue
 		}
 		idx := strings.Index(line, rootScopeAnnotation)
-		if idx >= 0 && strings.TrimSpace(line[idx+len(rootScopeAnnotation):]) != "" {
-			continue
+		if idx >= 0 {
+			reason := strings.TrimSpace(line[idx+len(rootScopeAnnotation):])
+			if reason != "" && !readBreadthReason.MatchString(reason) {
+				continue
+			}
 		}
 		violations = append(violations, fmt.Sprintf("%s:%d: %s", path, i+1, code))
 	}
@@ -111,11 +122,18 @@ func checkRootAllowCalls(path string, src []byte) []string {
 // caller selected and that already passed the crossing, list or by-ID read
 // breadth, or a comparison that does not involve the caller at all.
 //
+// A reason that states read breadth ("list breadth", "by-ID read", "read
+// breadth", or a citation of A7.2) is itself a violation: a root read of a client
+// tenant's records is decided by the crossing, so breadth is not a reason. A
+// genuinely tenant-less resource or a decision the crossing already made keeps its
+// own reason.
+//
 // Annotate, don't weaken: if the rule fires on a legitimate decision, add the
 // annotation with the reason rather than an exemption.
 //
 // It also covers the hand-written form: comparing the caller's tenant filter
-// (from callerTenantFilter, callerTenantID or authRunAccess) with "".
+// (from callerTenantFilter, callerTenantID, callerTenantSubtree,
+// stewardsInTenantScope, tenantListFilterForScope or authRunAccess) with "".
 //
 // Known evasion limits: the rule matches by name, line by line, within one
 // function. It does not follow the filter through a parameter, a struct field
@@ -164,4 +182,57 @@ func (s *Server) tenantAccessForScope(scope ctxkeys.TenantScope) bool {
 	require.Len(t, violations, 2, "%v", violations)
 	assert.Contains(t, violations[0], "x.go:4:")
 	assert.Contains(t, violations[1], "x.go:8:")
+}
+
+// TestRootScopeRuleRejectsReadBreadthReason proves an annotation whose reason
+// states read breadth is reported, and one with a non-read reason is not.
+func TestRootScopeRuleRejectsReadBreadthReason(t *testing.T) {
+	src := []byte(`package api
+
+func a(scope ctxkeys.TenantScope) bool {
+	return scope.IsRoot() //architecture:allow-root-scope -- list breadth
+}
+
+func b(scope ctxkeys.TenantScope) bool {
+	return scope.IsRoot() //architecture:allow-root-scope -- by-ID read; root read breadth is unchanged
+}
+
+func c(scope ctxkeys.TenantScope) bool {
+	return scope.IsRoot() //architecture:allow-root-scope -- read breadth
+}
+
+func d(scope ctxkeys.TenantScope) bool {
+	return scope.IsRoot() //architecture:allow-root-scope -- A7.2 root keeps the fleet view
+}
+
+func e(scope ctxkeys.TenantScope) bool {
+	return scope.IsRoot() //architecture:allow-root-scope -- fleet-wide resource owned by no tenant
+}
+`)
+	violations := checkRootAllowCalls("x.go", src)
+	require.Len(t, violations, 4, "%v", violations)
+	for i, line := range []string{"x.go:4:", "x.go:8:", "x.go:12:", "x.go:16:"} {
+		assert.Contains(t, violations[i], line)
+	}
+}
+
+// TestRootScopeRuleDetectsWrapperSources proves each wrapper that returns the
+// root "all tenants" filter is recognised as a source: comparing its result with
+// "" without an annotation is reported.
+func TestRootScopeRuleDetectsWrapperSources(t *testing.T) {
+	for name, assign := range map[string]string{
+		"callerTenantSubtree":      "callerTenant := callerTenantSubtree(r)",
+		"stewardsInTenantScope":    "callerTenant, ok := s.stewardsInTenantScope(r)",
+		"tenantListFilterForScope": "callerTenant, ok := s.tenantListFilterForScope(r)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := []byte("package api\n\nfunc a(r *http.Request) {\n\t" + assign + "\n" +
+				"\tif callerTenant == \"\" {\n\t}\n}\n\n" +
+				"func b(r *http.Request) {\n\t" + assign + "\n" +
+				"\tif callerTenant == \"\" { //architecture:allow-root-scope -- tenant-less resource\n\t}\n}\n")
+			violations := checkRootAllowCalls("x.go", src)
+			require.Len(t, violations, 1, "%v", violations)
+			assert.Contains(t, violations[0], "x.go:5:")
+		})
+	}
 }
