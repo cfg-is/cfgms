@@ -36,6 +36,138 @@ func (s *renewFailingStore) AcquireOrRenew(ctx context.Context, name, holderID s
 	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
 }
 
+// fakeClock is a Clock the test advances explicitly. Its Now is anchored at
+// the real instant of construction and then moves only when advanced, so a
+// deadline derived from the Manager's real monotonic reading (always at or
+// after the anchor) can only look further away, never nearer, if the host
+// stalls.
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	ticker *fakeTicker
+}
+
+func newFakeClock() *fakeClock {
+	return &fakeClock{now: time.Now(), ticker: &fakeTicker{c: make(chan time.Time, 1)}}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+func (c *fakeClock) Until(t time.Time) time.Duration { return t.Sub(c.Now()) }
+
+func (c *fakeClock) NewTicker(time.Duration) Ticker { return c.ticker }
+
+// After elapses immediately, advancing the clock by d: a backoff wait costs
+// the simulated time it asks for and no real time.
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.Advance(d)
+	ch := make(chan time.Time, 1)
+	ch <- c.Now()
+	return ch
+}
+
+// Tick delivers one renewal tick to the job's ticker.
+func (c *fakeClock) Tick() { c.ticker.c <- c.Now() }
+
+type fakeTicker struct{ c chan time.Time }
+
+func (t *fakeTicker) C() <-chan time.Time { return t.c }
+func (t *fakeTicker) Stop()               {}
+
+// fakeClockLeaseStore is a business.LeaseStore with the real stores' contract
+// (fresh token on acquisition, unchanged token on renewal, refusal while
+// another holder's row is unexpired) whose expiry is evaluated against a
+// fakeClock instead of the wall clock.
+type fakeClockLeaseStore struct {
+	clock *fakeClock
+	mu    sync.Mutex
+	rows  map[string]*business.LeaseState
+	high  map[string]uint64
+}
+
+func newFakeClockLeaseStore(clock *fakeClock) *fakeClockLeaseStore {
+	return &fakeClockLeaseStore{
+		clock: clock,
+		rows:  make(map[string]*business.LeaseState),
+		high:  make(map[string]uint64),
+	}
+}
+
+func (s *fakeClockLeaseStore) AcquireOrRenew(_ context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.clock.Now()
+	row, ok := s.rows[name]
+	switch {
+	case ok && now.Before(row.ExpiresAt) && row.HolderID != holderID:
+		return &business.LeaseState{Name: name, HolderID: row.HolderID, Token: row.Token, ExpiresAt: row.ExpiresAt, Valid: true}, nil
+	case ok && now.Before(row.ExpiresAt):
+		row.ExpiresAt = now.Add(ttl)
+	default:
+		s.high[name]++
+		row = &business.LeaseState{Name: name, HolderID: holderID, Token: s.high[name], ExpiresAt: now.Add(ttl)}
+		s.rows[name] = row
+	}
+	return &business.LeaseState{Name: name, HolderID: holderID, Token: row.Token, ExpiresAt: row.ExpiresAt, Valid: true, Acquired: true}, nil
+}
+
+func (s *fakeClockLeaseStore) Release(_ context.Context, name, holderID string, token uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if row, ok := s.rows[name]; ok && row.HolderID == holderID && row.Token == token {
+		row.ExpiresAt = s.clock.Now()
+	}
+	return nil
+}
+
+func (s *fakeClockLeaseStore) GetLease(_ context.Context, name string) (*business.LeaseState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.rows[name]
+	if !ok {
+		return nil, business.ErrLeaseNotFound
+	}
+	out := *row
+	out.Valid = s.clock.Now().Before(row.ExpiresAt)
+	return &out, nil
+}
+
+func (s *fakeClockLeaseStore) Close() error { return nil }
+
+// signalingStore closes done after the first successful AcquireOrRenew call
+// numbered afterCall or later (1-indexed), letting a test wait on the store
+// event it needs instead of sleeping.
+type signalingStore struct {
+	business.LeaseStore
+	afterCall int32
+	calls     int32
+	done      chan struct{}
+	once      sync.Once
+}
+
+func newSignalingStore(inner business.LeaseStore, afterCall int32) *signalingStore {
+	return &signalingStore{LeaseStore: inner, afterCall: afterCall, done: make(chan struct{})}
+}
+
+func (s *signalingStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	n := atomic.AddInt32(&s.calls, 1)
+	state, err := s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+	if err == nil && n >= s.afterCall {
+		s.once.Do(func() { close(s.done) })
+	}
+	return state, err
+}
+
 func TestNewSingletonJob_NilManagerSkipsTTLValidation(t *testing.T) {
 	job, err := NewSingletonJob(nil, "x", "node-1", 0, 0, nil)
 	require.NoError(t, err)
@@ -103,9 +235,13 @@ func TestSingletonJob_SkipsWhenLeaseHeldByAnother(t *testing.T) {
 
 // [REQUIRED TEST] A two-node simulation proves exactly one node executes a
 // given cycle of a lease-claimed loop: node-2 attempts to run while node-1's
-// cycle is still in flight (holding the lease) and must be refused.
+// cycle is still in flight (holding the lease) and must be refused. Time is
+// simulated: the lease outlives its original TTL only because node-1's
+// renewal ran, and nothing here depends on how fast the host schedules
+// goroutines.
 func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
-	store := newTestStore(t)
+	clock := newFakeClock()
+	store := newSignalingStore(newFakeClockLeaseStore(clock), 2) // call #1 acquire, #2 renewal
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
 	m1, err := NewManager(store, ttl, renewInterval, renewInterval)
@@ -115,8 +251,10 @@ func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 
 	job1, err := NewSingletonJob(m1, "sweep-x", "node-1", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job1.Clock = clock
 	job2, err := NewSingletonJob(m2, "sweep-x", "node-2", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job2.Clock = clock
 
 	node1Started := make(chan struct{})
 	releaseNode1 := make(chan struct{})
@@ -132,11 +270,17 @@ func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 		done1 <- ran
 	}()
 
+	<-node1Started
+
+	// Past the original expiry only the renewal keeps node-1 the holder.
+	clock.Advance(ttl - renewInterval)
+	clock.Tick()
 	select {
-	case <-node1Started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-1 never started its cycle")
+	case <-store.done:
+	case <-time.After(30 * time.Second): // failure bound only; the passing path waits on the event
+		t.Fatal("node-1's renewal never reached the store")
 	}
+	clock.Advance(ttl - renewInterval)
 
 	ran2 := job2.RunIfLeader(context.Background(), func(ctx context.Context) {
 		atomic.AddInt32(&node2Ran, 1)
@@ -144,14 +288,7 @@ func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	assert.False(t, ran2, "node-2 must not run while node-1 holds the lease")
 
 	close(releaseNode1)
-	var ran1 bool
-	select {
-	case ran1 = <-done1:
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-1's cycle never completed")
-	}
-
-	assert.True(t, ran1)
+	assert.True(t, <-done1)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&node1Ran))
 	assert.Equal(t, int32(0), atomic.LoadInt32(&node2Ran))
 }
@@ -288,20 +425,26 @@ func (s *renewOnceFailingStore) AcquireOrRenew(ctx context.Context, name, holder
 // Before that retry existed, renewWhileRunning gave up on the very first
 // error and cancelled fn's context on its first mid-cycle renewal tick.
 func TestSingletonJob_RenewWithRetry_SingleTransientErrorDoesNotLoseLease(t *testing.T) {
-	base := newTestStore(t)
+	clock := newFakeClock()
 	// Call #1 is RunIfLeader's initial TryAcquire; call #2 is the first
-	// mid-cycle renewal tick.
-	store := &renewOnceFailingStore{LeaseStore: base, callNumber: 2}
+	// mid-cycle renewal tick (fails); call #3 is its retry.
+	failing := &renewOnceFailingStore{LeaseStore: newFakeClockLeaseStore(clock), callNumber: 2}
+	store := newSignalingStore(failing, 3)
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
 	m, err := NewManager(store, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
 	job, err := NewSingletonJob(m, "x", "node-1", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job.Clock = clock
 
 	var ctxCancelled bool
 	ran := job.RunIfLeader(context.Background(), func(ctx context.Context) {
-		time.Sleep(ttl + ttl/2) // forces at least one renewal past the injected failure
+		clock.Tick()
+		select {
+		case <-store.done: // the retry after the injected failure succeeded
+		case <-ctx.Done():
+		}
 		select {
 		case <-ctx.Done():
 			ctxCancelled = true
@@ -337,21 +480,28 @@ func (s *renewRunFailingStore) AcquireOrRenew(ctx context.Context, name, holderI
 // stops renewing while the lease is still valid, so it lapses mid-cycle and a
 // second node acquires it.
 func TestSingletonJob_RenewWithRetry_OutageLongerThanLatencyBudget_KeepsLease(t *testing.T) {
-	base := newTestStore(t)
+	clock := newFakeClock()
 	// Call #1 is the initial TryAcquire; calls #2-#9 are the first renewal
-	// tick and its retries. The per-call latency budget (200ms) is exhausted
-	// by call #6 or so; the lease TTL (2s) is not.
-	store := &renewRunFailingStore{LeaseStore: base, firstFail: 2, lastFail: 9}
+	// tick and its retries; call #10 succeeds. The retry backoffs total 910ms
+	// of simulated time: past the per-call latency budget (200ms), inside the
+	// 1.6s safety margin.
+	failing := &renewRunFailingStore{LeaseStore: newFakeClockLeaseStore(clock), firstFail: 2, lastFail: 9}
+	store := newSignalingStore(failing, 10)
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
 	m, err := NewManager(store, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
 	job, err := NewSingletonJob(m, "x", "node-1", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job.Clock = clock
 
 	var ctxCancelled bool
 	ran := job.RunIfLeader(context.Background(), func(ctx context.Context) {
-		time.Sleep(ttl + ttl/2)
+		clock.Tick()
+		select {
+		case <-store.done: // the renewal finally went through
+		case <-ctx.Done():
+		}
 		select {
 		case <-ctx.Done():
 			ctxCancelled = true
@@ -361,7 +511,9 @@ func TestSingletonJob_RenewWithRetry_OutageLongerThanLatencyBudget_KeepsLease(t 
 	assert.True(t, ran)
 	assert.False(t, ctxCancelled, "an outage shorter than the lease's safety margin must not cancel fn's context")
 
-	// The lease never lapsed, so a second holder is still fenced out.
+	// The lease never lapsed, so a second holder is still fenced out. Move
+	// past the original expiry: only the post-outage renewal keeps it held.
+	clock.Advance(ttl - renewInterval)
 	_, acquired, err := m.TryAcquire(context.Background(), "x", "node-2", ttl)
 	require.NoError(t, err)
 	assert.False(t, acquired, "the lease must still be held after the outage")
