@@ -6,6 +6,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -232,6 +233,41 @@ func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID 
 		return business.ErrStewardNotFound
 	}
 	return nil
+}
+
+// TransitionStewardStatus applies status only if the stored status is in from.
+// The check is part of the UPDATE's WHERE clause, so it is atomic with the write.
+func (s *SQLiteStewardStore) TransitionStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus, from ...business.StewardStatus) (bool, error) {
+	if len(from) == 0 {
+		return false, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(from)), ",")
+	args := []interface{}{string(status), formatTime(nowUTC()), stewardID}
+	for _, f := range from {
+		args = append(args, string(f))
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		// #nosec G202 -- placeholders is only "?" markers; all values are bound parameters.
+		res, e = s.db.ExecContext(ctx,
+			`UPDATE stewards SET status = ?, last_seen = ? WHERE id = ? AND status IN (`+placeholders+`)`, args...)
+		return e
+	})
+	if err != nil {
+		return false, fmt.Errorf("sqlite: failed to transition steward status %s: %w", stewardID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return true, nil
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM stewards WHERE id = ?`, stewardID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, business.ErrStewardNotFound
+		}
+		return false, fmt.Errorf("sqlite: failed to probe steward %s: %w", stewardID, err)
+	}
+	return false, nil
 }
 
 // SetStewardHidden sets the operator-controlled visibility flag for the given steward.

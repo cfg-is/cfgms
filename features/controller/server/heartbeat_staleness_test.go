@@ -170,8 +170,8 @@ func TestHeartbeatOnStatusChange_NoClobberDeregistered(t *testing.T) {
 		"recovery heartbeat must not overwrite Deregistered status")
 }
 
-// controlCharStewardStore wraps a real StewardStore, overriding only GetSteward
-// and UpdateStewardStatus to force deterministic failures carrying a
+// controlCharStewardStore wraps a real StewardStore, overriding only GetSteward,
+// UpdateStewardStatus and TransitionStewardStatus to force deterministic failures carrying a
 // caller-supplied error — used to prove a control-character payload from the
 // durable store cannot reach the logger unsanitized (Issue #4073 site 3).
 // Embedding the business.StewardStore interface (not a concrete provider)
@@ -197,35 +197,27 @@ func (s *controlCharStewardStore) UpdateStewardStatus(ctx context.Context, id st
 	return s.StewardStore.UpdateStewardStatus(ctx, id, status)
 }
 
+func (s *controlCharStewardStore) TransitionStewardStatus(ctx context.Context, id string, status business.StewardStatus, from ...business.StewardStatus) (bool, error) {
+	if s.updErr != nil {
+		return false, s.updErr
+	}
+	return s.StewardStore.TransitionStewardStatus(ctx, id, status, from...)
+}
+
 // heartbeatCtrlCharPayload is the control-character error text used to prove
 // makeHeartbeatStatusChangeCallback sanitizes store errors before logging.
 const heartbeatCtrlCharPayload = "steward store failure\nInjected: fake log line\rtrailer"
 
 // TestMakeHeartbeatStatusChangeCallback_SanitizesErrorLogs guards Issue #4073
 // site 3 — the exact shape CLAUDE.md calls out by name: SanitizeLogValue(sid)
-// paired with a bare getErr/updErr in the same log call. Drives all three call
-// sites (server.go:308, 316, 326) with a control-character store error and
+// paired with a bare getErr/updErr in the same log call. Drives both write call
+// sites with a control-character store error and
 // asserts none of them leak the raw payload. Each sub-test must fail if its
 // site's sanitization is ever reverted.
 func TestMakeHeartbeatStatusChangeCallback_SanitizesErrorLogs(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("GetSteward failure during recovery (line 308)", func(t *testing.T) {
-		store := &controlCharStewardStore{
-			StewardStore: newFlatFileStewardStore(t),
-			getErr:       errors.New(heartbeatCtrlCharPayload),
-		}
-		rec := &recordingLogger{}
-		callback := makeHeartbeatStatusChangeCallback(store, rec)
-
-		callback("hb-ctrlchar-get", true, heartbeat.StewardStatus{})
-
-		assert.True(t, rec.containsAny("Injected"), "expected the sanitized error text to reach the logger")
-		assert.False(t, rec.containsAny("\n"), "raw newline from the store error reached the logger unsanitized")
-		assert.False(t, rec.containsAny("\r"), "raw carriage return from the store error reached the logger unsanitized")
-	})
-
-	t.Run("UpdateStewardStatus failure during recovery (line 316)", func(t *testing.T) {
+	t.Run("UpdateStewardStatus failure during recovery", func(t *testing.T) {
 		base := newFlatFileStewardStore(t)
 		const stewardID = "hb-ctrlchar-upd-active"
 		require.NoError(t, base.RegisterSteward(ctx, &business.StewardRecord{
@@ -247,7 +239,7 @@ func TestMakeHeartbeatStatusChangeCallback_SanitizesErrorLogs(t *testing.T) {
 		assert.False(t, rec.containsAny("\r"), "raw carriage return from the store error reached the logger unsanitized")
 	})
 
-	t.Run("UpdateStewardStatus failure during loss (line 326)", func(t *testing.T) {
+	t.Run("UpdateStewardStatus failure during loss", func(t *testing.T) {
 		store := &controlCharStewardStore{
 			StewardStore: newFlatFileStewardStore(t),
 			updErr:       errors.New(heartbeatCtrlCharPayload),
@@ -261,4 +253,41 @@ func TestMakeHeartbeatStatusChangeCallback_SanitizesErrorLogs(t *testing.T) {
 		assert.False(t, rec.containsAny("\n"), "raw newline from the store error reached the logger unsanitized")
 		assert.False(t, rec.containsAny("\r"), "raw carriage return from the store error reached the logger unsanitized")
 	})
+}
+
+// TestHeartbeatOnStatusChange_NoClobberRevoked is the controller-level
+// regression for Issue #4851: a heartbeat timeout that fires after an operator
+// set a steward to revoked must not rewrite it to lost, because a lost record
+// is re-admitted through the refresh policy (pending) instead of refused.
+func TestHeartbeatOnStatusChange_NoClobberRevoked(t *testing.T) {
+	ctx := context.Background()
+	st := newFlatFileStewardStore(t)
+	callback := makeHeartbeatStatusChangeCallback(st, logging.NewNoopLogger())
+
+	for _, terminal := range []business.StewardStatus{
+		business.StewardStatusRevoked, business.StewardStatusArchived,
+		business.StewardStatusDormant, business.StewardStatusDeregistered,
+	} {
+		id := "hb-noclobber-" + string(terminal)
+		require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+			ID: id, TenantID: "test-tenant", Status: business.StewardStatusActive,
+		}))
+		require.NoError(t, st.UpdateStewardStatus(ctx, id, terminal))
+
+		callback(id, false, heartbeat.StewardStatus{}) // heartbeat lost
+		callback(id, true, heartbeat.StewardStatus{})  // heartbeat recovered
+
+		rec, err := st.GetSteward(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, terminal, rec.Status, "heartbeat transitions must not overwrite %s", terminal)
+	}
+
+	// A live steward still goes lost on a missed heartbeat.
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "hb-live", TenantID: "test-tenant", Status: business.StewardStatusActive,
+	}))
+	callback("hb-live", false, heartbeat.StewardStatus{})
+	rec, err := st.GetSteward(ctx, "hb-live")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusLost, rec.Status)
 }

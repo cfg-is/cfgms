@@ -4,7 +4,9 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -612,4 +614,67 @@ func TestSQLiteStewardStore_DeviceIDUniquePerTenant(t *testing.T) {
 	got, getErr := store.GetStewardByDeviceID(ctx, deviceID)
 	require.NoError(t, getErr)
 	require.NotNil(t, got)
+}
+
+// TestTransitionStewardStatus_AppliesOnlyFromListedStatuses covers the
+// compare-and-set contract (Issue #4851).
+func TestSQLiteStewardStore_TransitionStewardStatus(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRec("s-cas")))
+
+	ok, err := store.TransitionStewardStatus(ctx, "s-cas", business.StewardStatusActive, business.StewardStatusRegistered)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	require.NoError(t, store.UpdateStewardStatus(ctx, "s-cas", business.StewardStatusRevoked))
+	ok, err = store.TransitionStewardStatus(ctx, "s-cas", business.StewardStatusLost,
+		business.StewardStatusRegistered, business.StewardStatusActive)
+	require.NoError(t, err)
+	assert.False(t, ok, "revoked must not match a from-list without revoked")
+	got, err := store.GetSteward(ctx, "s-cas")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusRevoked, got.Status)
+
+	ok, err = store.TransitionStewardStatus(ctx, "s-cas", business.StewardStatusLost)
+	require.NoError(t, err)
+	assert.False(t, ok, "empty from-list never matches")
+
+	_, err = store.TransitionStewardStatus(ctx, "missing", business.StewardStatusLost, business.StewardStatusActive)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestSQLiteStewardStore_ConcurrentHeartbeatNeverLosesRevoked races system
+// transitions against an operator revoke: whatever the interleaving, the final
+// status must be revoked (Issue #4851).
+func TestSQLiteStewardStore_ConcurrentTransitionNeverLosesRevoked(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprintf("s-race-%d", i)
+		require.NoError(t, store.RegisterSteward(ctx, testStewardRec(id)))
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			_, _ = store.TransitionStewardStatus(ctx, id, business.StewardStatusLost,
+				business.StewardStatusRegistered, business.StewardStatusActive)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = store.UpdateHeartbeat(ctx, id, "")
+			_, _ = store.TransitionStewardStatus(ctx, id, business.StewardStatusActive,
+				business.StewardStatusRegistered, business.StewardStatusLost)
+		}()
+		go func() {
+			defer wg.Done()
+			require.NoError(t, store.UpdateStewardStatus(ctx, id, business.StewardStatusRevoked))
+		}()
+		wg.Wait()
+		// Revoke again after the dust settles is NOT done: a transition that ran
+		// after the revoke must have been a no-op, one that ran before is overwritten.
+		got, err := store.GetSteward(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.StewardStatusRevoked, got.Status, "iteration %d", i)
+	}
 }

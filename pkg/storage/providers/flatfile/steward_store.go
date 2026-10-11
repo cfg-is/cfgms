@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -298,6 +299,27 @@ func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID 
 	record.Status = status
 	record.LastSeen = time.Now().UTC()
 	return s.writeSteward(record)
+}
+
+// TransitionStewardStatus applies status only if the stored status is in from.
+// The read and the write happen under one write lock, so the check cannot go stale.
+func (s *FlatFileStewardStore) TransitionStewardStatus(_ context.Context, stewardID string, status business.StewardStatus, from ...business.StewardStatus) (bool, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return false, err
+	}
+	if !slices.Contains(from, record.Status) {
+		return false, nil
+	}
+	record.Status = status
+	record.LastSeen = time.Now().UTC()
+	if err := s.writeSteward(record); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetStewardHidden sets the operator-controlled visibility flag for the given steward.

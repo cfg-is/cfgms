@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -528,6 +529,95 @@ func TestDatabaseStewardStore_SetStewardHidden_NotFound(t *testing.T) {
 	store := newTestStewardStore(t)
 	err := store.SetStewardHidden(context.Background(), "nonexistent", true)
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestDatabaseStewardStore_TransitionStewardStatus covers the compare-and-set
+// contract (Issue #4851): the write applies only when the stored status is in
+// the from-list, which the UPDATE evaluates via status = ANY($4).
+func TestDatabaseStewardStore_TransitionStewardStatus(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, makeSampleSteward("sw-cas", "tenant-sw-cas")))
+
+	// Applied: single-element from-list matches the stored status.
+	ok, err := store.TransitionStewardStatus(ctx, "sw-cas", business.StewardStatusActive, business.StewardStatusRegistered)
+	require.NoError(t, err)
+	assert.True(t, ok, "registered must match a from-list containing registered")
+	got, err := store.GetSteward(ctx, "sw-cas")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusActive, got.Status)
+
+	// Applied: multi-element from-list where the match is not the first entry
+	// exercises the pq.Array-bound ANY($4) across more than one element.
+	ok, err = store.TransitionStewardStatus(ctx, "sw-cas", business.StewardStatusLost,
+		business.StewardStatusRegistered, business.StewardStatusActive)
+	require.NoError(t, err)
+	assert.True(t, ok, "active must match the second entry of the from-list")
+	got, err = store.GetSteward(ctx, "sw-cas")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusLost, got.Status)
+
+	// Rejected: an operator-set revoked status must survive a system transition
+	// whose from-list does not include revoked.
+	require.NoError(t, store.UpdateStewardStatus(ctx, "sw-cas", business.StewardStatusRevoked))
+	ok, err = store.TransitionStewardStatus(ctx, "sw-cas", business.StewardStatusActive,
+		business.StewardStatusRegistered, business.StewardStatusLost)
+	require.NoError(t, err)
+	assert.False(t, ok, "revoked must not match a from-list without revoked")
+	got, err = store.GetSteward(ctx, "sw-cas")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusRevoked, got.Status, "a rejected transition must not write")
+
+	// Empty from-list: ANY of an empty array never matches.
+	ok, err = store.TransitionStewardStatus(ctx, "sw-cas", business.StewardStatusLost)
+	require.NoError(t, err)
+	assert.False(t, ok, "empty from-list never matches")
+	got, err = store.GetSteward(ctx, "sw-cas")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusRevoked, got.Status, "an empty from-list must not write")
+}
+
+func TestDatabaseStewardStore_TransitionStewardStatus_NotFound(t *testing.T) {
+	store := newTestStewardStore(t)
+	ok, err := store.TransitionStewardStatus(context.Background(), "nonexistent",
+		business.StewardStatusLost, business.StewardStatusActive)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+	assert.False(t, ok)
+}
+
+// TestDatabaseStewardStore_ConcurrentTransitionNeverLosesRevoked races system
+// transitions against an operator revoke: whatever the interleaving, the final
+// status must be revoked, because a transition that runs after the revoke is a
+// no-op and one that runs before is overwritten (Issue #4851).
+func TestDatabaseStewardStore_ConcurrentTransitionNeverLosesRevoked(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("sw-race-%d", i)
+		require.NoError(t, store.RegisterSteward(ctx, makeSampleSteward(id, "tenant-sw-race")))
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			_, err := store.TransitionStewardStatus(ctx, id, business.StewardStatusLost,
+				business.StewardStatusRegistered, business.StewardStatusActive)
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := store.TransitionStewardStatus(ctx, id, business.StewardStatusActive,
+				business.StewardStatusRegistered, business.StewardStatusLost)
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			assert.NoError(t, store.UpdateStewardStatus(ctx, id, business.StewardStatusRevoked))
+		}()
+		wg.Wait()
+		got, err := store.GetSteward(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.StewardStatusRevoked, got.Status, "iteration %d", i)
+	}
 }
 
 func TestDatabaseStewardStore_GetStewardsSeen(t *testing.T) {

@@ -1108,7 +1108,8 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 		// Persist the status promotion and last-seen to the durable fleet store so
 		// GET /api/v1/stewards shows "active" after a first connect (Issue #3403).
 		if promoted && s.stewardStore != nil {
-			if storeErr := s.stewardStore.UpdateStewardStatus(context.Background(), stewardID, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
+			if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatusActive,
+				business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
 				s.logger.Warn("EnsureSteward: failed to persist status promotion to fleet store",
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"error", logging.SanitizeLogValue(storeErr.Error()))
@@ -1154,18 +1155,12 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// dormant) must not be overwritten even if the approval checker failed to block
 	// the connection — defence-in-depth. ErrStewardNotFound is benign.
 	if s.stewardStore != nil {
-		if sr, getErr := s.stewardStore.GetSteward(context.Background(), stewardID); getErr == nil {
-			switch sr.Status {
-			case business.StewardStatusDeregistered, business.StewardStatusRevoked,
-				business.StewardStatusArchived, business.StewardStatusDormant:
-				// Terminal: do not promote.
-			default:
-				if storeErr := s.stewardStore.UpdateStewardStatus(context.Background(), stewardID, business.StewardStatus(status)); storeErr != nil && storeErr != business.ErrStewardNotFound {
-					s.logger.Warn("EnsureSteward: failed to update fleet store status on reconnect",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"error", logging.SanitizeLogValue(storeErr.Error()))
-				}
-			}
+		// The terminal check is atomic with the write (Issue #4851).
+		if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatus(status),
+			business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
+			s.logger.Warn("EnsureSteward: failed to update fleet store status on reconnect",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(storeErr.Error()))
 		}
 	}
 

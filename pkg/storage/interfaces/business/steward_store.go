@@ -217,6 +217,16 @@ type StewardStore interface {
 	// Returns ErrStewardNotFound if no record exists.
 	UpdateStewardStatus(ctx context.Context, stewardID string, status StewardStatus) error
 
+	// TransitionStewardStatus moves the steward to status only if its stored
+	// status is one of from, evaluated atomically with the write. It returns
+	// true when the write was applied and false (with a nil error) when the
+	// current status is not in from, so a system-initiated transition (heartbeat
+	// promotion, lost-marking) can never overwrite a status an operator set
+	// concurrently, such as revoked. A read-then-UpdateStewardStatus sequence is
+	// NOT equivalent: the status can change between the read and the write.
+	// Returns ErrStewardNotFound if no record exists.
+	TransitionStewardStatus(ctx context.Context, stewardID string, status StewardStatus, from ...StewardStatus) (bool, error)
+
 	// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
 	// Returns ErrStewardNotFound if no record exists.
 	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
