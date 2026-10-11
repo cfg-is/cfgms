@@ -1218,6 +1218,10 @@ services:
       VGW_BACKEND: posix
       VGW_BACKEND_ARG: /data
       VGW_ARGS: "--port :9000 --access s3admin --secret s3admin"
+    # The image has no /data directory; the posix backend chdirs into it at
+    # start and exits if it is missing. Test data is disposable.
+    tmpfs:
+      - /data
     ports:
       - "9002:9000"  # S3 API — use non-standard port to avoid conflicts
     healthcheck:

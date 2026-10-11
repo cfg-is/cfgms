@@ -30,6 +30,8 @@ type composeFile struct {
 		Image       string    `yaml:"image"`
 		Environment yaml.Node `yaml:"environment"`
 		Ports       []string  `yaml:"ports"`
+		Tmpfs       []string  `yaml:"tmpfs"`
+		Volumes     []string  `yaml:"volumes"`
 		Profiles    []string  `yaml:"profiles"`
 		Healthcheck struct {
 			Test []string `yaml:"test"`
@@ -79,6 +81,16 @@ func TestComposeS3ServiceDefinition(t *testing.T) {
 		t.Errorf("VGW_ARGS %q does not set the credentials s3TestConfig defaults to", envMap(svc.Environment)["VGW_ARGS"])
 	}
 
+	// The image ships no /data directory, so the posix backend exits at start
+	// ("chdir /data: no such file or directory") unless the directory named by
+	// VGW_BACKEND_ARG is provided by a tmpfs or volume mount.
+	backend := envMap(svc.Environment)["VGW_BACKEND_ARG"]
+	if backend == "" {
+		t.Error("VGW_BACKEND_ARG is not set")
+	} else if !mountsPath(svc.Tmpfs, backend) && !mountsVolume(svc.Volumes, backend) {
+		t.Errorf("backend dir %q is not provided by a tmpfs or volume mount (tmpfs %v, volumes %v)", backend, svc.Tmpfs, svc.Volumes)
+	}
+
 	for name, s := range cf.Services {
 		env := envMap(s.Environment)
 		if got := env["CFGMS_S3_INSTALLER_ENDPOINT_URL"]; got != "" && got != "http://s3-test:9000" {
@@ -93,6 +105,28 @@ func TestComposeS3ServiceDefinition(t *testing.T) {
 func contains(list []string, want string) bool {
 	for _, v := range list {
 		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// mountsPath reports whether a tmpfs entry ("/path" or "/path:opts") targets path.
+func mountsPath(entries []string, path string) bool {
+	for _, e := range entries {
+		if strings.SplitN(e, ":", 2)[0] == path {
+			return true
+		}
+	}
+	return false
+}
+
+// mountsVolume reports whether a short-syntax volume entry
+// ("source:/target[:mode]") targets path.
+func mountsVolume(entries []string, path string) bool {
+	for _, e := range entries {
+		parts := strings.Split(e, ":")
+		if len(parts) >= 2 && parts[1] == path {
 			return true
 		}
 	}
