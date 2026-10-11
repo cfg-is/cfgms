@@ -269,7 +269,7 @@ type ProviderInfoV2 struct {
 // CreateSecretStoreFromConfig creates a SecretStore from configuration
 // This is the main entry point used by the controller
 func CreateSecretStoreFromConfig(providerName string, config map[string]interface{}) (SecretStore, error) {
-	provider, err := GetSecretProvider(providerName)
+	provider, err := getProviderForConfig(providerName, config)
 	if err != nil {
 		// Provide helpful error with available options
 		available := GetAvailableProviders()
@@ -281,6 +281,37 @@ func CreateSecretStoreFromConfig(providerName string, config map[string]interfac
 	}
 
 	return provider.CreateSecretStore(config)
+}
+
+// ConfigAvailabilityChecker is implemented by providers whose reachability
+// depends on the configuration a store is created with (e.g. a configured
+// server address). CreateSecretStoreFromConfig probes with the same config
+// the store will use instead of the provider's ambient defaults.
+type ConfigAvailabilityChecker interface {
+	AvailableWithConfig(config map[string]interface{}) (bool, error)
+}
+
+// getProviderForConfig returns the named provider after checking availability
+// against the supplied config when the provider supports it.
+func getProviderForConfig(name string, config map[string]interface{}) (SecretProvider, error) {
+	globalRegistry.mutex.RLock()
+	provider, exists := globalRegistry.providers[name]
+	globalRegistry.mutex.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("secrets provider '%s' not found", name)
+	}
+
+	var available bool
+	var err error
+	if checker, ok := provider.(ConfigAvailabilityChecker); ok {
+		available, err = checker.AvailableWithConfig(config)
+	} else {
+		available, err = provider.Available()
+	}
+	if !available {
+		return nil, fmt.Errorf("secrets provider '%s' not available: %v", name, err)
+	}
+	return provider, nil
 }
 
 // ListProvidersV2 returns enhanced information about all registered providers

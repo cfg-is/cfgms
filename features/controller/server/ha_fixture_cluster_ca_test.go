@@ -4,14 +4,13 @@ package server
 
 import (
 	"os"
-	"strings"
-
-	"gopkg.in/yaml.v3"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"

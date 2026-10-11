@@ -79,10 +79,19 @@ func (p *OpenBaoProvider) ClusterCapable() bool { return true }
 // Available performs a connectivity check against the configured OpenBao instance.
 // It returns true if the health endpoint responds successfully.
 func (p *OpenBaoProvider) Available() (bool, error) {
+	return p.AvailableWithConfig(nil)
+}
+
+// AvailableWithConfig probes the address a store created from config would use:
+// the configured address, then OPENBAO_ADDR, then the default.
+func (p *OpenBaoProvider) AvailableWithConfig(config map[string]interface{}) (bool, error) {
 	// Use a short timeout for the liveness probe.
 	httpClient := &http.Client{Timeout: 3 * time.Second}
 
-	addr := os.Getenv("OPENBAO_ADDR")
+	addr, _ := config["address"].(string)
+	if addr == "" {
+		addr = os.Getenv("OPENBAO_ADDR")
+	}
 	if addr == "" {
 		addr = "http://127.0.0.1:8200"
 	}

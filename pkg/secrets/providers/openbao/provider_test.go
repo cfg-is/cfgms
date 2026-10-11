@@ -5,6 +5,8 @@
 package openbao
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -205,4 +207,25 @@ func TestSplitKey_EmptyTenant(t *testing.T) {
 func TestSplitKey_EmptyKey(t *testing.T) {
 	_, _, err := splitKey("tenant/")
 	require.Error(t, err)
+}
+
+func TestAvailableWithConfig_ProbesConfiguredAddress(t *testing.T) {
+	t.Setenv("OPENBAO_ADDR", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p := &OpenBaoProvider{}
+	ok, err := p.AvailableWithConfig(map[string]interface{}{"address": srv.URL})
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	// Without a configured address the default (nothing listening) is probed.
+	ok, _ = p.AvailableWithConfig(nil)
+	assert.False(t, ok)
 }
