@@ -19,82 +19,6 @@ func NewDatabaseSchemas() DatabaseSchemas {
 	return DatabaseSchemas{}
 }
 
-// CreateClientTenantsTable creates the client_tenants table with proper indexing
-func (s DatabaseSchemas) CreateClientTenantsTable(ctx context.Context, db *sql.DB) error {
-	// Create table with proper data types and constraints
-	createTableQuery := `
-		CREATE TABLE IF NOT EXISTS client_tenants (
-			id VARCHAR(255) PRIMARY KEY,
-			tenant_id VARCHAR(255) UNIQUE NOT NULL,
-			tenant_name VARCHAR(500) NOT NULL,
-			domain_name VARCHAR(255) NOT NULL,
-			admin_email VARCHAR(255) NOT NULL,
-			consented_at TIMESTAMP WITH TIME ZONE NOT NULL,
-			status VARCHAR(50) NOT NULL DEFAULT 'pending',
-			client_identifier VARCHAR(255) NOT NULL,
-			metadata JSONB DEFAULT '{}',
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-	`
-
-	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
-		return fmt.Errorf("failed to create client_tenants table: %w", err)
-	}
-
-	// Create indexes for performance
-	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_client_tenants_tenant_id ON client_tenants(tenant_id);",
-		"CREATE INDEX IF NOT EXISTS idx_client_tenants_client_identifier ON client_tenants(client_identifier);",
-		"CREATE INDEX IF NOT EXISTS idx_client_tenants_status ON client_tenants(status);",
-		"CREATE INDEX IF NOT EXISTS idx_client_tenants_created_at ON client_tenants(created_at);",
-		"CREATE INDEX IF NOT EXISTS idx_client_tenants_domain_name ON client_tenants(domain_name);",
-	}
-
-	for _, indexQuery := range indexes {
-		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
-			return fmt.Errorf("failed to create index: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// CreateAdminConsentRequestsTable creates the admin_consent_requests table
-func (s DatabaseSchemas) CreateAdminConsentRequestsTable(ctx context.Context, db *sql.DB) error {
-	// Create table for admin consent requests
-	createTableQuery := `
-		CREATE TABLE IF NOT EXISTS admin_consent_requests (
-			client_identifier VARCHAR(255) NOT NULL,
-			client_name VARCHAR(500) NOT NULL,
-			requested_by VARCHAR(255) NOT NULL,
-			state VARCHAR(255) PRIMARY KEY,
-			expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-			metadata JSONB DEFAULT '{}'
-		);
-	`
-
-	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
-		return fmt.Errorf("failed to create admin_consent_requests table: %w", err)
-	}
-
-	// Create indexes for performance
-	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_client_identifier ON admin_consent_requests(client_identifier);",
-		"CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_expires_at ON admin_consent_requests(expires_at);",
-		"CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_requested_by ON admin_consent_requests(requested_by);",
-	}
-
-	for _, indexQuery := range indexes {
-		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
-			return fmt.Errorf("failed to create index: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // CreateConfigsTable creates the configs table for configuration storage
 func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db *sql.DB) error {
 	// Create table with proper data types and constraints
@@ -1278,14 +1202,6 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 // CreateAllTables creates all necessary database tables and indexes
 func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error {
 	// Create tables in dependency order
-	if err := s.CreateClientTenantsTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateAdminConsentRequestsTable(ctx, db); err != nil {
-		return err
-	}
-
 	if err := s.CreateConfigsTable(ctx, db); err != nil {
 		return err
 	}

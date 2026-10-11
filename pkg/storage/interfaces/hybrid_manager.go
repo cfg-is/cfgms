@@ -31,7 +31,6 @@ type HybridStorageManager struct {
 	operationalProvider   StorageProvider
 	configurationProvider StorageProvider
 
-	clientTenantStore        business.ClientTenantStore
 	auditStore               business.AuditStore
 	configStore              cfgconfig.ConfigStore
 	ipTrustStore             business.IPTrustStore
@@ -66,12 +65,6 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	manager.configurationProvider = cfgProvider
 
 	// Create operational stores (high-performance queries)
-	clientTenantStore, err := opProvider.CreateClientTenantStore(config.Operational.Config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client tenant store: %w", err)
-	}
-	manager.clientTenantStore = clientTenantStore
-
 	auditStore, err := opProvider.CreateAuditStore(config.Operational.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audit store: %w", err)
@@ -122,11 +115,6 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	manager.configStore = configStore
 
 	return manager, nil
-}
-
-// GetClientTenantStore returns the client tenant storage interface (operational backend).
-func (h *HybridStorageManager) GetClientTenantStore() business.ClientTenantStore {
-	return h.clientTenantStore
 }
 
 // GetAuditStore returns the audit storage interface (operational backend).

@@ -67,7 +67,7 @@ func TestCollectActiveStorageRequirements_IncludesAudit(t *testing.T) {
 // collectActiveStorageRequirements.
 func TestValidateStorageRequirements_FailsWhenAuditStoreAbsent(t *testing.T) {
 	sm := interfaces.NewStorageManagerFromStores(
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	require.False(t, sm.HasStore(interfaces.StoreNameAudit),
 		"precondition: a composite manager built with a nil audit store must report it absent")

@@ -31,7 +31,6 @@ func newOSSManagerWithoutTriggerAndPush(t *testing.T) *interfaces.StorageManager
 		full.GetAuditStore(),
 		full.GetRBACStore(),
 		full.GetTenantStore(),
-		full.GetClientTenantStore(),
 		full.GetRegistrationTokenStore(),
 		full.GetSessionStore(),
 		full.GetStewardStore(),
@@ -181,28 +180,6 @@ func assertRBACMatches(ctx context.Context, t *testing.T, src, dst *interfaces.S
 	assert.Equal(t, "subject-seed-1", dstAssignments[0].SubjectId, "role assignment SubjectId")
 	assert.Equal(t, "role-seed-1", dstAssignments[0].RoleId, "role assignment RoleId")
 	assert.Equal(t, "tenant-seed-1", dstAssignments[0].TenantId, "role assignment TenantId")
-}
-
-// assertClientTenantMatches compares the migrated client tenant against the source.
-func assertClientTenantMatches(t *testing.T, src, dst *interfaces.StorageManager, tenantID string) {
-	t.Helper()
-
-	srcStore, dstStore := src.GetClientTenantStore(), dst.GetClientTenantStore()
-	require.NotNil(t, srcStore, "source client tenant store")
-	require.NotNil(t, dstStore, "destination client tenant store")
-
-	srcCT, err := srcStore.GetClientTenant(tenantID)
-	require.NoError(t, err, "source client tenant %s", tenantID)
-	dstCT, err := dstStore.GetClientTenant(tenantID)
-	require.NoError(t, err, "migrated client tenant %s must exist in destination", tenantID)
-
-	assert.Equal(t, srcCT.ID, dstCT.ID, "client tenant ID")
-	assert.Equal(t, srcCT.TenantName, dstCT.TenantName, "client tenant TenantName")
-	assert.Equal(t, srcCT.DomainName, dstCT.DomainName, "client tenant DomainName")
-	assert.Equal(t, srcCT.AdminEmail, dstCT.AdminEmail, "client tenant AdminEmail")
-	assert.Equal(t, srcCT.Status, dstCT.Status, "client tenant Status")
-	assert.Equal(t, srcCT.ClientIdentifier, dstCT.ClientIdentifier, "client tenant ClientIdentifier")
-	assert.True(t, srcCT.ConsentedAt.Equal(dstCT.ConsentedAt), "client tenant ConsentedAt")
 }
 
 // seedOSSManager populates an OSS StorageManager with one representative record
@@ -427,19 +404,4 @@ func seedOSSManager(t *testing.T, mgr *interfaces.StorageManager) {
 		AssignedBy: "test-seeder",
 	}))
 
-	// client_tenant — exercises exportClientTenants / importClientTenant.
-	cts := mgr.GetClientTenantStore()
-	require.NotNil(t, cts, "client tenant store")
-	require.NoError(t, cts.StoreClientTenant(&business.ClientTenant{
-		ID:               "ct-seed-1",
-		TenantID:         "ct-tenant-seed-1",
-		TenantName:       "Seed Client Org",
-		DomainName:       "seed-client.example.com",
-		AdminEmail:       "admin@seed-client.example.com",
-		ConsentedAt:      time.Now(),
-		Status:           business.ClientTenantStatusActive,
-		ClientIdentifier: "seed-client-id-1",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-	}))
 }

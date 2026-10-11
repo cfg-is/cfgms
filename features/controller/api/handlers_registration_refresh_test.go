@@ -72,7 +72,6 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

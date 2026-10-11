@@ -26,7 +26,7 @@ Storage interfaces are organized into five sub-packages (the five-type taxonomy 
 pkg/
 ├── storage/
 │   ├── interfaces/           # Storage contracts (used by all features)
-│   │   ├── business/         # Business data: TenantStore, ClientTenantStore,
+│   │   ├── business/         # Business data: TenantStore,
 │   │   │                     #   StewardStore, CommandStore, AuditStore,
 │   │   │                     #   RBACStore, SessionStore, RegistrationTokenStore,
 │   │   │                     #   TriggerStore, PushStore, DNAHistoryStore
@@ -52,15 +52,15 @@ features/
 ### Step 1: Define Global Storage Interfaces
 
 ```go
-// pkg/storage/interfaces/client_tenant.go
-package interfaces
+// pkg/storage/interfaces/business/tenant_store.go
+package business
 
-// ClientTenantStore defines storage for MSP client tenant data
-type ClientTenantStore interface {
-    StoreClient(client *ClientTenant) error
-    GetClient(id string) (*ClientTenant, error)
-    ListClients(filter ClientFilter) ([]*ClientTenant, error)
-    DeleteClient(id string) error
+// TenantStore defines storage for CFGMS tenant data (abridged)
+type TenantStore interface {
+    CreateTenant(ctx context.Context, tenant *TenantData) error
+    GetTenant(ctx context.Context, tenantID string) (*TenantData, error)
+    ListTenants(ctx context.Context, filter *TenantFilter) ([]*TenantData, error)
+    Close() error
 }
 
 // pkg/storage/interfaces/config.go
@@ -78,7 +78,7 @@ type StorageProvider interface {
     Available() (bool, error)
     
     // Create all storage interfaces for this provider
-    CreateClientTenantStore(config map[string]interface{}) (ClientTenantStore, error)
+    CreateTenantStore(config map[string]interface{}) (TenantStore, error)
     CreateConfigStore(config map[string]interface{}) (ConfigStore, error)
     CreateAuditStore(config map[string]interface{}) (AuditStore, error)
     
@@ -102,8 +102,8 @@ func (p *DatabaseProvider) Available() (bool, error) {
     return true, nil // Check database connectivity
 }
 
-func (p *DatabaseProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
-    return NewDatabaseClientTenantStore(), nil
+func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+    return NewDatabaseTenantStore(), nil
 }
 
 func (p *DatabaseProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
@@ -127,8 +127,8 @@ func init() {
 ### Step 3: Modules Use Global Storage Interfaces Only
 
 ```go
-// features/modules/m365/auth/admin_consent.go
-package auth
+// features/tenant/manager.go
+package tenant
 
 import (
     "your.domain/cfgms/pkg/storage/interfaces"
@@ -136,13 +136,13 @@ import (
     // "your.domain/cfgms/pkg/storage/providers/database"
 )
 
-type AdminConsentFlow struct {
-    clientStore interfaces.ClientTenantStore  // Global interface!
+type Manager struct {
+    tenantStore interfaces.TenantStore  // Global interface!
 }
 
 // Controller injects the storage interface - module doesn't care which provider
-func NewAdminConsentFlow(clientStore interfaces.ClientTenantStore) *AdminConsentFlow {
-    return &AdminConsentFlow{clientStore: clientStore}
+func NewManager(tenantStore interfaces.TenantStore) *Manager {
+    return &Manager{tenantStore: tenantStore}
 }
 ```
 
@@ -243,15 +243,16 @@ func TestStorageProviderCompliance(t *testing.T) {
 Business logic tests use real CFGMS provider implementations (e.g. SQLite for business data, flat-file for config storage) — never in-memory substitutes or mocks. The pluggable interface makes it trivial to inject the appropriate real provider in tests:
 
 ```go
-// features/modules/m365/auth/admin_consent_test.go
-func TestAdminConsentFlow(t *testing.T) {
+// features/tenant/manager_test.go
+func TestManager(t *testing.T) {
     // Use a real storage provider (sqlite) — no mocks or in-memory substitutes
     provider, err := interfaces.GetStorageProvider("sqlite")
     require.NoError(t, err)
     bundle, err := provider.OpenBusinessStores(t.TempDir() + "/test.db")
     require.NoError(t, err)
 
-    flow := NewAdminConsentFlow(bundle.ClientTenant)
+    mgr := NewManager(bundle.Tenant)
+    _ = mgr
     // Test business logic with a real provider; isolation via t.TempDir()
 }
 ```
@@ -356,7 +357,7 @@ Modules get injected with the specific interface they need
 
 Current implementations following this pattern:
 
-- **Business data**: `pkg/storage/providers/sqlite` (TenantStore, ClientTenantStore, AuditStore, RBACStore, SessionStore, CommandStore, StewardStore, RegistrationTokenStore, TriggerStore, PushStore)
+- **Business data**: `pkg/storage/providers/sqlite` (TenantStore, AuditStore, RBACStore, SessionStore, CommandStore, StewardStore, RegistrationTokenStore, TriggerStore, PushStore)
 - **Config storage**: `pkg/storage/providers/flatfile` (ConfigStore, AuditStore, StewardStore)
 - **Alert state**: `pkg/storage/providers/flatfile` and `pkg/storage/providers/database` (AlertStore, Issue #3266)
 - **Blob storage**: `pkg/storage/providers/blobstore/filesystem` and `blobstore/s3`

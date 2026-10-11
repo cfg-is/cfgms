@@ -2521,7 +2521,6 @@ func setupTwoNodeSharedStoreServers(t *testing.T) (*Server, *Server) {
 		storageManager := pkgtesting.SetupTestStorage(t)
 		rbacManager := rbac.NewManagerWithStorage(
 			storageManager.GetAuditStore(),
-			storageManager.GetClientTenantStore(),
 			storageManager.GetRBACStore(),
 		)
 		err := rbacManager.Initialize(context.Background())

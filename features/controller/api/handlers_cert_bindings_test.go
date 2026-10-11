@@ -43,7 +43,6 @@ func setupCertBindingServer(t *testing.T) (*Server, *cert.Manager) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

@@ -31,9 +31,7 @@ var ErrTopLevelTenantExists = errors.New("a top-level tenant already exists; cre
 // same condition differently, turning the resulting status-code difference into
 // a cross-tenant existence oracle.
 //
-// Named for symmetry with ErrTenantAlreadyExists rather than "NotFound",
-// because ErrTenantNotFound in this package is the unrelated
-// *ClientTenantValidationError for the M365 client-tenant surface.
+// Named for symmetry with ErrTenantAlreadyExists.
 var ErrTenantDoesNotExist = errors.New("tenant does not exist")
 
 // Pending-deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).

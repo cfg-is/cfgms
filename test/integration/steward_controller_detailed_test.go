@@ -233,7 +233,6 @@ func TestStewardDecommissionCycle_FullControllerStack(t *testing.T) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(ctx))

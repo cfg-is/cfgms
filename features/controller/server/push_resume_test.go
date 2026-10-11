@@ -398,9 +398,6 @@ func (p *testNoPushStoreProvider) ClusterCapable() bool     { return false }
 func (p *testNoPushStoreProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{}
 }
-func (p *testNoPushStoreProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return nil, business.ErrNotSupported
-}
 func (p *testNoPushStoreProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, business.ErrNotSupported
 }

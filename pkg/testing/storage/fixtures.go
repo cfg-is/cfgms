@@ -275,24 +275,6 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		return
 	}
 
-	t.Run(fmt.Sprintf("provider_%s_client_tenant_store", providerName), func(t *testing.T) {
-		store, err := provider.CreateClientTenantStore(testConfig.Config)
-		if isUnsupportedStoreError(err) {
-			t.Skipf("provider %q does not implement ClientTenantStore (ADR-003 tier boundary)", providerName)
-			return
-		}
-		if err != nil && providerName == "database" {
-			requireInfrastructureOrSkip(t, err, "Database provider")
-			return
-		}
-		require.NoError(t, err, "ClientTenantStore creation should succeed")
-		require.NotNil(t, store, "ClientTenantStore should not be nil")
-
-		if closer, ok := store.(interface{ Close() error }); ok {
-			defer func() { _ = closer.Close() }()
-		}
-	})
-
 	t.Run(fmt.Sprintf("provider_%s_config_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateConfigStore(testConfig.Config)
 		if isUnsupportedStoreError(err) {

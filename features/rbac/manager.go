@@ -27,7 +27,6 @@ type Manager struct {
 
 	// Pluggable storage interfaces (when using NewManagerWithStorage)
 	auditStore          business.AuditStore
-	clientTenantStore   business.ClientTenantStore
 	rbacStore           business.RBACStore
 	usePluggableStorage bool
 	auditManager        *audit.Manager
@@ -59,7 +58,7 @@ func (m *Manager) SetCacheManager(cm *continuous.CacheManager) {
 //   // OLD: manager := rbac.NewManager()
 //   // NEW:
 //   storageManager := interfaces.CreateAllStoresFromConfig("git", config)
-//   manager := rbac.NewManagerWithStorage(storageManager.GetAuditStore(), storageManager.GetClientTenantStore())
+//   manager := rbac.NewManagerWithStorage(storageManager.GetAuditStore(), storageManager.GetRBACStore())
 //
 // For testing, use: pkg/testing.SetupTestRBACManager(t)
 //
@@ -67,14 +66,14 @@ func (m *Manager) SetCacheManager(cm *continuous.CacheManager) {
 
 // NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
 // This is the recommended constructor for production deployments with configurable storage backends
-func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore business.ClientTenantStore, rbacStore business.RBACStore) *Manager {
-	if auditStore == nil || clientTenantStore == nil || rbacStore == nil {
+func NewManagerWithStorage(auditStore business.AuditStore, rbacStore business.RBACStore) *Manager {
+	if auditStore == nil || rbacStore == nil {
 		panic("NewManagerWithStorage requires non-nil storage interfaces")
 	}
 
 	// Epic 6: Create ephemeral memory store (not package-level persistent)
 	// This store exists only for the lifetime of this manager instance
-	// All persistent data flows through global storage interfaces (auditStore, clientTenantStore)
+	// All persistent data flows through global storage interfaces (auditStore, rbacStore)
 	ephemeralStore := memory.NewStore()
 	hierarchyEngine := NewHierarchyEngine(ephemeralStore, ephemeralStore)
 
@@ -88,7 +87,6 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	manager := &Manager{
 		store:               ephemeralStore, // Epic 6: Ephemeral store - not persistent
 		auditStore:          auditStore,
-		clientTenantStore:   clientTenantStore,
 		rbacStore:           rbacStore, // Write-through persistent RBAC storage
 		usePluggableStorage: true,
 		auditManager:        auditManager,

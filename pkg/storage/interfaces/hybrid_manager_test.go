@@ -119,8 +119,6 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	require.NotNil(t, manager)
 
 	// Test interface access
-	ctStore := manager.GetClientTenantStore()
-	require.NotNil(t, ctStore)
 	assert.NotNil(t, manager.GetAuditStore())
 	assert.NotNil(t, manager.GetConfigStore())
 	// GetIPTrustStore must be wired in the constructor when the operational
@@ -133,14 +131,6 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	// must succeed and leave the accessor nil rather than failing (Issue #3266).
 	assert.Nil(t, manager.GetAlertStore(),
 		"GetAlertStore must be nil when the operational provider does not support alert storage")
-
-	// Round-trip: store a client tenant and verify retrieval returns the same value.
-	wantTenant := &business.ClientTenant{ID: "hybrid-rt-1", TenantName: "Hybrid Round Trip"}
-	require.NoError(t, ctStore.StoreClientTenant(wantTenant))
-	gotTenant, err := ctStore.GetClientTenant("hybrid-rt-1")
-	require.NoError(t, err)
-	assert.Equal(t, wantTenant.ID, gotTenant.ID)
-	assert.Equal(t, wantTenant.TenantName, gotTenant.TenantName)
 
 	// Test provider access
 	assert.NotNil(t, manager.GetOperationalProvider())
@@ -183,7 +173,6 @@ func TestCreateHybridStorageFromConfig(t *testing.T) {
 	require.NotNil(t, manager)
 
 	// Verify all storage interfaces are available
-	assert.NotNil(t, manager.GetClientTenantStore())
 	assert.NotNil(t, manager.GetAuditStore())
 	assert.NotNil(t, manager.GetConfigStore())
 }
@@ -344,10 +333,6 @@ func (p *mockProvider) Available() (bool, error) {
 	return true, nil
 }
 
-func (p *mockProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return newMockClientTenantStoreHybrid(), nil
-}
-
 func (p *mockProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return &mockConfigStore{}, nil
 }
@@ -361,8 +346,7 @@ func (p *mockProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACS
 }
 
 // CreateTenantStore reports that this provider has no tenant backend.
-// HybridStorageManager never wires a TenantStore (it consumes ClientTenantStore
-// only), and this package cannot import a real provider without the import cycle
+// HybridStorageManager never wires a TenantStore, and this package cannot import a real provider without the import cycle
 // described on mockProvider. Reporting ErrNotSupported keeps the provider honest
 // instead of handing callers a tenant store that silently succeeds. Real
 // TenantStore behaviour — including the pending-deletion pipeline — is covered
@@ -442,59 +426,6 @@ func (p *mockProvider) GetVersion() string {
 func (p *mockProvider) ClusterCapable() bool { return false }
 
 // Mock store implementations
-type mockClientTenantStore struct {
-	tenants map[string]*business.ClientTenant
-}
-
-func newMockClientTenantStoreHybrid() *mockClientTenantStore {
-	return &mockClientTenantStore{tenants: make(map[string]*business.ClientTenant)}
-}
-
-func (s *mockClientTenantStore) StoreClientTenant(ct *business.ClientTenant) error {
-	s.tenants[ct.ID] = ct
-	return nil
-}
-
-func (s *mockClientTenantStore) GetClientTenant(tenantID string) (*business.ClientTenant, error) {
-	ct, ok := s.tenants[tenantID]
-	if !ok {
-		return nil, business.ErrTenantNotFound
-	}
-	return ct, nil
-}
-
-func (s *mockClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*business.ClientTenant, error) {
-	return &business.ClientTenant{ID: "mock-id", ClientIdentifier: clientIdentifier}, nil
-}
-
-func (s *mockClientTenantStore) ListClientTenants(_ business.ClientTenantStatus) ([]*business.ClientTenant, error) {
-	return []*business.ClientTenant{{ID: "test", TenantName: "Test Tenant"}}, nil
-}
-
-func (s *mockClientTenantStore) UpdateClientTenantStatus(_ string, _ business.ClientTenantStatus) error {
-	return nil
-}
-
-func (s *mockClientTenantStore) DeleteClientTenant(_ string) error {
-	return nil
-}
-
-func (s *mockClientTenantStore) StoreAdminConsentRequest(_ *business.AdminConsentRequest) error {
-	return nil
-}
-
-func (s *mockClientTenantStore) GetAdminConsentRequest(state string) (*business.AdminConsentRequest, error) {
-	return &business.AdminConsentRequest{State: state}, nil
-}
-
-func (s *mockClientTenantStore) DeleteAdminConsentRequest(_ string) error {
-	return nil
-}
-
-func (s *mockClientTenantStore) Close() error {
-	return nil
-}
-
 type mockConfigStore struct{}
 
 func (s *mockConfigStore) StoreConfig(_ context.Context, _ *cfgconfig.ConfigEntry) error {

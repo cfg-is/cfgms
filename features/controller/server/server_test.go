@@ -48,9 +48,6 @@ func (p *testNonClusterProvider) ClusterCapable() bool     { return false }
 func (p *testNonClusterProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{}
 }
-func (p *testNonClusterProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return nil, business.ErrNotSupported
-}
 func (p *testNonClusterProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, business.ErrNotSupported
 }
@@ -114,9 +111,6 @@ func (p *testClusterProvider) ClusterCapable() bool     { return true }
 func (p *testClusterProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{}
 }
-func (p *testClusterProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return nil, business.ErrNotSupported
-}
 func (p *testClusterProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return nil, business.ErrNotSupported
 }
@@ -166,10 +160,10 @@ func (p *testClusterProvider) CreateWorkflowExecutionStore(_ map[string]interfac
 }
 
 // clusterStorageCloseCountingProvider wraps a real StorageProvider (the actual
-// registered "database" provider) and counts how many ClientTenantStore
+// registered "database" provider) and counts how many TenantStore
 // instances it creates are later closed. It delegates every Create*Store call
 // to the wrapped provider (so Postgres performs real I/O) and only
-// instruments the returned ClientTenantStore's Close — the same technique
+// instruments the returned TenantStore's Close — the same technique
 // pkg/storage/interfaces/provider_test.go's closeCountingProvider uses, here
 // against the "database" provider registration itself (temporarily swapped
 // in, restored via t.Cleanup) since New()'s cluster branch resolves the
@@ -179,22 +173,22 @@ type clusterStorageCloseCountingProvider struct {
 	closes int
 }
 
-func (p *clusterStorageCloseCountingProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
-	store, err := p.StorageProvider.CreateClientTenantStore(config)
+func (p *clusterStorageCloseCountingProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
+	store, err := p.StorageProvider.CreateTenantStore(config)
 	if err != nil {
 		return store, err
 	}
-	return clusterCloseCountingClientTenantStore{ClientTenantStore: store, p: p}, nil
+	return clusterCloseCountingTenantStore{TenantStore: store, p: p}, nil
 }
 
-type clusterCloseCountingClientTenantStore struct {
-	business.ClientTenantStore
+type clusterCloseCountingTenantStore struct {
+	business.TenantStore
 	p *clusterStorageCloseCountingProvider
 }
 
-func (s clusterCloseCountingClientTenantStore) Close() error {
+func (s clusterCloseCountingTenantStore) Close() error {
 	s.p.closes++
-	return s.ClientTenantStore.Close()
+	return s.TenantStore.Close()
 }
 
 // TestNew_ClusterMode_ClosesStorageManagerWhenBackendsNotReady is a REQUIRED
@@ -838,7 +832,7 @@ func TestAbsentCapabilities_ProviderMatchesStorageProviderName(t *testing.T) {
 		},
 	}
 
-	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.Equal(t, "composite", sm.GetProviderName(),
 		"precondition: NewStorageManagerFromStores always reports the internal composition name")
 

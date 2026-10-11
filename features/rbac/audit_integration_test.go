@@ -26,7 +26,6 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	// Create RBAC manager with audit integration
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -329,7 +328,6 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	// Create manager but then simulate audit failure by setting auditManager to nil
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	t.Cleanup(func() {
@@ -381,7 +379,6 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 		// Create a properly configured manager (audit manager is always present in Epic 6)
 		manager := NewManagerWithStorage(
 			storageManager.GetAuditStore(),
-			storageManager.GetClientTenantStore(),
 			storageManager.GetRBACStore(),
 		)
 		t.Cleanup(func() {

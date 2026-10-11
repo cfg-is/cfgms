@@ -636,13 +636,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
-	clientTenantStore := storageManager.GetClientTenantStore()
 	rbacStore := storageManager.GetRBACStore()
 
 	logger.Info("Creating RBAC manager with storage...")
 	rbacManager := rbac.NewManagerWithStorage(
 		auditStore,
-		clientTenantStore,
 		rbacStore,
 	)
 	logger.Info("RBAC manager created")

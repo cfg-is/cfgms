@@ -13,13 +13,11 @@ import (
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -133,26 +131,6 @@ func TestDatabaseProvider_Basic(t *testing.T) {
 	available, err := provider.Available()
 	assert.True(t, available)
 	assert.NoError(t, err)
-}
-
-func TestDatabaseProvider_CreateClientTenantStore(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration tests in short mode")
-	}
-
-	db := setupTestDatabase(t)
-	defer func() { _ = db.Close() }()
-
-	provider := &DatabaseProvider{}
-	t.Cleanup(func() { _ = provider.Close() })
-
-	// Test creating client tenant store
-	store, err := provider.CreateClientTenantStore(getTestConfig())
-	require.NoError(t, err)
-	require.NotNil(t, store)
-
-	// Verify store is not nil - interface compliance verified at compile time
-	assert.NotNil(t, store)
 }
 
 func TestDatabaseProvider_CreateConfigStore(t *testing.T) {
@@ -303,8 +281,6 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 
 	// Verify tables exist
 	tables := []string{
-		"client_tenants",
-		"admin_consent_requests",
 		"configs",
 		"config_history",
 		"audit_entries",
@@ -328,121 +304,6 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 	assert.True(t, viewExists, "Materialized view audit_stats should exist")
 }
 
-func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration tests in short mode")
-	}
-
-	db := setupTestDatabase(t)
-	defer func() { _ = db.Close() }()
-
-	store, err := NewDatabaseClientTenantStore(db, getTestConfig())
-	require.NoError(t, err)
-
-	// Create a test client tenant
-	tenant := &business.ClientTenant{
-		TenantID:         "test-tenant-123",
-		TenantName:       "Test Organization",
-		DomainName:       "test.com",
-		AdminEmail:       "admin@test.com",
-		ConsentedAt:      time.Now(),
-		Status:           business.ClientTenantStatusActive,
-		ClientIdentifier: "client-123",
-		Metadata: map[string]interface{}{
-			"region": "us-east-1",
-			"plan":   "enterprise",
-		},
-	}
-
-	// Test Store
-	err = store.StoreClientTenant(tenant)
-	require.NoError(t, err)
-
-	// Test Get by tenant ID
-	retrieved, err := store.GetClientTenant("test-tenant-123")
-	require.NoError(t, err)
-	assert.Equal(t, tenant.TenantID, retrieved.TenantID)
-	assert.Equal(t, tenant.TenantName, retrieved.TenantName)
-	assert.Equal(t, tenant.Status, retrieved.Status)
-	assert.Equal(t, tenant.Metadata["region"], retrieved.Metadata["region"])
-
-	// Test Get by client identifier
-	byIdentifier, err := store.GetClientTenantByIdentifier("client-123")
-	require.NoError(t, err)
-	assert.Equal(t, tenant.TenantID, byIdentifier.TenantID)
-
-	// Test List all tenants
-	allTenants, err := store.ListClientTenants("")
-	require.NoError(t, err)
-	assert.Len(t, allTenants, 1)
-
-	// Test List by status
-	activeTenants, err := store.ListClientTenants(business.ClientTenantStatusActive)
-	require.NoError(t, err)
-	assert.Len(t, activeTenants, 1)
-
-	pendingTenants, err := store.ListClientTenants(business.ClientTenantStatusPending)
-	require.NoError(t, err)
-	assert.Len(t, pendingTenants, 0)
-
-	// Test Update status
-	err = store.UpdateClientTenantStatus("test-tenant-123", business.ClientTenantStatusSuspended)
-	require.NoError(t, err)
-
-	updated, err := store.GetClientTenant("test-tenant-123")
-	require.NoError(t, err)
-	assert.Equal(t, business.ClientTenantStatusSuspended, updated.Status)
-
-	// Test Delete
-	err = store.DeleteClientTenant("test-tenant-123")
-	require.NoError(t, err)
-
-	_, err = store.GetClientTenant("test-tenant-123")
-	assert.Error(t, err)
-}
-
-func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database integration tests in short mode")
-	}
-
-	db := setupTestDatabase(t)
-	defer func() { _ = db.Close() }()
-
-	store, err := NewDatabaseClientTenantStore(db, getTestConfig())
-	require.NoError(t, err)
-
-	// Create a test admin consent request
-	request := &business.AdminConsentRequest{
-		ClientIdentifier: "client-456",
-		ClientName:       "Test Client",
-		RequestedBy:      "admin@msp.com",
-		State:            "test-state-789",
-		ExpiresAt:        time.Now().Add(1 * time.Hour),
-		Metadata: map[string]interface{}{
-			"flow": "delegated",
-		},
-	}
-
-	// Test Store
-	err = store.StoreAdminConsentRequest(request)
-	require.NoError(t, err)
-
-	// Test Get
-	retrieved, err := store.GetAdminConsentRequest("test-state-789")
-	require.NoError(t, err)
-	assert.Equal(t, request.ClientIdentifier, retrieved.ClientIdentifier)
-	assert.Equal(t, request.State, retrieved.State)
-	assert.Equal(t, request.Metadata["flow"], retrieved.Metadata["flow"])
-
-	// Test Delete
-	err = store.DeleteAdminConsentRequest("test-state-789")
-	require.NoError(t, err)
-
-	_, err = store.GetAdminConsentRequest("test-state-789")
-	assert.Error(t, err)
-}
-
 func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	provider := &DatabaseProvider{}
 	t.Cleanup(func() { _ = provider.Close() })
@@ -452,10 +313,7 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 		"dsn": "invalid://connection/string",
 	}
 
-	_, err := provider.CreateClientTenantStore(invalidConfig)
-	assert.Error(t, err)
-
-	_, err = provider.CreateConfigStore(invalidConfig)
+	_, err := provider.CreateConfigStore(invalidConfig)
 	assert.Error(t, err)
 
 	_, err = provider.CreateAuditStore(invalidConfig)
@@ -476,7 +334,7 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 		"username": "test",
 	}
 
-	_, err = provider.CreateClientTenantStore(missingPasswordConfig)
+	_, err = provider.CreateConfigStore(missingPasswordConfig)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "password is required")
 
@@ -513,8 +371,6 @@ func TestDatabaseProvider_SharedPool_Identity(t *testing.T) {
 	config := getTestConfig()
 	config["session_hmac_key"] = "test-hmac-key-for-shared-pool-identity-test-32b"
 
-	clientTenantStore, err := provider.CreateClientTenantStore(config)
-	require.NoError(t, err)
 	configStore, err := provider.CreateConfigStore(config)
 	require.NoError(t, err)
 	auditStore, err := provider.CreateAuditStore(config)
@@ -536,7 +392,6 @@ func TestDatabaseProvider_SharedPool_Identity(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pool)
 
-	assert.Same(t, pool, clientTenantStore.(*DatabaseClientTenantStore).db, "ClientTenantStore must share the provider's pool")
 	assert.Same(t, pool, configStore.(*DatabaseConfigStore).db, "ConfigStore must share the provider's pool")
 	assert.Same(t, pool, auditStore.(*DatabaseAuditStore).db, "AuditStore must share the provider's pool")
 	assert.Same(t, pool, rbacStore.(*DatabaseRBACStore).db, "RBACStore must share the provider's pool")
@@ -759,7 +614,7 @@ func BenchmarkDatabaseProvider_CreateStores(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = provider.CreateClientTenantStore(getTestConfig())
+		_, _ = provider.CreateTenantStore(getTestConfig())
 	}
 }
 

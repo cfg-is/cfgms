@@ -207,10 +207,9 @@ func TestExportRBAC_RoleParentCycleFails(t *testing.T) {
 	}
 }
 
-// TestImportRBACAndClientTenant_MalformedData verifies every RBAC and
-// client-tenant import path rejects a corrupt record with a descriptive error
+// TestImportRBAC_MalformedData verifies every RBAC import path rejects a corrupt record with a descriptive error
 // instead of writing partial state.
-func TestImportRBACAndClientTenant_MalformedData(t *testing.T) {
+func TestImportRBAC_MalformedData(t *testing.T) {
 	ctx := context.Background()
 	mgr := newInternalOSSManager(t)
 
@@ -223,7 +222,6 @@ func TestImportRBACAndClientTenant_MalformedData(t *testing.T) {
 		{"role", importRBACRole, "unmarshal role"},
 		{"subject", importRBACSubject, "unmarshal subject"},
 		{"assignment", importRBACAssignment, "unmarshal role assignment"},
-		{"client tenant", importClientTenant, "unmarshal client tenant"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -267,13 +265,13 @@ func TestImportRBAC_StoreWriteFailureIsReported(t *testing.T) {
 	}
 }
 
-// TestImportRBACAndClientTenant_StoreUnavailable verifies the import paths fail
+// TestImportRBAC_StoreUnavailable verifies the import paths fail
 // with a clear message when the destination backend does not expose the store,
 // rather than panicking on a nil interface.
-func TestImportRBACAndClientTenant_StoreUnavailable(t *testing.T) {
+func TestImportRBAC_StoreUnavailable(t *testing.T) {
 	ctx := context.Background()
-	// A composite manager with no RBAC and no client-tenant store.
-	mgr := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	// A composite manager with no RBAC store.
+	mgr := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	cases := []struct {
 		name string
@@ -284,7 +282,6 @@ func TestImportRBACAndClientTenant_StoreUnavailable(t *testing.T) {
 		{"role", importRBACRole, "RBAC store not available"},
 		{"subject", importRBACSubject, "RBAC store not available"},
 		{"assignment", importRBACAssignment, "RBAC store not available"},
-		{"client tenant", importClientTenant, "client tenant store not available"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -302,9 +299,5 @@ func TestImportRBACAndClientTenant_StoreUnavailable(t *testing.T) {
 	recs, err := exportRBAC(ctx, mgr)
 	if err != nil || recs != nil {
 		t.Fatalf("exportRBAC with no store: got recs=%v err=%v", recs, err)
-	}
-	ctRecs, err := exportClientTenants(ctx, mgr)
-	if err != nil || ctRecs != nil {
-		t.Fatalf("exportClientTenants with no store: got recs=%v err=%v", ctRecs, err)
 	}
 }

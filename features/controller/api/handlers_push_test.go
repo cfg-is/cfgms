@@ -84,7 +84,6 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -553,7 +552,6 @@ func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -692,7 +690,6 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -839,7 +836,6 @@ func makePushServerWithCommandStore(t *testing.T, cp controlplaneInterfaces.Cont
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

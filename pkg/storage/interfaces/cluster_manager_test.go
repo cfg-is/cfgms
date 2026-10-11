@@ -87,8 +87,6 @@ func TestCreateClusterStorageManager_DatabaseProvider(t *testing.T) {
 		"database-backed audit store must be non-nil")
 	assert.NotNil(t, sm.GetRBACStore(),
 		"database-backed RBAC store must be non-nil")
-	assert.NotNil(t, sm.GetClientTenantStore(),
-		"database-backed client tenant store must be non-nil")
 	// Issue #3401: CreatePendingRegistrationStore returned ErrNotSupported, leaving this
 	// store nil and every cluster-mode registration endpoint answering 503.
 	assert.NotNil(t, sm.GetPendingRegistrationStore(),

@@ -47,7 +47,6 @@ func useStorageWriteFailingConfigService(t *testing.T, server *Server) {
 		sm.GetAuditStore(),
 		sm.GetRBACStore(),
 		sm.GetTenantStore(),
-		sm.GetClientTenantStore(),
 		sm.GetRegistrationTokenStore(),
 		sm.GetSessionStore(),
 		sm.GetStewardStore(),

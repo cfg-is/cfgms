@@ -62,7 +62,6 @@ func setupTenantDeletionServer(t *testing.T) (*Server, business.TenantStore) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

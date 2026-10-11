@@ -376,15 +376,6 @@ func (p *SQLiteProvider) CreateTenantStore(config map[string]interface{}) (busin
 	return &SQLiteTenantStore{db: db}, nil
 }
 
-// CreateClientTenantStore returns a SQLite-backed ClientTenantStore with M365 extension columns.
-func (p *SQLiteProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
-	db, err := openAndInit(getPath(config))
-	if err != nil {
-		return nil, err
-	}
-	return &SQLiteClientTenantStore{db: db}, nil
-}
-
 // CreateAuditStore returns a SQLite-backed AuditStore (append-only).
 func (p *SQLiteProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	db, err := openAndInit(getPath(config))
@@ -511,7 +502,6 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 	return &interfaces.BusinessStoreBundle{
 		RBAC:                &SQLiteRBACStore{db: db},
 		Tenant:              &SQLiteTenantStore{db: db},
-		ClientTenant:        &SQLiteClientTenantStore{db: db},
 		RegistrationToken:   &SQLiteRegistrationTokenStore{db: db},
 		Session:             &SQLiteSessionStore{db: db},
 		Command:             &SQLiteCommandStore{db: db},

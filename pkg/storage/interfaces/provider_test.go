@@ -94,14 +94,6 @@ type closeCountingProvider struct {
 	closes int
 }
 
-func (p *closeCountingProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
-	store, err := p.StorageProvider.CreateClientTenantStore(config)
-	if err != nil {
-		return store, err
-	}
-	return closeCountingClientTenantStore{ClientTenantStore: store, p: p}, nil
-}
-
 func (p *closeCountingProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
 	store, err := p.StorageProvider.CreateAuditStore(config)
 	if err != nil {
@@ -148,16 +140,6 @@ func (p *closeCountingProvider) CreateTriggerStore(config map[string]interface{}
 		return store, err
 	}
 	return closeCountingTriggerStore{TriggerStore: store, p: p}, nil
-}
-
-type closeCountingClientTenantStore struct {
-	business.ClientTenantStore
-	p *closeCountingProvider
-}
-
-func (s closeCountingClientTenantStore) Close() error {
-	s.p.closes++
-	return s.ClientTenantStore.Close()
 }
 
 type closeCountingAuditStore struct {
@@ -222,7 +204,7 @@ func (s closeCountingTriggerStore) Close() error {
 
 // TestRegisterStorageProviderWithValidation_ClosesValidationStores guards
 // against the Windows-only CI failure diagnosed against PR #3254: validation
-// creates seven stores (ClientTenantStore, AuditStore, RBACStore, TenantStore,
+// creates six stores (AuditStore, RBACStore, TenantStore,
 // RegistrationTokenStore, StewardStore, TriggerStore) purely to prove
 // Create*Store succeeds, then discarded them without closing. On Linux a
 // leaked *sql.DB handle is invisible because the OS allows unlinking an open
@@ -238,7 +220,7 @@ func TestRegisterStorageProviderWithValidation_ClosesValidationStores(t *testing
 
 	require.NoError(t, interfaces.RegisterStorageProviderWithValidation(provider, sqliteCfg))
 
-	assert.Equal(t, 7, provider.closes, "RegisterStorageProviderWithValidation must close every validation store it creates")
+	assert.Equal(t, 6, provider.closes, "RegisterStorageProviderWithValidation must close every validation store it creates")
 }
 
 // TestValidateProvider verifies that the real OSS providers satisfy the
@@ -362,23 +344,6 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 
 		if manager.GetProviderName() != "sqlite" {
 			t.Errorf("Expected provider name 'sqlite', got: %s", manager.GetProviderName())
-		}
-
-		ctStore := manager.GetClientTenantStore()
-		if ctStore == nil {
-			t.Fatal("ClientTenantStore should not be nil")
-		}
-		// Round-trip: store a tenant and verify retrieval returns the same value.
-		want := &business.ClientTenant{ID: "rt-tenant-1", TenantID: "rt-tenant-1", TenantName: "Round Trip Tenant"}
-		if err := ctStore.StoreClientTenant(want); err != nil {
-			t.Fatalf("StoreClientTenant failed: %v", err)
-		}
-		got, err := ctStore.GetClientTenant("rt-tenant-1")
-		if err != nil {
-			t.Fatalf("GetClientTenant failed: %v", err)
-		}
-		if got.ID != want.ID || got.TenantName != want.TenantName {
-			t.Errorf("round-trip mismatch: got %+v, want %+v", got, want)
 		}
 
 		if manager.GetAuditStore() == nil {
@@ -587,14 +552,12 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		require.NoError(t, err)
 		tenantStore, err := sq.CreateTenantStore(sqliteCfg)
 		require.NoError(t, err)
-		clientTenantStore, err := sq.CreateClientTenantStore(sqliteCfg)
-		require.NoError(t, err)
 		registrationTokenStore, err := sq.CreateRegistrationTokenStore(sqliteCfg)
 		require.NoError(t, err)
 
 		sm := interfaces.NewStorageManagerFromStores(
 			configStore, auditStore, rbacStore,
-			tenantStore, clientTenantStore, registrationTokenStore,
+			tenantStore, registrationTokenStore,
 			nil, nil, nil, nil, nil,
 		)
 		t.Cleanup(func() { _ = sm.Close() })
@@ -608,7 +571,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetCapabilities returns zero value without panic", func(t *testing.T) {
-		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		caps := sm.GetCapabilities()
 		// Zero value - no field should be set
 		if caps.SupportsTransactions || caps.SupportsVersioning || caps.MaxBatchSize != 0 {
@@ -617,14 +580,14 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetVersion returns composite without panic", func(t *testing.T) {
-		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetVersion() != "composite" {
 			t.Errorf("expected version %q, got %q", "composite", sm.GetVersion())
 		}
 	})
 
 	t.Run("GetProvider returns nil without panic", func(t *testing.T) {
-		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetProvider() != nil {
 			t.Errorf("expected nil from GetProvider on composite manager")
 		}
@@ -642,8 +605,6 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		require.NoError(t, err)
 		tenantStore, err := sq.CreateTenantStore(sqliteCfg)
 		require.NoError(t, err)
-		clientTenantStore, err := sq.CreateClientTenantStore(sqliteCfg)
-		require.NoError(t, err)
 		registrationTokenStore, err := sq.CreateRegistrationTokenStore(sqliteCfg)
 		require.NoError(t, err)
 		pushStore, err := sq.CreatePushStore(sqliteCfg)
@@ -651,7 +612,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 
 		sm := interfaces.NewStorageManagerFromStores(
 			configStore, auditStore, rbacStore,
-			tenantStore, clientTenantStore, registrationTokenStore,
+			tenantStore, registrationTokenStore,
 			nil, nil, nil, nil, pushStore,
 		)
 		t.Cleanup(func() { _ = sm.Close() })
@@ -667,9 +628,6 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 		}
 		if sm.GetTenantStore() != tenantStore {
 			t.Errorf("TenantStore mismatch")
-		}
-		if sm.GetClientTenantStore() != clientTenantStore {
-			t.Errorf("ClientTenantStore mismatch")
 		}
 		if sm.GetRegistrationTokenStore() != registrationTokenStore {
 			t.Errorf("RegistrationTokenStore mismatch")
@@ -692,7 +650,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("nil values allowed for all stores", func(t *testing.T) {
-		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		// Should not panic
 		if sm.GetConfigStore() != nil {
 			t.Errorf("expected nil ConfigStore")
@@ -765,9 +723,6 @@ func TestCreateOSSStorageManager(t *testing.T) {
 		}
 		if sm.GetTenantStore() == nil {
 			t.Errorf("TenantStore should not be nil")
-		}
-		if sm.GetClientTenantStore() == nil {
-			t.Errorf("ClientTenantStore should not be nil")
 		}
 		if sm.GetRegistrationTokenStore() == nil {
 			t.Errorf("RegistrationTokenStore should not be nil")

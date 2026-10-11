@@ -129,7 +129,6 @@ func buildTestServer(t *testing.T, seedRoot bool) *Server {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	err := rbacManager.Initialize(context.Background())
@@ -219,7 +218,6 @@ func setupRouteTestServer(t *testing.T) *Server {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	// Do NOT call rbacManager.Initialize() here — route tests don't need
@@ -1006,7 +1004,6 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	err := rbacManager.Initialize(context.Background())
@@ -1568,7 +1565,6 @@ func setupServerWithPublisher(t *testing.T, fx *controlPlaneFixture) (*Server, *
 
 	rbacMgr := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacMgr.Initialize(context.Background()))

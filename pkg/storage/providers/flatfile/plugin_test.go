@@ -85,13 +85,6 @@ func TestUnsupportedStoresReturnErrNotSupported(t *testing.T) {
 
 	cfg := map[string]interface{}{}
 
-	t.Run("CreateClientTenantStore", func(t *testing.T) {
-		store, err := p.CreateClientTenantStore(cfg)
-		assert.Nil(t, store)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not supported")
-	})
-
 	t.Run("CreateRBACStore", func(t *testing.T) {
 		store, err := p.CreateRBACStore(cfg)
 		assert.Nil(t, store)

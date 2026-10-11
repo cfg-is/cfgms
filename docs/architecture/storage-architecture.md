@@ -285,7 +285,7 @@ Target layout (tracked under the ADR-003 epic):
 
 ```
 pkg/storage/interfaces/
-  business/       # TenantStore, ClientTenantStore, StewardStore, CommandStore,
+  business/       # TenantStore, StewardStore, CommandStore,
                   # AuditStore, RBACStore, SessionStore, RegistrationTokenStore
   config/         # ConfigStore
   secrets/        # SecretStore
@@ -294,8 +294,6 @@ pkg/storage/interfaces/
 ```
 
 **Naming rule**: anything ending in `*Store` is durable. Anything ephemeral (resolved configs, inheritance memoization, rebuildable-on-restart state) is named `*Cache` and lives under [`pkg/cache/`](../../pkg/cache/). The old `RuntimeStore` mixed both and has been retired — its durable parts moved to `business/SessionStore`, its ephemeral parts moved to `pkg/cache`.
-
-**`ClientTenantStore` is unified.** The former `M365ClientTenantStore` folds in. Provider-specific data (M365 consent state, AD domain binding, Intune enrollment) is carried as extension fields so that a single endpoint or user can be correlated across steward, Intune, and AD.
 
 Interfaces are organized into five sub-packages under `pkg/storage/interfaces/`: `business/`, `config/`, `blob/`, `secrets/`, and `timeseries/`. See [`pkg/storage/interfaces/README.md`](../../pkg/storage/interfaces/README.md) for the layout and import paths.
 
@@ -466,7 +464,7 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 | Provider | Story | Stores implemented |
 |----------|-------|--------------------|
-| `pkg/storage/providers/sqlite` | #662 | `TenantStore`, `ClientTenantStore`, `AuditStore`, `RBACStore`, `RegistrationTokenStore`, `SessionStore` |
+| `pkg/storage/providers/sqlite` | #662 | `TenantStore`, `AuditStore`, `RBACStore`, `RegistrationTokenStore`, `SessionStore` |
 | `pkg/storage/providers/flatfile` | #661 | `ConfigStore`, `AuditStore` |
 | `pkg/storage/providers/sqlite` | #663 | `StewardStore` |
 | `pkg/storage/providers/flatfile` | #663 | `StewardStore` |

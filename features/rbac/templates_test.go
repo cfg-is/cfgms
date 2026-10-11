@@ -23,7 +23,6 @@ func setupTemplateTestManager(t *testing.T) (*Manager, context.Context) {
 
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()

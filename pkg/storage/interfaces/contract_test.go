@@ -90,7 +90,6 @@ var shapeCapabilityMatrix = map[deploymentShape][]capabilityEntry{
 		{subsystem: "alerts", store: interfaces.StoreNameAlert, required: true},
 		{subsystem: "rbac", store: interfaces.StoreNameRBAC, required: true},
 		{subsystem: "tenants", store: interfaces.StoreNameTenant, required: true},
-		{subsystem: "client-tenants", store: interfaces.StoreNameClientTenant, required: true},
 		{subsystem: "registration", store: interfaces.StoreNameRegistrationToken, required: true},
 		{subsystem: "registration", store: interfaces.StoreNamePendingRegistration, required: true},
 		{subsystem: "sessions", store: interfaces.StoreNameSession, required: true},
@@ -128,7 +127,6 @@ var shapeCapabilityMatrix = map[deploymentShape][]capabilityEntry{
 		{subsystem: "alerts", store: interfaces.StoreNameAlert, required: true},
 		{subsystem: "rbac", store: interfaces.StoreNameRBAC, required: true},
 		{subsystem: "tenants", store: interfaces.StoreNameTenant, required: true},
-		{subsystem: "client-tenants", store: interfaces.StoreNameClientTenant, required: true},
 		{subsystem: "registration", store: interfaces.StoreNameRegistrationToken, required: true},
 		{subsystem: "registration", store: interfaces.StoreNamePendingRegistration, required: true},
 		{subsystem: "sessions", store: interfaces.StoreNameSession, required: true},
@@ -309,7 +307,6 @@ func TestCapabilityCompleteness_ClusterRegression_Issue3402(t *testing.T) {
 // that a missed update is visible as soon as the reader looks at the test.
 func TestCapabilityMatrix_AllShapesCovered(t *testing.T) {
 	allStores := []interfaces.StoreName{
-		interfaces.StoreNameClientTenant,
 		interfaces.StoreNameConfig,
 		interfaces.StoreNameAudit,
 		interfaces.StoreNameRBAC,

@@ -1499,7 +1499,7 @@ func TestStoreRequirements_TriggerStoreDeclined_FailsStartup(t *testing.T) {
 
 	// Compose a StorageManager as production code does: ErrNotSupported → nil TriggerStore field.
 	sm := interfaces.NewStorageManagerFromStores(
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, ts, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, ts, nil,
 	)
 
 	err := interfaces.ValidateStorageRequirements(sm, StoreRequirements)

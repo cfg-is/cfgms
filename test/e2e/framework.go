@@ -306,7 +306,6 @@ func (f *E2ETestFramework) initializeRBAC() error {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	if err := rbacManager.Initialize(f.ctx); err != nil {

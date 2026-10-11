@@ -825,7 +825,6 @@ func setupTestServerWithCertMgr(t *testing.T, certManager *cert.Manager) *Server
 	storageManager := pkgtesting.SetupTestStorage(t)
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -1038,7 +1037,6 @@ func setupTestServerWithIsolationEngine(t *testing.T) *Server {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

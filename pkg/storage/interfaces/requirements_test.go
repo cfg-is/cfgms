@@ -14,7 +14,7 @@ import (
 // newEmptySM returns a StorageManager with no stores — providerName is "composite"
 // because NewStorageManagerFromStores always sets that value.
 func newEmptySM() *interfaces.StorageManager {
-	return interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 // TestValidateStorageRequirements_RequiredMissingFails verifies that a missing
@@ -357,7 +357,6 @@ func TestCollectAbsentOptionalCapabilities_MultipleAbsent(t *testing.T) {
 // supplies them).
 func TestStorageManager_HasStore(t *testing.T) {
 	allNames := []interfaces.StoreName{
-		interfaces.StoreNameClientTenant,
 		interfaces.StoreNameConfig,
 		interfaces.StoreNameAudit,
 		interfaces.StoreNameRBAC,
@@ -404,7 +403,6 @@ func TestStorageManager_HasStore(t *testing.T) {
 			interfaces.StoreNameAlert,
 			interfaces.StoreNameRBAC,
 			interfaces.StoreNameTenant,
-			interfaces.StoreNameClientTenant,
 			interfaces.StoreNameRegistrationToken,
 			interfaces.StoreNamePendingRegistration,
 			interfaces.StoreNamePendingRefresh,

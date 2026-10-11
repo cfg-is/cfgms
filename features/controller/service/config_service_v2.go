@@ -360,7 +360,6 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 	if controllerSvc != nil {
 		ir = config.NewInheritanceResolverWithRoles(
 			router,
-			storageManager.GetClientTenantStore(),
 			storageManager.GetTenantStore(),
 			&clusterRegistryAdapter{controllerSvc: controllerSvc},
 			&roleConfigAdapter{
@@ -370,7 +369,7 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 			},
 		)
 	} else {
-		ir = config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore())
+		ir = config.NewInheritanceResolver(router, storageManager.GetTenantStore())
 	}
 
 	svc := &ConfigurationServiceV2{

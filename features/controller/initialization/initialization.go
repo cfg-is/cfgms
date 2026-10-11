@@ -237,10 +237,9 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	// Step 3: Initialize RBAC
 	logger.Info("Initializing RBAC...")
 	auditStore := storageManager.GetAuditStore()
-	clientTenantStore := storageManager.GetClientTenantStore()
 	rbacStore := storageManager.GetRBACStore()
 
-	rbacManager := rbac.NewManagerWithStorage(auditStore, clientTenantStore, rbacStore)
+	rbacManager := rbac.NewManagerWithStorage(auditStore, rbacStore)
 	// Startup seeding and loading are system-internal: the RBAC store refuses a
 	// context with no caller (Issue #4665).
 	if err := rbacManager.Initialize(ctxkeys.WithSystem(context.Background())); err != nil {

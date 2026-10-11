@@ -51,7 +51,6 @@ func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -327,7 +326,6 @@ func setupCertTestServerWithStewardStoreRoot(t *testing.T) (*Server, *cert.Manag
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -892,7 +890,6 @@ func setupRotationTestServerWith(t *testing.T, certMgr *cert.Manager) (*Server, 
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
@@ -1211,7 +1208,6 @@ func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))

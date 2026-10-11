@@ -136,7 +136,6 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	require.NoError(t, rbacManager.Initialize(context.Background()))
