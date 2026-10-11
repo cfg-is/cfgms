@@ -279,3 +279,31 @@ describe('AppShell', () => {
     expect(scopeButton).toHaveAccessibleName(/root/i)
   })
 })
+
+describe('AppShell — elevation banner (Issue #4725)', () => {
+  function routeFeed(items: unknown[]) {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      const body = url.includes('/api/v1/tenant-crossings/active')
+        ? { data: items }
+        : { data: { stewards: [], total: 0, limit: 50, offset: 0 }, timestamp: new Date().toISOString() }
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
+    })
+  }
+
+  it('shows the banner and a bell badge when the feed lists a break-glass', async () => {
+    routeFeed([
+      { id: 'c-1', tenant_id: 'msp-a', kind: 'break_glass', principal_name: 'root-op', reason_category: 'security_incident', tenant_name: 'MSP A', expires_at: '2099-01-01T00:00:00Z' },
+    ])
+    renderShell()
+    expect(await screen.findByTestId('elevation-banner')).toHaveTextContent('root-op')
+    expect(screen.getByTestId('alert-badge')).toHaveTextContent('1')
+  })
+
+  it('shows no banner for an empty feed', async () => {
+    routeFeed([])
+    renderShell()
+    await screen.findByText(/no stewards enrolled yet/i)
+    expect(screen.queryByTestId('elevation-banner')).not.toBeInTheDocument()
+  })
+})

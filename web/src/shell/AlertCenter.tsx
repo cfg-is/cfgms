@@ -20,10 +20,19 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import AlertSeverity from './AlertSeverity.tsx'
 import { useAlerts } from './useAlerts.ts'
+import type { ActiveCrossing } from '../tenants/useTenantCrossings.ts'
 
 const SILENCE_HOURS = 24
 
-export default function AlertCenter() {
+export interface AlertCenterProps {
+  /**
+   * Active break-glass crossings on the signed-in MSP's tenants (Issue #4725).
+   * Each renders as a critical item at the top of the list and adds to the badge.
+   */
+  breakGlassNotices?: ActiveCrossing[]
+}
+
+export default function AlertCenter({ breakGlassNotices = [] }: AlertCenterProps) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const { alerts, totalAlerts, loading, error, acknowledge, silence } = useAlerts(open)
@@ -80,9 +89,9 @@ export default function AlertCenter() {
           />
           <path d="M10 20a2 2 0 004 0" stroke="currentColor" strokeWidth="1.6" />
         </svg>
-        {totalAlerts > 0 && (
+        {totalAlerts + breakGlassNotices.length > 0 && (
           <span className="badge" data-testid="alert-badge">
-            {totalAlerts}
+            {totalAlerts + breakGlassNotices.length}
           </span>
         )}
       </button>
@@ -94,6 +103,23 @@ export default function AlertCenter() {
               {actionError}
             </div>
           )}
+          {breakGlassNotices.map((c) => (
+            <div key={`bg-${c.id}`} className="row" data-testid="breakglass-row">
+              <AlertSeverity severity="critical" />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div>
+                  CFGMS break-glass access active
+                  {c.tenantName !== '' ? ` on ${c.tenantName}` : ''}
+                </div>
+                <div className="sub">
+                  {c.principalName !== '' ? `Held by ${c.principalName}. ` : ''}
+                  <Link to="/support-access" onClick={() => setOpen(false)}>
+                    Support access
+                  </Link>
+                </div>
+              </div>
+            </div>
+          ))}
           {loading && alerts.length === 0 && (
             <div className="notice empty">
               <p>Loading…</p>
@@ -104,7 +130,7 @@ export default function AlertCenter() {
               <p>Failed to load alerts.</p>
             </div>
           )}
-          {!loading && error === null && alerts.length === 0 && (
+          {!loading && error === null && alerts.length === 0 && breakGlassNotices.length === 0 && (
             <div className="notice empty">
               <p>No notifications.</p>
             </div>

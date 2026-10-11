@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import AlertCenter from './AlertCenter.tsx'
+import { parseActiveCrossingList } from '../tenants/useTenantCrossings.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -475,5 +476,34 @@ describe('AlertCenter', () => {
     render(<MemoryRouter><AlertCenter /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
     expect(screen.getByRole('link', { name: /view all alerts/i })).toHaveAttribute('href', '/alerts')
+  })
+})
+
+describe('AlertCenter — break-glass notices (Issue #4725)', () => {
+  const notices = parseActiveCrossingList([
+    { id: 'c-1', tenant_id: 'msp-a', kind: 'break_glass', principal_name: 'root-op', tenant_name: 'MSP A', expires_at: '2030-01-01T00:00:00Z' },
+  ])
+
+  it('counts a break-glass in the badge before the popover is opened', () => {
+    render(<MemoryRouter><AlertCenter breakGlassNotices={notices} /></MemoryRouter>)
+    expect(screen.getByTestId('alert-badge')).toHaveTextContent('1')
+  })
+
+  it('renders a critical item first and links to Support access', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(alertsResponse([makeAlert()], 1)))
+    render(<MemoryRouter><AlertCenter breakGlassNotices={notices} /></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+    await waitFor(() => expect(screen.getAllByTestId('alert-row')).toHaveLength(1))
+    const rows = screen.getAllByTestId(/^(breakglass-row|alert-row)$/)
+    expect(rows[0]!).toHaveAttribute('data-testid', 'breakglass-row')
+    expect(rows[0]!).toHaveTextContent('root-op')
+    expect(rows[0]!.querySelector('[data-severity="critical"]')).not.toBeNull()
+    expect(screen.getByRole('link', { name: 'Support access' })).toHaveAttribute('href', '/support-access')
+    expect(screen.getByTestId('alert-badge')).toHaveTextContent('2')
+  })
+
+  it('adds nothing without notices', () => {
+    render(<MemoryRouter><AlertCenter breakGlassNotices={[]} /></MemoryRouter>)
+    expect(screen.queryByTestId('alert-badge')).not.toBeInTheDocument()
   })
 })

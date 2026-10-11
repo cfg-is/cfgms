@@ -31,6 +31,7 @@ import {
   requestBreakGlass,
   type Crossing,
 } from './useTenantCrossings.ts'
+import { notifyActiveCrossingsChanged } from '../shell/useActiveCrossings.ts'
 import { parseTenantList, type TenantInfo } from './useTenants.ts'
 import './CrossingPrompt.css'
 
@@ -128,6 +129,8 @@ export default function CrossingPrompt({
   function grant(crossing: Crossing) {
     if (closedRef.current) return
     closedRef.current = true
+    // Refresh the shell's elevation banner now rather than at the next poll.
+    notifyActiveCrossingsChanged()
     onGranted(crossing)
   }
 

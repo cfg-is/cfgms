@@ -18,6 +18,8 @@ import GlobalSearch from './GlobalSearch.tsx'
 import AlertCenter from './AlertCenter.tsx'
 import UserMenu from './UserMenu.tsx'
 import ControllerChip from './ControllerChip.tsx'
+import ElevationBanner from './ElevationBanner.tsx'
+import { useActiveCrossings } from './useActiveCrossings.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
 import './AppShell.css'
 
@@ -50,6 +52,8 @@ export default function AppShell() {
   const { principal } = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const { crossings, refresh } = useActiveCrossings()
+  const isRoot = principal?.rootScope === true
 
   useEffect(() => {
     document.body.classList.toggle('drawer', drawerOpen)
@@ -141,9 +145,13 @@ export default function AppShell() {
             <GlobalSearch value={search} onChange={setSearch} />
             <div className="abspacer" />
             <ControllerChip />
-            <AlertCenter />
+            <AlertCenter
+              breakGlassNotices={isRoot ? [] : crossings.filter((c) => c.kind === 'break_glass')}
+            />
             <UserMenu />
           </div>
+
+          <ElevationBanner crossings={crossings} root={isRoot} onChanged={refresh} />
 
           <div className="content">
             <Outlet context={{ search, onSearchChange: setSearch } satisfies AppShellContext} />
