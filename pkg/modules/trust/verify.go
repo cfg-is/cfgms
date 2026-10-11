@@ -88,6 +88,14 @@ func isUnsafePublisherKey(pub []byte) bool {
 	return false
 }
 
+// IsUsableIdentityKey reports whether id carries a 32-byte Ed25519 key that can
+// anchor trust. It is false for the all-zero placeholder of unsigned builds and
+// every other small-order key, so "real key vs placeholder" has one definition:
+// the one VerifyBundleSignature enforces.
+func IsUsableIdentityKey(id PublisherIdentity) bool {
+	return len(id.PublicKey) == ed25519.PublicKeySize && !isUnsafePublisherKey(id.PublicKey)
+}
+
 // VerifyBundleSignature verifies that sig is a valid Ed25519 signature over the
 // bundle's ContentHash bytes, produced by a publisher known to store.
 //

@@ -149,6 +149,7 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 	// store leaves credentialed modules refused.
 	if f, ok := moduleFactory.(*WorkflowModuleFactory); ok {
 		f.useSecretStore(secrets)
+		f.warnUnboundCredentials(workflowLogger)
 	}
 
 	// Initialize debug engine

@@ -6,6 +6,7 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -33,6 +34,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 )
@@ -125,6 +127,14 @@ func (fx *credFixture) breakStore(t *testing.T) {
 
 func newCredFixture(t *testing.T, name, publisher, binary string) *credFixture {
 	t.Helper()
+	return newCredFixtureSigned(t, name, publisher, binary, nil, nil)
+}
+
+// newCredFixtureSigned is newCredFixture with the bundle's signatures and the
+// factory's CFGMS publisher identity chosen by the test. A nil identityFn keeps
+// the build's own identity (the placeholder in a test binary).
+func newCredFixtureSigned(t *testing.T, name, publisher, binary string, sigs []bundle.BundleSignature, identityFn func() trust.PublisherIdentity) *credFixture {
+	t.Helper()
 	meta := &modules.ModuleMetadata{
 		Name: name, Version: "0.1.0", Publisher: publisher,
 		Executors: []string{"controller"}, Kind: "workflow",
@@ -132,6 +142,7 @@ func newCredFixture(t *testing.T, name, publisher, binary string) *credFixture {
 	b := &bundle.Bundle{
 		Manifest:    meta,
 		ContentHash: "sha256-cred-test-" + name + "-" + publisher,
+		Signatures:  sigs,
 		Binaries:    map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: binary},
 	}
 	c, err := cache.New(t.TempDir())
@@ -145,6 +156,7 @@ func newCredFixture(t *testing.T, name, publisher, binary string) *credFixture {
 	store, storeRoot, _ := newSOPSStoreAt(t, t.TempDir())
 	te := newTokenEndpoint(t)
 	f := NewWorkflowModuleFactory(c, rt).(*WorkflowModuleFactory)
+	f.identityFn = identityFn
 	f.useSecretStore(store)
 	f.credentials.SetHTTPClient(te.cl)
 	return &credFixture{factory: f, rt: rt, runtimeDir: runtimeDir, store: store, storeRoot: storeRoot, token: te}
@@ -470,4 +482,109 @@ func TestM365Credential_SecretAndTokenNeverLogged(t *testing.T) {
 	}
 	assert.NotContains(t, out, testClientSecret)
 	assert.NotContains(t, out, testMintedToken)
+}
+
+func testIdentity(pub ed25519.PublicKey) func() trust.PublisherIdentity {
+	return func() trust.PublisherIdentity {
+		return trust.PublisherIdentity{Name: cfgmsPublisher, PublicKey: pub, Algorithm: "ed25519"}
+	}
+}
+
+func signHash(priv ed25519.PrivateKey, publisher, hash string) bundle.BundleSignature {
+	return bundle.BundleSignature{Publisher: publisher, Algorithm: "ed25519", Signature: ed25519.Sign(priv, []byte(hash))}
+}
+
+// [REQUIRED TEST] Issue #4913
+func TestM365Credential_SignedBuildRequiresCFGMSSignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	hash := "sha256-cred-test-m365-entra-user-cfgms"
+
+	for name, sigs := range map[string][]bundle.BundleSignature{
+		"no signature":                          nil,
+		"signature from other key":              {signHash(otherPriv, cfgmsPublisher, hash)},
+		"signature over other hash":             {signHash(priv, cfgmsPublisher, "sha256-something-else")},
+		"valid signature, other publisher name": {signHash(priv, "vendor-a", hash)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", dummyBinary(t), sigs, testIdentity(pub))
+			fx.storeConnection(t, testCFGMSTenant)
+
+			mod, err := fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)
+			require.Error(t, err)
+			assert.Nil(t, mod)
+			assert.Contains(t, err.Error(), "m365-entra-user")
+			assert.Contains(t, err.Error(), testCFGMSTenant)
+			assert.Zero(t, fx.token.hits.Load(), "no token may be minted")
+			fx.assertNoProcessStarted(t)
+		})
+	}
+
+	t.Run("one valid among invalid signatures gets a token", func(t *testing.T) {
+		if integrationEchoModuleBin == "" {
+			t.Skip("echo_module binary not available")
+		}
+		sigs := []bundle.BundleSignature{signHash(otherPriv, cfgmsPublisher, hash), signHash(priv, cfgmsPublisher, hash)}
+		fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", integrationEchoModuleBin, sigs, testIdentity(pub))
+		fx.storeConnection(t, testCFGMSTenant)
+
+		mod, err := fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)
+		require.NoError(t, err)
+		handle := mod.(*runtime.ModuleHandle)
+		t.Cleanup(func() { _ = handle.Stop() })
+		assert.EqualValues(t, 1, fx.token.hits.Load())
+	})
+
+	t.Run("checked on every issue", func(t *testing.T) {
+		if integrationEchoModuleBin == "" {
+			t.Skip("echo_module binary not available")
+		}
+		fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", integrationEchoModuleBin,
+			[]bundle.BundleSignature{signHash(priv, cfgmsPublisher, hash)}, testIdentity(pub))
+		fx.storeConnection(t, testCFGMSTenant)
+		for i := 0; i < 2; i++ {
+			mod, err := fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)
+			require.NoError(t, err)
+			require.NoError(t, mod.(*runtime.ModuleHandle).Stop())
+		}
+		// Rotate the anchor: the earlier-approved bundle no longer verifies.
+		otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		fx.factory.identityFn = testIdentity(otherPub)
+		_, err = fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)
+		require.Error(t, err)
+	})
+}
+
+// [REQUIRED TEST] Issue #4913
+func TestM365Credential_PlaceholderKeyWarnsOnce(t *testing.T) {
+	require.False(t, trust.IsUsableIdentityKey(trust.CFGMSPublisherIdentity()), "test binary carries the placeholder key")
+
+	rec := &recordingLogger{Logger: logging.NewNoopLogger()}
+	f := NewWorkflowModuleFactory(nil, nil).(*WorkflowModuleFactory)
+	f.warnUnboundCredentials(rec)
+	f.warnUnboundCredentials(rec)
+	assert.Equal(t, 1, rec.warns, "the warning is logged once")
+	assert.Contains(t, rec.msg, "not signature-bound")
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signed := NewWorkflowModuleFactory(nil, nil).(*WorkflowModuleFactory)
+	signed.identityFn = testIdentity(pub)
+	rec2 := &recordingLogger{Logger: logging.NewNoopLogger()}
+	signed.warnUnboundCredentials(rec2)
+	assert.Zero(t, rec2.warns, "a build with a real key does not warn")
+}
+
+type recordingLogger struct {
+	logging.Logger
+	warns int
+	msg   string
+}
+
+func (r *recordingLogger) Warn(msg string, _ ...interface{}) {
+	r.warns++
+	r.msg = msg
 }
