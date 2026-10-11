@@ -62,6 +62,14 @@ describe('ElevationBanner — root operator', () => {
     expect(screen.queryByTestId('elevation-banner')).not.toBeInTheDocument()
   })
 
+  it('labels a grant as a support access grant, not break-glass, and offers no End', () => {
+    renderBanner([{ kind: 'grant', principal_name: '', reason_category: '' }], true)
+    const banner = screen.getByTestId('elevation-banner')
+    expect(banner).toHaveTextContent('Support access grant active')
+    expect(banner).not.toHaveTextContent('Break-glass')
+    expect(screen.queryByTestId('elevation-end-btn')).not.toBeInTheDocument()
+  })
+
   it('names no tenant when tenant_name is empty', () => {
     renderBanner([{ tenant_name: '' }], true)
     expect(screen.getByTestId('elevation-banner')).toBeInTheDocument()

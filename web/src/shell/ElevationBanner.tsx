@@ -87,7 +87,7 @@ function Row({
       <span className="elevbanner-text">
         {root ? (
           <>
-            <b>Break-glass access active</b>
+            <b>{isBreakGlass ? 'Break-glass access active' : 'Support access grant active'}</b>
             {crossing.tenantName !== '' && (
               <>
                 {' — '}
