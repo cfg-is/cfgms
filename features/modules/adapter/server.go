@@ -9,9 +9,13 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
 )
 
@@ -75,11 +79,39 @@ func (s *moduleServer) Shutdown(_ context.Context, _ *proto.ShutdownRequest) (*p
 // delegates to the same helpers as moduleServer.
 // moduleName is reported in the Handshake capabilities list. The grpcServer
 // parameter is used by Shutdown to call GracefulStop.
-func NewWorkflow(m modules.Module, moduleName string, grpcServer interface{ GracefulStop() }) proto.WorkflowModuleServiceServer {
-	return &workflowModuleServer{
+//
+// With the WithHandshakeHandler option the server binds each session to the
+// handshake's tenant (see workflowModuleServer.Handshake); without it the
+// server is tenant-agnostic and Handshake only reports the capability.
+func NewWorkflow(m modules.Module, moduleName string, grpcServer interface{ GracefulStop() }, opts ...WorkflowOption) proto.WorkflowModuleServiceServer {
+	s := &workflowModuleServer{
 		module:     m,
 		moduleName: moduleName,
 		srv:        grpcServer,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// WorkflowOption configures a workflow module server.
+type WorkflowOption func(*workflowModuleServer)
+
+// HandshakeHandler receives the credential the controller delivered in
+// WorkflowHandshakeRequest.auth_token for the tenant the session is bound to.
+// A returned error fails the handshake. Implementations must not log or return
+// authToken in an error.
+type HandshakeHandler func(tenantID, authToken string) error
+
+// WithHandshakeHandler makes the server tenant-bound: Handshake requires a
+// tenant_id, binds the session to it and hands auth_token to handler; Get, Set
+// and Test are refused until a tenant is bound and run with ctxkeys.TenantID set
+// to it, so a module's execution-tenant check works across the process boundary.
+func WithHandshakeHandler(handler HandshakeHandler) WorkflowOption {
+	return func(s *workflowModuleServer) {
+		s.bindTenant = true
+		s.handshake = handler
 	}
 }
 
@@ -89,36 +121,83 @@ type workflowModuleServer struct {
 	module     modules.Module
 	moduleName string
 	srv        interface{ GracefulStop() }
+
+	// bindTenant is set by WithHandshakeHandler.
+	bindTenant bool
+	handshake  HandshakeHandler
+
+	mu       sync.RWMutex
+	tenantID string // bound by Handshake; empty until then
 }
 
-// Handshake reports the module name as its capability.
-//
-// req.TenantId / req.AuthToken are not yet consumed here: the workflow engine
-// does not populate them today (features/workflow/runtime.Start's Handshake
-// call leaves both fields at their zero value), so per-call tenant scoping
-// for Get/Set continues to rely on ctx (ctxkeys.TenantID) exactly as
-// documented on entra_user.requireExecutionTenant. Wiring WorkflowHandshakeRequest's
-// tenant_id/auth_token through the engine -> module_loader -> runtime.Start
-// call chain is a separate, cross-cutting runtime change, not specific to
-// any one module (Issue #4325).
-func (s *workflowModuleServer) Handshake(_ context.Context, _ *proto.WorkflowHandshakeRequest) (*proto.WorkflowHandshakeResponse, error) {
+// Handshake reports the module name as its capability. On a tenant-bound
+// server (WithHandshakeHandler) it also binds the session to req.TenantId and
+// passes req.AuthToken to the handler; a later Handshake naming a different
+// tenant is refused. The token is never logged or echoed in an error.
+func (s *workflowModuleServer) Handshake(_ context.Context, req *proto.WorkflowHandshakeRequest) (*proto.WorkflowHandshakeResponse, error) {
+	if s.bindTenant {
+		tenantID := req.GetTenantId()
+		if tenantID == "" {
+			return nil, status.Error(codes.InvalidArgument, "handshake requires a tenant_id")
+		}
+		s.mu.Lock()
+		if s.tenantID != "" && s.tenantID != tenantID {
+			s.mu.Unlock()
+			return nil, status.Error(codes.PermissionDenied, "session is already bound to a different tenant")
+		}
+		if s.handshake != nil {
+			if err := s.handshake(tenantID, req.GetAuthToken()); err != nil {
+				s.mu.Unlock()
+				return nil, status.Errorf(codes.PermissionDenied, "handshake credential refused: %v", err)
+			}
+		}
+		s.tenantID = tenantID
+		s.mu.Unlock()
+	}
 	return &proto.WorkflowHandshakeResponse{
 		Capabilities: []string{s.moduleName},
 	}, nil
 }
 
+// boundContext returns ctx carrying the bound tenant, or an error when the
+// server is tenant-bound and no Handshake has completed.
+func (s *workflowModuleServer) boundContext(ctx context.Context) (context.Context, error) {
+	if !s.bindTenant {
+		return ctx, nil
+	}
+	s.mu.RLock()
+	tenantID := s.tenantID
+	s.mu.RUnlock()
+	if tenantID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "no tenant bound: Handshake must complete first")
+	}
+	return context.WithValue(ctx, ctxkeys.TenantID, tenantID), nil
+}
+
 // Get retrieves the current resource state and returns it as YAML-encoded ConfigData.
 func (s *workflowModuleServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+	ctx, err := s.boundContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return moduleGet(ctx, s.module, req)
 }
 
 // Set applies the desired state from ConfigData (YAML) to the resource.
 func (s *workflowModuleServer) Set(ctx context.Context, req *proto.SetRequest) (*proto.SetResponse, error) {
+	ctx, err := s.boundContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return moduleSet(ctx, s.module, req)
 }
 
 // Test checks compliance without applying changes.
 func (s *workflowModuleServer) Test(ctx context.Context, req *proto.TestRequest) (*proto.TestResponse, error) {
+	ctx, err := s.boundContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return moduleTest(ctx, s.module, req)
 }
 

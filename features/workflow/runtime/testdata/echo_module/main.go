@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
@@ -28,13 +29,28 @@ import (
 type echoServer struct {
 	proto.UnimplementedWorkflowModuleServiceServer
 	srv *grpc.Server
+
+	mu        sync.Mutex
+	tenantID  string
+	authToken string
 }
 
-func (s *echoServer) Handshake(_ context.Context, _ *proto.WorkflowHandshakeRequest) (*proto.WorkflowHandshakeResponse, error) {
+func (s *echoServer) Handshake(_ context.Context, req *proto.WorkflowHandshakeRequest) (*proto.WorkflowHandshakeResponse, error) {
+	s.mu.Lock()
+	s.tenantID = req.GetTenantId()
+	s.authToken = req.GetAuthToken()
+	s.mu.Unlock()
 	return &proto.WorkflowHandshakeResponse{Capabilities: []string{"echo"}}, nil
 }
 
+// Get returns "echo:<resource_id>"; a resource_id of "handshake" returns
+// "tenant=<tenant_id>;token=<auth_token>" as recorded by Handshake.
 func (s *echoServer) Get(_ context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+	if req.ResourceId == "handshake" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return &proto.GetResponse{ConfigData: "tenant=" + s.tenantID + ";token=" + s.authToken}, nil
+	}
 	return &proto.GetResponse{ConfigData: "echo:" + req.ResourceId}, nil
 }
 

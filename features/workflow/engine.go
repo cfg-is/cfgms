@@ -144,6 +144,13 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 		opt(engine)
 	}
 
+	// The controller-published M365 workflow modules are issued a Graph token
+	// minted from the controller secret store; hand the factory that store. A nil
+	// store leaves credentialed modules refused.
+	if f, ok := moduleFactory.(*WorkflowModuleFactory); ok {
+		f.useSecretStore(secrets)
+	}
+
 	// Initialize debug engine
 	engine.debugEngine = NewDebugEngine(engine, logger)
 
@@ -673,7 +680,13 @@ func (e *Engine) executeTaskStep(ctx context.Context, step Step, execution *Work
 
 	// Create module instance
 	var module modules.Module
-	module, err := e.moduleFactory.CreateModuleInstance(step.Module)
+	var err error
+	if tl, ok := e.moduleFactory.(TenantModuleLoader); ok {
+		tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+		module, err = tl.CreateTenantModuleInstance(ctx, step.Module, tenantID)
+	} else {
+		module, err = e.moduleFactory.CreateModuleInstance(step.Module)
+	}
 	if err != nil {
 		return NewWorkflowError(
 			ErrorCodeModuleExecution,
@@ -682,6 +695,18 @@ func (e *Engine) executeTaskStep(ctx context.Context, step Step, execution *Work
 			step.Type,
 			err,
 		).WithVariableState(execution.Variables).WithDetails("module", step.Module)
+	}
+
+	// Stop the module process when the step ends, on success and on error, so a
+	// process holding a Graph credential never outlives its step.
+	if stopper, ok := module.(interface{ Stop() error }); ok {
+		defer func() {
+			if stopErr := stopper.Stop(); stopErr != nil {
+				e.logger.Warn("Failed to stop module process",
+					"step", step.Name,
+					"error", logging.SanitizeLogValue(stopErr.Error()))
+			}
+		}()
 	}
 
 	// Create resource ID from step name
