@@ -485,6 +485,11 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		}
 	}
 
+	// Register the in-flight execution before the received event is published:
+	// a caller that reacts to the event by calling Wait must observe it, and
+	// WaitGroup.Add must not race a Wait that starts at a zero counter.
+	h.wg.Add(1)
+
 	// Send command received event
 	h.sendStatus(ctx, &cpTypes.Event{
 		ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
@@ -498,7 +503,6 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	})
 
 	// Execute command in background; wg.Done is called inside executeCommand.
-	h.wg.Add(1)
 	// #nosec G118 -- accepted commands intentionally outlive receipt handling;
 	// executeCommand applies a command timeout and Handler.Stop waits on h.wg.
 	go h.executeCommand(cmd)
