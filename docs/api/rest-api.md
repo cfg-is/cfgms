@@ -50,10 +50,12 @@ A tenant-scoped caller reaches its own tenant's records. A root caller not subje
 {
   "error": "tenant_crossing_required",
   "required_assurance": "tenant-crossing",
-  "break_glass_endpoint": "/api/v1/tenants/<tenant>/break-glass",
+  "break_glass_endpoint": "/api/v1/tenants/<msp-tenant>/break-glass",
   "reason_categories": ["account_recovery", "security_incident", "legal_request", "billing_dispute"]
 }
 ```
+
+`break_glass_endpoint` names the MSP tenant that covers the record you asked for — the tenant you invoke break-glass on, or receive a grant from — never the client tenant that owns the record. When the record belongs to the MSP tenant itself, that is the MSP. If the covering tenant cannot be resolved the field is omitted.
 
 `reason_categories` lists the values `break_glass_endpoint` accepts as `reason_category`, so a client can render the choices.
 

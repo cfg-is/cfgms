@@ -163,19 +163,19 @@ func TestRootReportReads_TenantSelection(t *testing.T) {
 		"/api/v1/reports/dashboard/alerts?tenant_id=" + reportReadClient,
 	} {
 		t.Run("naming a client tenant answers the challenge: "+path, func(t *testing.T) {
-			assertCrossingChallenge(t, f.do(boundRootOperator("report-named"), http.MethodGet, path, ""), reportReadClient)
+			assertCrossingChallenge(t, f.do(boundRootOperator("report-named"), http.MethodGet, path, ""), reportReadMSP)
 		})
 	}
 
 	t.Run("generate naming a client tenant answers the challenge", func(t *testing.T) {
 		rec := f.do(boundRootOperator("report-gen"), http.MethodPost, "/api/v1/reports/generate",
 			f.generateBody([]string{reportReadClient}, nil))
-		assertCrossingChallenge(t, rec, reportReadClient)
+		assertCrossingChallenge(t, rec, reportReadMSP)
 	})
 
 	t.Run("an active grant on the MSP returns the client data", func(t *testing.T) {
 		op := boundRootOperator("report-granted")
-		grantCrossing(t, f.server, op.ID, reportReadMSP)
+		grantCrossing(t, f.server, op.ID, reportReadClient)
 		assert.EqualValues(t, 2, devicesAnalyzed(t, f.do(op, http.MethodGet, "/api/v1/reports/compliance/status", "")))
 		assert.EqualValues(t, 1, devicesAnalyzed(t, f.do(op, http.MethodGet, "/api/v1/reports/compliance/status?tenant_id="+reportReadClient, "")))
 	})
@@ -189,9 +189,9 @@ func TestRootReportReads_DeviceSelection(t *testing.T) {
 
 	t.Run("a client device is refused with the challenge without a crossing", func(t *testing.T) {
 		op := boundRootOperator("report-dev-none")
-		assertCrossingChallenge(t, generate(op, f.clientSteward), reportReadClient)
-		assertCrossingChallenge(t, f.do(op, http.MethodGet, "/api/v1/reports/compliance/status?device_id="+f.clientSteward, ""), reportReadClient)
-		assertCrossingChallenge(t, f.do(op, http.MethodGet, "/api/v1/reports/dashboard/alerts?device_id="+f.clientSteward, ""), reportReadClient)
+		assertCrossingChallenge(t, generate(op, f.clientSteward), reportReadMSP)
+		assertCrossingChallenge(t, f.do(op, http.MethodGet, "/api/v1/reports/compliance/status?device_id="+f.clientSteward, ""), reportReadMSP)
+		assertCrossingChallenge(t, f.do(op, http.MethodGet, "/api/v1/reports/dashboard/alerts?device_id="+f.clientSteward, ""), reportReadMSP)
 	})
 	t.Run("a client device is generated with a crossing", func(t *testing.T) {
 		op := boundRootOperator("report-dev-granted")

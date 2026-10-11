@@ -274,7 +274,7 @@ func TestStewardRoutes_CrossingBoundaryTable(t *testing.T) {
 			t.Run("root without crossing is challenged", func(t *testing.T) {
 				token := session(t, &account{ID: "root-no-" + suffix, Username: "root-no-" + suffix, RootScope: true})
 				rec := send(t, token, method, row, newSteward(t, clientTn))
-				assertCrossingChallenge(t, rec, clientTn)
+				assertCrossingChallenge(t, rec, msp)
 			})
 			t.Run("root with crossing is past the gate", func(t *testing.T) {
 				operator := "root-yes-" + suffix

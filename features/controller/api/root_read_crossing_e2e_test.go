@@ -126,8 +126,9 @@ func assertE2EChallenged(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &challenge))
 	assert.Equal(t, "tenant_crossing_required", challenge.Error)
-	assert.True(t, strings.HasPrefix(challenge.Endpoint, "/api/v1/tenants/") && strings.HasSuffix(challenge.Endpoint, "/break-glass"),
-		"challenge must name the break-glass endpoint, got %q", challenge.Endpoint)
+	assert.Equal(t, "/api/v1/tenants/"+sweepMSP+"/break-glass", challenge.Endpoint,
+		"challenge must name the covering MSP, never the client tenant")
+	assert.NotContains(t, rec.Body.String(), sweepClient)
 	assert.ElementsMatch(t, []string{"account_recovery", "security_incident", "legal_request", "billing_dispute"}, challenge.Reasons)
 }
 
@@ -357,6 +358,25 @@ func TestRootReadPolicy_EndToEnd(t *testing.T) {
 		assert.True(t, hasAction(e.settledAudit(t, testRootTenantID), "tenant.crossing_break_glass_invoked"), "root meta-log entry")
 		notified := findAuditEntryByAction(t, e.settledAudit(t, sweepMSP), "tenant.crossing_break_glass_notified")
 		assert.Equal(t, "not_configured", notified.Details["outcome"])
+	})
+
+	t.Run("4b break-glass on the endpoint the challenge names admits the by-ID read", func(t *testing.T) {
+		e := newE2ERootRead(t)
+		token := e.rootSession(t, "e2e-root-follow")
+		read := e.byIDReads()[0]
+
+		challenged := e.do(token, http.MethodGet, read.url, nil)
+		assertE2EChallenged(t, challenged)
+		var challenge struct {
+			Endpoint string `json:"break_glass_endpoint"`
+		}
+		require.NoError(t, json.Unmarshal(challenged.Body.Bytes(), &challenge))
+
+		rec := e.do(token, http.MethodPost, challenge.Endpoint,
+			map[string]string{"reason_category": "security_incident", "justification": loudJustification})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		admitted := e.do(token, http.MethodGet, read.url, nil)
+		assert.Equal(t, http.StatusOK, admitted.Code, admitted.Body.String())
 	})
 
 	t.Run("5 second approver", func(t *testing.T) {

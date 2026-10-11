@@ -148,11 +148,11 @@ func TestRootStewardReads_ByIDCrossingBoundary(t *testing.T) {
 
 			t.Run("no crossing", func(t *testing.T) {
 				rec := f.get(t, rt.handler, boundRootOperator("steward-read-no-"+string(rune('a'+i))), path, vars)
-				assertCrossingChallenge(t, rec, stewardReadClient)
+				assertCrossingChallenge(t, rec, stewardReadMSP)
 			})
 			t.Run("active crossing on the owning MSP", func(t *testing.T) {
 				operator := boundRootOperator("steward-read-msp-" + string(rune('a'+i)))
-				grantCrossing(t, s, operator.ID, stewardReadMSP)
+				grantCrossing(t, s, operator.ID, stewardReadClient)
 				rec := f.get(t, rt.handler, operator, path, vars)
 				assert.True(t, rt.ok(rec.Code), "unexpected %d: %s", rec.Code, rec.Body.String())
 			})
@@ -220,7 +220,7 @@ func TestRootStewardReads_ListsOmitClientTenants(t *testing.T) {
 
 	t.Run("an active grant on the MSP adds its client stewards", func(t *testing.T) {
 		operator := boundRootOperator("list-granted")
-		grantCrossing(t, s, operator.ID, stewardReadMSP)
+		grantCrossing(t, s, operator.ID, stewardReadClient)
 		rec := f.get(t, s.handleListStewards, operator, "/api/v1/stewards?limit=10", nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		page := decodeData[StewardListPage](t, rec)
@@ -263,7 +263,7 @@ func TestRootStewardReads_ConnectionsAllAndResolve(t *testing.T) {
 
 	t.Run("connections/all includes them under a crossing", func(t *testing.T) {
 		operator := boundRootOperator("conn-granted")
-		grantCrossing(t, s, operator.ID, stewardReadMSP)
+		grantCrossing(t, s, operator.ID, stewardReadClient)
 		rec := f.get(t, s.handleListAllConnections, operator, "/api/v1/stewards/connections/all", nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		body := decodeData[struct {
@@ -319,7 +319,7 @@ func TestRootStewardReads_FleetHealthAnonymizesWalledOffTenants(t *testing.T) {
 
 	t.Run("under a crossing, client stewards are counted as visible rows", func(t *testing.T) {
 		operator := boundRootOperator("health-granted")
-		grantCrossing(t, s, operator.ID, stewardReadMSP)
+		grantCrossing(t, s, operator.ID, stewardReadClient)
 		rec := f.get(t, s.handleFleetHealth, operator, "/api/v1/fleet/health", nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		resp := decodeData[FleetHealthResponse](t, rec)
@@ -421,13 +421,13 @@ func TestRootStewardReads_TelemetryStream(t *testing.T) {
 
 	t.Run("refused with the challenge without a crossing", func(t *testing.T) {
 		rec := call(boundRootOperator("telemetry-none"), f.clientSteward)
-		assertCrossingChallenge(t, rec, stewardReadClient)
+		assertCrossingChallenge(t, rec, stewardReadMSP)
 		assert.False(t, reached, "the stream handler must not run")
 	})
 
 	t.Run("delivered with a crossing", func(t *testing.T) {
 		operator := boundRootOperator("telemetry-granted")
-		grantCrossing(t, s, operator.ID, stewardReadMSP)
+		grantCrossing(t, s, operator.ID, stewardReadClient)
 		rec := call(operator, f.clientSteward)
 		assert.Equal(t, http.StatusSwitchingProtocols, rec.Code)
 		assert.True(t, reached)
