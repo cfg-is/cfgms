@@ -151,6 +151,15 @@ secret store, for a tenant with no connection on file, or when the secret store 
 be read. There is no environment fallback. The workflow engine stops the module process
 when the step ends, on success and on error.
 
+**Signature binding by build.** In a signed build (one carrying a real CFGMS publisher
+key), the controller issues the token only to a module bundle carrying a valid `cfgms`
+publisher signature, verified against the build's CFGMS publisher identity every time a
+token is issued, so a bundle approved earlier is checked again. A bundle without one
+fails the step with an error naming the module and tenant, and no process starts. In
+unsigned OSS release builds (placeholder key) the token is issued on the bundle's
+manifest name and publisher alone, and the controller logs one warning at engine start
+that M365 module credentials are not signature-bound in this build.
+
 ### Tenant binding in the adapter
 
 A workflow module server created with `adapter.WithHandshakeHandler` binds the session
