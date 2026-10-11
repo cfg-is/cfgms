@@ -30,7 +30,7 @@ We've implemented a robust infrastructure setup system that:
 
 - Loads test environment from `.env.test`
 - Sets CI mode (`CI=1`) to enforce infrastructure requirements
-- Validates PostgreSQL and Gitea availability
+- Validates PostgreSQL and TimescaleDB availability
 - Provides clear error messages for missing services
 - Executes tests with proper environment variables
 
@@ -49,9 +49,6 @@ CFGMS_TEST_DB_HOST=localhost
 CFGMS_TEST_DB_PORT=5433
 CFGMS_TEST_DB_NAME=cfgms_test
 CFGMS_TEST_DB_PASSWORD=<generated>
-CFGMS_TEST_GITEA_URL=http://localhost:3001
-CFGMS_TEST_GITEA_USER=cfgms_test
-CFGMS_TEST_GITEA_PASSWORD=<generated>
 ```
 
 ## Usage Instructions
@@ -64,7 +61,7 @@ CFGMS_TEST_GITEA_PASSWORD=<generated>
 make test-integration-setup
 ```
 
-This starts Docker containers for PostgreSQL, TimescaleDB, and Gitea.
+This starts Docker containers for PostgreSQL and TimescaleDB. The images come from `ghcr.io/cfg-is/ci-mirror/`, which is public, so no registry login is needed.
 
 #### 2. Run Infrastructure Tests
 
@@ -107,12 +104,7 @@ This runs the complete validation suite including:
    - Database: `cfgms_test`
    - Status check: `pg_isready`
 
-2. **Gitea Test Instance**
-   - Container: `cfgms-git-server-test`
-   - Port: `3001:3000`
-   - Status check: Health endpoint
-
-3. **TimescaleDB Test Instance**
+2. **TimescaleDB Test Instance**
    - Container: `cfgms-timescaledb-test`
    - Port: `5434:5432`
    - Used for time-series logging tests
@@ -124,7 +116,6 @@ All tests that require infrastructure automatically inherit these variables:
 - `CI=1` - Forces infrastructure requirement mode
 - `CFGMS_TEST_INTEGRATION=1` - Enables integration test features
 - Database connection parameters from `.env.test`
-- Gitea connection parameters from `.env.test`
 
 ### HA cluster CA custody
 
@@ -177,16 +168,6 @@ seeds the CA into it before the nodes start. The vault token comes from
 2. Check PostgreSQL container status: `docker exec cfgms-postgres-test pg_isready`
 3. Regenerate test environment: `rm .env.test && make test-integration-setup`
 
-### Gitea Connectivity Issues
-
-**Error**: `Gitea test instance not available`
-
-**Solutions**:
-
-1. Check Gitea container: `docker logs cfgms-git-server-test`
-2. Verify health endpoint: `curl http://localhost:3001/api/healthz`
-3. Restart services: `make test-integration-setup`
-
 ## Integration with Existing Workflow
 
 ### Pre-Commit Validation
@@ -219,7 +200,7 @@ make test-with-real-storage  # Tests storage providers with real infrastructure
 
 CI pulls container images from Docker Hub, which limits unauthenticated pulls per IP address; GitHub-hosted runners share addresses, so a busy hour can fail the Docker test-infrastructure step with `toomanyrequests`. Every third-party image CI pulls is therefore mirrored to `ghcr.io/cfg-is/ci-mirror/`.
 
-> Status: the mirror is built and filled by this mechanism, but CI still pulls the upstream images. A follow-up story switches every CI image reference to the mirror.
+CI reads only from the mirror: every image reference in `docker-compose.test.yml`, in each Dockerfile `FROM` line and in each workflow `pull_with_retry` step is `ghcr.io/cfg-is/ci-mirror/<name>:<tag>@sha256:<digest>`, copied from the list below. No CI job pulls from Docker Hub.
 
 ### The image list
 
@@ -230,9 +211,9 @@ CI pulls container images from Docker Hub, which limits unauthenticated pulls pe
   mirror: redis
 ```
 
-It covers the `docker-compose.test.yml` services, every Dockerfile `FROM` image, and the workflow `pull_with_retry` pre-pulls. Every entry is digest-pinned; the destination is `ghcr.io/cfg-is/ci-mirror/<mirror>:<tag>`. Two tags of one image (`gitea/gitea:1.21.0`, `gitea/gitea:1.21`) are two entries sharing a mirror name.
+It covers the `docker-compose.test.yml` services, every Dockerfile `FROM` image, and the workflow `pull_with_retry` pre-pulls. Every entry is digest-pinned; the destination is `ghcr.io/cfg-is/ci-mirror/<mirror>:<tag>`. Two tags of one image (`golang:1.27.1-alpine3.24`, `golang:1.27.1-trixie`) are two entries sharing a mirror name. An image with no test that uses it does not belong in the list: the git storage provider was removed, so the `git-server-test` Gitea service was deleted; `git-server-ha` stays because the HA suite in `test/integration/ha` lists it in its required services.
 
-`scripts/mirror-ci-images.sh --check` fails when an image reference in the compose file, a Dockerfile or a workflow step is missing from the list or has a different digest, so the list cannot drift from what CI pulls. It runs in `ci-image-mirror.yml` before any copy, and `scripts/mirror-ci-images_test.sh` covers it.
+`scripts/mirror-ci-images.sh --check` is the gate that keeps CI on the mirror. It fails when an image reference in the compose file, a Dockerfile or a workflow step is outside `ghcr.io/cfg-is/ci-mirror/` (a new Docker Hub pull), is missing from the list, or has a digest that differs from its list entry. Build-stage names (`FROM builder`) and `${...}` variables are skipped. There is no image exception. It runs from `make check-architecture`, so a new Docker Hub pull fails the build, and in `ci-image-mirror.yml` before any copy. `scripts/mirror-ci-images_test.sh` covers it with fixture consumers that name a `docker.io` image and a mismatched digest.
 
 Out of the list on purpose: images CI pulls from a registry other than Docker Hub (the ZAP image behind `zaproxy/action-baseline` comes from `ghcr.io`), user-facing example compose files, and images CFGMS publishes.
 
@@ -249,9 +230,9 @@ The weekly `dependency-pin-check.yml` compares each listed digest with its tag's
 ### Adding a CI image
 
 1. Resolve the digest: `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`.
-2. Reference it as `<image>:<tag>@sha256:...` in the compose file, Dockerfile or workflow step.
-3. Add the two-line entry to `.github/ci-images.yml`.
-4. Run `scripts/mirror-ci-images.sh --check`. Merging to `develop` fills the mirror.
+2. Add the two-line entry to `.github/ci-images.yml` (`upstream` is the Docker Hub reference with its digest).
+3. Reference it as `ghcr.io/cfg-is/ci-mirror/<mirror>:<tag>@sha256:...` in the compose file, Dockerfile or workflow step.
+4. Run `scripts/mirror-ci-images.sh --check`. Merging to `develop` fills the mirror; set the new package public (below).
 
 ### One-time step after first publish
 

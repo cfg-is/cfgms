@@ -25,9 +25,6 @@ TIMESCALEDB_USER="cfgms_test"  # Unified user for both logging and HA tests
 TIMESCALEDB_DB="cfgms_ha_test"  # Unified database for both logging and HA tests
 TIMESCALEDB_PASSWORD="${CFGMS_TEST_TIMESCALEDB_PASSWORD:?ERROR: CFGMS_TEST_TIMESCALEDB_PASSWORD not set. Run: make test-integration-setup}"
 
-GITEA_URL="http://localhost:3001"
-GITEA_HEALTH_URL="http://localhost:3001/api/healthz"
-
 MAX_WAIT=120  # Maximum wait time in seconds
 WAIT_INTERVAL=5
 
@@ -41,12 +38,6 @@ check_postgres() {
 check_timescaledb() {
     echo -n "Checking TimescaleDB... "
     docker exec cfgms-timescaledb-test psql -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';" > /dev/null 2>&1
-}
-
-# Function to check Gitea
-check_gitea() {
-    echo -n "Checking Gitea... "
-    curl -s -f "$GITEA_HEALTH_URL" > /dev/null 2>&1
 }
 
 # Function to wait for service
@@ -111,33 +102,12 @@ else
     echo -e "${YELLOW}⚠️  TimescaleDB not available - logging tests will be skipped${NC}"
 fi
 
-if wait_for_service "Gitea" check_gitea; then
-    echo "📁 Testing Gitea functionality..."
-    
-    # Test API access
-    if curl -s "$GITEA_URL/api/v1/version" > /dev/null; then
-        echo -e "${GREEN}   ✅ Gitea API accessible${NC}"
-    else
-        echo -e "${YELLOW}   ⚠️  Gitea API not accessible${NC}"
-    fi
-    
-    # Check if test repositories exist
-    if curl -s -u "cfgms_test:${CFGMS_TEST_GITEA_PASSWORD}" "$GITEA_URL/api/v1/user/repos" | grep -q "cfgms-test"; then
-        echo -e "${GREEN}   ✅ Test repositories found${NC}"
-    else
-        echo -e "${YELLOW}   ⚠️  Test repositories not found - run setup script${NC}"
-    fi
-else
-    exit 1
-fi
-
 echo ""
 echo -e "${GREEN}🎉 All services are ready for testing!${NC}"
 echo ""
 echo "📋 Service Information:"
 echo "   PostgreSQL:  localhost:5433 (user: cfgms_test, db: cfgms_test)"
 echo "   TimescaleDB: localhost:5434 (user: cfgms_logger_test, db: cfgms_logs_test)"
-echo "   Gitea:       http://localhost:3001 (user: cfgms_test)"
 echo ""
 echo "🧪 Ready to run integration tests:"
 echo "   make test-with-real-storage"
