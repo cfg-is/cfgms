@@ -3,6 +3,10 @@
 package server
 
 import (
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 	"path/filepath"
 	"testing"
 
@@ -49,4 +53,35 @@ func TestHAFixtureSelectsClusterCertPath(t *testing.T) {
 	assert.NotEmpty(t, cfg.Certificate.ClusterCA.VaultKeyPath)
 	require.NoError(t, initialization.RequireClusterCAConfig(cfg))
 	assert.True(t, initialization.UsesClusterCA(cfg))
+}
+
+// TestOpenBaoTestHealthcheckTargetsBoundAddress parses the compose file and
+// asserts the openbao-test healthcheck probes the IPv4 address the dev listener
+// binds. "localhost" resolves to ::1 first in the image, where nothing listens,
+// so the service never reports healthy and the HA controllers never start.
+func TestOpenBaoTestHealthcheckTargetsBoundAddress(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "docker-compose.test.yml"))
+	require.NoError(t, err)
+
+	var compose struct {
+		Services struct {
+			OpenBao struct {
+				Environment map[string]string `yaml:"environment"`
+				Healthcheck struct {
+					Test []string `yaml:"test"`
+				} `yaml:"healthcheck"`
+			} `yaml:"openbao-test"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &compose))
+
+	svc := compose.Services.OpenBao
+	require.NotEmpty(t, svc.Healthcheck.Test, "openbao-test service must define a healthcheck")
+
+	listen := svc.Environment["BAO_DEV_LISTEN_ADDRESS"]
+	require.Equal(t, "0.0.0.0:8200", listen, "listener binds IPv4 only")
+
+	probe := strings.Join(svc.Healthcheck.Test, " ")
+	assert.Contains(t, probe, "http://127.0.0.1:8200/v1/sys/health")
+	assert.NotContains(t, probe, "localhost", "localhost resolves to ::1 first, which the IPv4 listener does not serve")
 }
