@@ -55,6 +55,17 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    old) and `WARN:claude_version` (host `claude` newer than the container's)
    health-check signals below are what prompt one.
 
+   **Reclaiming old images and cache:** each rebuild leaves the previous image and
+   its layers behind. You do not need to prune by hand — `agent-dispatch.sh
+   cleanup-stale` (run every PO cycle) prunes unused images and BuildKit cache
+   once disk usage reaches `CFGMS_AGENT_DOCKER_PRUNE_AT` (default `0.80`),
+   keeping anything newer than `CFGMS_AGENT_DOCKER_PRUNE_IMAGE_AGE` /
+   `CFGMS_AGENT_DOCKER_PRUNE_CACHE_AGE` (default `168h` each, so recent cache and
+   base layers survive Docker Hub's anonymous pull limit). It never touches an
+   image used by any container, `cfg-agent:latest`, or any volume, and skips
+   (`DOCKER_PRUNED:skipped=build_in_progress`) while a rebuild holds the rebuild
+   lock. Result line: `DOCKER_PRUNED:images=<bytes>:cache=<bytes>`.
+
    While waiting, proceed with steps 6-8 (they're independent).
 
 6. **Verify Claude credentials**: Agent containers bind-mount the host's `~/.claude/.credentials.json` directly, so no separate container-side login is needed.
