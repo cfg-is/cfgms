@@ -2,15 +2,13 @@
 // Copyright 2026 Jordan Ritz
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { cleanup, renderHook, waitFor } from '@testing-library/react'
 import {
-  bannerStorageKey,
   createAccessGrant,
   endCrossing,
   fetchActiveCrossings,
   parseCrossing,
   requestBreakGlass,
-  useCrossingBanner,
   useTenantCrossings,
 } from './useTenantCrossings.ts'
 import { onStepUpRequired } from '../api/client.ts'
@@ -190,82 +188,5 @@ describe('useTenantCrossings', () => {
     const { result } = renderHook(() => useTenantCrossings(null))
     expect(result.current.loading).toBe(false)
     expect(fetchMock).not.toHaveBeenCalled()
-  })
-})
-
-describe('useCrossingBanner persistence', () => {
-  function persist(over: Record<string, unknown> = {}) {
-    window.sessionStorage.setItem(
-      bannerStorageKey,
-      JSON.stringify({ tenantId: 'msp-a', crossingId: 'c-1', expiresAt: future(), reason: 'outage response', ...over }),
-    )
-  }
-
-  it('reappears after reload when GET confirms the crossing', async () => {
-    persist()
-    fetchMock.mockResolvedValueOnce(json(200, { data: [crossing()] }))
-    const { result } = renderHook(() => useCrossingBanner())
-    expect(result.current.entry?.crossingId).toBe('c-1')
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/tenants/msp-a/access-grants', expect.anything()))
-    expect(result.current.entry).not.toBeNull()
-    expect(window.sessionStorage.getItem(bannerStorageKey)).not.toBeNull()
-  })
-
-  it('is dropped when the crossing is expired', async () => {
-    persist()
-    fetchMock.mockResolvedValueOnce(json(200, { data: [crossing({ ExpiresAt: past() })] }))
-    const { result } = renderHook(() => useCrossingBanner())
-    await waitFor(() => expect(result.current.entry).toBeNull())
-    expect(window.sessionStorage.getItem(bannerStorageKey)).toBeNull()
-  })
-
-  it('is dropped when revoked', async () => {
-    persist()
-    fetchMock.mockResolvedValueOnce(json(200, { data: [crossing({ RevokedAt: past() })] }))
-    const { result } = renderHook(() => useCrossingBanner())
-    await waitFor(() => expect(result.current.entry).toBeNull())
-  })
-
-  it('is dropped when not found in the list', async () => {
-    persist()
-    fetchMock.mockResolvedValueOnce(json(200, { data: [crossing({ ID: 'other' })] }))
-    const { result } = renderHook(() => useCrossingBanner())
-    await waitFor(() => expect(result.current.entry).toBeNull())
-  })
-
-  it('is dropped on a 404 tenant', async () => {
-    persist()
-    fetchMock.mockResolvedValueOnce(json(404, { error: { code: 'TENANT_NOT_FOUND', message: 'tenant not found' } }))
-    const { result } = renderHook(() => useCrossingBanner())
-    await waitFor(() => expect(result.current.entry).toBeNull())
-  })
-
-  it('keeps the entry on a transient failure', async () => {
-    persist()
-    fetchMock.mockResolvedValueOnce(json(500, { error: { message: 'boom' } }))
-    const { result } = renderHook(() => useCrossingBanner())
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    await act(async () => {})
-    expect(result.current.entry).not.toBeNull()
-  })
-
-  it('ignores corrupt storage and survives an unavailable store', () => {
-    window.sessionStorage.setItem(bannerStorageKey, '{not json')
-    const { result } = renderHook(() => useCrossingBanner())
-    expect(result.current.entry).toBeNull()
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('adopt persists and clear removes', () => {
-    const { result } = renderHook(() => useCrossingBanner())
-    const c = parseCrossing(crossing())!
-    act(() => result.current.adopt(c))
-    expect(JSON.parse(window.sessionStorage.getItem(bannerStorageKey)!)).toMatchObject({
-      tenantId: 'msp-a',
-      crossingId: 'c-1',
-      reason: 'outage response',
-    })
-    act(() => result.current.clear())
-    expect(window.sessionStorage.getItem(bannerStorageKey)).toBeNull()
   })
 })

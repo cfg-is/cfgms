@@ -14,15 +14,11 @@
  * The controller serialises a crossing with snake_case keys (`expires_at`); the
  * parser also accepts the Go field names (`ExpiresAt`) and coerces every string.
  *
- * Banner persistence: a root operator cannot enumerate its own crossings (GET
- * access-grants on a walled tenant returns the crossing challenge), so the
- * break-glass response is kept in sessionStorage — non-secret — and
- * re-validated against the server on mount (useCrossingBanner).
- *
- * The justification is sent once and never held client-side beyond the
- * request; the only text kept is the server-echoed `reason` shown in the banner.
+ * The justification is sent once and never held client-side beyond the request.
+ * Nothing about a crossing is kept in browser storage; the shell's elevation
+ * banner reads the active feed (shell/useActiveCrossings.ts).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import { TenantApiError } from './useTenants.ts'
 
@@ -273,127 +269,4 @@ export function useTenantCrossings(tenantId: string | null, version = 0): UseTen
     error: current?.error ?? null,
     refetch,
   }
-}
-
-// ── Persisted banner state ────────────────────────────────────────────────────
-
-export interface BannerEntry {
-  tenantId: string
-  crossingId: string
-  expiresAt: string
-  reason: string
-}
-
-export const bannerStorageKey = 'cfgms.tenants.crossingBanner'
-
-export function readBannerEntry(): BannerEntry | null {
-  try {
-    const raw = window.sessionStorage.getItem('cfgms.tenants.crossingBanner')
-    if (raw === null) return null
-    const v = JSON.parse(raw) as Record<string, unknown>
-    if (typeof v.tenantId !== 'string' || typeof v.crossingId !== 'string' || typeof v.expiresAt !== 'string') {
-      return null
-    }
-    return {
-      tenantId: v.tenantId,
-      crossingId: v.crossingId,
-      expiresAt: v.expiresAt,
-      reason: typeof v.reason === 'string' ? v.reason : '',
-    }
-  } catch {
-    return null
-  }
-}
-
-function writeBannerEntry(entry: BannerEntry | null): void {
-  try {
-    if (entry === null) window.sessionStorage.removeItem('cfgms.tenants.crossingBanner')
-    else window.sessionStorage.setItem('cfgms.tenants.crossingBanner', JSON.stringify(entry))
-  } catch {
-    // Storage unavailable (private mode / quota): the banner just won't survive a reload.
-  }
-}
-
-export function entryFromCrossing(c: Crossing): BannerEntry {
-  return { tenantId: c.tenantId, crossingId: c.id, expiresAt: c.expiresAt, reason: c.justification }
-}
-
-export interface UseCrossingBannerResult {
-  entry: BannerEntry | null
-  /** Adopt a freshly invoked break-glass crossing and persist it. */
-  adopt: (c: Crossing) => void
-  /** Re-check the crossing with the server; drops the entry unless still active. */
-  revalidate: () => void
-  /** Drop the entry (after End session). */
-  clear: () => void
-}
-
-/**
- * Banner state for the operator's own active break-glass crossing. On mount a
- * persisted entry is re-validated with GET access-grants and dropped when the
- * crossing is expired, revoked or not found.
- */
-export function useCrossingBanner(): UseCrossingBannerResult {
-  const [entry, setEntry] = useState<BannerEntry | null>(() => readBannerEntry())
-  const entryRef = useRef(entry)
-  useEffect(() => {
-    entryRef.current = entry
-  }, [entry])
-
-  const drop = useCallback(() => {
-    writeBannerEntry(null)
-    setEntry(null)
-  }, [])
-
-  const validate = useCallback(
-    (target: BannerEntry, isCancelled: () => boolean, dropOnError: boolean) => {
-      listCrossings(target.tenantId).then(
-        (list) => {
-          if (isCancelled()) return
-          const match = list.find((c) => c.id === target.crossingId)
-          if (match === undefined || !isCrossingActive(match, Date.now())) {
-            drop()
-            return
-          }
-          const next = entryFromCrossing(match)
-          next.reason = match.justification || target.reason
-          writeBannerEntry(next)
-          setEntry(next)
-        },
-        (cause: unknown) => {
-          if (isCancelled()) return
-          // Not found → gone. On mount any other failure (network blip) keeps the
-          // entry; at countdown zero the entry is already expired, so it goes too.
-          if (dropOnError || (cause instanceof TenantApiError && cause.status === 404)) drop()
-        },
-      )
-    },
-    [drop],
-  )
-
-  useEffect(() => {
-    const persisted = readBannerEntry()
-    if (persisted === null) return
-    let cancelled = false
-    validate(persisted, () => cancelled, false)
-    return () => {
-      cancelled = true
-    }
-  }, [validate])
-
-  const adopt = useCallback((c: Crossing) => {
-    const next = entryFromCrossing(c)
-    writeBannerEntry(next)
-    setEntry(next)
-  }, [])
-
-  const revalidate = useCallback(() => {
-    const current = entryRef.current
-    if (current === null) return
-    // Past its expiry by the server's own timestamp: the refetch decides, and
-    // anything not confirmed active is dropped.
-    validate(current, () => false, true)
-  }, [validate])
-
-  return { entry, adopt, revalidate, clear: drop }
 }

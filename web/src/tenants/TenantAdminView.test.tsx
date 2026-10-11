@@ -1132,7 +1132,7 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     fireEvent.click(screen.getByTestId('crossing-submit-btn'))
   }
 
-  it('submits break-glass as a JSON body, then shows the banner and ends the session', async () => {
+  it('submits break-glass as a JSON body, then closes the prompt and reloads the tree', async () => {
     let invoked = false
     let ended = false
     renderSession(rootSession, (url, init) => {
@@ -1163,17 +1163,9 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     expect(screen.getByTestId('crossing-prompt')).toBeInTheDocument()
     fillPrompt()
 
-    const banner = await screen.findByTestId('crossing-banner')
-    expect(banner).toHaveTextContent('msp-a')
-    expect(screen.getByTestId('crossing-banner-reason')).toHaveTextContent('outage response')
-    expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByTestId('crossing-prompt')).not.toBeInTheDocument())
     // The crossing exposes the subtree: the tree reloads and the boundary state goes.
     await waitFor(() => expect(screen.queryByTestId('boundary-row')).not.toBeInTheDocument())
-
-    fireEvent.click(screen.getByTestId('crossing-end-btn'))
-    await waitFor(() => expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument())
-    expect(ended).toBe(true)
-    expect(window.sessionStorage.getItem('cfgms.tenants.crossingBanner')).toBeNull()
   })
 
   it('a 403 on break-glass renders an inline error, keeps the prompt open and shows no banner', async () => {
@@ -1191,50 +1183,6 @@ describe('TenantAdminView — break-glass, banner and support access', () => {
     fillPrompt()
     expect(await screen.findByTestId('crossing-error')).toHaveTextContent('cannot be invoked on the root tenant')
     expect(screen.getByTestId('crossing-prompt')).toBeInTheDocument()
-    expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument()
-  })
-
-  it('restores the banner after a reload when GET confirms the crossing', async () => {
-    fetchMock.mockImplementation((input) => {
-      const url = String(input)
-      if (url.endsWith('/api/v1/tenants')) return Promise.resolve(makeTenantsResponse([makeTenant({ id: 'root', name: 'root' })]))
-      if (url.endsWith('/api/v1/tenants/msp-a/access-grants')) return Promise.resolve(jsonResponse(200, { data: [crossingBody()] }))
-      return Promise.resolve(jsonResponse(404, {}))
-    })
-    window.sessionStorage.setItem(
-      'cfgms.tenants.crossingBanner',
-      JSON.stringify({ tenantId: 'msp-a', crossingId: 'c-1', expiresAt: future(), reason: 'outage response' }),
-    )
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <TenantAdminView />
-        </AuthProvider>
-      </MemoryRouter>,
-    )
-    expect(await screen.findByTestId('crossing-banner')).toHaveTextContent('msp-a')
-    await waitFor(() =>
-      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/api/v1/tenants/msp-a/access-grants'))).toBe(true),
-    )
-    expect(screen.getByTestId('crossing-banner')).toBeInTheDocument()
-  })
-
-  it('drops the persisted banner when the crossing is expired', async () => {
-    fetchMock.mockImplementation((input) => {
-      const url = String(input)
-      if (url.endsWith('/api/v1/tenants')) return Promise.resolve(makeTenantsResponse([makeTenant()]))
-      if (url.endsWith('/api/v1/tenants/msp-a/access-grants')) {
-        return Promise.resolve(jsonResponse(200, { data: [crossingBody({ ExpiresAt: '2020-01-01T00:00:00Z' })] }))
-      }
-      return Promise.resolve(jsonResponse(404, {}))
-    })
-    window.sessionStorage.setItem(
-      'cfgms.tenants.crossingBanner',
-      JSON.stringify({ tenantId: 'msp-a', crossingId: 'c-1', expiresAt: future(), reason: 'x' }),
-    )
-    renderView()
-    await waitFor(() => expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument())
-    expect(window.sessionStorage.getItem('cfgms.tenants.crossingBanner')).toBeNull()
   })
 
   it('links the MSP row action to the Support access page', async () => {

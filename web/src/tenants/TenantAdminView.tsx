@@ -50,9 +50,7 @@ import {
   type TenantInfo,
 } from './useTenants.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
-import { useCrossingBanner, type Crossing } from './useTenantCrossings.ts'
 import CrossingPrompt from './CrossingPrompt.tsx'
-import CrossingBanner from './CrossingBanner.tsx'
 
 // ── Tree building ──────────────────────────────────────────────────────────────
 
@@ -713,7 +711,6 @@ export default function TenantAdminView() {
   const [dualControlLockedIds, setDualControlLockedIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   )
-  const banner = useCrossingBanner()
   const [crossingTarget, setCrossingTarget] = useState<string | null>(null)
   // Clock for the hold countdowns, re-read every minute so a row approaching
   // eligibility updates without a refetch.
@@ -834,15 +831,9 @@ export default function TenantAdminView() {
     setCrossingTarget(tenantId)
   }
 
-  function handleBreakGlassInvoked(crossing: Crossing) {
-    banner.adopt(crossing)
+  function handleBreakGlassInvoked() {
     setCrossingTarget(null)
     // The crossing exposes the tenant's subtree; reload the tree.
-    retry()
-  }
-
-  function handleBannerEnded() {
-    banner.clear()
     retry()
   }
 
@@ -857,10 +848,6 @@ export default function TenantAdminView() {
         <h1>Tenants</h1>
         <p>Tenant hierarchy, cascade suspension, and the delete pipeline.</p>
       </div>
-
-      {banner.entry !== null && (
-        <CrossingBanner entry={banner.entry} onEnded={handleBannerEnded} onExpired={banner.revalidate} />
-      )}
 
       <section className="panel">
         <div className="ptool">
