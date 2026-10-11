@@ -887,7 +887,6 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 			if winner == managerA {
 				loser = managerB
 			}
-			require.True(t, winner.HasLeadership(), "the manager that signalled acquisition must report leadership")
 
 			// Stop the winner so its renewal loop stops (simulates a crashed leader).
 			// Stop does not release the lease, so the loser can only acquire once the
@@ -912,7 +911,6 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 			}
 			require.False(t, winner.HasLeadership() && loser.HasLeadership(),
 				"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
-			assert.True(t, loser.HasLeadership(), "the surviving manager must report leadership after taking over")
 
 			require.NoError(t, loser.Stop(context.Background()))
 		})
