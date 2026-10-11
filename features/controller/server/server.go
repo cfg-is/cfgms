@@ -431,26 +431,24 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 			if store == nil {
 				return
 			}
-			rec, getErr := store.GetSteward(context.Background(), sid)
-			if getErr != nil {
-				logger.Warn("Heartbeat recovery: failed to read current durable status",
-					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(getErr.Error()))
-				return
-			}
 			// Only promote to Active when currently Registered or Lost; never
 			// overwrite Deregistered, Archived, Dormant, or Revoked (Issue #2463).
-			if rec.Status == business.StewardStatusRegistered || rec.Status == business.StewardStatusLost {
-				if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusActive); updErr != nil {
-					logger.Warn("Heartbeat recovery: failed to persist active status",
-						"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
-				}
+			// The check is atomic with the write (Issue #4851).
+			if _, updErr := store.TransitionStewardStatus(context.Background(), sid, business.StewardStatusActive,
+				business.StewardStatusRegistered, business.StewardStatusLost); updErr != nil {
+				logger.Warn("Heartbeat recovery: failed to persist active status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
 			}
 		} else {
 			logger.Warn("Steward heartbeat failed", "steward_id", logging.SanitizeLogValue(sid), "status", status.Status)
 			if store == nil {
 				return
 			}
-			if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusLost); updErr != nil {
+			// Lost is only a valid successor of registered/active; a revoked,
+			// archived or deregistered record must keep its operator-set status
+			// (Issue #4851).
+			if _, updErr := store.TransitionStewardStatus(context.Background(), sid, business.StewardStatusLost,
+				business.StewardStatusRegistered, business.StewardStatusActive); updErr != nil {
 				logger.Warn("Heartbeat lost: failed to persist lost status",
 					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
 			}

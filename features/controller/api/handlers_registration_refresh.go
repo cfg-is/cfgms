@@ -781,7 +781,11 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 	// and only converges via slow background reconciliation
 	// (Issue #2098: TestFleetRegistrationRefresh/Archived).
 	if s.stewardStore != nil {
-		if err := s.stewardStore.UpdateStewardStatus(ctx, record.ID, business.StewardStatusRegistered); err != nil {
+		// Never resurrect a revoked or deregistered record that changed after the
+		// lifecycle gate read it (Issue #4851).
+		if _, err := s.stewardStore.TransitionStewardStatus(ctx, record.ID, business.StewardStatusRegistered,
+			business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost,
+			business.StewardStatusArchived, business.StewardStatusDormant); err != nil {
 			s.logger.Warn("Failed to persist steward status after refresh cert issuance",
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}

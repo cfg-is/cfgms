@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -292,6 +292,41 @@ func (s *DatabaseStewardStore) UpdateStewardStatus(ctx context.Context, stewardI
 		return business.ErrStewardNotFound
 	}
 	return tx.Commit()
+}
+
+// TransitionStewardStatus applies status only if the stored status is in from.
+// The check is part of the UPDATE's WHERE clause, so it is atomic with the write.
+func (s *DatabaseStewardStore) TransitionStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus, from ...business.StewardStatus) (bool, error) {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return false, err
+	}
+	fromStrs := make([]string, len(from))
+	for i, f := range from {
+		fromStrs[i] = string(f)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("database: failed to begin transition steward status tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return false, fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records SET status = $2, last_seen = $3
+		WHERE id = $1 AND status = ANY($4)`,
+		stewardID, string(status), time.Now().UTC(), pq.Array(fromStrs))
+	if err != nil {
+		return false, fmt.Errorf("database: failed to transition steward status %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("database: failed to commit steward status transition: %w", err)
+	}
+	return n > 0, nil
 }
 
 // SetStewardHidden sets the operator-controlled visibility flag for the given steward.

@@ -91,13 +91,11 @@ func (t *HealthTracker) UpdateHeartbeat(ctx context.Context, stewardID string) e
 		return err
 	}
 	// Promote registered → active on first heartbeat
-	rec, err := t.store.GetSteward(ctx, stewardID)
-	if err == nil && rec.Status == business.StewardStatusRegistered {
-		if statusErr := t.store.UpdateStewardStatus(ctx, stewardID, business.StewardStatusActive); statusErr != nil {
-			t.logger.Warn("Failed to promote steward to active",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", statusErr)
-		}
+	if _, statusErr := t.store.TransitionStewardStatus(ctx, stewardID, business.StewardStatusActive,
+		business.StewardStatusRegistered); statusErr != nil {
+		t.logger.Warn("Failed to promote steward to active",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(statusErr.Error()))
 	}
 	// Refresh in-memory heartbeat time
 	if m, ok := t.metrics.Load(stewardID); ok {
@@ -112,7 +110,11 @@ func (t *HealthTracker) UpdateHeartbeat(ctx context.Context, stewardID string) e
 // MarkLost marks a steward as lost (last_seen exceeded the configured TTL).
 func (t *HealthTracker) MarkLost(ctx context.Context, stewardID string) error {
 	t.logger.Warn("Marking steward as lost", "steward_id", logging.SanitizeLogValue(stewardID))
-	return t.store.UpdateStewardStatus(ctx, stewardID, business.StewardStatusLost)
+	// Only registered/active stewards become lost; an operator-set status such
+	// as revoked is never overwritten (Issue #4851).
+	_, err := t.store.TransitionStewardStatus(ctx, stewardID, business.StewardStatusLost,
+		business.StewardStatusRegistered, business.StewardStatusActive)
+	return err
 }
 
 // DeregisterSteward marks a steward as deregistered. Records are retained for audit.
