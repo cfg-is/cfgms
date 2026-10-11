@@ -35,6 +35,19 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 	tenants.Handle("/{id}/admin-contacts",
 		s.requirePermission("tenant", "update")(http.HandlerFunc(s.handlePutTenantAdminContacts))).Methods("PUT")
 
+	// M365 connections on client tenants (Issue #4551). Every route names the tenant in
+	// {id}, so the ADR-025 root boundary in requirePermission applies to it.
+	tenants.Handle("/{id}/m365-connection",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handlePutTenantM365Connection))).Methods("PUT")
+	tenants.Handle("/{id}/m365-connection",
+		s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenantM365Connection))).Methods("GET")
+	tenants.Handle("/{id}/m365-connection",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleDeleteTenantM365Connection))).Methods("DELETE")
+	tenants.Handle("/{id}/m365-gdap-customers",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleM365GDAPCustomers))).Methods("POST")
+	tenants.Handle("/{id}/m365-gdap-links",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleM365GDAPLinks))).Methods("POST")
+
 	// Tenant deletion pipeline (ADR-027 Decisions 3-4, Issue #3182).
 	// POST requests deletion; DELETE cancels; GET reads the pending state;
 	// POST /approve is the dual-control terminal approval step.

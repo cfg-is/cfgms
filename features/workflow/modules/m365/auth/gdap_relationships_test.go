@@ -377,3 +377,51 @@ func TestGDAPClient_getPartnerCenterToken_concurrentCallsNoraceCondition(t *test
 		assert.NoError(t, err, "goroutine %d must not error", i)
 	}
 }
+
+// TestDiscoverGDAPCustomers_ExplicitCredentialsNoStore verifies that discovery works
+// with explicit client credentials and no credential store, and that the token is
+// held in memory only.
+func TestDiscoverGDAPCustomers_ExplicitCredentialsNoStore(t *testing.T) {
+	var tokenCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/partner-1/oauth2/v2.0/token" {
+			atomic.AddInt32(&tokenCalls, 1)
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, "app-1", r.PostForm.Get("client_id"))
+			assert.Equal(t, "s3cret", r.PostForm.Get("client_secret"))
+			_ = json.NewEncoder(w).Encode(tokenResponse("pc-token", 3600))
+			return
+		}
+		assert.Equal(t, "Bearer pc-token", r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": []map[string]interface{}{
+				{
+					"id": "rel-1", "status": "active",
+					"customer":    map[string]string{"tenantId": "cust-1", "displayName": "Customer One"},
+					"endDateTime": time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+				},
+				{
+					"id": "rel-2", "status": "expired",
+					"customer":    map[string]string{"tenantId": "cust-2", "displayName": "Customer Two"},
+					"endDateTime": time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	resolver := NewGDAPRelationshipResolver(nil, "partner-1")
+	resolver.SetEndpoints(srv.URL, srv.URL)
+	resolver.SetClientCredentials("app-1", "s3cret")
+
+	rels, err := resolver.DiscoverGDAPCustomers(context.Background())
+	require.NoError(t, err)
+	require.Len(t, rels, 1)
+	assert.Equal(t, "cust-1", rels[0].CustomerTenantID)
+
+	// A second call reuses the in-memory token.
+	_, err = resolver.DiscoverGDAPCustomers(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&tokenCalls))
+}

@@ -446,7 +446,10 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 // the partner tenant ID as the key. The token is cached in memory and also persisted
 // back to the credential store for reuse across process restarts.
 func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*AccessToken, error) {
-	if c.credStore == nil {
+	// Explicit client credentials need no credential store: the token is then held
+	// in memory only and nothing is read from or written to a store.
+	explicitCreds := c.clientID != "" && c.clientSecret != ""
+	if c.credStore == nil && !explicitCreds {
 		return nil, fmt.Errorf("credential store not configured for GDAP client")
 	}
 
@@ -460,7 +463,9 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*AccessToken, e
 	c.tokenMu.Unlock()
 
 	// Check persisted token (valid across process restarts).
-	if stored, err := c.credStore.GetToken(c.persistedTokenKey()); err == nil && stored != nil &&
+	if c.credStore == nil {
+		// No store: fall through to a fresh token request.
+	} else if stored, err := c.credStore.GetToken(c.persistedTokenKey()); err == nil && stored != nil &&
 		time.Now().Before(stored.ExpiresAt.Add(-60*time.Second)) {
 		c.tokenMu.Lock()
 		c.cachedToken = stored
@@ -566,6 +571,9 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*AccessToken, e
 	c.tokenMu.Unlock()
 
 	// Persist to credential store for cross-process reuse (best-effort).
+	if c.credStore == nil {
+		return token, nil
+	}
 	if storeErr := c.credStore.StoreToken(c.persistedTokenKey(), token); storeErr != nil {
 		c.logger.Warn("failed to persist Partner Center token to credential store",
 			"tenant_id", logging.SanitizeLogValue(c.partnerTenantID),
