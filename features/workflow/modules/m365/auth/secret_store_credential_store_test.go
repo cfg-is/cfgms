@@ -336,3 +336,22 @@ func TestSecretStoreCredentialStore_ReadRejectsForeignTenantRecord(t *testing.T)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTenantMismatch)
 }
+
+func TestSecretStoreCredentialStore_DeleteConfig(t *testing.T) {
+	cs := newTestCredentialStore(t)
+
+	require.NoError(t, cs.StoreConfig("root/msp/client", &OAuth2Config{ClientID: "a", ClientSecret: "b", TenantID: "t"}))
+	require.NoError(t, cs.StoreToken("root/msp/client", &AccessToken{Token: "tok", ExpiresAt: time.Now().Add(time.Hour)}))
+
+	require.NoError(t, cs.DeleteConfig("root/msp/client"))
+	_, err := cs.GetConfig("root/msp/client")
+	assert.ErrorIs(t, err, interfaces.ErrSecretNotFound)
+	_, err = cs.GetToken("root/msp/client")
+	assert.ErrorIs(t, err, interfaces.ErrSecretNotFound)
+
+	// No config: not an error.
+	assert.NoError(t, cs.DeleteConfig("root/msp/other"))
+	// Tenant ID validation applies.
+	assert.Error(t, cs.DeleteConfig(""))
+	assert.Error(t, cs.DeleteConfig("../x"))
+}

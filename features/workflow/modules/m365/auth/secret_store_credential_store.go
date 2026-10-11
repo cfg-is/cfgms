@@ -138,6 +138,67 @@ func userContextKey(tenantID, userID string) string {
 	return "m365/" + sanitizeSegment(tenantID) + "/user_context/" + sanitizeSegment(userID)
 }
 
+// The controller's secret store (the sops provider) keeps a secret's key as one
+// storage name, so a key holding "/" is rejected on write, and its GetSecret and
+// DeleteSecret take a combined "<tenant_id>/<key>" reference that cannot address the
+// legacy "m365/<tenant>/<kind>" keys. A store implementing
+// secretsif.TenantSecretAccessor is addressed by the explicit (tenant, key) pair with
+// the flat keys below instead; the tenant is then part of the address, not the key.
+// Any other store keeps the legacy keys, which carry the tenant themselves.
+
+func (s *SecretStoreCredentialStore) tenantAccessor() (secretsif.TenantSecretAccessor, bool) {
+	acc, ok := s.store.(secretsif.TenantSecretAccessor)
+	return acc, ok
+}
+
+// flatSegment is sanitizeSegment with "." encoded too, so a flat key never ends in
+// the "." a leaf-name validator rejects.
+func flatSegment(s string) string {
+	return strings.ReplaceAll(url.PathEscape(s), ".", "%2E")
+}
+
+func (s *SecretStoreCredentialStore) tokenKey(tenantID string) string {
+	if _, ok := s.tenantAccessor(); ok {
+		return "m365-token"
+	}
+	return tokenKey(tenantID)
+}
+
+func (s *SecretStoreCredentialStore) configKey(tenantID string) string {
+	if _, ok := s.tenantAccessor(); ok {
+		return "m365-config"
+	}
+	return configKey(tenantID)
+}
+
+func (s *SecretStoreCredentialStore) delegatedKey(tenantID, userID string) string {
+	if _, ok := s.tenantAccessor(); ok {
+		return "m365-delegated-" + flatSegment(userID)
+	}
+	return delegatedKey(tenantID, userID)
+}
+
+func (s *SecretStoreCredentialStore) userContextKey(tenantID, userID string) string {
+	if _, ok := s.tenantAccessor(); ok {
+		return "m365-user-context-" + flatSegment(userID)
+	}
+	return userContextKey(tenantID, userID)
+}
+
+func (s *SecretStoreCredentialStore) getSecret(tenantID, key string) (*secretsif.Secret, error) {
+	if acc, ok := s.tenantAccessor(); ok {
+		return acc.GetTenantSecret(context.Background(), tenantID, key)
+	}
+	return s.store.GetSecret(context.Background(), key)
+}
+
+func (s *SecretStoreCredentialStore) deleteSecret(tenantID, key string) error {
+	if acc, ok := s.tenantAccessor(); ok {
+		return acc.DeleteTenantSecret(context.Background(), tenantID, key)
+	}
+	return s.store.DeleteSecret(context.Background(), key)
+}
+
 // isNotFoundError returns true when err indicates the secret does not exist.
 // The steward provider does not wrap ErrSecretNotFound in DeleteSecret, so we
 // also check the error message as a fallback.
@@ -159,7 +220,7 @@ func (s *SecretStoreCredentialStore) StoreToken(tenantID string, token *AccessTo
 		return fmt.Errorf("marshal token: %w", err)
 	}
 	return s.store.StoreSecret(context.Background(), &secretsif.SecretRequest{
-		Key:       tokenKey(tenantID),
+		Key:       s.tokenKey(tenantID),
 		Value:     string(data),
 		TenantID:  tenantID,
 		CreatedBy: "m365-auth",
@@ -170,7 +231,7 @@ func (s *SecretStoreCredentialStore) GetToken(tenantID string) (*AccessToken, er
 	if err := validateTenantID(tenantID); err != nil {
 		return nil, err
 	}
-	secret, err := s.store.GetSecret(context.Background(), tokenKey(tenantID))
+	secret, err := s.getSecret(tenantID, s.tokenKey(tenantID))
 	if err != nil {
 		if errors.Is(err, secretsif.ErrSecretNotFound) {
 			return nil, fmt.Errorf("no token for tenant %s: %w", tenantID, secretsif.ErrSecretNotFound)
@@ -191,7 +252,7 @@ func (s *SecretStoreCredentialStore) DeleteToken(tenantID string) error {
 	if err := validateTenantID(tenantID); err != nil {
 		return err
 	}
-	err := s.store.DeleteSecret(context.Background(), tokenKey(tenantID))
+	err := s.deleteSecret(tenantID, s.tokenKey(tenantID))
 	if err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("delete token: %w", err)
 	}
@@ -209,18 +270,32 @@ func (s *SecretStoreCredentialStore) StoreConfig(tenantID string, config *OAuth2
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	return s.store.StoreSecret(context.Background(), &secretsif.SecretRequest{
-		Key:       configKey(tenantID),
+		Key:       s.configKey(tenantID),
 		Value:     string(data),
 		TenantID:  tenantID,
 		CreatedBy: "m365-auth",
 	})
 }
 
+// DeleteConfig removes the stored OAuth2 configuration for a CFGMS tenant and the
+// token minted from it, so a stale token is not served after the connection is
+// removed. A tenant with no stored config is not an error.
+func (s *SecretStoreCredentialStore) DeleteConfig(tenantID string) error {
+	if err := validateTenantID(tenantID); err != nil {
+		return err
+	}
+	err := s.deleteSecret(tenantID, s.configKey(tenantID))
+	if err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("delete config: %w", err)
+	}
+	return s.DeleteToken(tenantID)
+}
+
 func (s *SecretStoreCredentialStore) GetConfig(tenantID string) (*OAuth2Config, error) {
 	if err := validateTenantID(tenantID); err != nil {
 		return nil, err
 	}
-	secret, err := s.store.GetSecret(context.Background(), configKey(tenantID))
+	secret, err := s.getSecret(tenantID, s.configKey(tenantID))
 	if err != nil {
 		if errors.Is(err, secretsif.ErrSecretNotFound) {
 			return nil, fmt.Errorf("no config for tenant %s: %w", tenantID, secretsif.ErrSecretNotFound)
@@ -248,7 +323,7 @@ func (s *SecretStoreCredentialStore) StoreDelegatedToken(tenantID, userID string
 		return fmt.Errorf("marshal delegated token: %w", err)
 	}
 	return s.store.StoreSecret(context.Background(), &secretsif.SecretRequest{
-		Key:       delegatedKey(tenantID, userID),
+		Key:       s.delegatedKey(tenantID, userID),
 		Value:     string(data),
 		TenantID:  tenantID,
 		CreatedBy: "m365-auth",
@@ -259,7 +334,7 @@ func (s *SecretStoreCredentialStore) GetDelegatedToken(tenantID, userID string) 
 	if err := validateTenantID(tenantID); err != nil {
 		return nil, err
 	}
-	secret, err := s.store.GetSecret(context.Background(), delegatedKey(tenantID, userID))
+	secret, err := s.getSecret(tenantID, s.delegatedKey(tenantID, userID))
 	if err != nil {
 		if errors.Is(err, secretsif.ErrSecretNotFound) {
 			return nil, fmt.Errorf("no delegated token for user %s in tenant %s: %w", userID, tenantID, secretsif.ErrSecretNotFound)
@@ -280,7 +355,7 @@ func (s *SecretStoreCredentialStore) DeleteDelegatedToken(tenantID, userID strin
 	if err := validateTenantID(tenantID); err != nil {
 		return err
 	}
-	err := s.store.DeleteSecret(context.Background(), delegatedKey(tenantID, userID))
+	err := s.deleteSecret(tenantID, s.delegatedKey(tenantID, userID))
 	if err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("delete delegated token: %w", err)
 	}
@@ -296,7 +371,7 @@ func (s *SecretStoreCredentialStore) StoreUserContext(tenantID, userID string, u
 		return fmt.Errorf("marshal user context: %w", err)
 	}
 	return s.store.StoreSecret(context.Background(), &secretsif.SecretRequest{
-		Key:       userContextKey(tenantID, userID),
+		Key:       s.userContextKey(tenantID, userID),
 		Value:     string(data),
 		TenantID:  tenantID,
 		CreatedBy: "m365-auth",
@@ -307,7 +382,7 @@ func (s *SecretStoreCredentialStore) GetUserContext(tenantID, userID string) (*U
 	if err := validateTenantID(tenantID); err != nil {
 		return nil, err
 	}
-	secret, err := s.store.GetSecret(context.Background(), userContextKey(tenantID, userID))
+	secret, err := s.getSecret(tenantID, s.userContextKey(tenantID, userID))
 	if err != nil {
 		if errors.Is(err, secretsif.ErrSecretNotFound) {
 			return nil, fmt.Errorf("no user context for user %s in tenant %s: %w", userID, tenantID, secretsif.ErrSecretNotFound)
@@ -328,7 +403,7 @@ func (s *SecretStoreCredentialStore) DeleteUserContext(tenantID, userID string) 
 	if err := validateTenantID(tenantID); err != nil {
 		return err
 	}
-	err := s.store.DeleteSecret(context.Background(), userContextKey(tenantID, userID))
+	err := s.deleteSecret(tenantID, s.userContextKey(tenantID, userID))
 	if err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("delete user context: %w", err)
 	}

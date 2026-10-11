@@ -68,3 +68,21 @@ cfg tenant end-crossing client-1 <crossing-id>
 - **Confirmation.** `break-glass`, `approve-break-glass`, `grant` and `end-crossing` print what they will do and prompt `Proceed? [y/N]`. `--yes` (`-y`) skips the prompt. With no terminal and no `--yes` they refuse, send no request and exit non-zero. `crossings` is read-only and never prompts.
 - **Listing.** `crossings` prints active and pending records with their id, kind, reason category, status and expiry, or `no active crossings` and exits 0 when there are none. `--json` prints every record the server returned, including expired and ended ones.
 - **Errors.** The server's message is printed and the command exits non-zero: `401` (session expired, or step-up not completed), `403` (for example `NOT_ROOT_SCOPED`, `ROOT_SCOPED_CANNOT_GRANT`), `404` (tenant or crossing not found), `400` (`INVALID_REASON_CATEGORY`, `INVALID_DURATION`, `JUSTIFICATION_REQUIRED`), `SAME_APPROVER` and `NOT_PENDING` when approving. When access to a tenant is refused because no crossing is active, the message suggests `cfg tenant break-glass`.
+
+## M365 connection
+
+A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connection exists only on an existing client tenant**, a tenant whose parent is an MSP tenant (a direct child of the root tenant). The root tenant, an MSP tenant, a tenant that does not exist, a tenant below a client tenant and a client tenant that is not a child of the MSP named in the request are all refused before anything is written. No command creates a tenant, an account or a consent record. Setup is described in the [M365 Integration Guide](../M365_INTEGRATION_GUIDE.md#part-2-connecting-client-tenants).
+
+| Command | What it does |
+|---------|--------------|
+| `cfg tenant m365 set <client-tenant> --app-id <id> --m365-tenant <directory-id> --client-secret-stdin [--replace] [--yes]` | Stores a direct-mode connection on one client tenant |
+| `cfg tenant m365 get <client-tenant>` | Shows the mode, app ID, M365 tenant, partner tenant, GDAP roles and `client secret: set`; never the secret |
+| `cfg tenant m365 delete <client-tenant> [--yes]` | Removes the stored connection and token |
+| `cfg tenant m365 gdap-customers <msp-tenant> --partner-tenant <id> --app-id <id> --client-secret-stdin` | Lists the MSP's active GDAP customers with `CUSTOMER TENANT`, `NAME`, `STATUS`, `EXPIRES` and `LINKED TO` |
+| `cfg tenant m365 gdap-link <msp-tenant> --partner-tenant <id> --app-id <id> --client-secret-stdin --link <customer>=<client-tenant> [--link ...] [--gdap-role <role> ...] [--replace] [--yes]` | Links many GDAP customers to existing client tenants in one all-or-nothing request |
+
+- **Secrets.** No flag accepts a secret value. `--client-secret-stdin` reads the secret as one line from standard input. The secret is never echoed, logged or written to an audit entry.
+- **Confirmation.** `delete`, `set --replace` and `gdap-link` print what they will change and prompt `Proceed? [y/N]`. `--yes` (`-y`) skips the prompt. With no terminal and no `--yes` they refuse, send no request and exit non-zero. A secret piped on stdin leaves no terminal, so a confirm-gated command that reads the secret from stdin needs `--yes`.
+- **Output.** `--json` prints the response data as received.
+- **Permissions.** `set`, `delete`, `gdap-customers` and `gdap-link` need `tenant:manage`; `get` needs `tenant:read`. A root-scoped operator needs an active crossing into the MSP.
+- **Audit.** Each write emits one event per affected client tenant: `m365.connection.set`, `m365.connection.delete` or `m365.gdap.link`.
