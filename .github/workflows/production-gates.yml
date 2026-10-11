@@ -559,7 +559,7 @@ jobs:
     # It is excluded from the step above because it cannot finish inside that
     # step's 10-minute `go test -timeout`. A test binary killed by that timeout
     # never runs TestMain's cleanup or StopCluster, so its three controllers,
-    # three stewards, minio and ha-ca-init stay up on the shared cfgms-test
+    # three stewards, the S3 test store and ha-ca-init stay up on the shared cfgms-test
     # network — and the E2E `go test` that follows in the same `sh -c` block is
     # the command whose exit status becomes this required check. The leak, not
     # the timeout, is what would turn the gate red.

@@ -51,8 +51,8 @@ const sharedDatabaseService = "timescaledb-test"
 // it is shared infrastructure rather than per-test state, so it is started once
 // and reused.
 const (
-	blobStoreService   = "minio-test"
-	blobStoreContainer = "cfgms-minio-test"
+	blobStoreService   = "s3-test"
+	blobStoreContainer = "cfgms-s3-test"
 )
 
 // caInitService bootstraps the certificate authority the three controllers
