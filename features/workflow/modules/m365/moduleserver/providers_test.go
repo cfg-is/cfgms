@@ -5,9 +5,6 @@
 
 package moduleserver_test
 
-import (
-	// newControllerSecretStore opens the sops secret store over a flatfile root
-	// through interfaces.GetStorageProvider; this blank import registers the
-	// flatfile storage provider for this package's tests.
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-)
+// Registers the flatfile storage provider that newControllerSecretStore
+// (server_test.go) names as the sops secret store's backing storage.
+import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"

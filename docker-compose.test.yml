@@ -164,10 +164,10 @@ services:
       CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
       CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
       CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
-      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://s3-test:9000"
       CFGMS_S3_INSTALLER_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "minioadmin"
-      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      AWS_ACCESS_KEY_ID: "s3admin"
+      AWS_SECRET_ACCESS_KEY: "s3admin"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
       CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
@@ -271,10 +271,10 @@ services:
       CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
       CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
       CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
-      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://s3-test:9000"
       CFGMS_S3_INSTALLER_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "minioadmin"
-      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      AWS_ACCESS_KEY_ID: "s3admin"
+      AWS_SECRET_ACCESS_KEY: "s3admin"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
       CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
@@ -318,7 +318,7 @@ services:
     depends_on:
       timescaledb-test:
         condition: service_healthy
-      minio-test:
+      s3-test:
         condition: service_healthy
       ha-ca-init:
         condition: service_completed_successfully
@@ -388,10 +388,10 @@ services:
       CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
       CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
       CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
-      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://s3-test:9000"
       CFGMS_S3_INSTALLER_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "minioadmin"
-      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      AWS_ACCESS_KEY_ID: "s3admin"
+      AWS_SECRET_ACCESS_KEY: "s3admin"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
       CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
@@ -427,7 +427,7 @@ services:
     depends_on:
       timescaledb-test:
         condition: service_healthy
-      minio-test:
+      s3-test:
         condition: service_healthy
       ha-ca-init:
         condition: service_completed_successfully
@@ -497,10 +497,10 @@ services:
       CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
       CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
       CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
-      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://s3-test:9000"
       CFGMS_S3_INSTALLER_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "minioadmin"
-      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      AWS_ACCESS_KEY_ID: "s3admin"
+      AWS_SECRET_ACCESS_KEY: "s3admin"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
       CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
@@ -536,7 +536,7 @@ services:
     depends_on:
       timescaledb-test:
         condition: service_healthy
-      minio-test:
+      s3-test:
         condition: service_healthy
       ha-ca-init:
         condition: service_completed_successfully
@@ -1205,22 +1205,27 @@ services:
     profiles:
       - openbao
 
-  # MinIO S3-compatible object store for blob migrator integration tests and for
-  # the HA cluster, whose controllers require an S3 installer artifact store in
-  # cluster mode (features/controller/server/server.go assertClusterBackendsReady).
-  # Start with: docker compose --profile blob-migrate -f docker-compose.test.yml up -d minio-test
-  minio-test:
-    image: minio/minio:latest
-    container_name: cfgms-minio-test
-    command: server /data --console-address ":9001"
+  # S3-compatible object store (Versity S3 Gateway, posix backend) for blob
+  # migrator integration tests and for the HA cluster, whose controllers require
+  # an S3 installer artifact store in cluster mode
+  # (features/controller/server/server.go assertClusterBackendsReady).
+  # Start with: docker compose --profile blob-migrate -f docker-compose.test.yml up -d s3-test
+  # The image has no curl; the healthcheck uses busybox nc against the S3 port.
+  s3-test:
+    image: ghcr.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    container_name: cfgms-s3-test
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      VGW_BACKEND: posix
+      VGW_BACKEND_ARG: /data
+      VGW_ARGS: "--port :9000 --access s3admin --secret s3admin"
+    # The image has no /data directory; the posix backend chdirs into it at
+    # start and exits if it is missing. Test data is disposable.
+    tmpfs:
+      - /data
     ports:
       - "9002:9000"  # S3 API — use non-standard port to avoid conflicts
-      - "9003:9001"  # Console
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
       interval: 10s
       timeout: 5s
       retries: 5
