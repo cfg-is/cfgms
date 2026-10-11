@@ -364,9 +364,6 @@ make test-with-real-storage
 # Test database provider specifically
 make test-integration-db
 
-# Test git provider specifically
-make test-integration-git
-
 # Complete integration testing workflow
 make test-integration-complete
 ```

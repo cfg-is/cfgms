@@ -20,7 +20,6 @@ All E2E tests use a single `docker-compose.test.yml` with **profiles** to isolat
 - `--profile ha` - Tier 2 & 3: Controller + stewards, HA cluster
 - `--profile timescale` - TimescaleDB for controller storage
 - `--profile database` - PostgreSQL for testing
-- `--profile git` - Gitea for git storage testing
 
 ### Why This Approach
 

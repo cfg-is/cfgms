@@ -6,7 +6,7 @@
 # Multi-platform index digests are pinned so a mutable registry tag cannot alter
 # a release build. Dependabot (or an explicit release change) must update both
 # the human-readable tag and digest together.
-FROM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
+FROM ghcr.io/cfg-is/ci-mirror/golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/g
     -ldflags="-s -w" -o controller ./cmd/controller
 
 # Final stage
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM ghcr.io/cfg-is/ci-mirror/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Apply pending Alpine security updates, then install the runtime trust store and
 # the full wget client used by the verified-TLS healthcheck below (Alpine's

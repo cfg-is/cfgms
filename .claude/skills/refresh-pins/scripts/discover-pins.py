@@ -172,6 +172,11 @@ CI_MIRROR_REGISTRY = "ghcr.io/cfg-is/ci-mirror"
 
 CI_IMAGES_PATH = ".github/ci-images.yml"
 
+#: CI consumers (Dockerfile FROM, compose, workflow pre-pulls) name the mirror
+#: form of a list entry, so a golang: consumer reads
+#: ghcr.io/cfg-is/ci-mirror/golang:<tag>@sha256:<digest>.
+_MIRROR_PREFIX = re.escape(CI_MIRROR_REGISTRY + "/")
+
 #: .github/ci-images.yml is a flat list read by line pattern (no YAML parser —
 #: this script is standard-library only):
 #:   - upstream: <image>:<tag>@sha256:<64 hex>
@@ -268,6 +273,12 @@ def discover_base_images(root: Path) -> list[dict]:
                     f"resolvable, image left untracked: {line.strip()}",
                     file=sys.stderr,
                 )
+                continue
+
+            # A mirror-form reference is the consumer side of a list entry; the
+            # entry itself is read from the CI image list below, so tracking
+            # the consumer too would be a second pin for the same image.
+            if ref.startswith(CI_MIRROR_REGISTRY + "/"):
                 continue
 
             parsed = parse_image_ref(ref)
@@ -473,7 +484,7 @@ def discover_go_toolchain(root: Path) -> dict:
     # Globbed repo-wide — see all_dockerfiles() for why the previous
     # cmd/*+devcontainer globs were not enough.
     locations.extend(grep_files(
-        re.compile(r"^\s*FROM\s+golang:\d+\.\d+(\.\d+)?"),
+        re.compile(r"^\s*FROM\s+(?:" + _MIRROR_PREFIX + r")?golang:\d+\.\d+(\.\d+)?"),
         all_dockerfiles(root), root,
     ))
 
@@ -484,7 +495,7 @@ def discover_go_toolchain(root: Path) -> dict:
     # so they need their own grep target (issue #4472 — production-gates.yml's
     # pre-pull of the builder image was invisible to every existing pattern).
     locations.extend(grep_files(
-        re.compile(r"^\s*(?:docker\s+pull|pull_with_retry)\s+[\"']?golang:\d+\.\d+(\.\d+)?"),
+        re.compile(r"^\s*(?:docker\s+pull|pull_with_retry)\s+[\"']?(?:" + _MIRROR_PREFIX + r")?golang:\d+\.\d+(\.\d+)?"),
         workflows, root,
     ))
 
