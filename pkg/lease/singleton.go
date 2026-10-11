@@ -126,7 +126,7 @@ const renewRetryBaseBackoff = 10 * time.Millisecond
 // A renewal that is still failing once renewWithRetry's budget is exhausted
 // invokes onLost (cancelling fn's context) and returns.
 func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.CancelFunc, token uint64) {
-	ticker := time.NewTicker(j.RenewInterval)
+	ticker := j.Manager.clock.NewTicker(j.RenewInterval)
 	defer ticker.Stop()
 
 	current := token
@@ -134,7 +134,7 @@ func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.Canc
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.C():
 			newToken, err := j.renewWithRetry(ctx, current)
 			if err != nil {
 				j.logWarn("lease: renew failed mid-cycle; cancelling remaining work to avoid a duplicate run", err)
@@ -179,7 +179,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		if !ok {
 			return 0, err
 		}
-		remaining := time.Until(deadline)
+		remaining := deadline.Sub(j.Manager.clock.Now())
 		if remaining <= 0 {
 			return 0, err
 		}
@@ -192,7 +192,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		select {
 		case <-ctx.Done():
 			return 0, ctx.Err()
-		case <-time.After(backoff):
+		case <-j.Manager.clock.After(backoff):
 		}
 		backoff *= 2
 	}

@@ -95,6 +95,10 @@ type Manager struct {
 	maxAllowedRenewalLatency time.Duration
 	safetyMargin             time.Duration
 
+	// clock is the time source for callStart stamps and the safety-margin
+	// comparison; the real clock unless built via NewManagerWithClock.
+	clock Clock
+
 	mu     sync.RWMutex
 	cached map[string]cachedAuthority
 }
@@ -103,6 +107,17 @@ type Manager struct {
 // SafetyMargin(leaseTTL, renewalInterval, maxAllowedRenewalLatency) and
 // refuses to start if the derived margin is not strictly positive.
 func NewManager(store business.LeaseStore, leaseTTL, renewalInterval, maxAllowedRenewalLatency time.Duration) (*Manager, error) {
+	return NewManagerWithClock(store, leaseTTL, renewalInterval, maxAllowedRenewalLatency, realClock{})
+}
+
+// NewManagerWithClock is NewManager with an explicit Clock for the
+// local-authority window and for any SingletonJob built on this Manager
+// (renewal ticker and retry backoff). NewManager is NewManagerWithClock with
+// the real clock; a nil clock is rejected rather than silently defaulted.
+func NewManagerWithClock(store business.LeaseStore, leaseTTL, renewalInterval, maxAllowedRenewalLatency time.Duration, clock Clock) (*Manager, error) {
+	if clock == nil {
+		return nil, fmt.Errorf("lease: clock cannot be nil")
+	}
 	if store == nil {
 		return nil, fmt.Errorf("lease: store cannot be nil")
 	}
@@ -116,6 +131,7 @@ func NewManager(store business.LeaseStore, leaseTTL, renewalInterval, maxAllowed
 		renewalInterval:          renewalInterval,
 		maxAllowedRenewalLatency: maxAllowedRenewalLatency,
 		safetyMargin:             margin,
+		clock:                    clock,
 		cached:                   make(map[string]cachedAuthority),
 	}, nil
 }
@@ -150,7 +166,7 @@ func (m *Manager) TryAcquire(ctx context.Context, name string, holderID string, 
 			ttl, m.leaseTTL)
 	}
 
-	callStart := time.Now()
+	callStart := m.clock.Now()
 	state, err := m.store.AcquireOrRenew(ctx, name, holderID, ttl)
 	if err != nil {
 		return 0, false, err
@@ -171,7 +187,7 @@ func (m *Manager) TryAcquire(ctx context.Context, name string, holderID string, 
 // someone else), which Renew reports as an error rather than silently
 // returning a token the caller did not ask to hold.
 func (m *Manager) Renew(ctx context.Context, name string, holderID string, token uint64) (newToken uint64, err error) {
-	callStart := time.Now()
+	callStart := m.clock.Now()
 	state, err := m.store.AcquireOrRenew(ctx, name, holderID, m.leaseTTL)
 	if err != nil {
 		return 0, err
@@ -235,7 +251,7 @@ func (m *Manager) HasLocalAuthority(name string, holderID string) (token uint64,
 	if !exists || c.holderID != holderID {
 		return 0, false
 	}
-	if time.Since(c.acquiredOrRenewedAt) >= m.safetyMargin {
+	if m.clock.Now().Sub(c.acquiredOrRenewedAt) >= m.safetyMargin {
 		return 0, false
 	}
 	return c.token, true

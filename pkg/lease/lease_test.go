@@ -64,6 +64,17 @@ func TestNewManager_ValidatesPositiveSafetyMargin(t *testing.T) {
 		_, err := NewManager(nil, 10*time.Second, 3*time.Second, 2*time.Second)
 		require.Error(t, err)
 	})
+
+	t.Run("nil clock rejected", func(t *testing.T) {
+		_, err := NewManagerWithClock(store, 10*time.Second, 3*time.Second, 2*time.Second, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("NewManager uses the real clock", func(t *testing.T) {
+		m, err := NewManager(store, 10*time.Second, 3*time.Second, 2*time.Second)
+		require.NoError(t, err)
+		assert.Equal(t, realClock{}, m.clock)
+	})
 }
 
 func TestManager_TryAcquire_FirstHolderGetsToken(t *testing.T) {
