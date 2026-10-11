@@ -295,7 +295,7 @@ docker compose -f docker-compose.test.yml --profile database --profile timescale
 ./bin/cfgms-wait-for-services
 
 # Verify output shows all services ready
-# Should see: PostgreSQL ✅, TimescaleDB ✅, Gitea ✅
+# Should see: PostgreSQL ✅, TimescaleDB ✅
 
 # Cleanup
 docker compose -f docker-compose.test.yml down -v
