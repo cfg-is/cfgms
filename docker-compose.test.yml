@@ -152,6 +152,7 @@ services:
       dockerfile: cmd/controller/Dockerfile
     environment:
       CFGMS_NODE_ID: "controller-east"
+      OPENBAO_TOKEN: "${OPENBAO_TEST_TOKEN:-root}"
       CFGMS_STORAGE_PROVIDER: "database"
       CFGMS_DB_HOST: "timescaledb-test"
       CFGMS_DB_PORT: "5432"
@@ -206,6 +207,8 @@ services:
     depends_on:
       timescaledb-test:
         condition: service_healthy
+      openbao-test:
+        condition: service_healthy
     networks:
       - cfgms-test
     profiles:
@@ -222,6 +225,7 @@ services:
       - "9080:9080"   # HTTP API
     environment:
       CFGMS_NODE_ID: "controller-east"
+      OPENBAO_TOKEN: "${OPENBAO_TEST_TOKEN:-root}"
       CFGMS_NODE_REGION: "us-east"
       # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
@@ -318,6 +322,8 @@ services:
     depends_on:
       timescaledb-test:
         condition: service_healthy
+      openbao-test:
+        condition: service_healthy
       s3-test:
         condition: service_healthy
       ha-ca-init:
@@ -349,6 +355,7 @@ services:
       - "9081:9081"   # HTTP API
     environment:
       CFGMS_NODE_ID: "controller-central"
+      OPENBAO_TOKEN: "${OPENBAO_TEST_TOKEN:-root}"
       CFGMS_NODE_REGION: "us-central"
       # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
@@ -427,6 +434,8 @@ services:
     depends_on:
       timescaledb-test:
         condition: service_healthy
+      openbao-test:
+        condition: service_healthy
       s3-test:
         condition: service_healthy
       ha-ca-init:
@@ -458,6 +467,7 @@ services:
       - "9082:9082"   # HTTP API
     environment:
       CFGMS_NODE_ID: "controller-west"
+      OPENBAO_TOKEN: "${OPENBAO_TEST_TOKEN:-root}"
       CFGMS_NODE_REGION: "us-west"
       # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
@@ -535,6 +545,8 @@ services:
       - ./test/fixtures/ha/controller-ha.cfg:/etc/cfgms/controller.cfg:ro
     depends_on:
       timescaledb-test:
+        condition: service_healthy
+      openbao-test:
         condition: service_healthy
       s3-test:
         condition: service_healthy
@@ -1186,10 +1198,13 @@ services:
   # OpenBao dev-mode instance for secrets provider integration tests.
   # Uses host port 8201 to avoid collision with any local Vault/OpenBao on 8200.
   # Start with: docker compose --profile openbao -f docker-compose.test.yml up -d openbao-test
+  # The `ha` profile also starts it: it holds the HA cluster's CA and config-signing
+  # key (certificate.cluster_ca in test/fixtures/ha/controller-ha.cfg). Dev mode is
+  # in-memory, so a restart wipes the CA; recreate the ha_cluster_certs volume with it.
   openbao-test:
     image: openbao/openbao:latest@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
     container_name: cfgms-openbao-test
-    command: server -dev -dev-root-token-id=root
+    command: server -dev -dev-root-token-id=${OPENBAO_TEST_TOKEN:-root}
     environment:
       BAO_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
     ports:
@@ -1204,6 +1219,7 @@ services:
       - cfgms-test
     profiles:
       - openbao
+      - ha
 
   # S3-compatible object store (Versity S3 Gateway, posix backend) for blob
   # migrator integration tests and for the HA cluster, whose controllers require

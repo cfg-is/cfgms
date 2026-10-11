@@ -36,6 +36,9 @@ chmod 600 "$SECRETS_KEY_FILE"
 # aborts every cluster-mode controller during storage initialisation.
 HA_SESSION_HMAC_KEY=$(openssl rand -base64 48 | tr -d "=+/" | cut -c1-44)
 
+# Dev-mode OpenBao root token shared by openbao-test and the HA controllers
+OPENBAO_TEST_TOKEN=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+
 # Generate API keys for HA controller nodes
 API_KEY_EAST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 API_KEY_CENTRAL=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
@@ -93,6 +96,9 @@ CFGMS_SECRETS_KEY_FILE=$SECRETS_KEY_FILE
 
 # Shared session HMAC key for the HA cluster's database session store
 HA_SESSION_HMAC_KEY=$HA_SESSION_HMAC_KEY
+
+# Dev-mode OpenBao root token (HA cluster CA custody)
+OPENBAO_TEST_TOKEN=$OPENBAO_TEST_TOKEN
 
 # API keys for HA controller nodes
 API_KEY_EAST=$API_KEY_EAST
