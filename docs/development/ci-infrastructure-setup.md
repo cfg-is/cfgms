@@ -225,6 +225,8 @@ It covers the `docker-compose.test.yml` services, every Dockerfile `FROM` image,
 
 Out of the list on purpose: images CI pulls from a registry other than Docker Hub (the ZAP image behind `zaproxy/action-baseline` comes from `ghcr.io`), user-facing example compose files, and images CFGMS publishes.
 
+The S3-compatible test store (`s3-test` in `docker-compose.test.yml`) runs the Versity S3 Gateway (`ghcr.io/versity/versitygw`, posix backend), published on ghcr.io and pinned by digest like every other entry. The previous `minio/minio` image can no longer be pulled from a public registry.
+
 ### Filling and refreshing the mirror
 
 `.github/workflows/ci-image-mirror.yml` runs `scripts/mirror-ci-images.sh`, which copies each `<image>:<tag>@<digest>` with `docker buildx imagetools create`. The copy keeps the manifest digest and the full multi-arch index, so the Trivy image scan stays valid, and an entry whose digest is already in the mirror is skipped. `--dry-run` prints each copy without credentials.

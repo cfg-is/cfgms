@@ -23,7 +23,9 @@ import (
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/contract"
 )
 
 // ErrWrongModuleKind is returned by Start when the bundle's module kind is not
@@ -37,6 +39,7 @@ var handleSeq atomic.Int64
 // Create one per steward instance with NewModuleRuntime.
 type ModuleRuntime struct {
 	runtimeDir string
+	logger     logging.Logger
 	enforcer   *stewardtrust.StewardTrustEnforcer
 }
 
@@ -45,6 +48,7 @@ type ModuleRuntime struct {
 func NewModuleRuntime(runtimeDir string) *ModuleRuntime {
 	return &ModuleRuntime{
 		runtimeDir: runtimeDir,
+		logger:     logging.ForComponent("module-runtime"),
 		enforcer:   stewardtrust.NewStewardTrustEnforcer(),
 	}
 }
@@ -55,7 +59,16 @@ func NewModuleRuntime(runtimeDir string) *ModuleRuntime {
 func NewModuleRuntimeWithEnforcer(runtimeDir string, enforcer *stewardtrust.StewardTrustEnforcer) *ModuleRuntime {
 	return &ModuleRuntime{
 		runtimeDir: runtimeDir,
+		logger:     logging.ForComponent("module-runtime"),
 		enforcer:   enforcer,
+	}
+}
+
+// SetLogger replaces the logger the runtime reports module starts to. Call it
+// before Start; it is not safe to call concurrently with Start.
+func (r *ModuleRuntime) SetLogger(l logging.Logger) {
+	if l != nil {
+		r.logger = l
 	}
 }
 
@@ -105,6 +118,12 @@ func (r *ModuleRuntime) Start(
 		return nil, err
 	}
 
+	// Declared env names are validated before anything is created: an invalid
+	// name must leave no socket directory entry and no process behind.
+	if err := contract.ValidateEnvNames(b.Manifest.Env); err != nil {
+		return nil, fmt.Errorf("module %q: %w", b.Manifest.Name, err)
+	}
+
 	// 3. Locate the binary for the current platform.
 	osArch := goruntime.GOOS + "-" + goruntime.GOARCH
 	binPath, ok := b.Binaries[osArch]
@@ -121,14 +140,25 @@ func (r *ModuleRuntime) Start(
 		return nil, fmt.Errorf("socket path for module %q: %w", b.Manifest.Name, err)
 	}
 
-	// 5. Fork/exec the module binary with the socket path in its environment.
+	// 5. Fork/exec the module binary with the baseline, its declared env and the
+	// socket path — never the parent's full environment.
+	modEnv, err := contract.BuildModuleEnvFromProcess(b.Manifest.Env, socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("module %q: %w", b.Manifest.Name, err)
+	}
 	// #nosec G204 — binPath comes from the bundle manifest, not user-supplied input.
 	cmd := exec.Command(binPath)
-	cmd.Env = append(os.Environ(), "CFGMS_MODULE_SOCKET="+socketPath)
+	cmd.Env = modEnv.Env
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("fork/exec module %q (%s): %w", b.Manifest.Name, binPath, err)
 	}
+
+	// Names only — an environment value is never logged.
+	for _, name := range modEnv.MissingDeclared {
+		r.logger.Warn("declared module env variable is not set in the parent", "module", logging.SanitizeLogValue(b.Manifest.Name), "env_name", name)
+	}
+	r.logger.Info("module process started", "module", logging.SanitizeLogValue(b.Manifest.Name), "env_names", modEnv.PassedNames)
 
 	// 6. Reap the child from the moment it exists — not after the handshake — so
 	// every later step can tell "not listening yet" from "already dead". A module

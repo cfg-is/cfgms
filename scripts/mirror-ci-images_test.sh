@@ -101,18 +101,13 @@ if ! "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then pass "workflow pull_wi
 if "$SCRIPT" --check >/dev/null 2>&1; then pass "this repository's list matches its consumers"; else fail "this repository's list matches its consumers"; "$SCRIPT" --check 2>&1 | sed 's/^/     /'; fi
 
 fx="$(make_fixture)"
+printf '  other:\n    image: acme/other:latest\n' >> "$fx/docker-compose.test.yml"
+out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'acme/other:latest has no @sha256' <<<"$out"; then pass "an unpinned image fails with no exceptions"; else fail "an unpinned image fails with no exceptions"; fi
+
+fx="$(make_fixture)"
 printf '  minio:\n    image: minio/minio:latest\n' >> "$fx/docker-compose.test.yml"
-out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && grep -q '#4910' <<<"$out"; then pass "minio/minio:latest is the named exception and names #4910"; else fail "minio/minio:latest is the named exception and names #4910"; fi
-
-fx="$(make_fixture)"
-printf '  minio:\n    image: minio/minio:latest\n  other:\n    image: acme/other:latest\n' >> "$fx/docker-compose.test.yml"
-out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && grep -q 'acme/other:latest has no @sha256' <<<"$out"; then pass "any other unpinned image still fails with minio present"; else fail "any other unpinned image still fails with minio present"; fi
-
-fx="$(make_fixture)"
-printf '  minio:\n    image: minio/minio:RELEASE.2024\n' >> "$fx/docker-compose.test.yml"
-if "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then fail "other minio refs are not excepted"; else pass "other minio refs are not excepted"; fi
+if "$SCRIPT" --check --root "$fx" >/dev/null 2>&1; then fail "minio/minio:latest is no longer excepted"; else pass "minio/minio:latest is no longer excepted"; fi
 
 echo "dry-run"
 fx="$(make_fixture)"
