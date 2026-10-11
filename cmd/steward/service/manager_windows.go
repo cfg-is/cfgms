@@ -6,6 +6,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -134,7 +135,8 @@ func (m *windowsManager) IsElevated() bool {
 // the Linux launcher-managed model. This is what makes a Windows steward
 // upgradeable via the control plane: the push-upgrade handler execs
 // "cfgms-steward-launcher.exe swap" at windowsLauncherPath. If the service
-// already exists it is stopped and re-registered.
+// already exists it is stopped and re-registered; its definition is deleted
+// only after staging succeeds, and a failed stage restarts it.
 //
 // Uses the native Windows Service API via golang.org/x/sys/windows/svc/mgr.
 // Does NOT shell out to sc.exe.
@@ -183,21 +185,91 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 	}
 	defer func() { _ = scm.Disconnect() }()
 
-	// Stop and delete existing service to allow binary replacement (idempotent).
-	if existing, err := scm.OpenService(windowsServiceName); err == nil {
-		fmt.Println("Stopping existing service...")
-		_, _ = existing.Control(svc.Stop)
-		if err := waitForStop(existing, 30*time.Second); err != nil {
-			fmt.Printf("Warning: %v — proceeding anyway\n", err)
-		}
-		fmt.Println("Removing existing service definition...")
-		if err := existing.Delete(); err != nil {
+	// The existing service (if any) is held open across staging: it must be
+	// stopped before the launcher executable is replaced (a running executable
+	// cannot be overwritten on Windows), but its definition is only deleted
+	// once staging succeeds, so a failed stage can restart it (#4538).
+	var existing *mgr.Service
+	defer func() {
+		if existing != nil {
 			_ = existing.Close()
-			return fmt.Errorf("failed to delete existing service: %w", err)
 		}
-		_ = existing.Close()
-	}
+	}()
 
+	return runInstallSequence(installSteps{
+		stopExisting: func() bool {
+			s, err := scm.OpenService(windowsServiceName)
+			if err != nil {
+				return false
+			}
+			existing = s
+			fmt.Println("Stopping existing service...")
+			_, _ = existing.Control(svc.Stop)
+			if err := waitForStop(existing, 30*time.Second); err != nil {
+				fmt.Printf("Warning: %v — proceeding anyway\n", err)
+			}
+			return true
+		},
+		restartExisting: func() error {
+			fmt.Println("Install failed — restarting existing service...")
+			return existing.Start()
+		},
+		stage: func() error {
+			return m.stageInstall(launcherSrc, caCertPEM)
+		},
+		replaceDefinition: func() error {
+			if existing != nil {
+				fmt.Println("Removing existing service definition...")
+				err := existing.Delete()
+				// Close before CreateService: an open handle keeps a
+				// deleted service in the marked-for-delete state.
+				_ = existing.Close()
+				existing = nil
+				if err != nil {
+					return fmt.Errorf("failed to delete existing service: %w", err)
+				}
+			}
+			return registerAndStartService(scm, token, controllerURL)
+		},
+	})
+}
+
+// installSteps are the phases of an install that touch an existing service.
+// They are parameters so the failure-path ordering in runInstallSequence is
+// testable without the SCM or elevation.
+type installSteps struct {
+	// stopExisting stops the existing service and reports whether one was found.
+	stopExisting func() bool
+	// restartExisting starts the service stopped by stopExisting again.
+	restartExisting func() error
+	// stage installs the launcher, stages the steward binary, and writes the CA cert.
+	stage func() error
+	// replaceDefinition deletes the existing service definition (if any) and
+	// registers and starts the new one.
+	replaceDefinition func() error
+}
+
+// runInstallSequence runs stop, stage, replace-definition in that order. If
+// stage fails after an existing service was stopped, the existing service is
+// restarted so a failed install does not leave the host unmanaged, and the
+// stage error is returned (joined with the restart error if that fails too).
+func runInstallSequence(s installSteps) error {
+	stopped := s.stopExisting()
+	if err := s.stage(); err != nil {
+		if stopped {
+			if rerr := s.restartExisting(); rerr != nil {
+				return errors.Join(err, fmt.Errorf("failed to restart existing service: %w", rerr))
+			}
+		}
+		return err
+	}
+	return s.replaceDefinition()
+}
+
+// stageInstall installs the launcher, stages the steward binary under the
+// launcher's versioned layout, and writes the CA cert. It runs while the
+// existing service is stopped but still defined.
+func (m *windowsManager) stageInstall(launcherSrc, caCertPEM string) error {
 	// Create install directory.
 	if err := os.MkdirAll(windowsInstallDir, 0755); err != nil {
 		return fmt.Errorf("failed to create install directory %s: %w", windowsInstallDir, err)
@@ -231,7 +303,12 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 			return fmt.Errorf("failed to write CA cert: %w", err)
 		}
 	}
+	return nil
+}
 
+// registerAndStartService creates the launcher-backed service, sets its
+// environment and recovery actions, and starts it.
+func registerAndStartService(scm *mgr.Mgr, token, controllerURL string) error {
 	fmt.Println("Registering Windows service...")
 	newSvc, err := scm.CreateService(
 		windowsServiceName,
