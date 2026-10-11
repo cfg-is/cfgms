@@ -220,7 +220,7 @@ func (s *Server) handleListCases(w http.ResponseWriter, r *http.Request) {
 		s.listBoundaryCases(w, r, readScope)
 		return
 	}
-	if callerTenant == "" {
+	if callerTenant == "" { //architecture:allow-root-scope -- refuses a caller with no home tenant (empty list); not a grant
 		// Global-scope callers: no tenant to filter by. ListCases requires a
 		// non-empty tenant ID. Return empty list — global admins do not have a
 		// home tenant and cockpit cases are always tenant-anchored.
