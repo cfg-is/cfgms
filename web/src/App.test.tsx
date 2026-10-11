@@ -127,6 +127,17 @@ describe('App', () => {
     expect(screen.queryByText(/no passkey matched/i)).not.toBeInTheDocument()
   })
 
+  it('the support-access route is reachable when signed in', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { data: {} })))
+    render(
+      <MemoryRouter initialEntries={['/support-access']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Support access', level: 1 })).toBeInTheDocument()
+    expect(screen.getByRole('navigation')).toBeInTheDocument()
+  })
+
   it('a 401 on the fleet data call drops to the expired login screen', async () => {
     const MOCK_PASSKEY_BEGIN = {
       publicKey: {

@@ -65,6 +65,11 @@ describe('parseCrossing', () => {
     expect(c).toMatchObject({ id: 'c-2', tenantId: 't', expiresAt: '2030-01-01T00:00:00Z' })
   })
 
+  it('reads status and principal_name and coerces non-string fields to empty strings', () => {
+    const c = parseCrossing({ id: 'c-3', status: 'active', principal_name: 'root-ops', justification: { x: 1 }, reason_category: 7 })
+    expect(c).toMatchObject({ status: 'active', principalName: 'root-ops', justification: '', reasonCategory: '' })
+  })
+
   it('rejects a value without an id', () => {
     expect(parseCrossing({ TenantID: 'x' })).toBeNull()
     expect(parseCrossing(null)).toBeNull()
@@ -147,21 +152,17 @@ describe('crossing requests', () => {
 
   it('surfaces the crossing challenge body as a coded error', async () => {
     fetchMock.mockResolvedValueOnce(json(401, { error: 'tenant_crossing_required' }))
-    await expect(createAccessGrant('msp-a', { principalId: 'p', durationMinutes: 5 })).rejects.toMatchObject({
+    await expect(createAccessGrant('msp-a', { durationMinutes: 5 })).rejects.toMatchObject({
       code: 'tenant_crossing_required',
     })
   })
 
-  it('grant posts principal_id, duration_minutes and justification', async () => {
+  it('grant posts duration_minutes only, with no principal_id', async () => {
     fetchMock.mockResolvedValueOnce(json(201, { data: crossing({ Kind: 'grant' }) }))
-    await createAccessGrant('msp-a', { principalId: 'root-op', durationMinutes: 90, justification: 'quarterly review' })
+    await createAccessGrant('msp-a', { durationMinutes: 240 })
     const [url, init] = fetchMock.mock.calls[0]!
     expect(url).toBe('/api/v1/tenants/msp-a/access-grants')
-    expect(JSON.parse(String(init?.body))).toEqual({
-      principal_id: 'root-op',
-      duration_minutes: 90,
-      justification: 'quarterly review',
-    })
+    expect(JSON.parse(String(init?.body))).toEqual({ duration_minutes: 240 })
   })
 
   it('end calls DELETE on the crossing path', async () => {

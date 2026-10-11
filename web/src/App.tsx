@@ -27,6 +27,7 @@
  *   /compliance      → AppShell layout → ComplianceSummaryView
  *   /monitoring      → AppShell layout → MonitoringView
  *   /tenants         → AppShell layout → TenantAdminView
+ *   /support-access  → AppShell layout → SupportAccessView
  *   /installer       → AppShell layout → InstallerPage
  *   /cases           → AppShell layout → CaseListView (Story #3614)
  *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
@@ -79,6 +80,7 @@ import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
 import AlertsView from './alerts/AlertsView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
 import TenantAdminView from './tenants/TenantAdminView.tsx'
+import SupportAccessView from './tenants/SupportAccessView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
 import CockpitView from './cockpit/CockpitView.tsx'
 import CaseListView from './cockpit/CaseListView.tsx'
@@ -124,6 +126,7 @@ function App() {
                   <Route path="alerts" element={<AlertsView />} />
                   <Route path="monitoring" element={<MonitoringView />} />
                   <Route path="tenants" element={<TenantAdminView />} />
+                  <Route path="support-access" element={<SupportAccessView />} />
                   <Route path="installer" element={<InstallerPage />} />
                   <Route path="cases" element={<CaseListView />} />
                   <Route path="cases/:id" element={<CockpitView />} />
