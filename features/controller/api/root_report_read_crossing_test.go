@@ -175,7 +175,7 @@ func TestRootReportReads_TenantSelection(t *testing.T) {
 
 	t.Run("an active grant on the MSP returns the client data", func(t *testing.T) {
 		op := boundRootOperator("report-granted")
-		grantCrossing(t, f.server, op.ID, reportReadClient)
+		grantCrossing(t, f.server, op.ID, reportReadMSP)
 		assert.EqualValues(t, 2, devicesAnalyzed(t, f.do(op, http.MethodGet, "/api/v1/reports/compliance/status", "")))
 		assert.EqualValues(t, 1, devicesAnalyzed(t, f.do(op, http.MethodGet, "/api/v1/reports/compliance/status?tenant_id="+reportReadClient, "")))
 	})
