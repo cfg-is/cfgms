@@ -114,7 +114,7 @@ func TestEchoModuleLifecycle(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeWorkflowBundle(echoModuleBin)
 
-	handle, err := rt.Start(b)
+	handle, err := rt.Start(b, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, handle)
 	assert.Equal(t, runtime.StateRunning, handle.GetState())
@@ -136,7 +136,7 @@ func TestEchoModuleLifecycle_ModuleInterface(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeWorkflowBundle(echoModuleBin)
 
-	handle, err := rt.Start(b)
+	handle, err := rt.Start(b, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, handle)
 
@@ -183,7 +183,7 @@ func TestStartFailsFastWhenModuleExitsBeforeListening(t *testing.T) {
 	b := makeWorkflowBundle(exitModuleBin)
 
 	start := time.Now()
-	handle, err := rt.Start(b)
+	handle, err := rt.Start(b, "", "")
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -220,7 +220,7 @@ func TestStartReturnsErrWrongModuleKindForNonWorkflowBundle(t *testing.T) {
 				Binaries: map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: "/nonexistent"},
 			}
 
-			_, err := rt.Start(b)
+			_, err := rt.Start(b, "", "")
 			require.Error(t, err)
 			assert.ErrorIs(t, err, runtime.ErrWrongModuleKind)
 		})
@@ -235,7 +235,7 @@ func TestStartReturnsErrWrongModuleKindForNilManifest(t *testing.T) {
 		Manifest: nil,
 		Binaries: map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: "/nonexistent"},
 	}
-	_, err := rt.Start(b)
+	_, err := rt.Start(b, "", "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, runtime.ErrWrongModuleKind)
 }
@@ -246,9 +246,25 @@ func TestStopIsIdempotent(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeWorkflowBundle(echoModuleBin)
 
-	handle, err := rt.Start(b)
+	handle, err := rt.Start(b, "", "")
 	require.NoError(t, err)
 
 	require.NoError(t, rt.Stop(handle))
 	require.NoError(t, rt.Stop(handle))
+}
+
+// [REQUIRED TEST] Issue #4891: Start sends the handshake tenant and token.
+func TestStart_SendsHandshakeTenantAndToken(t *testing.T) {
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
+	handle, err := rt.Start(makeWorkflowBundle(echoModuleBin), "client-1", "opaque-credential")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = handle.Stop() })
+
+	resp, err := handle.Client.Get(context.Background(), &proto.GetRequest{ResourceId: "handshake"})
+	require.NoError(t, err)
+	assert.Equal(t, "tenant=client-1;token=opaque-credential", resp.ConfigData)
+
+	require.NoError(t, handle.Stop())
+	assert.Equal(t, runtime.StateStopped, handle.GetState())
+	require.NoError(t, handle.Stop(), "Stop is idempotent")
 }

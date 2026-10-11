@@ -48,7 +48,17 @@ type ModuleHandle struct {
 	socketPath string
 	state      LifecycleState
 	waitCh     chan struct{} // closed when the module process exits
+	rt         *ModuleRuntime
 	mu         sync.Mutex
+}
+
+// Stop shuts the module process down and removes its socket (see
+// ModuleRuntime.Stop). It is idempotent.
+func (h *ModuleHandle) Stop() error {
+	if h.rt == nil {
+		return nil
+	}
+	return h.rt.Stop(h)
 }
 
 // GetState returns the current lifecycle state of the handle.

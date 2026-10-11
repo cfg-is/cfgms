@@ -128,6 +128,38 @@ message WorkflowHandshakeResponse {
 }
 ```
 
+### What the workflow engine sends in the handshake
+
+`ModuleRuntime.Start` sends `tenant_id` and `auth_token` in `WorkflowHandshakeRequest`:
+
+- `tenant_id` is the execution tenant (`ctxkeys.TenantID`) of the workflow run. A
+  `context.Context` value does not cross the gRPC hop, so this field is how the
+  tenant reaches the module process.
+- `auth_token` is empty for most modules. For the fixed set of CFGMS-published M365
+  workflow modules (`m365-conditional-access`, `m365-entra-admin-unit`,
+  `m365-entra-application`, `m365-entra-group`, `m365-entra-user`,
+  `m365-intune-policy`; manifest publisher `cfgms`) it is the JSON encoding of a
+  short-lived Microsoft Graph access token (`access_token`, `token_type`,
+  `expires_at`, `scope`, `tenant_id`). The controller reads the tenant's connection
+  from its own secret store and mints the token **before** it starts the module
+  process. The client secret, the connection and any refresh token never leave the
+  controller, and a module process never opens a secret store.
+
+The controller refuses, and starts no process, when a credentialed module is requested
+with no execution tenant, through the tenant-less create path, from an engine with no
+secret store, for a tenant with no connection on file, or when the secret store cannot
+be read. There is no environment fallback. The workflow engine stops the module process
+when the step ends, on success and on error.
+
+### Tenant binding in the adapter
+
+A workflow module server created with `adapter.WithHandshakeHandler` binds the session
+to the handshake's `tenant_id` and passes `auth_token` to the handler. It refuses a later
+`Handshake` naming a different tenant and refuses `Get`/`Set`/`Test` before a tenant is
+bound. Every `Get`/`Set`/`Test` runs with `ctxkeys.TenantID` set to the bound tenant, so a
+module's execution-tenant check works across the process boundary. Without the option,
+`Handshake` only reports the capability.
+
 ## Using the contract wrappers
 
 Import `pkg/modules/contract` rather than the generated package to insulate your

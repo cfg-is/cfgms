@@ -141,6 +141,10 @@ A customer M365 tenant is linked to at most one client tenant under an MSP, and 
 
 Each write emits one audit event per affected client tenant (`m365.connection.set`, `m365.connection.delete`, `m365.gdap.link`) carrying the mode, the app ID and the M365 tenant IDs, never the secret.
 
+### 2.3 Using the connection from workflows
+
+A connection made with `cfg tenant m365 set` or `cfg tenant m365 gdap-link` is used by the M365 workflow modules (`m365-entra-user`, `m365-entra-group`, `m365-entra-application`, `m365-entra-admin-unit`, `m365-conditional-access`, `m365-intune-policy`) with no other setup. When a workflow step runs one of them, the controller reads the client tenant's connection from its secret store, mints a short-lived Microsoft Graph access token and hands only that token to the module process. The client secret never leaves the controller. If the tenant has no connection, the step fails with an error that names the tenant and points back to `cfg tenant m365 set` or `cfg tenant m365 gdap-link`. A replaced or deleted connection takes effect on the next step. A step that outlives its token fails; start it again.
+
 ## Part 3: Capability Testing
 
 ### MSP Capabilities Tested

@@ -5,6 +5,7 @@ package adapter_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,8 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/adapter"
 	"github.com/cfgis/cfgms/features/modules/stdlib/file"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // stubServer satisfies the GracefulStop interface used by Shutdown.
@@ -104,4 +107,93 @@ func TestShutdownCallsGracefulStop(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("GracefulStop was not called within 100ms")
 	}
+}
+
+// tenantEchoModule returns the ctxkeys.TenantID it sees from Get.
+type tenantEchoModule struct{}
+
+type echoState struct{ tenant string }
+
+func (e echoState) AsMap() map[string]interface{} { return map[string]interface{}{"tenant": e.tenant} }
+func (e echoState) ToYAML() ([]byte, error)       { return []byte("tenant: " + e.tenant), nil }
+func (e echoState) FromYAML([]byte) error         { return nil }
+func (e echoState) Validate() error               { return nil }
+func (e echoState) GetManagedFields() []string    { return []string{"tenant"} }
+func (tenantEchoModule) Get(ctx context.Context, _ string) (modules.ConfigState, error) {
+	t, _ := ctx.Value(ctxkeys.TenantID).(string)
+	return echoState{tenant: t}, nil
+}
+func (tenantEchoModule) Set(ctx context.Context, _ string, _ modules.ConfigState) error {
+	if t, _ := ctx.Value(ctxkeys.TenantID).(string); t == "" {
+		return errors.New("no tenant")
+	}
+	return nil
+}
+
+// [REQUIRED TEST] Issue #4891
+func TestWorkflowServer_HandshakeBindsTenant(t *testing.T) {
+	ctx := context.Background()
+	var gotTenant, gotToken string
+	srv := adapter.NewWorkflow(tenantEchoModule{}, "m", newStubServer(),
+		adapter.WithHandshakeHandler(func(tenantID, authToken string) error {
+			gotTenant, gotToken = tenantID, authToken
+			return nil
+		}))
+
+	// Refused before a tenant is bound.
+	_, err := srv.Get(ctx, &proto.GetRequest{ResourceId: "r"})
+	require.Error(t, err)
+	_, err = srv.Set(ctx, &proto.SetRequest{ResourceId: "r"})
+	require.Error(t, err)
+	_, err = srv.Test(ctx, &proto.TestRequest{ResourceId: "r"})
+	require.Error(t, err)
+
+	// A handshake with no tenant is refused and binds nothing.
+	_, err = srv.Handshake(ctx, &proto.WorkflowHandshakeRequest{})
+	require.Error(t, err)
+	_, err = srv.Get(ctx, &proto.GetRequest{ResourceId: "r"})
+	require.Error(t, err)
+
+	_, err = srv.Handshake(ctx, &proto.WorkflowHandshakeRequest{TenantId: "t1", AuthToken: "tok"})
+	require.NoError(t, err)
+	assert.Equal(t, "t1", gotTenant)
+	assert.Equal(t, "tok", gotToken)
+
+	resp, err := srv.Get(ctx, &proto.GetRequest{ResourceId: "r"})
+	require.NoError(t, err)
+	assert.Contains(t, resp.ConfigData, "t1")
+	setResp, err := srv.Set(ctx, &proto.SetRequest{ResourceId: "r"})
+	require.NoError(t, err)
+	assert.True(t, setResp.Applied)
+	tr, err := srv.Test(ctx, &proto.TestRequest{ResourceId: "r", ConfigData: "tenant: t1"})
+	require.NoError(t, err)
+	assert.True(t, tr.InCompliance)
+
+	// A different tenant cannot rebind the session; the same tenant may re-handshake.
+	_, err = srv.Handshake(ctx, &proto.WorkflowHandshakeRequest{TenantId: "t2"})
+	require.Error(t, err)
+	resp, err = srv.Get(ctx, &proto.GetRequest{ResourceId: "r"})
+	require.NoError(t, err)
+	assert.Contains(t, resp.ConfigData, "t1")
+	_, err = srv.Handshake(ctx, &proto.WorkflowHandshakeRequest{TenantId: "t1"})
+	require.NoError(t, err)
+}
+
+func TestWorkflowServer_HandshakeHandlerErrorBindsNothing(t *testing.T) {
+	ctx := context.Background()
+	srv := adapter.NewWorkflow(tenantEchoModule{}, "m", newStubServer(),
+		adapter.WithHandshakeHandler(func(string, string) error { return errors.New("bad credential") }))
+	_, err := srv.Handshake(ctx, &proto.WorkflowHandshakeRequest{TenantId: "t1", AuthToken: "secret-tok"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "secret-tok")
+	_, err = srv.Get(ctx, &proto.GetRequest{ResourceId: "r"})
+	require.Error(t, err)
+}
+
+func TestWorkflowServer_WithoutOptionIsTenantAgnostic(t *testing.T) {
+	srv := adapter.NewWorkflow(tenantEchoModule{}, "m", newStubServer())
+	_, err := srv.Handshake(context.Background(), &proto.WorkflowHandshakeRequest{})
+	require.NoError(t, err)
+	_, err = srv.Get(context.Background(), &proto.GetRequest{ResourceId: "r"})
+	require.NoError(t, err)
 }

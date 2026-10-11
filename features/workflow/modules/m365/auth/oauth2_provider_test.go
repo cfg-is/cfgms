@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -428,4 +431,107 @@ func TestOAuth2Provider_GetAccessToken_configError(t *testing.T) {
 	authErr, ok := err.(*AuthenticationError)
 	require.True(t, ok, "expected *AuthenticationError")
 	assert.Equal(t, "CONFIG_ERROR", authErr.Code)
+}
+
+// rewriteTransport sends every request to target, preserving path and body, so
+// the provider's hard-coded login host reaches an httptest server.
+type rewriteTransport struct {
+	target *url.URL
+}
+
+func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = r.target.Scheme
+	clone.URL.Host = r.target.Host
+	clone.Host = r.target.Host
+	return http.DefaultTransport.RoundTrip(clone)
+}
+
+// [REQUIRED TEST] Issue #4891: MintAccessToken reads the connection on file on
+// every call and serves no cached or stored token.
+func TestMintAccessToken_RereadsConfigNoCacheNoStoredToken(t *testing.T) {
+	var mu sync.Mutex
+	var seen []url.Values
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		seen = append(seen, r.PostForm)
+		paths = append(paths, r.URL.Path)
+		n := len(seen)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("minted-%d", n), "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	store := newKeyedCredentialStore()
+	p := NewOAuth2Provider(store, nil, nil)
+	p.SetHTTPClient(&http.Client{Transport: rewriteTransport{target: u}})
+	ctx := context.Background()
+
+	_, err = p.MintAccessToken(ctx, "client-1")
+	require.Error(t, err, "no connection on file must fail")
+	assert.Contains(t, err.Error(), "client-1")
+
+	require.NoError(t, store.StoreConfig("client-1", &OAuth2Config{
+		ClientID: "id-one", ClientSecret: "secret-one", TenantID: "m365-one", UseClientCredentials: true,
+	}))
+	// A stored token and a cached token must both be ignored.
+	require.NoError(t, store.StoreToken("client-1", &AccessToken{Token: "stored", ExpiresAt: time.Now().Add(time.Hour)}))
+	p.setCachedToken("client-1", &AccessToken{Token: "cached", ExpiresAt: time.Now().Add(time.Hour)})
+
+	tok1, err := p.MintAccessToken(ctx, "client-1")
+	require.NoError(t, err)
+	assert.Equal(t, "minted-1", tok1.Token)
+	tok2, err := p.MintAccessToken(ctx, "client-1")
+	require.NoError(t, err)
+	assert.Equal(t, "minted-2", tok2.Token, "every call mints anew")
+
+	stored, _ := store.GetToken("client-1")
+	assert.Equal(t, "stored", stored.Token, "minting must not persist a token")
+
+	// Replace the connection.
+	require.NoError(t, store.StoreConfig("client-1", &OAuth2Config{
+		ClientID: "id-two", ClientSecret: "secret-two", TenantID: "m365-two", UseClientCredentials: true,
+	}))
+	_, err = p.MintAccessToken(ctx, "client-1")
+	require.NoError(t, err)
+	mu.Lock()
+	last := seen[len(seen)-1]
+	lastPath := paths[len(paths)-1]
+	mu.Unlock()
+	assert.Equal(t, "id-two", last.Get("client_id"))
+	if last.Get("client_secret") != "secret-two" {
+		t.Fatal("token endpoint did not receive the replaced client secret")
+	}
+	assert.Contains(t, lastPath, "m365-two")
+
+	// Delete the connection.
+	store.mu.Lock()
+	delete(store.configs, "client-1")
+	store.mu.Unlock()
+	_, err = p.MintAccessToken(ctx, "client-1")
+	require.Error(t, err)
+}
+
+func TestMintAccessToken_UnsupportedConnectionAndStoreError(t *testing.T) {
+	store := newKeyedCredentialStore()
+	require.NoError(t, store.StoreConfig("t1", &OAuth2Config{ClientID: "a", ClientSecret: "b", TenantID: "m"}))
+	p := NewOAuth2Provider(store, &OAuth2Config{ClientID: "default", ClientSecret: "default", UseClientCredentials: true}, nil)
+	_, err := p.MintAccessToken(context.Background(), "t1")
+	require.Error(t, err)
+
+	// defaultConfig must never be used for a tenant without a connection.
+	_, err = p.MintAccessToken(context.Background(), "t2")
+	require.Error(t, err)
+
+	p2 := NewOAuth2Provider(&failingCredentialStore{getConfigErr: errors.New("store closed")}, nil, nil)
+	_, err = p2.MintAccessToken(context.Background(), "t1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "t1")
 }

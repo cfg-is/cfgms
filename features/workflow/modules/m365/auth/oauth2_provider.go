@@ -13,6 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // OAuth2Provider implements the Provider interface using OAuth2 client credentials flow
@@ -115,6 +116,40 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	p.setCachedToken(tenantID, token)
 
 	return token, nil
+}
+
+// MintAccessToken mints a new Microsoft Graph access token for the CFGMS tenant
+// from the connection currently on file. It is the controller-side issuing
+// path for workflow modules: it reads the tenant's OAuth2Config from the
+// credential store on every call and never consults the in-memory token cache,
+// a stored token or defaultConfig, and it does not persist the result. A
+// connection deleted or replaced elsewhere is therefore never served from a
+// stale token, on this node or any other.
+//
+// Direct connections mint with the client-credentials grant; partner-delegated
+// connections validate the GDAP relationship and mint against the customer
+// tenant. A tenant with no connection on file returns an error wrapping
+// secretsif.ErrSecretNotFound; an unreadable store returns the store's error.
+func (p *OAuth2Provider) MintAccessToken(ctx context.Context, cfgmsTenantID string) (*AccessToken, error) {
+	if p.credentialStore == nil {
+		return nil, NewAuthenticationError(cfgmsTenantID, "NO_CREDENTIAL_STORE", "No credential store is configured", nil)
+	}
+	config, err := p.credentialStore.GetConfig(cfgmsTenantID)
+	if err != nil {
+		return nil, NewAuthenticationError(cfgmsTenantID, "CONFIG_ERROR", "Failed to read the stored OAuth2 connection", err)
+	}
+	if config == nil {
+		return nil, NewAuthenticationError(cfgmsTenantID, "CONFIG_ERROR", "No OAuth2 connection on file", secretsif.ErrSecretNotFound)
+	}
+	switch {
+	case config.PartnerDelegated:
+		return p.getPartnerDelegatedToken(ctx, cfgmsTenantID, config)
+	case config.UseClientCredentials:
+		return p.getClientCredentialsToken(ctx, config)
+	default:
+		return nil, NewAuthenticationError(cfgmsTenantID, "UNSUPPORTED_CONNECTION",
+			"The stored connection is neither client-credentials nor partner-delegated, so a workflow module token cannot be minted", nil)
+	}
 }
 
 // GetDelegatedAccessToken retrieves a valid delegated access token for the specified user
@@ -290,6 +325,13 @@ func (p *OAuth2Provider) IsTokenValid(token *AccessToken) bool {
 
 // ValidatePermissions checks if the token has the required permissions for an operation
 func (p *OAuth2Provider) ValidatePermissions(ctx context.Context, token *AccessToken, requiredScopes []string) error {
+	return validateTokenPermissions(ctx, p.httpClient, token, requiredScopes)
+}
+
+// validateTokenPermissions is the permission check shared by OAuth2Provider and
+// HandshakeTokenProvider, so the Graph probe behaves identically on the
+// controller and inside a workflow module. client performs the probe request.
+func validateTokenPermissions(ctx context.Context, client *http.Client, token *AccessToken, requiredScopes []string) error {
 	if token == nil {
 		return fmt.Errorf("token is nil")
 	}
@@ -308,7 +350,7 @@ func (p *OAuth2Provider) ValidatePermissions(ctx context.Context, token *AccessT
 	if len(token.GrantedScopes) == 0 {
 		// If granted scopes are not tracked, we can't validate
 		// Fall back to making a test request to Microsoft Graph
-		return p.validatePermissionsByRequest(ctx, token, requiredScopes)
+		return validatePermissionsByRequest(ctx, client, token, requiredScopes)
 	}
 
 	// Check if all required scopes are in the granted scopes
@@ -333,10 +375,10 @@ func (p *OAuth2Provider) ValidatePermissions(ctx context.Context, token *AccessT
 }
 
 // validatePermissionsByRequest validates permissions by making a test request
-func (p *OAuth2Provider) validatePermissionsByRequest(ctx context.Context, token *AccessToken, requiredScopes []string) error {
+func validatePermissionsByRequest(ctx context.Context, client *http.Client, token *AccessToken, requiredScopes []string) error {
 	// Make different test requests based on required scopes
 	for _, scope := range requiredScopes {
-		if err := p.testScopeAccess(ctx, token, scope); err != nil {
+		if err := testScopeAccess(ctx, client, token, scope); err != nil {
 			return NewAuthenticationError(token.TenantID, "INSUFFICIENT_PERMISSIONS",
 				fmt.Sprintf("Token lacks permission for scope: %s", scope), err)
 		}
@@ -345,7 +387,7 @@ func (p *OAuth2Provider) validatePermissionsByRequest(ctx context.Context, token
 }
 
 // testScopeAccess tests if a token has access to a specific scope
-func (p *OAuth2Provider) testScopeAccess(ctx context.Context, token *AccessToken, scope string) error {
+func testScopeAccess(ctx context.Context, client *http.Client, token *AccessToken, scope string) error {
 	var testURL string
 
 	// Map scopes to test endpoints
@@ -373,7 +415,7 @@ func (p *OAuth2Provider) testScopeAccess(ctx context.Context, token *AccessToken
 	req.Header.Set("Authorization", token.GetAuthorizationHeader())
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to make test request: %w", err)
 	}

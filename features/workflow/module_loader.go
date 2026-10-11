@@ -3,12 +3,14 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/runtime"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ModuleLoader creates module instances by name for use by the workflow engine.
@@ -17,6 +19,16 @@ import (
 // interfaces/ subdirectory is required.
 type ModuleLoader interface {
 	CreateModuleInstance(moduleName string) (modules.Module, error)
+}
+
+// TenantModuleLoader is the optional tenant-scoped extension of ModuleLoader.
+// The engine uses it when its loader implements it, passing the execution
+// tenant (ctxkeys.TenantID) so the module session is scoped to that tenant and
+// credentialed modules can be issued a tenant-specific credential. It is a
+// separate interface so ModuleLoader implementations that need no tenant (the
+// steward module factory and its test doubles) stay unchanged.
+type TenantModuleLoader interface {
+	CreateTenantModuleInstance(ctx context.Context, moduleName, tenantID string) (modules.Module, error)
 }
 
 // ErrModuleNotCached is returned by WorkflowModuleFactory.CreateModuleInstance
@@ -35,6 +47,11 @@ var ErrModuleNotCached = errors.New("workflow: module bundle not found in contro
 type WorkflowModuleFactory struct {
 	cache   *cache.ModuleCache
 	runtime *runtime.ModuleRuntime
+
+	// credentials issues the Graph access token for CFGMS-published M365
+	// modules. Nil until NewEngine hands the factory the controller secret
+	// store; with no issuer every credentialed module is refused.
+	credentials *M365CredentialIssuer
 }
 
 // NewWorkflowModuleFactory returns a WorkflowModuleFactory backed by the given
@@ -50,6 +67,12 @@ func NewWorkflowModuleFactory(c *cache.ModuleCache, rt *runtime.ModuleRuntime) M
 	return &WorkflowModuleFactory{cache: c, runtime: rt}
 }
 
+// useSecretStore gives the factory the controller secret store its credential
+// issuer reads tenant connections from. A nil store leaves the issuer unset.
+func (f *WorkflowModuleFactory) useSecretStore(store secretsif.SecretStore) {
+	f.credentials = NewM365CredentialIssuer(store)
+}
+
 // CreateModuleInstance looks up an approved controller-kind bundle matching
 // moduleName in the cache, then fork/execs it via the workflow module runtime
 // and returns a connected WorkflowModuleClient as a modules.Module.
@@ -61,7 +84,25 @@ func NewWorkflowModuleFactory(c *cache.ModuleCache, rt *runtime.ModuleRuntime) M
 //  4. bundle load error — propagated as-is
 //  5. runtime unavailable (nil rt) — descriptive error
 //  6. runtime.Start error — propagated as-is (fork/exec or gRPC failure)
+//
+// This tenant-less path starts no execution-tenant-scoped session, so it refuses
+// every credentialed (CFGMS-published M365) module: use
+// CreateTenantModuleInstance for those.
 func (f *WorkflowModuleFactory) CreateModuleInstance(moduleName string) (modules.Module, error) {
+	return f.create(context.Background(), moduleName, "", false)
+}
+
+// CreateTenantModuleInstance is CreateModuleInstance for an execution tenant.
+// tenantID scopes the module session (WorkflowHandshakeRequest.tenant_id). For a
+// credentialed module the factory mints the tenant's access token BEFORE
+// fork/exec; if that fails, or tenantID is empty, or the factory has no secret
+// store, it returns an error and starts no process. Every other module gets the
+// tenant with an empty auth_token.
+func (f *WorkflowModuleFactory) CreateTenantModuleInstance(ctx context.Context, moduleName, tenantID string) (modules.Module, error) {
+	return f.create(ctx, moduleName, tenantID, true)
+}
+
+func (f *WorkflowModuleFactory) create(ctx context.Context, moduleName, tenantID string, tenantScoped bool) (modules.Module, error) {
 	if f.cache == nil {
 		return nil, fmt.Errorf("workflow: module factory has no cache backing — call NewWorkflowModuleFactory with a non-nil cache")
 	}
@@ -97,7 +138,24 @@ func (f *WorkflowModuleFactory) CreateModuleInstance(moduleName string) (modules
 				moduleName, e.Addr.Version, e.Addr.ContentHash)
 		}
 
-		handle, startErr := f.runtime.Start(b)
+		authToken := ""
+		if isCredentialedModule(b) {
+			switch {
+			case !tenantScoped:
+				return nil, fmt.Errorf("workflow: module %q requires an execution tenant for its M365 credential and cannot be created without one", moduleName)
+			case tenantID == "":
+				return nil, fmt.Errorf("workflow: module %q requires an execution tenant for its M365 credential: no tenant in the execution context", moduleName)
+			case f.credentials == nil:
+				return nil, fmt.Errorf("workflow: module %q cannot be issued an M365 credential for tenant %q: the workflow engine has no secret store", moduleName, tenantID)
+			}
+			var issueErr error
+			authToken, issueErr = f.credentials.Issue(ctx, moduleName, tenantID)
+			if issueErr != nil {
+				return nil, issueErr
+			}
+		}
+
+		handle, startErr := f.runtime.Start(b, tenantID, authToken)
 		if startErr != nil {
 			return nil, fmt.Errorf("workflow: start module %q: %w", moduleName, startErr)
 		}

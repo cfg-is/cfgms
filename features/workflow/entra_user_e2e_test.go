@@ -18,6 +18,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	featuremodules "github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/workflow/runtime"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
@@ -31,13 +32,12 @@ import (
 // through the same cache APIs the controller's module approval pipeline uses,
 // and drives a real Get() call through the fork/exec'd process's gRPC server.
 //
-// The module has no M365 credentials configured for the test's CFGMS tenant,
-// so the RPC is expected to reach the module's real Set/Get logic and fail at
-// the Microsoft Graph authentication step — not at connection, resolution, or
-// module-lookup. That failure shape is what proves the full path (cache ->
-// fork/exec -> gRPC -> adapter -> entra_user.Get -> ctx tenant check ->
-// auth.Provider) executed for real, without depending on outbound network
-// access or real M365 credentials in CI.
+// A connection is stored for the test's CFGMS tenant in a real controller
+// secret store; the controller mints the Graph token and hands it to the module
+// in the handshake (Issue #4891). The RPC reaches the module's real Get logic
+// (cache -> credential issue -> fork/exec -> handshake -> gRPC -> adapter ->
+// entra_user.Get -> tenant check -> auth.Provider) and fails at the module's
+// tenant agreement check, without depending on outbound network access.
 func TestWorkflowModuleFactory_IntegrationWithEntraUserModule(t *testing.T) {
 	binDir := t.TempDir()
 	bin := binDir + "/cfgms-module-m365-entra-user" + exeSuffix()
@@ -93,39 +93,44 @@ func TestWorkflowModuleFactory_IntegrationWithEntraUserModule(t *testing.T) {
 	assert.Equal(t, sig, stored.Signatures[0].Signature)
 
 	rt := runtime.NewModuleRuntime(shortRuntimeDir(t))
-	factory := NewWorkflowModuleFactory(c, rt)
+	factory := NewWorkflowModuleFactory(c, rt).(*WorkflowModuleFactory)
 
-	// The forked module process builds its auth provider from its own
-	// environment (inherited from this test process via os.Environ()) — see
-	// cmd/main.go's buildAuthProvider. No M365 credentials are seeded here:
-	// the point of this test is reachability, not a successful Graph call.
-	t.Setenv("CFGMS_M365_SECRETS_DIR", t.TempDir())
+	// The controller holds the connection `cfg tenant m365 set` stored; the
+	// forked module process holds no secret store and reads no M365 environment
+	// settings. The controller mints the Graph token and delivers it, with the
+	// execution tenant, in the module handshake (Issue #4891).
+	store, _, _ := newSOPSStoreAt(t, t.TempDir())
+	require.NoError(t, auth.NewSecretStoreCredentialStore(store).StoreConfig("e2e-tenant", &auth.OAuth2Config{
+		ClientID: "e2e-client-id", ClientSecret: testClientSecret, TenantID: testM365Tenant, UseClientCredentials: true,
+	}))
+	factory.useSecretStore(store)
+	te := newTokenEndpoint(t)
+	factory.credentials.SetHTTPClient(te.cl)
 
-	mod, err := factory.CreateModuleInstance("m365-entra-user")
-	require.NoError(t, err, "CreateModuleInstance must resolve the published, approved bundle")
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "e2e-tenant")
+	mod, err := factory.CreateTenantModuleInstance(ctx, "m365-entra-user", "e2e-tenant")
+	require.NoError(t, err, "CreateTenantModuleInstance must resolve the published, approved bundle")
 	require.NotNil(t, mod)
+	assert.EqualValues(t, 1, te.hits.Load(), "the controller mints exactly one token for the session")
 
 	handle, ok := mod.(*runtime.ModuleHandle)
-	require.True(t, ok, "CreateModuleInstance must return *runtime.ModuleHandle")
-	t.Cleanup(func() { _ = rt.Stop(handle) })
+	require.True(t, ok, "CreateTenantModuleInstance must return *runtime.ModuleHandle")
+	t.Cleanup(func() { _ = handle.Stop() })
 
-	// Drive a real Get() call through the fork/exec'd process's gRPC server.
-	//
-	// ctx here carries ctxkeys.TenantID, but plain context.Context values do
-	// not cross a gRPC hop (grpc-go propagates deadlines/cancellation, not
-	// arbitrary Value entries), and neither this runtime nor the engine wires
-	// WorkflowHandshakeRequest's tenant_id field yet (see adapter.NewWorkflow's
-	// Handshake doc) — so the module process sees an empty execution tenant.
-	// It must still refuse cleanly with entra_user's own fail-closed tenant
-	// check, which is itself proof the RPC reached and executed the module's
-	// real Get() logic on the other side of the socket, rather than failing at
-	// connection or module resolution.
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "e2e-tenant")
-	_, err = mod.Get(ctx, "some-m365-tenant:someone@example.com")
-
+	// Drive a real Get() through the fork/exec'd process's gRPC server. The
+	// handshake bound the execution tenant inside the module process, so the
+	// module no longer refuses with "tenant context required", and the delivered
+	// token is the one its auth provider hands out, so it does not fail with a
+	// credential error. The resource names a different M365 tenant than the one
+	// the delivered token was issued for, so the module stops at its own tenant
+	// agreement check before any Graph request — proving the whole path ran
+	// without outbound network access.
+	_, err = mod.Get(ctx, "00000000-0000-0000-0000-000000000000:someone@example.com")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tenant context required",
-		"error must come from the module's real Get() logic, not a transport/resolution failure: %v", err)
+	assert.NotContains(t, err.Error(), "tenant context required")
+	assert.NotContains(t, err.Error(), "authenticate with Microsoft Graph")
+	assert.Contains(t, err.Error(), "does not match the M365 tenant configured for this workflow execution",
+		"error must come from the module's tenant agreement check, after authentication: %v", err)
 }
 
 // exeSuffix returns the platform executable suffix (".exe" on Windows, empty

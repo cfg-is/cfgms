@@ -46,11 +46,16 @@ func NewModuleRuntime(runtimeDir string) *ModuleRuntime {
 // Start fork/execs the module binary for the current OS/arch, waits for it to
 // start listening, dials gRPC, and returns a ModuleHandle ready for RPC calls.
 //
+// tenantID and authToken are sent in WorkflowHandshakeRequest.tenant_id and
+// .auth_token: the execution tenant the session is scoped to and the
+// controller-issued credential for the module (empty when the module needs
+// none). authToken is never logged and never appears in an error message.
+//
 // Error precedence:
 //  1. ErrWrongModuleKind — bundle.Manifest.Kind != "workflow"
 //  2. binary not found in bundle.Binaries for current os-arch
 //  3. fork/exec, socket, or gRPC errors
-func (r *ModuleRuntime) Start(b *bundle.Bundle) (*ModuleHandle, error) {
+func (r *ModuleRuntime) Start(b *bundle.Bundle, tenantID, authToken string) (*ModuleHandle, error) {
 	// 1. Kind gate — must be first; workflow runtime hosts only workflow-kind modules.
 	if b.Manifest == nil || b.Manifest.Kind != "workflow" {
 		got := ""
@@ -161,6 +166,8 @@ func (r *ModuleRuntime) Start(b *bundle.Bundle) (*ModuleHandle, error) {
 		ModuleName:    b.Manifest.Name,
 		ModuleVersion: b.Manifest.Version,
 		Publisher:     b.Manifest.Publisher,
+		TenantId:      tenantID,
+		AuthToken:     authToken,
 	}); err != nil {
 		_ = conn.Close()
 		// Read the exit state before terminate kills the child, or the kill
@@ -181,6 +188,7 @@ func (r *ModuleRuntime) Start(b *bundle.Bundle) (*ModuleHandle, error) {
 		socketPath: socketPath,
 		state:      StateRunning,
 		waitCh:     waitCh,
+		rt:         r,
 	}
 	return h, nil
 }
