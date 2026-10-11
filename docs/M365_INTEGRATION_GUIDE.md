@@ -6,7 +6,7 @@ Complete guide for integrating CFGMS with Microsoft 365, covering development se
 
 CFGMS integrates with M365 for **MSP (Managed Service Provider)** scenarios where MSP employees manage multiple client tenants using application permissions.
 
-**Architecture**: MSP app (registered in cfgis.onmicrosoft.com) manages multiple client tenants via admin consent.
+**Architecture**: each CFGMS client tenant holds its own M365 connection, stored in the controller's secret store. A connection is either *direct* (the client's own application registration) or *partner* (the MSP's partner application reaching the client through a GDAP relationship). Connections are created with `cfg tenant m365`.
 
 ## Part 1: Development Setup
 
@@ -66,70 +66,80 @@ go test -v ./features/modules/m365/auth -run TestMSPCapabilities
 go test -v ./features/modules/m365/auth -run TestRealM365Integration
 ```
 
-## Part 2: Production MSP Setup
+## Part 2: Connecting Client Tenants
 
-### 2.1 Create Production MSP App
+An M365 connection exists **only on an existing CFGMS client tenant**: a tenant whose parent is an MSP tenant (a direct child of the root tenant). The root tenant, an MSP tenant, a tenant that does not exist and a tenant below a client tenant (for example `root/msp-a/client-1/servers`) are refused before anything is written. No `cfg tenant m365` command creates a tenant, an account or a consent record, so create the client tenant first.
 
-In your **MSP tenant (cfgis.onmicrosoft.com)**:
+A client secret is never accepted as a flag value and is never echoed, logged or audited. Pass `--client-secret-stdin` and write the secret as one line on standard input. A command that asks for confirmation has no terminal left to ask on when the secret is piped, so it needs `--yes`. `--json` prints the API response data.
 
-1. **Azure Portal** → **App registrations** → **New registration**
-2. Configure:
+Connecting needs `tenant:manage` (`tenant:read` for `get`). A root-scoped operator needs an active crossing into the MSP first (see [Tenant Management](administration/tenant-management.md#tenant-crossings)).
 
+### 2.1 Direct mode: one client, its own app registration
+
+1. In the **client's** Entra tenant, register an application, add the application permissions the modules need (see Part 3), grant admin consent in that tenant, and create a client secret.
+2. Connect the client tenant:
+
+   ```bash
+   printf '%s\n' "$CLIENT_SECRET" | cfg tenant m365 set client-1 \
+     --app-id <application-client-id> \
+     --m365-tenant <client-directory-tenant-id> \
+     --client-secret-stdin
    ```
-   Name: CFGMS MSP Production
-   Account types: Multi-tenant (REQUIRED for MSP)
-   Redirect URI: https://portal.example.com/admin/callback
+
+   The stored connection holds the application ID, the directory tenant ID and the secret, and nothing else.
+3. Check it (the secret is never printed):
+
+   ```bash
+   cfg tenant m365 get client-1
    ```
 
-   **Note**: Replace `portal.example.com` with your actual CFGMS controller domain.
+   `get` prints the mode, app ID, M365 tenant, partner tenant and GDAP roles for a partner connection, and `client secret: set`. A tenant without a connection reports that it has none.
 
-   **Examples**:
-   - Self-hosted: `https://cfgms.yourcompany.com/admin/callback`
-   - cfg.is hosted beta: `https://portal.cfg.is/admin/callback`
+A tenant that already has a connection is refused. Re-run `set` with `--replace` to overwrite it; the command prints what it will change and asks `Proceed? [y/N]`. With no terminal and no `--yes` it refuses and exits non-zero:
 
-3. **Add Same Application Permissions** as development
-4. **DO NOT grant admin consent** (each client will consent individually)
-5. **Create Client Secret** and **Certificate** (prod)
-
-### 2.2 MSP Operations
-
-**Get Token for Client Tenant:**
-
-```go
-// MSP app uses client credentials to access client tenant
-func GetMSPToken(clientTenantID string) (*AccessToken, error) {
-    tokenURL := fmt.Sprintf(
-        "https://login.microsoftonline.com/%s/oauth2/v2.0/token", 
-        clientTenantID,
-    )
-    
-    data := url.Values{
-        "grant_type":    {"client_credentials"},
-        "client_id":     {mspConfig.ClientID},
-        "client_secret": {mspConfig.ClientSecret},
-        "scope":         {"https://graph.microsoft.com/.default"},
-    }
-    
-    return exchangeForToken(tokenURL, data)
-}
+```bash
+printf '%s\n' "$NEW_SECRET" | cfg tenant m365 set client-1 --app-id <id> --m365-tenant <directory-id> --client-secret-stdin --replace --yes
 ```
 
-**Test Client Readiness:**
+Remove a connection and its stored token with `cfg tenant m365 delete client-1` (also confirm-gated; `--yes` skips the prompt).
 
-```go
-func ValidateClient(clientTenantID string) {
-    token, _ := GetMSPToken(clientTenantID)
-    
-    report, _ := TestMSPCapabilities(ctx, mspConfig, clientTenantID, token)
-    
-    if report.OverallSuccess {
-        fmt.Printf("✅ Client %s ready for management\n", clientTenantID)
-    } else {
-        fmt.Printf("⚠️  Setup required: %.1f%% ready\n", report.SuccessRate*100)
-        fmt.Println(report.GetMSPCapabilitySummary())
-    }
-}
-```
+### 2.2 Partner mode: many customers through GDAP
+
+In the **MSP's** M365 tenant, register one partner application with Partner Center access and the application permissions the modules need, and create a client secret. Each customer must have an active GDAP relationship with the MSP.
+
+1. List the MSP's active GDAP customers and see which are already linked:
+
+   ```bash
+   printf '%s\n' "$PARTNER_SECRET" | cfg tenant m365 gdap-customers msp-a \
+     --partner-tenant <msp-m365-tenant-id> --app-id <partner-app-id> --client-secret-stdin
+   ```
+
+   The table has the columns `CUSTOMER TENANT`, `NAME`, `STATUS`, `EXPIRES` and `LINKED TO`. `LINKED TO` is the client tenant of that MSP whose stored connection names the customer, or `unlinked`. It is computed on demand and never stored. Nothing is written.
+2. Link many customers to existing client tenants in one command:
+
+   ```bash
+   printf '%s\n' "$PARTNER_SECRET" | cfg tenant m365 gdap-link msp-a \
+     --partner-tenant <msp-m365-tenant-id> --app-id <partner-app-id> --client-secret-stdin \
+     --link <customer-1-m365-tenant>=client-1 \
+     --link <customer-2-m365-tenant>=client-2 \
+     --gdap-role "User Administrator" --yes
+   ```
+
+   The command prints the planned links and asks `Proceed? [y/N]` (`--yes` skips the prompt). Each linked client tenant gets a partner connection holding the partner tenant ID, the customer tenant ID, the required GDAP roles and the partner app's ID and secret.
+
+The partner credentials are supplied on every `gdap-customers` and `gdap-link` call. They are copied only into the connections of the client tenants being linked and are never stored on the MSP tenant or under any other key.
+
+`gdap-link` validates the whole request before it writes anything. If any check fails, nothing is written:
+
+- every `--link` target must be a client tenant of `msp-a`;
+- every customer must be in the partner's active GDAP list;
+- no customer and no target may appear twice;
+- no customer may already be linked to a different client tenant;
+- a target that already has a connection is refused unless `--replace` is set.
+
+A customer M365 tenant is linked to at most one client tenant under an MSP, and a client tenant holds at most one connection. Use `cfg tenant m365 get <client-tenant>` and `cfg tenant m365 delete <client-tenant>` to inspect or unlink.
+
+Each write emits one audit event per affected client tenant (`m365.connection.set`, `m365.connection.delete`, `m365.gdap.link`) carrying the mode, the app ID and the M365 tenant IDs, never the secret.
 
 ## Part 3: Capability Testing
 
@@ -164,31 +174,7 @@ if report.OverallSuccess {
 
 ## Part 4: Configuration
 
-### MSP Production Config
-
-```go
-type MSPConfig struct {
-    ClientID                string   `yaml:"client_id"`
-    ClientSecret            string   `yaml:"client_secret"`
-    MSPTenantID            string   `yaml:"msp_tenant_id"`    // Your MSP tenant ID
-    ApplicationPermissions  []string `yaml:"app_permissions"`
-    AdminCallbackURI        string   `yaml:"admin_callback"`   // https://portal.example.com/admin/callback
-}
-
-// Default MSP permissions
-func DefaultMSPPermissions() []string {
-    return []string{
-        "User.ReadWrite.All",
-        "Directory.ReadWrite.All", 
-        "Group.ReadWrite.All",
-        "Policy.ReadWrite.ConditionalAccess",
-        "DeviceManagementManagedDevices.ReadWrite.All",
-        "Organization.ReadWrite.All",
-        "Reports.Read.All",
-        "AuditLog.Read.All",
-    }
-}
-```
+Connections are stored with the controller's secret store and are managed only through `cfg tenant m365` (Part 2) or the `/api/v1/tenants/{id}/m365-connection`, `/m365-gdap-customers` and `/m365-gdap-links` routes behind it. There is no configuration file to edit.
 
 ## Key Concepts
 
@@ -197,10 +183,10 @@ func DefaultMSPPermissions() []string {
 - **MSP**: App uses application permissions to manage client tenants on behalf of MSP employees
 - **Traditional**: Users authenticate with delegated permissions to access their own data
 
-**Admin Consent vs User Consent:**  
+**Direct vs Partner connections:**
 
-- **Admin Consent**: Client tenant admin grants MSP app permission to manage entire tenant
-- **User Consent**: Individual users grant permission to access their personal data
+- **Direct**: the client's own application registration, with a client secret stored on the client tenant
+- **Partner (GDAP)**: the MSP's partner application reaches the customer through a GDAP relationship; the partner app's credentials are stored on each linked client tenant
 
 **Application vs Delegated Permissions:**
 
