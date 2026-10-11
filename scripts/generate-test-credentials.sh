@@ -15,9 +15,7 @@ echo -e "${YELLOW}🔐 Generating secure test credentials...${NC}"
 # Generate random credentials (shorter, YAML-safe)
 DB_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 TIMESCALEDB_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
-GITEA_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 GITEA_SECRET_KEY=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
-GITEA_INTERNAL_TOKEN=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 REDIS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 
 # Ephemeral external secrets key. The controller refuses to start without one —
@@ -79,11 +77,8 @@ CFGMS_TEST_TIMESCALEDB_USER=cfgms_test
 CFGMS_TEST_TIMESCALEDB_PASSWORD=$TIMESCALEDB_PASSWORD
 TIMESCALEDB_PASSWORD=$TIMESCALEDB_PASSWORD
 
-# Gitea credentials
-CFGMS_TEST_GITEA_PASSWORD=$GITEA_PASSWORD
-GITEA_ADMIN_PASSWORD=$GITEA_PASSWORD
+# Gitea credentials (git-server-ha)
 GITEA_SECRET_KEY=$GITEA_SECRET_KEY
-GITEA_INTERNAL_TOKEN=$GITEA_INTERNAL_TOKEN
 
 # Redis credentials
 REDIS_PASSWORD=$REDIS_PASSWORD
@@ -112,8 +107,6 @@ REG_TOKEN_TENANT3=$REG_TOKEN_TENANT3
 CFGMS_TEST_DB_HOST=localhost
 CFGMS_TEST_DB_PORT=5433
 CFGMS_TEST_DB_NAME=cfgms_test
-CFGMS_TEST_GITEA_URL=http://localhost:3001
-CFGMS_TEST_GITEA_USER=cfgms_test
 
 # Session info
 CFGMS_TEST_SESSION_ID=$(uuidgen 2>/dev/null || echo "test-session-$(date +%s)")
@@ -136,12 +129,6 @@ services:
   timescaledb-test:
     environment:
       POSTGRES_PASSWORD: $TIMESCALEDB_PASSWORD
-
-  git-server-test:
-    environment:
-      - GITEA__admin__PASSWORD=$GITEA_PASSWORD
-      - GITEA__security__SECRET_KEY=$GITEA_SECRET_KEY
-      - GITEA__security__INTERNAL_TOKEN=$GITEA_INTERNAL_TOKEN
 
   redis-test:
     command: redis-server --requirepass $REDIS_PASSWORD --appendonly no

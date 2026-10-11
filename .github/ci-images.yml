@@ -15,8 +15,6 @@
   mirror: postgres
 - upstream: timescale/timescaledb:latest-pg15@sha256:6343bdc87ca132c6b53acb26113a6bad1821d188fa39975a745f32ddd9757634
   mirror: timescaledb
-- upstream: gitea/gitea:1.21.0@sha256:1b34baabfe2a23bc4ac5c1db5c2316c683d0afa6bc600867c9aafc02a5f9c959
-  mirror: gitea
 - upstream: gitea/gitea:1.21@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
   mirror: gitea
 - upstream: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499

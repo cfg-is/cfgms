@@ -289,13 +289,13 @@ Test the productized service readiness tool:
 
 ```bash
 # Start test infrastructure
-docker compose -f docker-compose.test.yml --profile database --profile timescale --profile git up -d
+docker compose -f docker-compose.test.yml --profile database --profile timescale up -d
 
 # Wait for services
 ./bin/cfgms-wait-for-services
 
 # Verify output shows all services ready
-# Should see: PostgreSQL ✅, TimescaleDB ✅, Gitea ✅
+# Should see: PostgreSQL ✅, TimescaleDB ✅
 
 # Cleanup
 docker compose -f docker-compose.test.yml down -v

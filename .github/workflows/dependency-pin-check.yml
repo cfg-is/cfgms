@@ -333,9 +333,12 @@ jobs:
         done < <(
           {
             grep -hoE '^FROM [^[:space:]]+@sha256:[0-9a-f]{64}' \
-              .devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null
-            # The CI image list (.github/ci-images.yml) also covers the compose
-            # test services and the workflow pre-pull refs.
+              .devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null \
+              | grep -v '^FROM ghcr.io/cfg-is/ci-mirror/' || true
+            # Dockerfile FROM lines name the ghcr.io mirror form of a list entry;
+            # the upstream (Docker Hub) reference is read from the CI image list
+            # (.github/ci-images.yml), which also covers the compose test
+            # services and the workflow pre-pull refs.
             sed -nE 's/^- upstream:[[:space:]]+([^[:space:]]+@sha256:[0-9a-f]{64}).*/FROM \1/p' .github/ci-images.yml
           } | sort -u
         )

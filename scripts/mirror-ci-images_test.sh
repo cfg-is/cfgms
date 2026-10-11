@@ -5,6 +5,8 @@
 # Tests for scripts/mirror-ci-images.sh (Issue #4858).
 #
 # Covers: --check passes on a matching fixture and on this repo; it fails when a
+# consumer names an image outside ghcr.io/cfg-is/ci-mirror/ (docker.io included)
+# or a mirror reference whose digest differs from the list; it also fails when a
 # compose image is missing from the list, when a digest differs, when a compose
 # image has no digest, and when a Dockerfile FROM or workflow pull_with_retry
 # ref is missing; --dry-run prints exactly one copy per list entry to
@@ -24,6 +26,7 @@ FAIL=0
 pass() { echo "  ✅ $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ❌ $1"; FAIL=$((FAIL + 1)); }
 
+M="ghcr.io/cfg-is/ci-mirror"
 D1="$(printf 'a%.0s' $(seq 64))"
 D2="$(printf 'b%.0s' $(seq 64))"
 D3="$(printf 'c%.0s' $(seq 64))"
@@ -48,14 +51,14 @@ LIST
     cat > "$dir/docker-compose.test.yml" <<COMPOSE
 services:
   redis:
-    image: redis:7-alpine@sha256:$D1
+    image: $M/redis:7-alpine@sha256:$D1
   db:
-    image: acme/db:latest-pg15@sha256:$D2 # pinned
+    image: $M/db:latest-pg15@sha256:$D2 # pinned
 COMPOSE
     cat > "$dir/cmd/x/Dockerfile" <<DOCKER
-FROM golang:1.27-alpine@sha256:$D3 AS builder
+FROM $M/golang:1.27-alpine@sha256:$D3 AS builder
 RUN true
-FROM alpine:3.24@sha256:$D4
+FROM $M/alpine:3.24@sha256:$D4
 COPY --from=builder /a /a
 DOCKER
     cat > "$dir/.github/workflows/w.yml" <<WF
@@ -66,7 +69,7 @@ jobs:
         pull_with_retry() {
           until docker pull "\$image"; do :; done
         }
-        pull_with_retry alpine:3.24@sha256:$D4
+        pull_with_retry $M/alpine:3.24@sha256:$D4
 WF
     echo "$dir"
 }
@@ -83,10 +86,10 @@ if [ "$rc" -ne 0 ] && grep -q "redis:7-alpine.*missing" <<<"$out"; then pass "co
 fx="$(make_fixture)"
 sed -i "s/sha256:$D2/sha256:$D1/" "$fx/.github/ci-images.yml"
 out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && grep -q "acme/db:latest-pg15.*digest differs" <<<"$out"; then pass "digest mismatch fails and is named"; else fail "digest mismatch fails and is named ($rc: $out)"; fi
+if [ "$rc" -ne 0 ] && grep -q "ci-mirror/db:latest-pg15.*digest differs" <<<"$out"; then pass "digest mismatch fails and is named"; else fail "digest mismatch fails and is named ($rc: $out)"; fi
 
 fx="$(make_fixture)"
-sed -i "s#image: redis:7-alpine@sha256:$D1#image: redis:7-alpine#" "$fx/docker-compose.test.yml"
+sed -i "s#image: $M/redis:7-alpine@sha256:$D1#image: $M/redis:7-alpine#" "$fx/docker-compose.test.yml"
 out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && grep -q "no @sha256 digest" <<<"$out"; then pass "digest-less compose image fails"; else fail "digest-less compose image fails ($rc: $out)"; fi
 
@@ -95,19 +98,48 @@ sed -i "s/sha256:$D3/sha256:$D1/" "$fx/cmd/x/Dockerfile"
 if ! "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then pass "Dockerfile FROM digest mismatch fails"; else fail "Dockerfile FROM digest mismatch fails"; fi
 
 fx="$(make_fixture)"
-sed -i "s/pull_with_retry alpine:3.24@sha256:$D4/pull_with_retry debian:trixie@sha256:$D4/" "$fx/.github/workflows/w.yml"
+sed -i "s#pull_with_retry $M/alpine:3.24@sha256:$D4#pull_with_retry $M/debian:trixie@sha256:$D4#" "$fx/.github/workflows/w.yml"
 if ! "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then pass "workflow pull_with_retry ref missing from list fails"; else fail "workflow pull_with_retry ref missing from list fails"; fi
 
 if "$SCRIPT" --check >/dev/null 2>&1; then pass "this repository's list matches its consumers"; else fail "this repository's list matches its consumers"; "$SCRIPT" --check 2>&1 | sed 's/^/     /'; fi
 
 fx="$(make_fixture)"
-printf '  other:\n    image: acme/other:latest\n' >> "$fx/docker-compose.test.yml"
+printf '  other:\n    image: %s/other:latest\n' "$M" >> "$fx/docker-compose.test.yml"
 out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && grep -q 'acme/other:latest has no @sha256' <<<"$out"; then pass "an unpinned image fails with no exceptions"; else fail "an unpinned image fails with no exceptions"; fi
+if [ "$rc" -ne 0 ] && grep -q 'other:latest has no @sha256' <<<"$out"; then pass "an unpinned mirror image fails with no exceptions"; else fail "an unpinned mirror image fails with no exceptions"; fi
 
 fx="$(make_fixture)"
 printf '  minio:\n    image: minio/minio:latest\n' >> "$fx/docker-compose.test.yml"
 if "$SCRIPT" --check --root "$fx" >/dev/null 2>&1; then fail "minio/minio:latest is no longer excepted"; else pass "minio/minio:latest is no longer excepted"; fi
+
+fx="$(make_fixture)"
+printf '  hub:\n    image: redis:7-alpine@sha256:%s\n' "$D1" >> "$fx/docker-compose.test.yml"
+out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q "redis:7-alpine@sha256:$D1 is outside" <<<"$out"; then pass "compose consumer naming a Docker Hub image fails"; else fail "compose consumer naming a Docker Hub image fails ($rc: $out)"; fi
+
+fx="$(make_fixture)"
+printf '  hub:\n    image: docker.io/library/redis:7-alpine@sha256:%s\n' "$D1" >> "$fx/docker-compose.test.yml"
+out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'docker.io/library/redis:7-alpine.* is outside ghcr.io/cfg-is/ci-mirror/' <<<"$out"; then pass "docker.io consumer fails and is named"; else fail "docker.io consumer fails and is named ($rc: $out)"; fi
+
+fx="$(make_fixture)"
+sed -i "s#FROM $M/alpine:3.24@#FROM alpine:3.24@#" "$fx/cmd/x/Dockerfile"
+out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'alpine:3.24.* is outside' <<<"$out"; then pass "Dockerfile FROM outside the mirror fails"; else fail "Dockerfile FROM outside the mirror fails ($rc: $out)"; fi
+
+fx="$(make_fixture)"
+sed -i "s#pull_with_retry $M/alpine#pull_with_retry alpine#" "$fx/.github/workflows/w.yml"
+out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'alpine:3.24.* is outside' <<<"$out"; then pass "workflow pull outside the mirror fails"; else fail "workflow pull outside the mirror fails ($rc: $out)"; fi
+
+fx="$(make_fixture)"
+sed -i "s#FROM $M/alpine:3.24@sha256:$D4#FROM \${BASE}\nFROM builder#" "$fx/cmd/x/Dockerfile"
+if "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then pass "build-stage names and \${...} variables are excepted"; else fail "build-stage names and variables are excepted"; fi
+
+fx="$(make_fixture)"
+sed -i "s#image: $M/redis:7-alpine@sha256:$D1#image: $M/redis:7-alpine@sha256:$D4#" "$fx/docker-compose.test.yml"
+out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'ci-mirror/redis:7-alpine@sha256:'"$D4"' digest differs' <<<"$out"; then pass "mirror consumer whose digest does not match the list fails"; else fail "mirror digest mismatch ($rc: $out)"; fi
 
 echo "dry-run"
 fx="$(make_fixture)"
