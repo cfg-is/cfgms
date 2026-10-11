@@ -179,7 +179,7 @@ func TestRootOpsReads_ByIDCrossingBoundary(t *testing.T) {
 			clientID, rootID := f.records[rt.kind], f.rootIDs[rt.kind]
 
 			noCross := boundRootOperator("ops-no-" + rt.name)
-			assertCrossingChallenge(t, do(rootOperatorCaller(noCross), clientID), opsClient)
+			assertCrossingChallenge(t, do(rootOperatorCaller(noCross), clientID), opsMSP)
 			assert.Equal(t, http.StatusOK, do(rootOperatorCaller(noCross), rootID).Code, "root's own record stays readable")
 			assert.Equal(t, http.StatusNotFound, do(rootOperatorCaller(noCross), "no-such-record").Code, "not-found stays 404")
 
@@ -264,7 +264,7 @@ func TestRootOpsReads_PendingDeliveriesCrossingBoundary(t *testing.T) {
 		return rec
 	}
 	op := boundRootOperator("ops-pending")
-	assertCrossingChallenge(t, do(rootOperatorCaller(op)), opsClient)
+	assertCrossingChallenge(t, do(rootOperatorCaller(op)), opsMSP)
 	grantCrossing(t, f.server, op.ID, opsMSP)
 	assert.Equal(t, http.StatusOK, do(rootOperatorCaller(op)).Code)
 	assert.Equal(t, http.StatusOK, do(certAdminCaller()).Code)

@@ -91,7 +91,11 @@ func (h *RollbackHandler) refuseTarget(w http.ResponseWriter, r *http.Request, t
 	case tenantAuthAllowed:
 		return false
 	case tenantAuthNeedsCrossing:
-		writeTenantCrossingChallenge(w, tenant)
+		covering := ""
+		if h.crossingTenant != nil {
+			covering = h.crossingTenant(r.Context(), tenant)
+		}
+		writeTenantCrossingChallenge(w, covering)
 	default:
 		deny()
 	}
@@ -110,8 +114,11 @@ type RollbackHandler struct {
 	// descendant" (Server.tenantSubtreeContains), injected at construction. Nil
 	// fails closed: only the caller's own tenant is then in scope.
 	tenantSubtree tenantSubtreeFunc
-	auditManager  *audit.Manager
-	logger        logging.Logger
+	// crossingTenant resolves the crossing-covering MSP for a target tenant
+	// (Server.crossingCoveringTenant); nil omits break_glass_endpoint.
+	crossingTenant func(ctx context.Context, tenant string) string
+	auditManager   *audit.Manager
+	logger         logging.Logger
 }
 
 // executeRollbackRequest extends RollbackRequest with handler-local cross-tenant check fields.

@@ -422,7 +422,7 @@ func TestAuthorizeRecordRead(t *testing.T) {
 	ok, rec, nf := run(boundRootOperator("rr-op"), root, "client-other")
 	assert.False(t, ok)
 	assert.False(t, nf, "the challenge replaces notFound")
-	assertCrossingChallenge(t, rec, "client-other")
+	assertCrossingChallenge(t, rec, "msp-other")
 
 	ok, rec, nf = run(boundRootOperator("rr-op"), root, "no-such-tenant")
 	assert.False(t, ok)
@@ -461,5 +461,5 @@ func TestTenantReadScope_StoreErrorFailsClosed(t *testing.T) {
 		t.Fatal("a store error must challenge, not 404")
 	})
 	assert.False(t, ok)
-	assertCrossingChallenge(t, rec, "client-r")
+	assertCrossingChallenge(t, rec, "msp-r")
 }

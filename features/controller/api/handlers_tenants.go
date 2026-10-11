@@ -300,25 +300,49 @@ func (s *Server) isCallerAuthorizedForTenant(ctx context.Context, principal *Pri
 // opposed to a bare 403/404, which would give a legitimate break-glass invocation no
 // path forward. "tenant-crossing" is not a session.AssuranceLevel: this does not touch
 // the assurance enum or resolveAssuranceRequirement, only the response shape.
+//
+// The endpoint names the MSP tenant that covers resourceTenant (ADR-025 A8.2), never a
+// client tenant below it, so a by-ID read does not disclose the owning client tenant.
 func (s *Server) writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) {
-	writeTenantCrossingChallenge(w, resourceTenant)
+	writeTenantCrossingChallenge(w, s.crossingCoveringTenant(context.Background(), resourceTenant))
+}
+
+// crossingCoveringTenant returns the tenant a caller invokes break-glass on (or
+// receives a grant from) to cross into resourceTenant: path[1] of its path from
+// root, which is resourceTenant itself when it is an MSP tenant. It returns ""
+// when the path cannot be resolved, and never falls back to resourceTenant.
+func (s *Server) crossingCoveringTenant(ctx context.Context, resourceTenant string) string {
+	if s.tenantManager == nil || resourceTenant == "" {
+		return ""
+	}
+	root := s.tenantManager.RootTenantID(ctx)
+	path, err := s.tenantManager.GetTenantPath(ctx, resourceTenant)
+	if root == "" || err != nil || len(path) < 2 || path[0] != root {
+		return ""
+	}
+	return path[1]
 }
 
 // writeTenantCrossingChallenge is Server.writeTenantCrossingChallenge for handlers
-// that are not *Server (RollbackHandler).
-func writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) {
+// that are not *Server (RollbackHandler). coveringTenant is the already-resolved
+// crossing-covering tenant; empty omits break_glass_endpoint.
+func writeTenantCrossingChallenge(w http.ResponseWriter, coveringTenant string) {
 	w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="tenant-crossing"`)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
+	endpoint := ""
+	if coveringTenant != "" {
+		endpoint = "/api/v1/tenants/" + coveringTenant + "/break-glass"
+	}
 	_ = json.NewEncoder(w).Encode(struct {
 		Error              string   `json:"error"`
 		RequiredAssurance  string   `json:"required_assurance"`
-		BreakGlassEndpoint string   `json:"break_glass_endpoint"`
+		BreakGlassEndpoint string   `json:"break_glass_endpoint,omitempty"`
 		ReasonCategories   []string `json:"reason_categories"`
 	}{
 		Error:              "tenant_crossing_required",
 		RequiredAssurance:  "tenant-crossing",
-		BreakGlassEndpoint: "/api/v1/tenants/" + resourceTenant + "/break-glass",
+		BreakGlassEndpoint: endpoint,
 		ReasonCategories: []string{
 			string(business.TenantCrossingReasonAccountRecovery),
 			string(business.TenantCrossingReasonSecurityIncident),

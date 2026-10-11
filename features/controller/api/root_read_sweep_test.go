@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -352,34 +351,6 @@ func (f *rootReadSweepFixture) grantMSP(t *testing.T) {
 	}))
 }
 
-// withoutChallengeEndpoint returns the response body with, for the crossing
-// challenge only, the break_glass_endpoint field removed.
-//
-// KNOWN GAP, not an endorsement: writeTenantCrossingChallenge builds that endpoint
-// from the tenant that owns the record, so a by-ID read of a client tenant's record
-// names the client tenant's ID in /api/v1/tenants/<id>/break-glass. ADR-025 A8.2's
-// visibility rule says root never sees a client tenant's name or path in any API
-// response. Fixing it belongs to the by-ID read story (point the endpoint at the
-// crossing-covering MSP), not to this guard; until then the sweep ignores this one
-// field so it can hold every other field of every response to the rule. Delete this
-// function and its use when the challenge stops naming the owning tenant.
-func withoutChallengeEndpoint(rec *httptest.ResponseRecorder) string {
-	body := rec.Body.String()
-	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`) {
-		return body
-	}
-	var challenge map[string]interface{}
-	if err := json.Unmarshal([]byte(body), &challenge); err != nil {
-		return body
-	}
-	delete(challenge, "break_glass_endpoint")
-	stripped, err := json.Marshal(challenge)
-	if err != nil {
-		return body
-	}
-	return string(stripped)
-}
-
 // sweepResult is what one crossing-class route answered.
 type sweepResult struct {
 	route  string
@@ -396,7 +367,7 @@ func sweepCrossingRoutes(t *testing.T, f *rootReadSweepFixture, token string) []
 		url, echoed, err := f.resolveSweepRoute(route)
 		require.NoError(t, err)
 		rec := f.get(token, url)
-		body := withoutChallengeEndpoint(rec)
+		body := rec.Body.String()
 		for _, v := range echoed {
 			body = strings.ReplaceAll(body, v, "")
 		}
@@ -460,26 +431,4 @@ func TestRootReadSweep_EveryCrossingRouteResolves(t *testing.T) {
 		assert.Equal(t, rootReadCrossing, rootReadClassification[template].Class,
 			"%s has a sweep fixture but is not crossing-class", template)
 	}
-}
-
-// TestWithoutChallengeEndpoint_IsNarrow proves the one field the sweep ignores is
-// ignored only on the crossing challenge: the same marker anywhere else in the
-// challenge, or in any other response, still counts as a leak.
-func TestWithoutChallengeEndpoint_IsNarrow(t *testing.T) {
-	challenge := func(extra string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		writeTenantCrossingChallenge(rec, sweepClient)
-		if extra != "" {
-			rec.Body.Reset()
-			rec.Body.WriteString(`{"error":"tenant_crossing_required","hint":"` + extra + `","break_glass_endpoint":"/api/v1/tenants/` + sweepClient + `/break-glass"}`)
-		}
-		return rec
-	}
-	assert.NotContains(t, withoutChallengeEndpoint(challenge("")), sweepMarker)
-	assert.Contains(t, withoutChallengeEndpoint(challenge(sweepMarker)), sweepMarker)
-
-	plain := httptest.NewRecorder()
-	plain.WriteHeader(http.StatusForbidden)
-	plain.Body.WriteString(`{"break_glass_endpoint":"` + sweepMarker + `"}`)
-	assert.Contains(t, withoutChallengeEndpoint(plain), sweepMarker)
 }

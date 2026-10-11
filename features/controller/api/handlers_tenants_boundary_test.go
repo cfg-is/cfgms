@@ -139,8 +139,11 @@ func TestHandleListTenants_RootScoped_NoClientBytesLeak(t *testing.T) {
 	assert.NotContains(t, body, boundaryGrandchildName)
 	assert.NotContains(t, body, "grandchild-a1x")
 	assert.NotContains(t, body, label)
-	assert.NotContains(t, body, "msp-a")
+	assert.NotContains(t, body, "client-a1")
 	assert.NotContains(t, body, "msp-b")
+	if getRec.Code == http.StatusUnauthorized {
+		assert.Contains(t, body, "/api/v1/tenants/msp-a/break-glass", "the challenge names the covering MSP")
+	}
 }
 
 func assertNoClientBytes(t *testing.T, body, label string) {

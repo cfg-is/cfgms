@@ -148,7 +148,7 @@ func TestRootStewardReads_ByIDCrossingBoundary(t *testing.T) {
 
 			t.Run("no crossing", func(t *testing.T) {
 				rec := f.get(t, rt.handler, boundRootOperator("steward-read-no-"+string(rune('a'+i))), path, vars)
-				assertCrossingChallenge(t, rec, stewardReadClient)
+				assertCrossingChallenge(t, rec, stewardReadMSP)
 			})
 			t.Run("active crossing on the owning MSP", func(t *testing.T) {
 				operator := boundRootOperator("steward-read-msp-" + string(rune('a'+i)))
@@ -421,7 +421,7 @@ func TestRootStewardReads_TelemetryStream(t *testing.T) {
 
 	t.Run("refused with the challenge without a crossing", func(t *testing.T) {
 		rec := call(boundRootOperator("telemetry-none"), f.clientSteward)
-		assertCrossingChallenge(t, rec, stewardReadClient)
+		assertCrossingChallenge(t, rec, stewardReadMSP)
 		assert.False(t, reached, "the stream handler must not run")
 	})
 

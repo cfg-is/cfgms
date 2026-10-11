@@ -87,5 +87,5 @@ func (a *reportsReadScope) AnonymizedFleet() any {
 
 // WriteCrossingChallenge answers with the ADR-025 crossing challenge.
 func (a *reportsReadScope) WriteCrossingChallenge(w http.ResponseWriter, tenantID string) {
-	writeTenantCrossingChallenge(w, tenantID)
+	a.s.writeTenantCrossingChallenge(w, tenantID)
 }
