@@ -57,6 +57,8 @@ A tenant-scoped caller reaches its own tenant's records. A root caller not subje
 
 `reason_categories` lists the values `break_glass_endpoint` accepts as `reason_category`, so a client can render the choices.
 
+For the operator procedure (grants, break-glass and account recovery) see the [tenant support access guide](../operations/tenant-support-access.md).
+
 Bulk approvals (approve-all, approve-by-CIDR) skip registrations the caller may not act on instead of returning the challenge.
 
 **Entity graph, cluster and cockpit reads.** These reads apply the same rule to a root caller subject to the boundary, per owning tenant:
@@ -2201,6 +2203,8 @@ Grant create, break-glass create and approve, list, and end all return this snak
 | `status` | Derived: `revoked` if ended, else `expired` if past `expires_at`, else `pending` if awaiting a second approver, else `active` |
 
 #### Loud break-glass
+
+Operator procedure: [tenant support access guide](../operations/tenant-support-access.md#4-account-recovery-break-glass-procedure).
 
 Every break-glass that becomes active is announced on three channels, for all four reason categories. A break-glass becomes active when it is created `approved`, or when it is approved from `pending` (second-approver setting on); a pending break-glass announces nothing. The crossing is persisted first. A failure of any announcement channel never fails or delays the request and never undoes the crossing.
 
