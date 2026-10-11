@@ -207,7 +207,19 @@ security workflow guide for the full per-check gap list).
 
 **Jobs**:
 - `denylist-check` — hard-fails any PR that pins a known-compromised Trivy version (CVE-2026-33634)
-- `check-tool-versions` — schedule/manual only; checks gosec, staticcheck, gitleaks, nancy, trufflehog, trivy, go-licenses, golangci-lint, and Go toolchain against latest releases; opens a GitHub issue if outdated
+- `check-tool-versions` — schedule/manual only; checks gosec, staticcheck, gitleaks, nancy, trufflehog, trivy, go-licenses, golangci-lint, and Go toolchain against latest releases, plus the digest of every image in `.github/ci-images.yml`; opens a GitHub issue if outdated and outputs the drifted image refs
+- `mirror-new-digests` — schedule/manual only (`packages: write`); calls `ci-image-mirror.yml` once per drifted image ref so the new digest is mirrored before any bump story exists
+
+---
+
+#### `ci-image-mirror.yml` — CI Image Mirror
+
+**Triggers**: Push to `develop` touching `.github/ci-images.yml` or the workflow file, `workflow_call` (from `dependency-pin-check.yml`), Manual dispatch. Deliberately no `pull_request` / `pull_request_target`: the job holds `packages: write`.
+
+**Jobs**:
+- `mirror` — runs `scripts/mirror-ci-images.sh`, copying each image in `.github/ci-images.yml` to `ghcr.io/cfg-is/ci-mirror/<name>:<tag>` with its digest unchanged. Optional `upstream_ref` input mirrors a single new digest.
+
+See `docs/development/ci-infrastructure-setup.md` → CI Image Mirror.
 
 ---
 
@@ -298,6 +310,7 @@ security workflow guide for the full per-check gap list).
 | `zizmor.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 | `scorecard.yml` | push develop only | ❌ | ❌ | Weekly Sat | ✅ |
 | `dependency-pin-check.yml` | ❌ | ✅ (path-filtered) | ❌ | Weekly Wed | ✅ |
+| `ci-image-mirror.yml` | develop only (`.github/ci-images.yml`, workflow file) | ❌ (deliberate) | ❌ | ❌ | ✅ (+ `workflow_call`) |
 | `production-gates.yml` | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `license-check.yml` | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `cla-check.yml` | ❌ | pull_request_target | ✅ | ❌ | ❌ |

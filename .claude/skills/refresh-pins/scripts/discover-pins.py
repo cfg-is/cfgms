@@ -24,6 +24,11 @@ Discovery sources:
   grep for. Claude Code CLI is NOT grepped here — it is exempt from pin
   tracking entirely (founder decision 2026-10-01, Issue #4473; see
   references/cooldown-policy.md "Claude Code CLI exemption").
+- .github/ci-images.yml — every third-party image CI pulls from Docker Hub
+  (compose test services, Dockerfile FROM bases, workflow pre-pulls), each
+  digest-pinned with a ghcr.io mirror name. Non-golang entries are emitted as
+  `kind: "docker"` pins carrying `upstream_ref` and `mirror_name`; golang:
+  entries join the go-toolchain lockstep `locations[]` instead.
 - go.mod require blocks — every DIRECT module requirement, `kind: "gomod"`.
   Indirect requirements are deliberately not enumerated (334 of them here);
   their versions are chosen by MVS rather than by us, so the actionable signal
@@ -162,6 +167,63 @@ def parse_image_ref(ref: str) -> tuple[str, str, str] | None:
     return ref, tag, digest
 
 
+#: Registry the CI image list is mirrored to; mirrors scripts/mirror-ci-images.sh.
+CI_MIRROR_REGISTRY = "ghcr.io/cfg-is/ci-mirror"
+
+CI_IMAGES_PATH = ".github/ci-images.yml"
+
+#: .github/ci-images.yml is a flat list read by line pattern (no YAML parser —
+#: this script is standard-library only):
+#:   - upstream: <image>:<tag>@sha256:<64 hex>
+#:     mirror: <name>
+_CI_UPSTREAM_RE = re.compile(r"^- upstream:\s*(?P<ref>\S+)\s*$")
+_CI_MIRROR_RE = re.compile(r"^\s+mirror:\s*(?P<name>\S+)\s*$")
+
+
+def read_ci_images(root: Path) -> list[dict]:
+    """Entries of .github/ci-images.yml: image, tag, digest, mirror_name, line.
+
+    An entry whose reference does not parse to image+tag+digest, or that has no
+    mirror line, is reported on stderr and dropped rather than emitted as a
+    confidently wrong pin.
+    """
+    path = root / CI_IMAGES_PATH
+    if not path.is_file():
+        return []
+    entries: list[dict] = []
+    pending: tuple[int, str] | None = None
+    for i, line in enumerate(path.read_text().splitlines(), 1):
+        m = _CI_UPSTREAM_RE.match(line)
+        if m:
+            if pending:
+                print(f"discover-pins: WARNING {CI_IMAGES_PATH}:{pending[0]} entry has no mirror line",
+                      file=sys.stderr)
+            pending = (i, m.group("ref"))
+            continue
+        m = _CI_MIRROR_RE.match(line)
+        if m and pending:
+            parsed = parse_image_ref(pending[1])
+            if parsed is None or not parsed[1] or not parsed[2]:
+                print(f"discover-pins: WARNING {CI_IMAGES_PATH}:{pending[0]} not image:tag@digest: {pending[1]}",
+                      file=sys.stderr)
+            else:
+                image, tag, digest = parsed
+                entries.append({
+                    "image": image, "tag": tag, "digest": digest,
+                    "mirror_name": m.group("name"), "line": pending[0],
+                    "match": f"- upstream: {pending[1]}",
+                })
+            pending = None
+    if pending:
+        print(f"discover-pins: WARNING {CI_IMAGES_PATH}:{pending[0]} entry has no mirror line",
+              file=sys.stderr)
+    return entries
+
+
+def _is_golang(image: str) -> bool:
+    return image == "golang" or image.endswith("/golang")
+
+
 def discover_base_images(root: Path) -> list[dict]:
     """Container base images pinned by FROM lines, excluding golang:.
 
@@ -220,19 +282,41 @@ def discover_base_images(root: Path) -> list[dict]:
                 {"file": rel, "line": i, "match": line.strip()}
             )
 
+    # The CI image list: one entry per image CI pulls, including compose test
+    # services no Dockerfile mentions. golang: entries belong to the
+    # go-toolchain lockstep pin (discover_go_toolchain), same as above.
+    mirrors: dict[tuple[str, str, str], str] = {}
+    for e in read_ci_images(root):
+        if _is_golang(e["image"]):
+            continue
+        key = (e["image"], e["tag"], e["digest"])
+        by_pin.setdefault(key, []).append(
+            {"file": CI_IMAGES_PATH, "line": e["line"], "match": e["match"]}
+        )
+        mirrors[key] = e["mirror_name"]
+
     pins: list[dict] = []
     for (image, tag, digest), locations in sorted(by_pin.items()):
-        pins.append({
+        # Official images (no namespace) live under /_/, namespaced ones under /r/.
+        source = (f"https://hub.docker.com/r/{image}" if "/" in image
+                  else f"https://hub.docker.com/_/{image}")
+        pin = {
             "name": f"docker:{image}:{tag}" if tag else f"docker:{image}",
             "kind": "docker",
             "current": digest or tag,
             "tag": tag or None,
             "digest": digest or None,
-            "release_source": f"https://hub.docker.com/_/{image}",
+            "release_source": source,
             "ecosystem": None,  # OS-package CVEs come from the image scan, not GHSA
             "package": image,
             "locations": locations,
-        })
+        }
+        key = (image, tag, digest)
+        if key in mirrors:
+            pin["upstream_ref"] = f"{image}:{tag}@{digest}"
+            pin["mirror_name"] = mirrors[key]
+            pin["mirror"] = f"{CI_MIRROR_REGISTRY}/{mirrors[key]}:{tag}"
+        pins.append(pin)
     return pins
 
 
@@ -403,6 +487,15 @@ def discover_go_toolchain(root: Path) -> dict:
         re.compile(r"^\s*(?:docker\s+pull|pull_with_retry)\s+[\"']?golang:\d+\.\d+(\.\d+)?"),
         workflows, root,
     ))
+
+    # golang: entries of the CI image list (.github/ci-images.yml). The list
+    # must move with the Dockerfile FROM digests, so a Go bump edits it too.
+    ci_images = root / CI_IMAGES_PATH
+    if ci_images.is_file():
+        locations.extend(grep_files(
+            re.compile(r"^- upstream:\s*golang:\d+\.\d+(\.\d+)?"),
+            [ci_images], root,
+        ))
 
     # Any other literal occurrence of the toolchain version that the
     # structural patterns above don't match — e.g. a Windows dev-setup
