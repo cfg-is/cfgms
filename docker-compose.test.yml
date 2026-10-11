@@ -668,7 +668,7 @@ services:
 
   # Git Server for HA testing (uses TimescaleDB for storage); the HA suite in
   # test/integration/ha lists it in its required services.
-    git-server-ha:
+  git-server-ha:
     image: ghcr.io/cfg-is/ci-mirror/gitea:1.21@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
     container_name: cfgms-git-server-ha
     environment:
