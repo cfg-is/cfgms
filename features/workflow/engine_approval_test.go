@@ -268,12 +268,19 @@ func TestApproval_KilledResumeIsReclaimedAndCompletesOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, got.ResumedAt.IsZero(), "a killed run is not marked resumed")
 
-	e2 := h.engine(WithApprovalLease(lease), WithNodeID("node-2"))
-	// Within the lease the claim holds: nothing is resumed.
-	require.NoError(t, e2.RecoverApprovals(context.Background()))
-	_, err = e2.GetExecution(context.Background(), approvalTestTenant, rec.ExecutionID)
+	// The lease is judged by the node attempting the takeover, against wall-clock
+	// time since the claim. A node whose lease cannot have elapsed yet must leave the
+	// claim alone; a long lease keeps that true however slowly the steps above ran.
+	observer := h.engine(WithApprovalLease(time.Hour), WithNodeID("node-observer"))
+	require.NoError(t, observer.RecoverApprovals(context.Background()))
+	_, err = observer.GetExecution(context.Background(), approvalTestTenant, rec.ExecutionID)
 	assert.Error(t, err, "a live claim must not be taken over")
+	got, err = h.store.GetApproval(context.Background(), rec.TenantID, rec.ApprovalID)
+	require.NoError(t, err)
+	assert.Equal(t, "node-1", got.ResumeClaimedBy, "the live claim still belongs to the killed node")
 
+	// Once a node's lease has elapsed since the claim, that node reclaims the run.
+	e2 := h.engine(WithApprovalLease(lease), WithNodeID("node-2"))
 	time.Sleep(lease + 50*time.Millisecond)
 	require.NoError(t, e2.RecoverApprovals(context.Background()))
 	eventually(t, "second engine completes the run", func() bool { return execStatus(e2, rec.ExecutionID) == StatusCompleted })
