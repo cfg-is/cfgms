@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/cert"
 	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -159,4 +160,44 @@ func TestRun_SingleNodeCreatesNoSigningCertificate(t *testing.T) {
 	}
 	assert.Contains(t, types, cert.CertificateTypeInternalServer)
 	assert.NotContains(t, types, cert.CertificateTypeConfigSigning)
+}
+
+func TestRequireClusterCAConfig(t *testing.T) {
+	t.Run("cluster mode without cluster_ca names the missing setting", func(t *testing.T) {
+		err := RequireClusterCAConfig(certStoreTestConfig("cluster"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "certificate.cluster_ca")
+		assert.NotContains(t, err.Error(), "single-node signing key store")
+	})
+
+	t.Run("cluster mode with a missing vault address names it", func(t *testing.T) {
+		cfg := certStoreTestConfig("cluster")
+		cfg.Certificate.ClusterCA = &config.ClusterCAConfig{VaultKeyPath: "root/cluster-ca"}
+		err := RequireClusterCAConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "vault_address")
+	})
+
+	t.Run("cluster mode with a missing vault key path names it", func(t *testing.T) {
+		cfg := certStoreTestConfig("cluster")
+		cfg.Certificate.ClusterCA = &config.ClusterCAConfig{VaultAddress: "https://vault.example.com:8200"}
+		err := RequireClusterCAConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "vault_key_path")
+	})
+
+	t.Run("complete cluster_ca is accepted", func(t *testing.T) {
+		cfg := certStoreTestConfig("cluster")
+		cfg.Certificate.ClusterCA = &config.ClusterCAConfig{
+			VaultAddress: "https://vault.example.com:8200", VaultKeyPath: "root/cluster-ca",
+		}
+		require.NoError(t, RequireClusterCAConfig(cfg))
+		assert.True(t, UsesClusterCA(cfg))
+	})
+
+	t.Run("single node needs no cluster_ca", func(t *testing.T) {
+		cfg := certStoreTestConfig("")
+		require.NoError(t, RequireClusterCAConfig(cfg))
+		assert.False(t, UsesClusterCA(cfg))
+	})
 }

@@ -150,7 +150,13 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	wireClusterCertStores(managerCfg, cfg, storageManager)
 
 	var certManager *cert.Manager
-	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
+	if err := RequireClusterCAConfig(cfg); err != nil {
+		if rbErr := rollback.Execute(); rbErr != nil {
+			logger.Error("Rollback failed after cluster CA config validation error", "rollback_error", rbErr.Error())
+		}
+		return nil, err
+	}
+	if UsesClusterCA(cfg) {
 		if err := applyClusterCAExternalPaths(caConfig, cfg.Certificate.ClusterCA); err != nil {
 			if rbErr := rollback.Execute(); rbErr != nil {
 				logger.Error("Rollback failed after cluster CA config validation error", "rollback_error", rbErr.Error())
@@ -637,6 +643,33 @@ func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.Man
 	// on shutdown.
 	manager.AttachCloser(store)
 	return manager, nil
+}
+
+// UsesClusterCA reports whether cfg selects the cluster certificate path: the CA
+// and config-signing key are held in the shared OpenBao vault named by
+// certificate.cluster_ca rather than on the node.
+func UsesClusterCA(cfg *config.Config) bool {
+	return cfg != nil && cfg.HA.IsClusterMode() && cfg.Certificate != nil && cfg.Certificate.ClusterCA != nil
+}
+
+// RequireClusterCAConfig fails a cluster-mode config that lacks cluster signing-key
+// custody, naming the missing setting. It is a no-op outside cluster mode. Without
+// it a cluster node would fall through to the single-node signing key store, whose
+// refusal message does not say what to configure.
+func RequireClusterCAConfig(cfg *config.Config) error {
+	if cfg == nil || !cfg.HA.IsClusterMode() {
+		return nil
+	}
+	if cfg.Certificate == nil || cfg.Certificate.ClusterCA == nil {
+		return fmt.Errorf("cluster mode requires certificate.cluster_ca (vault_address and vault_key_path, or CFGMS_CLUSTER_CA_VAULT_ADDRESS and CFGMS_CLUSTER_CA_VAULT_KEY_PATH) so the CA and signing key are held in the shared vault")
+	}
+	if cfg.Certificate.ClusterCA.VaultAddress == "" {
+		return fmt.Errorf("cluster mode requires certificate.cluster_ca.vault_address (or CFGMS_CLUSTER_CA_VAULT_ADDRESS)")
+	}
+	if cfg.Certificate.ClusterCA.VaultKeyPath == "" {
+		return fmt.Errorf("cluster mode requires certificate.cluster_ca.vault_key_path (or CFGMS_CLUSTER_CA_VAULT_KEY_PATH)")
+	}
+	return nil
 }
 
 // singleNodeSigningKeyTenant is the system tenant a single-node controller keeps

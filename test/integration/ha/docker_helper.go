@@ -55,6 +55,14 @@ const (
 	blobStoreContainer = "cfgms-s3-test"
 )
 
+// vaultService is the OpenBao instance that holds the cluster CA and
+// config-signing key (certificate.cluster_ca in test/fixtures/ha/controller-ha.cfg).
+// It must be up before ha-ca-init seeds the CA.
+const (
+	vaultService   = "openbao-test"
+	vaultContainer = "cfgms-openbao-test"
+)
+
 // caInitService bootstraps the certificate authority the three controllers
 // share. Raft peer traffic is mutual TLS and each node authenticates its peers
 // against CFGMS_HA_CA_CERT_PATH, so every node must present a certificate
@@ -221,6 +229,11 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 		return err
 	}
 
+	// Step 2a: the cluster CA lives in OpenBao, so it must be up first.
+	if err := h.ensureVault(ctx); err != nil {
+		return err
+	}
+
 	// Step 2b: bootstrap the shared CA. Idempotent, so it runs on every
 	// StartCluster and short-circuits once the ha_cluster_certs volume is warm.
 	if err := h.ensureSharedCA(ctx); err != nil {
@@ -372,6 +385,24 @@ func (h *DockerComposeHelper) ensureBlobStore(ctx context.Context) error {
 		blobStoreService)
 	if err != nil {
 		return fmt.Errorf("failed to start %s: %w\nOutput: %s", blobStoreService, err, output)
+	}
+	return nil
+}
+
+// ensureVault makes sure the OpenBao instance holding the cluster CA is running
+// and healthy, reusing an already-running container.
+func (h *DockerComposeHelper) ensureVault(ctx context.Context) error {
+	if containerRunning(ctx, vaultContainer) {
+		fmt.Printf("Reusing the running %s container\n", vaultContainer)
+		return nil
+	}
+
+	output, err := h.compose(ctx,
+		"--profile", "ha",
+		"up", "-d", "--wait", "--wait-timeout", strconv.Itoa(int(databaseReadyTimeout.Seconds())),
+		vaultService)
+	if err != nil {
+		return fmt.Errorf("failed to start %s: %w\nOutput: %s", vaultService, err, output)
 	}
 	return nil
 }

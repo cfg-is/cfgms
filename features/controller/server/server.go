@@ -3582,7 +3582,10 @@ func loadExistingCertificateManager(cfg *config.Config, storageManager *interfac
 	// (and fail) to read a local ca.key that a cluster-mode node never has.
 	// storageManager also supplies the cluster-visible revocation/signing-cursor
 	// stores (ADR-031 Decision 1, Issue #3852 AC3).
-	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
+	if err := initialization.RequireClusterCAConfig(cfg); err != nil {
+		return nil, err
+	}
+	if initialization.UsesClusterCA(cfg) {
 		manager, err := initialization.BuildClusterCertManager(context.Background(), cfg, certPath, storageManager, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load cluster CA from vault: %w", err)
