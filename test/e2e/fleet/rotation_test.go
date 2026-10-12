@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -595,13 +596,14 @@ func (s *FleetTestSuite) requireSigningPushApplied(t *testing.T, container strin
 	}
 }
 
-// waitForSigningTrustSetOf waits until container's steward has logged a
-// "Signing cert push applied" line for serial whose resulting trust set holds
-// exactly count certificates. A serial is unique to one rotation, so a match is
-// that rotation's outcome regardless of when the line was written.
-func (s *FleetTestSuite) waitForSigningTrustSetOf(t *testing.T, container, serial string, count int, timeout time.Duration) bool {
+// waitForSigningTrustSetExcluding waits until container's steward has logged a
+// "Signing cert push applied" line for serial whose resulting trust set (the
+// trust_serials field) holds serial and does not hold retired. Serials are unique
+// to one rotation, so a match is that rotation's retirement outcome regardless of
+// when the line was written or how many other certs the steward retains.
+func (s *FleetTestSuite) waitForSigningTrustSetExcluding(t *testing.T, container, serial, retired string, timeout time.Duration) bool {
 	t.Helper()
-	countRe := regexp.MustCompile(fmt.Sprintf(`cert_count"?\s*[=:]\s*%d\b`, count))
+	trustRe := regexp.MustCompile(`trust_serials"?\s*[=:]\s*"?([0-9,]*)`)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		tmpDir := t.TempDir()
@@ -619,7 +621,15 @@ func (s *FleetTestSuite) waitForSigningTrustSetOf(t *testing.T, container, seria
 					continue
 				}
 				for _, line := range strings.Split(string(content), "\n") {
-					if strings.Contains(line, signingPushAppliedMarker) && strings.Contains(line, serial) && countRe.MatchString(line) {
+					if !strings.Contains(line, signingPushAppliedMarker) {
+						continue
+					}
+					m := trustRe.FindStringSubmatch(line)
+					if m == nil {
+						continue
+					}
+					held := strings.Split(m[1], ",")
+					if slices.Contains(held, serial) && !slices.Contains(held, retired) {
 						return true
 					}
 				}
@@ -674,11 +684,12 @@ func (s *FleetTestSuite) testRetirementAtOverlapEnd(t *testing.T) {
 	// The sweep interval is one minute by default; allow it two full cycles. The
 	// outcome is asserted, not a new log line: with a zero overlap the sweep can land
 	// within moments of the rotation push, so the retiring push may already be logged
-	// before any count taken here. The retirement shows as a push of the new serial
-	// leaving a trust set of exactly one certificate.
-	if !s.waitForSigningTrustSetOf(t, connected, result.NewSerial, 1, 150*time.Second) {
+	// before any count taken here. The retirement shows as an applied push whose
+	// resulting trust set holds the new serial and no longer holds the old one. The
+	// set size is not asserted: earlier subtests leave certs inside their own windows.
+	if !s.waitForSigningTrustSetExcluding(t, connected, result.NewSerial, result.OldSerial, 150*time.Second) {
 		log, _ := s.readStewardLog(t, connected)
-		t.Fatalf("%s: retirement of %s never left a trust set of one (%s)\nlog tail:\n%s",
+		t.Fatalf("%s: retired serial %s never left the trust set holding %s\nlog tail:\n%s",
 			connected, result.OldSerial, result.NewSerial, lastLines(log, 60))
 	}
 	s.requireConfigAccepted(t, connected)
