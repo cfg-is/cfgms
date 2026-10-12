@@ -3179,10 +3179,18 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 		appliedSerial = x509Cert.SerialNumber.String()
 	}
 
+	trustSerials := make([]string, 0, len(newPEMs))
+	for _, p := range newPEMs {
+		if parsed, perr := cert.ParseCertificateFromPEM([]byte(p)); perr == nil {
+			trustSerials = append(trustSerials, parsed.SerialNumber.String())
+		}
+	}
+
 	c.logger.Info("Signing cert push applied",
 		"command_id", cmd.ID,
 		"serial", appliedSerial,
 		"cert_count", len(newPEMs),
+		"trust_serials", strings.Join(trustSerials, ","),
 		"retire_old", retireOld)
 
 	if refetchConfig {

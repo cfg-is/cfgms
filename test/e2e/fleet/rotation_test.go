@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -594,6 +596,50 @@ func (s *FleetTestSuite) requireSigningPushApplied(t *testing.T, container strin
 	}
 }
 
+// waitForSigningTrustSetExcluding waits until container's steward has logged a
+// "Signing cert push applied" line for serial whose resulting trust set (the
+// trust_serials field) holds serial and does not hold retired. Serials are unique
+// to one rotation, so a match is that rotation's retirement outcome regardless of
+// when the line was written or how many other certs the steward retains.
+func (s *FleetTestSuite) waitForSigningTrustSetExcluding(t *testing.T, container, serial, retired string, timeout time.Duration) bool {
+	t.Helper()
+	trustRe := regexp.MustCompile(`trust_serials"?\s*[=:]\s*"?([0-9,]*)`)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		tmpDir := t.TempDir()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := exec.CommandContext(ctx, "docker", "cp", container+":/tmp/cfgms/.", tmpDir).CombinedOutput()
+		cancel()
+		if err == nil {
+			entries, _ := os.ReadDir(tmpDir)
+			for _, entry := range entries {
+				if !strings.HasSuffix(entry.Name(), ".log") {
+					continue
+				}
+				content, readErr := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+				if readErr != nil {
+					continue
+				}
+				for _, line := range strings.Split(string(content), "\n") {
+					if !strings.Contains(line, signingPushAppliedMarker) {
+						continue
+					}
+					m := trustRe.FindStringSubmatch(line)
+					if m == nil {
+						continue
+					}
+					held := strings.Split(m[1], ",")
+					if slices.Contains(held, serial) && !slices.Contains(held, retired) {
+						return true
+					}
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
 // requireConfigAccepted uploads the fleet config for the steward in container and
 // waits for it to converge, proving the steward verifies what the controller signs now.
 func (s *FleetTestSuite) requireConfigAccepted(t *testing.T, container string) {
@@ -634,10 +680,18 @@ func (s *FleetTestSuite) testRetirementAtOverlapEnd(t *testing.T) {
 	if !s.waitForStewardLogEntry(t, connected, result.NewSerial, 60*time.Second) {
 		t.Fatalf("%s: rotation push carrying %s never applied", connected, result.NewSerial)
 	}
-	appliedBefore := s.stewardLogCount(t, connected, signingPushAppliedMarker)
 
-	// The sweep interval is one minute by default; allow it two full cycles.
-	s.requireSigningPushApplied(t, connected, appliedBefore, 150*time.Second, "retirement sweep push for "+result.OldSerial)
+	// The sweep interval is one minute by default; allow it two full cycles. The
+	// outcome is asserted, not a new log line: with a zero overlap the sweep can land
+	// within moments of the rotation push, so the retiring push may already be logged
+	// before any count taken here. The retirement shows as an applied push whose
+	// resulting trust set holds the new serial and no longer holds the old one. The
+	// set size is not asserted: earlier subtests leave certs inside their own windows.
+	if !s.waitForSigningTrustSetExcluding(t, connected, result.NewSerial, result.OldSerial, 150*time.Second) {
+		log, _ := s.readStewardLog(t, connected)
+		t.Fatalf("%s: retired serial %s never left the trust set holding %s\nlog tail:\n%s",
+			connected, result.OldSerial, result.NewSerial, lastLines(log, 60))
+	}
 	s.requireConfigAccepted(t, connected)
 
 	// The steward that was away reconnects: its single on-connect push carries the retirement.
