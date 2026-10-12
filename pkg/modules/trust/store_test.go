@@ -3,6 +3,8 @@
 package trust_test
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,4 +46,13 @@ func TestInMemoryTrustStore_AddPublisher_DistinctNamesBothSucceed(t *testing.T) 
 	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{Name: "vendor-a", PublicKey: []byte("22222222222222222222222222222222"), Algorithm: "ed25519"}))
 
 	assert.Len(t, store.ListPublishers(), 2)
+}
+
+// TestIsUsableIdentityKey covers the placeholder / small-order / real-key decision.
+func TestIsUsableIdentityKey(t *testing.T) {
+	assert.False(t, trust.IsUsableIdentityKey(trust.PublisherIdentity{PublicKey: make([]byte, 32)}), "placeholder")
+	assert.False(t, trust.IsUsableIdentityKey(trust.PublisherIdentity{PublicKey: []byte{1, 2}}), "wrong length")
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	assert.True(t, trust.IsUsableIdentityKey(trust.PublisherIdentity{PublicKey: pub}))
 }

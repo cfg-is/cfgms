@@ -11,6 +11,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -40,6 +41,27 @@ func isCredentialedModule(b *bundle.Bundle) bool {
 	}
 	_, ok := m365CredentialedModules[b.Manifest.Name]
 	return ok
+}
+
+// verifyCFGMSSignature checks, at issue time, that b carries at least one
+// signature from publisher cfgms that verifies against id. It is called only
+// when id is a usable key; a build with the placeholder key skips it (see
+// WorkflowModuleFactory.warnUnboundCredentials). Errors name the module and the
+// tenant only.
+func verifyCFGMSSignature(b *bundle.Bundle, id trust.PublisherIdentity, moduleName, tenantID string) error {
+	store := trust.NewInMemoryTrustStore()
+	if err := store.AddPublisher(id); err != nil {
+		return fmt.Errorf("workflow: module %q cannot be issued an M365 credential for tenant %q: CFGMS publisher identity unusable", moduleName, tenantID)
+	}
+	for _, sig := range b.Signatures {
+		if sig.Publisher != cfgmsPublisher {
+			continue
+		}
+		if trust.VerifyBundleSignature(b, sig, store) == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("workflow: module %q cannot be issued an M365 credential for tenant %q: the bundle carries no valid CFGMS publisher signature", moduleName, tenantID)
 }
 
 // M365CredentialIssuer mints the Graph access token delivered to an M365

@@ -6,10 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/runtime"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -52,6 +55,32 @@ type WorkflowModuleFactory struct {
 	// modules. Nil until NewEngine hands the factory the controller secret
 	// store; with no issuer every credentialed module is refused.
 	credentials *M365CredentialIssuer
+
+	// identityFn returns the CFGMS publisher identity credentialed bundles must
+	// be signed by. It defaults to trust.CFGMSPublisherIdentity; tests pass a
+	// generated key.
+	identityFn func() trust.PublisherIdentity
+
+	warnOnce sync.Once
+}
+
+// publisherIdentity returns the identity credentialed bundles are checked against.
+func (f *WorkflowModuleFactory) publisherIdentity() trust.PublisherIdentity {
+	if f.identityFn != nil {
+		return f.identityFn()
+	}
+	return trust.CFGMSPublisherIdentity()
+}
+
+// warnUnboundCredentials logs, once, that this build carries no usable CFGMS
+// publisher key, so M365 module credentials rest on the manifest alone.
+func (f *WorkflowModuleFactory) warnUnboundCredentials(logger logging.Logger) {
+	if trust.IsUsableIdentityKey(f.publisherIdentity()) {
+		return
+	}
+	f.warnOnce.Do(func() {
+		logger.Warn("M365 module credentials are not signature-bound in this build: no CFGMS publisher key is configured, so a bundle is trusted on its manifest name and publisher alone")
+	})
 }
 
 // NewWorkflowModuleFactory returns a WorkflowModuleFactory backed by the given
@@ -147,6 +176,11 @@ func (f *WorkflowModuleFactory) create(ctx context.Context, moduleName, tenantID
 				return nil, fmt.Errorf("workflow: module %q requires an execution tenant for its M365 credential: no tenant in the execution context", moduleName)
 			case f.credentials == nil:
 				return nil, fmt.Errorf("workflow: module %q cannot be issued an M365 credential for tenant %q: the workflow engine has no secret store", moduleName, tenantID)
+			}
+			if id := f.publisherIdentity(); trust.IsUsableIdentityKey(id) {
+				if sigErr := verifyCFGMSSignature(b, id, moduleName, tenantID); sigErr != nil {
+					return nil, sigErr
+				}
 			}
 			var issueErr error
 			authToken, issueErr = f.credentials.Issue(ctx, moduleName, tenantID)

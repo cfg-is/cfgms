@@ -145,6 +145,8 @@ Each write emits one audit event per affected client tenant (`m365.connection.se
 
 A connection made with `cfg tenant m365 set` or `cfg tenant m365 gdap-link` is used by the M365 workflow modules (`m365-entra-user`, `m365-entra-group`, `m365-entra-application`, `m365-entra-admin-unit`, `m365-conditional-access`, `m365-intune-policy`) with no other setup. When a workflow step runs one of them, the controller reads the client tenant's connection from its secret store, mints a short-lived Microsoft Graph access token and hands only that token to the module process. The client secret never leaves the controller. If the tenant has no connection, the step fails with an error that names the tenant and points back to `cfg tenant m365 set` or `cfg tenant m365 gdap-link`. A replaced or deleted connection takes effect on the next step. A step that outlives its token fails; start it again.
 
+**Signature binding by build.** In a signed build (one carrying a real CFGMS publisher key), the controller issues the token only to a module bundle carrying a valid `cfgms` publisher signature, checked every time a token is issued; a bundle without one fails the step with an error naming the module and tenant. In unsigned OSS release builds (placeholder key) the token is issued on the bundle's manifest name and publisher alone, and the controller logs a warning at engine start that M365 module credentials are not signature-bound.
+
 ## Part 3: Capability Testing
 
 ### MSP Capabilities Tested
