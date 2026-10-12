@@ -135,6 +135,10 @@ type StewardSigningMigrationService struct {
 	nextAttempt       map[string]time.Time // earliest next attempt per steward
 	retirePending     map[string]string    // steward -> shared serial whose retire push failed
 	plan              *migrationPlan
+	// slots holds one token per migration command the steward may still be
+	// working on. A worker that stops waiting for a slow steward keeps the token
+	// until the command resolves, so outstanding commands never exceed maxWorkers.
+	slots chan struct{}
 
 	runMu  sync.Mutex
 	cancel context.CancelFunc
@@ -229,6 +233,7 @@ func (s *StewardSigningMigrationService) Start(ctx context.Context) {
 
 	s.mu.Lock()
 	workers, interval := s.maxWorkers, s.reconcileInterval
+	s.slots = make(chan struct{}, workers)
 	s.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -551,10 +556,28 @@ func (s *StewardSigningMigrationService) retire(ctx context.Context, publisher *
 // steward's completion event. It reports true only on completion; a failure
 // event, a send error and the step timeout (the signature of a rejected
 // command) all report false.
+//
+// The caller stops waiting after the step timeout, but the steward may still be
+// working on the command. The command therefore keeps its slot until it resolves
+// (a late completion or failure event, the publisher's timeout, or the hold
+// ceiling), so a slow steward cannot let a worker send the next command while
+// the first is still outstanding.
 func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher *commands.Publisher, stewardID string, params map[string]interface{}, signer signature.Signer) bool {
 	s.mu.Lock()
 	timeout := s.stepTimeout
+	slots := s.slots
 	s.mu.Unlock()
+
+	release := func() {}
+	if slots != nil {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		}
+		var once sync.Once
+		release = func() { once.Do(func() { <-slots }) }
+	}
 
 	result := make(chan bool, 1)
 	report := func(ok bool) {
@@ -563,7 +586,10 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 		default:
 		}
 	}
-	_, err := publisher.PublishCommandWithSignerAndCallback(ctx, stewardID, types.CommandPushSigningCert, params, signer, timeout,
+	// The publisher keeps the command registered for twice the step timeout, so
+	// a completion that arrives after the caller gave up still frees the slot.
+	holdTimeout := 2 * timeout
+	_, err := publisher.PublishCommandWithSignerAndCallback(ctx, stewardID, types.CommandPushSigningCert, params, signer, holdTimeout,
 		func(ev *types.Event) {
 			// The publisher calls back for every event naming the command. A
 			// completion counts as proof of trust only from the steward the
@@ -574,20 +600,34 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 			switch ev.Type {
 			case types.EventCommandCompleted:
 				report(true)
+				release()
 			case types.EventCommandFailed:
 				report(false)
+				release()
 			}
 		},
-		func() { report(false) })
+		func() {
+			report(false)
+			release()
+		})
 	if err != nil {
+		release()
 		s.logger.Warn("steward signing migration: could not send push",
 			"steward_id", logging.SanitizeLogValue(stewardID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		return false
 	}
 	// The publisher stops its timer on any event naming the command, so a steward
-	// that acknowledged receipt and then stalled is bounded here instead.
-	timer := time.NewTimer(timeout + time.Second)
+	// that acknowledged receipt and then stalled would hold the slot for good
+	// without this ceiling.
+	holdTimer := time.AfterFunc(holdTimeout+time.Second, release)
+	defer func() {
+		if ctx.Err() != nil {
+			holdTimer.Stop()
+			release()
+		}
+	}()
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case ok := <-result:
