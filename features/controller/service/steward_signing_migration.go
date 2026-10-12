@@ -552,6 +552,11 @@ func (s *StewardSigningMigrationService) retire(ctx context.Context, publisher *
 		"shared_serial", logging.SanitizeLogValue(plan.sharedSerial))
 }
 
+// holdCeiling is how long a command may keep its slot without a terminal event.
+func holdCeiling(stepTimeout time.Duration) time.Duration {
+	return 8*stepTimeout + time.Second
+}
+
 // deliver sends one push_signing_cert signed by signer and waits for the
 // steward's completion event. It reports true only on completion; a failure
 // event, a send error and the step timeout (the signature of a rejected
@@ -559,8 +564,7 @@ func (s *StewardSigningMigrationService) retire(ctx context.Context, publisher *
 //
 // The caller stops waiting after the step timeout, but the steward may still be
 // working on the command. The command therefore keeps its slot until it resolves
-// (a late completion or failure event, the publisher's timeout, or the hold
-// ceiling), so a slow steward cannot let a worker send the next command while
+// (a late completion or failure event, or the hold ceiling), so a slow steward cannot let a worker send the next command while
 // the first is still outstanding.
 func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher *commands.Publisher, stewardID string, params map[string]interface{}, signer signature.Signer) bool {
 	s.mu.Lock()
@@ -587,7 +591,7 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 				<-slots
 			})
 		}
-		holdTimer = time.AfterFunc(2*timeout+time.Second, func() { release() })
+		holdTimer = time.AfterFunc(holdCeiling(timeout), func() { release() })
 	}
 
 	result := make(chan bool, 1)
@@ -597,9 +601,9 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 		default:
 		}
 	}
-	// The publisher keeps the command registered for twice the step timeout, so
-	// a completion that arrives after the caller gave up still frees the slot.
-	holdTimeout := 2 * timeout
+	// The publisher keeps the command registered for the whole hold ceiling, so a
+	// completion that arrives after the caller gave up still frees the slot.
+	holdTimeout := holdCeiling(timeout)
 	_, err := publisher.PublishCommandWithSignerAndCallback(ctx, stewardID, types.CommandPushSigningCert, params, signer, holdTimeout,
 		func(ev *types.Event) {
 			// The publisher calls back for every event naming the command. A
