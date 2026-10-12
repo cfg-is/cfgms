@@ -55,7 +55,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 Write-Host "`n=== Installing Core Development Tools (winget) ===" -ForegroundColor Yellow
 
 $coreTools = @(
-    @{ Name = 'Go';         Id = 'GoLang.Go';       Version = '1.27.1'; Command = 'go' },   # matches .devcontainer/Dockerfile's golang:1.27.1-trixie
+    @{ Name = 'Go';         Id = 'GoLang.Go';       Version = '1.27.2'; Command = 'go' },   # matches .devcontainer/Dockerfile's golang:1.27.2-trixie
     @{ Name = 'Git';        Id = 'Git.Git';         Version = '2.47.1'; Command = 'git' },
     @{ Name = 'Make';       Id = 'GnuWin32.Make';   Version = '3.81';   Command = 'make' },
     @{ Name = 'GitHub CLI'; Id = 'GitHub.cli';      Version = '2.63.2'; Command = 'gh' },
