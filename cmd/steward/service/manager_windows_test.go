@@ -6,6 +6,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,4 +217,76 @@ func TestPlatformLogDir(t *testing.T) {
 	t.Setenv("CFGMS_INSTALL_PREFIX", `D:\scratch`)
 	assert.Equal(t, filepath.Join(`D:\scratch`, `ProgramData`, "CFGMS", "logs"), platformLogDir(),
 		"CFGMS_INSTALL_PREFIX nests the path under the prefix")
+}
+
+// recordedInstallSteps returns installSteps whose closures append their name
+// to calls, with stage returning stageErr and restartExisting returning
+// restartErr.
+func recordedInstallSteps(calls *[]string, existingFound bool, stageErr, restartErr error) installSteps {
+	return installSteps{
+		stopExisting: func() bool {
+			*calls = append(*calls, "stop")
+			return existingFound
+		},
+		restartExisting: func() error {
+			*calls = append(*calls, "restart-existing")
+			return restartErr
+		},
+		stage: func() error {
+			*calls = append(*calls, "stage")
+			return stageErr
+		},
+		replaceDefinition: func() error {
+			*calls = append(*calls, "replace-definition")
+			return nil
+		},
+	}
+}
+
+// TestRunInstallSequenceStageFailureRestartsExisting verifies that a failed
+// stage restarts the stopped existing service and never deletes its
+// definition, so a failed install leaves the host managed (#4538).
+func TestRunInstallSequenceStageFailureRestartsExisting(t *testing.T) {
+	var calls []string
+	stageErr := errors.New("downgrade rejected")
+	err := runInstallSequence(recordedInstallSteps(&calls, true, stageErr, nil))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stageErr)
+	assert.Contains(t, err.Error(), "downgrade rejected")
+	assert.Equal(t, []string{"stop", "stage", "restart-existing"}, calls)
+	assert.NotContains(t, calls, "replace-definition")
+}
+
+// TestRunInstallSequenceSuccessOrder verifies the success path order: stop,
+// stage, replace-definition, with no restart of the old service.
+func TestRunInstallSequenceSuccessOrder(t *testing.T) {
+	var calls []string
+	require.NoError(t, runInstallSequence(recordedInstallSteps(&calls, true, nil, nil)))
+	assert.Equal(t, []string{"stop", "stage", "replace-definition"}, calls)
+}
+
+// TestRunInstallSequenceStageFailureNoExisting verifies that with no existing
+// service there is nothing to restore: the stage error is returned as-is.
+func TestRunInstallSequenceStageFailureNoExisting(t *testing.T) {
+	var calls []string
+	stageErr := errors.New("launcher copy failed")
+	err := runInstallSequence(recordedInstallSteps(&calls, false, stageErr, nil))
+	require.ErrorIs(t, err, stageErr)
+	assert.Equal(t, []string{"stop", "stage"}, calls)
+}
+
+// TestRunInstallSequenceRestartFailureReturnsBoth verifies that when the
+// restart of the existing service also fails, both errors are returned with
+// the stage error first.
+func TestRunInstallSequenceRestartFailureReturnsBoth(t *testing.T) {
+	var calls []string
+	stageErr := errors.New("stage failed")
+	restartErr := errors.New("start refused")
+	err := runInstallSequence(recordedInstallSteps(&calls, true, stageErr, restartErr))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stageErr)
+	assert.ErrorIs(t, err, restartErr)
+	msg := err.Error()
+	assert.Less(t, strings.Index(msg, "stage failed"), strings.Index(msg, "start refused"))
+	assert.Equal(t, []string{"stop", "stage", "restart-existing"}, calls)
 }
