@@ -7,7 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -75,4 +82,81 @@ func (c *stewardStoreApprovalChecker) IsApproved(ctx context.Context, stewardID 
 	default:
 		return false, nil
 	}
+}
+
+// defaultRevocationRecheckInterval bounds how long an already-open
+// ControlChannel survives the revocation of its client-certificate serial.
+const defaultRevocationRecheckInterval = 30 * time.Second
+
+// CertRevocationChecker reports whether a client-certificate serial is
+// revoked. *cert.Manager satisfies it. A non-nil error means the status cannot
+// be determined and callers must fail closed.
+type CertRevocationChecker interface {
+	IsRevoked(serial string) (bool, error)
+}
+
+// WithRevocationChecker injects the certificate revocation checker consulted by
+// Register and ControlChannel admission, and by the periodic re-check of open
+// control channels (Issue #4930). Nil (default) disables the check.
+func WithRevocationChecker(checker CertRevocationChecker) option {
+	return func(p *Provider) {
+		p.revocationChecker = checker
+	}
+}
+
+// WithRevocationRecheckInterval overrides how often an open ControlChannel
+// re-checks its peer serial. Non-positive values keep the default (30s).
+func WithRevocationRecheckInterval(d time.Duration) option {
+	return func(p *Provider) {
+		p.revocationRecheckInterval = d
+	}
+}
+
+func (p *Provider) recheckInterval() time.Duration {
+	if p.revocationRecheckInterval > 0 {
+		return p.revocationRecheckInterval
+	}
+	return defaultRevocationRecheckInterval
+}
+
+// peerCertSerial returns the decimal serial of the verified client certificate.
+func peerCertSerial(ctx context.Context) (string, error) {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return "", fmt.Errorf("no peer info in context")
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return "", fmt.Errorf("no peer certificate")
+	}
+	return tlsInfo.State.PeerCertificates[0].SerialNumber.String(), nil
+}
+
+// checkPeerRevocation refuses a peer whose certificate serial is revoked
+// (PermissionDenied) or whose status cannot be determined (Unavailable,
+// fail-closed). It returns the peer serial; with no checker it admits and
+// returns "".
+func (p *Provider) checkPeerRevocation(ctx context.Context, stewardID string) (string, error) {
+	if p.revocationChecker == nil {
+		return "", nil
+	}
+	serial, err := peerCertSerial(ctx)
+	if err != nil {
+		return "", status.Errorf(codes.Unauthenticated, "failed to read peer certificate serial")
+	}
+	revoked, err := p.revocationChecker.IsRevoked(serial)
+	if err != nil {
+		p.logger.Error("certificate revocation check error, rejecting (fail-closed)",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"serial", logging.SanitizeLogValue(serial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return "", status.Error(codes.Unavailable, "certificate revocation service unavailable")
+	}
+	if revoked {
+		p.logger.Warn("steward rejected: client certificate revoked",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"serial", logging.SanitizeLogValue(serial))
+		return "", status.Error(codes.PermissionDenied, "client certificate revoked")
+	}
+	return serial, nil
 }

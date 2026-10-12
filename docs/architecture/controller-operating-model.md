@@ -596,6 +596,15 @@ Either way, `httpServer.SetDurableSessionStore(sessionStore)` is called on every
 
 The security invariant is unchanged by the backing store: `session.Manager` always passes `session.HashToken(token)` to `Store.Set`/`Get` — the raw token value is never stored or logged.
 
+### Control-Plane Admission (Issue #4930)
+
+`transportServer.Register` and `transportServer.ControlChannel` admit a steward only after two independent checks on the mTLS-verified peer certificate, in this order:
+
+1. **Certificate revocation.** The peer's client-certificate serial is looked up through `cert.Manager.IsRevoked` (injected with `WithRevocationChecker`, always wired by `features/controller/server`). A revoked serial is refused with `codes.PermissionDenied`; a lookup error is refused with `codes.Unavailable` (fail closed) and logged with sanitized values. The steward treats `PermissionDenied` as an identity rejection and follows the re-admission path.
+2. **Record status.** The approval checker confirms the steward record is in a reconnect-capable state (`registered`, `active`, `lost`).
+
+Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
+
 ### Steward Tracking
 
 For each steward, the controller tracks:
