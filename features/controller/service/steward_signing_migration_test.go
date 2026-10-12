@@ -213,8 +213,16 @@ type migrationCluster struct {
 	serials []string
 	acks    certinterfaces.SigningTrustAckStore
 	fingers map[string]string
-	elected string
 	logger  logging.Logger
+
+	electedMu sync.Mutex // elect can run after a node's goroutines already read the serial
+	elected   string
+}
+
+func (c *migrationCluster) electedSerial() string {
+	c.electedMu.Lock()
+	defer c.electedMu.Unlock()
+	return c.elected
 }
 
 func newMigrationCluster(t *testing.T) *migrationCluster {
@@ -273,7 +281,9 @@ func (c *migrationCluster) elect(t *testing.T) {
 	_, created, err := c.nodes[0].ElectSharedSigningSerial(context.Background(), c.serials[0])
 	require.NoError(t, err)
 	require.True(t, created)
+	c.electedMu.Lock()
 	c.elected = c.serials[0]
+	c.electedMu.Unlock()
 }
 
 type migrationNode struct {
@@ -289,7 +299,7 @@ func (c *migrationCluster) newNode(t *testing.T, idx int) *migrationNode {
 	t.Helper()
 	cp := &simControlPlane{
 		acks:         c.acks,
-		sharedSerial: func() string { return c.elected },
+		sharedSerial: c.electedSerial,
 		fingerprints: c.fingers,
 		stewards:     map[string]*simSteward{},
 	}
@@ -326,10 +336,11 @@ func (n *migrationNode) connect(t *testing.T, id string, delay time.Duration, tr
 }
 
 func (c *migrationCluster) confirmed(id string) bool {
-	if c.elected == "" {
+	elected := c.electedSerial()
+	if elected == "" {
 		return false
 	}
-	ack, err := c.acks.GetAck(context.Background(), id, c.elected)
+	ack, err := c.acks.GetAck(context.Background(), id, elected)
 	return err == nil && ack != nil
 }
 
@@ -533,4 +544,25 @@ func TestStewardMigration_ConfirmedStewardIsSkipped(t *testing.T) {
 	require.NoError(t, n.svc.OnConnect(context.Background(), "steward-done"))
 	time.Sleep(300 * time.Millisecond)
 	assert.Zero(t, n.cp.total(), "a recorded confirmation means nothing is sent")
+}
+
+// A steward that answers after the worker stopped waiting must still count as
+// outstanding: the next send waits for it, so the cap holds across step timeouts.
+func TestStewardMigration_SlowStewardKeepsItsSlotAfterStepTimeout(t *testing.T) {
+	c := newMigrationCluster(t)
+	c.elect(t)
+	n := c.newNode(t, 0)
+	n.svc.SetMaxWorkers(1)
+	n.svc.SetTimings(100*time.Millisecond, time.Hour, time.Hour)
+	// Trusts the shared key and a legacy key, so the retry after the first step
+	// timeout is verified too. Each push completes 150ms after the send, 50ms
+	// after the worker's wait ended.
+	n.connect(t, "steward-slow", 150*time.Millisecond, c.legacy[0], c.legacy[1])
+	n.svc.Start(context.Background())
+	require.NoError(t, n.svc.OnConnect(context.Background(), "steward-slow"))
+
+	eventually(t, "several attempts sent", func() bool { return len(n.cp.pushes("steward-slow")) >= 3 })
+	n.cp.mu.Lock()
+	defer n.cp.mu.Unlock()
+	assert.Equal(t, 1, n.cp.maxSeen, "one worker never has two commands outstanding")
 }
