@@ -483,7 +483,7 @@ jobs:
 
         pull_with_retry ghcr.io/cfg-is/ci-mirror/golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
         pull_with_retry ghcr.io/cfg-is/ci-mirror/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
-        pull_with_retry ghcr.io/cfg-is/ci-mirror/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+        pull_with_retry ghcr.io/cfg-is/ci-mirror/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
