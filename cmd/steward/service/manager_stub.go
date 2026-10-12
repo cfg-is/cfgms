@@ -29,3 +29,11 @@ func (m *stubManager) Uninstall(purge bool) error {
 func (m *stubManager) Status() (*ServiceStatus, error) {
 	return &ServiceStatus{}, fmt.Errorf("service status is not supported on %s", runtime.GOOS)
 }
+
+func (m *stubManager) Stop() error {
+	return fmt.Errorf("service stop is not supported on %s", runtime.GOOS)
+}
+
+func (m *stubManager) RegistrationTokenConfigured() (bool, error) {
+	return false, fmt.Errorf("service inspection is not supported on %s", runtime.GOOS)
+}

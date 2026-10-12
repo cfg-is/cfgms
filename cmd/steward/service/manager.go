@@ -47,6 +47,18 @@ type Manager interface {
 	// Requires elevated privileges.
 	Uninstall(purge bool) error
 
+	// Stop stops the running OS service without removing or disabling its
+	// definition, so the service stays enabled for the next boot. It returns
+	// only once the service has stopped; a service supervisor does not restart
+	// a service stopped through the service manager. Stopping a service that is
+	// installed but not running succeeds. Requires elevated privileges.
+	Stop() error
+
+	// RegistrationTokenConfigured reports whether the installed service
+	// definition carries a --regtoken argument. It never returns the token.
+	// A service that is not installed reports false.
+	RegistrationTokenConfigured() (bool, error)
+
 	// Status returns the current state of the OS service.
 	// Does not require elevated privileges.
 	Status() (*ServiceStatus, error)

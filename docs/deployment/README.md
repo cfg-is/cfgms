@@ -14,6 +14,8 @@ The canonical public-beta controller and service/container definitions select
 remove or downgrade those settings; startup is intentionally blocked when the
 controller CA or command-signing certificate cannot be loaded.
 
+- [Preparing a steward image for cloning](steward-image-preparation.md) — `cfgms-steward prepare-image` removes the enrolled identity before an image is captured.
+
 ## Deployment Modes
 
 ### [Single Controller](single-controller/walkthrough.md)

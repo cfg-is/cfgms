@@ -190,6 +190,31 @@ func (m *darwinManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// Stop unloads the launchd daemon so launchd does not restart it. The plist
+// stays on disk, so the daemon loads again at the next boot.
+func (m *darwinManager) Stop() error {
+	if !m.IsElevated() {
+		return fmt.Errorf("stop requires root privileges: re-run with sudo")
+	}
+	if _, err := os.Stat(darwinPlistPath); err != nil {
+		return fmt.Errorf("service %s is not installed: %w", darwinServiceName, err)
+	}
+	// launchctl unload fails when the daemon is not loaded; that is already
+	// the state Stop wants.
+	if out, err := exec.Command("launchctl", "unload", darwinPlistPath).CombinedOutput(); err != nil {
+		listOut, listErr := exec.Command("launchctl", "list", darwinServiceName).Output()
+		if listErr == nil && !strings.Contains(string(listOut), "Could not find service") {
+			return fmt.Errorf("launchctl unload %s failed: %w\n%s", darwinPlistPath, err, out)
+		}
+	}
+	return nil
+}
+
+// RegistrationTokenConfigured reports whether the launchd plist carries --regtoken.
+func (m *darwinManager) RegistrationTokenConfigured() (bool, error) {
+	return definitionHasRegToken(darwinPlistPath)
+}
+
 // Status returns the current state of the launchd daemon without requiring
 // elevated privileges.
 func (m *darwinManager) Status() (*ServiceStatus, error) {

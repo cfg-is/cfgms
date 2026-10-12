@@ -352,6 +352,7 @@ Entry paths:
 		buildInstallCommand(),
 		buildUninstallCommand(),
 		buildStatusCommand(),
+		buildPrepareImageCommand(),
 		buildDexSpikeCommand(),
 	)
 

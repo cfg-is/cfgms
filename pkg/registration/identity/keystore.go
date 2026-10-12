@@ -163,3 +163,20 @@ func computeDeviceID(pub ed25519.PublicKey) string {
 	h := sha256.Sum256([]byte(pub))
 	return hex.EncodeToString(h[:])
 }
+
+// RemoveStoredKey deletes the encrypted device identity key from dir so the next
+// FileKeyStore.GenerateOrLoad on that directory generates a new key and with it
+// a new DeviceID. It is the only exported way to name the key file, so the file
+// name stays defined in this package. Removing a key that does not exist is not
+// an error. The path is removed without following symlinks.
+func RemoveStoredKey(dir string) error {
+	err := os.Remove(filepath.Join(dir, keyFileName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove device identity key: %w", err)
+	}
+	return nil
+}
+
+// StoredKeyFileName returns the name of the device identity key file inside the
+// identity directory, so a dry run can list it without touching it.
+func StoredKeyFileName() string { return keyFileName }

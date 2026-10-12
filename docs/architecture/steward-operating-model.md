@@ -117,6 +117,18 @@ The steward runs three concurrent activities:
 3. Disconnect from controller cleanly (gRPC-over-QUIC transport close)
 4. Exit
 
+### Planned Clones (ADR-034 §6)
+
+A base image captured from an enrolled machine would copy the device key, client
+certificate and steward ID into every clone. For planned cloning, run
+`cfgms-steward prepare-image` on the source machine before capture: it stops the
+service and removes the enrolled identity (device key, identity file,
+pending/re-admission state and issued credential), keeping the binary, the service
+definition with its registration token, and the install-pinned trust anchor. The
+first start of each clone finds no stored identity, generates a new device key and
+enrolls through the normal registration and approval flow as a distinct device. See
+[Preparing a Steward Image for Cloning](../deployment/steward-image-preparation.md).
+
 ## Convergence Loop
 
 This is the steward's core activity. It runs on startup, on schedule, and in response to events.

@@ -153,3 +153,26 @@ func TestFileKeyStore_PublicKey(t *testing.T) {
 
 	assert.Equal(t, []byte(pub), []byte(ks.PublicKey()))
 }
+
+func TestRemoveStoredKey_NextLoadGeneratesNewDeviceID(t *testing.T) {
+	dir := t.TempDir()
+	ks, err := NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	_, _, err = ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	before := ks.DeviceID()
+
+	require.NoError(t, RemoveStoredKey(dir))
+	_, statErr := os.Stat(filepath.Join(dir, StoredKeyFileName()))
+	assert.True(t, os.IsNotExist(statErr))
+
+	ks2, err := NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	_, _, err = ks2.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	assert.NotEqual(t, before, ks2.DeviceID())
+}
+
+func TestRemoveStoredKey_MissingKeyIsNotAnError(t *testing.T) {
+	require.NoError(t, RemoveStoredKey(t.TempDir()))
+}
