@@ -1416,12 +1416,40 @@ func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
 		leader, follower = managerB, managerA
 	}
 
-	leaderTerm := leader.GetTerm()
-	require.NotZero(t, leaderTerm)
+	require.NotZero(t, leader.GetTerm())
 	assert.Zero(t, follower.GetTerm(), "GetTerm reports local authority only")
-	assert.Equal(t, leaderTerm, follower.CommandTerm(), "a follower stamps the lease's current token")
-	assert.Equal(t, leaderTerm, leader.CommandTerm(), "the holder stamps its own term")
-	assert.Equal(t, leaderTerm, CommandTermSource{Manager: follower}.GetTerm())
+
+	// The lease token is not frozen: under load a renewal can miss the short
+	// FastElectionConfig TTL and the holder re-acquires with a strictly higher
+	// token. So each stamp is checked against the lease token read immediately
+	// before and after it (tokens only increase), never against a value read
+	// earlier. The follower has not called CommandTerm yet, so its first call
+	// reads the lease fresh rather than from a cache.
+	assertStampsLeaseToken(t, store, "follower", follower.CommandTerm)
+	assertStampsLeaseToken(t, store, "follower source", CommandTermSource{Manager: follower}.GetTerm)
+	assertStampsLeaseToken(t, store, "holder", leader.CommandTerm)
+}
+
+// leaseTerm reads the cluster leadership lease's current token from the store as a
+// command term.
+func leaseTerm(t *testing.T, store business.LeaseStore) uint64 {
+	t.Helper()
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	return LeaseTermFloor + state.Token
+}
+
+// assertStampsLeaseToken calls stamp once and requires the result to be the lease
+// token as it stood at that call: lease tokens never decrease, so the stamp must
+// lie between the token read just before and just after. A wrong token (0, a
+// stale or unfloored one) falls outside the bracket.
+func assertStampsLeaseToken(t *testing.T, store business.LeaseStore, who string, stamp func() uint64) {
+	t.Helper()
+	before := leaseTerm(t, store)
+	got := stamp()
+	after := leaseTerm(t, store)
+	assert.GreaterOrEqual(t, got, before, "%s must stamp the lease's current token, not an older one", who)
+	assert.LessOrEqual(t, got, after, "%s must not stamp a token the lease has not issued", who)
 }
 
 // TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to
@@ -1473,13 +1501,15 @@ func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
 
 	assert.Zero(t, managerA.GetTerm(), "the former holder no longer has local authority")
 	// B's token is not frozen at newTerm: on a loaded runner a renewal can miss
-	// the short FastElectionConfig lease TTL, and B's re-acquisition of the
-	// expired lease legitimately gets a strictly higher token. The guarded
-	// property is that A stamps B's generation (at or above the takeover token),
-	// never its own old term — so compare against newTerm as a floor.
-	assert.Eventually(t, func() bool { return managerA.CommandTerm() >= newTerm },
-		leaseWait, 50*time.Millisecond, "the former holder stamps the new token once its cache refreshes")
-	stamped := managerA.CommandTerm()
+	// the short FastElectionConfig lease TTL and B re-acquires with a strictly
+	// higher token. A's first CommandTerm call reads the lease fresh, so the guarded
+	// property is that the stamp is the lease's token at that moment (bracketed by
+	// reads of the store), which is at least B's takeover token and above A's old one.
+	var stamped uint64
+	assertStampsLeaseToken(t, store, "the former holder", func() uint64 {
+		stamped = managerA.CommandTerm()
+		return stamped
+	})
 	assert.GreaterOrEqual(t, stamped, newTerm, "the former holder stamps at least the takeover token")
 	assert.Greater(t, stamped, oldTerm, "the former holder must not keep stamping its old term")
 }
