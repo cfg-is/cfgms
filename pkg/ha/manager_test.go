@@ -1424,9 +1424,13 @@ func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
 	// token. So each stamp is checked against the lease token read immediately
 	// before and after it (tokens only increase), never against a value read
 	// earlier. The follower has not called CommandTerm yet, so its first call
-	// reads the lease fresh rather than from a cache.
-	assertStampsLeaseToken(t, store, "follower", follower.CommandTerm)
-	assertStampsLeaseToken(t, store, "follower source", CommandTermSource{Manager: follower}.GetTerm)
+	// reads the lease fresh rather than from a cache. The second call is served
+	// from that cache (commandTermCacheTTL), so it may legitimately lag the lease:
+	// it is bounded below by the first stamp, not by a fresh lease read.
+	firstStamp := assertStampsLeaseToken(t, store, "follower", follower.CommandTerm)
+	cached := CommandTermSource{Manager: follower}.GetTerm()
+	assert.GreaterOrEqual(t, cached, firstStamp, "the follower never stamps an older token than it did before")
+	assert.LessOrEqual(t, cached, leaseTerm(t, store), "the follower must not stamp a token the lease has not issued")
 	assertStampsLeaseToken(t, store, "holder", leader.CommandTerm)
 }
 
@@ -1443,13 +1447,14 @@ func leaseTerm(t *testing.T, store business.LeaseStore) uint64 {
 // token as it stood at that call: lease tokens never decrease, so the stamp must
 // lie between the token read just before and just after. A wrong token (0, a
 // stale or unfloored one) falls outside the bracket.
-func assertStampsLeaseToken(t *testing.T, store business.LeaseStore, who string, stamp func() uint64) {
+func assertStampsLeaseToken(t *testing.T, store business.LeaseStore, who string, stamp func() uint64) uint64 {
 	t.Helper()
 	before := leaseTerm(t, store)
 	got := stamp()
 	after := leaseTerm(t, store)
 	assert.GreaterOrEqual(t, got, before, "%s must stamp the lease's current token, not an older one", who)
 	assert.LessOrEqual(t, got, after, "%s must not stamp a token the lease has not issued", who)
+	return got
 }
 
 // TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to
