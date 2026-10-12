@@ -44,14 +44,15 @@ func (r *recordingConflictObserver) snapshot() []IdentityConflict {
 	return append([]IdentityConflict(nil), r.conflicts...)
 }
 
-// startWildcardServer listens on all interfaces so a client can reach it from
-// distinct loopback source addresses (127.0.0.1 and 127.0.0.2).
+// startWildcardServer listens dual-stack so a client can reach it from two
+// distinct loopback source addresses that exist on every OS: IPv4 127.0.0.1 and
+// IPv6 ::1. (127.0.0.2 is not routable by default on macOS or Windows.)
 func (e *revocationEnv) startWildcardServer(t *testing.T, opts ...option) (*Provider, registry.Registry, string) {
 	t.Helper()
 	reg := registry.NewRegistry()
 	server := New(ModeServer, append([]option{WithApprovalChecker(approveAll{})}, opts...)...)
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
-		"mode": "server", "addr": "0.0.0.0:0", "tls_config": e.serverTLS, "registry": reg,
+		"mode": "server", "addr": "[::]:0", "tls_config": e.serverTLS, "registry": reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
 	t.Cleanup(server.ForceStop)
@@ -136,7 +137,7 @@ func TestControlChannel_DuplicateIdentityDifferentPeer_ReportsConflict(t *testin
 		5*time.Second, 10*time.Millisecond)
 	assert.Empty(t, obs.snapshot(), "first connection is not a conflict")
 
-	openControlChannelFrom(t, "127.0.0.2", "127.0.0.1:"+port, tlsCfg)
+	openControlChannelFrom(t, "::1", "[::1]:"+port, tlsCfg)
 	require.Eventually(t, func() bool { return len(obs.snapshot()) >= 1 },
 		5*time.Second, 10*time.Millisecond)
 
@@ -145,7 +146,7 @@ func TestControlChannel_DuplicateIdentityDifferentPeer_ReportsConflict(t *testin
 	c := got[0]
 	assert.Equal(t, "steward-dup", c.StewardID)
 	assert.Equal(t, "127.0.0.1", addrHost(c.ExistingAddr))
-	assert.Equal(t, "127.0.0.2", addrHost(c.NewAddr))
+	assert.Equal(t, "::1", addrHost(c.NewAddr))
 	assert.Equal(t, serial, c.ExistingSerial)
 	assert.Equal(t, serial, c.NewSerial)
 	assert.False(t, c.DetectedAt.IsZero())
@@ -187,7 +188,7 @@ func TestControlChannel_RevokedPeerNeverReportsConflict(t *testing.T) {
 		5*time.Second, 10*time.Millisecond)
 
 	require.NoError(t, env.mgr.Revoke(revSerial))
-	openControlChannelFrom(t, "127.0.0.2", "127.0.0.1:"+port, revCfg)
+	openControlChannelFrom(t, "::1", "[::1]:"+port, revCfg)
 	time.Sleep(500 * time.Millisecond)
 	assert.Empty(t, obs.snapshot(), "a revoked serial is refused before conflict detection")
 }
