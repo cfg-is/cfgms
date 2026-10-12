@@ -402,25 +402,36 @@ func runLargeOrganizationSimulation(t *testing.T, scale int) {
 	// and tripped the "no measurable cost" guard below. A block spanning
 	// hundreds of writes accumulates real elapsed time well past one tick
 	// regardless of any single write's resolution, so the average per-write
-	// cost derived from it stays meaningful on any clock. Individual write
-	// durations are still collected per cohort — despite that same clock-tick
-	// collapse making many of them read as 0 on a coarse-clock runner — to
-	// report median/p95 and to drive the median growth assertion (Issues #4239,
-	// #4552); the block average is logged but not asserted.
+	// cost derived from it stays meaningful on any clock. The median growth
+	// assertion (Issues #4239, #4552) is driven by per-batch average write costs
+	// (batches of 50 writes) rather than single-write timings, so every sample is
+	// well above the clock tick (Issue #4931); the whole-cohort block average is
+	// logged but not asserted.
 	half := len(allDNA) / 2
 	firstHalf := allDNA[:half]
 	secondHalf := allDNA[half:]
 
+	// perWrite holds one entry per batch of writeBatchSize writes: the batch's
+	// elapsed time divided by its successful writes. Timing a batch instead of a
+	// single write keeps each sample far above the clock tick, so a median of
+	// samples cannot collapse to 0s on a coarse clock (Issue #4931).
+	const writeBatchSize = 50
 	storeCohort := func(items []*DirectoryDNA) (successCount int, blockDuration time.Duration, perWrite []time.Duration) {
-		perWrite = make([]time.Duration, 0, len(items))
+		perWrite = make([]time.Duration, 0, len(items)/writeBatchSize+1)
 		start := time.Now()
-		for _, dna := range items {
-			writeStart := time.Now()
-			err := storage.StoreDirectoryDNA(ctx, dna)
-			writeDuration := time.Since(writeStart)
-			if err == nil {
-				successCount++
-				perWrite = append(perWrite, writeDuration)
+		for i := 0; i < len(items); i += writeBatchSize {
+			end := min(i+writeBatchSize, len(items))
+			batchOK := 0
+			batchStart := time.Now()
+			for _, dna := range items[i:end] {
+				if err := storage.StoreDirectoryDNA(ctx, dna); err == nil {
+					batchOK++
+				}
+			}
+			batchDuration := time.Since(batchStart)
+			if batchOK > 0 {
+				successCount += batchOK
+				perWrite = append(perWrite, batchDuration/time.Duration(batchOK))
 			}
 		}
 		return successCount, time.Since(start), perWrite
