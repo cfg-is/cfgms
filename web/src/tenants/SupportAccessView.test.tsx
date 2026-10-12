@@ -272,7 +272,7 @@ describe('SupportAccessView — list and revoke', () => {
     fireEvent.click(within(confirm).getByTestId('confirm-revoke-btn'))
     await waitFor(() => expect(screen.queryByTestId('confirm-row')).not.toBeInTheDocument())
     expect(deleteUrl).toBe(`${grantsUrl}/g-1`)
-    fireEvent.click(screen.getByTestId('filter-all'))
+    fireEvent.click(await screen.findByTestId('filter-all'))
     expect(await screen.findByTestId('crossing-row')).toHaveTextContent('Revoked')
     expect(screen.queryByTestId('revoke-btn')).not.toBeInTheDocument()
   })
