@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 
-**Date:** 2026-10-11
+**Date:** 2026-10-11 (amended 2026-10-11: hardware-backed keys, limits, rolling token rejected)
 
 **Deciders:** Founder, Architecture
 
@@ -73,6 +73,22 @@ The steward installer gains an **image-preparation step** (for example `cfgms-st
 
 A clone made from an image that was **not** prepared is handled by §1: it is a copy and goes to the approval queue.
 
+### 7. Hardware-backed device keys when the endpoint has them; file-backed otherwise
+
+A copy can exist only because the device key is a file. Where the endpoint has a hardware key store, the steward generates the device key **inside it, non-exportable**, through the ADR-011 §2 `KeyStore` interface:
+
+- Windows: TPM 2.0 through the platform crypto provider.
+- Linux: TPM 2.0.
+- macOS: Secure Enclave.
+
+The key never leaves the hardware, so copying the steward's files does not copy the identity: a copy cannot answer the proof-of-possession challenge (ADR-011 §4–5) and is refused. For these endpoints, clone detection becomes certain — the machine that can sign with the key is the original.
+
+An endpoint without usable hardware falls back to the file-backed `KeyStore` (ADR-011 v1). This is automatic and needs no operator action; the steward never fails to enroll because hardware is missing.
+
+The steward reports the result in ADR-011's `key_protection_level` (`tpm`, `secure-enclave` or `file`), and the controller stores it on the `StewardRecord` and shows it to the operator. A tenant setting that **requires** a hardware-backed level for new enrollments is a possible later addition; it is out of scope here and defaults to off.
+
+A steward never moves an existing file-backed key into hardware in place (the old file would remain a valid copy). An endpoint that gains a TPM gets a hardware-backed key by re-enrolling through the normal flow.
+
 ## Consequences
 
 **Positive**
@@ -84,6 +100,21 @@ A clone made from an image that was **not** prepared is handled by §1: it is a 
 - A byte-for-byte copy that connects while the original is offline cannot be told apart by provenance; it holds the identity until the original reconnects, which triggers detection. The original then keeps the open stream only if it connected first. The operator alert and the rotate-and-revoke removal path bound this window.
 - Provenance attributes change on legitimate hardware repairs (a new NIC or disk). That machine lands in the approval queue, the same friction ADR-011 §7 already accepts.
 
+## Limits — when the original cannot be proven
+
+For a **file-backed** key, every copy holds the same key and certificate, so no cryptographic check separates them. The controller cannot prove which machine is the original in these cases:
+
+1. **An exact copy** (a VM clone or a disk image of the running machine). Hardware attributes often match too; §2 falls back to the already-connected endpoint, which is ordering, not proof.
+2. **A stolen identity that reports false hardware attributes.** Host attributes are reported by the steward process; an attacker who holds the key controls that process. If the original is offline, the copy connects first and keeps the identity until the original reconnects and detection fires.
+3. **The original changed hardware** (a disk or network card replaced). The original looks like the copy and lands in the approval queue.
+4. **A VM rolled back to an earlier snapshot.** It is the same machine at an earlier point and looks like a copy taken before a rotation.
+
+In each case the controller reports the ambiguity plainly (both endpoints, the provenance diff, the serials) and the operator decides by checking the machines directly, using §5. No copy is auto-trusted for a split. For a **hardware-backed** key (§7), none of these cases exist: only the machine holding the hardware key can prove possession.
+
+## Alternatives considered
+
+- **A rolling per-connection token** (the controller issues a one-time token on every connection; the steward must present it next time, so diverged copies are detected for certain). Rejected: it makes the connection fragile. A steward that crashes or loses its disk write after receiving a token but before persisting it is locked out on its next connection, and network retries can consume a token twice. It also detects a split without proving which side is the original.
+
 ## Implementation (to be decomposed into stories under #4556)
 
 1. Duplicate-connection detection at `ControlChannel` and the operator alert and audit event (§3).
@@ -91,5 +122,6 @@ A clone made from an image that was **not** prepared is handled by §1: it is a 
 3. The "identity in use by another device" refusal reason, and the steward's re-key-and-register response with `clone_of` (§4).
 4. Operator commands: list detected clones, move the identity to the other machine, and rotate-and-revoke (§5).
 5. The image-preparation step in the installer (§6).
+6. Hardware-backed `KeyStore` implementations (TPM 2.0 on Windows and Linux, Secure Enclave on macOS) with automatic file-backed fallback, and `key_protection_level` stored on the record and shown to the operator (§7).
 
 Revocation at admission (#4930) is a prerequisite for §5 and is already in progress.
