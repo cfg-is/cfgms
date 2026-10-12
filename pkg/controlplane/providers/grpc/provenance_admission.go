@@ -149,17 +149,14 @@ func sanitizeHostAttrs(in map[string]string) map[string]string {
 	if len(in) > maxHostAttrKeys {
 		return nil
 	}
-	out := make(map[string]string, len(in))
+	bounded := make(map[string]string, len(in))
 	for k, v := range in {
-		if registration.DNAFieldKeys[k] || k == "" || len(v) > maxHostAttrValueLen {
+		if len(v) > maxHostAttrValueLen {
 			continue
 		}
-		out[k] = v
+		bounded[k] = v
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	return registration.NormalizeProvenance(bounded)
 }
 
 // assessProvenance runs the configured checker, or returns ProvenanceUnknown
@@ -231,10 +228,19 @@ func (c *stewardStoreProvenanceChecker) CheckProvenance(ctx context.Context, ste
 		return unknown
 	}
 
-	result := c.matcher.FuzzyMatch(record.LastProvenanceJSON, attrs)
+	// The stored baseline may predate normalisation; compare both sides in
+	// canonical form so formatting alone never reads as divergence.
+	baseline := registration.NormalizeStoredProvenance(record.LastProvenanceJSON)
+	result := c.matcher.FuzzyMatch(baseline, attrs)
 	if result.TotalFields == 0 {
 		return unknown
 	}
+	matchedKeys, differedKeys := registration.ProvenanceKeyDiff(baseline, attrs)
+	c.logger.Debug("steward host provenance compared",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"score", result.Score,
+		"matched_keys", sanitizeKeyNames(matchedKeys),
+		"divergent_keys", sanitizeKeyNames(differedKeys))
 	a := ProvenanceAssessment{
 		Score:         result.Score,
 		MatchedFields: result.MatchedFields,
@@ -245,13 +251,17 @@ func (c *stewardStoreProvenanceChecker) CheckProvenance(ctx context.Context, ste
 		return a
 	}
 	a.Decision = ProvenanceCopy
-	a.DivergentKeys = divergentKeys(record.LastProvenanceJSON, attrs)
+	a.DivergentKeys = differedKeys
 	c.auditDivergence(ctx, record, stewardID, a)
 	return a
 }
 
 // recordBaseline stores attrs as the steward's baseline (trust on first use).
 func (c *stewardStoreProvenanceChecker) recordBaseline(ctx context.Context, record *business.StewardRecord, attrs map[string]string) {
+	attrs = registration.NormalizeProvenance(attrs)
+	if attrs == nil {
+		return
+	}
 	raw, err := json.Marshal(attrs)
 	if err != nil {
 		return
@@ -331,22 +341,14 @@ func (c *stewardStoreProvenanceChecker) allow(stewardID string) bool {
 	return true
 }
 
-// divergentKeys names the baseline attributes (DNA keys excluded) whose
-// incoming value differs or is missing. Values are never returned.
-func divergentKeys(storedJSON string, incoming map[string]string) []string {
-	var stored map[string]string
-	if err := json.Unmarshal([]byte(storedJSON), &stored); err != nil {
-		return nil
+// sanitizeKeyNames returns a log-safe copy of attribute key names. Key names
+// arrive in the steward-supplied host-attributes header (and the stored
+// baseline was recorded from the same header on first use), so each one is
+// untrusted and is passed through logging.SanitizeLogValue individually.
+func sanitizeKeyNames(keys []string) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = logging.SanitizeLogValue(k)
 	}
-	var keys []string
-	for k, sv := range stored {
-		if registration.DNAFieldKeys[k] {
-			continue
-		}
-		if iv, ok := incoming[k]; !ok || iv != sv {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	return keys
+	return out
 }

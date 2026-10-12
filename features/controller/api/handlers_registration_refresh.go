@@ -603,14 +603,15 @@ func (s *Server) rebaselineProvenance(ctx context.Context, record *business.Stew
 	if len(provenance) == 0 || len(provenance) > maxProvenanceAttrs {
 		return
 	}
-	attrs := make(map[string]string, len(provenance))
+	bounded := make(map[string]string, len(provenance))
 	for k, v := range provenance {
-		if registration.DNAFieldKeys[k] || k == "" || len(v) > maxProvenanceValueLen {
+		if len(v) > maxProvenanceValueLen {
 			continue
 		}
-		attrs[k] = v
+		bounded[k] = v
 	}
-	if len(attrs) == 0 {
+	attrs := registration.NormalizeProvenance(bounded)
+	if attrs == nil {
 		return
 	}
 	raw, err := json.Marshal(attrs)
@@ -651,7 +652,7 @@ func (s *Server) handleRefreshByPolicy(
 		// the check is skipped and the cert is issued immediately.
 		if record.LastProvenanceJSON != "" {
 			pm := registration.ProvenanceMatcher{}
-			result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
+			result := pm.FuzzyMatch(registration.NormalizeStoredProvenance(record.LastProvenanceJSON), registration.NormalizeProvenance(provenance))
 			if result.Score < registration.ProvenanceMatchThreshold {
 				// Demote to require_approval (demote-only invariant).
 				s.handleRefreshQueueEntry(w, r, record, deviceID, provenance, csrPEM,

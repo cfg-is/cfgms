@@ -3,7 +3,11 @@
 // Package registration provides provenance matching for the registration-refresh flow (ADR-010).
 package registration
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"sort"
+	"strings"
+)
 
 // DNAFieldKeys are volatile device-state fields excluded from provenance scoring.
 // These change on every boot or OS update and carry no re-entry identity signal.
@@ -66,4 +70,67 @@ func (ProvenanceMatcher) FuzzyMatch(storedJSON string, incoming map[string]strin
 		MatchedFields: matched,
 		TotalFields:   total,
 	}
+}
+
+// NormalizeProvenance returns the canonical form of a host-attribute map: DNA
+// fields, empty keys and empty values are dropped and surrounding whitespace is
+// trimmed. Every writer of a provenance baseline and every admission-time
+// comparison passes attributes through it, so an unchanged host presents the
+// same set whichever path (connect, refresh claim, refresh complete) carried it.
+// It returns nil when nothing usable remains.
+func NormalizeProvenance(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" || DNAFieldKeys[k] {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ProvenanceKeyDiff reports which non-DNA keys of the stored baseline matched
+// the incoming attributes and which did not. Key names only; never values.
+func ProvenanceKeyDiff(storedJSON string, incoming map[string]string) (matched, divergent []string) {
+	var stored map[string]string
+	if err := json.Unmarshal([]byte(storedJSON), &stored); err != nil {
+		return nil, nil
+	}
+	for k, sv := range stored {
+		if DNAFieldKeys[k] {
+			continue
+		}
+		if iv, ok := incoming[k]; ok && iv == sv {
+			matched = append(matched, k)
+		} else {
+			divergent = append(divergent, k)
+		}
+	}
+	sort.Strings(matched)
+	sort.Strings(divergent)
+	return matched, divergent
+}
+
+// NormalizeStoredProvenance returns storedJSON in canonical form (see
+// NormalizeProvenance) so a baseline written before normalisation compares the
+// same way as a fresh one. Unparseable or empty input is returned unchanged.
+func NormalizeStoredProvenance(storedJSON string) string {
+	var stored map[string]string
+	if err := json.Unmarshal([]byte(storedJSON), &stored); err != nil {
+		return storedJSON
+	}
+	norm := NormalizeProvenance(stored)
+	if norm == nil {
+		return storedJSON
+	}
+	raw, err := json.Marshal(norm)
+	if err != nil {
+		return storedJSON
+	}
+	return string(raw)
 }

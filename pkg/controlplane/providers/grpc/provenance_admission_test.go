@@ -6,6 +6,7 @@ package grpc
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -207,3 +208,122 @@ func TestHostAttrsFromContext_RejectsMalformed(t *testing.T) {
 }
 
 func toString(v interface{}) string { return fmt.Sprint(v) }
+
+// An unchanged host must score 1.0 whichever path wrote the baseline and
+// however that path formatted it: the baseline here is stored un-normalised
+// (padded values, an empty value, a DNA key), the way an earlier writer could
+// have left it, while the connect path presents the collected attributes.
+func TestControlChannel_UnchangedHost_ScoresOneAcrossPaths(t *testing.T) {
+	t.Parallel()
+	attrs := map[string]string{
+		"machine_id":   "m-1",
+		"nic_macs":     "aa:bb:cc:dd:ee:ff",
+		"install_date": "2026-01-01",
+	}
+	stored, err := json.Marshal(map[string]string{
+		"machine_id":   " m-1\n",
+		"nic_macs":     "aa:bb:cc:dd:ee:ff ",
+		"install_date": "2026-01-01",
+		"disk_serials": "",
+		"os_version":   "6.1",
+	})
+	require.NoError(t, err)
+
+	env := newProvEnv(t, "steward-same", string(stored))
+	env.connect(t, "steward-same", attrs)
+
+	_, got := env.spy.snapshot()
+	assert.Equal(t, ProvenanceApprovedMachine, got.Decision)
+	assert.InDelta(t, 1.0, got.Score, 0.0001)
+	assert.Equal(t, 3, got.TotalFields)
+	assert.Empty(t, got.DivergentKeys)
+	assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
+}
+
+// A host that genuinely diverges must still read as a copy once both sides
+// are normalised: formatting noise in the stored baseline is ignored, but the
+// keys whose values really changed are reported, sorted, without values.
+func TestCheckProvenance_DivergentHostAfterNormalisation_ReportsCopy(t *testing.T) {
+	t.Parallel()
+	stored, err := json.Marshal(map[string]string{
+		"machine_id":   " m-1 ",
+		"nic_macs":     "aa:bb\n",
+		"install_date": "2026-01-01",
+		"disk_serials": "",
+		"os_version":   "6.1",
+	})
+	require.NoError(t, err)
+	env := newProvEnv(t, "steward-div", string(stored))
+
+	got := env.spy.inner.CheckProvenance(context.Background(), "steward-div", map[string]string{
+		"machine_id": "m-1", "nic_macs": "cc:dd", "os_version": "9.9",
+	})
+
+	assert.Equal(t, ProvenanceCopy, got.Decision)
+	assert.Equal(t, 1, got.MatchedFields)
+	assert.Equal(t, 3, got.TotalFields, "empty values and DNA keys never count")
+	assert.Equal(t, []string{"install_date", "nic_macs"}, got.DivergentKeys)
+	entries := env.auditEntries(t, "steward_provenance_divergence")
+	require.Len(t, entries, 1)
+	for _, v := range entries[0].Details {
+		assert.NotContains(t, toString(v), "cc:dd")
+	}
+	assert.JSONEq(t, string(stored), env.baseline(t, "steward-div"), "a copy must never overwrite the baseline")
+}
+
+// Attributes that normalise to nothing must not be recorded as a baseline:
+// an empty baseline would leave the steward unscoreable forever.
+func TestCheckProvenance_FirstUse_NothingUsable_RecordsNoBaseline(t *testing.T) {
+	t.Parallel()
+	env := newProvEnv(t, "steward-empty", "")
+
+	got := env.spy.inner.CheckProvenance(context.Background(), "steward-empty", map[string]string{
+		"os_version": "6.1", "machine_id": "  ", " ": "x",
+	})
+
+	assert.Equal(t, ProvenanceUnknown, got.Decision)
+	assert.Equal(t, "", env.baseline(t, "steward-empty"))
+	assert.Empty(t, env.auditEntries(t, "steward_provenance_baseline_recorded"))
+}
+
+// First use with padded attributes stores the canonical form.
+func TestCheckProvenance_FirstUse_StoresNormalisedBaseline(t *testing.T) {
+	t.Parallel()
+	env := newProvEnv(t, "steward-norm", "")
+
+	got := env.spy.inner.CheckProvenance(context.Background(), "steward-norm", map[string]string{
+		"machine_id": " m-1\n", "nic_macs": "aa:bb", "uptime_seconds": "5",
+	})
+
+	assert.Equal(t, ProvenanceUnknown, got.Decision)
+	assert.JSONEq(t, `{"machine_id":"m-1","nic_macs":"aa:bb"}`, env.baseline(t, "steward-norm"))
+	assert.Len(t, env.auditEntries(t, "steward_provenance_baseline_recorded"), 1)
+}
+
+// A stored baseline that is not valid JSON cannot be scored: the steward is
+// admitted as unknown, nothing is audited and the stored value is left alone.
+func TestCheckProvenance_InvalidStoredBaseline_Unknown(t *testing.T) {
+	t.Parallel()
+	env := newProvEnv(t, "steward-bad", "not json")
+
+	got := env.spy.inner.CheckProvenance(context.Background(), "steward-bad", map[string]string{"machine_id": "m-1"})
+
+	assert.Equal(t, ProvenanceUnknown, got.Decision)
+	assert.Empty(t, got.DivergentKeys)
+	assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
+	assert.Equal(t, "not json", env.baseline(t, "steward-bad"))
+}
+
+// Key names are steward-chosen; every element must be sanitised before it
+// reaches a log line.
+func TestSanitizeKeyNames_StripsControlCharacters(t *testing.T) {
+	got := sanitizeKeyNames([]string{"machine_id", "evil\r\nlevel=error msg=forged", "tab\tkey"})
+	require.Len(t, got, 3)
+	assert.Equal(t, "machine_id", got[0])
+	for _, k := range got {
+		assert.NotContains(t, k, "\n")
+		assert.NotContains(t, k, "\r")
+		assert.NotContains(t, k, "\t")
+	}
+	assert.Empty(t, sanitizeKeyNames(nil))
+}
