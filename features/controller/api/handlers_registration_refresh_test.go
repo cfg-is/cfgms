@@ -1460,7 +1460,7 @@ func TestRefresh_EndToEnd_CompleteToMTLSHandshake(t *testing.T) {
 	require.NoError(t, err)
 
 	completeResp, err := stewardClient.RefreshComplete(context.Background(), testDeviceID, testTenantID,
-		challenge.Nonce, int64(challenge.ServerTS), pop, csrPEM)
+		challenge.Nonce, int64(challenge.ServerTS), pop, csrPEM, nil)
 	require.NoError(t, err)
 	require.NotNil(t, completeResp)
 	require.NotEmpty(t, completeResp.ClientCert)
@@ -1611,13 +1611,20 @@ func TestHandleApproveRefresh_RootScoped_RootTenantItself_ProceedsGuard(t *testi
 // postClaim proves possession with a fresh challenge and POSTs to handleRefreshClaim.
 func postClaim(t *testing.T, server *Server, deviceID, tenantID, pendingID string, priv ed25519.PrivateKey) *httptest.ResponseRecorder {
 	t.Helper()
+	return postClaimWithProvenance(t, server, deviceID, tenantID, pendingID, priv, nil)
+}
+
+// postClaimWithProvenance is postClaim carrying the steward's host attributes.
+func postClaimWithProvenance(t *testing.T, server *Server, deviceID, tenantID, pendingID string, priv ed25519.PrivateKey, provenance map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
 	challenge := issueChallenge(t, server, deviceID, tenantID)
 	proof := buildValidCompleteRequest(t, deviceID, tenantID, challenge, priv, nil)
 	body, _ := json.Marshal(RefreshClaimRequest{
-		PendingID: pendingID,
-		Nonce:     proof.Nonce,
-		IssuedAt:  proof.IssuedAt,
-		Signature: proof.Signature,
+		PendingID:  pendingID,
+		Nonce:      proof.Nonce,
+		IssuedAt:   proof.IssuedAt,
+		Signature:  proof.Signature,
+		Provenance: provenance,
 	})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+deviceID+"/refresh/claim", bytes.NewReader(body))
 	r = mux.SetURLVars(r, map[string]string{"device_id": deviceID})
@@ -1663,6 +1670,43 @@ func TestHandleRefreshClaim_DeliversApprovedRefresh(t *testing.T) {
 
 	again := postClaim(t, f.server, testDeviceID, testTenantID, q.PendingID, priv)
 	assert.Equal(t, http.StatusNotFound, again.Code, "a claimed refresh is delivered once")
+}
+
+// TestHandleRefreshClaim_OperatorApprovedRefreshRebaselinesProvenance guards
+// ADR-034 §2: the baseline moves only when an operator-approved refresh is
+// collected — a still-pending claim leaves it alone, and DNA fields never enter it.
+func TestHandleRefreshClaim_OperatorApprovedRefreshRebaselinesProvenance(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	const oldBaseline = `{"machine_id":"old","nic_macs":"aa:bb"}`
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-rebase", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+		LastProvenanceJSON: oldBaseline,
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+
+	queued := postComplete(f.server, testDeviceID, buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv, nil))
+	require.Equal(t, http.StatusAccepted, queued.Code, queued.Body.String())
+	var q RefreshCompleteResponse
+	require.NoError(t, json.Unmarshal(queued.Body.Bytes(), &q))
+
+	fresh := map[string]string{"machine_id": "new", "nic_macs": "cc:dd", "os_version": "volatile"}
+	pending := postClaimWithProvenance(t, f.server, testDeviceID, testTenantID, q.PendingID, priv, fresh)
+	require.Equal(t, http.StatusAccepted, pending.Code)
+	rec, err := f.stewards.GetSteward(context.Background(), "steward-rebase")
+	require.NoError(t, err)
+	assert.JSONEq(t, oldBaseline, rec.LastProvenanceJSON, "an unapproved claim must not move the baseline")
+
+	approve := httptest.NewRecorder()
+	f.server.router.ServeHTTP(approve, makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+q.PendingID+"/approve", nil))
+	require.Equal(t, http.StatusOK, approve.Code, approve.Body.String())
+
+	claimed := postClaimWithProvenance(t, f.server, testDeviceID, testTenantID, q.PendingID, priv, fresh)
+	require.Equal(t, http.StatusOK, claimed.Code, claimed.Body.String())
+	rec, err = f.stewards.GetSteward(context.Background(), "steward-rebase")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"machine_id":"new","nic_macs":"cc:dd"}`, rec.LastProvenanceJSON)
 }
 
 // TestHandleRefreshClaim_Refusals covers the claim endpoint's refusals: a wrong

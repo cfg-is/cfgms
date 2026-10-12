@@ -1179,6 +1179,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
+				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
 			)
 		} else {
 			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook)
@@ -1193,6 +1194,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
+				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
 			)
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{

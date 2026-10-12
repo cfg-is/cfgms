@@ -550,6 +550,17 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
+### Host Attributes (Issue #4949, ADR-034 §2)
+
+On every ControlChannel connect the steward reports host attributes in the `x-cfgms-host-attrs` metadata header (base64 JSON, at most 4 KiB), collected by `identity.CollectHostAttributes`:
+
+- `machine_id` — the per-OS machine identifier the secrets encryptor also uses (`/etc/machine-id`, `IOPlatformUUID`, Windows `MachineGuid`).
+- `nic_macs` — hardware addresses of physical network interfaces, sorted and comma-joined (loopback and container/hypervisor virtual interfaces excluded).
+- `disk_serials` — block-device serial numbers, sorted and comma-joined; best effort (read on Linux, omitted on macOS and Windows).
+- `install_date` — the calendar date the device identity file was first created.
+
+An attribute that cannot be read is omitted, never fabricated. DNA fields are never included. The controller compares these with the baseline it recorded (see the controller operating model). The same attributes accompany `/refresh/complete` and `/refresh/claim`, so the `auto_accept` demotion can compare them and an operator-approved refresh re-baselines them.
+
 ### Duplicate Identity Detection (Issue #4948)
 
 If a second endpoint presents the same steward identity (certificate and key) while another endpoint already holds a control stream, the controller detects the change of peer host and records a high-severity audit event naming both addresses and certificate serials. Detection does not refuse either endpoint; a steward reconnecting from the same host is not treated as a duplicate. Detection is per controller node.

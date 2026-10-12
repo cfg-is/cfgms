@@ -25,6 +25,11 @@ func newPlatformEncryptor(secretsDir string) (platformEncryptor, error) {
 	return newAesGcmEncryptor(machineID, secretsDir)
 }
 
+// MachineID returns the host's stable machine identifier (IOPlatformUUID).
+func MachineID() ([]byte, error) {
+	return readDarwinMachineID()
+}
+
 // readDarwinMachineID reads the machine UUID via ioreg on macOS.
 func readDarwinMachineID() ([]byte, error) {
 	cmd := exec.Command("ioreg", "-rd1", "-c", "IOPlatformExpertDevice") //#nosec G204 -- fixed command, no user input

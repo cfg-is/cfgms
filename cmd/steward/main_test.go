@@ -687,7 +687,7 @@ func TestCompleteRefreshWithFreshKeypair_PairsLocalKeyWithIssuedCert(t *testing.
 
 	const deviceID = "device-refresh-keypair"
 	resp, keyPEM, err := completeRefreshWithFreshKeypair(
-		context.Background(), httpClient, deviceID, "tenant-1", "dGVzdA", 1, []byte("pop-signature"))
+		context.Background(), httpClient, deviceID, "tenant-1", "dGVzdA", 1, []byte("pop-signature"), nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	require.NotEmpty(t, resp.ClientCert, "controller must return the certificate it signed over the submitted CSR")
@@ -719,7 +719,7 @@ func TestCompleteRefreshWithFreshKeypair_PairsLocalKeyWithIssuedCert(t *testing.
 	// A second refresh must generate a different keypair — the renewed credential
 	// is never a re-use of a previous one.
 	resp2, keyPEM2, err := completeRefreshWithFreshKeypair(
-		context.Background(), httpClient, deviceID, "tenant-1", "dGVzdA", 1, []byte("pop-signature"))
+		context.Background(), httpClient, deviceID, "tenant-1", "dGVzdA", 1, []byte("pop-signature"), nil)
 	require.NoError(t, err)
 	assert.NotEqual(t, keyPEM, keyPEM2, "each refresh must generate a fresh keypair")
 	_, err = tls.X509KeyPair([]byte(resp2.ClientCert), []byte(keyPEM))
@@ -742,7 +742,7 @@ func TestCompleteRefreshWithFreshKeypair_PendingReturnsKeyForClaim(t *testing.T)
 	require.NoError(t, err)
 
 	resp, keyPEM, err := completeRefreshWithFreshKeypair(
-		context.Background(), httpClient, "device-pending", "tenant-1", "dGVzdA", 1, []byte("pop"))
+		context.Background(), httpClient, "device-pending", "tenant-1", "dGVzdA", 1, []byte("pop"), nil)
 	require.ErrorIs(t, err, registration.ErrRefreshPending)
 	assert.Nil(t, resp)
 	assert.Contains(t, keyPEM, "PRIVATE KEY", "a queued refresh returns the CSR key the approval will pair with")

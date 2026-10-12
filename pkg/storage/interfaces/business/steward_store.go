@@ -231,6 +231,13 @@ type StewardStore interface {
 	// Returns ErrStewardNotFound if no record exists.
 	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
 
+	// SetStewardProvenance replaces the steward's recorded provenance baseline
+	// (LastProvenanceJSON) with provenanceJSON (ADR-034 §2). It is written at
+	// first admission (trust on first use) and when an operator approves a
+	// refresh; a connection that scores below the match threshold must never
+	// call it. Returns ErrStewardNotFound if no record exists.
+	SetStewardProvenance(ctx context.Context, stewardID, provenanceJSON string) error
+
 	// UpdateStewardTenant moves a steward to a different tenant, guarded by a
 	// compare-and-swap on the steward's current tenant (Issue #3895): the write
 	// only applies if the record's tenant_id still equals expectedTenantID at

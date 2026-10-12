@@ -1561,6 +1561,7 @@ func connectWithApprovedRegistration(
 		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
 		PublicBeta:                      publicBeta,
 		CertStoreDir:                    certStoreDir,
+		HostAttributes:                  hostAttributes,
 		UpgradeAllowDowngrade:           upgradeAllowDowngrade,
 		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:              dnaRefreshInterval,
@@ -1851,6 +1852,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
 		PublicBeta:                      publicBeta,
 		CertStoreDir:                    certStoreDir,
+		HostAttributes:                  hostAttributes,
 		AdmissionWindow:                 storedIdentityAdmissionWindow,
 		InitialConnectTimeout:           storedIdentityConnectBudget,
 		UpgradeAllowDowngrade:           upgradeAllowDowngradeReconnect,
@@ -2032,6 +2034,13 @@ func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks *identity.Fi
 	}
 }
 
+// hostAttributes collects the host provenance attributes the controller compares
+// against the approved record (ADR-034 §2). The device identity file lives in the
+// default cert store, which is where its install date is read from.
+func hostAttributes() map[string]string {
+	return identity.CollectHostAttributes(defaultCertStoreDir())
+}
+
 // completeRefreshWithFreshKeypair performs the credential half of a registration
 // refresh (Issue #3781): it generates a fresh keypair for the renewed credential,
 // submits only its public half as a CSR to /refresh/complete, and returns the
@@ -2052,6 +2061,7 @@ func completeRefreshWithFreshKeypair(
 	deviceID, tenantID, nonce string,
 	serverTS int64,
 	pop []byte,
+	provenance map[string]string,
 ) (*registration.RefreshCompleteResponse, string, error) {
 	renewedKey, err := registration.GenerateStewardKeypair()
 	if err != nil {
@@ -2067,7 +2077,7 @@ func completeRefreshWithFreshKeypair(
 		return nil, "", fmt.Errorf("encode renewed steward private key: %w", err)
 	}
 
-	completeResp, err := httpClient.RefreshComplete(ctx, deviceID, tenantID, nonce, serverTS, pop, csrPEM)
+	completeResp, err := httpClient.RefreshComplete(ctx, deviceID, tenantID, nonce, serverTS, pop, csrPEM, provenance)
 	if err != nil {
 		// A queued request (ErrRefreshPending) still returns the key: the eventual
 		// approval signs this CSR, so the caller must keep the key to pair with it
@@ -2137,7 +2147,7 @@ func readmitWithDeviceKey(
 		_ = clearRefreshPendingState(certStoreDir)
 	}
 	if pending != nil {
-		completeResp, err = httpClient.RefreshClaim(exchangeCtx, ks.DeviceID(), pending.PendingID, nonce, serverTS, pop)
+		completeResp, err = httpClient.RefreshClaim(exchangeCtx, ks.DeviceID(), pending.PendingID, nonce, serverTS, pop, hostAttributes())
 		switch {
 		case err == nil:
 			renewedKeyPEM = pending.ClientKeyPEM
@@ -2155,7 +2165,7 @@ func readmitWithDeviceKey(
 		}
 	} else {
 		completeResp, renewedKeyPEM, err = completeRefreshWithFreshKeypair(
-			exchangeCtx, httpClient, ks.DeviceID(), tenantID, nonce, serverTS, pop)
+			exchangeCtx, httpClient, ks.DeviceID(), tenantID, nonce, serverTS, pop, hostAttributes())
 		if err != nil {
 			var queued *registration.RefreshPendingError
 			if errors.As(err, &queued) && queued.PendingID != "" && renewedKeyPEM != "" {

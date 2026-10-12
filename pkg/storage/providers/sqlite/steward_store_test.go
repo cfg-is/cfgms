@@ -678,3 +678,21 @@ func TestSQLiteStewardStore_ConcurrentTransitionNeverLosesRevoked(t *testing.T) 
 		assert.Equal(t, business.StewardStatusRevoked, got.Status, "iteration %d", i)
 	}
 }
+
+func TestSetStewardProvenance(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRec("s-prov")))
+
+	got, err := store.GetSteward(ctx, "s-prov")
+	require.NoError(t, err)
+	assert.Empty(t, got.LastProvenanceJSON, "a fresh record has no baseline")
+
+	require.NoError(t, store.SetStewardProvenance(ctx, "s-prov", `{"machine_id":"m1"}`))
+	got, err = store.GetSteward(ctx, "s-prov")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"machine_id":"m1"}`, got.LastProvenanceJSON)
+
+	err = store.SetStewardProvenance(ctx, "ghost-prov", `{"machine_id":"m2"}`)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}

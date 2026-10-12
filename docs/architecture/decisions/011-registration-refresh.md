@@ -247,3 +247,7 @@ Provenance is corroboration, not proof: the cryptographic identity proof is the 
 - **DNA as an identity/provenance input.** Rejected — non-secret and ring-shared; excluded from provenance scoring.
 - **Shared nonce cache via HA replication.** Deferred — single-instance controller in v1; nonce cache is in-process and moves to the shared durable store when multi-controller HA ships. **Implemented by ADR-031 (Issue #3755):** the durable `business.NonceStore` described above.
 - **TPM-backed key storage in v1.** Deferred — out of scope; the `KeyStore` interface and `key_protection_level` attribute make it a drop-in.
+
+### Amendment 2 — Provenance is also evaluated at ControlChannel admission (Issue #4949, ADR-034 §2)
+
+Provenance was previously consulted only by the refresh `auto_accept` path, and nothing wrote the baseline or sent the attributes. Now the steward collects host attributes and sends them on `/refresh/complete`, `/refresh/claim` and as metadata on the `ControlChannel` call; the controller writes `LastProvenanceJSON` at first admission (trust on first use, audited) and when an operator-approved refresh is collected, and compares attributes at ControlChannel admission, after the revocation and approval gates. The invariant of §7 is unchanged: provenance is demote-only. It classifies a connection as `approved_machine`, `copy` or `unknown`; it never admits a connection the revocation or lifecycle gates refuse, and a store error falls back to `unknown`. See the controller operating model, "Host Provenance at Admission".

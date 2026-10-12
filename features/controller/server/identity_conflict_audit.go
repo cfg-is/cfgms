@@ -90,7 +90,12 @@ func (o *identityConflictAuditObserver) ObserveIdentityConflict(ctx context.Cont
 		Detail("new_addr", c.NewAddr).
 		Detail("existing_serial", c.ExistingSerial).
 		Detail("new_serial", c.NewSerial).
-		Detail("detected_at", c.DetectedAt.UTC().Format(time.RFC3339))
+		Detail("detected_at", c.DetectedAt.UTC().Format(time.RFC3339)).
+		Detail("provenance_decision", string(c.Provenance.Decision)).
+		Detail("provenance_score", c.Provenance.Score).
+		Detail("provenance_matched_fields", c.Provenance.MatchedFields).
+		Detail("provenance_total_fields", c.Provenance.TotalFields).
+		Detail("provenance_divergent_keys", c.Provenance.DivergentKeys)
 	if err := o.audit.RecordEvent(ctx, b); err != nil {
 		o.logger.Warn("Failed to record steward identity conflict audit event",
 			"steward_id", logging.SanitizeLogValue(c.StewardID),

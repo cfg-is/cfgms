@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -165,6 +166,15 @@ type Provider struct {
 	// different host (ADR-034 §3). Nil = no-op. Injected via
 	// WithIdentityConflictObserver.
 	identityConflictObserver IdentityConflictObserver
+
+	// provenanceChecker compares a connecting host's attributes against the
+	// approved record after the revocation and approval gates (ADR-034 §2).
+	// Nil = no check. Injected via WithProvenanceChecker.
+	provenanceChecker ProvenanceChecker
+
+	// hostAttributes (client mode) supplies the attributes sent in the
+	// HostAttrsHeader on each ControlChannel dial. Nil = none sent.
+	hostAttributes func() map[string]string
 
 	// Subscription handlers (client mode). commands holds the subscribed command
 	// handler and any commands that arrive before it is subscribed (Issue #4678).
@@ -656,7 +666,13 @@ func (p *Provider) dialAndOpenStream() error {
 		return fmt.Errorf("failed to create gRPC client: %w", err)
 	}
 
-	stream, err := transportpb.NewStewardTransportClient(conn).ControlChannel(p.ctx)
+	streamCtx := p.ctx
+	if p.hostAttributes != nil {
+		if enc := encodeHostAttrs(p.hostAttributes()); enc != "" {
+			streamCtx = metadata.AppendToOutgoingContext(streamCtx, HostAttrsHeader, enc)
+		}
+	}
+	stream, err := transportpb.NewStewardTransportClient(conn).ControlChannel(streamCtx)
 	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("failed to open ControlChannel: %w", err)
@@ -1544,8 +1560,13 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		peerSerial, _ = peerCertSerial(stream.Context())
 	}
 
+	// Provenance (ADR-034 §2): demote-only and last — it runs only for a
+	// connection the revocation and approval gates above already admitted, and
+	// only classifies it. Refusing a Copy is a separate gate.
+	provenance := s.provider.assessProvenance(stream.Context(), stewardID)
+
 	// Duplicate-identity detection (ADR-034 §3): report only, never refuse.
-	s.provider.reportIdentityConflict(stream.Context(), stewardID, p.Addr.String(), peerSerial)
+	s.provider.reportIdentityConflict(stream.Context(), stewardID, p.Addr.String(), peerSerial, provenance)
 
 	// Create a stream sender adapter for the registry
 	sender := &streamSender{stream: stream}

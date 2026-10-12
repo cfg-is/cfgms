@@ -30,6 +30,10 @@ type IdentityConflict struct {
 	ExistingSerial string
 	// DetectedAt is when the conflict was detected.
 	DetectedAt time.Time
+	// Provenance is the host-provenance assessment of the connection being
+	// admitted (ADR-034 §2), so a conflict carries the same evidence as a
+	// divergence. Its Decision is ProvenanceUnknown when no check ran.
+	Provenance ProvenanceAssessment
 }
 
 // IdentityConflictObserver receives identity-conflict reports. Implementations
@@ -52,7 +56,7 @@ func WithIdentityConflictObserver(observer IdentityConflictObserver) option {
 // registry entry for the same steward ID and reports a conflict when the peer
 // hosts differ. A same-host reconnect (a restarting steward whose stale stream
 // has not yet errored) is not a conflict.
-func (p *Provider) reportIdentityConflict(ctx context.Context, stewardID, newAddr, newSerial string) {
+func (p *Provider) reportIdentityConflict(ctx context.Context, stewardID, newAddr, newSerial string, provenance ProvenanceAssessment) {
 	if p.identityConflictObserver == nil {
 		return
 	}
@@ -91,6 +95,7 @@ func (p *Provider) reportIdentityConflict(ctx context.Context, stewardID, newAdd
 		NewSerial:      newSerial,
 		ExistingSerial: existing.PeerSerial,
 		DetectedAt:     time.Now().UTC(),
+		Provenance:     provenance,
 	})
 }
 

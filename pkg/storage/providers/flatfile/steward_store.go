@@ -335,6 +335,19 @@ func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID str
 	return s.writeSteward(record)
 }
 
+// SetStewardProvenance replaces the steward's provenance baseline.
+func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID, provenanceJSON string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	record.LastProvenanceJSON = provenanceJSON
+	return s.writeSteward(record)
+}
+
 // UpdateStewardTenant moves a steward to a different tenant by updating its
 // TenantID field, guarded by a compare-and-swap on the steward's current
 // tenant (Issue #3895): the write only applies if the on-disk record's

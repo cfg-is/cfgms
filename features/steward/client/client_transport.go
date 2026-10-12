@@ -371,6 +371,7 @@ type TransportClient struct {
 	// downloads binaries to a subdirectory here. (Issue #1943)
 	certStoreDir          string
 	admissionWindow       time.Duration
+	hostAttributes        func() map[string]string
 	initialConnectTimeout time.Duration
 
 	// revokedVersions is the controller-supplied list of revoked steward versions.
@@ -610,6 +611,11 @@ type TransportConfig struct {
 	// hands control back to the registration fallback.
 	AdmissionWindow time.Duration
 
+	// HostAttributes supplies the host provenance attributes sent to the
+	// controller on every ControlChannel dial (ADR-034 §2). Called per dial so a
+	// reconnect reports current values. Nil sends none.
+	HostAttributes func() map[string]string
+
 	// InitialConnectTimeout bounds the initial control-plane dial (Issue #4532).
 	// Zero retries until the controller is reachable — right after a fresh
 	// registration. The stored-identity reconnect sets it so an unreachable
@@ -787,6 +793,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		secretStore:                     cfg.SecretStore,
 		certStoreDir:                    cfg.CertStoreDir,
 		admissionWindow:                 cfg.AdmissionWindow,
+		hostAttributes:                  cfg.HostAttributes,
 		initialConnectTimeout:           cfg.InitialConnectTimeout,
 		fenceRatchet:                    fenceRatchet,
 		termRatchetSet:                  ratchetSet,
@@ -966,7 +973,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		c.logger.Info("Initializing gRPC control plane provider",
 			"addr", transportAddress, "steward_id", logging.RedactedID(stewardID))
 
-		provider := grpcCP.New(grpcCP.ModeClient)
+		provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes))
 
 		providerCfg := map[string]interface{}{
 			"mode":       "client",

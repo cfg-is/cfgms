@@ -56,6 +56,13 @@ func readLinuxMachineID() ([]byte, error) {
 	return machineID, nil
 }
 
+// MachineID returns the host's stable machine identifier (/etc/machine-id).
+// Unlike the encryptor key source it has no per-directory fallback: when the
+// host has no machine ID the caller gets an error and must omit the attribute.
+func MachineID() ([]byte, error) {
+	return readLinuxMachineID()
+}
+
 // loadOrGenerateFallbackMachineID loads {secretsDir}/machine-id, generating it on first call.
 // The generated value is a random 32-hex-char string stored with 0600 permissions.
 func loadOrGenerateFallbackMachineID(secretsDir string) ([]byte, error) {
