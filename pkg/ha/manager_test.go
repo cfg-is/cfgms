@@ -1427,34 +1427,56 @@ func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
 	// reads the lease fresh rather than from a cache. The second call is served
 	// from that cache (commandTermCacheTTL), so it may legitimately lag the lease:
 	// it is bounded below by the first stamp, not by a fresh lease read.
-	firstStamp := assertStampsLeaseToken(t, store, "follower", follower.CommandTerm)
+	firstStamp, stamped := assertStampsLeaseToken(t, store, "follower", follower.CommandTerm)
 	cached := CommandTermSource{Manager: follower}.GetTerm()
-	assert.GreaterOrEqual(t, cached, firstStamp, "the follower never stamps an older token than it did before")
+	if stamped {
+		assert.GreaterOrEqual(t, cached, firstStamp, "the follower never stamps an older token than it did before")
+	}
 	assert.LessOrEqual(t, cached, leaseTerm(t, store), "the follower must not stamp a token the lease has not issued")
-	assertStampsLeaseToken(t, store, "holder", leader.CommandTerm)
+	_, _ = assertStampsLeaseToken(t, store, "holder", leader.CommandTerm)
 }
 
 // leaseTerm reads the cluster leadership lease's current token from the store as a
 // command term.
 func leaseTerm(t *testing.T, store business.LeaseStore) uint64 {
 	t.Helper()
+	term, _ := leaseTermValid(t, store)
+	return term
+}
+
+// leaseTermValid is leaseTerm plus the store's verdict on whether the lease is
+// currently unexpired.
+func leaseTermValid(t *testing.T, store business.LeaseStore) (uint64, bool) {
+	t.Helper()
 	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
 	require.NoError(t, err)
-	return LeaseTermFloor + state.Token
+	return LeaseTermFloor + state.Token, state.Valid
 }
 
 // assertStampsLeaseToken calls stamp once and requires the result to be the lease
 // token as it stood at that call: lease tokens never decrease, so the stamp must
-// lie between the token read just before and just after. A wrong token (0, a
-// stale or unfloored one) falls outside the bracket.
-func assertStampsLeaseToken(t *testing.T, store business.LeaseStore, who string, stamp func() uint64) uint64 {
+// lie between the token read just before and just after. A wrong token (a stale
+// or unfloored one) falls outside the bracket.
+//
+// CommandTerm fails closed: it stamps 0 while the lease is not valid. On a loaded
+// runner the holder's renewal can miss the short FastElectionConfig TTL, leaving
+// the lease expired for a moment before the holder re-acquires. A 0 is therefore
+// accepted only when the store itself reported the lease expired in the read
+// before or after the call; a 0 against a lease the store held valid throughout
+// still fails. The returned bool reports whether a non-zero token was stamped.
+func assertStampsLeaseToken(t *testing.T, store business.LeaseStore, who string, stamp func() uint64) (uint64, bool) {
 	t.Helper()
-	before := leaseTerm(t, store)
+	before, validBefore := leaseTermValid(t, store)
 	got := stamp()
-	after := leaseTerm(t, store)
+	after, validAfter := leaseTermValid(t, store)
+	if got == 0 {
+		assert.False(t, validBefore && validAfter,
+			"%s stamped 0 although the lease was valid before and after the call", who)
+		return 0, false
+	}
 	assert.GreaterOrEqual(t, got, before, "%s must stamp the lease's current token, not an older one", who)
 	assert.LessOrEqual(t, got, after, "%s must not stamp a token the lease has not issued", who)
-	return got
+	return got, true
 }
 
 // TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to
@@ -1510,13 +1532,17 @@ func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
 	// higher token. A's first CommandTerm call reads the lease fresh, so the guarded
 	// property is that the stamp is the lease's token at that moment (bracketed by
 	// reads of the store), which is at least B's takeover token and above A's old one.
+	// If B's renewal missed the TTL at that instant the lease is expired and the
+	// stamp is 0 (fail closed); the token checks then do not apply.
 	var stamped uint64
-	assertStampsLeaseToken(t, store, "the former holder", func() uint64 {
+	_, ok := assertStampsLeaseToken(t, store, "the former holder", func() uint64 {
 		stamped = managerA.CommandTerm()
 		return stamped
 	})
-	assert.GreaterOrEqual(t, stamped, newTerm, "the former holder stamps at least the takeover token")
-	assert.Greater(t, stamped, oldTerm, "the former holder must not keep stamping its old term")
+	if ok {
+		assert.GreaterOrEqual(t, stamped, newTerm, "the former holder stamps at least the takeover token")
+		assert.Greater(t, stamped, oldTerm, "the former holder must not keep stamping its old term")
+	}
 }
 
 // erroringLeaseStore is a real business.LeaseStore whose reads fail on demand, for
