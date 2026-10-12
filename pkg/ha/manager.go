@@ -617,7 +617,8 @@ const LeaseTermFloor uint64 = 1 << 32
 const commandTermCacheTTL = 2 * time.Second
 
 // commandTermFailureTTL is how long a failed lease read (or a vacant lease) is
-// cached as 0, so a hung or failing lease store costs one read per interval
+// cached as 0 (an expired lease's token is cached for the same interval so a
+// takeover is picked up quickly), so a hung or failing lease store costs one read per interval
 // rather than one per published command. A command stamped 0 is rejected anyway,
 // so caching the failure changes nothing about correctness.
 const commandTermFailureTTL = 500 * time.Millisecond
@@ -630,8 +631,9 @@ const commandTermFailureTTL = 500 * time.Millisecond
 //   - on any other node, the lease's current token read from the lease store,
 //     cached for commandTermCacheTTL.
 //
-// It returns 0 in SingleServerMode and BlueGreenMode (no lease), and when the
-// lease cannot be read — a command stamped 0 is rejected by any steward whose
+// An expired lease row still stamps its last token (see the comment at the read).
+// It returns 0 in SingleServerMode and BlueGreenMode (no lease), when no lease
+// row has ever been written, and when the lease cannot be read — a command stamped 0 is rejected by any steward whose
 // ratchet is set, so an unreadable lease fails closed. Before this, GetTerm's 0
 // on non-holders meant every command a follower published (config push, DNA
 // sync, script runs on the steward's session node) was rejected fleet-wide
@@ -689,9 +691,18 @@ func (m *Manager) CommandTerm() uint64 {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, token, _, ok, err := leaseManager.CurrentHolder(ctx, clusterLeadershipLeaseName)
-	if err == nil && ok && token != 0 {
-		term, ttl = LeaseTermFloor+token, commandTermCacheTTL
+	_, token, _, valid, err := leaseManager.CurrentHolder(ctx, clusterLeadershipLeaseName)
+	if err == nil && token != 0 {
+		term = LeaseTermFloor + token
+		if valid {
+			ttl = commandTermCacheTTL
+		}
+		// An expired row (the holder's renewal missed its TTL and nobody has
+		// re-acquired yet) still carries the highest token issued, so no steward
+		// can have seen a higher one. Stamping it is no weaker than a cached stale
+		// token; stamping 0 here broke the "never 0 while a lease row exists"
+		// property (Issue #4964). The short TTL re-reads soon, so a takeover's
+		// higher token is picked up quickly.
 	}
 	return term
 }
