@@ -1,6 +1,6 @@
 # ADR-034: Steward Identity Clones — Detection, Split and Removal
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-10-11 (amended 2026-10-11: hardware-backed keys, limits, rolling token rejected)
 
