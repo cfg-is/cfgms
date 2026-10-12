@@ -538,6 +538,10 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
+### Duplicate Identity Detection (Issue #4948)
+
+If a second endpoint presents the same steward identity (certificate and key) while another endpoint already holds a control stream, the controller detects the change of peer host and records a high-severity audit event naming both addresses and certificate serials. Detection does not refuse either endpoint; a steward reconnecting from the same host is not treated as a duplicate. Detection is per controller node.
+
 ### Fencing-Token Command Fence (ADR-029 Decision 6; substrate updated by ADR-031 Decision 5 / Issue #3760)
 
 Every inbound `Command` carries a fencing token stamped by the controller that published it (`Command.Term`, #3390). The field name and wire type are unchanged since #3390 — a `uint64` — only its source has moved: originally the Raft term the controller cluster was at (ADR-029 Decision 5), it is now the S3 database lease's monotonic fencing token (ADR-031 Decision 5, Issue #3760). Every controller node stamps it, not only the lease holder (`ha.Manager.CommandTerm()`): the holder uses its local authority, any other node reads the lease's current token from the lease store (cached for 2 s). An unreadable lease stamps 0, which a steward with a set ratchet rejects — it fails closed. Only a cluster deployment (`ha.mode: cluster`) holds that lease and therefore stamps a non-zero token; single-server and blue-green deployments have no lease to draw one from and publish unstamped commands, which the ratchet's first column already covers. The steward tracks the highest value it has observed and enforces a three-state ratchet on the receive path, ahead of command dispatch — this mechanism did not change when the source did:

@@ -160,6 +160,12 @@ type Provider struct {
 	// Injected via WithStewardTenantResolver.
 	stewardTenantResolver StewardTenantResolver
 
+	// identityConflictObserver is told when a second endpoint opens a
+	// ControlChannel for a steward ID that already has a live stream from a
+	// different host (ADR-034 §3). Nil = no-op. Injected via
+	// WithIdentityConflictObserver.
+	identityConflictObserver IdentityConflictObserver
+
 	// Subscription handlers (client mode). commands holds the subscribed command
 	// handler and any commands that arrive before it is subscribed (Issue #4678).
 	commands *pendingcmd.Queue
@@ -1533,6 +1539,14 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		heartbeatBucket = s.provider.admissionBucket(stream.Context(), stewardID, "")
 	}
 
+	if peerSerial == "" {
+		// No revocation checker configured: still record the serial as evidence.
+		peerSerial, _ = peerCertSerial(stream.Context())
+	}
+
+	// Duplicate-identity detection (ADR-034 §3): report only, never refuse.
+	s.provider.reportIdentityConflict(stream.Context(), stewardID, p.Addr.String(), peerSerial)
+
 	// Create a stream sender adapter for the registry
 	sender := &streamSender{stream: stream}
 
@@ -1541,6 +1555,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		Sender:      sender,
 		ConnectedAt: time.Now(),
 		RemoteAddr:  p.Addr.String(),
+		PeerSerial:  peerSerial,
 	}
 
 	if err := s.provider.registry.Register(conn); err != nil {

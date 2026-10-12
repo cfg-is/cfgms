@@ -605,6 +605,14 @@ The security invariant is unchanged by the backing store: `session.Manager` alwa
 
 Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
 
+### Duplicate Steward Identity Detection (Issue #4948, ADR-034 §3)
+
+After the revocation and approval gates and before `registry.Register`, `transportServer.ControlChannel` looks up the steward ID in the connection registry. If a live stream exists and its remote host (IP, port stripped) differs from the new peer's host, the provider reports an `IdentityConflict` to the observer injected with `WithIdentityConflictObserver`. A reconnect from the same host (a restarting steward whose stale stream has not yet errored) is not a conflict, and the new stream still replaces the stale one.
+
+Detection is report-only: `Register` is unchanged, so the newest connection still wins and nobody is refused. The controller's observer writes an audit event of type `security_event`, action `steward_identity_conflict_detected`, severity `high`, resource `steward`. Details carry both peer addresses and both client-certificate serials; the tenant is resolved server-side from the fleet record. Events are rate-limited in memory to one per steward ID per minute. Operators see them through `GET /api/v1/audit/entries` and `cfg controller audit list`.
+
+**Limitation:** the connection registry is per controller node. A duplicate that connects to a different node of a cluster is not detected.
+
 ### Steward Tracking
 
 For each steward, the controller tracks:
