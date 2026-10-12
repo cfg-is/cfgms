@@ -10,40 +10,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// Clock is the time source SingletonJob's renewal loop draws on: the renewal
-// ticker, the remaining-authority computation and the retry backoff wait. The
-// zero SingletonJob uses the real clock; tests substitute a clock they advance
-// explicitly so the outcome does not depend on how quickly the host schedules
-// goroutines.
-type Clock interface {
-	// Until returns the duration from now until t.
-	Until(t time.Time) time.Duration
-	// NewTicker returns a Ticker firing every d.
-	NewTicker(d time.Duration) Ticker
-	// After returns a channel that receives once d has elapsed.
-	After(d time.Duration) <-chan time.Time
-}
-
-// Ticker is the subset of *time.Ticker that SingletonJob uses.
-type Ticker interface {
-	// C returns the channel on which ticks are delivered.
-	C() <-chan time.Time
-	// Stop turns the ticker off.
-	Stop()
-}
-
-type realClock struct{}
-
-func (realClock) Until(t time.Time) time.Duration { return time.Until(t) }
-
-func (realClock) NewTicker(d time.Duration) Ticker { return realTicker{time.NewTicker(d)} }
-
-func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
-
-type realTicker struct{ *time.Ticker }
-
-func (t realTicker) C() <-chan time.Time { return t.Ticker.C }
-
 // SingletonJob wraps a cluster background loop's per-cycle execution so it
 // runs on at most one node at a time, using this package's fenced lease as
 // the singleton claim (ADR-031 Decision 4). A loop constructs one
@@ -81,11 +47,16 @@ type SingletonJob struct {
 	Clock Clock
 }
 
+// clock returns the job's own Clock when set, else the Manager's clock (see
+// NewManagerWithClock), else the real clock.
 func (j SingletonJob) clock() Clock {
-	if j.Clock == nil {
-		return realClock{}
+	if j.Clock != nil {
+		return j.Clock
 	}
-	return j.Clock
+	if j.Manager != nil && j.Manager.clock != nil {
+		return j.Manager.clock
+	}
+	return realClock{}
 }
 
 // NewSingletonJob constructs a SingletonJob, validating name/holderID are

@@ -5,6 +5,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +51,120 @@ type slowFlushBackend struct {
 func (b *slowFlushBackend) Flush() error {
 	time.Sleep(b.delay)
 	return b.Backend.Flush()
+}
+
+// manualClock is a lease.Clock whose time moves only when the test advances
+// it. It lets a test drive node-a's renewal ticker and retry backoff by
+// explicit events, so the renewal-outage property does not depend on how fast
+// the runner schedules goroutines. Every After/NewTicker registration is
+// announced on registered so the test advances only once the code under test
+// is actually waiting.
+type manualClock struct {
+	mu         sync.Mutex
+	now        time.Time
+	waiters    []*manualWaiter
+	registered chan struct{}
+}
+
+type manualWaiter struct {
+	at      time.Time
+	period  time.Duration // zero for a one-shot After
+	ch      chan time.Time
+	stopped bool
+}
+
+func newManualClock() *manualClock {
+	return &manualClock{
+		now:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		registered: make(chan struct{}, 256),
+	}
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualClock) Until(t time.Time) time.Duration { return t.Sub(c.Now()) }
+
+func (c *manualClock) add(d, period time.Duration) *manualWaiter {
+	c.mu.Lock()
+	w := &manualWaiter{at: c.now.Add(d), period: period, ch: make(chan time.Time, 1)}
+	c.waiters = append(c.waiters, w)
+	c.mu.Unlock()
+	c.registered <- struct{}{}
+	return w
+}
+
+func (c *manualClock) After(d time.Duration) <-chan time.Time { return c.add(d, 0).ch }
+
+func (c *manualClock) NewTicker(d time.Duration) lease.Ticker {
+	return &manualTicker{clock: c, w: c.add(d, d)}
+}
+
+// advanceToNextAfter moves time forward to the earliest pending one-shot
+// After deadline and fires every waiter due by then. Ticker ticks that fall
+// due on the way are delivered like *time.Ticker's: at most one buffered,
+// the rest dropped.
+func (c *manualClock) advanceToNextAfter() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var next *manualWaiter
+	for _, w := range c.waiters {
+		if w.period == 0 && !w.stopped && (next == nil || w.at.Before(next.at)) {
+			next = w
+		}
+	}
+	if next != nil {
+		c.advanceLocked(next.at.Sub(c.now))
+	}
+}
+
+// advance moves time forward by d and fires every waiter due by then.
+func (c *manualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.advanceLocked(d)
+}
+
+func (c *manualClock) advanceLocked(d time.Duration) {
+	c.now = c.now.Add(d)
+	pending := c.waiters[:0]
+	for _, w := range c.waiters {
+		if w.stopped {
+			continue
+		}
+		if w.at.After(c.now) {
+			pending = append(pending, w)
+			continue
+		}
+		select {
+		case w.ch <- c.now:
+		default:
+		}
+		if w.period == 0 {
+			continue
+		}
+		for !w.at.After(c.now) {
+			w.at = w.at.Add(w.period)
+		}
+		pending = append(pending, w)
+	}
+	c.waiters = pending
+}
+
+type manualTicker struct {
+	clock *manualClock
+	w     *manualWaiter
+}
+
+func (t *manualTicker) C() <-chan time.Time { return t.w.ch }
+
+func (t *manualTicker) Stop() {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	t.w.stopped = true
 }
 
 // newMaintenanceLeaseManager builds a Manager backed by the real SQLite
@@ -169,6 +284,10 @@ type transientErrorLeaseStore struct {
 	// every call from callNumber through lastCallNumber inclusive.
 	lastCallNumber int32
 	calls          int32
+	// afterCall, when non-nil, is invoked after every holderID call with the
+	// call's ordinal and whether it was an injected failure, so a test can
+	// drive other actors off observed renewals instead of wall-clock time.
+	afterCall func(n int32, failed bool)
 }
 
 func (s *transientErrorLeaseStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
@@ -177,9 +296,18 @@ func (s *transientErrorLeaseStore) AcquireOrRenew(ctx context.Context, name, hol
 		if last < s.callNumber {
 			last = s.callNumber
 		}
-		if n := atomic.AddInt32(&s.calls, 1); n >= s.callNumber && n <= last {
+		n := atomic.AddInt32(&s.calls, 1)
+		if n >= s.callNumber && n <= last {
+			if s.afterCall != nil {
+				s.afterCall(n, true)
+			}
 			return nil, fmt.Errorf("simulated transient lease store error (e.g. Windows ERROR_SHARING_VIOLATION on an unretried rename)")
 		}
+		state, err := s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+		if s.afterCall != nil {
+			s.afterCall(n, false)
+		}
+		return state, err
 	}
 	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
 }
@@ -257,21 +385,41 @@ func TestManager_MaintenanceLease_TransientRenewalError_DoesNotLoseLease(t *test
 // Manager's MaxAllowedRenewalLatency (200ms here) but ends well inside the
 // lease's safety margin must not cost node-a the lease. Before #4541,
 // renewWithRetry gave up at the 200ms latency budget, cancelled node-a's
-// context and stopped renewing while the lease still had ~1.8s left; the
+// context and stopped renewing while the lease still had ~1.8s left; node-a's
 // cycle (which, like the real sweep, does not observe cancellation
-// mid-Flush) kept running, the lease lapsed, and node-b ran. The failure is
-// injected by call count, so it does not depend on scheduler timing.
+// mid-Flush) kept running, the lease lapsed, and node-b ran.
+//
+// The test is event-driven, not wall-clock-driven. node-a's lease manager runs
+// on a manualClock, so its renewal tick and every retry backoff happen only
+// when the test advances time; node-a's cycle is held in Flush by a channel and
+// released once the store has observed the first successful renewal after the
+// injected outage (calls #2-#9 fail, call #10 succeeds). In node-a's clock the
+// outage spans 200ms (first tick) + 10+20+40+80+160+200+200+200ms of backoff,
+// i.e. 1.11s — far past the 200ms latency budget, inside the 1.6s safety
+// margin. Node-b probes once after every renewal call node-a makes, and the
+// property asserted is that node-a's context was never cancelled by a
+// premature give-up and node-b never ran.
 func TestManager_MaintenanceLease_RenewalOutageBeyondLatencyBudget_DoesNotLoseLease(t *testing.T) {
 	ttl := 2 * time.Second
 	renew := 200 * time.Millisecond
 
-	realStore := pkgtesting.SetupTestLeaseStore(t)
 	// Call #1 is the initial TryAcquire; calls #2-#9 are the first renewal
-	// tick and its retries (backoff 10+20+40+80+160ms exhausts a 200ms
-	// budget by call #6).
-	flakyStore := &transientErrorLeaseStore{LeaseStore: realStore, holderID: "node-a", callNumber: 2, lastCallNumber: 9}
+	// tick and its retries; call #10 is the first renewal that succeeds.
+	const firstSuccessfulRenewal = 10
+	type renewalEvent struct {
+		n      int32
+		failed bool
+	}
+	events := make(chan renewalEvent, 64)
 
-	mgrAManager, err := lease.NewManager(flakyStore, ttl, renew, renew)
+	realStore := pkgtesting.SetupTestLeaseStore(t)
+	flakyStore := &transientErrorLeaseStore{
+		LeaseStore: realStore, holderID: "node-a", callNumber: 2, lastCallNumber: 9,
+		afterCall: func(n int32, failed bool) { events <- renewalEvent{n: n, failed: failed} },
+	}
+
+	clockA := newManualClock()
+	mgrAManager, err := lease.NewManagerWithClock(flakyStore, ttl, renew, renew, clockA)
 	require.NoError(t, err)
 	mgrBManager, err := lease.NewManager(realStore, ttl, renew, renew)
 	require.NoError(t, err)
@@ -282,8 +430,10 @@ func TestManager_MaintenanceLease_RenewalOutageBeyondLatencyBudget_DoesNotLoseLe
 	leaseJobB, err := lease.NewSingletonJob(mgrBManager, name, "node-b", ttl, renew, nil)
 	require.NoError(t, err)
 
+	blocking := &blockingFlushBackend{started: make(chan struct{}), release: make(chan struct{})}
 	mgrA := newMaintenanceLeaseManager(t, func(real Backend) Backend {
-		return &slowFlushBackend{Backend: real, delay: ttl + ttl/2}
+		blocking.Backend = real
+		return blocking
 	})
 	mgrA.SetMaintenanceLease(leaseJobA)
 
@@ -291,32 +441,71 @@ func TestManager_MaintenanceLease_RenewalOutageBeyondLatencyBudget_DoesNotLoseLe
 	mgrB.SetMaintenanceLease(leaseJobB)
 
 	var nodeBAttempts int32
-	stopProbing := make(chan struct{})
-	probeDone := make(chan struct{})
+	probeB := func() {
+		mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+			atomic.AddInt32(&nodeBAttempts, 1)
+			mgrB.runMaintenance()
+		})
+	}
+
+	runCtxCh := make(chan context.Context, 1)
+	var ctxErrAfterCycle error
+	doneA := make(chan bool, 1)
 	go func() {
-		defer close(probeDone)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopProbing:
-				return
-			case <-ticker.C:
-				mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
-					atomic.AddInt32(&nodeBAttempts, 1)
-					mgrB.runMaintenance()
-				})
-			}
-		}
+		doneA <- mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(runCtx context.Context) {
+			runCtxCh <- runCtx
+			mgrA.runMaintenance()
+			ctxErrAfterCycle = runCtx.Err()
+		})
 	}()
 
-	ranA := mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
-		mgrA.runMaintenance()
-	})
-	close(stopProbing)
-	<-probeDone
+	runCtx := <-runCtxCh
+	<-blocking.started
+
+	// waitRegistered blocks until node-a's renewal goroutine is waiting on the
+	// clock (its ticker, or a retry backoff), or reports false if node-a gave
+	// up and cancelled its run context instead.
+	waitRegistered := func() bool {
+		select {
+		case <-clockA.registered:
+			return true
+		case <-runCtx.Done():
+			return false
+		}
+	}
+
+	// First renewal tick: once the renewal ticker exists, advance one interval.
+	stillRenewing := waitRegistered()
+	if stillRenewing {
+		clockA.advance(renew)
+	}
+	for stillRenewing {
+		ev := <-events
+		probeB()
+		if ev.n == 1 {
+			// The initial TryAcquire, observed before the first tick.
+			continue
+		}
+		if !ev.failed {
+			if ev.n >= firstSuccessfulRenewal {
+				break
+			}
+			continue
+		}
+		// A failed renewal: node-a must schedule a retry backoff rather than
+		// give up; fire it.
+		if stillRenewing = waitRegistered(); stillRenewing {
+			clockA.advanceToNextAfter()
+		}
+	}
+	close(blocking.release)
+	ranA := <-doneA
 
 	assert.True(t, ranA)
+	assert.NoError(t, ctxErrAfterCycle,
+		"node-a's context must not be cancelled by a renewal outage inside the safety margin")
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&flakyStore.calls), int32(firstSuccessfulRenewal),
+		"node-a must keep renewing through the outage until a renewal succeeds")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&nodeBAttempts),
 		"a renewal outage inside the safety margin must not let node-b acquire the lease")
 }
