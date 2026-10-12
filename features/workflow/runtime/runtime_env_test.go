@@ -73,19 +73,19 @@ func randomCanary(t *testing.T) string {
 
 func TestStart_ModuleGetsOnlyDeclaredAndBaselineEnv(t *testing.T) {
 	bin := buildEnvModule(t)
-	t.Setenv("CFGMS_TEST_UNDECLARED", "undeclared-value")
-	t.Setenv("CFGMS_TEST_DECLARED", "declared-value")
+	t.Setenv("VENDOR_A_TEST_UNDECLARED", "undeclared-value")
+	t.Setenv("VENDOR_A_TEST_DECLARED", "declared-value")
 
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	h, err := rt.Start(makeEnvBundle(bin, []string{"CFGMS_TEST_DECLARED"}), "", "")
+	h, err := rt.Start(makeEnvBundle(bin, []string{"VENDOR_A_TEST_DECLARED"}), "", "")
 	require.NoError(t, err)
 	defer func() { _ = rt.Stop(h) }()
 
-	assert.Equal(t, "unset", getConfig(t, h, "env:CFGMS_TEST_UNDECLARED"))
-	assert.Equal(t, "set:declared-value", getConfig(t, h, "env:CFGMS_TEST_DECLARED"))
+	assert.Equal(t, "unset", getConfig(t, h, "env:VENDOR_A_TEST_UNDECLARED"))
+	assert.Equal(t, "set:declared-value", getConfig(t, h, "env:VENDOR_A_TEST_DECLARED"))
 	assert.True(t, strings.HasPrefix(getConfig(t, h, "env:PATH"), "set:"), "PATH is part of the baseline")
 
-	allowed := append(contract.BaselineEnvNames(), "CFGMS_TEST_DECLARED", contract.SocketEnvVar)
+	allowed := append(contract.BaselineEnvNames(), "VENDOR_A_TEST_DECLARED", contract.SocketEnvVar)
 	for _, name := range strings.Split(getConfig(t, h, "names"), "\n") {
 		ok := false
 		for _, a := range allowed {
@@ -101,18 +101,18 @@ func TestStart_ModuleGetsOnlyDeclaredAndBaselineEnv(t *testing.T) {
 func TestStart_EnvValuesNeverLogged(t *testing.T) {
 	bin := buildEnvModule(t)
 	undeclared, declared := randomCanary(t), randomCanary(t)
-	t.Setenv("CFGMS_TEST_UNDECLARED", undeclared)
-	t.Setenv("CFGMS_TEST_DECLARED", declared)
+	t.Setenv("VENDOR_A_TEST_UNDECLARED", undeclared)
+	t.Setenv("VENDOR_A_TEST_DECLARED", declared)
 
 	logger := logging.NewCapturingLogger()
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	rt.SetLogger(logger)
 
-	h, err := rt.Start(makeEnvBundle(bin, []string{"CFGMS_TEST_DECLARED", "CFGMS_TEST_NOT_SET"}), "", "")
+	h, err := rt.Start(makeEnvBundle(bin, []string{"VENDOR_A_TEST_DECLARED", "VENDOR_A_TEST_NOT_SET"}), "", "")
 	require.NoError(t, err)
 	require.NoError(t, rt.Stop(h))
 
-	_, badErr := rt.Start(makeEnvBundle(bin, []string{"CFGMS_TEST_DECLARED", "BAD=NAME"}), "", "")
+	_, badErr := rt.Start(makeEnvBundle(bin, []string{"VENDOR_A_TEST_DECLARED", "BAD=NAME"}), "", "")
 	require.Error(t, badErr)
 
 	var seen []string
@@ -133,13 +133,13 @@ func TestStart_EnvValuesNeverLogged(t *testing.T) {
 	require.True(t, ok, "start log line missing")
 	names, ok := entry["env_names"].([]string)
 	require.True(t, ok)
-	assert.Contains(t, names, "CFGMS_TEST_DECLARED")
-	assert.NotContains(t, names, "CFGMS_TEST_UNDECLARED")
+	assert.Contains(t, names, "VENDOR_A_TEST_DECLARED")
+	assert.NotContains(t, names, "VENDOR_A_TEST_UNDECLARED")
 	assert.Contains(t, names, contract.SocketEnvVar)
 
 	warn, ok := logger.FindWarn("declared module env variable is not set in the parent")
 	require.True(t, ok)
-	assert.Equal(t, "CFGMS_TEST_NOT_SET", warn["env_name"])
+	assert.Equal(t, "VENDOR_A_TEST_NOT_SET", warn["env_name"])
 }
 
 func TestStart_InvalidEnvNameRefusedBeforeExec(t *testing.T) {

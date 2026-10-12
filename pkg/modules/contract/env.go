@@ -19,11 +19,54 @@ const SocketEnvVar = "CFGMS_MODULE_SOCKET"
 // MaxDeclaredEnvNames bounds the module.yaml `env:` list.
 const MaxDeclaredEnvNames = 64
 
+// ReservedEnvPrefix is the prefix of every variable that configures the CFGMS
+// steward or controller process itself (storage DSNs, secret-store key files,
+// transport and certificate settings). A manifest may not pull any of them into
+// a module: the module is a separate trust domain from the host process.
+const ReservedEnvPrefix = "CFGMS_"
+
+// reservedLoaderEnvNames are process-loader and interpreter-control variables.
+// They change what code a child process loads or how its runtime behaves, so an
+// approved manifest that could name them would turn a parent value into code
+// injection. Grouped by reason; compared case-insensitively.
+var reservedLoaderEnvNames = []string{
+	// Dynamic-loader injection: load an attacker-chosen library into the child.
+	"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+	"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+	// Go runtime control: debug knobs and crash-dump behaviour.
+	"GODEBUG", "GOTRACEBACK",
+	// Interpreter code-load paths and startup hooks.
+	"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS", "NODE_PATH",
+	"PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+	// JVM option injection: agents and flags picked up by every java launch.
+	"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+	// Shell startup files executed when a child shell starts.
+	"BASH_ENV", "ENV",
+	// PowerShell module search path: resolves modules from attacker-chosen dirs.
+	"PSModulePath",
+}
+
+// IsReservedEnvName reports whether name may not appear in a manifest `env:`
+// list: the SocketEnvVar, any CFGMS_-prefixed name, or a loader/interpreter
+// control variable. Matching is case-insensitive.
+func IsReservedEnvName(name string) bool {
+	if len(name) >= len(ReservedEnvPrefix) && strings.EqualFold(name[:len(ReservedEnvPrefix)], ReservedEnvPrefix) {
+		return true
+	}
+	for _, r := range reservedLoaderEnvNames {
+		if strings.EqualFold(name, r) {
+			return true
+		}
+	}
+	return false
+}
+
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // ValidateEnvNames checks a module.yaml `env:` list: at most
 // MaxDeclaredEnvNames entries, each a plain variable name (no wildcard, no
-// prefix pattern, no "="), none duplicated, none the reserved SocketEnvVar.
+// prefix pattern, no "="), none duplicated, none reserved (SocketEnvVar, CFGMS_* names, loader and interpreter control
+// variables; see IsReservedEnvName).
 // Each error names the offending entry by index.
 func ValidateEnvNames(names []string) error {
 	if len(names) > MaxDeclaredEnvNames {
@@ -35,7 +78,7 @@ func ValidateEnvNames(names []string) error {
 			return fmt.Errorf("env[%d]: %q is not a valid variable name (must match %s; wildcards and patterns are not allowed)",
 				i, name, envNamePattern.String())
 		}
-		if strings.EqualFold(name, SocketEnvVar) {
+		if IsReservedEnvName(name) {
 			return fmt.Errorf("env[%d]: %q is reserved for the module runtime", i, name)
 		}
 		if _, dup := seen[name]; dup {

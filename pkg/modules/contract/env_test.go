@@ -81,3 +81,32 @@ func TestValidateEnvNames_ErrorNamesIndex(t *testing.T) {
 	assert.NoError(t, ValidateEnvNames(nil))
 	assert.NoError(t, ValidateEnvNames([]string{"HTTP_PROXY", "_x1"}))
 }
+
+func TestValidateEnvNames_ReservedNamesRejected(t *testing.T) {
+	groups := map[string][]string{
+		"cfgms prefix":    {"CFGMS_SECRET_KEY_FILE", "cfgms_x", "Cfgms_Mixed", SocketEnvVar},
+		"dynamic loader":  {"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "ld_preload"},
+		"go runtime":      {"GODEBUG", "GOTRACEBACK", "godebug"},
+		"interpreters":    {"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS", "NODE_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB"},
+		"jvm options":     {"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "java_tool_options"},
+		"shell startup":   {"BASH_ENV", "ENV", "env"},
+		"powershell path": {"PSModulePath", "PSMODULEPATH"},
+	}
+	for group, names := range groups {
+		for _, name := range names {
+			t.Run(group+"/"+name, func(t *testing.T) {
+				err := ValidateEnvNames([]string{"HTTPS_PROXY", name})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "env[1]")
+				assert.Contains(t, err.Error(), "reserved")
+			})
+		}
+	}
+	assert.NoError(t, ValidateEnvNames([]string{"HTTPS_PROXY", "NO_PROXY", "CFGM_X", "ENVIRON"}))
+}
+
+func TestModuleEnv_ReservedDeclaredNameErrors(t *testing.T) {
+	res, err := BuildModuleEnv([]string{"LD_PRELOAD=/x.so"}, []string{"LD_PRELOAD"}, "/s")
+	require.Error(t, err)
+	assert.Nil(t, res)
+}

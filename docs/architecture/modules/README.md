@@ -74,7 +74,7 @@ Proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) and TLS trust override
 **`env:` rules.** The list holds variable names only; values always come from the parent process at start time and the manifest never carries one.
 
 - Each name matches `^[A-Za-z_][A-Za-z0-9_]*$`. Wildcards, prefix patterns, empty names and names containing `=` are parse errors.
-- `CFGMS_MODULE_SOCKET` is reserved; declaring it is a parse error.
+- Reserved names (matched case-insensitively) are parse errors; see [Reserved names](interface.md#reserved-env-names).
 - At most 64 names; a duplicate is a parse error.
 - The field is part of the manifest bytes, so the bundle `ContentHash` and the publisher signature cover it.
 - The runtimes re-validate the names before starting a process. An invalid name makes `Start` return an error before any socket or process is created.
