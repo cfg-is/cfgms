@@ -25,10 +25,12 @@
 #   --only REF  Mirror just REF (a digest that is not yet in the list, e.g. one
 #               the weekly pin check found). The destination is the <name>:<tag>
 #               of the list entry with the same image and tag.
-#   --check     Verify every upstream reference in docker-compose.test.yml, every
+#   --check     Verify every image reference in docker-compose.test.yml, every
 #               Dockerfile FROM line and every workflow pull_with_retry /
-#               docker pull step is in the list with the same digest. Exit 1 on
-#               any miss or digest mismatch.
+#               docker pull step is ghcr.io/cfg-is/ci-mirror/<name>:<tag>@sha256:<digest>
+#               and equals the mirror form of a list entry. Exit 1 on a
+#               reference outside the mirror, a miss or a digest mismatch.
+#               Build-stage names and ${...} variables are skipped.
 #
 # Options (for tests): --list FILE, --root DIR.
 
@@ -119,23 +121,37 @@ repo_refs() {
     done
 }
 
+# mirror_form prints the consumer reference for a list entry:
+# ghcr.io/cfg-is/ci-mirror/<name>:<tag>@sha256:<digest>
+mirror_form() {
+    local up="$1" name="$2" it
+    it="$(ref_image_tag "$up")"
+    printf '%s/%s:%s@%s\n' "$REGISTRY" "$name" "$(tag_of "$it")" "${up#*@}"
+}
+
+# run_check requires every consumer reference to be the mirror form of a list
+# entry. A reference outside ghcr.io/cfg-is/ci-mirror/ (Docker Hub or any other
+# registry) fails, as does a mirror reference whose digest differs from the list.
 run_check() {
-    local entries rc=0 loc ref it known
+    local entries rc=0 loc ref up name
     entries="$(list_entries)" || { echo "malformed image list: $LIST" >&2; return 1; }
-    local upstreams
-    upstreams="$(printf '%s\n' "$entries" | cut -f1)"
-    local seen=""
+    local forms="" count=0
+    while IFS=$'\t' read -r up name; do
+        [ -n "$up" ] || continue
+        forms="$forms$(mirror_form "$up" "$name")"$'\n'
+        count=$((count + 1))
+    done <<< "$entries"
     while IFS=$'\t' read -r loc ref; do
         [ -n "$ref" ] || continue
-        if printf '%s\n' "$upstreams" | grep -qxF -- "$ref"; then
-            seen="$seen$ref"$'\n'
+        if [[ "$ref" != "$REGISTRY/"* ]]; then
+            echo "FAIL $loc: $ref is outside $REGISTRY/" >&2
+        elif printf '%s' "$forms" | grep -qxF -- "$ref"; then
             continue
-        fi
-        it="$(ref_image_tag "$ref")"
-        if ! [[ "$ref" =~ $DIGEST_RE ]]; then
+        elif ! [[ "$ref" =~ $DIGEST_RE ]]; then
             echo "FAIL $loc: $ref has no @sha256 digest" >&2
         else
-            known="$(printf '%s\n' "$upstreams" | grep -F -- "$it@" || true)"
+            local known
+            known="$(printf '%s' "$forms" | grep -F -- "${ref%%@*}@" || true)"
             if [ -n "$known" ]; then
                 echo "FAIL $loc: $ref digest differs from list ($(printf '%s' "$known" | head -1))" >&2
             else
@@ -144,9 +160,8 @@ run_check() {
         fi
         rc=1
     done < <(repo_refs)
-    # Entries nothing consumes are stale, but not a failure: the list may carry
-    # a ref a consumer will adopt in the follow-up that switches CI to the mirror.
-    [ "$rc" -eq 0 ] && echo "ci-images: list matches repo ($(printf '%s\n' "$upstreams" | grep -c .) entries)"
+    # Entries nothing consumes are stale, but not a failure.
+    [ "$rc" -eq 0 ] && echo "ci-images: every consumer reads the mirror and matches the list ($count entries)"
     return "$rc"
 }
 

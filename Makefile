@@ -1384,6 +1384,9 @@ check-architecture:
 	@echo "📦 Checking for tracked .py files under core product paths..."
 	@bash ./scripts/check-no-python-in-core.sh
 	@echo ""
+	@echo "📦 Checking every CI image reference reads the ghcr.io mirror..."
+	@bash ./scripts/mirror-ci-images.sh --check
+	@echo ""
 	@echo "📦 Checking windows-setup.ps1 and script templates for banned execution patterns..."
 	@bash ./scripts/check-no-banned-exec-patterns.sh
 	@echo ""
@@ -1494,7 +1497,7 @@ test-infrastructure-required:
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
 	@echo "- ✅ M365 integration tested (strict - fails if no credentials)"
-	@echo "- ✅ Storage backends tested (Docker PostgreSQL + Gitea)"
+	@echo "- ✅ Storage backends tested (Docker PostgreSQL + TimescaleDB)"
 	@echo ""
 	@echo "🚀 Code is fully validated for production deployment"
 
@@ -2329,19 +2332,19 @@ prepare-team-workflow:
 
 # Docker-based Integration Testing (Story #152: Storage Provider Testing Infrastructure)
 .PHONY: test-integration-setup test-integration-cleanup test-with-real-storage test-integration-status
-.PHONY: test-integration-db test-integration-git test-integration-redis
+.PHONY: test-integration-db test-integration-redis
 
 # Set up Docker test environment with secure credentials
 test-integration-setup:
 	@echo "🐳 Setting up CFGMS Docker test environment..."
 	@echo "=============================================="
 	@./scripts/generate-test-credentials.sh
-	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
-	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
+	@echo "Starting PostgreSQL and TimescaleDB test services..."
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test
 	@echo ""
 	@echo "⏳ Waiting for Docker healthchecks to pass..."
-	@echo "   (Gitea requires up to 60s start period + health check validation)"
-	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d --wait postgres-test timescaledb-test git-server-test
+	@echo "   (TimescaleDB requires up to 30s start period + health check validation)"
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d --wait postgres-test timescaledb-test
 	@echo "✅ Docker healthchecks passed"
 	@echo ""
 	@echo "🔍 Verifying service connectivity..."
@@ -2352,21 +2355,10 @@ test-integration-setup:
 		./scripts/wait-for-services.sh; \
 	fi
 	@echo ""
-	@echo "🔧 Setting up test repositories..."
-	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
-		echo "📁 Setting up repositories manually..."; \
-		sleep 10; \
-		curl -X POST -u "cfgms_test:$$CFGMS_TEST_GITEA_PASSWORD" \
-			-H "Content-Type: application/json" \
-			-d '{"name":"cfgms-test-global","auto_init":true}' \
-			http://localhost:3001/api/v1/user/repos || true; \
-	}
-	@echo ""
 	@echo "✅ Docker test environment ready!"
 	@echo ""
 	@echo "📋 Service Information:"
 	@echo "   PostgreSQL: localhost:5433 (user: cfgms_test, db: cfgms_test)"
-	@echo "   Gitea:      http://localhost:3001 (user: cfgms_test)"
 	@echo ""
 
 # Clean up Docker test environment and generated credentials
@@ -2436,7 +2428,7 @@ test-integration-unified:
 test-with-real-storage:
 	@echo "🧪 Running CFGMS Integration Tests with Real Storage"
 	@echo "=================================================="
-	@echo "Testing with Docker-based PostgreSQL and Gitea..."
+	@echo "Testing with Docker-based PostgreSQL and TimescaleDB..."
 	@echo ""
 	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... -timeout=15m
 	@echo ""
@@ -2490,19 +2482,6 @@ test-integration-db:
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
 	go test -v -p 1 -tags=integration ./pkg/storage/providers/database/... ./pkg/storage/interfaces/... ./features/controller/api/... ./pkg/migrate/storage/... ./pkg/cert/...
-
-# Test git provider specifically  
-test-integration-git:
-	@echo "📁 Testing Git Storage Provider"
-	@echo "==============================="
-	@if [ ! -f .env.test ]; then \
-		echo "❌ .env.test not found. Run: make test-integration-setup"; \
-		exit 1; \
-	fi
-	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
-	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
-	CFGMS_TEST_GITEA_USER=cfgms_test \
-	go test -v -tags=integration ./pkg/storage/providers/git/...
 
 # Future: Test Redis provider (when implemented)
 test-integration-redis:

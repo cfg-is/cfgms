@@ -17,6 +17,8 @@ type Clock interface {
 	// monotonic reading keeps elapsed-time arithmetic immune to wall-clock
 	// steps (ADR-029 Decision 2).
 	Now() time.Time
+	// Until returns the duration from now until t.
+	Until(t time.Time) time.Duration
 	// After returns a channel that receives once d has elapsed.
 	After(d time.Duration) <-chan time.Time
 	// NewTicker returns a Ticker that fires every d.
@@ -33,6 +35,7 @@ type Ticker interface {
 type realClock struct{}
 
 func (realClock) Now() time.Time                         { return time.Now() }
+func (realClock) Until(t time.Time) time.Duration        { return time.Until(t) }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 func (realClock) NewTicker(d time.Duration) Ticker       { return realTicker{time.NewTicker(d)} }
 

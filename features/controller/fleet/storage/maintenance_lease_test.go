@@ -86,6 +86,8 @@ func (c *manualClock) Now() time.Time {
 	return c.now
 }
 
+func (c *manualClock) Until(t time.Time) time.Duration { return t.Sub(c.Now()) }
+
 func (c *manualClock) add(d, period time.Duration) *manualWaiter {
 	c.mu.Lock()
 	w := &manualWaiter{at: c.now.Add(d), period: period, ch: make(chan time.Time, 1)}

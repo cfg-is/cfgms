@@ -1268,11 +1268,11 @@ func dockerTestDBAddr() string {
 // `make test-integration-docker` sources .env.test whenever the file exists, and that
 // file outlives the containers it was generated for: a previous session that was torn
 // down (or a machine with no Docker daemon at all) still leaves CFGMS_TEST_DB_PASSWORD
-// and CFGMS_TEST_GITEA_URL exported. Detecting on the credentials alone made the suite
+// exported. Detecting on the credentials alone made the suite
 // claim a Docker environment that did not exist and then fail on "connection refused"
 // against port 5433. Both the credentials and a live listener are required.
 func isDockerTestEnvironment() bool {
-	if os.Getenv("CFGMS_TEST_DB_PASSWORD") == "" || os.Getenv("CFGMS_TEST_GITEA_URL") == "" {
+	if os.Getenv("CFGMS_TEST_DB_PASSWORD") == "" {
 		return false
 	}
 	conn, err := net.DialTimeout("tcp", dockerTestDBAddr(), 2*time.Second)

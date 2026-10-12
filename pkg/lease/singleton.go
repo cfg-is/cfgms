@@ -41,6 +41,22 @@ type SingletonJob struct {
 
 	// Logger receives acquire/renew diagnostics. May be nil.
 	Logger logging.Logger
+
+	// Clock supplies the renewal ticker, the remaining-authority computation
+	// and the retry backoff wait. Nil means the real clock.
+	Clock Clock
+}
+
+// clock returns the job's own Clock when set, else the Manager's clock (see
+// NewManagerWithClock), else the real clock.
+func (j SingletonJob) clock() Clock {
+	if j.Clock != nil {
+		return j.Clock
+	}
+	if j.Manager != nil && j.Manager.clock != nil {
+		return j.Manager.clock
+	}
+	return realClock{}
 }
 
 // NewSingletonJob constructs a SingletonJob, validating name/holderID are
@@ -126,7 +142,7 @@ const renewRetryBaseBackoff = 10 * time.Millisecond
 // A renewal that is still failing once renewWithRetry's budget is exhausted
 // invokes onLost (cancelling fn's context) and returns.
 func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.CancelFunc, token uint64) {
-	ticker := j.Manager.clock.NewTicker(j.RenewInterval)
+	ticker := j.clock().NewTicker(j.RenewInterval)
 	defer ticker.Stop()
 
 	current := token
@@ -179,7 +195,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		if !ok {
 			return 0, err
 		}
-		remaining := deadline.Sub(j.Manager.clock.Now())
+		remaining := j.clock().Until(deadline)
 		if remaining <= 0 {
 			return 0, err
 		}
@@ -192,7 +208,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		select {
 		case <-ctx.Done():
 			return 0, ctx.Err()
-		case <-j.Manager.clock.After(backoff):
+		case <-j.clock().After(backoff):
 		}
 		backoff *= 2
 	}
