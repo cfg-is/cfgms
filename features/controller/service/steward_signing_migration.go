@@ -575,8 +575,19 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 		case <-ctx.Done():
 			return false
 		}
+		// The publisher stops its timer on any event naming the command, so a steward
+		// that acknowledged receipt and then stalled would hold the slot for good
+		// without this ceiling. It is started before the publish so every callback
+		// sees it, and stopped by release so no timer outlives its command.
 		var once sync.Once
-		release = func() { once.Do(func() { <-slots }) }
+		var holdTimer *time.Timer
+		release = func() {
+			once.Do(func() {
+				holdTimer.Stop()
+				<-slots
+			})
+		}
+		holdTimer = time.AfterFunc(2*timeout+time.Second, func() { release() })
 	}
 
 	result := make(chan bool, 1)
@@ -617,13 +628,8 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 			"error", logging.SanitizeLogValue(err.Error()))
 		return false
 	}
-	// The publisher stops its timer on any event naming the command, so a steward
-	// that acknowledged receipt and then stalled would hold the slot for good
-	// without this ceiling.
-	holdTimer := time.AfterFunc(holdTimeout+time.Second, release)
 	defer func() {
 		if ctx.Err() != nil {
-			holdTimer.Stop()
 			release()
 		}
 	}()
