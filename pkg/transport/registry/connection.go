@@ -41,6 +41,11 @@ type StewardConnection struct {
 	// RemoteAddr is the network address of the connected steward.
 	RemoteAddr string
 
+	// PeerSerial is the serial number of the client certificate the steward
+	// presented on this connection. Empty when it could not be read. It lets a
+	// later connection for the same steward ID be compared against this one.
+	PeerSerial string
+
 	// mu serializes writes to Sender and lastActivity.
 	mu sync.Mutex
 }
