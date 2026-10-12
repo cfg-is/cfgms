@@ -1584,6 +1584,26 @@ func TestManager_CommandTerm_UnreadableLeaseIsZero(t *testing.T) {
 		3*time.Second, 50*time.Millisecond, "once readable again the current token is stamped")
 }
 
+// TestManager_CommandTerm_ExpiredLeaseStampsLastToken: a lease row whose TTL has
+// lapsed (the holder's renewal missed it and nobody re-acquired yet) still carries
+// the highest token issued, and no higher token exists for a steward to have seen.
+// CommandTerm stamps it rather than 0 — a 0 here is what a loaded runner observed
+// as "0 although the lease was valid before and after the call" (Issue #4964).
+func TestManager_CommandTerm_ExpiredLeaseStampsLastToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	follower := newLeaseBackedClusterManager(t, "cmdterm-expired", store)
+
+	held, err := store.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", 20*time.Millisecond)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, valid := leaseTermValid(t, store)
+		return !valid
+	}, 5*time.Second, 5*time.Millisecond, "the lease lapses")
+
+	assert.Equal(t, LeaseTermFloor+held.Token, follower.CommandTerm(),
+		"an expired lease still stamps its last issued token, never 0")
+}
+
 // TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp guards the #4567
 // review: on a freshly started non-holder, concurrent first publishes wait for
 // the in-flight lease read instead of stamping 0.
