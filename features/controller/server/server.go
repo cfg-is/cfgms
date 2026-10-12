@@ -1172,6 +1172,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
 				grpcCP.WithApprovalChecker(approvalChecker),
+				grpcCP.WithRevocationChecker(certManager),
 				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
 				// the DNA and bulk handlers use, whose bucket key comes off the wire
 				// (see ingest_admission.go).
@@ -1184,6 +1185,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
 				grpcCP.WithApprovalChecker(approvalChecker),
+				grpcCP.WithRevocationChecker(certManager),
 				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
 				// the DNA and bulk handlers use, whose bucket key comes off the wire
 				// (see ingest_admission.go).

@@ -136,6 +136,14 @@ type Provider struct {
 	// the approval-gate epic (#1690–#1698).
 	approvalChecker StewardApprovalChecker
 
+	// revocationChecker refuses peers whose client-certificate serial is revoked
+	// (Issue #4930). Nil means "no revocation check" (default); the controller
+	// always injects cert.Manager via WithRevocationChecker.
+	revocationChecker CertRevocationChecker
+	// revocationRecheckInterval is how often an open ControlChannel re-checks
+	// its peer serial. Zero means defaultRevocationRecheckInterval.
+	revocationRecheckInterval time.Duration
+
 	// onConnectHook is called after a steward successfully registers, before the
 	// receive loop begins. Nil means no-op (default). Injected via WithOnConnectHook
 	// for refresh-on-connect cert delivery (Issue #1817).
@@ -1390,6 +1398,9 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "failed to extract steward identity from mTLS certificate: %v", err)
 	}
+	if _, err := s.provider.checkPeerRevocation(ctx, stewardID); err != nil {
+		return nil, err
+	}
 
 	// Tenant binding: enforced when a registration token store is wired in.
 	// The authoritative tenant comes from the server-side RegistrationTokenStore lookup
@@ -1487,6 +1498,12 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		return status.Errorf(codes.Unauthenticated, "failed to extract steward identity: %v", err)
 	}
 
+	// Revocation gate (Issue #4930): before any other admission work.
+	peerSerial, err := s.provider.checkPeerRevocation(stream.Context(), stewardID)
+	if err != nil {
+		return err
+	}
+
 	// Approval gate hook (Issue #1719): checked before admitting the stream.
 	// Store and service failures deny admission; an unavailable authorization
 	// dependency must not turn into fleet-wide implicit approval.
@@ -1552,11 +1569,51 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// authoritative steward identity. Empty payload StewardIDs are stamped with
 	// the CN; mismatched payload StewardIDs are rejected and counted without
 	// tearing down the stream (misconfiguration tolerance per Issue #828).
+	recvDone := make(chan struct{})
+	go func() {
+		defer close(recvDone)
+		s.controlChannelRecvLoop(stream, stewardID, conn, heartbeatBucket)
+	}()
+
+	// Close the stream if the peer serial is revoked while it is open. Returning
+	// from the handler cancels the stream context, which unblocks Recv.
+	if peerSerial != "" && s.provider.revocationChecker != nil {
+		ticker := time.NewTicker(s.provider.recheckInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-recvDone:
+				return nil
+			case <-ticker.C:
+				revoked, rErr := s.provider.revocationChecker.IsRevoked(peerSerial)
+				if rErr != nil {
+					// A transient store error must not tear down the whole fleet;
+					// the next tick retries and new admissions still fail closed.
+					s.provider.logger.Error("revocation re-check failed, keeping stream open",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"error", logging.SanitizeLogValue(rErr.Error()))
+					continue
+				}
+				if revoked {
+					s.provider.logger.Warn("closing steward ControlChannel: certificate revoked",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"serial", logging.SanitizeLogValue(peerSerial))
+					return status.Error(codes.PermissionDenied, "client certificate revoked")
+				}
+			}
+		}
+	}
+	<-recvDone
+	return nil
+}
+
+// controlChannelRecvLoop is the receive loop of an admitted ControlChannel.
+func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer[transportpb.ControlMessage, transportpb.ControlMessage], stewardID string, conn *registry.StewardConnection, heartbeatBucket string) {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
 			s.provider.logger.Info("steward ControlChannel closed", "steward_id", logging.SanitizeLogValue(stewardID), "error", err)
-			return nil
+			return
 		}
 
 		conn.UpdateActivity()
