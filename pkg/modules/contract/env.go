@@ -32,11 +32,14 @@ const ReservedEnvPrefix = "CFGMS_"
 var reservedLoaderEnvNames = []string{
 	// Dynamic-loader injection: load an attacker-chosen library into the child.
 	"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
-	"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+	"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
 	// Go runtime control: debug knobs and crash-dump behaviour.
 	"GODEBUG", "GOTRACEBACK",
 	// Interpreter code-load paths and startup hooks.
-	"PYTHONPATH", "PYTHONSTARTUP", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+	"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS", "NODE_PATH",
+	"PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+	// JVM option injection: agents and flags picked up by every java launch.
+	"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
 	// Shell startup files executed when a child shell starts.
 	"BASH_ENV", "ENV",
 	// PowerShell module search path: resolves modules from attacker-chosen dirs.

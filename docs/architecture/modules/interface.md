@@ -169,9 +169,10 @@ A manifest `env:` list names parent-process variables to pass into the module. `
 | Names | Reason |
 |-------|--------|
 | `CFGMS_*` (every name with the prefix, including `CFGMS_MODULE_SOCKET`) | Configure the steward or controller process itself (storage, secrets, transport); a module is a separate trust domain. The socket variable is set by the runtime. |
-| `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` | Dynamic-loader injection: load an arbitrary library into the module process. |
+| `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH` | Dynamic-loader injection: load an arbitrary library into the module process. |
 | `GODEBUG`, `GOTRACEBACK` | Change Go runtime behaviour and crash output. |
-| `PYTHONPATH`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `PERL5OPT`, `RUBYOPT` | Interpreter code-load paths and startup hooks. |
+| `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `NODE_OPTIONS`, `NODE_PATH`, `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `RUBYLIB` | Interpreter code-load paths and startup hooks. |
+| `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS` | JVM option injection: agents and flags picked up by every java launch. |
 | `BASH_ENV`, `ENV` | Shell startup files run when a child shell starts. |
 | `PSModulePath` | PowerShell module search path. |
 

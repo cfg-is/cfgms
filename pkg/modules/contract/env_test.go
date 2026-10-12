@@ -85,9 +85,10 @@ func TestValidateEnvNames_ErrorNamesIndex(t *testing.T) {
 func TestValidateEnvNames_ReservedNamesRejected(t *testing.T) {
 	groups := map[string][]string{
 		"cfgms prefix":    {"CFGMS_SECRET_KEY_FILE", "cfgms_x", "Cfgms_Mixed", SocketEnvVar},
-		"dynamic loader":  {"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "ld_preload"},
+		"dynamic loader":  {"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "ld_preload"},
 		"go runtime":      {"GODEBUG", "GOTRACEBACK", "godebug"},
-		"interpreters":    {"PYTHONPATH", "PYTHONSTARTUP", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT"},
+		"interpreters":    {"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS", "NODE_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB"},
+		"jvm options":     {"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "java_tool_options"},
 		"shell startup":   {"BASH_ENV", "ENV", "env"},
 		"powershell path": {"PSModulePath", "PSMODULEPATH"},
 	}
