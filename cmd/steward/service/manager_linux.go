@@ -262,6 +262,34 @@ func (m *linuxManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// Stop stops the systemd service without disabling it. systemctl stop is
+// synchronous, and a unit stopped through systemd is not restarted by its
+// Restart=always policy.
+func (m *linuxManager) Stop() error {
+	if !m.IsElevated() {
+		return fmt.Errorf("stop requires root privileges: re-run with sudo")
+	}
+	return stopSystemdUnit(linuxSystemdUnit)
+}
+
+// stopSystemdUnit stops the linuxServiceName unit when the unit file at
+// unitPath exists. unitPath is a parameter so tests can point it at a temp
+// file; the unit name passed to systemctl is always the constant.
+func stopSystemdUnit(unitPath string) error {
+	if _, err := os.Stat(unitPath); err != nil {
+		return fmt.Errorf("service %s is not installed: %w", linuxServiceName, err)
+	}
+	if out, err := exec.Command("systemctl", "stop", linuxServiceName).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl stop %s failed: %w\n%s", linuxServiceName, err, out)
+	}
+	return nil
+}
+
+// RegistrationTokenConfigured reports whether the systemd unit carries --regtoken.
+func (m *linuxManager) RegistrationTokenConfigured() (bool, error) {
+	return definitionHasRegToken(linuxSystemdUnit)
+}
+
 // Status returns the current state of the systemd service without requiring
 // elevated privileges.
 func (m *linuxManager) Status() (*ServiceStatus, error) {

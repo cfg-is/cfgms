@@ -446,6 +446,59 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// Stop stops the Windows service and waits for it to reach the Stopped state.
+// The service definition and its automatic start type are left untouched.
+func (m *windowsManager) Stop() error {
+	if !m.IsElevated() {
+		return fmt.Errorf("stop requires Administrator privileges: right-click the binary and select 'Run as administrator'")
+	}
+	scm, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
+	}
+	defer func() { _ = scm.Disconnect() }()
+
+	existing, err := scm.OpenService(windowsServiceName)
+	if err != nil {
+		return fmt.Errorf("service %s is not installed: %w", windowsServiceName, err)
+	}
+	defer func() { _ = existing.Close() }()
+
+	q, err := existing.Query()
+	if err != nil {
+		return fmt.Errorf("failed to query service state: %w", err)
+	}
+	if q.State == svc.Stopped {
+		return nil
+	}
+	if _, err := existing.Control(svc.Stop); err != nil {
+		return fmt.Errorf("failed to stop service %s: %w", windowsServiceName, err)
+	}
+	return waitForStop(existing, 30*time.Second)
+}
+
+// RegistrationTokenConfigured reports whether the service's launcher command
+// line carries --regtoken. The command line is inspected, never returned.
+func (m *windowsManager) RegistrationTokenConfigured() (bool, error) {
+	scm, err := mgr.Connect()
+	if err != nil {
+		return false, fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
+	}
+	defer func() { _ = scm.Disconnect() }()
+
+	existing, err := scm.OpenService(windowsServiceName)
+	if err != nil {
+		return false, nil
+	}
+	defer func() { _ = existing.Close() }()
+
+	cfg, err := existing.Config()
+	if err != nil {
+		return false, fmt.Errorf("failed to read service configuration: %w", err)
+	}
+	return commandLineHasRegToken(cfg.BinaryPathName), nil
+}
+
 // Status returns the current service state without requiring elevated privileges.
 func (m *windowsManager) Status() (*ServiceStatus, error) {
 	status := &ServiceStatus{
