@@ -71,6 +71,8 @@ type ProvenanceAssessment struct {
 	MatchedFields int
 	TotalFields   int
 	DivergentKeys []string
+	// MatchedKeys names the attributes that matched; values are never included.
+	MatchedKeys []string
 }
 
 // ProvenanceChecker compares a connecting steward's host attributes against its
@@ -231,11 +233,10 @@ func (c *stewardStoreProvenanceChecker) CheckProvenance(ctx context.Context, ste
 	// The stored baseline may predate normalisation; compare both sides in
 	// canonical form so formatting alone never reads as divergence.
 	baseline := registration.NormalizeStoredProvenance(record.LastProvenanceJSON)
-	result := c.matcher.FuzzyMatch(baseline, attrs)
+	result, matchedKeys, differedKeys := c.matcher.ScoreAdmission(baseline, attrs)
 	if result.TotalFields == 0 {
 		return unknown
 	}
-	matchedKeys, differedKeys := registration.ProvenanceKeyDiff(baseline, attrs)
 	c.logger.Debug("steward host provenance compared",
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"score", result.Score,
@@ -252,6 +253,7 @@ func (c *stewardStoreProvenanceChecker) CheckProvenance(ctx context.Context, ste
 	}
 	a.Decision = ProvenanceCopy
 	a.DivergentKeys = differedKeys
+	a.MatchedKeys = matchedKeys
 	c.auditDivergence(ctx, record, stewardID, a)
 	return a
 }
@@ -289,7 +291,9 @@ func (c *stewardStoreProvenanceChecker) recordBaseline(ctx context.Context, reco
 func (c *stewardStoreProvenanceChecker) auditDivergence(ctx context.Context, record *business.StewardRecord, stewardID string, a ProvenanceAssessment) {
 	c.logger.Warn("steward host provenance diverges from approved record",
 		"steward_id", logging.SanitizeLogValue(stewardID),
-		"score", a.Score)
+		"score", a.Score,
+		"matched_keys", sanitizeKeyNames(a.MatchedKeys),
+		"divergent_keys", sanitizeKeyNames(a.DivergentKeys))
 	if !c.allow(stewardID) {
 		return
 	}

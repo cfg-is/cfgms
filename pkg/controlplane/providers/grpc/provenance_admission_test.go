@@ -117,8 +117,8 @@ func TestControlChannel_ProvenanceBelowThreshold_ReportsCopy(t *testing.T) {
 	require.Equal(t, 1, calls)
 	assert.Equal(t, ProvenanceCopy, got.Decision)
 	assert.Equal(t, 1, got.MatchedFields)
-	assert.Equal(t, 4, got.TotalFields)
-	assert.ElementsMatch(t, []string{"nic_macs", "disk_serials", "install_date"}, got.DivergentKeys)
+	assert.Equal(t, 2, got.TotalFields)
+	assert.ElementsMatch(t, []string{"disk_serials"}, got.DivergentKeys)
 
 	entries := env.auditEntries(t, "steward_provenance_divergence")
 	require.Len(t, entries, 1)
@@ -134,14 +134,14 @@ func TestControlChannel_ProvenanceBelowThreshold_ReportsCopy(t *testing.T) {
 func TestControlChannel_ProvenanceAtOrAboveThreshold_ApprovedMachine(t *testing.T) {
 	t.Parallel()
 	env := newProvEnv(t, "steward-ok", baselineJSON)
-	// 3 of 4 = 0.75 >= 0.60
+	// stable keys 2 of 2; install_date differs but is ephemeral
 	env.connect(t, "steward-ok", map[string]string{
 		"machine_id": "m-1", "nic_macs": "aa:bb", "disk_serials": "d-1", "install_date": "2030-01-01",
 	})
 
 	_, got := env.spy.snapshot()
 	assert.Equal(t, ProvenanceApprovedMachine, got.Decision)
-	assert.Equal(t, 3, got.MatchedFields)
+	assert.Equal(t, 2, got.MatchedFields)
 	assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
 	assert.JSONEq(t, baselineJSON, env.baseline(t, "steward-ok"))
 }
@@ -235,14 +235,14 @@ func TestControlChannel_UnchangedHost_ScoresOneAcrossPaths(t *testing.T) {
 	_, got := env.spy.snapshot()
 	assert.Equal(t, ProvenanceApprovedMachine, got.Decision)
 	assert.InDelta(t, 1.0, got.Score, 0.0001)
-	assert.Equal(t, 3, got.TotalFields)
+	assert.Equal(t, 1, got.TotalFields)
 	assert.Empty(t, got.DivergentKeys)
 	assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
 }
 
-// A host that genuinely diverges must still read as a copy once both sides
-// are normalised: formatting noise in the stored baseline is ignored, but the
-// keys whose values really changed are reported, sorted, without values.
+// A host whose stable identity changed must still read as a copy once both
+// sides are normalised: formatting noise in the stored baseline is ignored,
+// but the keys whose values really changed are reported, without values.
 func TestCheckProvenance_DivergentHostAfterNormalisation_ReportsCopy(t *testing.T) {
 	t.Parallel()
 	stored, err := json.Marshal(map[string]string{
@@ -256,19 +256,41 @@ func TestCheckProvenance_DivergentHostAfterNormalisation_ReportsCopy(t *testing.
 	env := newProvEnv(t, "steward-div", string(stored))
 
 	got := env.spy.inner.CheckProvenance(context.Background(), "steward-div", map[string]string{
-		"machine_id": "m-1", "nic_macs": "cc:dd", "os_version": "9.9",
+		"machine_id": "m-2", "nic_macs": "aa:bb", "os_version": "9.9",
 	})
 
 	assert.Equal(t, ProvenanceCopy, got.Decision)
-	assert.Equal(t, 1, got.MatchedFields)
-	assert.Equal(t, 3, got.TotalFields, "empty values and DNA keys never count")
-	assert.Equal(t, []string{"install_date", "nic_macs"}, got.DivergentKeys)
+	assert.Equal(t, 0, got.MatchedFields)
+	assert.Equal(t, 1, got.TotalFields, "only the stable machine_id is scored; empty values and DNA keys never count")
+	assert.Equal(t, []string{"machine_id"}, got.DivergentKeys)
 	entries := env.auditEntries(t, "steward_provenance_divergence")
 	require.Len(t, entries, 1)
 	for _, v := range entries[0].Details {
-		assert.NotContains(t, toString(v), "cc:dd")
+		assert.NotContains(t, toString(v), "m-2")
 	}
 	assert.JSONEq(t, string(stored), env.baseline(t, "steward-div"), "a copy must never overwrite the baseline")
+}
+
+// A container recreated from the same image keeps its machine id and disk
+// serials but gets new MACs and a new (or no) install date: not a divergence.
+func TestCheckProvenance_RecreatedContainer_NoDivergence(t *testing.T) {
+	t.Parallel()
+	for name, attrs := range map[string]map[string]string{
+		"new macs and install date": {"machine_id": "m-1", "disk_serials": "d-1", "nic_macs": "cc:dd", "install_date": "2030-01-01"},
+		"new macs, no install date": {"machine_id": "m-1", "disk_serials": "d-1", "nic_macs": "cc:dd"},
+		"only machine id":           {"machine_id": "m-1"},
+	} {
+		attrs := attrs
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newProvEnv(t, "steward-rc", baselineJSON)
+			got := env.spy.inner.CheckProvenance(context.Background(), "steward-rc", attrs)
+			assert.Equal(t, ProvenanceApprovedMachine, got.Decision)
+			assert.InDelta(t, 1.0, got.Score, 0.0001)
+			assert.Empty(t, got.DivergentKeys)
+			assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
+		})
+	}
 }
 
 // Attributes that normalise to nothing must not be recorded as a baseline:

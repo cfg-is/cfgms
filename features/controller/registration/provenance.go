@@ -134,3 +134,59 @@ func NormalizeStoredProvenance(storedJSON string) string {
 	}
 	return string(raw)
 }
+
+// EphemeralProvenanceKeys are host attributes that change when the same
+// machine is recreated (a container or VM rebuilt from the same image gets new
+// NIC MACs and a new identity-file creation date). ADR-011 §7: they corroborate
+// but never decide — they count only when the baseline holds no stable key.
+var EphemeralProvenanceKeys = map[string]bool{
+	"nic_macs":     true,
+	"install_date": true,
+}
+
+// ScoreAdmission scores incoming host attributes against a stored baseline for
+// ControlChannel admission. Differences from FuzzyMatch:
+//   - EphemeralProvenanceKeys are not scored while the baseline has any stable key;
+//   - a baseline key that is absent or empty in incoming is not comparable and
+//     counts neither as matched nor as divergent.
+//
+// A changed stable key (machine_id, disk_serials) still diverges. matched and
+// divergent hold key names only. A zero result means nothing was comparable.
+func (ProvenanceMatcher) ScoreAdmission(storedJSON string, incoming map[string]string) (res ProvenanceResult, matched, divergent []string) {
+	var stored map[string]string
+	if storedJSON == "" || json.Unmarshal([]byte(storedJSON), &stored) != nil {
+		return ProvenanceResult{}, nil, nil
+	}
+	hasStable := false
+	for k := range stored {
+		if !DNAFieldKeys[k] && !EphemeralProvenanceKeys[k] {
+			hasStable = true
+			break
+		}
+	}
+	for k, sv := range stored {
+		if DNAFieldKeys[k] || (hasStable && EphemeralProvenanceKeys[k]) {
+			continue
+		}
+		iv, ok := incoming[k]
+		if !ok || iv == "" {
+			continue
+		}
+		if iv == sv {
+			matched = append(matched, k)
+		} else {
+			divergent = append(divergent, k)
+		}
+	}
+	sort.Strings(matched)
+	sort.Strings(divergent)
+	total := len(matched) + len(divergent)
+	if total == 0 {
+		return ProvenanceResult{}, nil, nil
+	}
+	return ProvenanceResult{
+		Score:         float64(len(matched)) / float64(total),
+		MatchedFields: len(matched),
+		TotalFields:   total,
+	}, matched, divergent
+}
