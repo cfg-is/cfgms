@@ -160,6 +160,23 @@ bound. Every `Get`/`Set`/`Test` runs with `ctxkeys.TenantID` set to the bound te
 module's execution-tenant check works across the process boundary. Without the option,
 `Handshake` only reports the capability.
 
+## Reserved `env:` names
+
+<a id="reserved-env-names"></a>
+
+A manifest `env:` list names parent-process variables to pass into the module. `contract.ValidateEnvNames` rejects the following names, case-insensitively, with an error naming the entry by index. The baseline variables the runtime passes itself (`BaselineEnvNames`) are not affected.
+
+| Names | Reason |
+|-------|--------|
+| `CFGMS_*` (every name with the prefix, including `CFGMS_MODULE_SOCKET`) | Configure the steward or controller process itself (storage, secrets, transport); a module is a separate trust domain. The socket variable is set by the runtime. |
+| `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` | Dynamic-loader injection: load an arbitrary library into the module process. |
+| `GODEBUG`, `GOTRACEBACK` | Change Go runtime behaviour and crash output. |
+| `PYTHONPATH`, `PYTHONSTARTUP`, `NODE_OPTIONS`, `PERL5OPT`, `RUBYOPT` | Interpreter code-load paths and startup hooks. |
+| `BASH_ENV`, `ENV` | Shell startup files run when a child shell starts. |
+| `PSModulePath` | PowerShell module search path. |
+
+The runtimes (`features/steward/modules/runtime`, `features/workflow/runtime`) and manifest parsing (`features/modules`) all call this validation, so a bundle declaring a reserved name is refused before any process starts.
+
 ## Using the contract wrappers
 
 Import `pkg/modules/contract` rather than the generated package to insulate your
