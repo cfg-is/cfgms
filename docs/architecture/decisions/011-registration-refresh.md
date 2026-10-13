@@ -49,7 +49,7 @@ Each steward holds an **Ed25519 device identity key pair** that is generated onc
 | Rotation | Yes, on renewal / refresh | Never |
 | Used by | gRPC-over-QUIC TLS handshake | Registration-refresh PoP only |
 
-The **64-char lowercase hex SHA-256 hash of the Ed25519 public key** is the `DeviceID`: `hex.EncodeToString(sha256(publicKeyBytes))`. It is stable across mTLS cert rotations and is the primary lookup key in `GetStewardByDeviceID`. The controller stores the public key on the steward record at first registration (#2095); the expired mTLS cert serial is retained as a chain-of-custody/audit signal only, never as the PoP credential.
+The **64-char lowercase hex SHA-256 hash of the Ed25519 public key** is the `DeviceID`: `hex.EncodeToString(sha256(publicKeyBytes))`. It is stable across mTLS cert rotations and is the primary lookup key in `GetStewardByDeviceID`. The controller stores the public key on the steward record at first registration (#2095); the expired mTLS cert serial is retained as a chain-of-custody/audit signal only, never as the PoP credential. (Amendment 3 adds a P-256 key for hardware-backed stewards, with its own DeviceID encoding.)
 
 The key carries a `key_protection_level` attribute (`file` in v1; `tpm` / `secure-enclave` as future drop-ins). Whether a tenant *requires* a hardware-backed level is a future policy knob; v1 ships `file` and records the attested level so "require TPM" is additive later, not a re-architecture.
 
@@ -57,7 +57,7 @@ The key carries a `key_protection_level` attribute (`file` in v1; `tpm` / `secur
 
 The private key is **encrypted at rest by the application**, via the existing steward secrets provider `pkg/secrets/providers/steward/crypto.go` (AES-256-GCM, HKDF-SHA256 from machine ID). It is written to `{identityDir}/device_identity.enc` with mode `0600`. **The plaintext private key never touches disk**, and the on-disk bytes are ciphertext — they must fail to parse as PEM or DER (this is a required test in #2094). This is stronger than relying on OS-level disk encryption alone, which would leave a cleartext key readable by any process with file access and violates the CFGMS "no cleartext secrets on disk, even in dev" rule.
 
-The `KeyStore` interface abstracts key material storage and signing so a TPM/secure-enclave backend is a future drop-in with no protocol change:
+The `KeyStore` interface abstracts key material storage and signing so a TPM/secure-enclave backend is a future drop-in with no protocol change (Amendment 3 generalises it for P-256 hardware keys):
 
 ```go
 type KeyStore interface {
@@ -255,15 +255,42 @@ Provenance was previously consulted only by the refresh `auto_accept` path, and 
 
 ### Amendment 3 — Two device key algorithms; hardware-backed KeyStores (ADR-034 §7, epic #4947)
 
-Hardware key stores cannot generate Ed25519 keys: TPM 2.0 and the Secure Enclave generate NIST P-256 keys. ADR-034 §7 puts the device key inside that hardware where it exists, so the device identity key is no longer always Ed25519.
+Hardware key stores cannot generate Ed25519 keys: TPM 2.0 and the Secure Enclave generate NIST P-256 keys. ADR-034 §7 puts the device key inside that hardware where it exists, so the device identity key is no longer always Ed25519. This amendment changes §1, §2, §4 and §5 as follows; where it and those sections differ, this amendment wins.
 
 - **Two algorithms.** A device key is `ed25519` or `ecdsa-p256`. File-backed keys stay `ed25519`; hardware-backed keys are `ecdsa-p256`. Existing stewards keep their keys and their `DeviceID`; no re-enrollment is needed.
-- **DeviceID.** For `ed25519` it is unchanged: SHA-256 of the 32-byte raw public key, lowercase hex. For `ecdsa-p256` it is SHA-256 of the public key's PKIX (SubjectPublicKeyInfo, DER) encoding, lowercase hex. The two encodings cannot collide in practice, and the stored algorithm removes any ambiguity.
-- **Wire.** Registration and the refresh endpoints carry `key_algorithm` beside the public key. An absent value means `ed25519`, so stewards that predate this amendment keep working. An `ecdsa-p256` proof of possession is an ASN.1 DER ECDSA signature over SHA-256 of the same challenge message §4 defines for Ed25519.
-- **Controller.** The `StewardRecord` stores `key_algorithm` with the public key (absent means `ed25519`) and verifies every proof of possession with the stored algorithm. A request whose `key_algorithm` differs from the stored one for that `DeviceID` is refused before any signature check, so an attacker cannot downgrade an existing record to a weaker or different scheme.
-- **KeyStore interface.** `GenerateOrLoad` returns a `crypto.PublicKey` and the algorithm instead of Ed25519 types, and `Sign` signs with the private key wherever it lives; a hardware backend never returns private key material. The file backend keeps its current encrypted format.
-- **Backends.**
-  - Linux: TPM 2.0 through `github.com/google/go-tpm` (already in the module graph indirectly; becomes a direct dependency).
-  - Windows: TPM 2.0 through the OS Platform Crypto Provider (CNG `NCrypt*` calls via `golang.org/x/sys/windows`); no new module.
-  - macOS: Secure Enclave through the Security framework, called without cgo through `github.com/ebitengine/purego`, so every release build stays `CGO_ENABLED=0`. This adds one module.
-- **Fallback.** If a hardware backend is absent, or fails to create or load a key, the steward uses the file backend and reports `key_protection_level: file`. The reason goes to the steward log. Enrollment never fails because hardware is missing (ADR-034 §7). Whether a macOS steward that runs as an unsigned or ad-hoc-signed daemon can create Secure Enclave keys is to be established by the macOS story; if it cannot, macOS reports `file` until it can.
+- **DeviceID (§1).** For `ed25519` it is unchanged: SHA-256 of the 32-byte raw public key, lowercase hex. For `ecdsa-p256` it is SHA-256 of the public key's PKIX (SubjectPublicKeyInfo, DER) encoding, lowercase hex. The stored algorithm removes any ambiguity between the two encodings.
+- **Proof of possession (§4).** The `digest` is unchanged: `sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)`, 32 bytes. Ed25519 signs those 32 bytes as its message, as today. ECDSA P-256 signs **the same 32-byte `digest` as its hash input**, with no second hash, and `pop` is the ASN.1 DER signature. (In Go: `ecdsa.SignASN1(rand, key, digest)` and `ecdsa.VerifyASN1(pub, digest, sig)`. A TPM or Secure Enclave signs the 32-byte digest directly with its "sign digest" operation.)
+- **Wire (§4).** Registration and `/refresh/complete` and `/refresh/claim` carry `key_algorithm` beside the public key or `pop`. An absent value means `ed25519`, so stewards that predate this amendment keep working.
+- **Controller order (§5).** The `StewardRecord` stores `key_algorithm` with the public key (absent means `ed25519`). In the §5 order, an algorithm check is added **after step 4 (nonce consumed) and before step 5 (signature verification)**: if the request's `key_algorithm` differs from the stored one, the controller answers **401**, the same response as an invalid signature, and does not verify. Revocation (step 2) and the tenant check (step 3) therefore still come first, and the mismatch gives no more information than a bad signature. "Before any `ed25519.Verify` call" in step 2 reads "before any signature verification". `PoPVerifier` becomes algorithm-aware:
+
+  ```go
+  type PoPVerifier interface {
+      Verify(alg KeyAlgorithm, pub crypto.PublicKey, digest, sig []byte) bool
+  }
+  ```
+
+  The zero-calls-for-a-revoked-device test still applies.
+- **KeyStore interface (§2).** It becomes:
+
+  ```go
+  type KeyStore interface {
+      // GenerateOrLoad returns the device public key and its algorithm,
+      // creating the key on first call. It never returns private key material.
+      GenerateOrLoad(ctx context.Context) (crypto.PublicKey, KeyAlgorithm, error)
+      // DeviceID returns the stable 64-char lowercase hex DeviceID.
+      DeviceID() string
+      // Sign signs the 32-byte PoP digest with the device private key,
+      // wherever it lives.
+      Sign(digest []byte) ([]byte, error)
+      // ProtectionLevel reports "file", "tpm" or "secure-enclave".
+      ProtectionLevel() string
+  }
+  ```
+
+  The file backend keeps its current encrypted format and reports `file`.
+- **Backends and the level each reports.**
+  - Linux: TPM 2.0 through `github.com/google/go-tpm` (already in the module graph indirectly; becomes a direct dependency). Reports `tpm`.
+  - Windows: TPM 2.0 through the OS Platform Crypto Provider (CNG `NCrypt*` calls via `golang.org/x/sys/windows`); no new module. Reports `tpm`.
+  - macOS: Secure Enclave through the Security framework, called without cgo through `github.com/ebitengine/purego`, so every release build stays `CGO_ENABLED=0`. This adds one module. Reports `secure-enclave`.
+- **Fallback is decided once, at first enrollment.** When a steward creates its device key for the first time and a hardware backend is absent or cannot create a key, it uses the file backend, reports `file`, and logs the reason. Enrollment never fails because hardware is missing (ADR-034 §7). **A steward that already holds a hardware-backed key never falls back.** If it cannot use that key (TPM busy, driver error, or tampering), it retries with backoff and reports the error; it does not create a file key. Creating one would mint a new `DeviceID` — a new object, which loses identity (R3) and loses the hardware guarantee that a copy cannot answer the challenge. Moving that endpoint to a new key is an operator decision through re-enrollment, as ADR-034 §7 already requires for a file key.
+- **Open question for the macOS story.** Whether a steward that runs as an unsigned or ad-hoc-signed daemon can create Secure Enclave keys is to be established there. If it cannot, macOS stewards enroll with `file` until it can.
