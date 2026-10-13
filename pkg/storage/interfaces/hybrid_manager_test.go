@@ -709,3 +709,7 @@ func (s *mockPendingRegistrationStore) ListAll(_ context.Context, _ string) ([]*
 func (s *mockPendingRegistrationStore) ExpireStale(_ context.Context, _ time.Time) (int, error) {
 	return 0, nil
 }
+
+func (s *mockPendingRegistrationStore) ReassignPendingSteward(_ context.Context, _, _ string) error {
+	return nil
+}

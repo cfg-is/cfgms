@@ -89,6 +89,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"PUT", "/api/v1/tenants/test-tenant/refresh-policy", "refresh:set-policy"},
 	{"PUT", "/api/v1/tenants/test-tenant/assurance-policy", "assurance-policy:set"}, // Issue #2839: per-tenant assurance override — raises tenant's own posture.
 	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},
+	{"POST", "/api/v1/stewards/test-steward-id/credentials/rotate", "steward:rotate-credentials"},    // ADR-034 §5
+	{"POST", "/api/v1/stewards/test-steward-id/identity/move", "steward:move-identity"},              // ADR-034 §5
 	{"POST", "/api/v1/stewards/test-steward-id/services/spooler/actions", "steward:service-control"}, // Issue #4628
 	{"POST", "/api/v1/stewards/test-steward-id/processes/4242/actions", "steward:process-control"},   // Issue #4628
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},

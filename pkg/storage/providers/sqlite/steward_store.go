@@ -316,6 +316,36 @@ func (s *SQLiteStewardStore) SetStewardProvenance(ctx context.Context, stewardID
 	return nil
 }
 
+// RebindStewardIdentity replaces the steward's device identity and clears its
+// provenance baseline. A device_id held by another live steward in the tenant
+// is reported as ErrStewardDeviceIDConflict.
+func (s *SQLiteStewardStore) RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel string) error {
+	if identityKeyPub == nil {
+		identityKeyPub = []byte{}
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET device_id = ?, identity_key_pub = ?, key_protection_level = ?, last_provenance_json = ''
+			WHERE id = ?`,
+			deviceID, identityKeyPub, keyProtectionLevel, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return business.ErrStewardDeviceIDConflict
+		}
+		return fmt.Errorf("sqlite: failed to rebind identity for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)

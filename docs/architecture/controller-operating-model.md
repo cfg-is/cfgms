@@ -642,6 +642,14 @@ A same-host reconnect (a restarting steward) is neither a conflict nor a refusal
 
 The refusal is `codes.PermissionDenied` with an `errdetails.ErrorInfo` detail: `Reason: "IDENTITY_IN_USE"`, `Domain: "cfgms.io"`. The message text is fixed and never names the other endpoint's address, hostname or provenance. The refusal is the only admission refusal that carries a reason; revocation (`PermissionDenied`, "client certificate revoked") and the approval gate ("steward reconnect not approved") carry none and are not treated as copies. A steward that receives `IDENTITY_IN_USE` re-keys and registers as a new device with `clone_of` (see the steward operating model); the controller records `clone_of` on the pending registration and shows it in `cfg registration pending`.
 
+### Operator Actions on a Detected Clone (Issue #4951, ADR-034 §5)
+
+Three endpoints back the operator verbs; the [identity clone runbook](../runbooks/steward-identity-clone.md) says when to use each.
+
+- `GET /api/v1/stewards/identity-clones` (`steward:read`, tenant-scoped) joins the `steward_identity_conflict_detected` and `steward_provenance_divergence` audit events with the pending registrations whose `CloneOf` names the steward. It reads the audit manager and `PendingRegistrationStore.ListPending`; nothing new is stored.
+- `POST /api/v1/stewards/{id}/credentials/rotate` (`steward:rotate-credentials`, AssuranceStrong) revokes every client-certificate serial issued for the steward ID through `cert.Manager.Revoke` (refused at admission by the #4930 gate, including open streams) and moves the record to `archived`, so the next refresh is queued for approval. Audit: `steward_credentials_rotated`.
+- `POST /api/v1/stewards/{id}/identity/move` (`steward:move-identity`, AssuranceStrong) takes `{"pending_id"}` of a pending same-tenant copy with `CloneOf` equal to the steward. It calls `StewardStore.RebindStewardIdentity` (honouring the unique `(tenant_id, device_id)` rule), `PendingRegistrationStore.ReassignPendingSteward` and approves the entry; the ordinary claim then signs the certificate with the original ID as CN and takes the existing record whose `DeviceID` now matches as the benign re-claim. Previous serials are revoked. Audit: `steward_identity_moved`. This is the only code path that changes a record's `DeviceID`.
+
 ### Steward Tracking
 
 For each steward, the controller tracks:

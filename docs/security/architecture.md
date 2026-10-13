@@ -338,6 +338,8 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 | `refresh:set-policy` | `PUT /api/v1/tenants/{tenant_path}/refresh-policy` |
 | `steward:move` | `POST /api/v1/stewards/{id}/move` |
 | `steward:decommission` | `DELETE /api/v1/stewards/{id}` |
+| `steward:rotate-credentials` | `POST /api/v1/stewards/{id}/credentials/rotate` |
+| `steward:move-identity` | `POST /api/v1/stewards/{id}/identity/move` |
 | `account:create` | `POST /api/v1/accounts` |
 | `account:delete` | `DELETE /api/v1/accounts/{username}` |
 | `cert-binding:bind` | `POST /api/v1/accounts/{username}/certs/bind` — `cert-binding:list` is permission-gated only (reads are outside the elevated surface) |

@@ -7,25 +7,27 @@ package api
 // C1: "*" (wildcard) is intentionally absent — it is never a valid permission ID.
 var knownPermissions = map[string]bool{
 	// Steward management
-	"steward:list":            true,
-	"steward:read":            true,
-	"steward:telemetry":       true, // Issue #2765: live telemetry WebSocket fan-out
-	"steward:read-dna":        true,
-	"steward:read-logs":       true,
-	"steward:auth-refresh":    true,
-	"steward:read-config":     true,
-	"steward:write-config":    true,
-	"steward:validate-config": true,
-	"steward:read-scripts":    true,
-	"steward:execute-scripts": true,
-	"steward:read-compliance": true,
-	"steward:read-modules":    true,
-	"steward:delete-config":   true,
-	"steward:move":            true,
-	"steward:service-control": true, // Issue #4628
-	"steward:process-control": true, // Issue #4628
-	"steward:decommission":    true,
-	"steward:visibility":      true, // Issue #2918: hide/unhide steward from default fleet view
+	"steward:list":               true,
+	"steward:read":               true,
+	"steward:telemetry":          true, // Issue #2765: live telemetry WebSocket fan-out
+	"steward:read-dna":           true,
+	"steward:read-logs":          true,
+	"steward:auth-refresh":       true,
+	"steward:read-config":        true,
+	"steward:write-config":       true,
+	"steward:validate-config":    true,
+	"steward:read-scripts":       true,
+	"steward:execute-scripts":    true,
+	"steward:read-compliance":    true,
+	"steward:read-modules":       true,
+	"steward:delete-config":      true,
+	"steward:move":               true,
+	"steward:service-control":    true, // Issue #4628
+	"steward:process-control":    true, // Issue #4628
+	"steward:decommission":       true,
+	"steward:rotate-credentials": true, // ADR-034 §5: revoke serials and archive (AssuranceStrong)
+	"steward:move-identity":      true, // ADR-034 §5: move an identity to the queued copy (AssuranceStrong)
+	"steward:visibility":         true, // Issue #2918: hide/unhide steward from default fleet view
 	// Config management
 	"config:list":             true,
 	"config:list-deployments": true,

@@ -68,6 +68,15 @@ var stewardCrossingTable = map[string]stewardCrossingRoute{
 		body:           func(string) interface{} { return map[string]string{"new_tenant_id": testRootTenantID} },
 		pastGateStatus: http.StatusOK, pastGateBody: `"steward_id"`,
 	},
+	"POST /api/v1/stewards/{id}/credentials/rotate": {
+		permission: "steward:rotate-credentials", path: stewardPath("/credentials/rotate"), body: noBody,
+		pastGateStatus: http.StatusOK, pastGateBody: "revoked_serials",
+	},
+	"POST /api/v1/stewards/{id}/identity/move": {
+		permission: "steward:move-identity", path: stewardPath("/identity/move"),
+		body:           func(string) interface{} { return map[string]string{"pending_id": "pending-none"} },
+		pastGateStatus: http.StatusServiceUnavailable, pastGateBody: "Registration store unavailable",
+	},
 	"PATCH /api/v1/stewards/{id}/visibility": {
 		permission: "steward:visibility", path: stewardPath("/visibility"),
 		body:           func(string) interface{} { return map[string]bool{"hidden": false} },
