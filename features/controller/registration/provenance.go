@@ -155,7 +155,7 @@ func admissionKeyScored(key string, hasStable bool) bool {
 	if DNAFieldKeys[key] {
 		return false
 	}
-	return !(hasStable && EphemeralProvenanceKeys[key] && !setOverlapKeys[key])
+	return !hasStable || !EphemeralProvenanceKeys[key] || setOverlapKeys[key]
 }
 
 func sharesMember(a, b string) bool {
