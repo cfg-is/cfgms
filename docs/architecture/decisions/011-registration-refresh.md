@@ -49,7 +49,7 @@ Each steward holds an **Ed25519 device identity key pair** that is generated onc
 | Rotation | Yes, on renewal / refresh | Never |
 | Used by | gRPC-over-QUIC TLS handshake | Registration-refresh PoP only |
 
-The **64-char lowercase hex SHA-256 hash of the Ed25519 public key** is the `DeviceID`: `hex.EncodeToString(sha256(publicKeyBytes))`. It is stable across mTLS cert rotations and is the primary lookup key in `GetStewardByDeviceID`. The controller stores the public key on the steward record at first registration (#2095); the expired mTLS cert serial is retained as a chain-of-custody/audit signal only, never as the PoP credential.
+The **64-char lowercase hex SHA-256 hash of the Ed25519 public key** is the `DeviceID`: `hex.EncodeToString(sha256(publicKeyBytes))`. It is stable across mTLS cert rotations and is the primary lookup key in `GetStewardByDeviceID`. The controller stores the public key on the steward record at first registration (#2095); the expired mTLS cert serial is retained as a chain-of-custody/audit signal only, never as the PoP credential. (Amendment 3 adds a P-256 key for hardware-backed stewards, with its own DeviceID encoding.)
 
 The key carries a `key_protection_level` attribute (`file` in v1; `tpm` / `secure-enclave` as future drop-ins). Whether a tenant *requires* a hardware-backed level is a future policy knob; v1 ships `file` and records the attested level so "require TPM" is additive later, not a re-architecture.
 
@@ -57,7 +57,7 @@ The key carries a `key_protection_level` attribute (`file` in v1; `tpm` / `secur
 
 The private key is **encrypted at rest by the application**, via the existing steward secrets provider `pkg/secrets/providers/steward/crypto.go` (AES-256-GCM, HKDF-SHA256 from machine ID). It is written to `{identityDir}/device_identity.enc` with mode `0600`. **The plaintext private key never touches disk**, and the on-disk bytes are ciphertext — they must fail to parse as PEM or DER (this is a required test in #2094). This is stronger than relying on OS-level disk encryption alone, which would leave a cleartext key readable by any process with file access and violates the CFGMS "no cleartext secrets on disk, even in dev" rule.
 
-The `KeyStore` interface abstracts key material storage and signing so a TPM/secure-enclave backend is a future drop-in with no protocol change:
+The `KeyStore` interface abstracts key material storage and signing so a TPM/secure-enclave backend is a future drop-in with no protocol change (Amendment 3 generalises it for P-256 hardware keys):
 
 ```go
 type KeyStore interface {
@@ -135,7 +135,7 @@ Request:
 {
   "device_id":       "<64-char hex>",
   "nonce":           "<base64url nonce from /challenge>",
-  "pop":             "<base64url ed25519 signature>",
+  "pop":             "<base64url signature: ed25519, or ASN.1 DER ecdsa-p256 (Amendment 3)>",
   "host_attributes": { "...": "..." }
 }
 ```
@@ -175,7 +175,7 @@ The controller `/refresh/complete` handler MUST follow this order; each step sho
 2. record.Status == revoked               → 403 BEFORE any ed25519.Verify call
 3. tenant check: record.TenantID != req   → 403 (not 404 — 404 leaks existence)
 4. consume nonce (delete; 401 if absent/expired/used)
-5. PoPVerifier.Verify(pubkey, digest, pop) → 401 if signature invalid
+5. PoPVerifier.Verify(alg, pubkey, digest, pop) → 401 if signature invalid (Amendment 3 adds the algorithm check before this step)
 6. lifecycle + policy + provenance gate (§3, §6, §7) → 200 / 202 / 403
 7. audit the outcome (accept / queue / reject) → before WriteHeader
 ```
@@ -252,3 +252,52 @@ Provenance is corroboration, not proof: the cryptographic identity proof is the 
 ### Amendment 2 — Provenance is also evaluated at ControlChannel admission (Issue #4949, ADR-034 §2)
 
 Provenance was previously consulted only by the refresh `auto_accept` path, and nothing wrote the baseline or sent the attributes. Now the steward collects host attributes and sends them on `/refresh/complete`, `/refresh/claim` and as metadata on the `ControlChannel` call; the controller writes `LastProvenanceJSON` at first admission (trust on first use, audited) and when an operator-approved refresh is collected, and compares attributes at ControlChannel admission, after the revocation and approval gates. The invariant of §7 is unchanged: provenance is demote-only. It classifies a connection as `approved_machine`, `copy` or `unknown`; it never admits a connection the revocation or lifecycle gates refuse, and a store error falls back to `unknown`. See the controller operating model, "Host Provenance at Admission".
+
+### Amendment 3 — Two device key algorithms; hardware-backed KeyStores (ADR-034 §7, epic #4947)
+
+Hardware key stores cannot generate Ed25519 keys: TPM 2.0 and the Secure Enclave generate NIST P-256 keys. ADR-034 §7 puts the device key inside that hardware where it exists, so the device identity key is no longer always Ed25519. This amendment changes §1, §2, §4 and §5 as follows; where it and those sections differ, this amendment wins.
+
+- **Two algorithms.** A device key is `ed25519` or `ecdsa-p256`. File-backed keys stay `ed25519`; hardware-backed keys are `ecdsa-p256`. Existing stewards keep their keys and their `DeviceID`; no re-enrollment is needed.
+- **DeviceID (§1).** For `ed25519` it is unchanged: SHA-256 of the 32-byte raw public key, lowercase hex. For `ecdsa-p256` it is SHA-256 of the public key's PKIX (SubjectPublicKeyInfo, DER) encoding, lowercase hex. The stored algorithm removes any ambiguity between the two encodings.
+- **Proof of possession (§4).** The `digest` is unchanged: `sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)`, 32 bytes. Ed25519 signs those 32 bytes as its message, as today. ECDSA P-256 signs **the same 32-byte `digest` as its hash input**, with no second hash, and `pop` is the ASN.1 DER signature. (In Go: `ecdsa.SignASN1(rand, key, digest)` and `ecdsa.VerifyASN1(pub, digest, sig)`. A TPM or Secure Enclave signs the 32-byte digest directly with its "sign digest" operation.)
+- **Wire (§4).** Registration and `/refresh/complete` and `/refresh/claim` carry `key_algorithm` beside the public key or `pop`. An absent value means `ed25519`, so stewards that predate this amendment keep working.
+- **Controller order (§5).** The `StewardRecord` stores `key_algorithm` with the public key (absent means `ed25519`). In the §5 order, an algorithm check is added **after step 4 (nonce consumed) and before step 5 (signature verification)**: if the request's `key_algorithm` differs from the stored one, the controller answers **401**, the same response as an invalid signature, and does not verify. Revocation (step 2) and the tenant check (step 3) therefore still come first, and the mismatch gives no more information than a bad signature. "Before any `ed25519.Verify` call" in step 2 reads "before any signature verification". `PoPVerifier` becomes algorithm-aware:
+
+  ```go
+  type PoPVerifier interface {
+      Verify(alg KeyAlgorithm, pub crypto.PublicKey, digest, sig []byte) bool
+  }
+  ```
+
+  The zero-calls-for-a-revoked-device test still applies.
+- **KeyStore interface (§2).** It becomes:
+
+  ```go
+  type KeyStore interface {
+      // GenerateOrLoad returns the device public key and its algorithm,
+      // creating the key on first call. It never returns private key material.
+      GenerateOrLoad(ctx context.Context) (crypto.PublicKey, KeyAlgorithm, error)
+      // DeviceID returns the stable 64-char lowercase hex DeviceID.
+      DeviceID() string
+      // Sign signs the 32-byte PoP digest with the device private key,
+      // wherever it lives.
+      Sign(digest []byte) ([]byte, error)
+      // Algorithm reports "ed25519" or "ecdsa-p256".
+      Algorithm() KeyAlgorithm
+      // ProtectionLevel reports "file", "tpm" or "secure-enclave".
+      ProtectionLevel() string
+      // Regenerate replaces the device key with a new one in the same
+      // backend (clone re-key, ADR-034 §4). The DeviceID changes.
+      Regenerate(ctx context.Context) (crypto.PublicKey, KeyAlgorithm, error)
+      // Remove deletes the stored device key (prepare-image, ADR-034 §6).
+      Remove(ctx context.Context) error
+  }
+  ```
+
+  The file backend keeps its current encrypted format and reports `file`.
+- **Backends and the level each reports.**
+  - Linux: TPM 2.0 through `github.com/google/go-tpm` (already in the module graph indirectly; becomes a direct dependency). Reports `tpm`.
+  - Windows: TPM 2.0 through the OS Platform Crypto Provider (CNG `NCrypt*` calls via `golang.org/x/sys/windows`); no new module. Reports `tpm`.
+  - macOS: Secure Enclave through the Security framework, called without cgo through `github.com/ebitengine/purego`, so every release build stays `CGO_ENABLED=0`. This adds one module. Reports `secure-enclave`.
+- **Fallback is decided once, at first enrollment.** When a steward creates its device key for the first time and a hardware backend is absent or cannot create a key, it uses the file backend, reports `file`, and logs the reason. Enrollment never fails because hardware is missing (ADR-034 §7). **A steward that already holds a hardware-backed key never falls back.** If it cannot use that key (TPM busy, driver error, or tampering), it retries with backoff and reports the error; it does not create a file key. Creating one would mint a new `DeviceID` — a new object, which loses identity (R3) and loses the hardware guarantee that a copy cannot answer the challenge. Moving that endpoint to a new key is an operator decision through re-enrollment, as ADR-034 §7 already requires for a file key.
+- **Open question for the macOS story.** Whether a steward that runs as an unsigned or ad-hoc-signed daemon can create Secure Enclave keys is to be established there. If it cannot, macOS stewards enroll with `file` until it can.
