@@ -1103,6 +1103,9 @@ services:
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward1_data:/app/data
+    # Fixed MAC so a container restart keeps its NIC set; host provenance
+    # scores nic_macs by overlap with the registered baseline (Issue #4949).
+    mac_address: "02:42:ac:15:00:a1"
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
@@ -1143,6 +1146,9 @@ services:
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward2_data:/app/data
+    # Fixed MAC so a container restart keeps its NIC set; host provenance
+    # scores nic_macs by overlap with the registered baseline (Issue #4949).
+    mac_address: "02:42:ac:15:00:a2"
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:

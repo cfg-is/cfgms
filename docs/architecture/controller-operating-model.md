@@ -609,7 +609,9 @@ Revocation therefore takes effect at admission even while the steward record sta
 
 The admission pipeline order is: **revocation, approval, provenance**. Provenance runs only for a connection the first two gates already admitted, and is demote-only (ADR-011 §7): it classifies the connection and can never admit one they refused.
 
-The steward sends its host attributes as gRPC metadata on the `ControlChannel` call (`x-cfgms-host-attrs`, base64 of a JSON string map, hard cap 4 KiB). `transportServer.ControlChannel` reads it and, through the checker injected with `WithProvenanceChecker`, scores it against the steward record's `LastProvenanceJSON` using `registration.ProvenanceMatcher.FuzzyMatch` at `registration.ProvenanceMatchThreshold` (0.60). The decision is one of:
+The steward sends its host attributes as gRPC metadata on the `ControlChannel` call (`x-cfgms-host-attrs`, base64 of a JSON string map, hard cap 4 KiB). `transportServer.ControlChannel` reads it and, through the checker injected with `WithProvenanceChecker`, scores it against the steward record's `LastProvenanceJSON` using `registration.ProvenanceMatcher.ScoreAdmission` at `registration.ProvenanceMatchThreshold` (0.60). The decision is one of:
+
+`ScoreAdmission` rules: DNA keys never count; a baseline key that is absent or empty in the incoming report is skipped (neither matched nor divergent); `install_date` is not scored while the baseline holds a stable key (`machine_id`, `disk_serials`); `nic_macs` is scored by **set overlap** — any MAC present in both baseline and report is a match, no shared MAC is divergent; every other key is an exact match.
 
 - `unknown` — no baseline is recorded, no attributes were sent (an old steward without the collector, or an oversized/unparsable header), or the check could not be made. The connection is admitted exactly as before.
 - `approved_machine` — score at or above the threshold.
@@ -619,7 +621,7 @@ The steward sends its host attributes as gRPC metadata on the `ControlChannel` c
 
 **Store failures fail toward the pre-provenance behaviour.** If the steward store cannot be read, the connection is admitted as `unknown` and the error is logged (sanitized) at error level, so a store outage does not lock the fleet out. The revocation and approval gates ahead of it still fail closed.
 
-**Limit (false attributes).** The attributes are self-reported by the endpoint, and a copy controls its own steward binary. A disk-image clone carries `machine_id` and `install_date` with it, but not the NIC and disk hardware values, so it scores low; an attacker who has learned the original machine's full attribute set can still send those values. Provenance therefore raises the cost of an unnoticed clone and leaves an audit trail; it is not proof of identity, and certificate revocation remains the authoritative control.
+**Limit (false attributes).** The attributes are self-reported by the endpoint, and a copy controls its own steward binary. A disk-image clone carries `machine_id` and `install_date`, but normally not the NIC and disk hardware, so a clone with different MACs scores low (on macOS/Windows, where `disk_serials` is not collected, the NIC set is the deciding signal). A clone that also carries the original MACs (for example a VM clone with a preserved MAC), or an attacker who has learned the full attribute set, is not caught by provenance; the concurrent-connection check (#4948) is the control for that case. Provenance raises the cost of an unnoticed clone and leaves an audit trail; it is not proof of identity, and certificate revocation remains the authoritative control.
 
 ### Duplicate Steward Identity Detection (Issue #4948, ADR-034 §3)
 

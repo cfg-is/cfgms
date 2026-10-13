@@ -144,9 +144,39 @@ var EphemeralProvenanceKeys = map[string]bool{
 	"install_date": true,
 }
 
+// setOverlapKeys are comma-joined set attributes that match when the baseline
+// and the incoming report share at least one member.
+var setOverlapKeys = map[string]bool{"nic_macs": true}
+
+// admissionKeyScored reports whether key counts toward the admission score.
+// install_date is skipped while the baseline holds a stable key; nic_macs is
+// always scored (by set overlap) so a clone with different NICs diverges.
+func admissionKeyScored(key string, hasStable bool) bool {
+	if DNAFieldKeys[key] {
+		return false
+	}
+	return !(hasStable && EphemeralProvenanceKeys[key] && !setOverlapKeys[key])
+}
+
+func sharesMember(a, b string) bool {
+	seen := map[string]bool{}
+	for _, m := range strings.Split(a, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			seen[strings.ToLower(m)] = true
+		}
+	}
+	for _, m := range strings.Split(b, ",") {
+		if seen[strings.ToLower(strings.TrimSpace(m))] && strings.TrimSpace(m) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // ScoreAdmission scores incoming host attributes against a stored baseline for
 // ControlChannel admission. Differences from FuzzyMatch:
-//   - EphemeralProvenanceKeys are not scored while the baseline has any stable key;
+//   - install_date is not scored while the baseline has any stable key;
+//   - nic_macs is scored by set overlap: any MAC present in both matches;
 //   - a baseline key that is absent or empty in incoming is not comparable and
 //     counts neither as matched nor as divergent.
 //
@@ -165,14 +195,14 @@ func (ProvenanceMatcher) ScoreAdmission(storedJSON string, incoming map[string]s
 		}
 	}
 	for k, sv := range stored {
-		if DNAFieldKeys[k] || (hasStable && EphemeralProvenanceKeys[k]) {
+		if !admissionKeyScored(k, hasStable) {
 			continue
 		}
 		iv, ok := incoming[k]
 		if !ok || iv == "" {
 			continue
 		}
-		if iv == sv {
+		if iv == sv || (setOverlapKeys[k] && sharesMember(sv, iv)) {
 			matched = append(matched, k)
 		} else {
 			divergent = append(divergent, k)

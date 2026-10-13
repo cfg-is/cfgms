@@ -117,8 +117,8 @@ func TestControlChannel_ProvenanceBelowThreshold_ReportsCopy(t *testing.T) {
 	require.Equal(t, 1, calls)
 	assert.Equal(t, ProvenanceCopy, got.Decision)
 	assert.Equal(t, 1, got.MatchedFields)
-	assert.Equal(t, 2, got.TotalFields)
-	assert.ElementsMatch(t, []string{"disk_serials"}, got.DivergentKeys)
+	assert.Equal(t, 3, got.TotalFields)
+	assert.ElementsMatch(t, []string{"disk_serials", "nic_macs"}, got.DivergentKeys)
 
 	entries := env.auditEntries(t, "steward_provenance_divergence")
 	require.Len(t, entries, 1)
@@ -134,14 +134,14 @@ func TestControlChannel_ProvenanceBelowThreshold_ReportsCopy(t *testing.T) {
 func TestControlChannel_ProvenanceAtOrAboveThreshold_ApprovedMachine(t *testing.T) {
 	t.Parallel()
 	env := newProvEnv(t, "steward-ok", baselineJSON)
-	// stable keys 2 of 2; install_date differs but is ephemeral
+	// machine_id, disk_serials and nic_macs match; install_date differs but is not scored
 	env.connect(t, "steward-ok", map[string]string{
 		"machine_id": "m-1", "nic_macs": "aa:bb", "disk_serials": "d-1", "install_date": "2030-01-01",
 	})
 
 	_, got := env.spy.snapshot()
 	assert.Equal(t, ProvenanceApprovedMachine, got.Decision)
-	assert.Equal(t, 2, got.MatchedFields)
+	assert.Equal(t, 3, got.MatchedFields)
 	assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
 	assert.JSONEq(t, baselineJSON, env.baseline(t, "steward-ok"))
 }
@@ -235,7 +235,7 @@ func TestControlChannel_UnchangedHost_ScoresOneAcrossPaths(t *testing.T) {
 	_, got := env.spy.snapshot()
 	assert.Equal(t, ProvenanceApprovedMachine, got.Decision)
 	assert.InDelta(t, 1.0, got.Score, 0.0001)
-	assert.Equal(t, 1, got.TotalFields)
+	assert.Equal(t, 2, got.TotalFields)
 	assert.Empty(t, got.DivergentKeys)
 	assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
 }
@@ -260,8 +260,8 @@ func TestCheckProvenance_DivergentHostAfterNormalisation_ReportsCopy(t *testing.
 	})
 
 	assert.Equal(t, ProvenanceCopy, got.Decision)
-	assert.Equal(t, 0, got.MatchedFields)
-	assert.Equal(t, 1, got.TotalFields, "only the stable machine_id is scored; empty values and DNA keys never count")
+	assert.Equal(t, 1, got.MatchedFields)
+	assert.Equal(t, 2, got.TotalFields, "machine_id and nic_macs are scored; empty values, install_date and DNA keys never count")
 	assert.Equal(t, []string{"machine_id"}, got.DivergentKeys)
 	entries := env.auditEntries(t, "steward_provenance_divergence")
 	require.Len(t, entries, 1)
@@ -276,9 +276,9 @@ func TestCheckProvenance_DivergentHostAfterNormalisation_ReportsCopy(t *testing.
 func TestCheckProvenance_RecreatedContainer_NoDivergence(t *testing.T) {
 	t.Parallel()
 	for name, attrs := range map[string]map[string]string{
-		"new macs and install date": {"machine_id": "m-1", "disk_serials": "d-1", "nic_macs": "cc:dd", "install_date": "2030-01-01"},
-		"new macs, no install date": {"machine_id": "m-1", "disk_serials": "d-1", "nic_macs": "cc:dd"},
-		"only machine id":           {"machine_id": "m-1"},
+		"shared mac, new install date": {"machine_id": "m-1", "disk_serials": "d-1", "nic_macs": "cc:dd,aa:bb", "install_date": "2030-01-01"},
+		"shared mac, no install date":  {"machine_id": "m-1", "disk_serials": "d-1", "nic_macs": "aa:bb"},
+		"only machine id":              {"machine_id": "m-1"},
 	} {
 		attrs := attrs
 		t.Run(name, func(t *testing.T) {
@@ -291,6 +291,21 @@ func TestCheckProvenance_RecreatedContainer_NoDivergence(t *testing.T) {
 			assert.Empty(t, env.auditEntries(t, "steward_provenance_divergence"))
 		})
 	}
+}
+
+// A disk-image clone on a platform without disk serials (macOS/Windows shape)
+// keeps machine_id but has different NICs: it must be classified as a copy.
+func TestCheckProvenance_CloneSameMachineIDDifferentMACs_ReportsCopy(t *testing.T) {
+	t.Parallel()
+	env := newProvEnv(t, "steward-clone", `{"machine_id":"m-1","nic_macs":"aa:bb","install_date":"2026-01-01"}`)
+
+	got := env.spy.inner.CheckProvenance(context.Background(), "steward-clone", map[string]string{
+		"machine_id": "m-1", "nic_macs": "ee:ff", "install_date": "2026-01-01",
+	})
+
+	assert.Equal(t, ProvenanceCopy, got.Decision)
+	assert.Equal(t, []string{"nic_macs"}, got.DivergentKeys)
+	assert.Len(t, env.auditEntries(t, "steward_provenance_divergence"), 1)
 }
 
 // Attributes that normalise to nothing must not be recorded as a baseline:
