@@ -20,7 +20,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    ```
    If either fails, provide specific fix instructions and stop.
 
-2. **If `$ARGUMENTS` is 'creds'**: Agent containers bind-mount the host's live `~/.claude/.credentials.json` directly — there is no separate setup step. Tell the user: if `claude` is authenticated on this host (i.e. this session works), dispatch credentials are already in place. If missing, run `claude` normally on the host to log in. Verify with `./.claude/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
+2. **If `$ARGUMENTS` is 'creds'**: Headless agent containers use a long-lived token from the TPM2-bound `systemd-creds` credential `~/.config/cfgms/claude-oauth-token.cred` (token mode); if it is absent they fall back to bind-mounting the host's `~/.claude/.credentials.json`. Walk the user through the one-time token setup below if `check-creds` does not report `CREDS_MODE:token`; the fallback needs `claude` logged in on this host. Verify with `./.claude/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
 
 3. **Health check** (runs when image already exists and `$ARGUMENTS` is NOT 'rebuild'):
    ```bash
@@ -70,7 +70,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
    While waiting, proceed with steps 6-8 (they're independent).
 
-6. **Verify Claude credentials**: Agent containers bind-mount the host's `~/.claude/.credentials.json` directly, so no separate container-side login is needed.
+6. **Verify Claude credentials**: In token mode (`check-creds` reports `CREDS_MODE:token`) nothing more is needed. Otherwise containers fall back to bind-mounting the host's `~/.claude/.credentials.json`, so no separate container-side login is needed.
 
    - Check if credentials already exist on the host:
      ```bash
@@ -124,3 +124,17 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 - **Image build fails**: Show build output, suggest checking Dockerfile
 - **OAuth flow fails**: Tell user to retry by running `claude` normally on the host to re-authenticate
 - **Network issues during build**: Suggest checking internet connection
+
+## Agent token setup
+
+Headless agent containers authenticate with a long-lived subscription token (from `claude setup-token`) passed as `CLAUDE_CODE_OAUTH_TOKEN`, not with the host's refreshing session. The token is held as a TPM2-bound `systemd-creds` credential, so only ciphertext is on disk and it decrypts only on this host.
+
+```bash
+sudo usermod -aG tss "$USER"      # then start a NEW login session so the group applies
+claude setup-token                # prints the long-lived token
+mkdir -p ~/.config/cfgms
+read -rs T; printf %s "$T" | systemd-creds encrypt --with-key=tpm2 --name=claude-oauth-token - ~/.config/cfgms/claude-oauth-token.cred; unset T
+chmod 600 ~/.config/cfgms/claude-oauth-token.cred
+```
+
+Verify with `./.claude/scripts/agent-dispatch.sh check-creds` (expect `CREDS_MODE:token`). To rotate the token, run `claude setup-token` again and re-run the `read -rs T; ... systemd-creds encrypt` line (it overwrites the file). If the credential is absent, cannot be decrypted, or decryption exceeds 15 s, launches fall back to bind-mounting `~/.claude/.credentials.json` and print one `WARN:agent_token:<absent|decrypt_failed|timeout>` line; a launch never blocks on this.
