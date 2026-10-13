@@ -18,6 +18,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -290,4 +291,61 @@ func TestCompiledInRegistry_ProductionConstructorUsesRegistry(t *testing.T) {
 	require.Len(t, resolved, 1)
 	assert.Equal(t, "vendor-a", resolved[0].Name)
 	assert.Equal(t, []byte(pub), resolved[0].PublicKey)
+}
+
+// TestDefaultResolveKnownPublisher_RefusesUnsafeEntries: bad build input must
+// not create a forgeable or ambiguous trust anchor.
+func TestDefaultResolveKnownPublisher_RefusesUnsafeEntries(t *testing.T) {
+	_, _, good := newRegistryKey(t)
+	_, _, other := newRegistryKey(t)
+	zeroKey := base64.StdEncoding.EncodeToString(make([]byte, ed25519PublicKeySize))
+	identity := make([]byte, ed25519PublicKeySize)
+	identity[0] = 1 // the identity point, also small-order
+	identityKey := base64.StdEncoding.EncodeToString(identity)
+
+	cases := []struct {
+		name     string
+		material string
+		lookup   string
+	}{
+		{"all-zero small-order key", "acme-corp=" + zeroKey, "acme-corp"},
+		{"identity-point small-order key", "acme-corp=" + identityKey, "acme-corp"},
+		{"reserved cfgms name", "cfgms=" + good, "cfgms"},
+		{"empty name", "=" + good, ""},
+		{"empty key", "acme-corp=", "acme-corp"},
+		{"duplicate name same key", "acme-corp=" + good + ",acme-corp=" + good, "acme-corp"},
+		{"duplicate name different keys", "acme-corp=" + good + ",acme-corp=" + other, "acme-corp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setKeyMaterial(t, tc.material)
+			id, ok := defaultResolveKnownPublisher(tc.lookup)
+			assert.False(t, ok)
+			assert.Nil(t, id.PublicKey)
+		})
+	}
+}
+
+// TestDefaultResolveKnownPublisher_MakeFlagTextResolves resolves the exact text
+// the Makefile passes after -X, and checks the Makefile wires the variable.
+func TestDefaultResolveKnownPublisher_MakeFlagTextResolves(t *testing.T) {
+	pub, _, encoded := newRegistryKey(t)
+	flagText := "acme-corp=" + encoded
+	setKeyMaterial(t, flagText)
+
+	id, ok := defaultResolveKnownPublisher("acme-corp")
+	require.True(t, ok)
+	assert.Equal(t, []byte(pub), id.PublicKey)
+
+	makePath, lookErr := exec.LookPath("make")
+	if lookErr != nil {
+		// Justified skip: native Windows/macOS CI legs may not ship GNU make; the
+		// Makefile wiring is still verified on the Linux legs.
+		t.Skip("make not available on this platform")
+	}
+	out, err := exec.Command(makePath, "-n", "-C", "../../../..", "build-steward",
+		"STEWARD_ADDITIONAL_PUBLISHER_KEYS="+flagText).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out),
+		"features/steward/modules/trust.additionalPublisherKeyMaterial="+flagText)
 }

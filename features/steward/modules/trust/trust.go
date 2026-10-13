@@ -33,7 +33,8 @@ const ed25519PublicKeySize = 32
 //
 //	go build -ldflags "-X .../trust.additionalPublisherKeyMaterial=name1=<b64key1>,name2=<b64key2>"
 //
-// mirroring pkg/modules/trust.cfgmsPublisherPublicKey. Per ADR-006, publisher
+// mirroring pkg/modules/trust.cfgmsPublisherPublicKey. The Makefile variable
+// STEWARD_ADDITIONAL_PUBLISHER_KEYS supplies this value. Per ADR-006, publisher
 // key material is baked into the steward binary at build time and never
 // injected via steward.cfg or any other runtime configuration path — this
 // variable, not the config file, is additional_publishers' only legitimate
@@ -41,6 +42,10 @@ const ed25519PublicKeySize = 32
 // additional publishers, so any additional_publishers entry fails resolution
 // with a named error rather than silently granting no trust.
 var additionalPublisherKeyMaterial = ""
+
+// reservedPublisherName is the name of the baked-in CFGMS publisher; an
+// additional publisher may not claim it.
+const reservedPublisherName = "cfgms"
 
 // ErrAdditionalPublisherUnresolvable is returned by ResolveAdditionalPublishers
 // when a configured additional_publishers name has no known key material.
@@ -55,22 +60,32 @@ func defaultResolveKnownPublisher(name string) (pkgtrust.PublisherIdentity, bool
 	// An empty name is never resolvable: without this guard a malformed registry
 	// entry whose name half is empty ("=<b64key>") would match an empty
 	// additional_publishers entry and grant trust to key material the operator
-	// never named.
-	if name == "" || additionalPublisherKeyMaterial == "" {
+	// never named. The reserved name "cfgms" belongs to the baked-in CFGMS key.
+	if name == "" || name == reservedPublisherName || additionalPublisherKeyMaterial == "" {
 		return pkgtrust.PublisherIdentity{}, false
 	}
+	var found pkgtrust.PublisherIdentity
+	matches := 0
 	for _, entry := range strings.Split(additionalPublisherKeyMaterial, ",") {
 		entryName, b64Key, ok := strings.Cut(entry, "=")
 		if !ok || entryName != name {
 			continue
 		}
+		matches++
 		keyBytes, err := base64.StdEncoding.DecodeString(b64Key)
 		if err != nil || len(keyBytes) != ed25519PublicKeySize {
-			return pkgtrust.PublisherIdentity{}, false
+			continue
 		}
-		return pkgtrust.PublisherIdentity{Name: name, PublicKey: keyBytes, Algorithm: "ed25519"}, true
+		found = pkgtrust.PublisherIdentity{Name: name, PublicKey: keyBytes, Algorithm: "ed25519"}
 	}
-	return pkgtrust.PublisherIdentity{}, false
+	// A name listed more than once is ambiguous: which key anchors trust would
+	// depend on list order, so it never resolves. A key that is a small-order
+	// point (including the all-zero placeholder) would accept forged signatures,
+	// so it never anchors trust either.
+	if matches != 1 || !pkgtrust.IsUsableIdentityKey(found) {
+		return pkgtrust.PublisherIdentity{}, false
+	}
+	return found, true
 }
 
 // StewardTrustEnforcer enforces module trust policy before the steward runtime

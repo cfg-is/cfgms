@@ -33,9 +33,13 @@ GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 # Override for MSP builds:
 #   make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com VERSION=v1.0.0
 #   make build-steward STEWARD_PUBLISHER_KEY=<base64-ed25519-pub>
+#   make build-steward STEWARD_ADDITIONAL_PUBLISHER_KEYS=acme-corp=<base64-ed25519-pub>[,name2=<b64>]
+# STEWARD_ADDITIONAL_PUBLISHER_KEYS is the only source of key material for
+# module_trust.additional_publishers (ADR-006: build-time only). Empty by default.
+STEWARD_ADDITIONAL_PUBLISHER_KEYS ?=
 STEWARD_CONTROLLER_URL ?= https://localhost:9080
 STEWARD_SECURITY_PROFILE?=public-beta
-STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=)"
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=) -X github.com/cfgis/cfgms/features/steward/modules/trust.additionalPublisherKeyMaterial=$(STEWARD_ADDITIONAL_PUBLISHER_KEYS)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
