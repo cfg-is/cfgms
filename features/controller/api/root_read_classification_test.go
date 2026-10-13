@@ -143,6 +143,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/sessions":                                               {rootReadCrossing, ""},
 	"/api/v1/stewards":                                               {rootReadCrossing, ""},
 	"/api/v1/stewards/connections/all":                               {rootReadCrossing, ""},
+	"/api/v1/stewards/identity-clones":                               {rootReadCrossing, ""},
 	"/api/v1/stewards/refresh/pending":                               {rootReadCrossing, ""},
 	"/api/v1/stewards/upgrade/{upgrade_id}":                          {rootReadCrossing, ""},
 	"/api/v1/stewards/{id}":                                          {rootReadCrossing, ""},

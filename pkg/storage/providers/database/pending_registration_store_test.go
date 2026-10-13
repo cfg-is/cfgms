@@ -829,3 +829,19 @@ func TestPendingRegistration_CloneOfRoundTrip(t *testing.T) {
 	assert.Equal(t, "steward-original", byPending["pr-clone"])
 	assert.Empty(t, byPending["pr-plain"])
 }
+
+func TestDatabasePendingRegistrationStore_ReassignPendingSteward(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("p-reassign", "tenant-1")))
+
+	require.NoError(t, store.ReassignPendingSteward(ctx, "p-reassign", "steward-original"))
+	got, err := store.GetPendingByID(ctx, "p-reassign")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-original", got.StewardID)
+
+	assert.ErrorIs(t, store.ReassignPendingSteward(ctx, "ghost", "steward-original"), business.ErrPendingRegistrationNotFound)
+
+	require.NoError(t, store.UpdateStatus(ctx, "p-reassign", business.PendingRegistrationStatusApproved))
+	assert.ErrorIs(t, store.ReassignPendingSteward(ctx, "p-reassign", "steward-other"), business.ErrPendingRegistrationNotFound)
+}

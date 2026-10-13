@@ -117,6 +117,18 @@ The steward runs three concurrent activities:
 3. Disconnect from controller cleanly (gRPC-over-QUIC transport close)
 4. Exit
 
+### Operator Actions on a Detected Clone (Issue #4951, ADR-034 §5)
+
+The operator decides which machine is the original; each action leaves the steward record in a defined state. See the [identity clone runbook](../runbooks/steward-identity-clone.md).
+
+| Action | Command | Record afterwards |
+|--------|---------|-------------------|
+| Split | `cfg registration approve <pending-id>` | Original unchanged; the copy is a new steward with its own ID. |
+| Removal | `cfg registration deny <pending-id>` (plus `cfg steward rotate-credentials` if the original's credentials may be stolen) | Original unchanged; after rotate it is `archived` and every certificate for the ID is revoked. |
+| Move | `cfg steward move-identity <steward-id> --to <pending-id>` | Same ID, `DeviceID`/`IdentityKeyPub`/`KeyProtectionLevel` of the queued machine, provenance baseline cleared; old certificates revoked. |
+
+After a rotate the approved machine finds its stored certificate refused, runs the re-admission handshake with its device key (ADR-011 Amendment 1) and waits for `cfg refresh approve`. With a file-backed device key a copy holding the key can also file a request, so approve only after checking the machine; hardware-backed keys remove that case.
+
 ### Planned Clones (ADR-034 §6)
 
 A base image captured from an enrolled machine would copy the device key, client

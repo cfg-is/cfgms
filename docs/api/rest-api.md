@@ -834,6 +834,36 @@ strips it. For a WebAuthn proof it also attaches `webauthn_manifest`, a CA-signe
 the credentials authorized for that steward's tenant, so the steward can verify the
 assertion independently. Nonce single-use is enforced by the steward.
 
+### Steward Identity Clones
+
+Operator endpoints for a steward identity that appears on two machines (ADR-034 §5). Detection and refusal are automatic; these endpoints are how the operator acts on a detected copy. Split and removal of a queued copy use `POST /api/v1/registration/{id}/approve` and `/deny`.
+
+#### GET /api/v1/stewards/identity-clones
+
+Permission `steward:read`, tenant-scoped (a tenant outside the caller's scope is omitted, and a root caller subject to the tenant-crossing boundary sees only tenants it has a crossing for). Returns, per steward ID, the detection evidence from the `steward_identity_conflict_detected` and `steward_provenance_divergence` audit events and every queued pending registration whose `clone_of` equals that steward ID. Nothing is stored for this view.
+
+```json
+{"data": {"clones": [{
+  "steward_id": "steward-1", "tenant_id": "acme-corp",
+  "first_detected": "2026-10-01T10:00:00Z", "last_detected": "2026-10-01T11:00:00Z",
+  "detection_count": 2,
+  "existing_peer": "192.0.2.10:5000", "other_peer": "192.0.2.20:6000",
+  "serials": ["1001", "1002"],
+  "divergent_fields": ["hostname", "machine_id"],
+  "queued_copies": [{"pending_id": "pending-9", "hostname": "copy-host", "source_ip": "10.0.0.9", "registered_at": "2026-10-01T10:05:00Z"}]
+}]}}
+```
+
+`divergent_fields` are provenance field **names**; values are never returned. A steward with a queued copy but no recorded detection event is listed with `detection_count` 0.
+
+#### POST /api/v1/stewards/{id}/credentials/rotate
+
+Permission `steward:rotate-credentials`, **AssuranceStrong**. Revokes every client-certificate serial issued for the steward ID (refused immediately at control-plane admission, including on open streams) and sets the record to `archived`, so the next refresh is queued for approval regardless of policy. Returns `{"id", "status": "archived", "revoked_serials": [...], "next_step"}` and records the high-severity security audit event `steward_credentials_rotated` listing the serials. `404` for an unknown steward or one outside the caller's tenant scope; `409` for a revoked or deregistered steward.
+
+#### POST /api/v1/stewards/{id}/identity/move
+
+Permission `steward:move-identity`, **AssuranceStrong**. Request body `{"pending_id": "..."}`. The pending registration must be in the steward's tenant, have `clone_of` equal to `{id}`, and be `pending`; otherwise `404` (a pending ID from another tenant or without `clone_of` is indistinguishable from an unknown one) or `409` (not pending). The steward record is rebound to the queued machine's device identity (`409` `DEVICE_ID_CONFLICT` if another live steward in the tenant holds it; nothing changes), its provenance baseline is cleared, the queued entry is pointed at the original steward ID and approved, and every serial previously issued for that ID is revoked. The queued machine claims under the original steward ID. Audit event `steward_identity_moved` (high). No other endpoint changes a steward's device identity.
+
 ### Steward Service and Process Actions
 
 An operator can start, stop or restart a service, or end, suspend or resume a process, on

@@ -254,6 +254,24 @@ func (s *SQLitePendingRegistrationStore) ListAll(ctx context.Context, tenantID s
 	return entries, rows.Err()
 }
 
+// ReassignPendingSteward points a still-pending entry at stewardID.
+func (s *SQLitePendingRegistrationStore) ReassignPendingSteward(ctx context.Context, pendingID, stewardID string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE cfgms_pending_registrations
+		SET steward_id = ?
+		WHERE pending_id = ? AND status = 'pending'`,
+		stewardID, pendingID,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to reassign steward for %s: %w", pendingID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrPendingRegistrationNotFound
+	}
+	return nil
+}
+
 // ExpireStale marks entries whose expires_at is at or before cutoff and whose status
 // is "pending" as "expired". Returns the number of entries updated.
 func (s *SQLitePendingRegistrationStore) ExpireStale(ctx context.Context, cutoff time.Time) (int, error) {

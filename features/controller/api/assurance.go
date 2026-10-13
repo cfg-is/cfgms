@@ -60,6 +60,8 @@ var permissionAssurance = map[string]Requirement{
 	"refresh:set-policy":                  {Min: session.AssuranceStrong},                            // PUT /tenants/{tenant_path}/refresh-policy
 	"steward:move":                        {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
 	"steward:decommission":                {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
+	"steward:rotate-credentials":          {Min: session.AssuranceStrong},                            // POST /stewards/{id}/credentials/rotate (ADR-034 §5)
+	"steward:move-identity":               {Min: session.AssuranceStrong},                            // POST /stewards/{id}/identity/move (ADR-034 §5)
 	"account:create":                      {Min: session.AssuranceStrong},                            // POST /accounts (Issue #3574)
 	"account:update":                      {Min: session.AssuranceStrong},                            // PUT  /accounts/{username} (Issue #3126: can reset password or disable; Issue #3574)
 	"account:delete":                      {Min: session.AssuranceStrong},                            // DELETE /accounts/{username} (Issue #3574)

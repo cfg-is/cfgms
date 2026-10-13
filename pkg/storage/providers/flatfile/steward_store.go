@@ -348,6 +348,35 @@ func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID
 	return s.writeSteward(record)
 }
 
+// RebindStewardIdentity replaces the steward's device identity and clears its
+// provenance baseline, enforcing the same-tenant device_id uniqueness rule.
+func (s *FlatFileStewardStore) RebindStewardIdentity(_ context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	if deviceID != "" {
+		all, err := s.readAllStewards()
+		if err != nil {
+			return fmt.Errorf("flatfile: failed to scan for device_id conflict: %w", err)
+		}
+		for _, r := range all {
+			if r.TenantID == record.TenantID && r.DeviceID == deviceID && r.ID != record.ID &&
+				r.Status != business.StewardStatusDeregistered {
+				return business.ErrStewardDeviceIDConflict
+			}
+		}
+	}
+	record.DeviceID = deviceID
+	record.IdentityKeyPub = identityKeyPub
+	record.KeyProtectionLevel = keyProtectionLevel
+	record.LastProvenanceJSON = ""
+	return s.writeSteward(record)
+}
+
 // UpdateStewardTenant moves a steward to a different tenant by updating its
 // TenantID field, guarded by a compare-and-swap on the steward's current
 // tenant (Issue #3895): the write only applies if the on-disk record's

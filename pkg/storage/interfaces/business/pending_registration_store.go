@@ -142,6 +142,12 @@ type PendingRegistrationStore interface {
 	// deadline.
 	UpdateStatus(ctx context.Context, pendingID, status string) error
 
+	// ReassignPendingSteward points a still-pending entry at stewardID (ADR-034 §5
+	// "move"), so the claim signs the certificate with that steward ID as CN. It
+	// applies only while the entry's status is "pending" and returns
+	// ErrPendingRegistrationNotFound — the conflict sentinel — otherwise.
+	ReassignPendingSteward(ctx context.Context, pendingID, stewardID string) error
+
 	// ListPending returns entries whose status is "pending", ordered by registered_at ascending.
 	// An empty tenantID returns pending entries for all tenants (operator list view).
 	// Approved, denied, claimed, and expired entries are never included.

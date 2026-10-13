@@ -389,6 +389,46 @@ func (s *DatabaseStewardStore) SetStewardProvenance(ctx context.Context, steward
 	return tx.Commit()
 }
 
+// RebindStewardIdentity replaces the steward's device identity and clears its
+// provenance baseline. A device_id held by another live steward in the tenant
+// is reported as ErrStewardDeviceIDConflict.
+func (s *DatabaseStewardStore) RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel string) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin rebind identity tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	if identityKeyPub == nil {
+		identityKeyPub = []byte{}
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records
+		SET device_id = $2, identity_key_pub = $3, key_protection_level = $4, last_provenance_json = ''
+		WHERE id = $1`,
+		stewardID, deviceID, identityKeyPub, keyProtectionLevel)
+	if err != nil {
+		if strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
+			return business.ErrStewardDeviceIDConflict
+		}
+		return fmt.Errorf("database: failed to rebind identity for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return tx.Commit()
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)

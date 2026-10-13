@@ -51,6 +51,20 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "steward",
 		Actions:      []string{"delete"},
 	},
+	{
+		Id:           "steward.rotate-credentials",
+		Name:         "Rotate Steward Credentials",
+		Description:  "Revoke a steward's client certificates and archive it so the next refresh needs approval (ADR-034 §5)",
+		ResourceType: "steward",
+		Actions:      []string{"rotate-credentials"},
+	},
+	{
+		Id:           "steward.move-identity",
+		Name:         "Move Steward Identity",
+		Description:  "Move a steward identity to a queued copy on another machine and revoke the previous certificates (ADR-034 §5)",
+		ResourceType: "steward",
+		Actions:      []string{"move-identity"},
+	},
 
 	// Configuration Management Permissions
 	{

@@ -392,3 +392,14 @@ func TestPendingRegistrationStore_HostnameAndKeyFingerprint(t *testing.T) {
 	assert.Equal(t, "ws-042.corp.example", got.Hostname)
 	assert.Equal(t, "ab12cd34", got.KeyFingerprint)
 }
+
+func (s *inMemPendingStore) ReassignPendingSteward(_ context.Context, pendingID, stewardID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[pendingID]
+	if !ok || e.Status != business.PendingRegistrationStatusPending {
+		return business.ErrPendingRegistrationNotFound
+	}
+	e.StewardID = stewardID
+	return nil
+}

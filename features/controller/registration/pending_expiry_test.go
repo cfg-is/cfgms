@@ -324,3 +324,14 @@ func TestPendingExpiryJobStoreRequirements_DecliningProviderFailsStartup(t *test
 	assert.Contains(t, err.Error(), string(interfaces.StoreNamePendingRegistration),
 		"startup error must name the missing store")
 }
+
+func (s *memPendingStore) ReassignPendingSteward(_ context.Context, pendingID, stewardID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[pendingID]
+	if !ok || e.Status != business.PendingRegistrationStatusPending {
+		return business.ErrPendingRegistrationNotFound
+	}
+	e.StewardID = stewardID
+	return nil
+}

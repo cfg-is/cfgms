@@ -125,3 +125,28 @@ is below Strong.
 Bulk decommission fans out one `DELETE /api/v1/stewards/:id` call per selected steward. Each
 call is individually authorized and audited server-side; no batch endpoint is used. Per-item
 success and failure are reported inline.
+
+
+---
+
+## cfg steward clones list / rotate-credentials / move-identity
+
+Operator actions for a steward identity that appears on two machines (ADR-034 §5).
+See the [identity clone runbook](../runbooks/steward-identity-clone.md) for when to use each.
+
+```
+cfg steward clones list [--format table|json]
+cfg steward rotate-credentials <steward-id> [--yes]
+cfg steward move-identity <steward-id> --to <pending-id> [--yes]
+```
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--format` | `clones list` | `table` (default; columns STEWARD, DETECTED, LAST SEEN, EXISTING PEER, OTHER PEER, QUEUED COPY, HOSTNAME) or `json`. |
+| `--to` | `move-identity` | Pending registration ID of the queued copy that becomes the steward (required). |
+| `--yes`, `-y` | `rotate-credentials`, `move-identity` | Skip the confirmation prompt. Without it a non-interactive run is refused. |
+| `--url`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` | all | Controller connection, as for the other `cfg steward` verbs. |
+
+`rotate-credentials` and `move-identity` require AssuranceStrong (permissions
+`steward:rotate-credentials` and `steward:move-identity`); `clones list` needs `steward:read`.
+They take a steward ID, not a selector.

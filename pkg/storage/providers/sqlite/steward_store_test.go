@@ -696,3 +696,34 @@ func TestSetStewardProvenance(t *testing.T) {
 	err = store.SetStewardProvenance(ctx, "ghost-prov", `{"machine_id":"m2"}`)
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
+
+func TestRebindStewardIdentity(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	a := testStewardRec("s-rb-a")
+	a.TenantID, a.DeviceID, a.IdentityKeyPub, a.KeyProtectionLevel = "t1", "dev-a", []byte("key-a"), "file"
+	require.NoError(t, store.RegisterSteward(ctx, a))
+	require.NoError(t, store.SetStewardProvenance(ctx, "s-rb-a", `{"machine_id":"m1"}`))
+	b := testStewardRec("s-rb-b")
+	b.TenantID, b.DeviceID = "t1", "dev-b"
+	require.NoError(t, store.RegisterSteward(ctx, b))
+
+	require.NoError(t, store.RebindStewardIdentity(ctx, "s-rb-a", "dev-new", []byte("key-new"), "tpm"))
+	got, err := store.GetSteward(ctx, "s-rb-a")
+	require.NoError(t, err)
+	assert.Equal(t, "dev-new", got.DeviceID)
+	assert.Equal(t, []byte("key-new"), got.IdentityKeyPub)
+	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Empty(t, got.LastProvenanceJSON, "the new machine must re-baseline")
+	assert.Equal(t, "t1", got.TenantID)
+
+	// Another live steward in the tenant holds dev-b: conflict, record unchanged.
+	err = store.RebindStewardIdentity(ctx, "s-rb-a", "dev-b", []byte("key-x"), "file")
+	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict)
+	got, err = store.GetSteward(ctx, "s-rb-a")
+	require.NoError(t, err)
+	assert.Equal(t, "dev-new", got.DeviceID)
+
+	err = store.RebindStewardIdentity(ctx, "ghost", "dev-z", []byte("k"), "file")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
