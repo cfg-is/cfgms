@@ -100,6 +100,25 @@ func (ks *FileKeyStore) GenerateOrLoad(_ context.Context) (ed25519.PublicKey, ed
 		return nil, nil, fmt.Errorf("read device identity key: %w", err)
 	}
 
+	return ks.generateAndStoreLocked(keyPath)
+}
+
+// Regenerate replaces the stored device identity key with a freshly generated
+// one and returns it. The new key is encrypted and written to a temp file and
+// renamed over the old key file, so the old key is discarded only once the new
+// one is durably in place; a crash leaves either the old key or the new one,
+// never neither. The old key is never reused. A steward that has learned its
+// identity is a copy of another device calls this so it registers as a new
+// device (ADR-034 §4).
+func (ks *FileKeyStore) Regenerate(_ context.Context) (ed25519.PublicKey, ed25519.PrivateKey, error) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	return ks.generateAndStoreLocked(filepath.Join(ks.identityDir, keyFileName))
+}
+
+// generateAndStoreLocked generates a key, writes it encrypted to keyPath
+// atomically (replacing any existing file) and makes it current. ks.mu must be held.
+func (ks *FileKeyStore) generateAndStoreLocked(keyPath string) (ed25519.PublicKey, ed25519.PrivateKey, error) {
 	pub, priv, genErr := ed25519.GenerateKey(rand.Reader)
 	if genErr != nil {
 		return nil, nil, fmt.Errorf("generate device identity key: %w", genErr)

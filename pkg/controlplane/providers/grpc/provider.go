@@ -17,6 +17,7 @@ import (
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -542,7 +543,11 @@ func (p *Provider) awaitAdmission() error {
 // returns it wrapped in interfaces.ErrIdentityRejected.
 func (p *Provider) markIdentityRejected(cause error) error {
 	p.rejectOnce.Do(func() {
-		p.rejectErr = fmt.Errorf("%w: %v", interfaces.ErrIdentityRejected, cause)
+		sentinel := interfaces.ErrIdentityRejected
+		if isIdentityInUse(cause) {
+			sentinel = interfaces.ErrIdentityInUse
+		}
+		p.rejectErr = fmt.Errorf("%w: %v", sentinel, cause)
 		close(p.rejectedCh)
 	})
 	return p.rejectErr
@@ -573,6 +578,35 @@ func isIdentityRejection(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isIdentityInUse reports whether err is the controller's IDENTITY_IN_USE
+// refusal: a PermissionDenied status carrying an ErrorInfo detail with that
+// reason in the cfgms.io domain (ADR-034 §4).
+func isIdentityInUse(err error) bool {
+	s, ok := status.FromError(err)
+	if !ok || s.Code() != codes.PermissionDenied {
+		return false
+	}
+	for _, d := range s.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == identityInUseReason && info.GetDomain() == identityInUseDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// identityInUseError builds the refusal returned to a connection that copies an
+// identity already in use. The text is fixed: it never names the other
+// endpoint's address, hostname or provenance.
+func identityInUseError() error {
+	st := status.New(codes.PermissionDenied, "steward identity is in use by another device")
+	withDetail, err := st.WithDetails(&errdetails.ErrorInfo{Reason: identityInUseReason, Domain: identityInUseDomain})
+	if err != nil {
+		return st.Err()
+	}
+	return withDetail.Err()
 }
 
 // dialInitial repeats dialAndOpenStream, using the same escalating backoff as
@@ -1565,22 +1599,50 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// only classifies it. Refusing a Copy is a separate gate.
 	provenance := s.provider.assessProvenance(stream.Context(), stewardID)
 
-	// Duplicate-identity detection (ADR-034 §3): report only, never refuse.
-	s.provider.reportIdentityConflict(stream.Context(), stewardID, p.Addr.String(), peerSerial, provenance)
+	// Duplicate-identity detection (ADR-034 §3): reported before any refusal.
+	existing := s.provider.reportIdentityConflict(stream.Context(), stewardID, p.Addr.String(), peerSerial, provenance)
+
+	// Copy refusal (ADR-034 §2/§4), before registry.Register so a refused
+	// connection never displaces the live one. Rule 1: provenance first; a
+	// positive ApprovedMachine displaces a live connection from another host.
+	// Rule 2: otherwise the endpoint that already holds the channel keeps it.
+	displaced := (*registry.StewardConnection)(nil)
+	switch {
+	case provenance.Decision == ProvenanceCopy:
+		s.provider.logger.Warn("steward ControlChannel refused: identity in use by another device",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		return identityInUseError()
+	case existing != nil && provenance.Decision != ProvenanceApprovedMachine:
+		s.provider.logger.Warn("steward ControlChannel refused: identity already connected from another host",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		return identityInUseError()
+	case existing != nil:
+		displaced = existing
+	}
 
 	// Create a stream sender adapter for the registry
 	sender := &streamSender{stream: stream}
 
+	evictCh := make(chan error, 1)
 	conn := &registry.StewardConnection{
 		StewardID:   stewardID,
 		Sender:      sender,
 		ConnectedAt: time.Now(),
 		RemoteAddr:  p.Addr.String(),
 		PeerSerial:  peerSerial,
+		Evict: func(err error) {
+			select {
+			case evictCh <- err:
+			default:
+			}
+		},
 	}
 
 	if err := s.provider.registry.Register(conn); err != nil {
 		return status.Errorf(codes.Internal, "failed to register steward: %v", err)
+	}
+	if displaced != nil && displaced.Evict != nil {
+		displaced.Evict(identityInUseError())
 	}
 	// Reconnect-safe cleanup: if the steward restarts, its new ControlChannel
 	// registers a fresh connection before this stale handler's stream.Recv
@@ -1613,34 +1675,36 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 
 	// Close the stream if the peer serial is revoked while it is open. Returning
 	// from the handler cancels the stream context, which unblocks Recv.
+	var tick <-chan time.Time
 	if peerSerial != "" && s.provider.revocationChecker != nil {
 		ticker := time.NewTicker(s.provider.recheckInterval())
 		defer ticker.Stop()
-		for {
-			select {
-			case <-recvDone:
-				return nil
-			case <-ticker.C:
-				revoked, rErr := s.provider.revocationChecker.IsRevoked(peerSerial)
-				if rErr != nil {
-					// A transient store error must not tear down the whole fleet;
-					// the next tick retries and new admissions still fail closed.
-					s.provider.logger.Error("revocation re-check failed, keeping stream open",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"error", logging.SanitizeLogValue(rErr.Error()))
-					continue
-				}
-				if revoked {
-					s.provider.logger.Warn("closing steward ControlChannel: certificate revoked",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"serial", logging.SanitizeLogValue(peerSerial))
-					return status.Error(codes.PermissionDenied, "client certificate revoked")
-				}
+		tick = ticker.C
+	}
+	for {
+		select {
+		case <-recvDone:
+			return nil
+		case evictErr := <-evictCh:
+			return evictErr
+		case <-tick:
+			revoked, rErr := s.provider.revocationChecker.IsRevoked(peerSerial)
+			if rErr != nil {
+				// A transient store error must not tear down the whole fleet;
+				// the next tick retries and new admissions still fail closed.
+				s.provider.logger.Error("revocation re-check failed, keeping stream open",
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"error", logging.SanitizeLogValue(rErr.Error()))
+				continue
+			}
+			if revoked {
+				s.provider.logger.Warn("closing steward ControlChannel: certificate revoked",
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"serial", logging.SanitizeLogValue(peerSerial))
+				return status.Error(codes.PermissionDenied, "client certificate revoked")
 			}
 		}
 	}
-	<-recvDone
-	return nil
 }
 
 // controlChannelRecvLoop is the receive loop of an admitted ControlChannel.

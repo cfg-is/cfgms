@@ -3727,3 +3727,82 @@ func TestSanitizeHostnameHint(t *testing.T) {
 	assert.Len(t, sanitizeHostnameHint(long), maxHostnameHintLen)
 	assert.Equal(t, "", sanitizeHostnameHint("<>\x00\n"))
 }
+
+// registerCloneForTest quarantines one device whose registration carries
+// cloneOf, with an existing steward owned by ownerTenant. It returns the
+// listed pending item and the audit entries recorded for the clone event.
+func registerCloneForTest(t *testing.T, cloneOf, ownerTenant string) (PendingRegistration, []*business.AuditEntry) {
+	t.Helper()
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	sm := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(sm.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+	server.SetPendingStore(sm.GetPendingRegistrationStore())
+	stewardSt := sm.GetStewardStore()
+	server.SetStewardStore(stewardSt)
+	server.apiKeys["reg-approval-key"] = &APIKey{
+		ID: "reg-approval-key-id", Key: "reg-approval-key",
+		Permissions: []string{"registration:list-pending"}, TenantID: "default",
+	}
+	server.SetApprovalHook(&quarantineHookForTest{})
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	require.NoError(t, stewardSt.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-original", TenantID: ownerTenant, Hostname: "h", Platform: "linux", Arch: "amd64",
+		Version: "1", Status: business.StewardStatusActive,
+	}))
+	tok := &registration.Token{Token: "cfgms_reg_clone_of", TenantID: "default", ControllerURL: "grpc://controller:7443"}
+	require.NoError(t, server.registrationTokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token: tok.Token, DeviceID: testValidDeviceID, IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM: testValidCSRPEM, CloneOf: cloneOf,
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/api/v1/registration/pending", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer reg-approval-key")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var pending []PendingRegistration
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+	require.Len(t, pending, 1)
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := sm.GetAuditStore().ListAuditEntries(context.Background(), &business.AuditFilter{Actions: []string{"steward_clone_registration_queued"}})
+	require.NoError(t, err)
+	return pending[0], entries
+}
+
+func TestRegister_CloneOf_RecordedWhenSameTenant(t *testing.T) {
+	item, _ := registerCloneForTest(t, "steward-original", "default")
+	assert.Equal(t, "steward-original", item.CloneOf)
+}
+
+func TestRegister_CloneOf_DroppedWhenDifferentTenant(t *testing.T) {
+	item, entries := registerCloneForTest(t, "steward-original", "other-tenant")
+	assert.Empty(t, item.CloneOf, "another tenant's steward ID must be dropped without any signal")
+	assert.Empty(t, entries, "no clone audit event for a dropped clone_of")
+}
+
+func TestRegister_CloneOf_DroppedWhenUnknownOrOversized(t *testing.T) {
+	item, _ := registerCloneForTest(t, "steward-nonexistent", "default")
+	assert.Empty(t, item.CloneOf)
+	item, _ = registerCloneForTest(t, strings.Repeat("a", maxCloneOfLen+1), "default")
+	assert.Empty(t, item.CloneOf)
+}
+
+func TestRegister_CloneOf_QueuedWritesAuditEvent(t *testing.T) {
+	_, entries := registerCloneForTest(t, "steward-original", "default")
+	require.Len(t, entries, 1)
+	assert.Equal(t, business.AuditEventSecurityEvent, entries[0].EventType)
+	assert.Equal(t, business.AuditSeverityMedium, entries[0].Severity)
+	assert.Equal(t, "steward-original", entries[0].Details["clone_of"])
+}

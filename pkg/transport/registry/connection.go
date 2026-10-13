@@ -46,6 +46,12 @@ type StewardConnection struct {
 	// later connection for the same steward ID be compared against this one.
 	PeerSerial string
 
+	// Evict ends this connection's stream with the given error. It is set by the
+	// stream handler that owns the connection, and is how a newer connection
+	// for the same steward ID displaces it (ADR-034 §2). Nil when the
+	// connection cannot be evicted. Safe to call more than once.
+	Evict func(error)
+
 	// mu serializes writes to Sender and lastActivity.
 	mu sync.Mutex
 }

@@ -363,6 +363,7 @@ type APIPendingRegistration struct {
 	TenantID     string    `json:"tenant_id"`
 	SourceIP     string    `json:"source_ip"`
 	RDNS         string    `json:"rdns,omitempty"` // populated by CLI at display time via net.LookupAddr
+	CloneOf      string    `json:"clone_of,omitempty"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
 

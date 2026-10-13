@@ -33,6 +33,12 @@ type RegistrationRequest struct {
 	DeviceID       string `json:"device_id,omitempty"`        // 64-char hex SHA-256 of Ed25519 public key (Issue #2094)
 	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (Issue #2094)
 
+	// CloneOf is the steward ID of the device this one was copied from. Set only
+	// by a steward that was refused as a copy and re-keyed (ADR-034 §4). The
+	// controller records it for the operator and never uses it for an approval,
+	// tenant or authorization decision.
+	CloneOf string `json:"clone_of,omitempty"`
+
 	// CSRPEM is a PEM-encoded CERTIFICATE REQUEST over a keypair the steward
 	// generates locally at registration time (Issue #3780). The controller signs
 	// this public key into the steward's mTLS client certificate; the matching

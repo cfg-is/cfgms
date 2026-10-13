@@ -358,7 +358,7 @@ func migrateRegistrationTokenClaimKey(ctx context.Context, db *sql.DB) error {
 }
 
 // backfillCfgmsPendingRegistrationColumns adds the device-identity columns
-// introduced by Issue #3403, plus csr_pem (Issue #3780) and key_fingerprint (Issue #4598), to a pre-existing
+// introduced by Issue #3403, plus csr_pem (Issue #3780), key_fingerprint (Issue #4598) and clone_of (Issue #4950), to a pre-existing
 // cfgms_pending_registrations table that was created before those columns
 // existed. Fresh databases (table absent or already carrying all columns) are
 // skipped. Column-existence is checked via PRAGMA before each ALTER TABLE so
@@ -383,6 +383,7 @@ func backfillCfgmsPendingRegistrationColumns(ctx context.Context, db *sql.DB) er
 		{"hostname", `ALTER TABLE cfgms_pending_registrations ADD COLUMN hostname             TEXT NOT NULL DEFAULT ''`},
 		{"platform", `ALTER TABLE cfgms_pending_registrations ADD COLUMN platform             TEXT NOT NULL DEFAULT ''`},
 		{"key_fingerprint", `ALTER TABLE cfgms_pending_registrations ADD COLUMN key_fingerprint      TEXT NOT NULL DEFAULT ''`},
+		{"clone_of", `ALTER TABLE cfgms_pending_registrations ADD COLUMN clone_of             TEXT NOT NULL DEFAULT ''`},
 	} {
 		present, err := columnExists(ctx, db, "cfgms_pending_registrations", c.name)
 		if err != nil {
@@ -981,7 +982,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			csr_pem              TEXT NOT NULL DEFAULT '',
 			hostname             TEXT NOT NULL DEFAULT '',
 			platform             TEXT NOT NULL DEFAULT '',
-			key_fingerprint      TEXT NOT NULL DEFAULT ''
+			key_fingerprint      TEXT NOT NULL DEFAULT '',
+			clone_of             TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_tenant_id    ON cfgms_pending_registrations(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_status       ON cfgms_pending_registrations(status)`,

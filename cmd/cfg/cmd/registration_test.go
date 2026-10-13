@@ -28,6 +28,14 @@ func newRegistrationServer(t *testing.T) *httptest.Server {
 			SourceIP:     "10.0.0.1",
 			RegisteredAt: registeredAt,
 		},
+		{
+			PendingID:    "pending-clone",
+			StewardID:    "steward-newcopy",
+			TenantID:     "test-tenant",
+			SourceIP:     "10.0.0.2",
+			CloneOf:      "steward-original",
+			RegisteredAt: registeredAt,
+		},
 	}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +89,8 @@ func TestRegistrationPendingCommand(t *testing.T) {
 		assert.Contains(t, output, "test-tenant")
 		assert.Contains(t, output, "10.0.0.1")
 		assert.Contains(t, output, "RDNS", "RDNS column header must appear")
+		assert.Contains(t, output, "CLONE OF", "CLONE OF column header must appear")
+		assert.Contains(t, output, "steward-original", "the original steward ID must be shown for a clone")
 		assert.Contains(t, output, "Pending registrations")
 	})
 
@@ -108,7 +118,8 @@ func TestRegistrationPendingCommand(t *testing.T) {
 
 		var parsed []APIPendingRegistration
 		require.NoError(t, json.Unmarshal([]byte(output), &parsed), "output must be valid JSON")
-		require.Len(t, parsed, 1)
+		require.Len(t, parsed, 2)
+		assert.Equal(t, "steward-original", parsed[1].CloneOf)
 		assert.Equal(t, "pending-1234567890", parsed[0].PendingID)
 		assert.Equal(t, "steward-1234567890", parsed[0].StewardID)
 		assert.Equal(t, "test-tenant", parsed[0].TenantID)

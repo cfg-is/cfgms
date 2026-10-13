@@ -802,3 +802,30 @@ func TestCreatePendingRegistrationsTable_AlterFailurePropagates(t *testing.T) {
 	assert.Contains(t, err.Error(), "cfgms_pending_registrations",
 		"the error must name the relation whose migration failed")
 }
+
+func TestPendingRegistration_CloneOfRoundTrip(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	entry := testDBPendingEntry("pr-clone", "tenant-1")
+	entry.CloneOf = "steward-original"
+	require.NoError(t, store.AddPending(ctx, entry))
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-plain", "tenant-1")))
+
+	byID, err := store.GetPendingByID(ctx, "pr-clone")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-original", byID.CloneOf)
+
+	byToken, err := store.GetPendingByToken(ctx, "cfgms_reg_tok_pr-clone")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-original", byToken.CloneOf)
+
+	pending, err := store.ListPending(ctx, "tenant-1")
+	require.NoError(t, err)
+	byPending := map[string]string{}
+	for _, p := range pending {
+		byPending[p.PendingID] = p.CloneOf
+	}
+	assert.Equal(t, "steward-original", byPending["pr-clone"])
+	assert.Empty(t, byPending["pr-plain"])
+}

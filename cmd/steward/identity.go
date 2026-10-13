@@ -230,3 +230,68 @@ func loadIdentity(dir string) (*StewardIdentity, error) {
 	}
 	return &id, nil
 }
+
+// cloneMarkerFileName records that this steward was refused as a copy and has
+// re-keyed (ADR-034 §4). It holds the steward ID of the original, which the new
+// device registers with as clone_of. It exists from the moment the device key is
+// regenerated until the registration completes, so a crash in between resumes
+// registering with the NEW key and never falls back to the copied identity.
+const cloneMarkerFileName = "steward-clone-of.json"
+
+type cloneMarker struct {
+	CloneOf string `json:"clone_of"`
+}
+
+func saveCloneMarker(dir, cloneOf string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create clone marker dir: %w", err)
+	}
+	data, err := json.Marshal(cloneMarker{CloneOf: cloneOf})
+	if err != nil {
+		return fmt.Errorf("marshal clone marker: %w", err)
+	}
+	path := filepath.Join(dir, cloneMarkerFileName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write clone marker: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit clone marker: %w", err)
+	}
+	return nil
+}
+
+// loadCloneMarker returns the marker, or (nil, nil) when none exists. An
+// unreadable or corrupt marker is an error: the caller must not guess.
+func loadCloneMarker(dir string) (*cloneMarker, error) {
+	// #nosec G304 -- fixed file name under the steward's private identity directory.
+	data, err := os.ReadFile(filepath.Join(dir, cloneMarkerFileName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read clone marker: %w", err)
+	}
+	var m cloneMarker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("clone marker corrupt: %w", err)
+	}
+	return &m, nil
+}
+
+func clearCloneMarker(dir string) error {
+	if err := os.Remove(filepath.Join(dir, cloneMarkerFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear clone marker: %w", err)
+	}
+	return nil
+}
+
+// clearStoredIdentity removes the stored identity file. After a copy is refused
+// the file describes the original device, not this one.
+func clearStoredIdentity(dir string) error {
+	if err := os.Remove(filepath.Join(dir, identityFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear identity file: %w", err)
+	}
+	return nil
+}
