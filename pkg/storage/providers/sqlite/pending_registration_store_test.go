@@ -533,3 +533,26 @@ func TestReassignPendingSteward(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "steward-original", got.StewardID)
 }
+
+func TestPendingRegistrationStore_KeyAlgorithmRoundTrip(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	p256 := testPendingEntry("pr-alg-p256", "tenant-1")
+	p256.DeviceID = "dev-p256"
+	p256.IdentityKeyPub = []byte{0x30, 0x59, 0x01}
+	p256.KeyAlgorithm = "ecdsa-p256"
+	require.NoError(t, store.AddPending(ctx, p256))
+
+	legacy := testPendingEntry("pr-alg-legacy", "tenant-1")
+	require.NoError(t, store.AddPending(ctx, legacy))
+
+	got, err := store.GetPendingByID(ctx, "pr-alg-p256")
+	require.NoError(t, err)
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm)
+	assert.Equal(t, []byte{0x30, 0x59, 0x01}, got.IdentityKeyPub)
+
+	got, err = store.GetPendingByID(ctx, "pr-alg-legacy")
+	require.NoError(t, err)
+	assert.Empty(t, got.KeyAlgorithm, "an entry written without the field reads back as ed25519 (empty)")
+}

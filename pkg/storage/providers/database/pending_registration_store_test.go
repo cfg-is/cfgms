@@ -60,6 +60,7 @@ func testDBPendingEntry(pendingID, tenantID string) *business.PendingRegistratio
 		DeviceID:           deviceID,
 		IdentityKeyPub:     keyPub,
 		KeyProtectionLevel: "tpm",
+		KeyAlgorithm:       "ecdsa-p256",
 		CSRPEM:             "-----BEGIN CERTIFICATE REQUEST-----\n" + pendingID + "\n-----END CERTIFICATE REQUEST-----",
 		Hostname:           "host-" + pendingID,
 		Platform:           "linux",
@@ -77,6 +78,7 @@ func assertDBDeviceIdentity(t *testing.T, pendingID string, got *business.Pendin
 	assert.Equal(t, deviceID, got.DeviceID, "device_id must round-trip")
 	assert.Equal(t, keyPub, got.IdentityKeyPub, "identity_key_pub must round-trip byte-for-byte")
 	assert.Equal(t, "tpm", got.KeyProtectionLevel, "key_protection_level must round-trip")
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm, "key_algorithm must round-trip")
 	assert.Equal(t, "-----BEGIN CERTIFICATE REQUEST-----\n"+pendingID+"\n-----END CERTIFICATE REQUEST-----", got.CSRPEM, "csr_pem must round-trip")
 	assert.Equal(t, "host-"+pendingID, got.Hostname, "hostname must round-trip")
 	assert.Equal(t, "linux", got.Platform, "platform must round-trip")

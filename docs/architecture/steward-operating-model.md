@@ -1015,6 +1015,10 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.
 
+#### Device key algorithm on the wire (ADR-011 Amendment 3)
+
+The registration request and the `/refresh/complete` and `/refresh/claim` requests carry an optional `key_algorithm` field: `ed25519` or `ecdsa-p256`. An absent or empty value means `ed25519`, so stewards that predate the field keep working unchanged. Beside it, `identity_key_pub` is the base64 raw 32-byte key for `ed25519`, or the base64 PKIX (SubjectPublicKeyInfo) DER encoding for `ecdsa-p256`; `device_id` is the lowercase hex SHA-256 of those bytes. The `pop` signature is over the same 32-byte digest for both algorithms; for `ecdsa-p256` it is an ASN.1 DER ECDSA signature with the digest as the hash input. The controller refuses a request whose algorithm differs from the one stored for the `device_id`. Controller behavior is in the [Controller operating model](controller-operating-model.md). Stewards currently send `ed25519` with the field absent.
+
 ### Reconnecting with a Stored Identity
 
 **A healthy, online steward is never left unable to get back in.** When its identity cannot be trusted it goes back through the controller's approval process — trusted by default or queued for an operator, per tenant policy — but it never ends up stuck (#4532).

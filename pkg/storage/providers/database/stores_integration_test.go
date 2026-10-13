@@ -980,17 +980,18 @@ func TestDatabaseStewardStore_RebindStewardIdentity(t *testing.T) {
 	b.DeviceID = "dev-b"
 	require.NoError(t, store.RegisterSteward(ctx, b))
 
-	require.NoError(t, store.RebindStewardIdentity(ctx, "sw-rb-a", "dev-new", []byte("key-new"), "tpm"))
+	require.NoError(t, store.RebindStewardIdentity(ctx, "sw-rb-a", "dev-new", []byte("key-new"), "tpm", "ecdsa-p256"))
 	got, err := store.GetSteward(ctx, "sw-rb-a")
 	require.NoError(t, err)
 	assert.Equal(t, "dev-new", got.DeviceID)
 	assert.Equal(t, []byte("key-new"), got.IdentityKeyPub)
 	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm, "rebind must carry the key algorithm")
 	assert.Empty(t, got.LastProvenanceJSON)
 
-	err = store.RebindStewardIdentity(ctx, "sw-rb-a", "dev-b", []byte("key-x"), "file")
+	err = store.RebindStewardIdentity(ctx, "sw-rb-a", "dev-b", []byte("key-x"), "file", "")
 	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict)
 
-	err = store.RebindStewardIdentity(ctx, "ghost-rb", "dev-z", []byte("k"), "file")
+	err = store.RebindStewardIdentity(ctx, "ghost-rb", "dev-z", []byte("k"), "file", "")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }

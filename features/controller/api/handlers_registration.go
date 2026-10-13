@@ -4,7 +4,6 @@ package api
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -37,9 +36,10 @@ type RegistrationRequest struct {
 	Token string `json:"token"`
 
 	// Device identity fields (Issue #2095, ADR-010 §1): stable across mTLS cert rotations.
-	DeviceID           string `json:"device_id,omitempty"`            // 64-char lowercase hex SHA-256 of Ed25519 public key
-	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64-encoded Ed25519 public key (32 bytes)
+	DeviceID           string `json:"device_id,omitempty"`            // 64-char lowercase hex SHA-256 of the key bytes (raw Ed25519 key, or PKIX DER for ecdsa-p256)
+	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64: raw 32-byte Ed25519 key, or PKIX DER for ecdsa-p256
 	KeyProtectionLevel string `json:"key_protection_level,omitempty"` // "file" or "tpm"
+	KeyAlgorithm       string `json:"key_algorithm,omitempty"`        // "ed25519" (default when absent) or "ecdsa-p256" (ADR-011 Amendment 3)
 
 	// CloneOf is the steward ID of the device this one reports being copied from
 	// (ADR-034 §4). Informational only: validated against the token's tenant and
@@ -567,6 +567,7 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 			DeviceID:           entry.DeviceID,
 			IdentityKeyPub:     entry.IdentityKeyPub,
 			KeyProtectionLevel: entry.KeyProtectionLevel,
+			KeyAlgorithm:       entry.KeyAlgorithm,
 		})
 		switch {
 		case errors.Is(storeErr, business.ErrStewardDeviceIDConflict):
@@ -1016,9 +1017,26 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device_id is required and must be a 64-character lowercase hex string", http.StatusBadRequest)
 		return
 	}
+	keyAlg, algOK := normalizeKeyAlgorithm(req.KeyAlgorithm)
+	if !algOK {
+		http.Error(w, "key_algorithm must be \"ed25519\" or \"ecdsa-p256\"", http.StatusBadRequest)
+		return
+	}
 	identityKeyBytes, keyErr := base64.StdEncoding.DecodeString(req.IdentityKeyPub)
-	if keyErr != nil || len(identityKeyBytes) != ed25519.PublicKeySize {
-		http.Error(w, "identity_key_pub is required and must be a base64-encoded 32-byte Ed25519 public key", http.StatusBadRequest)
+	if keyErr != nil {
+		http.Error(w, "identity_key_pub is required and must be base64-encoded", http.StatusBadRequest)
+		return
+	}
+	if _, parseErr := parseDevicePublicKey(keyAlg, identityKeyBytes); parseErr != nil {
+		http.Error(w, "identity_key_pub is not a valid public key for key_algorithm "+string(keyAlg)+
+			" (ed25519: raw 32-byte key; ecdsa-p256: PKIX DER on P-256)", http.StatusBadRequest)
+		return
+	}
+	// The DeviceID is SHA-256 of the key bytes. It is enforced here for ecdsa-p256
+	// (ADR-011 Amendment 3); the ed25519 path has historically only checked its
+	// format and keeps doing exactly that.
+	if keyAlg == KeyAlgorithmECDSAP256 && req.DeviceID != deviceIDForKey(identityKeyBytes) {
+		http.Error(w, "device_id must be the lowercase hex SHA-256 of the PKIX DER identity_key_pub", http.StatusBadRequest)
 		return
 	}
 	claimID := registrationClaimID(req.DeviceID, identityKeyBytes)
@@ -1050,6 +1068,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if s.stewardStore != nil {
 		if existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), req.DeviceID, token.TenantID); lookupErr == nil && existing != nil &&
 			existing.Status != business.StewardStatusDeregistered { // Issue #4534: decommissioned devices may re-enroll
+			if storedAlg, ok := normalizeKeyAlgorithm(existing.KeyAlgorithm); !ok || storedAlg != keyAlg {
+				s.emitRefreshAudit(r.Context(), req.DeviceID, token.TenantID,
+					business.AuditEventSecurityEvent, "registration_rejected",
+					business.AuditResultDenied, business.AuditSeverityCritical,
+					map[string]interface{}{
+						"reason":                "key_algorithm_change",
+						"stored_key_algorithm":  string(storedAlg),
+						"request_key_algorithm": string(keyAlg),
+					})
+			}
 			s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
 				"device_id", logging.SanitizeLogValue(req.DeviceID),
 				"tenant_id", logging.SanitizeLogValue(token.TenantID))
@@ -1147,6 +1175,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				DeviceID:           req.DeviceID,
 				IdentityKeyPub:     identityKeyBytes,
 				KeyProtectionLevel: req.KeyProtectionLevel,
+				KeyAlgorithm:       req.KeyAlgorithm,
 				CSRPEM:             req.CSRPEM,
 				Hostname:           req.Hostname,
 				Platform:           req.OS,
@@ -1327,6 +1356,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			DeviceID:           req.DeviceID,
 			IdentityKeyPub:     identityKeyBytes,
 			KeyProtectionLevel: req.KeyProtectionLevel,
+			KeyAlgorithm:       req.KeyAlgorithm,
 		}); storeErr != nil {
 			s.logger.Error("Failed to persist device identity to steward store",
 				"steward_id", stewardID,

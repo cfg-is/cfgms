@@ -135,6 +135,12 @@ type StewardRecord struct {
 	// steward host: "file" (software-only) or "tpm" (hardware-backed). Set by S2c.
 	KeyProtectionLevel string `json:"key_protection_level"`
 
+	// KeyAlgorithm is the device key algorithm: "ed25519" or "ecdsa-p256" (ADR-011
+	// Amendment 3). Empty means "ed25519": records written before the field existed
+	// read back as ed25519. For ed25519 IdentityKeyPub is the raw 32-byte key; for
+	// ecdsa-p256 it is the PKIX (SubjectPublicKeyInfo) DER encoding.
+	KeyAlgorithm string `json:"key_algorithm,omitempty"`
+
 	// LastProvenanceJSON is the last observed provenance snapshot serialised as JSON.
 	// Provenance is a set of device-identity signals (hostname, MAC, CPU serial, etc.)
 	// used by the gate handler (S3b) to score re-entry confidence. Updated at each
@@ -240,13 +246,13 @@ type StewardStore interface {
 
 	// RebindStewardIdentity points the steward record at a different machine's
 	// device identity (ADR-034 §5 "move"): DeviceID, IdentityKeyPub and
-	// KeyProtectionLevel are replaced and LastProvenanceJSON is cleared so the
+	// KeyProtectionLevel and KeyAlgorithm (empty = ed25519) are replaced and LastProvenanceJSON is cleared so the
 	// new machine re-baselines at its next admission. The unique (tenant_id,
 	// device_id) rule applies: when another non-deregistered steward in the same
 	// tenant already holds deviceID the call returns ErrStewardDeviceIDConflict
 	// and changes nothing. Returns ErrStewardNotFound if no record exists.
 	// Only the operator move-identity endpoint may call it.
-	RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel string) error
+	RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error
 
 	// UpdateStewardTenant moves a steward to a different tenant, guarded by a
 	// compare-and-swap on the steward's current tenant (Issue #3895): the write

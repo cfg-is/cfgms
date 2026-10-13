@@ -1159,6 +1159,7 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 			device_id            TEXT NOT NULL DEFAULT '',
 			identity_key_pub     BYTEA NOT NULL DEFAULT '',
 			key_protection_level TEXT NOT NULL DEFAULT '',
+			key_algorithm        TEXT NOT NULL DEFAULT '',
 			csr_pem              TEXT NOT NULL DEFAULT '',
 			hostname             TEXT NOT NULL DEFAULT '',
 			platform             TEXT NOT NULL DEFAULT '',
@@ -1175,6 +1176,7 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS device_id            TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS identity_key_pub     BYTEA NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS key_protection_level TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS key_algorithm        TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS csr_pem              TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS hostname             TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS platform             TEXT NOT NULL DEFAULT ''`,
@@ -1556,6 +1558,7 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 			device_id            TEXT NOT NULL DEFAULT '',
 			identity_key_pub     BYTEA,
 			key_protection_level TEXT NOT NULL DEFAULT '',
+			key_algorithm        TEXT NOT NULL DEFAULT '',
 			last_provenance_json TEXT NOT NULL DEFAULT '',
 			hidden               BOOLEAN NOT NULL DEFAULT FALSE
 		);`
@@ -1566,6 +1569,11 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		`ALTER TABLE steward_records ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;`,
 	); err != nil {
 		return fmt.Errorf("failed to add hidden column to steward_records: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE steward_records ADD COLUMN IF NOT EXISTS key_algorithm TEXT NOT NULL DEFAULT '';`,
+	); err != nil {
+		return fmt.Errorf("failed to add key_algorithm column to steward_records: %w", err)
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_steward_records_tenant_id   ON steward_records(tenant_id);",
