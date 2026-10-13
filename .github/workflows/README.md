@@ -214,10 +214,12 @@ security workflow guide for the full per-check gap list).
 
 #### `ci-image-mirror.yml` — CI Image Mirror
 
-**Triggers**: Push to `develop` touching `.github/ci-images.yml` or the workflow file, `workflow_call` (from `dependency-pin-check.yml`), Manual dispatch. Deliberately no `pull_request` / `pull_request_target`: the job holds `packages: write`.
+**Triggers**: Push to `develop` touching `.github/ci-images.yml` or the workflow file, `workflow_call` (from `dependency-pin-check.yml`), Manual dispatch. Deliberately no `pull_request` / `pull_request_target` of its own: the job holds `packages: write`. A pin-bump PR reaches it through `workflow_call` from the `mirror-pins` job of `docker-security.yml` and `agent-image-build.yml` (same-repository PRs only; fork bumps are mirrored by a maintainer with `gh workflow run ci-image-mirror.yml -f upstream_ref=<ref>`).
 
 **Jobs**:
 - `mirror` — runs `scripts/mirror-ci-images.sh`, copying each image in `.github/ci-images.yml` to `ghcr.io/cfg-is/ci-mirror/<name>:<tag>` with its digest unchanged. Optional `upstream_ref` input mirrors a single new digest.
+
+**PR-time flow**: `docker-security.yml` and `agent-image-build.yml` each run `pin-diff` (read-only; `mirror-ci-images.sh --changed-refs` against the PR base list) then `mirror-pins` (`packages: write`; skipped for forks and when no list entry changed), which calls this workflow once per added or changed ref. Their image-pulling jobs `needs:` it with `if: !cancelled() && needs.mirror-pins.result != 'failure'`, so a failed mirror blocks them and a skipped one does not.
 
 See `docs/development/ci-infrastructure-setup.md` → CI Image Mirror.
 
@@ -310,7 +312,7 @@ See `docs/development/ci-infrastructure-setup.md` → CI Image Mirror.
 | `zizmor.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 | `scorecard.yml` | push develop only | ❌ | ❌ | Weekly Sat | ✅ |
 | `dependency-pin-check.yml` | ❌ | ✅ (path-filtered) | ❌ | Weekly Wed | ✅ |
-| `ci-image-mirror.yml` | develop only (`.github/ci-images.yml`, workflow file) | ❌ (deliberate) | ❌ | ❌ | ✅ (+ `workflow_call`) |
+| `ci-image-mirror.yml` | develop only (`.github/ci-images.yml`, workflow file); PRs via `workflow_call` | ❌ (deliberate) | ❌ | ❌ | ✅ (+ `workflow_call`) |
 | `production-gates.yml` | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `license-check.yml` | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `cla-check.yml` | ❌ | pull_request_target | ✅ | ❌ | ❌ |

@@ -14,6 +14,7 @@
 # Usage:
 #   scripts/mirror-ci-images.sh [--dry-run] [--only <image>:<tag>@sha256:<digest>]
 #   scripts/mirror-ci-images.sh --check
+#   scripts/mirror-ci-images.sh --changed-refs <base-list-file>
 #
 # Modes:
 #   (default)   Copy every list entry to ghcr.io/cfg-is/ci-mirror/<name>:<tag>,
@@ -32,6 +33,13 @@
 #               reference outside the mirror, a miss or a digest mismatch.
 #               Build-stage names and ${...} variables are skipped.
 #
+#   --changed-refs BASE
+#               Print the upstream ref of every entry in the list that is absent
+#               from the list file BASE (an added entry or a changed tag or
+#               digest), one per line. A removed entry prints nothing. Read-only:
+#               no docker, no network. A missing or empty BASE yields every
+#               entry. The PR-time mirror job feeds this to --only.
+#
 # Options (for tests): --list FILE, --root DIR.
 
 set -euo pipefail
@@ -42,6 +50,7 @@ LIST=""
 MODE="copy"
 DRY_RUN=0
 ONLY=""
+BASE_LIST=""
 
 usage() {
     sed -n '2,/^set -/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
@@ -52,6 +61,7 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY_RUN=1 ;;
         --check) MODE="check" ;;
         --only) ONLY="${2:-}"; [ -n "$ONLY" ] || { echo "--only needs a reference" >&2; exit 2; }; shift ;;
+        --changed-refs) MODE="changed"; BASE_LIST="${2:-}"; [ -n "$BASE_LIST" ] || { echo "--changed-refs needs a base list file" >&2; exit 2; }; shift ;;
         --list) LIST="${2:-}"; shift ;;
         --root) ROOT="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -66,6 +76,7 @@ DIGEST_RE='@sha256:[0-9a-f]{64}$'
 
 # list_entries prints "<upstream>\t<mirror>" for each list entry.
 list_entries() {
+    local file="${1:-$LIST}"
     awk '
         /^- upstream:[[:space:]]/ { sub(/^- upstream:[[:space:]]*/, ""); up = $0; next }
         /^[[:space:]]+mirror:[[:space:]]/ {
@@ -74,7 +85,7 @@ list_entries() {
             print up "\t" $0; up = ""
         }
         END { if (up != "") { print "upstream without mirror: " up > "/dev/stderr"; bad = 1 } exit bad }
-    ' "$LIST"
+    ' "$file"
 }
 
 # ref_image_tag strips the digest: <image>:<tag>@sha256:x -> <image>:<tag>
@@ -214,7 +225,22 @@ run_copy() {
     return "$rc"
 }
 
+# run_changed prints each upstream ref in the list that BASE_LIST lacks.
+run_changed() {
+    local entries base="" up name
+    entries="$(list_entries)" || { echo "malformed image list: $LIST" >&2; return 1; }
+    if [ -f "$BASE_LIST" ]; then
+        base="$(list_entries "$BASE_LIST")" || { echo "malformed base list: $BASE_LIST" >&2; return 1; }
+    fi
+    while IFS=$'\t' read -r up name; do
+        [ -n "$up" ] || continue
+        printf '%s\n' "$base" | cut -f1 | grep -qxF -- "$up" || printf '%s\n' "$up"
+    done <<< "$entries"
+    return 0
+}
+
 case "$MODE" in
+    changed) run_changed ;;
     check) run_check ;;
     copy) run_copy ;;
 esac

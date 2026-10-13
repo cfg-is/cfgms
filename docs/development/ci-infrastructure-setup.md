@@ -223,9 +223,13 @@ The S3-compatible test store (`s3-test` in `docker-compose.test.yml`) runs the V
 
 `.github/workflows/ci-image-mirror.yml` runs `scripts/mirror-ci-images.sh`, which copies each `<image>:<tag>@<digest>` with `docker buildx imagetools create`. The copy keeps the manifest digest and the full multi-arch index, so the Trivy image scan stays valid, and an entry whose digest is already in the mirror is skipped. `--dry-run` prints each copy without credentials.
 
-Triggers: `push` to `develop` touching `.github/ci-images.yml` or the workflow file; `workflow_call`; `workflow_dispatch`. It never runs from `pull_request`, and `packages: write` is granted to the mirror job only.
+Triggers: `push` to `develop` touching `.github/ci-images.yml` or the workflow file; `workflow_call`; `workflow_dispatch`. It has no `pull_request` trigger of its own, and `packages: write` is granted to the mirror job only.
 
 The weekly `dependency-pin-check.yml` compares each listed digest with its tag's current digest. For every drift it calls the mirror workflow with `upstream_ref` (`--only <ref>`) in the same run, so a pin-bump PR always points at a digest that is already mirrored. There is no separate mirror schedule.
+
+**Pin-bump PRs.** A PR that adds or changes an entry in `.github/ci-images.yml` mirrors the new image during its own CI, with no manual step. `docker-security.yml` and `agent-image-build.yml` each start with an unprivileged `pin-diff` job (`contents: read`) that runs `scripts/mirror-ci-images.sh --changed-refs <list at the PR base>` and outputs the `upstream:` refs that were added or changed (a removed entry yields none). A `mirror-pins` job (`packages: write`, that job only) calls `ci-image-mirror.yml` through `workflow_call` once per ref, one at a time, which runs `--only <ref>`; `--only` still refuses a ref that is not in the list. The image-pulling jobs (`Scan Controller Image`, `Scan Steward Image`, `Agent Image Build`) `needs:` `mirror-pins` with `if: !cancelled() && needs.mirror-pins.result != 'failure'`: a failed mirror fails or blocks them, while a skipped one (fork PR, or no list change) does not. The merge-queue jobs that pull mirrored images run after the PR-time mirror, so they need no edit. A same-repository PR runs its own copy of the mirror script with `packages: write`; that is no wider than what a same-repository author can already do, and the destination is fixed to `ghcr.io/cfg-is/ci-mirror/`.
+
+**Fork PRs** never get package write access: `mirror-pins` is skipped when `github.event.pull_request.head.repo.full_name != github.repository`. For a fork's bump, a maintainer runs `gh workflow run ci-image-mirror.yml -f upstream_ref=<ref>` from `develop` after the entry is in the list on `develop`, or on a maintainer-owned branch carrying the list change, then re-runs the failed jobs.
 
 ### Adding a CI image
 
