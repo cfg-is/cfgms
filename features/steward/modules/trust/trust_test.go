@@ -40,13 +40,18 @@ func signBundle(b *bundle.Bundle, publisherName string, priv ed25519.PrivateKey)
 }
 
 func makeTestBundle() *bundle.Bundle {
+	return makeTestBundleFor("cfgms")
+}
+
+// makeTestBundleFor builds a bundle whose manifest names the given publisher.
+func makeTestBundleFor(publisher string) *bundle.Bundle {
 	return &bundle.Bundle{
 		Manifest: &featuremodules.ModuleMetadata{
 			Name:      "test-module",
 			Version:   "1.0.0",
 			Executors: []string{"steward"},
 			Kind:      "steward",
-			Publisher: "test",
+			Publisher: publisher,
 		},
 		ContentHash: "sha256-test-content-hash-for-signing",
 	}
@@ -87,7 +92,7 @@ func TestStrictModeRejectsUnknownPublisher(t *testing.T) {
 	_, unknownPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeTestBundle()
+	b := makeTestBundleFor("unknown-vendor")
 	signBundle(b, "unknown-vendor", unknownPriv)
 
 	enforcer := testEnforcer(cfgmsPub)
@@ -119,7 +124,7 @@ func TestStrictModeAcceptsAdditionalPublisher(t *testing.T) {
 	extraPub, extraPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeTestBundle()
+	b := makeTestBundleFor("extra-vendor")
 	signBundle(b, "extra-vendor", extraPriv)
 
 	enforcer := testEnforcer(cfgmsPub)
@@ -192,7 +197,7 @@ func TestResolveAdditionalPublishers_KnownNameLoadsUnderStrict(t *testing.T) {
 	resolved, err := enforcer.ResolveAdditionalPublishers([]string{"extra-vendor"})
 	require.NoError(t, err)
 
-	b := makeTestBundle()
+	b := makeTestBundleFor("extra-vendor")
 	signBundle(b, "extra-vendor", extraPriv)
 	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, resolved))
 }
@@ -223,7 +228,7 @@ func TestResolveAdditionalPublishers_NotListedNameIsRejected(t *testing.T) {
 	resolved, err := enforcer.ResolveAdditionalPublishers(nil)
 	require.NoError(t, err)
 
-	b := makeTestBundle()
+	b := makeTestBundleFor("extra-vendor")
 	signBundle(b, "extra-vendor", extraPriv)
 	err = enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, resolved)
 	require.Error(t, err)

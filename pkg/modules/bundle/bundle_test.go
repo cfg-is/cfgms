@@ -3,6 +3,7 @@
 package bundle_test
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"testing"
 
@@ -135,4 +136,97 @@ func TestBundle_TamperedContentProducesDifferentHash(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEqual(t, hashOriginal, hashTampered)
+}
+
+func TestComputeContentHashFromDigests_BoundaryShift(t *testing.T) {
+	d := func(b byte) [32]byte {
+		var x [32]byte
+		for i := range x {
+			x[i] = b
+		}
+		return x
+	}
+	manifest := []byte("name: m\n")
+
+	base, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"linux-amd64": d(1), "linux-arm64": d(2)}, manifest)
+	require.NoError(t, err)
+
+	t.Run("key/digest boundary", func(t *testing.T) {
+		// Digest whose first byte equals a would-be key byte differs from base.
+		dg := d(1)
+		dg[0] = 'x'
+		h, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"linux-amd64": dg, "linux-arm64": d(2)}, manifest)
+		require.NoError(t, err)
+		assert.NotEqual(t, base, h)
+	})
+
+	t.Run("digest/next-key boundary", func(t *testing.T) {
+		// Same digest bytes assigned to the other key.
+		h, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"linux-amd64": d(2), "linux-arm64": d(1)}, manifest)
+		require.NoError(t, err)
+		assert.NotEqual(t, base, h)
+	})
+
+	t.Run("last-digest/manifest boundary", func(t *testing.T) {
+		// Moving a leading manifest byte into the digest position must not collide.
+		dg := d(2)
+		shifted := append([]byte(nil), manifest[1:]...)
+		dg2 := dg
+		dg2[31] = manifest[0]
+		h1, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"linux-amd64": d(1), "linux-arm64": dg2}, shifted)
+		require.NoError(t, err)
+		assert.NotEqual(t, base, h1)
+
+		h2, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"linux-amd64": d(1), "linux-arm64": d(2)}, append(manifest, 0))
+		require.NoError(t, err)
+		assert.NotEqual(t, base, h2)
+	})
+}
+
+func TestComputeContentHashFromDigests_RefusesBadKeys(t *testing.T) {
+	var z [32]byte
+	for _, key := range []string{"plan9-mips", "", "linux", "Linux-amd64", "linux-amd64 "} {
+		_, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{key: z}, []byte("m"))
+		assert.Error(t, err, "key %q", key)
+	}
+	assert.True(t, bundle.ValidPlatformKey("windows-arm64"))
+	assert.False(t, bundle.ValidPlatformKey("freebsd-amd64"))
+}
+
+func TestComputeContentHashFromDigests_OrderIndependent(t *testing.T) {
+	var a, b [32]byte
+	a[0], b[0] = 1, 2
+	want, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"linux-amd64": a, "darwin-arm64": b, "windows-amd64": a}, []byte("m"))
+	require.NoError(t, err)
+	for i := 0; i < 20; i++ {
+		got, err := bundle.ComputeContentHashFromDigests(map[string][32]byte{"windows-amd64": a, "darwin-arm64": b, "linux-amd64": a}, []byte("m"))
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	}
+}
+
+func TestComputeContentHash_EqualsFromDigests(t *testing.T) {
+	bins := map[string][]byte{"linux-amd64": []byte("one"), "darwin-arm64": []byte("two")}
+	manifest := []byte("name: m\n")
+	digests := map[string][32]byte{}
+	for k, v := range bins {
+		digests[k] = sha256.Sum256(v)
+	}
+	want, err := bundle.ComputeContentHashFromDigests(digests, manifest)
+	require.NoError(t, err)
+	got, err := bundle.ComputeContentHash(bins, manifest)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	t.Run("changing one binary changes hash", func(t *testing.T) {
+		changed := map[string][]byte{"linux-amd64": []byte("one"), "darwin-arm64": []byte("twp")}
+		h, err := bundle.ComputeContentHash(changed, manifest)
+		require.NoError(t, err)
+		assert.NotEqual(t, got, h)
+	})
+	t.Run("changing manifest changes hash", func(t *testing.T) {
+		h, err := bundle.ComputeContentHash(bins, []byte("name: n\n"))
+		require.NoError(t, err)
+		assert.NotEqual(t, got, h)
+	})
 }

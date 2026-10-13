@@ -307,6 +307,7 @@ func TestStrictModeAcceptsCFGMSSignedBundle(t *testing.T) {
 	require.NoError(t, err)
 
 	b := makeBypassBundle(echoModuleBin)
+	b.Manifest.Publisher = "cfgms"
 	sig := ed25519.Sign(cfgmsPriv, []byte(b.ContentHash))
 	b.Signatures = []bundle.BundleSignature{
 		{Publisher: "cfgms", Algorithm: "ed25519", Signature: sig},

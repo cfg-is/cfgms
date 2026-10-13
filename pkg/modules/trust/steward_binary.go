@@ -93,5 +93,5 @@ func VerifyStewardBinarySignature(contentHash, version, platform, arch string, s
 	if err != nil {
 		return err
 	}
-	return VerifyBundleSignature(&bundle.Bundle{ContentHash: message}, sig, store)
+	return verifySignatureOverContentHash(message, sig, store)
 }

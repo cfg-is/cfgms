@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
@@ -24,7 +25,13 @@ func makeKeypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 }
 
 func makeBundle(contentHash string) *bundle.Bundle {
+	return makeBundleFor("cfgms", contentHash)
+}
+
+// makeBundleFor builds a bundle whose manifest names the given publisher.
+func makeBundleFor(publisher, contentHash string) *bundle.Bundle {
 	return &bundle.Bundle{
+		Manifest:    &modules.ModuleMetadata{Name: "test-module", Version: "1.0.0", Publisher: publisher},
 		ContentHash: contentHash,
 	}
 }
@@ -97,7 +104,7 @@ func TestVerifyBundleSignature_UnknownPublisher(t *testing.T) {
 	store := trust.NewInMemoryTrustStore()
 	// No publishers added to the store
 
-	b := makeBundle("some-content-hash")
+	b := makeBundleFor("unknown-publisher", "some-content-hash")
 	sig := bundle.BundleSignature{
 		Publisher: "unknown-publisher",
 		Algorithm: "ed25519",
@@ -315,4 +322,29 @@ func TestCFGMSPublisherIdentity(t *testing.T) {
 	assert.Equal(t, "cfgms", id.Name)
 	assert.Equal(t, "ed25519", id.Algorithm)
 	assert.Len(t, id.PublicKey, 32) // Ed25519 public key is 32 bytes
+}
+
+// TestVerifyBundleSignature_PublisherManifestMismatch refuses a signature by a
+// trusted publisher P over a bundle whose manifest names a different publisher.
+func TestVerifyBundleSignature_PublisherManifestMismatch(t *testing.T) {
+	pub, priv := makeKeypair(t)
+	store := trust.NewInMemoryTrustStore()
+	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{
+		Name: "vendor-a", PublicKey: []byte(pub), Algorithm: "ed25519",
+	}))
+
+	b := makeBundleFor("cfgms", "hash-of-a-cfgms-named-bundle")
+	sig := bundle.BundleSignature{
+		Publisher: "vendor-a",
+		Algorithm: "ed25519",
+		Signature: signHash(t, priv, b.ContentHash),
+	}
+
+	err := trust.VerifyBundleSignature(b, sig, store)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, trust.ErrPublisherManifestMismatch)
+
+	// A bundle with no manifest cannot bind a publisher either.
+	b.Manifest = nil
+	assert.ErrorIs(t, trust.VerifyBundleSignature(b, sig, store), trust.ErrPublisherManifestMismatch)
 }

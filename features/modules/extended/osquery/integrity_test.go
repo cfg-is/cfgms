@@ -222,6 +222,7 @@ func TestVerifyBeforeExec_AdditionalPublisherResolvesAndLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate extra-vendor key: %v", err)
 	}
+	b.Manifest.Publisher = "extra-vendor"
 	b.Signatures = []bundle.BundleSignature{{
 		Publisher: "extra-vendor",
 		Algorithm: "ed25519",
@@ -294,7 +295,10 @@ func TestVerifyBeforeExec_NoBinaryForPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read installed manifest: %v", err)
 	}
-	otherKey := "plan9-mips"
+	otherKey := "linux-arm64"
+	if platformKey() == otherKey {
+		otherKey = "darwin-arm64"
+	}
 	if err := os.Rename(
 		filepath.Join(root, "binaries", platformKey()),
 		filepath.Join(root, "binaries", otherKey),

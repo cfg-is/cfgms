@@ -156,8 +156,29 @@ func TestSignedBundle_VerifiesThroughTrustVerifier(t *testing.T) {
 	t.Run("other publisher name refused", func(t *testing.T) {
 		sig := b.Signatures[0]
 		sig.Publisher = "someone-else"
-		err := trust.VerifyBundleSignature(b, sig, store)
+		renamed := *b
+		manifest := *b.Manifest
+		manifest.Publisher = "someone-else"
+		renamed.Manifest = &manifest
+		err := trust.VerifyBundleSignature(&renamed, sig, store)
 		assert.True(t, errors.Is(err, trust.ErrPublisherNotTrusted))
+	})
+
+	t.Run("signature by other publisher over cfgms manifest refused", func(t *testing.T) {
+		sig := b.Signatures[0]
+		sig.Publisher = "someone-else"
+		err := trust.VerifyBundleSignature(b, sig, store)
+		assert.True(t, errors.Is(err, trust.ErrPublisherManifestMismatch))
+	})
+
+	t.Run("round trip through ReadInstalled", func(t *testing.T) {
+		spec := stageInputs(t, "linux", priv)
+		_, err := assembleRoot(spec)
+		require.NoError(t, err)
+		installed, err := bundle.ReadInstalled(spec.Root)
+		require.NoError(t, err)
+		require.Len(t, installed.Signatures, 1)
+		require.NoError(t, trust.VerifyBundleSignature(installed, installed.Signatures[0], store))
 	})
 }
 
