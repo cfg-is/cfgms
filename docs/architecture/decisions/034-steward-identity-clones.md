@@ -12,7 +12,7 @@
 
 ## Context
 
-A steward's identity is its Ed25519 device key (ADR-011 §1) plus its mTLS client certificate. Two real situations produce more than one endpoint presenting the same identity:
+A steward's identity is its device key (ADR-011 §1; Ed25519, or P-256 when hardware-backed per ADR-011 Amendment 3) plus its mTLS client certificate. Two real situations produce more than one endpoint presenting the same identity:
 
 - **Planned clones.** A base image is built from a machine that already enrolled a steward, then cloned into many machines. Every clone starts with the same device key and certificate.
 - **A copied identity.** The key and certificate are copied off a compromised host. The copy may run on different hardware, or on a byte-for-byte copy of the original.
@@ -80,6 +80,8 @@ A copy can exist only because the device key is a file. Where the endpoint has a
 - Windows: TPM 2.0 through the platform crypto provider.
 - Linux: TPM 2.0.
 - macOS: Secure Enclave.
+
+Hardware stores generate P-256 keys, not Ed25519. The key algorithm, the DeviceID encoding, the libraries and the fallback rules are fixed in ADR-011 Amendment 3.
 
 The key never leaves the hardware, so copying the steward's files does not copy the identity: a copy cannot answer the proof-of-possession challenge (ADR-011 §4–5) and is refused. For these endpoints, clone detection becomes certain — the machine that can sign with the key is the original.
 

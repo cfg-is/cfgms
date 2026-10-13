@@ -252,3 +252,18 @@ Provenance is corroboration, not proof: the cryptographic identity proof is the 
 ### Amendment 2 — Provenance is also evaluated at ControlChannel admission (Issue #4949, ADR-034 §2)
 
 Provenance was previously consulted only by the refresh `auto_accept` path, and nothing wrote the baseline or sent the attributes. Now the steward collects host attributes and sends them on `/refresh/complete`, `/refresh/claim` and as metadata on the `ControlChannel` call; the controller writes `LastProvenanceJSON` at first admission (trust on first use, audited) and when an operator-approved refresh is collected, and compares attributes at ControlChannel admission, after the revocation and approval gates. The invariant of §7 is unchanged: provenance is demote-only. It classifies a connection as `approved_machine`, `copy` or `unknown`; it never admits a connection the revocation or lifecycle gates refuse, and a store error falls back to `unknown`. See the controller operating model, "Host Provenance at Admission".
+
+### Amendment 3 — Two device key algorithms; hardware-backed KeyStores (ADR-034 §7, epic #4947)
+
+Hardware key stores cannot generate Ed25519 keys: TPM 2.0 and the Secure Enclave generate NIST P-256 keys. ADR-034 §7 puts the device key inside that hardware where it exists, so the device identity key is no longer always Ed25519.
+
+- **Two algorithms.** A device key is `ed25519` or `ecdsa-p256`. File-backed keys stay `ed25519`; hardware-backed keys are `ecdsa-p256`. Existing stewards keep their keys and their `DeviceID`; no re-enrollment is needed.
+- **DeviceID.** For `ed25519` it is unchanged: SHA-256 of the 32-byte raw public key, lowercase hex. For `ecdsa-p256` it is SHA-256 of the public key's PKIX (SubjectPublicKeyInfo, DER) encoding, lowercase hex. The two encodings cannot collide in practice, and the stored algorithm removes any ambiguity.
+- **Wire.** Registration and the refresh endpoints carry `key_algorithm` beside the public key. An absent value means `ed25519`, so stewards that predate this amendment keep working. An `ecdsa-p256` proof of possession is an ASN.1 DER ECDSA signature over SHA-256 of the same challenge message §4 defines for Ed25519.
+- **Controller.** The `StewardRecord` stores `key_algorithm` with the public key (absent means `ed25519`) and verifies every proof of possession with the stored algorithm. A request whose `key_algorithm` differs from the stored one for that `DeviceID` is refused before any signature check, so an attacker cannot downgrade an existing record to a weaker or different scheme.
+- **KeyStore interface.** `GenerateOrLoad` returns a `crypto.PublicKey` and the algorithm instead of Ed25519 types, and `Sign` signs with the private key wherever it lives; a hardware backend never returns private key material. The file backend keeps its current encrypted format.
+- **Backends.**
+  - Linux: TPM 2.0 through `github.com/google/go-tpm` (already in the module graph indirectly; becomes a direct dependency).
+  - Windows: TPM 2.0 through the OS Platform Crypto Provider (CNG `NCrypt*` calls via `golang.org/x/sys/windows`); no new module.
+  - macOS: Secure Enclave through the Security framework, called without cgo through `github.com/ebitengine/purego`, so every release build stays `CGO_ENABLED=0`. This adds one module.
+- **Fallback.** If a hardware backend is absent, or fails to create or load a key, the steward uses the file backend and reports `key_protection_level: file`. The reason goes to the steward log. Enrollment never fails because hardware is missing (ADR-034 §7). Whether a macOS steward that runs as an unsigned or ad-hoc-signed daemon can create Secure Enclave keys is to be established by the macOS story; if it cannot, macOS reports `file` until it can.
