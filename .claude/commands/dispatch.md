@@ -37,6 +37,7 @@ Launch isolated agent containers to implement GitHub issues, continue work on br
      ./.claude/scripts/agent-dispatch.sh check-creds
      ```
      Parse the output:
+     - `CREDS_MODE:token` — Long-lived agent token in use (containers do not share the host session); proceed, no freshness check applies
      - `CREDS_OK:<minutes>` — Credentials valid, proceed
      - `CREDS_LOW:<minutes>` — Warn: "Credentials expire in <minutes> min — agents may fail mid-run. Run `/agent-setup creds` to refresh."
      - `CREDS_EXPIRED:<minutes>` — **STOP**: "Credentials expired <abs(minutes)> min ago. Run `/agent-setup creds` to refresh before dispatching."

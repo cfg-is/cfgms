@@ -32,7 +32,7 @@ Developer (architect)
 │     │     └── git worktree add -b feature/story-N-agent ../worktrees/story-N develop
 │     └── .claude/scripts/agent-dispatch.sh launch <N>
 │           └── docker run --detach cfg-agent:latest
-│                 ├── Mounts: worktree (rw), host ~/.claude/.credentials.json (rw), gh-creds (ro)
+│                 ├── Mounts: worktree (rw), gh-creds (ro); Claude auth via CLAUDE_CODE_OAUTH_TOKEN (token mode) or host ~/.claude/.credentials.json (fallback)
 │                 ├── Firewall: GitHub + Anthropic API + Go proxy only
 │                 ├── entrypoint: gh issue view N → agent prompt
 │                 ├── claude --dangerously-skip-permissions
@@ -67,7 +67,9 @@ Developer (architect)
 
 ### Claude OAuth Token
 
-Agent containers bind-mount the host's live `~/.claude/.credentials.json` directly (the same file the host and `po-live` use), so they track host token rotations in place — a `LOW` or `EXPIRED` token is not a dispatch blocker; the agent's own entrypoint refreshes it exactly like an interactive session would. Only a genuinely missing or unparseable credentials file blocks a launch (`CREDS_MISSING`). If `/dispatch` reports `CREDS_MISSING`, run `claude` normally on the host to (re-)authenticate, then verify: `/agent-setup creds`.
+Headless agent containers authenticate with a separate long-lived subscription token (`claude setup-token`) passed as `CLAUDE_CODE_OAUTH_TOKEN`, so they no longer share the host's refreshing OAuth session (a refresh by either side used to invalidate the other). The token is a TPM2-bound `systemd-creds` credential at `~/.config/cfgms/claude-oauth-token.cred`; the launcher decrypts it under a 15 s timeout, hands it to `docker run` through the process environment only (`-e CLAUDE_CODE_OAUTH_TOKEN`, never in argv, never on disk), and does not mount the host credentials file. One-time operator setup and rotation: `/agent-setup` ("Agent token setup").
+
+If the credential is absent, cannot be decrypted, or times out, the launch falls back to bind-mounting the host's live `~/.claude/.credentials.json` and prints one `WARN:agent_token:<absent|decrypt_failed|timeout>` line. In fallback mode a `LOW` or `EXPIRED` token is not a dispatch blocker (the entrypoint refreshes it); only a missing or unparseable file blocks a launch (`CREDS_MISSING`). `po-live` still bind-mounts the whole host `~/.claude` directory.
 
 ### Rotate GitHub PAT
 
@@ -83,6 +85,7 @@ Agent containers bind-mount the host's live `~/.claude/.credentials.json` direct
 
 ```bash
 ./.claude/scripts/agent-dispatch.sh check-creds
+# CREDS_MODE:token       — long-lived agent token decrypts; host token freshness is not checked
 # CREDS_OK:<minutes>     — valid, minutes until expiry
 # CREDS_LOW:<minutes>    — expiring soon, advisory only (agent refreshes the live file in place)
 # CREDS_EXPIRED:<N>      — advisory only; the host's own token rotation covers it
