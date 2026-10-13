@@ -108,7 +108,8 @@ current version** — resolve the discrepancy instead.
 
 Claude Code CLI is not in this inventory at all — it is exempt from pin
 tracking entirely (see `references/cooldown-policy.md` "Claude Code CLI
-exemption"). Do not create a bump story for it.
+exemption"). Do not create a bump story for it. The Codex CLI is exempt
+likewise (Issue #4969; "Codex CLI exemption" in the same file).
 
 Match results back to inventory entries by `package`. A module that appears in
 the `go list` output but not in the inventory is **indirect** — do not create a
