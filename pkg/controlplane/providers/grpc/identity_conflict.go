@@ -9,6 +9,15 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
+)
+
+const (
+	// identityInUseReason and identityInUseDomain are the ErrorInfo fields that
+	// mark a ControlChannel refusal as "this identity is in use by another
+	// device" (ADR-034 §4), as distinct from any other PermissionDenied.
+	identityInUseReason = "IDENTITY_IN_USE"
+	identityInUseDomain = "cfgms.io"
 )
 
 // IdentityConflict describes one steward identity observed in use on two
@@ -56,18 +65,22 @@ func WithIdentityConflictObserver(observer IdentityConflictObserver) option {
 // registry entry for the same steward ID and reports a conflict when the peer
 // hosts differ. A same-host reconnect (a restarting steward whose stale stream
 // has not yet errored) is not a conflict.
-func (p *Provider) reportIdentityConflict(ctx context.Context, stewardID, newAddr, newSerial string, provenance ProvenanceAssessment) {
-	if p.identityConflictObserver == nil {
-		return
-	}
+//
+// It returns the live connection when one exists on a different host, whether or
+// not an observer is configured, so the caller can apply the admission rules of
+// ADR-034 §2; nil otherwise.
+func (p *Provider) reportIdentityConflict(ctx context.Context, stewardID, newAddr, newSerial string, provenance ProvenanceAssessment) *registry.StewardConnection {
 	existing, ok := p.registry.Get(stewardID)
 	if !ok || existing == nil {
-		return
+		return nil
 	}
 	existingHost := addrHost(existing.RemoteAddr)
 	newHost := addrHost(newAddr)
 	if existingHost == "" || newHost == "" || existingHost == newHost {
-		return
+		return nil
+	}
+	if p.identityConflictObserver == nil {
+		return existing
 	}
 
 	tenantID := ""
@@ -97,6 +110,7 @@ func (p *Provider) reportIdentityConflict(ctx context.Context, stewardID, newAdd
 		DetectedAt:     time.Now().UTC(),
 		Provenance:     provenance,
 	})
+	return existing
 }
 
 // addrHost returns the host part of a host:port address, or the input when it

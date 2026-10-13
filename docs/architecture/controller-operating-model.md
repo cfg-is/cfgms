@@ -615,7 +615,7 @@ The steward sends its host attributes as gRPC metadata on the `ControlChannel` c
 
 - `unknown` — no baseline is recorded, no attributes were sent (an old steward without the collector, or an oversized/unparsable header), or the check could not be made. The connection is admitted exactly as before.
 - `approved_machine` — score at or above the threshold.
-- `copy` — score below the threshold. The controller writes a `security_event` audit entry `steward_provenance_divergence`, severity `high`, carrying the decision, score, matched/total field counts and the **names** of the attributes that differed (never their values), rate-limited to one per steward ID per minute. The stored baseline is not touched. The decision is also passed to the `IdentityConflictObserver` so a duplicate-identity report carries the same evidence. This story only records the decision; refusing a `copy` is a separate gate.
+- `copy` — score below the threshold. The controller writes a `security_event` audit entry `steward_provenance_divergence`, severity `high`, carrying the decision, score, matched/total field counts and the **names** of the attributes that differed (never their values), rate-limited to one per steward ID per minute. The stored baseline is not touched. The decision is also passed to the `IdentityConflictObserver` so a duplicate-identity report carries the same evidence. A `copy` decision is refused at the admission gate described under "Refusing a Copied Identity" below.
 
 **Baseline.** `LastProvenanceJSON` is written (trust on first use, audited as `steward_provenance_baseline_recorded`) at the first admission that presents attributes while the baseline is empty, and when a steward collects an operator-approved refresh (`POST .../refresh/claim` carries the steward's current attributes; they replace the baseline and are audited as `steward_provenance_rebaselined`). A legitimate hardware change therefore re-baselines through an operator, never automatically; a connection that scores below threshold never overwrites the baseline. DNA fields are dropped before anything is stored.
 
@@ -627,9 +627,20 @@ The steward sends its host attributes as gRPC metadata on the `ControlChannel` c
 
 After the revocation and approval gates and before `registry.Register`, `transportServer.ControlChannel` looks up the steward ID in the connection registry. If a live stream exists and its remote host (IP, port stripped) differs from the new peer's host, the provider reports an `IdentityConflict` to the observer injected with `WithIdentityConflictObserver`. A reconnect from the same host (a restarting steward whose stale stream has not yet errored) is not a conflict, and the new stream still replaces the stale one.
 
-Detection is report-only: `Register` is unchanged, so the newest connection still wins and nobody is refused. The controller's observer writes an audit event of type `security_event`, action `steward_identity_conflict_detected`, severity `high`, resource `steward`. Details carry both peer addresses and both client-certificate serials; the tenant is resolved server-side from the fleet record. Events are rate-limited in memory to one per steward ID per minute. Operators see them through `GET /api/v1/audit/entries` and `cfg controller audit list`.
+Detection itself only reports; the refusal that follows is described in the next section. The controller's observer writes an audit event of type `security_event`, action `steward_identity_conflict_detected`, severity `high`, resource `steward`. Details carry both peer addresses and both client-certificate serials; the tenant is resolved server-side from the fleet record. Events are rate-limited in memory to one per steward ID per minute. Operators see them through `GET /api/v1/audit/entries` and `cfg controller audit list`.
 
 **Limitation:** the connection registry is per controller node. A duplicate that connects to a different node of a cluster is not detected.
+
+### Refusing a Copied Identity (Issue #4950, ADR-034 §2 and §4)
+
+After the revocation and approval gates, and before `registry.Register`, `transportServer.ControlChannel` applies two rules, in this order:
+
+1. **Provenance first.** A `copy` provenance decision is refused. A live connection for the same steward ID from a different peer host is displaced by a newcomer whose provenance is positively `approved_machine`: the newcomer is admitted and the existing stream is closed with the same refusal (`registry.StewardConnection.Evict`). This holds even when the copy connected while the original was offline.
+2. **The holder keeps the channel.** Otherwise a newcomer from a different peer host than a live connection is refused, whatever its provenance (`unknown` included), and the first connection is not disturbed.
+
+A same-host reconnect (a restarting steward) is neither a conflict nor a refusal; the new stream replaces the stale one as before.
+
+The refusal is `codes.PermissionDenied` with an `errdetails.ErrorInfo` detail: `Reason: "IDENTITY_IN_USE"`, `Domain: "cfgms.io"`. The message text is fixed and never names the other endpoint's address, hostname or provenance. The refusal is the only admission refusal that carries a reason; revocation (`PermissionDenied`, "client certificate revoked") and the approval gate ("steward reconnect not approved") carry none and are not treated as copies. A steward that receives `IDENTITY_IN_USE` re-keys and registers as a new device with `clone_of` (see the steward operating model); the controller records `clone_of` on the pending registration and shows it in `cfg registration pending`.
 
 ### Steward Tracking
 

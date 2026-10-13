@@ -90,6 +90,12 @@ type PendingRegistrationEntry struct {
 	// from the submitted CSR, so it is the verifiable value an operator can check
 	// out of band. Empty for entries created before this field existed.
 	KeyFingerprint string
+
+	// CloneOf is the steward ID a registering device reports having been copied
+	// from (ADR-034 §4). Informational only: it is validated against the
+	// registration token's tenant before it is stored, and never feeds an
+	// approval, tenant or authorization decision. Empty when not a clone.
+	CloneOf string
 }
 
 // PendingRegistrationStore defines the storage interface for durable persistence of

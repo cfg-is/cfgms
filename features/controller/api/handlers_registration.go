@@ -41,6 +41,12 @@ type RegistrationRequest struct {
 	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64-encoded Ed25519 public key (32 bytes)
 	KeyProtectionLevel string `json:"key_protection_level,omitempty"` // "file" or "tpm"
 
+	// CloneOf is the steward ID of the device this one reports being copied from
+	// (ADR-034 §4). Informational only: validated against the token's tenant and
+	// recorded for the operator, never used for an approval, tenant or
+	// authorization decision.
+	CloneOf string `json:"clone_of,omitempty"`
+
 	// CSRPEM is a PEM-encoded CERTIFICATE REQUEST over a keypair the steward
 	// generates locally (Issue #3780). The controller signs this public key into
 	// the steward's mTLS client certificate; the matching private key never
@@ -102,8 +108,11 @@ type PendingRegistration struct {
 	Hostname string `json:"hostname,omitempty"`
 	// KeyFingerprint is the hex SHA-256 of the CSR public key, computed by the
 	// controller. Empty for entries created before the field existed.
-	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
-	RegisteredAt   time.Time `json:"registered_at"`
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+	// CloneOf is the original steward ID when the device registered as a copy of
+	// an existing one (ADR-034 §4). Informational; empty otherwise.
+	CloneOf      string    `json:"clone_of,omitempty"`
+	RegisteredAt time.Time `json:"registered_at"`
 }
 
 // maxHostnameHintLen caps the stored steward-supplied hostname (RFC 1035 limit).
@@ -128,6 +137,31 @@ func sanitizeHostnameHint(h string) string {
 		}
 	}
 	return out
+}
+
+// maxCloneOfLen caps the steward-supplied clone_of value. Steward IDs are far
+// shorter; anything longer cannot name a real steward.
+const maxCloneOfLen = 128
+
+// validatedCloneOf returns cloneOf when it names an existing steward that
+// belongs to tenantID, the tenant of the registration token, and "" otherwise.
+// A value that fails any check is dropped without an error or any difference in
+// the response, so one tenant cannot probe another tenant's steward IDs. The
+// result is informational only and never feeds an authorization decision.
+func (s *Server) validatedCloneOf(ctx context.Context, cloneOf, tenantID string) string {
+	if cloneOf == "" || len(cloneOf) > maxCloneOfLen || s.stewardStore == nil {
+		return ""
+	}
+	for _, r := range cloneOf {
+		if !unicode.IsPrint(r) || unicode.IsSpace(r) {
+			return ""
+		}
+	}
+	rec, err := s.stewardStore.GetSteward(ctx, cloneOf)
+	if err != nil || rec == nil || rec.TenantID != tenantID {
+		return ""
+	}
+	return rec.ID
 }
 
 // csrKeyFingerprint returns the lowercase hex SHA-256 of the CSR's public key
@@ -195,6 +229,7 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 			SourceIP:       e.SourceIP,
 			Hostname:       e.Hostname,
 			KeyFingerprint: e.KeyFingerprint,
+			CloneOf:        e.CloneOf,
 			RegisteredAt:   e.RegisteredAt,
 		})
 	}
@@ -1116,6 +1151,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				Hostname:           req.Hostname,
 				Platform:           req.OS,
 				KeyFingerprint:     csrKeyFingerprint(csr),
+				CloneOf:            s.validatedCloneOf(r.Context(), req.CloneOf, token.TenantID),
 			}
 			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
 				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
@@ -1141,6 +1177,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				business.AuditEventAuthentication, "registration_quarantined",
 				business.AuditResultSuccess, business.AuditSeverityHigh,
 				map[string]interface{}{"quarantined": true, "reason": reason})
+			if pendingEntry.CloneOf != "" {
+				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+					business.AuditEventSecurityEvent, "steward_clone_registration_queued",
+					business.AuditResultSuccess, business.AuditSeverityMedium,
+					map[string]interface{}{"clone_of": pendingEntry.CloneOf, "pending_id": pendingID})
+			}
 			s.writePendingRegistrationResponse(w, pendingEntry, token.Group)
 			return
 		}

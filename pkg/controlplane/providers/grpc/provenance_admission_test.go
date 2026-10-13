@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
 // spyProvenanceChecker delegates to a real checker and records every call.
@@ -80,6 +81,14 @@ func newProvEnv(t *testing.T, stewardID, baseline string) *provEnv {
 
 func (e *provEnv) connect(t *testing.T, stewardID string, attrs map[string]string, extra ...option) {
 	t.Helper()
+	reg := e.dial(t, stewardID, attrs, extra...)
+	require.Eventually(t, func() bool { _, ok := reg.Get(stewardID); return ok }, 5*time.Second, 10*time.Millisecond)
+}
+
+// dial starts a server and a client and returns once the client has opened its
+// stream, without waiting for the controller to admit it.
+func (e *provEnv) dial(t *testing.T, stewardID string, attrs map[string]string, extra ...option) registry.Registry {
+	t.Helper()
 	server, reg := e.startServer(t, append([]option{WithProvenanceChecker(e.spy)}, extra...)...)
 	tlsCfg, _ := e.clientTLS(t, stewardID)
 	client := New(ModeClient, WithHostAttributes(func() map[string]string { return attrs }))
@@ -88,7 +97,7 @@ func (e *provEnv) connect(t *testing.T, stewardID string, attrs map[string]strin
 	}))
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 	require.NoError(t, client.Start(context.Background()))
-	require.Eventually(t, func() bool { _, ok := reg.Get(stewardID); return ok }, 5*time.Second, 10*time.Millisecond)
+	return reg
 }
 
 func (e *provEnv) auditEntries(t *testing.T, action string) []*business.AuditEntry {
@@ -109,9 +118,12 @@ func (e *provEnv) baseline(t *testing.T, id string) string {
 func TestControlChannel_ProvenanceBelowThreshold_ReportsCopy(t *testing.T) {
 	t.Parallel()
 	env := newProvEnv(t, "steward-copy", baselineJSON)
-	env.connect(t, "steward-copy", map[string]string{
+	reg := env.dial(t, "steward-copy", map[string]string{
 		"machine_id": "m-1", "nic_macs": "cc:dd", "disk_serials": "d-9", "install_date": "2030-01-01",
 	})
+	require.Eventually(t, func() bool { n, _ := env.spy.snapshot(); return n == 1 }, 5*time.Second, 10*time.Millisecond)
+	_, admitted := reg.Get("steward-copy")
+	assert.False(t, admitted, "a Copy decision is refused, never registered")
 
 	calls, got := env.spy.snapshot()
 	require.Equal(t, 1, calls)

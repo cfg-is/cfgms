@@ -1154,11 +1154,38 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		priorCAPinFingerprint = storedID.CAPinFingerprint
 	}
 
+	// A clone marker means this steward was refused as a copy and already
+	// re-keyed (ADR-034 §4). It resumes registering as the new device and never
+	// goes back to the copied identity. A marker that is stale because the new
+	// identity was already stored is simply dropped.
+	marker, markerErr := loadCloneMarker(certStoreDir)
+	if markerErr != nil {
+		return nil, markerErr
+	}
+	if marker != nil {
+		if storedID, _ := loadIdentity(certStoreDir); storedID != nil && ks != nil && ks.DeviceID() != "" && storedID.DeviceID == ks.DeviceID() {
+			_ = clearCloneMarker(certStoreDir)
+			marker = nil
+		}
+	}
+	if marker != nil {
+		logger.Info("Resuming registration as a new device after being refused as a copy",
+			"clone_of", logging.SanitizeLogValue(marker.CloneOf))
+		return registerNewDevice(ctx, certStoreDir, token, controllerURL, trustSrc, installCAPEM, priorCAPinFingerprint, ks, marker.CloneOf, runtimeCfg, publicBeta, logger)
+	}
+
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
 	tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger)
 	if tc != nil {
 		clearReadmissionState(certStoreDir)
 		return tc, nil
+	}
+
+	// Refused as a copy (ADR-034 §4): the stored key was copied to another
+	// device, so presenting it for re-admission would only re-present the copy.
+	// Become a new device instead.
+	if reconnErr != nil && errors.Is(reconnErr, controlplaneInterfaces.ErrIdentityInUse) {
+		return registerAsClone(ctx, certStoreDir, token, controllerURL, trustSrc, installCAPEM, priorCAPinFingerprint, ks, runtimeCfg, publicBeta, logger)
 	}
 
 	// Re-admission (Issue #4532): a steward is never left unable to get back in.
@@ -1208,6 +1235,91 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		}
 	}
 
+	return registerNewDevice(ctx, certStoreDir, token, controllerURL, trustSrc, installCAPEM, priorCAPinFingerprint, ks, "", runtimeCfg, publicBeta, logger)
+}
+
+// registerAsClone turns a steward the controller refused as a copy into a new
+// device (ADR-034 §4). It regenerates the device key, remembers the original
+// steward ID as clone_of, discards the stored identity and refresh state that
+// belong to the original, and registers with the configured token.
+//
+// The clone marker is written before the old identity is touched and before any
+// network call, so a crash after the key is regenerated resumes registering with
+// the new key (registerAndConnect) and never falls back to the copied one.
+func registerAsClone(
+	ctx context.Context,
+	certStoreDir, token, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM, priorCAPinFingerprint string,
+	ks *identity.FileKeyStore,
+	runtimeCfg stewardconfig.StewardConfig,
+	publicBeta bool,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
+	if ks == nil {
+		return nil, fmt.Errorf("refused as a copy but no device key store is available to re-key")
+	}
+	storedID, loadErr := loadIdentity(certStoreDir)
+	if loadErr != nil || storedID == nil {
+		return nil, fmt.Errorf("refused as a copy but the original steward ID is unavailable: %v", loadErr)
+	}
+	cloneOf := storedID.StewardID
+
+	logger.Warn("Controller refused this identity: it is in use by another device; generating a new device key and registering as a new device",
+		"clone_of", logging.SanitizeLogValue(cloneOf))
+
+	// Marker first: it must exist before the key changes (see doc comment).
+	if err := saveCloneMarker(certStoreDir, cloneOf); err != nil {
+		return nil, err
+	}
+	if _, _, err := ks.Regenerate(ctx); err != nil {
+		_ = clearCloneMarker(certStoreDir)
+		return nil, fmt.Errorf("regenerate device key: %w", err)
+	}
+	// The identity and any re-admission or registration state belong to the
+	// original device.
+	if err := clearStoredIdentity(certStoreDir); err != nil {
+		return nil, err
+	}
+	clearReadmissionState(certStoreDir)
+	_ = clearPendingState(certStoreDir)
+
+	return registerNewDevice(ctx, certStoreDir, token, controllerURL, trustSrc, installCAPEM, priorCAPinFingerprint, ks, cloneOf, runtimeCfg, publicBeta, logger)
+}
+
+// registerNewDevice registers this steward with the configured token and
+// continues through the pending-approval and claim flow to a connected
+// transport. cloneOf, when set, is sent as clone_of and the clone marker is
+// cleared once the new identity is connected.
+func registerNewDevice(
+	ctx context.Context,
+	certStoreDir, token, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM, priorCAPinFingerprint string,
+	ks *identity.FileKeyStore,
+	cloneOf string,
+	runtimeCfg stewardconfig.StewardConfig,
+	publicBeta bool,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
+	tc, err := registerWithToken(ctx, certStoreDir, token, controllerURL, trustSrc, installCAPEM, priorCAPinFingerprint, ks, cloneOf, runtimeCfg, publicBeta, logger)
+	if err == nil && cloneOf != "" {
+		_ = clearCloneMarker(certStoreDir)
+	}
+	return tc, err
+}
+
+func registerWithToken(
+	ctx context.Context,
+	certStoreDir, token, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM, priorCAPinFingerprint string,
+	ks *identity.FileKeyStore,
+	cloneOf string,
+	runtimeCfg stewardconfig.StewardConfig,
+	publicBeta bool,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
 	httpCfg := registrationHTTPConfig(controllerURL, trustSrc, installCAPEM, logger)
@@ -1280,7 +1392,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
-	regReq := registration.RegistrationRequest{Token: token}
+	regReq := registration.RegistrationRequest{Token: token, CloneOf: cloneOf}
 	if ks != nil && ks.DeviceID() != "" {
 		regReq.DeviceID = ks.DeviceID()
 		if pub := ks.PublicKey(); pub != nil {

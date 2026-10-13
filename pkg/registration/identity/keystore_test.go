@@ -176,3 +176,40 @@ func TestRemoveStoredKey_NextLoadGeneratesNewDeviceID(t *testing.T) {
 func TestRemoveStoredKey_MissingKeyIsNotAnError(t *testing.T) {
 	require.NoError(t, RemoveStoredKey(t.TempDir()))
 }
+
+// TestFileKeyStore_Regenerate_ReplacesKeyAndDeviceID verifies Regenerate swaps in a
+// new key and DeviceID, keeps the file encrypted, and leaves the old key unloadable.
+func TestFileKeyStore_Regenerate_ReplacesKeyAndDeviceID(t *testing.T) {
+	dir := t.TempDir()
+	ks := newTestKeyStoreInDir(t, dir)
+	oldPub, _, err := ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	oldID := ks.DeviceID()
+
+	newPub, newPriv, err := ks.Regenerate(context.Background())
+	require.NoError(t, err)
+	assert.NotEqual(t, []byte(oldPub), []byte(newPub), "new public key must differ")
+	assert.NotEqual(t, oldID, ks.DeviceID(), "DeviceID must change with the key")
+	assert.Equal(t, computeDeviceID(newPub), ks.DeviceID())
+
+	data, err := os.ReadFile(filepath.Join(dir, keyFileName))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), string(newPriv), "plaintext key never written to disk")
+	block, _ := pem.Decode(data)
+	assert.Nil(t, block, "on-disk bytes must be ciphertext")
+	_, statErr := os.Stat(filepath.Join(dir, keyFileName+".tmp"))
+	assert.True(t, os.IsNotExist(statErr), "no temp file left behind")
+
+	// A fresh store on the same directory loads the new key, not the old one.
+	reloaded := newTestKeyStoreInDir(t, dir)
+	gotPub, _, err := reloaded.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []byte(newPub), []byte(gotPub))
+	assert.NotEqual(t, []byte(oldPub), []byte(gotPub), "old key is no longer loadable")
+
+	// The new key signs; the old public key does not verify it.
+	sig, err := ks.Sign([]byte("m"))
+	require.NoError(t, err)
+	assert.True(t, ed25519.Verify(newPub, []byte("m"), sig))
+	assert.False(t, ed25519.Verify(oldPub, []byte("m"), sig))
+}

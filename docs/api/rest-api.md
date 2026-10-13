@@ -154,9 +154,12 @@ Steward-initiated self-registration. Called by the steward agent on first boot. 
 {
   "token": "reg-token-value",
   "steward_id": "server-001",
-  "hostname": "server-001.example.com"
+  "hostname": "server-001.example.com",
+  "clone_of": "stwd-abc123"
 }
 ```
+
+`clone_of` is optional and informational. A steward that the controller refused as a copy of an existing device (`IDENTITY_IN_USE`) re-keys and registers as a new device, naming the original steward ID here. The controller keeps it only when it is at most 128 characters and names an existing steward in the **same tenant as the registration token**; otherwise it is dropped silently, with no difference in the response, so one tenant cannot probe another's steward IDs. It never influences approval, tenant assignment or any authorization decision. A registration queued with a valid `clone_of` writes the `steward_clone_registration_queued` audit event (`security_event`, severity `medium`).
 
 **Response:** Returns controller URL, issued mTLS certificate, and tenant assignment. `409` when the controller already holds an active record for the request's device ID; the steward then re-admits through the registration-refresh handshake below.
 
@@ -1748,6 +1751,7 @@ Each item:
   "source_ip": "10.0.0.5",
   "hostname": "web-07.acme.lan",
   "key_fingerprint": "9c4a1f0e77b2d3a85c6e4f1029ab38d7e5c1f6a0b49d82e3c7f15a60d4b2e1ff",
+  "clone_of": "stwd-original",
   "registered_at": "2026-07-25T10:00:00Z"
 }
 ```
@@ -1755,6 +1759,7 @@ Each item:
 - `hostname` — reported by the device itself and not authenticated. It is sanitised on write (control characters and `<>&"'` and backtick removed, capped at 253 characters). Treat it as a hint and render it as text.
 - `key_fingerprint` — lowercase hex SHA-256 of the public key in the device's certificate signing request (DER SubjectPublicKeyInfo), computed by the controller. This is the value to verify against the device.
 - Both fields are omitted for entries created before they were recorded.
+- `clone_of` — present when the device registered after being refused as a copy of an existing steward in the same tenant; the value is that original steward ID. Informational only. `cfg registration pending` shows it in the `CLONE OF` column.
 
 ### Monitoring
 

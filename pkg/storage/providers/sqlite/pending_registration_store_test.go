@@ -480,3 +480,35 @@ func TestPendingRegistrationStore_HostnameAndKeyFingerprintRoundTrip(t *testing.
 	assert.Equal(t, "ws-042.corp.example", all[0].Hostname)
 	assert.Equal(t, "ab12cd34", all[0].KeyFingerprint)
 }
+
+func TestPendingRegistration_CloneOfRoundTrip(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	entry := testPendingEntry("pr-clone", "tenant-1")
+	entry.CloneOf = "steward-original"
+	require.NoError(t, store.AddPending(ctx, entry))
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-plain", "tenant-1")))
+
+	byID, err := store.GetPendingByID(ctx, "pr-clone")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-original", byID.CloneOf)
+
+	byToken, err := store.GetPendingByToken(ctx, "cfgms_reg_tok_pr-clone")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-original", byToken.CloneOf)
+
+	pending, err := store.ListPending(ctx, "tenant-1")
+	require.NoError(t, err)
+	require.Len(t, pending, 2)
+	byPending := map[string]string{}
+	for _, p := range pending {
+		byPending[p.PendingID] = p.CloneOf
+	}
+	assert.Equal(t, "steward-original", byPending["pr-clone"])
+	assert.Empty(t, byPending["pr-plain"], "entries without clone_of read back empty")
+
+	all, err := store.ListAll(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+}

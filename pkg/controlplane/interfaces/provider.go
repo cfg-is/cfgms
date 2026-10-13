@@ -9,6 +9,7 @@ package interfaces
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 )
@@ -27,6 +28,14 @@ var ErrStewardNotConnected = errors.New("steward not connected")
 // unreachable or timed-out controller, nor for a TLS handshake failure, which can
 // be transient (clock skew, an intercepting proxy) (Issue #4532).
 var ErrIdentityRejected = errors.New("controller rejected steward identity")
+
+// ErrIdentityInUse reports that the controller refused the steward's identity
+// because it is, or appears to be, in use by another device: the connection is a
+// copy of an approved identity (ADR-034 §2). It wraps ErrIdentityRejected so a
+// caller that only cares about refusal keeps working, but it is distinct: the
+// stored device key must NOT be re-presented for re-admission, because the key
+// itself was copied. The steward re-keys and registers as a new device instead.
+var ErrIdentityInUse = fmt.Errorf("steward identity in use by another device: %w", ErrIdentityRejected)
 
 // ControlPlaneProvider defines the interface for control plane implementations.
 //

@@ -249,11 +249,15 @@ func runRegistrationPending(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Pending registrations (%d):\n\n", len(pending))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintf(w, "PENDING ID\tSTEWARD ID\tTENANT ID\tSOURCE IP\tRDNS\tREGISTERED AT\n")
+	_, _ = fmt.Fprintf(w, "PENDING ID\tSTEWARD ID\tTENANT ID\tSOURCE IP\tRDNS\tCLONE OF\tREGISTERED AT\n")
 	for _, pr := range pending {
 		registeredAt := pr.RegisteredAt.UTC().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			pr.PendingID, pr.StewardID, pr.TenantID, pr.SourceIP, pr.RDNS, registeredAt)
+		cloneOf := pr.CloneOf
+		if cloneOf == "" {
+			cloneOf = "-"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			pr.PendingID, pr.StewardID, pr.TenantID, pr.SourceIP, pr.RDNS, cloneOf, registeredAt)
 	}
 	_ = w.Flush()
 
