@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -67,7 +68,11 @@ func ComputeContentHashFromDigests(digests map[string][32]byte, manifestBytes []
 	h.Write([]byte(contentHashFormatTag))
 	var n4 [4]byte
 	for _, k := range keys {
-		binary.BigEndian.PutUint32(n4[:], uint32(len(k)))
+		kLen := len(k)
+		if kLen < 0 || kLen > math.MaxUint32 {
+			return "", fmt.Errorf("bundle: platform key length %d exceeds uint32 frame", kLen)
+		}
+		binary.BigEndian.PutUint32(n4[:], uint32(kLen))
 		h.Write(n4[:])
 		h.Write([]byte(k))
 		d := digests[k]
