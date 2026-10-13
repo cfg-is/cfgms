@@ -164,6 +164,30 @@ out="$("$SCRIPT" --root "$fx" --dry-run --only "unknown:1@sha256:$D3" 2>&1)"; rc
 out="$("$SCRIPT" --root "$fx" --dry-run --only "redis:7-alpine" 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && pass "--only refuses a digest-less ref" || fail "--only refuses digest-less ref"
 
+echo "changed-refs"
+fx="$(make_fixture)"
+base="$(mktemp)"; cp "$fx/.github/ci-images.yml" "$base"
+out="$("$SCRIPT" --root "$fx" --changed-refs "$base" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$out" ]; then pass "--changed-refs: an unchanged list yields none"; else fail "--changed-refs unchanged ($rc: $out)"; fi
+
+sed -i "s/sha256:$D3/sha256:$D1/" "$fx/.github/ci-images.yml"
+out="$("$SCRIPT" --root "$fx" --changed-refs "$base" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = "golang:1.27-alpine@sha256:$D1" ]; then pass "--changed-refs: a changed digest yields exactly that ref"; else fail "--changed-refs changed digest ($rc: $out)"; fi
+
+fx="$(make_fixture)"
+printf -- '- upstream: postgres:18@sha256:%s\n  mirror: postgres\n' "$D2" >> "$fx/.github/ci-images.yml"
+out="$("$SCRIPT" --root "$fx" --changed-refs "$base" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = "postgres:18@sha256:$D2" ]; then pass "--changed-refs: an added entry yields its ref"; else fail "--changed-refs added ($rc: $out)"; fi
+
+fx="$(make_fixture)"
+sed -i '/^- upstream: redis/,+1d' "$fx/.github/ci-images.yml"
+out="$("$SCRIPT" --root "$fx" --changed-refs "$base" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$out" ]; then pass "--changed-refs: a removed entry yields none"; else fail "--changed-refs removed ($rc: $out)"; fi
+
+out="$("$SCRIPT" --root "$fx" --changed-refs "$fx/absent" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(wc -l <<<"$out")" -eq 3 ]; then pass "--changed-refs: a missing base yields every entry"; else fail "--changed-refs missing base ($rc: $out)"; fi
+rm -f "$base"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
