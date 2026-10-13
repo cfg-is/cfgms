@@ -300,6 +300,14 @@ def main() -> int:
         check("claude-code-cli" not in inventory_names,
               "no inventory source emits a claude-code-cli pin",
               f"saw {sorted(inventory_names)}")
+        check(not hasattr(dp, "discover_codex_cli"),
+              "Codex CLI has no discoverer — exempt from pin tracking (#4969)")
+        check(not any("codex" in n.lower() for n in inventory_names),
+              "no inventory source emits a Codex CLI pin (#4969)",
+              f"saw {sorted(inventory_names)}")
+        check(not any("CODEX_CLI_VERSION" in json.dumps(p) for p in
+                      dp.discover_tool_pins(root)),
+              "no tool pin is named for CODEX_CLI_VERSION (#4969)")
 
         print("base images")
         names = {p["name"] for p in images}

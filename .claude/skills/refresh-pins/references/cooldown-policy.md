@@ -60,6 +60,18 @@ installed is still recorded, as the `cfgms.claude_code_version` image label
 (`agent-dispatch.sh health-check` prints it), so a run can always be traced
 to a specific Claude Code version despite none being pinned in source.
 
+### Codex CLI exemption
+
+The Codex CLI is **exempt from the cooldown and from pin tracking**, on the
+same terms as Claude Code. Founder decision, 2026-10-13 (Issue #4969): Codex
+is the security-review harness's subscription lane, the account-side model
+list changes often, and a stale CLI can lag what the account serves.
+`.devcontainer/Dockerfile` installs npm's `latest` dist-tag at build time
+(`latest`, not `stable`, because Codex publishes no `stable` tag; alphas are
+published under `alpha`). `discover-pins.py` emits no Codex entry — do not file
+a bump story for it. The installed version is recorded as the
+`cfgms.codex_version` image label.
+
 ### MCP/agent-tooling pins (kind `mcp`, e.g. serena)
 
 These use the **default 3-day cooldown** for the *version* decision — same few days as any other pin. We deliberately do NOT lengthen the cooldown for them. The extra safety for agent tooling is not a longer wait; it's the **blast-radius classification** in `decision-matrix.md` ("MCP server pins"): a release that renames/removes a tool we consume routes to a human-reviewed **rewire story** (touching the `.claude/agents/*.md` allowlists + prose), not a mechanical bump that could auto-merge. So a non-breaking serena patch refreshes routinely after 3 days, while a breaking one is gated by review regardless of how long it's been out.
