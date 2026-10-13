@@ -28,16 +28,25 @@ This tuple is called a `ContentAddress` and is returned by `Bundle.ContentAddres
 
 ### How the content hash is computed
 
-`pkg/modules/bundle.ComputeContentHash` produces the hash:
+`pkg/modules/bundle.ComputeContentHashFromDigests` is the only code that feeds the
+digest; `ComputeContentHash` SHA-256s each binary and delegates to it. The hashed
+stream is length-framed, so distinct inputs never produce the same bytes:
 
-1. Collect `(os-arch, binary-content)` pairs from the bundle's binaries map.
-2. Sort the pairs lexicographically by `os-arch` key.
-3. Feed each `key || content` in sorted order into a SHA-256 digest.
-4. Feed the manifest YAML bytes last.
-5. Base64-encode (standard encoding) the 32-byte digest.
+1. A fixed format tag (`cfgms-module-content-v1`).
+2. For each `os-arch` entry, sorted by key: a 4-byte big-endian key length, the key,
+   then the fixed-width 32-byte SHA-256 of that platform's binary.
+3. An 8-byte big-endian manifest length, then the manifest YAML bytes.
+4. The result is SHA-256 hashed and base64-encoded (standard encoding).
 
-The sort step makes the hash independent of Go map iteration order. Two bundles with
-identical binary content and manifest always produce the same hash.
+Keys must be unique and drawn from the allowlist (`windows|darwin|linux` x
+`amd64|arm64`, see `bundle.ValidPlatformKey`); anything else is refused. Sorting makes
+the hash independent of map order, and because the stream carries binary digests, a
+holder of the digest list and manifest can verify a signature without holding every
+platform's binary. Hashes from earlier formats are invalid.
+
+A bundle signature only counts when the signature's publisher equals the publisher
+named in the bundle's manifest (`trust.ErrPublisherManifestMismatch`), checked before
+any key lookup.
 
 ---
 

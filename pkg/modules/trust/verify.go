@@ -23,6 +23,10 @@ var (
 	// against the bundle's ContentHash and the publisher's public key.
 	ErrInvalidSignature = errors.New("invalid bundle signature")
 
+	// ErrPublisherManifestMismatch is returned when a signature's publisher differs
+	// from the publisher named in the bundle's manifest.
+	ErrPublisherManifestMismatch = errors.New("signature publisher does not match manifest publisher")
+
 	// ErrUntrustedPublisherKey is returned when the stored publisher public key is not
 	// a safe, prime-order Ed25519 point — specifically the all-zero placeholder key
 	// baked into unconfigured builds or any known small-order point. Such keys must
@@ -105,6 +109,23 @@ func IsUsableIdentityKey(id PublisherIdentity) bool {
 //     store only holds one key per publisher so the verification catches this implicitly)
 //  3. ErrInvalidSignature — signature bytes do not verify
 func VerifyBundleSignature(b *bundle.Bundle, sig bundle.BundleSignature, store TrustStore) error {
+	if b.Manifest == nil || sig.Publisher != b.Manifest.Publisher {
+		manifestPublisher := ""
+		if b.Manifest != nil {
+			manifestPublisher = b.Manifest.Publisher
+		}
+		return fmt.Errorf("%w: signed by %q, manifest names %q",
+			ErrPublisherManifestMismatch, sig.Publisher, manifestPublisher)
+	}
+
+	return verifySignatureOverContentHash(b.ContentHash, sig, store)
+}
+
+// verifySignatureOverContentHash checks sig over message against the publisher key in
+// store, without any manifest binding. Callers that sign something other than a
+// module bundle (the steward binary) use it directly; module bundles go through
+// VerifyBundleSignature, which adds the publisher-equals-manifest check.
+func verifySignatureOverContentHash(message string, sig bundle.BundleSignature, store TrustStore) error {
 	id, ok := store.GetPublisher(sig.Publisher)
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrPublisherNotTrusted, sig.Publisher)
@@ -125,10 +146,9 @@ func VerifyBundleSignature(b *bundle.Bundle, sig bundle.BundleSignature, store T
 			ErrUntrustedPublisherKey, sig.Publisher)
 	}
 
-	message := []byte(b.ContentHash)
-	if !ed25519.Verify(ed25519.PublicKey(id.PublicKey), message, sig.Signature) {
+	if !ed25519.Verify(ed25519.PublicKey(id.PublicKey), []byte(message), sig.Signature) {
 		return fmt.Errorf("%w: signature by %q over content hash %q is not valid",
-			ErrInvalidSignature, sig.Publisher, b.ContentHash)
+			ErrInvalidSignature, sig.Publisher, message)
 	}
 
 	return nil
