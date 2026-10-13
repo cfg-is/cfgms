@@ -574,7 +574,7 @@ func TestRefreshComplete_200_ReturnsCerts(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce123", 1234567890, []byte("signature"), "test-csr-pem")
+	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce123", 1234567890, []byte("signature"), "test-csr-pem", nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, "CERT", resp.ClientCert)
@@ -592,7 +592,7 @@ func TestRefreshComplete_202_ReturnsErrRefreshPending(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"), "test-csr-pem")
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"), "test-csr-pem", nil)
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshPending)
 }
@@ -607,7 +607,7 @@ func TestRefreshComplete_403_ReturnsErrRefreshRejected(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"), "test-csr-pem")
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"), "test-csr-pem", nil)
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshRejected)
 }
@@ -627,7 +627,7 @@ func TestRefreshCompleteRequest_CSRPEMFieldName(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	_, err = cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce", 0, []byte("sig"), "csr-pem-data")
+	_, err = cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce", 0, []byte("sig"), "csr-pem-data", nil)
 	require.ErrorIs(t, err, ErrRefreshRejected)
 	assert.Equal(t, "csr-pem-data", gotBody["csr_pem"])
 }
@@ -684,7 +684,7 @@ func TestRefreshComplete_PrivateKeyNeverInResponseBody(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce", 0, []byte("sig"), csrPEM)
+	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce", 0, []byte("sig"), csrPEM, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
@@ -789,4 +789,49 @@ func TestVerifyEnrollmentCertSet_IntermediateChain_FailsWithoutChain(t *testing.
 
 	err := verifyEnrollmentCertSet(set)
 	assert.Error(t, err, "a leaf from an intermediate CA must not verify against a root-only pool without its issuer chain")
+}
+
+// TestRefreshComplete_SendsProvenance verifies the collected host attributes
+// travel in the request's provenance field, so the controller's auto_accept
+// demotion can compare them against the recorded baseline.
+func TestRefreshComplete_SendsProvenance(t *testing.T) {
+	var got struct {
+		Provenance map[string]string `json:"provenance"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_cert":"CERT"}`))
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	attrs := map[string]string{"machine_id": "m-1", "nic_macs": "aa:bb"}
+	_, err = cl.RefreshComplete(context.Background(), "dev", "t", "n", 1, []byte("sig"), "csr", attrs)
+	require.NoError(t, err)
+	assert.Equal(t, attrs, got.Provenance)
+}
+
+// TestRefreshClaim_SendsProvenance verifies the claim request carries the
+// attributes the controller records as the new baseline on an approved refresh.
+func TestRefreshClaim_SendsProvenance(t *testing.T) {
+	var got struct {
+		Provenance map[string]string `json:"provenance"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_cert":"CERT"}`))
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	attrs := map[string]string{"machine_id": "m-1"}
+	_, err = cl.RefreshClaim(context.Background(), "dev", "pending-1", "n", 1, []byte("sig"), attrs)
+	require.NoError(t, err)
+	assert.Equal(t, attrs, got.Provenance)
 }

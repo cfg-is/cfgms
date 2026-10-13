@@ -106,6 +106,12 @@ type RefreshClaimRequest struct {
 	Nonce     string `json:"nonce"`     // base64url nonce from challenge response
 	IssuedAt  int64  `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
 	Signature string `json:"signature"` // base64url Ed25519 sig over PoP message
+
+	// Provenance is the host attributes the steward collected on this machine.
+	// When the claim delivers an operator-approved refresh they become the
+	// steward's new provenance baseline (ADR-034 §2): a legitimate hardware
+	// change re-baselines through an operator, never automatically.
+	Provenance map[string]string `json:"provenance,omitempty"`
 }
 
 // ---- Handlers ---------------------------------------------------------------
@@ -562,6 +568,7 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pending refresh not available", http.StatusNotFound)
 			return
 		}
+		s.rebaselineProvenance(r.Context(), record, deviceID, entry.PendingID, req.Provenance)
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventAuthentication, "refresh_claimed",
 			business.AuditResultSuccess, business.AuditSeverityMedium,
@@ -578,6 +585,51 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 	default: // expired, claimed
 		http.Error(w, "pending refresh not available", http.StatusNotFound)
 	}
+}
+
+// maxProvenanceAttrs and maxProvenanceValueLen bound a caller-supplied
+// provenance map before it is stored as a baseline.
+const (
+	maxProvenanceAttrs    = 16
+	maxProvenanceValueLen = 1024
+)
+
+// rebaselineProvenance records the attributes a steward presented when it
+// collected an operator-approved refresh as its new provenance baseline. DNA
+// fields are dropped; with no usable attributes the existing baseline is kept.
+// A store failure is logged and audited but does not withhold the certificate
+// the operator already approved.
+func (s *Server) rebaselineProvenance(ctx context.Context, record *business.StewardRecord, deviceID, pendingID string, provenance map[string]string) {
+	if len(provenance) == 0 || len(provenance) > maxProvenanceAttrs {
+		return
+	}
+	bounded := make(map[string]string, len(provenance))
+	for k, v := range provenance {
+		if len(v) > maxProvenanceValueLen {
+			continue
+		}
+		bounded[k] = v
+	}
+	attrs := registration.NormalizeProvenance(bounded)
+	if attrs == nil {
+		return
+	}
+	raw, err := json.Marshal(attrs)
+	if err != nil {
+		return
+	}
+	if err := s.stewardStore.SetStewardProvenance(ctx, record.ID, string(raw)); err != nil {
+		s.logger.Error("Failed to re-baseline steward provenance", "steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
+		s.emitRefreshAudit(ctx, deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "provenance_rebaseline_failed"})
+		return
+	}
+	s.emitRefreshAudit(ctx, deviceID, record.TenantID,
+		business.AuditEventSecurityEvent, "steward_provenance_rebaselined",
+		business.AuditResultSuccess, business.AuditSeverityMedium,
+		map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "operator_approved_refresh"})
 }
 
 // handleRefreshByPolicy applies the per-tenant policy gate for non-archived stewards.
@@ -600,7 +652,7 @@ func (s *Server) handleRefreshByPolicy(
 		// the check is skipped and the cert is issued immediately.
 		if record.LastProvenanceJSON != "" {
 			pm := registration.ProvenanceMatcher{}
-			result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
+			result := pm.FuzzyMatch(registration.NormalizeStoredProvenance(record.LastProvenanceJSON), registration.NormalizeProvenance(provenance))
 			if result.Score < registration.ProvenanceMatchThreshold {
 				// Demote to require_approval (demote-only invariant).
 				s.handleRefreshQueueEntry(w, r, record, deviceID, provenance, csrPEM,

@@ -605,6 +605,24 @@ The security invariant is unchanged by the backing store: `session.Manager` alwa
 
 Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
 
+### Host Provenance at Admission (Issue #4949, ADR-034 §2)
+
+The admission pipeline order is: **revocation, approval, provenance**. Provenance runs only for a connection the first two gates already admitted, and is demote-only (ADR-011 §7): it classifies the connection and can never admit one they refused.
+
+The steward sends its host attributes as gRPC metadata on the `ControlChannel` call (`x-cfgms-host-attrs`, base64 of a JSON string map, hard cap 4 KiB). `transportServer.ControlChannel` reads it and, through the checker injected with `WithProvenanceChecker`, scores it against the steward record's `LastProvenanceJSON` using `registration.ProvenanceMatcher.ScoreAdmission` at `registration.ProvenanceMatchThreshold` (0.60). The decision is one of:
+
+`ScoreAdmission` rules: DNA keys never count; a baseline key that is absent or empty in the incoming report is skipped (neither matched nor divergent); `install_date` is not scored while the baseline holds a stable key (`machine_id`, `disk_serials`); `nic_macs` is scored by **set overlap** — any MAC present in both baseline and report is a match, no shared MAC is divergent; every other key is an exact match.
+
+- `unknown` — no baseline is recorded, no attributes were sent (an old steward without the collector, or an oversized/unparsable header), or the check could not be made. The connection is admitted exactly as before.
+- `approved_machine` — score at or above the threshold.
+- `copy` — score below the threshold. The controller writes a `security_event` audit entry `steward_provenance_divergence`, severity `high`, carrying the decision, score, matched/total field counts and the **names** of the attributes that differed (never their values), rate-limited to one per steward ID per minute. The stored baseline is not touched. The decision is also passed to the `IdentityConflictObserver` so a duplicate-identity report carries the same evidence. This story only records the decision; refusing a `copy` is a separate gate.
+
+**Baseline.** `LastProvenanceJSON` is written (trust on first use, audited as `steward_provenance_baseline_recorded`) at the first admission that presents attributes while the baseline is empty, and when a steward collects an operator-approved refresh (`POST .../refresh/claim` carries the steward's current attributes; they replace the baseline and are audited as `steward_provenance_rebaselined`). A legitimate hardware change therefore re-baselines through an operator, never automatically; a connection that scores below threshold never overwrites the baseline. DNA fields are dropped before anything is stored.
+
+**Store failures fail toward the pre-provenance behaviour.** If the steward store cannot be read, the connection is admitted as `unknown` and the error is logged (sanitized) at error level, so a store outage does not lock the fleet out. The revocation and approval gates ahead of it still fail closed.
+
+**Limit (false attributes).** The attributes are self-reported by the endpoint, and a copy controls its own steward binary. A disk-image clone carries `machine_id` and `install_date`, but normally not the NIC and disk hardware, so a clone with different MACs scores low (on macOS/Windows, where `disk_serials` is not collected, the NIC set is the deciding signal). A clone that also carries the original MACs (for example a VM clone with a preserved MAC), or an attacker who has learned the full attribute set, is not caught by provenance; the concurrent-connection check (#4948) is the control for that case. Provenance raises the cost of an unnoticed clone and leaves an audit trail; it is not proof of identity, and certificate revocation remains the authoritative control.
+
 ### Duplicate Steward Identity Detection (Issue #4948, ADR-034 §3)
 
 After the revocation and approval gates and before `registry.Register`, `transportServer.ControlChannel` looks up the steward ID in the connection registry. If a live stream exists and its remote host (IP, port stripped) differs from the new peer's host, the provider reports an `IdentityConflict` to the observer injected with `WithIdentityConflictObserver`. A reconnect from the same host (a restarting steward whose stale stream has not yet errored) is not a conflict, and the new stream still replaces the stale one.

@@ -295,6 +295,27 @@ func (s *SQLiteStewardStore) SetStewardHidden(ctx context.Context, stewardID str
 	return nil
 }
 
+// SetStewardProvenance replaces the steward's provenance baseline.
+func (s *SQLiteStewardStore) SetStewardProvenance(ctx context.Context, stewardID, provenanceJSON string) error {
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET last_provenance_json = ? WHERE id = ?`,
+			provenanceJSON, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to set provenance for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)

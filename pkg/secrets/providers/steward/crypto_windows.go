@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // DPAPI flags
@@ -43,6 +44,24 @@ func newPlatformEncryptor(_ string) (platformEncryptor, error) {
 	return &dpapiEncryptor{
 		entropy: entropyHash[:],
 	}, nil
+}
+
+// MachineID returns the host's stable machine identifier (the registry
+// MachineGuid under HKLM\SOFTWARE\Microsoft\Cryptography).
+func MachineID() ([]byte, error) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return nil, fmt.Errorf("open cryptography registry key: %w", err)
+	}
+	defer func() { _ = k.Close() }()
+	guid, _, err := k.GetStringValue("MachineGuid")
+	if err != nil {
+		return nil, fmt.Errorf("read MachineGuid: %w", err)
+	}
+	if guid == "" {
+		return nil, fmt.Errorf("MachineGuid is empty")
+	}
+	return []byte(guid), nil
 }
 
 // Encrypt encrypts plaintext using DPAPI CryptProtectData.

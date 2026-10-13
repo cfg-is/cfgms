@@ -556,10 +556,14 @@ func (c *HTTPClient) RefreshChallenge(ctx context.Context, deviceID string) (*Re
 // for the renewed credential (see GenerateStewardKeypair / BuildRegistrationCSR) — the
 // controller signs this public key; the matching private key never crosses the wire.
 //
+// provenance carries the host attributes collected on this machine (ADR-034 §2); the
+// controller compares them against the recorded baseline for the auto_accept demotion.
+// Nil omits the field.
+//
 // Returns (*RefreshCompleteResponse, nil) on HTTP 200 (cert issued immediately).
 // Returns (nil, ErrRefreshPending) on HTTP 202 (request queued for manual approval).
 // Returns (nil, ErrRefreshRejected) on HTTP 403 (device revoked or dormant).
-func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, nonce string, issuedAt int64, pop []byte, csrPEM string) (*RefreshCompleteResponse, error) {
+func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, nonce string, issuedAt int64, pop []byte, csrPEM string, provenance map[string]string) (*RefreshCompleteResponse, error) {
 	completeURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/complete", c.controllerURL, deviceID)
 
 	reqBody, err := json.Marshal(struct {
@@ -568,12 +572,15 @@ func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, no
 		IssuedAt  int64  `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
 		Signature string `json:"signature"` // base64url Ed25519 sig over PoP digest
 		CSRPEM    string `json:"csr_pem"`
+
+		Provenance map[string]string `json:"provenance,omitempty"`
 	}{
-		TenantID:  tenantID,
-		Nonce:     nonce,
-		IssuedAt:  issuedAt,
-		Signature: base64.RawURLEncoding.EncodeToString(pop),
-		CSRPEM:    csrPEM,
+		TenantID:   tenantID,
+		Nonce:      nonce,
+		IssuedAt:   issuedAt,
+		Signature:  base64.RawURLEncoding.EncodeToString(pop),
+		CSRPEM:     csrPEM,
+		Provenance: provenance,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal refresh complete request: %w", err)
@@ -635,7 +642,10 @@ func refreshPendingFromBody(body []byte) error {
 // it with the private key it kept for that request). Returns a
 // *RefreshPendingError on 202, ErrRefreshRejected on 403, and
 // ErrRefreshNotAvailable on 404 (expired, already collected, or unknown).
-func (c *HTTPClient) RefreshClaim(ctx context.Context, deviceID, pendingID, nonce string, issuedAt int64, pop []byte) (*RefreshCompleteResponse, error) {
+// provenance carries the host attributes collected on this machine; when the
+// claim delivers an operator-approved refresh the controller records them as the
+// new baseline (ADR-034 §2).
+func (c *HTTPClient) RefreshClaim(ctx context.Context, deviceID, pendingID, nonce string, issuedAt int64, pop []byte, provenance map[string]string) (*RefreshCompleteResponse, error) {
 	claimURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/claim", c.controllerURL, deviceID)
 
 	reqBody, err := json.Marshal(struct {
@@ -643,11 +653,14 @@ func (c *HTTPClient) RefreshClaim(ctx context.Context, deviceID, pendingID, nonc
 		Nonce     string `json:"nonce"`
 		IssuedAt  int64  `json:"issued_at"`
 		Signature string `json:"signature"`
+
+		Provenance map[string]string `json:"provenance,omitempty"`
 	}{
-		PendingID: pendingID,
-		Nonce:     nonce,
-		IssuedAt:  issuedAt,
-		Signature: base64.RawURLEncoding.EncodeToString(pop),
+		PendingID:  pendingID,
+		Nonce:      nonce,
+		IssuedAt:   issuedAt,
+		Signature:  base64.RawURLEncoding.EncodeToString(pop),
+		Provenance: provenance,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal refresh claim request: %w", err)

@@ -359,6 +359,36 @@ func (s *DatabaseStewardStore) SetStewardHidden(ctx context.Context, stewardID s
 	return tx.Commit()
 }
 
+// SetStewardProvenance replaces the steward's provenance baseline.
+func (s *DatabaseStewardStore) SetStewardProvenance(ctx context.Context, stewardID, provenanceJSON string) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin set provenance tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records SET last_provenance_json = $2 WHERE id = $1`,
+		stewardID, provenanceJSON)
+	if err != nil {
+		return fmt.Errorf("database: failed to set provenance for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return tx.Commit()
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)

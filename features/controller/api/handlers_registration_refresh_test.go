@@ -1460,7 +1460,7 @@ func TestRefresh_EndToEnd_CompleteToMTLSHandshake(t *testing.T) {
 	require.NoError(t, err)
 
 	completeResp, err := stewardClient.RefreshComplete(context.Background(), testDeviceID, testTenantID,
-		challenge.Nonce, int64(challenge.ServerTS), pop, csrPEM)
+		challenge.Nonce, int64(challenge.ServerTS), pop, csrPEM, nil)
 	require.NoError(t, err)
 	require.NotNil(t, completeResp)
 	require.NotEmpty(t, completeResp.ClientCert)
@@ -1611,13 +1611,20 @@ func TestHandleApproveRefresh_RootScoped_RootTenantItself_ProceedsGuard(t *testi
 // postClaim proves possession with a fresh challenge and POSTs to handleRefreshClaim.
 func postClaim(t *testing.T, server *Server, deviceID, tenantID, pendingID string, priv ed25519.PrivateKey) *httptest.ResponseRecorder {
 	t.Helper()
+	return postClaimWithProvenance(t, server, deviceID, tenantID, pendingID, priv, nil)
+}
+
+// postClaimWithProvenance is postClaim carrying the steward's host attributes.
+func postClaimWithProvenance(t *testing.T, server *Server, deviceID, tenantID, pendingID string, priv ed25519.PrivateKey, provenance map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
 	challenge := issueChallenge(t, server, deviceID, tenantID)
 	proof := buildValidCompleteRequest(t, deviceID, tenantID, challenge, priv, nil)
 	body, _ := json.Marshal(RefreshClaimRequest{
-		PendingID: pendingID,
-		Nonce:     proof.Nonce,
-		IssuedAt:  proof.IssuedAt,
-		Signature: proof.Signature,
+		PendingID:  pendingID,
+		Nonce:      proof.Nonce,
+		IssuedAt:   proof.IssuedAt,
+		Signature:  proof.Signature,
+		Provenance: provenance,
 	})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+deviceID+"/refresh/claim", bytes.NewReader(body))
 	r = mux.SetURLVars(r, map[string]string{"device_id": deviceID})
@@ -1663,6 +1670,43 @@ func TestHandleRefreshClaim_DeliversApprovedRefresh(t *testing.T) {
 
 	again := postClaim(t, f.server, testDeviceID, testTenantID, q.PendingID, priv)
 	assert.Equal(t, http.StatusNotFound, again.Code, "a claimed refresh is delivered once")
+}
+
+// TestHandleRefreshClaim_OperatorApprovedRefreshRebaselinesProvenance guards
+// ADR-034 §2: the baseline moves only when an operator-approved refresh is
+// collected — a still-pending claim leaves it alone, and DNA fields never enter it.
+func TestHandleRefreshClaim_OperatorApprovedRefreshRebaselinesProvenance(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	const oldBaseline = `{"machine_id":"old","nic_macs":"aa:bb"}`
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-rebase", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+		LastProvenanceJSON: oldBaseline,
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+
+	queued := postComplete(f.server, testDeviceID, buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv, nil))
+	require.Equal(t, http.StatusAccepted, queued.Code, queued.Body.String())
+	var q RefreshCompleteResponse
+	require.NoError(t, json.Unmarshal(queued.Body.Bytes(), &q))
+
+	fresh := map[string]string{"machine_id": "new", "nic_macs": "cc:dd", "os_version": "volatile"}
+	pending := postClaimWithProvenance(t, f.server, testDeviceID, testTenantID, q.PendingID, priv, fresh)
+	require.Equal(t, http.StatusAccepted, pending.Code)
+	rec, err := f.stewards.GetSteward(context.Background(), "steward-rebase")
+	require.NoError(t, err)
+	assert.JSONEq(t, oldBaseline, rec.LastProvenanceJSON, "an unapproved claim must not move the baseline")
+
+	approve := httptest.NewRecorder()
+	f.server.router.ServeHTTP(approve, makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+q.PendingID+"/approve", nil))
+	require.Equal(t, http.StatusOK, approve.Code, approve.Body.String())
+
+	claimed := postClaimWithProvenance(t, f.server, testDeviceID, testTenantID, q.PendingID, priv, fresh)
+	require.Equal(t, http.StatusOK, claimed.Code, claimed.Body.String())
+	rec, err = f.stewards.GetSteward(context.Background(), "steward-rebase")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"machine_id":"new","nic_macs":"cc:dd"}`, rec.LastProvenanceJSON)
 }
 
 // TestHandleRefreshClaim_Refusals covers the claim endpoint's refusals: a wrong
@@ -1826,4 +1870,88 @@ func TestHandleListPendingRefreshes_ResolvesHostnameTenantScoped(t *testing.T) {
 	}
 	assert.Equal(t, map[string]string{"r-known": "host-a", "r-unknown": "", "r-crosstenant": ""}, got)
 	assert.NotContains(t, rec.Body.String(), "host-b-secret")
+}
+
+// TestRefresh_AutoAccept_UnchangedHostWithPaddedBaseline_Issues guards the
+// handleRefreshByPolicy comparison: a baseline written before normalisation
+// (padded values, an empty value, a DNA key) and padded incoming attributes
+// from an unchanged host must compare equal, so auto_accept is not demoted.
+func TestRefresh_AutoAccept_UnchangedHostWithPaddedBaseline_Issues(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "s-padded", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+		LastProvenanceJSON: `{"machine_id":" m-1\n","nic_macs":"aa:bb ","disk_serials":"","os_version":"6.1"}`,
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "auto_accept"})
+
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv,
+		map[string]string{" machine_id": "m-1 ", "nic_macs": "aa:bb", "os_version": "9.9"})
+	rec := postComplete(f.server, testDeviceID, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 0, f.pendingCount(t), "an unchanged host must not be demoted to approval")
+}
+
+// TestRefresh_AutoAccept_DivergentHost_Demoted is the counterpart: values that
+// really differ still score below threshold after normalisation and demote.
+func TestRefresh_AutoAccept_DivergentHost_Demoted(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "s-diverged", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+		LastProvenanceJSON: `{"machine_id":" m-1 ","nic_macs":"aa:bb","install_date":"2026-01-01"}`,
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "auto_accept"})
+
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv,
+		map[string]string{"machine_id": "m-1", "nic_macs": "cc:dd", "install_date": "2030-01-01"})
+	rec := postComplete(f.server, testDeviceID, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, f.pendingCount(t))
+}
+
+// TestHandleRefreshClaim_RebaselineNormalisesAndSkipsUnusable guards
+// rebaselineProvenance: an approved claim stores the canonical form (trimmed,
+// no empty or DNA fields), and a claim with nothing usable leaves the old
+// baseline in place rather than overwriting it.
+func TestHandleRefreshClaim_RebaselineNormalisesAndSkipsUnusable(t *testing.T) {
+	cases := []struct {
+		name       string
+		provenance map[string]string
+		want       string
+	}{
+		{"normalised", map[string]string{" machine_id ": " new\n", "nic_macs": "cc:dd", "empty": " ", "uptime_seconds": "9"}, `{"machine_id":"new","nic_macs":"cc:dd"}`},
+		{"nothing usable", map[string]string{"os_version": "6.1", "blank": "  "}, `{"machine_id":"old","nic_macs":"aa:bb"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub, priv := newTestEd25519KeyPair(t)
+			f := newRefreshFixture(t, newTestCertManager(t))
+			f.addSteward(t, &business.StewardRecord{
+				ID: "steward-rebase-n", DeviceID: testDeviceID, TenantID: testTenantID,
+				Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+				LastProvenanceJSON: `{"machine_id":"old","nic_macs":"aa:bb"}`,
+			})
+			f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+
+			queued := postComplete(f.server, testDeviceID, buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv, nil))
+			require.Equal(t, http.StatusAccepted, queued.Code, queued.Body.String())
+			var q RefreshCompleteResponse
+			require.NoError(t, json.Unmarshal(queued.Body.Bytes(), &q))
+
+			approve := httptest.NewRecorder()
+			f.server.router.ServeHTTP(approve, makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+q.PendingID+"/approve", nil))
+			require.Equal(t, http.StatusOK, approve.Code, approve.Body.String())
+
+			claimed := postClaimWithProvenance(t, f.server, testDeviceID, testTenantID, q.PendingID, priv, tc.provenance)
+			require.Equal(t, http.StatusOK, claimed.Code, claimed.Body.String())
+			rec, err := f.stewards.GetSteward(context.Background(), "steward-rebase-n")
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, rec.LastProvenanceJSON)
+		})
+	}
 }

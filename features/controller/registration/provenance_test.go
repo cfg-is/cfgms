@@ -95,3 +95,15 @@ func TestProvenanceMatcher_FuzzyMatch(t *testing.T) {
 		})
 	}
 }
+
+func TestScoreAdmission_NicMacsSetOverlap(t *testing.T) {
+	stored := `{"machine_id":"m-1","nic_macs":"aa:bb,cc:dd"}`
+	res, _, div := ProvenanceMatcher{}.ScoreAdmission(stored, map[string]string{"machine_id": "m-1", "nic_macs": "cc:dd,ee:ff"})
+	if res.Score != 1.0 || len(div) != 0 {
+		t.Fatalf("shared MAC must match, got %+v %v", res, div)
+	}
+	res, _, div = ProvenanceMatcher{}.ScoreAdmission(stored, map[string]string{"machine_id": "m-1", "nic_macs": "ee:ff"})
+	if res.Score != 0.5 || len(div) != 1 || div[0] != "nic_macs" {
+		t.Fatalf("disjoint MACs must diverge, got %+v %v", res, div)
+	}
+}
