@@ -92,8 +92,8 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		INSERT INTO steward_records
 			(id, tenant_id, hostname, platform, arch, version, ip_address, status,
 			 registered_at, last_seen, last_heartbeat_at,
-			 device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15)`,
+			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16)`,
 		record.ID,
 		record.TenantID,
 		record.Hostname,
@@ -107,6 +107,7 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		record.DeviceID,
 		keyPub,
 		record.KeyProtectionLevel,
+		record.KeyAlgorithm,
 		record.LastProvenanceJSON,
 		record.Hidden,
 	)
@@ -191,7 +192,7 @@ func (s *DatabaseStewardStore) GetSteward(ctx context.Context, stewardID string)
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
 		FROM steward_records WHERE id = $1`, stewardID)
 	return scanStewardDBRow(row)
 }
@@ -213,7 +214,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceID(ctx context.Context, deviceI
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
 		FROM steward_records WHERE device_id = $1 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardDBRow(row)
 }
@@ -229,7 +230,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
 		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardDBRow(row)
@@ -240,7 +241,7 @@ func (s *DatabaseStewardStore) ListStewards(ctx context.Context) ([]*business.St
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
 		FROM steward_records ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list stewards: %w", err)
@@ -254,7 +255,7 @@ func (s *DatabaseStewardStore) ListStewardsByStatus(ctx context.Context, status 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
 		FROM steward_records WHERE status = $1 ORDER BY registered_at ASC`,
 		string(status))
 	if err != nil {
@@ -392,7 +393,7 @@ func (s *DatabaseStewardStore) SetStewardProvenance(ctx context.Context, steward
 // RebindStewardIdentity replaces the steward's device identity and clears its
 // provenance baseline. A device_id held by another live steward in the tenant
 // is reported as ErrStewardDeviceIDConflict.
-func (s *DatabaseStewardStore) RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel string) error {
+func (s *DatabaseStewardStore) RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
 	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
 	if err != nil {
 		return err
@@ -413,9 +414,9 @@ func (s *DatabaseStewardStore) RebindStewardIdentity(ctx context.Context, stewar
 	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE steward_records
-		SET device_id = $2, identity_key_pub = $3, key_protection_level = $4, last_provenance_json = ''
+		SET device_id = $2, identity_key_pub = $3, key_protection_level = $4, key_algorithm = $5, last_provenance_json = ''
 		WHERE id = $1`,
-		stewardID, deviceID, identityKeyPub, keyProtectionLevel)
+		stewardID, deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm)
 	if err != nil {
 		if strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
 			return business.ErrStewardDeviceIDConflict
@@ -483,7 +484,7 @@ func (s *DatabaseStewardStore) GetStewardsSeen(ctx context.Context, since time.T
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
 		FROM steward_records WHERE last_seen > $1 ORDER BY last_seen DESC`,
 		since)
 	if err != nil {
@@ -510,7 +511,7 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 	err := row.Scan(
 		&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.LastProvenanceJSON, &r.Hidden,
+		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -540,7 +541,7 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		if err := rows.Scan(
 			&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.LastProvenanceJSON, &r.Hidden,
+			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden,
 		); err != nil {
 			return nil, fmt.Errorf("database: failed to scan steward row: %w", err)
 		}

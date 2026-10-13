@@ -433,7 +433,7 @@ func New(
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
 		publicDownloadGuard:     newPublicDownloadGuard(defaultPublicDownloadGuardConfig()),
 		publicDownloadCache:     newPublicDownloadCache(),
-		popVerifier:             ed25519PoPVerifier{},    // Issue #2096: default PoP verifier; override in tests
+		popVerifier:             defaultPoPVerifier{},    // Issue #2096: default PoP verifier; override in tests
 		sessionCfg:              session.DefaultConfig(), // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),

@@ -73,6 +73,11 @@ type PendingRegistrationEntry struct {
 	// protected on the steward host.
 	KeyProtectionLevel string
 
+	// KeyAlgorithm is "ed25519" or "ecdsa-p256"; empty means "ed25519" (ADR-011
+	// Amendment 3). Determines how IdentityKeyPub is encoded and how the PoP
+	// signature is verified.
+	KeyAlgorithm string
+
 	// CSRPEM is the PEM-encoded certificate signing request the steward submitted
 	// with the original registration POST (Issue #3780). The claim step signs this
 	// exact CSR's public key into the steward's client certificate — the controller

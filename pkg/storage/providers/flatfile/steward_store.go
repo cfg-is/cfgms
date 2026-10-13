@@ -350,7 +350,7 @@ func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID
 
 // RebindStewardIdentity replaces the steward's device identity and clears its
 // provenance baseline, enforcing the same-tenant device_id uniqueness rule.
-func (s *FlatFileStewardStore) RebindStewardIdentity(_ context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel string) error {
+func (s *FlatFileStewardStore) RebindStewardIdentity(_ context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -373,6 +373,7 @@ func (s *FlatFileStewardStore) RebindStewardIdentity(_ context.Context, stewardI
 	record.DeviceID = deviceID
 	record.IdentityKeyPub = identityKeyPub
 	record.KeyProtectionLevel = keyProtectionLevel
+	record.KeyAlgorithm = keyAlgorithm
 	record.LastProvenanceJSON = ""
 	return s.writeSteward(record)
 }

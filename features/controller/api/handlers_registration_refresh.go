@@ -4,7 +4,6 @@ package api
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -22,19 +21,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
-
-// PoPVerifier verifies an Ed25519 proof-of-possession signature.
-// Injected on the Server so tests can assert it is never called for revoked devices.
-type PoPVerifier interface {
-	Verify(pub ed25519.PublicKey, message, sig []byte) bool
-}
-
-// ed25519PoPVerifier is the default PoPVerifier backed by the stdlib ed25519.Verify.
-type ed25519PoPVerifier struct{}
-
-func (ed25519PoPVerifier) Verify(pub ed25519.PublicKey, message, sig []byte) bool {
-	return ed25519.Verify(pub, message, sig)
-}
 
 // refreshNonceEntry is the value stored in the durable NonceStore keyed by
 // "refresh-nonce:<device_id>" (Issue #3755, ADR-031 amendment to ADR-011).
@@ -66,11 +52,15 @@ type RefreshChallengeResponse struct {
 
 // RefreshCompleteRequest is the body for the complete endpoint.
 type RefreshCompleteRequest struct {
-	TenantID   string            `json:"tenant_id"`
-	Nonce      string            `json:"nonce"`     // base64url nonce from challenge response
-	IssuedAt   int64             `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
-	Signature  string            `json:"signature"` // base64url Ed25519 sig over PoP message
-	Provenance map[string]string `json:"provenance,omitempty"`
+	TenantID  string `json:"tenant_id"`
+	Nonce     string `json:"nonce"`     // base64url nonce from challenge response
+	IssuedAt  int64  `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
+	Signature string `json:"signature"` // base64url signature over PoP message (ed25519, or ASN.1 DER ecdsa-p256)
+	// KeyAlgorithm is the device key algorithm the steward signed with: "ed25519"
+	// or "ecdsa-p256"; absent means ed25519 (ADR-011 Amendment 3). It must equal
+	// the stored algorithm for the device.
+	KeyAlgorithm string            `json:"key_algorithm,omitempty"`
+	Provenance   map[string]string `json:"provenance,omitempty"`
 
 	// CSRPEM is a PEM-encoded CERTIFICATE REQUEST over a fresh keypair the steward
 	// generates locally for the renewed credential (Issue #3781). The controller signs
@@ -105,7 +95,10 @@ type RefreshClaimRequest struct {
 	PendingID string `json:"pending_id"`
 	Nonce     string `json:"nonce"`     // base64url nonce from challenge response
 	IssuedAt  int64  `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
-	Signature string `json:"signature"` // base64url Ed25519 sig over PoP message
+	Signature string `json:"signature"` // base64url signature over PoP message (ed25519, or ASN.1 DER ecdsa-p256)
+	// KeyAlgorithm is the device key algorithm the steward signed with; absent
+	// means ed25519 (ADR-011 Amendment 3). It must equal the stored algorithm.
+	KeyAlgorithm string `json:"key_algorithm,omitempty"`
 
 	// Provenance is the host attributes the steward collected on this machine.
 	// When the claim delivers an operator-approved refresh they become the
@@ -333,7 +326,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Gates (4)-(7): nonce, IssuedAt, consume, proof-of-possession.
-	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.IssuedAt) {
+	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.KeyAlgorithm, req.IssuedAt) {
 		return
 	}
 
@@ -370,7 +363,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 // signature must verify against record.IdentityKeyPub. It writes the error
 // response and returns false on any failure. Used by /refresh/complete and
 // /refresh/claim.
-func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, deviceID, nonceB64, sigB64 string, issuedAt int64) bool {
+func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, deviceID, nonceB64, sigB64, reqKeyAlgorithm string, issuedAt int64) bool {
 	if s.nonceStore == nil {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
@@ -414,6 +407,25 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 		return false
 	}
 
+	// Algorithm gate (ADR-011 Amendment 3): after the nonce is consumed and before
+	// any signature verification, the algorithm the request names must equal the
+	// stored one. A change (in either direction) is a downgrade attempt and
+	// answers 401, the same as an invalid signature.
+	storedAlg, storedOK := normalizeKeyAlgorithm(record.KeyAlgorithm)
+	reqAlg, reqOK := normalizeKeyAlgorithm(reqKeyAlgorithm)
+	if !storedOK || !reqOK || storedAlg != reqAlg {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultFailure, business.AuditSeverityCritical,
+			map[string]interface{}{
+				"reason":                "key_algorithm_mismatch",
+				"stored_key_algorithm":  string(storedAlg),
+				"request_key_algorithm": logging.SanitizeLogValue(reqKeyAlgorithm),
+			})
+		http.Error(w, "proof-of-possession verification failed", http.StatusUnauthorized)
+		return false
+	}
+
 	// Gate (5): IssuedAt > 60s → 401
 	issuedAtTime := time.Unix(0, issuedAt)
 	if time.Since(issuedAtTime) > nonceMaxAge {
@@ -447,7 +459,8 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 	}
 
 	// Gate (7): PoP verify — message = sha256(nonce_bytes || device_id_utf8 || server_ts_be_uint64)
-	if len(record.IdentityKeyPub) != ed25519.PublicKeySize {
+	pubKey, keyErr := parseDevicePublicKey(storedAlg, record.IdentityKeyPub)
+	if keyErr != nil {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityHigh,
@@ -464,7 +477,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 	h.Write(tsBytes[:])
 	popMsg := h.Sum(nil)
 
-	if !s.popVerifier.Verify(ed25519.PublicKey(record.IdentityKeyPub), popMsg, sigBytes) {
+	if !s.popVerifier.Verify(storedAlg, pubKey, popMsg, sigBytes) {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical,
@@ -519,7 +532,7 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device is revoked", http.StatusForbidden)
 		return
 	}
-	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.IssuedAt) {
+	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.KeyAlgorithm, req.IssuedAt) {
 		return
 	}
 

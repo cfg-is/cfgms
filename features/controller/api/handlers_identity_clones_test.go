@@ -75,7 +75,7 @@ func (e *cloneEnv) addPending(t *testing.T, pendingID, tenantID, cloneOf, device
 		PendingID: pendingID, StewardID: "steward-queued-" + pendingID, TenantID: tenantID,
 		TokenStr: e.regToken, SourceIP: "10.1.2.3", RegisteredAt: time.Now().UTC(),
 		ExpiresAt: time.Now().UTC().Add(time.Hour), Status: business.PendingRegistrationStatusPending,
-		DeviceID: deviceID, IdentityKeyPub: []byte(e.deviceKey), KeyProtectionLevel: "tpm",
+		DeviceID: deviceID, IdentityKeyPub: []byte(e.deviceKey), KeyProtectionLevel: "tpm", KeyAlgorithm: "ecdsa-p256",
 		CSRPEM: testValidCSRPEM, Hostname: "queued-host", Platform: "linux", CloneOf: cloneOf,
 	}
 	require.NoError(t, e.server.pendingStore.AddPending(context.Background(), entry))
@@ -288,6 +288,7 @@ func TestMoveIdentity_RebindsRecordAndClaimsUnderOriginalID(t *testing.T) {
 	assert.Equal(t, cloneDeviceB, got.DeviceID)
 	assert.Equal(t, []byte(env.deviceKey), got.IdentityKeyPub)
 	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm, "the move must carry the key algorithm")
 	assert.Empty(t, got.LastProvenanceJSON)
 
 	// The queued entry is approved under the original steward ID.

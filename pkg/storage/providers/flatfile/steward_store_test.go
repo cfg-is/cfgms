@@ -275,6 +275,7 @@ func TestFlatFileStewardStore_GetStewardByDeviceID(t *testing.T) {
 	rec.DeviceID = deviceID
 	rec.IdentityKeyPub = []byte{0xde, 0xad}
 	rec.KeyProtectionLevel = "file"
+	rec.KeyAlgorithm = "ecdsa-p256"
 	rec.LastProvenanceJSON = `{"hostname":"host-s-dvc"}`
 	require.NoError(t, store.RegisterSteward(ctx, rec))
 
@@ -284,6 +285,7 @@ func TestFlatFileStewardStore_GetStewardByDeviceID(t *testing.T) {
 	assert.Equal(t, deviceID, got.DeviceID)
 	assert.Equal(t, []byte{0xde, 0xad}, got.IdentityKeyPub)
 	assert.Equal(t, "file", got.KeyProtectionLevel)
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm)
 	assert.Equal(t, `{"hostname":"host-s-dvc"}`, got.LastProvenanceJSON)
 
 	_, err = store.GetStewardByDeviceID(ctx, "0000000000000000000000000000000000000000000000000000000000000000")
@@ -641,20 +643,21 @@ func TestRebindStewardIdentity(t *testing.T) {
 	b.TenantID, b.DeviceID = "t1", "dev-b"
 	require.NoError(t, store.RegisterSteward(ctx, b))
 
-	require.NoError(t, store.RebindStewardIdentity(ctx, "s-rb-a", "dev-new", []byte("key-new"), "tpm"))
+	require.NoError(t, store.RebindStewardIdentity(ctx, "s-rb-a", "dev-new", []byte("key-new"), "tpm", "ecdsa-p256"))
 	got, err := store.GetSteward(ctx, "s-rb-a")
 	require.NoError(t, err)
 	assert.Equal(t, "dev-new", got.DeviceID)
 	assert.Equal(t, []byte("key-new"), got.IdentityKeyPub)
 	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm, "rebind must carry the key algorithm")
 	assert.Empty(t, got.LastProvenanceJSON, "the new machine must re-baseline")
 
-	err = store.RebindStewardIdentity(ctx, "s-rb-a", "dev-b", []byte("key-x"), "file")
+	err = store.RebindStewardIdentity(ctx, "s-rb-a", "dev-b", []byte("key-x"), "file", "")
 	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict)
 	got, err = store.GetSteward(ctx, "s-rb-a")
 	require.NoError(t, err)
 	assert.Equal(t, "dev-new", got.DeviceID)
 
-	err = store.RebindStewardIdentity(ctx, "ghost", "dev-z", []byte("k"), "file")
+	err = store.RebindStewardIdentity(ctx, "ghost", "dev-z", []byte("k"), "file", "")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }

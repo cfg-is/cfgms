@@ -427,8 +427,8 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (a) Rebind the record. A device_id conflict changes nothing.
-	oldDeviceID, oldKey, oldLevel := record.DeviceID, record.IdentityKeyPub, record.KeyProtectionLevel
-	if err := s.stewardStore.RebindStewardIdentity(ctx, record.ID, entry.DeviceID, entry.IdentityKeyPub, entry.KeyProtectionLevel); err != nil {
+	oldDeviceID, oldKey, oldLevel, oldAlg := record.DeviceID, record.IdentityKeyPub, record.KeyProtectionLevel, record.KeyAlgorithm
+	if err := s.stewardStore.RebindStewardIdentity(ctx, record.ID, entry.DeviceID, entry.IdentityKeyPub, entry.KeyProtectionLevel, entry.KeyAlgorithm); err != nil {
 		if errors.Is(err, business.ErrStewardDeviceIDConflict) {
 			s.writeErrorResponse(w, http.StatusConflict, "Device identity is held by another steward in this tenant", "DEVICE_ID_CONFLICT")
 			return
@@ -446,7 +446,7 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 	if stepErr != nil {
 		// Put the record back so the original machine keeps its identity.
-		if rbErr := s.stewardStore.RebindStewardIdentity(ctx, record.ID, oldDeviceID, oldKey, oldLevel); rbErr != nil {
+		if rbErr := s.stewardStore.RebindStewardIdentity(ctx, record.ID, oldDeviceID, oldKey, oldLevel, oldAlg); rbErr != nil {
 			s.logger.Error("move identity: rollback of rebind failed",
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(rbErr.Error()))
 		}
