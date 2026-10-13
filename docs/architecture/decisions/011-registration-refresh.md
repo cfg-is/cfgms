@@ -135,7 +135,7 @@ Request:
 {
   "device_id":       "<64-char hex>",
   "nonce":           "<base64url nonce from /challenge>",
-  "pop":             "<base64url ed25519 signature>",
+  "pop":             "<base64url signature: ed25519, or ASN.1 DER ecdsa-p256 (Amendment 3)>",
   "host_attributes": { "...": "..." }
 }
 ```
@@ -175,7 +175,7 @@ The controller `/refresh/complete` handler MUST follow this order; each step sho
 2. record.Status == revoked               → 403 BEFORE any ed25519.Verify call
 3. tenant check: record.TenantID != req   → 403 (not 404 — 404 leaks existence)
 4. consume nonce (delete; 401 if absent/expired/used)
-5. PoPVerifier.Verify(pubkey, digest, pop) → 401 if signature invalid
+5. PoPVerifier.Verify(alg, pubkey, digest, pop) → 401 if signature invalid (Amendment 3 adds the algorithm check before this step)
 6. lifecycle + policy + provenance gate (§3, §6, §7) → 200 / 202 / 403
 7. audit the outcome (accept / queue / reject) → before WriteHeader
 ```
@@ -282,8 +282,15 @@ Hardware key stores cannot generate Ed25519 keys: TPM 2.0 and the Secure Enclave
       // Sign signs the 32-byte PoP digest with the device private key,
       // wherever it lives.
       Sign(digest []byte) ([]byte, error)
+      // Algorithm reports "ed25519" or "ecdsa-p256".
+      Algorithm() KeyAlgorithm
       // ProtectionLevel reports "file", "tpm" or "secure-enclave".
       ProtectionLevel() string
+      // Regenerate replaces the device key with a new one in the same
+      // backend (clone re-key, ADR-034 §4). The DeviceID changes.
+      Regenerate(ctx context.Context) (crypto.PublicKey, KeyAlgorithm, error)
+      // Remove deletes the stored device key (prepare-image, ADR-034 §6).
+      Remove(ctx context.Context) error
   }
   ```
 
