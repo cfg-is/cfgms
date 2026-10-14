@@ -8,11 +8,9 @@ package api
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -28,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // requiredModulesValidCfgBody returns a minimal valid StewardConfig body with
@@ -74,114 +73,22 @@ func testBundle(publisher, name, version string) *bundle.Bundle {
 	}
 }
 
-// skipIfNoGitForRequiredModules skips when git is unavailable (parity with
-// resolution_test.go which exercises the same GitSourceResolver code path).
-func skipIfNoGitForRequiredModules(t *testing.T) string {
+// serveModule publishes a module signed by a fresh key as the root of a git
+// repository tagged with its version, serves it over verified TLS and returns the
+// source base URL plus the public key to register in a trust store. It sets
+// GIT_SSL_CAINFO, so callers must not use t.Parallel().
+func serveModule(t *testing.T, publisher, name, version string) (string, ed25519.PublicKey) {
 	t.Helper()
-	gitBin, err := exec.LookPath("git")
-	if err != nil {
-		t.Skip("git binary not found in PATH; required for GitSourceResolver integration")
-	}
-	return gitBin
-}
-
-// initUnsignedModuleRepo creates a local git repo for a module with no signature
-// files — the resolver will surface it but the approval workflow will queue it.
-func initUnsignedModuleRepo(t *testing.T, gitBin, repoDir, publisher, name, version string) {
-	t.Helper()
-	// Disable git CRLF rewriting so module.yaml + binaries are byte-identical
-	// after clone on every platform (mirrors resolution_test.go).
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitattributes"), []byte("* -text\n"), 0640))
-
-	meta := &modules.ModuleMetadata{
-		Name:      name,
-		Version:   version,
-		Publisher: publisher,
-		Executors: []string{"steward"},
-	}
-	metaBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "module.yaml"), metaBytes, 0640))
-
-	binDir := filepath.Join(repoDir, "binaries")
-	require.NoError(t, os.MkdirAll(binDir, 0750))
-	require.NoError(t, os.WriteFile(filepath.Join(binDir, "linux-amd64"), []byte("fake-binary"), 0640))
-
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(gitBin, args...)
-		cmd.Dir = repoDir
-		out, runErr := cmd.CombinedOutput()
-		require.NoError(t, runErr, "git %v: %s", args, string(out))
-	}
-	git("init", repoDir)
-	git("-C", repoDir, "config", "user.email", "test@cfgms.test")
-	git("-C", repoDir, "config", "user.name", "CFGMS Test")
-	git("add", ".")
-	git("commit", "-m", "Initial module commit")
-	// The resolver pins to the requested version by checking out a git ref of
-	// that exact name (Issue #4409); tag the commit so "version" resolves.
-	git("tag", version)
-}
-
-// initSignedModuleRepo creates a local git repo for a module signed by a fresh
-// Ed25519 key pair. Returns the public key so the test can register the
-// publisher in the trust store, making the approval workflow auto-approve.
-func initSignedModuleRepo(t *testing.T, gitBin, repoDir, publisher, name, version string) ed25519.PublicKey {
-	t.Helper()
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitattributes"), []byte("* -text\n"), 0640))
-
-	meta := &modules.ModuleMetadata{
-		Name:      name,
-		Version:   version,
-		Publisher: publisher,
-		Executors: []string{"steward"},
-	}
-	metaBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "module.yaml"), metaBytes, 0640))
-
-	binContent := []byte("fake-binary-content")
-	binDir := filepath.Join(repoDir, "binaries")
-	require.NoError(t, os.MkdirAll(binDir, 0750))
-	require.NoError(t, os.WriteFile(filepath.Join(binDir, "linux-amd64"), binContent, 0640))
-
-	contentHash, err := bundle.ComputeContentHash(
-		map[string][]byte{"linux-amd64": binContent},
-		metaBytes,
-	)
-	require.NoError(t, err)
-
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	sig := ed25519.Sign(privKey, []byte(contentHash))
-
-	sigDir := filepath.Join(repoDir, "signatures")
-	require.NoError(t, os.MkdirAll(sigDir, 0750))
-	sigBytes, err := yaml.Marshal(bundle.BundleSignature{
-		Publisher: publisher,
-		Algorithm: "ed25519",
-		Signature: sig,
-	})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(sigDir, publisher+".yaml"), sigBytes, 0640))
-
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(gitBin, args...)
-		cmd.Dir = repoDir
-		out, runErr := cmd.CombinedOutput()
-		require.NoError(t, runErr, "git %v: %s", args, string(out))
-	}
-	git("init", repoDir)
-	git("-C", repoDir, "config", "user.email", "test@cfgms.test")
-	git("-C", repoDir, "config", "user.name", "CFGMS Test")
-	git("add", ".")
-	git("commit", "-m", "Initial module commit")
-	// The resolver pins to the requested version by checking out a git ref of
-	// that exact name (Issue #4409); tag the commit so "version" resolves.
-	git("tag", version)
-	return pubKey
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: publisher, Name: name, Version: version})
+	root := t.TempDir()
+	repo := filepath.Join(root, name)
+	sb.CommitToRepo(t, repo)
+	// #nosec G204 -- fixed git binary; arguments are test-controlled.
+	out, err := exec.Command("git", "-C", repo, "tag", version).CombinedOutput()
+	require.NoError(t, err, string(out))
+	baseURL, caFile := testutil.NewGitServer(t, root)
+	t.Setenv("GIT_SSL_CAINFO", caFile)
+	return baseURL, sb.PublicKey
 }
 
 // TestHandleUpdateStewardConfig_RequiredModules_PendingInCache_Returns422 wires
@@ -262,16 +169,13 @@ func TestHandleUpdateStewardConfig_RequiredModules_ApprovedInCache_Returns200(t 
 // approval workflow. With an unsigned module + empty trust store the workflow
 // returns QueueForReview, which must block the deployment with HTTP 422.
 func TestHandleUpdateStewardConfig_RequiredModules_UncachedQueuedByResolver_Returns422(t *testing.T) {
-	gitBin := skipIfNoGitForRequiredModules(t)
 	server := setupTestServer(t)
 
-	modulesDir := t.TempDir()
-	firewallDir := filepath.Join(modulesDir, "firewall")
-	require.NoError(t, os.MkdirAll(firewallDir, 0750))
-	initUnsignedModuleRepo(t, gitBin, firewallDir, "cfgms", "firewall", "1.0.0")
+	// Signed, but the publisher is unknown to the trust store below.
+	baseURL, _ := serveModule(t, "cfgms", "firewall", "1.0.0")
 
 	resolver, err := gitresolver.New(map[string]gitresolver.SourceConfig{
-		"cfgms": {Type: "git", Base: "file://" + modulesDir},
+		"cfgms": {Type: "git", Base: baseURL},
 	}, t.TempDir(), logging.NewNoopLogger())
 	require.NoError(t, err)
 
@@ -304,16 +208,12 @@ func TestHandleUpdateStewardConfig_RequiredModules_UncachedQueuedByResolver_Retu
 // the resolver fetches it, the trust store recognises the publisher signature,
 // the approval workflow returns AutoApprove, and the cfg push succeeds.
 func TestHandleUpdateStewardConfig_RequiredModules_UncachedAutoApprovedByResolver_Returns200(t *testing.T) {
-	gitBin := skipIfNoGitForRequiredModules(t)
 	server := setupTestServer(t)
 
-	modulesDir := t.TempDir()
-	firewallDir := filepath.Join(modulesDir, "firewall")
-	require.NoError(t, os.MkdirAll(firewallDir, 0750))
-	pubKey := initSignedModuleRepo(t, gitBin, firewallDir, "cfgms", "firewall", "1.0.0")
+	baseURL, pubKey := serveModule(t, "cfgms", "firewall", "1.0.0")
 
 	resolver, err := gitresolver.New(map[string]gitresolver.SourceConfig{
-		"cfgms": {Type: "git", Base: "file://" + modulesDir},
+		"cfgms": {Type: "git", Base: baseURL},
 	}, t.TempDir(), logging.NewNoopLogger())
 	require.NoError(t, err)
 

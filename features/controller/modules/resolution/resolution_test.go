@@ -5,7 +5,6 @@ package resolution_test
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
@@ -24,17 +22,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
-
-// skipIfNoGit skips the test if git is not available.
-func skipIfNoGit(t *testing.T) string {
-	t.Helper()
-	gitBin, err := exec.LookPath("git")
-	if err != nil {
-		t.Skip("git binary not found in PATH; required for git resolver integration tests")
-	}
-	return gitBin
-}
 
 // makeTestBundle creates a Bundle with a stable fake content hash for cache tests.
 func makeTestBundle(publisher, name, version string) *bundle.Bundle {
@@ -68,116 +57,22 @@ func emptyResolver(t *testing.T) *gitresolver.GitSourceResolver {
 	return r
 }
 
-// initSignedGitRepo creates a local git repo for publisher/moduleName@version with
-// a valid Ed25519 signature. Returns the signing public key for the trust store.
-func initSignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, version string) ed25519.PublicKey {
+// serveModule publishes a module signed by a fresh key as the root of a git
+// repository tagged with its version, serves it over verified TLS and returns the
+// source base URL plus the public key to register in a trust store. It sets
+// GIT_SSL_CAINFO, so callers must not use t.Parallel().
+func serveModule(t *testing.T, publisher, name, version string) (string, ed25519.PublicKey) {
 	t.Helper()
-
-	// Disable git line-ending conversion so module.yaml and binaries are
-	// byte-identical after clone on every platform. Without this the Windows
-	// runner default (core.autocrlf=true) rewrites LF→CRLF on checkout, the
-	// resolver re-reads different bytes than the test signed, and signature
-	// verification fails. "* -text" treats every path as binary.
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitattributes"), []byte("* -text\n"), 0640))
-
-	// Write module.yaml
-	meta := &modules.ModuleMetadata{
-		Name:      moduleName,
-		Version:   version,
-		Publisher: publisher,
-		Executors: []string{"steward"},
-	}
-	metaBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "module.yaml"), metaBytes, 0640))
-
-	// Write a fake binary
-	binContent := []byte("fake-binary-content")
-	binDir := filepath.Join(repoDir, "binaries")
-	require.NoError(t, os.MkdirAll(binDir, 0750))
-	require.NoError(t, os.WriteFile(filepath.Join(binDir, "linux-amd64"), binContent, 0640))
-
-	// Compute the content hash (identical to parseBundleFromDir's algorithm)
-	contentHash, err := bundle.ComputeContentHash(
-		map[string][]byte{"linux-amd64": binContent},
-		metaBytes,
-	)
-	require.NoError(t, err)
-
-	// Generate an Ed25519 key pair and sign the content hash
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	sig := ed25519.Sign(privKey, []byte(contentHash))
-
-	// Write signature file under signatures/
-	sigEntry := bundle.BundleSignature{
-		Publisher: publisher,
-		Algorithm: "ed25519",
-		Signature: sig,
-	}
-	sigDir := filepath.Join(repoDir, "signatures")
-	require.NoError(t, os.MkdirAll(sigDir, 0750))
-	sigBytes, err := yaml.Marshal(sigEntry)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(sigDir, publisher+".yaml"), sigBytes, 0640))
-
-	// Initialise git repo and commit
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(gitBin, args...)
-		cmd.Dir = repoDir
-		out, runErr := cmd.CombinedOutput()
-		require.NoError(t, runErr, "git %v: %s", args, string(out))
-	}
-	git("init", repoDir)
-	git("-C", repoDir, "config", "user.email", "test@cfgms.test")
-	git("-C", repoDir, "config", "user.name", "CFGMS Test")
-	git("add", ".")
-	git("commit", "-m", "Initial module commit")
-	// The resolver pins to the requested version by checking out a git ref of
-	// that exact name (Issue #4409); tag the commit so "version" resolves.
-	git("tag", version)
-
-	return pubKey
-}
-
-// initUnsignedGitRepo creates a local git repo with no signature files.
-// The bundle returned by the resolver will have no valid signatures.
-func initUnsignedGitRepo(t *testing.T, gitBin, repoDir, publisher, moduleName, version string) {
-	t.Helper()
-
-	// See initSignedGitRepo for why this is required on Windows runners.
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitattributes"), []byte("* -text\n"), 0640))
-
-	meta := &modules.ModuleMetadata{
-		Name:      moduleName,
-		Version:   version,
-		Publisher: publisher,
-		Executors: []string{"steward"},
-	}
-	metaBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "module.yaml"), metaBytes, 0640))
-
-	binDir := filepath.Join(repoDir, "binaries")
-	require.NoError(t, os.MkdirAll(binDir, 0750))
-	require.NoError(t, os.WriteFile(filepath.Join(binDir, "linux-amd64"), []byte("fake-binary"), 0640))
-
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(gitBin, args...)
-		cmd.Dir = repoDir
-		out, runErr := cmd.CombinedOutput()
-		require.NoError(t, runErr, "git %v: %s", args, string(out))
-	}
-	git("init", repoDir)
-	git("-C", repoDir, "config", "user.email", "test@cfgms.test")
-	git("-C", repoDir, "config", "user.name", "CFGMS Test")
-	git("add", ".")
-	git("commit", "-m", "Initial module commit")
-	// The resolver pins to the requested version by checking out a git ref of
-	// that exact name (Issue #4409); tag the commit so "version" resolves.
-	git("tag", version)
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: publisher, Name: name, Version: version})
+	root := t.TempDir()
+	repo := filepath.Join(root, name)
+	sb.CommitToRepo(t, repo)
+	// #nosec G204 -- fixed git binary; arguments are test-controlled.
+	out, err := exec.Command("git", "-C", repo, "tag", version).CombinedOutput()
+	require.NoError(t, err, string(out))
+	baseURL, caFile := testutil.NewGitServer(t, root)
+	t.Setenv("GIT_SSL_CAINFO", caFile)
+	return baseURL, sb.PublicKey
 }
 
 // --- tests ---
@@ -218,17 +113,10 @@ func TestResolveCfgRequiredModules_AllModulesApprovedInCache_ReturnsNil(t *testi
 
 // [REQUIRED TEST] Uncached module: GitSourceResolver + ApprovalWorkflow called; AutoApprove → nil.
 func TestResolveCfgRequiredModules_UncachedModule_AutoApprove_ReturnsNil(t *testing.T) {
-	gitBin := skipIfNoGit(t)
-
-	// Create a local git repo with a properly signed "firewall" module.
-	modulesDir := t.TempDir()
-	firewallDir := filepath.Join(modulesDir, "firewall")
-	require.NoError(t, os.MkdirAll(firewallDir, 0750))
-	pubKey := initSignedGitRepo(t, gitBin, firewallDir, "cfgms", "firewall", "1.0.0")
-
-	// Configure resolver to use file:// URL pointing at the local modules directory.
+	// A properly signed "firewall" module served over verified TLS.
+	baseURL, pubKey := serveModule(t, "cfgms", "firewall", "1.0.0")
 	sources := map[string]gitresolver.SourceConfig{
-		"cfgms": {Type: "git", Base: "file://" + modulesDir},
+		"cfgms": {Type: "git", Base: baseURL},
 	}
 	resolver, err := gitresolver.New(sources, t.TempDir(), logging.NewNoopLogger())
 	require.NoError(t, err)
@@ -255,16 +143,10 @@ func TestResolveCfgRequiredModules_UncachedModule_AutoApprove_ReturnsNil(t *test
 
 // [REQUIRED TEST] Uncached module: resolver + workflow called; QueueForReview → blocking error.
 func TestResolveCfgRequiredModules_UncachedModule_QueueForReview_BlocksDeployment(t *testing.T) {
-	gitBin := skipIfNoGit(t)
-
-	// Create a local git repo with an unsigned (no signatures/) module.
-	modulesDir := t.TempDir()
-	firewallDir := filepath.Join(modulesDir, "firewall")
-	require.NoError(t, os.MkdirAll(firewallDir, 0750))
-	initUnsignedGitRepo(t, gitBin, firewallDir, "cfgms", "firewall", "1.0.0")
-
+	// The module is signed, but its publisher is unknown to the trust store below.
+	baseURL, _ := serveModule(t, "cfgms", "firewall", "1.0.0")
 	sources := map[string]gitresolver.SourceConfig{
-		"cfgms": {Type: "git", Base: "file://" + modulesDir},
+		"cfgms": {Type: "git", Base: baseURL},
 	}
 	resolver, err := gitresolver.New(sources, t.TempDir(), logging.NewNoopLogger())
 	require.NoError(t, err)
