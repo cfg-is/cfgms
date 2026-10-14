@@ -9,8 +9,9 @@
 // The signed message is exactly []byte(Bundle.ContentHash) — the bytes
 // trust.VerifyBundleSignature verifies — and the signature is attributed to the publisher
 // name "cfgms", the only name trust.CFGMSPublisherIdentity() answers to, so signer and
-// verifier cannot drift. The sidecar is written through bundle.WriteInstalledSidecar, the
-// same writer the steward-side reader (bundle.ReadInstalled) is the counterpart of. Like
+// verifier cannot drift. The root is built, signed and written by bundle.Assemble,
+// bundle.Sign and bundle.WriteInstalled — the one implementation of the layout, whose
+// counterpart reader is bundle.ReadInstalledPayload. Like
 // scripts/sign-steward-binary, this lives in a tracked directory on purpose: a signer that
 // must stay in lockstep with the verify path cannot live in an untracked directory.
 //
@@ -25,7 +26,7 @@
 //
 // Assembly is reproducible: file modes are set explicitly, the sidecar has a sorted
 // single-entry binaries map and no timestamps, and Ed25519 signing is deterministic
-// (RFC 8032). module.yaml is copied byte-for-byte; ComputeInstalledContentHash hashes the
+// (RFC 8032). module.yaml is copied byte-for-byte; the content hash covers the
 // manifest bytes, so any rewrite would invalidate the signature.
 //
 // Usage:
@@ -45,7 +46,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 
 	modules "github.com/cfgis/cfgms/features/modules"
@@ -127,7 +127,7 @@ func runAssemble(args []string, errOut io.Writer) error {
 		}
 	}
 
-	if _, err := assembleRoot(assembleSpec{
+	if _, err := assemble(assembleSpec{
 		ManifestPath: *manifest, BinaryPath: *binary,
 		OS: *osName, Arch: *arch, Root: *rootDir, Key: priv,
 	}); err != nil {
@@ -200,15 +200,6 @@ func publisherKey() (ed25519.PrivateKey, bool, error) {
 	return priv, isDev, nil
 }
 
-// signBundle signs exactly the bytes trust.VerifyBundleSignature verifies.
-func signBundle(b *bundle.Bundle, priv ed25519.PrivateKey) bundle.BundleSignature {
-	return bundle.BundleSignature{
-		Publisher: publisherName,
-		Algorithm: "ed25519",
-		Signature: ed25519.Sign(priv, []byte(b.ContentHash)),
-	}
-}
-
 // assembleSpec describes one installation root to build.
 type assembleSpec struct {
 	ManifestPath string
@@ -219,13 +210,16 @@ type assembleSpec struct {
 	Key          ed25519.PrivateKey
 }
 
-// assembleRoot builds the installation root at spec.Root and returns the signed bundle.
-// The root holds module.yaml (verbatim), the binary at cfgms-module-<name>[.exe], and the
-// sidecar with a single os-arch Binaries entry for the platform the root ships to.
-func assembleRoot(spec assembleSpec) (*bundle.Bundle, error) {
+// assemble builds, signs and writes the installation root at spec.Root through
+// pkg/modules/bundle — the single builder, signer and writer of the layout — and
+// returns the signed bundle. The root holds module.yaml (verbatim), the binary at
+// cfgms-module-<name>[.exe], and the sidecar with a single os-arch Binaries entry
+// for the platform the root ships to.
+func assemble(spec assembleSpec) (*bundle.Bundle, error) {
 	if !platformToken.MatchString(spec.OS) || !platformToken.MatchString(spec.Arch) {
 		return nil, fmt.Errorf("invalid platform %q/%q", spec.OS, spec.Arch)
 	}
+	key := spec.OS + "-" + spec.Arch
 
 	// #nosec G304 -- build tool reads paths supplied by its trusted local operator.
 	manifestBytes, err := os.ReadFile(spec.ManifestPath)
@@ -240,65 +234,32 @@ func assembleRoot(spec assembleSpec) (*bundle.Bundle, error) {
 		// The name becomes a file name; the manifest parser does not constrain its charset.
 		return nil, fmt.Errorf("manifest name %q is not a valid module file name", meta.Name)
 	}
-	// #nosec G304 -- build tool reads paths supplied by its trusted local operator.
-	binaryBytes, err := os.ReadFile(spec.BinaryPath)
-	if err != nil {
-		return nil, fmt.Errorf("read binary: %w", err)
-	}
-
-	if entries, err := os.ReadDir(spec.Root); err == nil && len(entries) > 0 {
-		return nil, fmt.Errorf("installation root %s already exists and is not empty", spec.Root)
-	}
-
 	binName := moduleBinaryPrefix + meta.Name
 	if spec.OS == "windows" {
 		binName += ".exe"
 	}
-	key := spec.OS + "-" + spec.Arch
 
-	// #nosec G301 -- installation roots are world-readable, root-writable payload.
-	if err := os.MkdirAll(spec.Root, 0o755); err != nil {
-		return nil, fmt.Errorf("create root: %w", err)
-	}
-	if err := writeFile(filepath.Join(spec.Root, bundle.ManifestFileName), manifestBytes, 0o644); err != nil {
-		return nil, err
-	}
-	if err := writeFile(filepath.Join(spec.Root, binName), binaryBytes, 0o755); err != nil {
-		return nil, err
-	}
-
-	hash, err := bundle.ComputeContentHash(map[string][]byte{key: binaryBytes}, manifestBytes)
+	b, err := bundle.Assemble(bundle.AssembleSpec{
+		ManifestPath: spec.ManifestPath,
+		Binaries:     map[string]bundle.PlatformBinary{key: {FileName: binName, SourcePath: spec.BinaryPath}},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("compute content hash: %w", err)
-	}
-	b := &bundle.Bundle{
-		Manifest:    meta,
-		Binaries:    map[string]string{key: binName},
-		ContentHash: hash,
-	}
-	b.Signatures = []bundle.BundleSignature{signBundle(b, spec.Key)}
-
-	if err := bundle.WriteInstalledSidecar(b, spec.Root); err != nil {
 		return nil, err
 	}
-	// Prove the contract with the reader before anything ships.
-	if err := bundle.VerifyInstalledContent(b, spec.Root); err != nil {
+	// Stdlib modules sign as the one name the verifier's trust anchor answers to.
+	if b.Manifest.Publisher != publisherName {
+		return nil, fmt.Errorf("manifest publisher %q is not %q; this tool signs only as %q",
+			b.Manifest.Publisher, publisherName, publisherName)
+	}
+	if err := bundle.Sign(b, spec.Key); err != nil {
+		return nil, err
+	}
+	if err := bundle.WriteInstalled(b, spec.Root, bundle.WriteOptions{}); err != nil {
+		return nil, err
+	}
+	// Prove the contract with the strict reader before anything ships.
+	if _, err := bundle.ReadInstalledPayload(spec.Root, bundle.ReadOptions{}); err != nil {
 		return nil, fmt.Errorf("assembled root fails its own verification: %w", err)
 	}
 	return b, nil
-}
-
-// writeFile writes data and sets the mode explicitly so the result does not depend on the
-// umask or on the source file's mode.
-func writeFile(path string, data []byte, mode os.FileMode) error {
-	// #nosec G306 G703 -- explicit payload modes; path is under the assembled root.
-	if err := os.WriteFile(path, data, mode); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	// #nosec G703 -- path is under the operator-supplied assembled root; the file name is a
-	// constant or moduleBinaryPrefix + a name validated by moduleNameToken.
-	if err := os.Chmod(path, mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
-	}
-	return nil
 }

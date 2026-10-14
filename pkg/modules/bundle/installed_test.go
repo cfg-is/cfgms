@@ -3,9 +3,12 @@
 package bundle_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -196,22 +199,22 @@ func installFullBundleAt(t *testing.T, root, name string, binaries map[string][]
 	// ReadInstalled will derive from it.
 	meta.Kind = "steward"
 
-	require.NoError(t, os.MkdirAll(filepath.Join(root, "binaries"), 0o700))
 	paths := make(map[string]string, len(binaries))
 	for key, content := range binaries {
-		rel := filepath.ToSlash(filepath.Join("binaries", key))
-		require.NoError(t, os.WriteFile(filepath.Join(root, "binaries", key), content, 0o600))
-		paths[key] = rel
+		name := "bin-" + key
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), content, 0o600))
+		paths[key] = name
 	}
 
 	hash, err := bundle.ComputeContentHash(binaries, manifestBytes)
 	require.NoError(t, err)
 
 	b := &bundle.Bundle{
-		Manifest:    meta,
-		Binaries:    paths,
-		Signatures:  sigs,
-		ContentHash: hash,
+		Manifest:      meta,
+		Binaries:      paths,
+		BinaryDigests: digestsOf(binaries),
+		Signatures:    sigs,
+		ContentHash:   hash,
 	}
 	require.NoError(t, bundle.WriteInstalledSidecar(b, root))
 
@@ -231,8 +234,8 @@ func installFullBundle(t *testing.T, name string, binaries map[string][]byte, si
 // cannot carry.
 func TestReadInstalled_RoundTrip(t *testing.T) {
 	root, want := installFullBundle(t, "osquery", map[string][]byte{
-		"linux-amd64": []byte("osquery-binary-linux-amd64"),
-		"linux-arm64": []byte("osquery-binary-linux-arm64"),
+		ownKey:   []byte("osquery-binary-linux-amd64"),
+		otherKey: []byte("osquery-binary-linux-arm64"),
 	}, []bundle.BundleSignature{
 		{Publisher: "cfgms", Algorithm: "ed25519", Signature: []byte("fake-64-byte-signature-placeholder-not-real-crypto-material!!!")},
 	})
@@ -253,7 +256,7 @@ func TestReadInstalled_RoundTrip(t *testing.T) {
 // would hand the caller an empty Kind — defeating the ADR-006 module-kind
 // confinement boundary for any consumer that gates execution on it.
 func TestReadInstalled_DerivesManifestKind(t *testing.T) {
-	root, _ := installFullBundle(t, "osquery", map[string][]byte{"linux-amd64": []byte("bin")}, nil)
+	root, _ := installFullBundle(t, "osquery", map[string][]byte{ownKey: []byte("bin")}, nil)
 
 	got, err := bundle.ReadInstalled(root)
 	require.NoError(t, err)
@@ -279,14 +282,14 @@ func TestReadInstalled_InvalidManifestIsRefused(t *testing.T) {
 
 	for name, manifest := range cases {
 		t.Run(name, func(t *testing.T) {
-			root, b := installFullBundle(t, "osquery", map[string][]byte{"linux-amd64": []byte("bin")}, nil)
+			root, b := installFullBundle(t, "osquery", map[string][]byte{ownKey: []byte("bin")}, nil)
 
 			manifestBytes := []byte(manifest)
 			require.NoError(t, os.WriteFile(filepath.Join(root, bundle.ManifestFileName), manifestBytes, 0o600))
 
 			// Keep the sidecar consistent with the rewritten manifest so the test
 			// fails on manifest validation, not on the content-hash re-check.
-			hash, err := bundle.ComputeContentHash(map[string][]byte{"linux-amd64": []byte("bin")}, manifestBytes)
+			hash, err := bundle.ComputeContentHash(map[string][]byte{ownKey: []byte("bin")}, manifestBytes)
 			require.NoError(t, err)
 			b.ContentHash = hash
 			require.NoError(t, bundle.WriteInstalledSidecar(b, root))
@@ -313,26 +316,29 @@ func TestReadInstalled_InvalidManifestIsRefused(t *testing.T) {
 // ReadInstalled's.
 func TestReadInstalled_SidecarHashIsAnUnsignedLocalAnchor(t *testing.T) {
 	root, b := installFullBundle(t, "osquery", map[string][]byte{
-		"linux-amd64": []byte("original-binary"),
+		ownKey: []byte("original-binary"),
 	}, nil)
 
 	// Rewrite the binary AND re-anchor the sidecar to the new bytes, which is
 	// exactly what an attacker with write access to root does.
 	tampered := []byte("TAMPERED-post-install")
-	require.NoError(t, os.WriteFile(filepath.Join(root, "binaries", "linux-amd64"), tampered, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "bin-"+ownKey), tampered, 0o600))
 
 	manifestBytes, err := os.ReadFile(filepath.Join(root, bundle.ManifestFileName))
 	require.NoError(t, err)
-	rehashed, err := bundle.ComputeContentHash(map[string][]byte{"linux-amd64": tampered}, manifestBytes)
+	rehashed, err := bundle.ComputeContentHash(map[string][]byte{ownKey: tampered}, manifestBytes)
 	require.NoError(t, err)
+	signedHash := b.ContentHash
 	b.ContentHash = rehashed
+	b.BinaryDigests = digestsOf(map[string][]byte{ownKey: tampered})
 	require.NoError(t, bundle.WriteInstalledSidecar(b, root))
 
 	got, err := bundle.ReadInstalled(root)
 	require.NoError(t, err, "self-consistent tampering is accepted: the sidecar hash is unsigned")
 	require.NotNil(t, got)
 	assert.Equal(t, rehashed, got.ContentHash,
-		"the returned ContentHash is the attacker's value, which only a publisher signature check can reject")
+		"the returned ContentHash is the recomputed value, which only a publisher signature check can reject")
+	assert.NotEqual(t, signedHash, got.ContentHash, "the signed hash no longer matches")
 }
 
 // TestReadInstalled_TamperedBinaryIsRefused proves the reader re-verifies
@@ -343,10 +349,10 @@ func TestReadInstalled_SidecarHashIsAnUnsignedLocalAnchor(t *testing.T) {
 // cover.
 func TestReadInstalled_TamperedBinaryIsRefused(t *testing.T) {
 	root, _ := installFullBundle(t, "osquery", map[string][]byte{
-		"linux-amd64": []byte("original-binary"),
+		ownKey: []byte("original-binary"),
 	}, nil)
 
-	require.NoError(t, os.WriteFile(filepath.Join(root, "binaries", "linux-amd64"), []byte("TAMPERED-post-install"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "bin-"+ownKey), []byte("TAMPERED-post-install"), 0o600))
 
 	got, err := bundle.ReadInstalled(root)
 	require.Error(t, err)
@@ -359,10 +365,10 @@ func TestReadInstalled_TamperedBinaryIsRefused(t *testing.T) {
 // a publisher-supplied path that escapes root must be refused, not resolved.
 func TestReadInstalled_EscapingBinaryPathIsRefused(t *testing.T) {
 	root, b := installFullBundle(t, "osquery", map[string][]byte{
-		"linux-amd64": []byte("bin"),
+		ownKey: []byte("bin"),
 	}, nil)
 
-	b.Binaries["linux-amd64"] = "../../etc/shadow"
+	b.Binaries[ownKey] = "../../etc/shadow"
 	require.NoError(t, bundle.WriteInstalledSidecar(b, root))
 
 	got, err := bundle.ReadInstalled(root)
@@ -391,7 +397,7 @@ func TestReadInstalled_MissingSidecarIsRefused(t *testing.T) {
 // returns a distinct, file-naming error rather than a partially populated
 // Bundle.
 func TestReadInstalled_MalformedSidecarIsRefused(t *testing.T) {
-	root, _ := installFullBundle(t, "osquery", map[string][]byte{"linux-amd64": []byte("bin")}, nil)
+	root, _ := installFullBundle(t, "osquery", map[string][]byte{ownKey: []byte("bin")}, nil)
 
 	require.NoError(t, os.WriteFile(filepath.Join(root, bundle.BundleSidecarFileName), []byte("not: [valid: yaml"), 0o600))
 
@@ -406,7 +412,7 @@ func TestReadInstalled_MalformedSidecarIsRefused(t *testing.T) {
 // returns a distinct, file-naming error rather than a partially populated
 // Bundle.
 func TestReadInstalled_MissingManifestIsRefused(t *testing.T) {
-	root, _ := installFullBundle(t, "osquery", map[string][]byte{"linux-amd64": []byte("bin")}, nil)
+	root, _ := installFullBundle(t, "osquery", map[string][]byte{ownKey: []byte("bin")}, nil)
 
 	require.NoError(t, os.Remove(filepath.Join(root, bundle.ManifestFileName)))
 
@@ -424,10 +430,10 @@ func TestDiscoverInstalled_ReturnsSetKeyedByModuleName(t *testing.T) {
 	parent := t.TempDir()
 
 	osqueryRoot := filepath.Join(parent, "osquery")
-	installFullBundleAt(t, osqueryRoot, "osquery", map[string][]byte{"linux-amd64": []byte("osquery-bin")}, nil)
+	installFullBundleAt(t, osqueryRoot, "osquery", map[string][]byte{ownKey: []byte("osquery-bin")}, nil)
 
 	firewallRoot := filepath.Join(parent, "firewall")
-	installFullBundleAt(t, firewallRoot, "firewall", map[string][]byte{"linux-amd64": []byte("firewall-bin")}, nil)
+	installFullBundleAt(t, firewallRoot, "firewall", map[string][]byte{ownKey: []byte("firewall-bin")}, nil)
 
 	got, err := bundle.DiscoverInstalled(parent)
 	require.NoError(t, err)
@@ -449,7 +455,7 @@ func TestDiscoverInstalled_MixedGoodAndBadIsSurfaced(t *testing.T) {
 	parent := t.TempDir()
 
 	goodRoot := filepath.Join(parent, "osquery")
-	installFullBundleAt(t, goodRoot, "osquery", map[string][]byte{"linux-amd64": []byte("osquery-bin")}, nil)
+	installFullBundleAt(t, goodRoot, "osquery", map[string][]byte{ownKey: []byte("osquery-bin")}, nil)
 
 	badRoot := filepath.Join(parent, "broken")
 	require.NoError(t, os.MkdirAll(badRoot, 0o700))
@@ -471,10 +477,10 @@ func TestDiscoverInstalled_DuplicateModuleNameIsHardError(t *testing.T) {
 	parent := t.TempDir()
 
 	firstRoot := filepath.Join(parent, "first")
-	installFullBundleAt(t, firstRoot, "osquery", map[string][]byte{"linux-amd64": []byte("bin-1")}, nil)
+	installFullBundleAt(t, firstRoot, "osquery", map[string][]byte{ownKey: []byte("bin-1")}, nil)
 
 	secondRoot := filepath.Join(parent, "second")
-	installFullBundleAt(t, secondRoot, "osquery", map[string][]byte{"linux-amd64": []byte("bin-2")}, nil)
+	installFullBundleAt(t, secondRoot, "osquery", map[string][]byte{ownKey: []byte("bin-2")}, nil)
 
 	got, err := bundle.DiscoverInstalled(parent)
 	require.Error(t, err)
@@ -490,4 +496,24 @@ func TestDiscoverInstalled_DuplicateModuleNameIsHardError(t *testing.T) {
 func TestDiscoverInstalled_NonexistentDirectory(t *testing.T) {
 	_, err := bundle.DiscoverInstalled(filepath.Join(t.TempDir(), "does-not-exist"))
 	require.Error(t, err)
+}
+
+// ownKey is the running platform's bundle key; otherKey is a different one.
+var (
+	ownKey   = runtime.GOOS + "-" + runtime.GOARCH
+	otherKey = func() string {
+		if ownKey == "darwin-arm64" {
+			return "linux-amd64"
+		}
+		return "darwin-arm64"
+	}()
+)
+
+func digestsOf(binaries map[string][]byte) map[string]string {
+	out := make(map[string]string, len(binaries))
+	for k, v := range binaries {
+		sum := sha256.Sum256(v)
+		out[k] = hex.EncodeToString(sum[:])
+	}
+	return out
 }

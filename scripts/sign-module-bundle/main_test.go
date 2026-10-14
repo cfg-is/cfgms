@@ -10,11 +10,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
@@ -120,7 +122,7 @@ func TestSignedBundle_VerifiesThroughTrustVerifier(t *testing.T) {
 	priv := ed25519.NewKeyFromSeed(seed)
 	spec := stageInputs(t, "linux", priv)
 
-	b, err := assembleRoot(spec)
+	b, err := assemble(spec)
 	require.NoError(t, err)
 	require.Len(t, b.Signatures, 1)
 	assert.Equal(t, "cfgms", b.Signatures[0].Publisher)
@@ -133,7 +135,7 @@ func TestSignedBundle_VerifiesThroughTrustVerifier(t *testing.T) {
 	})
 
 	t.Run("altered binary fails after signing", func(t *testing.T) {
-		installed, err := bundle.ReadInstalled(spec.Root)
+		installed, err := bundle.ReadInstalledPayload(spec.Root, bundle.ReadOptions{})
 		require.NoError(t, err)
 		binPath, err := bundle.InstalledBinaryPath(spec.Root, installed.Binaries["linux-amd64"])
 		require.NoError(t, err)
@@ -173,23 +175,28 @@ func TestSignedBundle_VerifiesThroughTrustVerifier(t *testing.T) {
 
 	t.Run("round trip through ReadInstalled", func(t *testing.T) {
 		spec := stageInputs(t, "linux", priv)
-		_, err := assembleRoot(spec)
+		_, err := assemble(spec)
 		require.NoError(t, err)
-		installed, err := bundle.ReadInstalled(spec.Root)
+		installed, err := bundle.ReadInstalledPayload(spec.Root, bundle.ReadOptions{})
 		require.NoError(t, err)
 		require.Len(t, installed.Signatures, 1)
 		require.NoError(t, trust.VerifyBundleSignature(installed, installed.Signatures[0], store))
 	})
 }
 
-func TestSignBundle_SignsExactlyContentHashBytes(t *testing.T) {
+func TestSign_SignsExactlyContentHashBytesAsManifestPublisher(t *testing.T) {
 	seed, _ := testSeed()
 	priv := ed25519.NewKeyFromSeed(seed)
-	b := &bundle.Bundle{ContentHash: "abc="}
+	b := &bundle.Bundle{
+		Manifest:    &modules.ModuleMetadata{Name: "demo", Version: "1.0.0", Publisher: publisherName},
+		ContentHash: "abc=",
+	}
 
-	sig := signBundle(b, priv)
+	require.NoError(t, bundle.Sign(b, priv))
 
-	assert.True(t, ed25519.Verify(priv.Public().(ed25519.PublicKey), []byte(b.ContentHash), sig.Signature))
+	require.Len(t, b.Signatures, 1)
+	assert.Equal(t, publisherName, b.Signatures[0].Publisher)
+	assert.True(t, ed25519.Verify(priv.Public().(ed25519.PublicKey), []byte(b.ContentHash), b.Signatures[0].Signature))
 }
 
 // REQUIRED: an assembled root round-trips through the #4425 reader and passes
@@ -201,10 +208,10 @@ func TestAssembledRoot_RoundTripsThroughReader(t *testing.T) {
 	for _, osName := range []string{"linux", "windows"} {
 		t.Run(osName, func(t *testing.T) {
 			spec := stageInputs(t, osName, priv)
-			want, err := assembleRoot(spec)
+			want, err := assemble(spec)
 			require.NoError(t, err)
 
-			got, err := bundle.ReadInstalled(spec.Root)
+			got, err := bundle.ReadInstalledPayload(spec.Root, bundle.ReadOptions{})
 			require.NoError(t, err)
 			require.NoError(t, bundle.VerifyInstalledContent(got, spec.Root))
 
@@ -233,7 +240,7 @@ func TestAssembledRoot_ManifestIsCopiedByteForByte(t *testing.T) {
 	odd := []byte(testManifest + "\n# trailing comment   \n\n")
 	require.NoError(t, os.WriteFile(spec.ManifestPath, odd, 0o600))
 
-	_, err := assembleRoot(spec)
+	_, err := assemble(spec)
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(filepath.Join(spec.Root, bundle.ManifestFileName))
@@ -252,9 +259,9 @@ func TestAssembly_IsReproducible(t *testing.T) {
 	// Same inputs, different on-disk modes.
 	require.NoError(t, os.Chmod(second.BinaryPath, 0o755))
 
-	_, err := assembleRoot(first)
+	_, err := assemble(first)
 	require.NoError(t, err)
-	_, err = assembleRoot(second)
+	_, err = assemble(second)
 	require.NoError(t, err)
 
 	for _, name := range []string{bundle.ManifestFileName, bundle.BundleSidecarFileName, "cfgms-module-demo"} {
@@ -272,25 +279,83 @@ func TestAssembly_IsReproducible(t *testing.T) {
 	}
 }
 
-func TestAssembleRoot_RejectsBadInputs(t *testing.T) {
+// REQUIRED: every stdlib root assembled through the shared Assemble path (no bin/
+// needed — a stand-in binary is used) passes the strict reader and verifies.
+func TestStdlibRoots_PassStrictReader(t *testing.T) {
+	seed, _ := testSeed()
+	priv := ed25519.NewKeyFromSeed(seed)
+	manifests, err := filepath.Glob("../../features/modules/stdlib/*/module.yaml")
+	require.NoError(t, err)
+	require.NotEmpty(t, manifests, "stdlib manifests not found")
+
+	binary := filepath.Join(t.TempDir(), "stand-in")
+	require.NoError(t, os.WriteFile(binary, []byte("stand-in stdlib module binary"), 0o700))
+
+	for _, manifest := range manifests {
+		for _, osName := range []string{"linux", "windows", "darwin"} {
+			t.Run(filepath.Base(filepath.Dir(manifest))+"/"+osName, func(t *testing.T) {
+				root := filepath.Join(t.TempDir(), "root")
+				want, err := assemble(assembleSpec{
+					ManifestPath: manifest, BinaryPath: binary, OS: osName, Arch: "arm64", Root: root, Key: priv,
+				})
+				require.NoError(t, err)
+
+				got, err := bundle.ReadInstalledPayload(root, bundle.ReadOptions{})
+				require.NoError(t, err)
+				assert.Equal(t, want.ContentHash, got.ContentHash)
+				require.NoError(t, trust.VerifyBundleSignature(got, got.Signatures[0],
+					trustStoreFor(t, priv.Public().(ed25519.PublicKey))))
+			})
+		}
+	}
+}
+
+func TestAssemble_RejectsNonCFGMSPublisherAndExistingRoot(t *testing.T) {
+	seed, _ := testSeed()
+	priv := ed25519.NewKeyFromSeed(seed)
+
+	t.Run("other publisher", func(t *testing.T) {
+		spec := stageInputs(t, "linux", priv)
+		require.NoError(t, os.WriteFile(spec.ManifestPath,
+			[]byte(strings.Replace(testManifest, "publisher: cfgms", "publisher: acme-corp", 1)), 0o600))
+		_, err := assemble(spec)
+		require.Error(t, err)
+		assert.NoFileExists(t, filepath.Join(spec.Root, bundle.ManifestFileName))
+	})
+	t.Run("inexact version", func(t *testing.T) {
+		spec := stageInputs(t, "linux", priv)
+		require.NoError(t, os.WriteFile(spec.ManifestPath,
+			[]byte(strings.Replace(testManifest, "version: 1.2.3", "version: v1.2.3", 1)), 0o600))
+		_, err := assemble(spec)
+		require.Error(t, err)
+	})
+	t.Run("existing root", func(t *testing.T) {
+		spec := stageInputs(t, "linux", priv)
+		require.NoError(t, os.MkdirAll(spec.Root, 0o755))
+		_, err := assemble(spec)
+		require.ErrorIs(t, err, bundle.ErrRootExists)
+	})
+}
+
+func TestAssemble_RejectsBadInputs(t *testing.T) {
 	seed, _ := testSeed()
 	priv := ed25519.NewKeyFromSeed(seed)
 
 	t.Run("invalid manifest", func(t *testing.T) {
 		spec := stageInputs(t, "linux", priv)
 		require.NoError(t, os.WriteFile(spec.ManifestPath, []byte("name: [unterminated"), 0o600))
-		_, err := assembleRoot(spec)
+		_, err := assemble(spec)
 		require.Error(t, err)
 	})
 	t.Run("missing binary", func(t *testing.T) {
 		spec := stageInputs(t, "linux", priv)
 		spec.BinaryPath = filepath.Join(t.TempDir(), "absent")
-		_, err := assembleRoot(spec)
+		_, err := assemble(spec)
 		require.Error(t, err)
 	})
 	t.Run("hostile os", func(t *testing.T) {
 		spec := stageInputs(t, "../escape", priv)
-		_, err := assembleRoot(spec)
+		_, err := assemble(spec)
 		require.Error(t, err)
 	})
 }
@@ -309,7 +374,7 @@ func TestRun_AssembleDevKeyPrintsDevBuildInvocation(t *testing.T) {
 	assert.NotContains(t, out.String()+errOut.String(), "CFGMS_PUBLISHER_SEED=",
 		"the seed value must never be echoed")
 
-	b, err := bundle.ReadInstalled(spec.Root)
+	b, err := bundle.ReadInstalledPayload(spec.Root, bundle.ReadOptions{})
 	require.NoError(t, err)
 	require.Len(t, b.Signatures, 1, "dev-key build must still emit a signature")
 }
@@ -378,7 +443,7 @@ func TestDevSignedBundle_LoadableOnlyWithDevPublicKey(t *testing.T) {
 	priv, usedDev, err := publisherKey()
 	require.NoError(t, err)
 	require.True(t, usedDev)
-	b, err := assembleRoot(stageInputs(t, "linux", priv))
+	b, err := assemble(stageInputs(t, "linux", priv))
 	require.NoError(t, err)
 	require.Len(t, b.Signatures, 1, "dev signing must not emit an empty Signatures list")
 
