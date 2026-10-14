@@ -122,5 +122,18 @@ func (s *Server) writeStewardFromDurableRecord(w http.ResponseWriter, r *http.Re
 		Hidden:          rec.Hidden,
 		ConnectionState: "disconnected",
 		ActiveSessions:  0,
+
+		KeyProtectionLevel: rec.KeyProtectionLevel,
+		KeyAlgorithm:       effectiveKeyAlgorithm(rec.KeyAlgorithm),
 	})
+}
+
+// effectiveKeyAlgorithm maps a stored empty key algorithm to "ed25519", the
+// algorithm every record created before ecdsa-p256 support used (ADR-011
+// Amendment 3).
+func effectiveKeyAlgorithm(stored string) string {
+	if stored == "" {
+		return "ed25519"
+	}
+	return stored
 }

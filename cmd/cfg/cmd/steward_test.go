@@ -200,6 +200,62 @@ func TestStewardStatusCommand(t *testing.T) {
 		assert.Contains(t, output, "production")
 	})
 
+	t.Run("prints key protection fields, unknown when absent", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			data map[string]interface{}
+			want []string
+		}{
+			{"reported", map[string]interface{}{"id": "steward-abc123", "status": "connected",
+				"key_protection_level": "tpm", "key_algorithm": "ecdsa-p256"},
+				[]string{"key_protection_level: tpm", "key_algorithm:", "ecdsa-p256"}},
+			{"old record", map[string]interface{}{"id": "steward-abc123", "status": "connected",
+				"key_algorithm": "ed25519"},
+				[]string{"key_protection_level: unknown", "ed25519"}},
+		} {
+			innerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": tc.data})
+			})
+			server := httptest.NewServer(wrapWithResolve(t, "steward-abc123", innerHandler))
+			origURL, origInsecure := stewardURL, stewardTLSInsecure
+			t.Cleanup(func() {
+				server.Close()
+				stewardURL, stewardTLSInsecure = origURL, origInsecure
+			})
+			stewardURL = server.URL
+			stewardTLSInsecure = true
+
+			output := captureStdout(t, func() {
+				require.NoError(t, runStewardStatus(stewardStatusCmd, []string{"steward-abc123"}))
+			})
+			for _, w := range tc.want {
+				assert.Contains(t, output, w, tc.name)
+			}
+		}
+	})
+
+	t.Run("json includes key protection fields", func(t *testing.T) {
+		innerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+				"id": "steward-abc123", "key_protection_level": "tpm", "key_algorithm": "ecdsa-p256"}})
+		})
+		server := httptest.NewServer(wrapWithResolve(t, "steward-abc123", innerHandler))
+		defer server.Close()
+		origURL, origInsecure, origJSON := stewardURL, stewardTLSInsecure, stewardStatusJSONOutput
+		t.Cleanup(func() {
+			stewardURL, stewardTLSInsecure, stewardStatusJSONOutput = origURL, origInsecure, origJSON
+		})
+		stewardURL, stewardTLSInsecure, stewardStatusJSONOutput = server.URL, true, true
+
+		output := captureStdout(t, func() {
+			require.NoError(t, runStewardStatus(stewardStatusCmd, []string{"steward-abc123"}))
+		})
+		assert.Contains(t, output, "key_protection_level")
+		assert.Contains(t, output, "ecdsa-p256")
+	})
+
 	t.Run("missing id argument returns cobra arg error", func(t *testing.T) {
 		err := stewardStatusCmd.Args(stewardStatusCmd, []string{})
 		require.Error(t, err)
