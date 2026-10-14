@@ -286,6 +286,8 @@ Get information about a specific steward, including connection state and active 
     "status": "connected",
     "last_seen": "2025-01-12T10:29:30Z",
     "clock_offset_ms": -12000,
+    "key_protection_level": "tpm",
+    "key_algorithm": "ecdsa-p256",
     "version": "0.2.0",
     "connection_state": "active",
     "active_sessions": 2,

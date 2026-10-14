@@ -2121,6 +2121,17 @@ components:
           description: >-
             Steward clock minus controller clock in milliseconds, from the last
             heartbeat (negative when the steward is behind). Omitted when unknown.
+        key_protection_level:
+          type: string
+          enum: [file, tpm, secure-enclave]
+          description: >-
+            How the steward's device key is protected. Omitted for a record that
+            predates the field.
+        key_algorithm:
+          type: string
+          enum: [ed25519, ecdsa-p256]
+          description: >-
+            Device key algorithm. A record that stored none is reported as ed25519.
         version:
           type: string
           description: Steward software version

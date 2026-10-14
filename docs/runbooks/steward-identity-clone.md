@@ -20,6 +20,12 @@ it appears in `cfg registration pending` as well. `--format json` also lists the
 
 ## 2. Decide which machine is the original
 
+`cfg steward status <steward-id>` shows `key_protection_level` (`file`, `tpm` or
+`secure-enclave`; `unknown` for a record that predates the field) and `key_algorithm`.
+`file` means the device key is a file, so a copy of the machine that holds that file can
+sign as the steward; `tpm` and `secure-enclave` keys cannot be copied off the hardware.
+`--json` returns the same fields.
+
 Compare the peer addresses and the queued hostname with what you expect the steward to
 be. Check the machine itself where you can. Then choose:
 

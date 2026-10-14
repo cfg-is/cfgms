@@ -52,6 +52,15 @@ type StewardInfo struct {
 	// a binary sentinel, not a real connection count.
 	ActiveSessions  int    `json:"active_sessions"`
 	ConnectionState string `json:"connection_state"` // "connected" or "disconnected"
+	// KeyProtectionLevel is how the steward's device key is protected: "file",
+	// "tpm" or "secure-enclave" (ADR-034 §7). Omitted for a record that predates
+	// the field; it is never defaulted, because "file" would be a claim the
+	// steward never made.
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
+	// KeyAlgorithm is the device key algorithm, "ed25519" or "ecdsa-p256". A
+	// record that stored no algorithm is reported as "ed25519" (ADR-011
+	// Amendment 3), so consumers never see an empty value.
+	KeyAlgorithm string `json:"key_algorithm,omitempty"`
 }
 
 // DNAInfo represents DNA information for API responses

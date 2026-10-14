@@ -5028,3 +5028,87 @@ func TestHandleGetSteward_ClockOffset(t *testing.T) {
 	require.True(t, present)
 	assert.InDelta(t, -20000.0, v.(float64), 2000)
 }
+
+// ---- key_protection_level / key_algorithm on GET /stewards/{id} (Issue #4975) ----
+
+func getStewardInfo(t *testing.T, server *Server, apiKey, id string) StewardInfo {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+id, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp.Data
+}
+
+func TestHandleGetSteward_KeyProtection_BothPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("attached steward with tpm ecdsa-p256 record", func(t *testing.T) {
+		server := setupTestServer(t)
+		st, _ := newTestStewardDurableStore(t)
+		server.SetStewardStore(st)
+		apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+		id := registerTestSteward(t, server.controllerService, map[string]string{"hostname": "h", "os": "linux"})
+		require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+			ID: id, TenantID: "test-tenant", Status: business.StewardStatusActive,
+			KeyProtectionLevel: "tpm", KeyAlgorithm: "ecdsa-p256",
+		}))
+
+		info := getStewardInfo(t, server, apiKey, id)
+		assert.Equal(t, "tpm", info.KeyProtectionLevel)
+		assert.Equal(t, "ecdsa-p256", info.KeyAlgorithm)
+	})
+
+	t.Run("attached steward with old record defaults", func(t *testing.T) {
+		server := setupTestServer(t)
+		st, _ := newTestStewardDurableStore(t)
+		server.SetStewardStore(st)
+		apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+		id := registerTestSteward(t, server.controllerService, map[string]string{"hostname": "h", "os": "linux"})
+		require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+			ID: id, TenantID: "test-tenant", Status: business.StewardStatusActive,
+		}))
+
+		info := getStewardInfo(t, server, apiKey, id)
+		assert.Empty(t, info.KeyProtectionLevel, "never invent a level for a record that did not report one")
+		assert.Equal(t, "ed25519", info.KeyAlgorithm)
+	})
+
+	t.Run("durable fallback with tpm ecdsa-p256 record", func(t *testing.T) {
+		server := setupTestServer(t)
+		st, _ := newTestStewardDurableStore(t)
+		server.SetStewardStore(st)
+		apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+		require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+			ID: "peer-steward", TenantID: "test-tenant", Status: business.StewardStatusActive,
+			KeyProtectionLevel: "tpm", KeyAlgorithm: "ecdsa-p256",
+		}))
+
+		info := getStewardInfo(t, server, apiKey, "peer-steward")
+		assert.Equal(t, "tpm", info.KeyProtectionLevel)
+		assert.Equal(t, "ecdsa-p256", info.KeyAlgorithm)
+	})
+
+	t.Run("durable fallback with old record defaults", func(t *testing.T) {
+		server := setupTestServer(t)
+		st, _ := newTestStewardDurableStore(t)
+		server.SetStewardStore(st)
+		apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+		require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+			ID: "old-peer", TenantID: "test-tenant", Status: business.StewardStatusActive,
+		}))
+
+		info := getStewardInfo(t, server, apiKey, "old-peer")
+		assert.Empty(t, info.KeyProtectionLevel)
+		assert.Equal(t, "ed25519", info.KeyAlgorithm)
+	})
+}

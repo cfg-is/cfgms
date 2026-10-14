@@ -531,6 +531,13 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 		apiStewardInfo.ClockOffsetMs = &ms
 	}
 
+	// Key protection comes from the durable record, which the in-memory
+	// attachment does not carry. Read after the tenant check above.
+	if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil {
+		apiStewardInfo.KeyProtectionLevel = rec.KeyProtectionLevel
+		apiStewardInfo.KeyAlgorithm = effectiveKeyAlgorithm(rec.KeyAlgorithm)
+	}
+
 	// Include DNA information if available
 	if stewardInfo.DNA != nil {
 		apiStewardInfo.DNA = DNAFromProto(stewardInfo.DNA)

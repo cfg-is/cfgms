@@ -1165,7 +1165,11 @@ type stewardStatusInfo struct {
 	Group           string            `json:"group,omitempty"`
 	Metrics         map[string]string `json:"metrics,omitempty"`
 	ClockOffsetMs   *int64            `json:"clock_offset_ms,omitempty"`
-	DNA             *struct {
+	// KeyProtectionLevel and KeyAlgorithm describe the steward's device key
+	// (ADR-034 §7). Empty protection level means the record predates the field.
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
+	KeyAlgorithm       string `json:"key_algorithm,omitempty"`
+	DNA                *struct {
 		Hostname     string `json:"hostname"`
 		OS           string `json:"os"`
 		Architecture string `json:"architecture"`
@@ -1266,6 +1270,14 @@ func runStewardStatus(_ *cobra.Command, args []string) error {
 		fmt.Printf("Version:          %s\n", s.Version)
 		if s.ClockOffsetMs != nil {
 			fmt.Printf("Clock Offset:     %s\n", formatClockOffset(*s.ClockOffsetMs))
+		}
+		keyProtection := s.KeyProtectionLevel
+		if keyProtection == "" {
+			keyProtection = "unknown"
+		}
+		fmt.Printf("key_protection_level: %s\n", keyProtection)
+		if s.KeyAlgorithm != "" {
+			fmt.Printf("key_algorithm:        %s\n", s.KeyAlgorithm)
 		}
 		if s.DNA != nil {
 			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
