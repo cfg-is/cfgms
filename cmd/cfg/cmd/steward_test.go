@@ -219,14 +219,16 @@ func TestStewardStatusCommand(t *testing.T) {
 			})
 			server := httptest.NewServer(wrapWithResolve(t, "steward-abc123", innerHandler))
 			origURL, origInsecure := stewardURL, stewardTLSInsecure
+			t.Cleanup(func() {
+				server.Close()
+				stewardURL, stewardTLSInsecure = origURL, origInsecure
+			})
 			stewardURL = server.URL
 			stewardTLSInsecure = true
 
 			output := captureStdout(t, func() {
 				require.NoError(t, runStewardStatus(stewardStatusCmd, []string{"steward-abc123"}))
 			})
-			server.Close()
-			stewardURL, stewardTLSInsecure = origURL, origInsecure
 			for _, w := range tc.want {
 				assert.Contains(t, output, w, tc.name)
 			}
