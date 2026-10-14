@@ -13,7 +13,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -23,7 +22,6 @@ import (
 
 // p256TestStore is a real in-memory P-256 KeyStore standing in for a hardware backend.
 type p256TestStore struct {
-	mu       sync.Mutex
 	priv     *ecdsa.PrivateKey
 	level    ProtectionLevel
 	loadFail error
@@ -70,8 +68,12 @@ func withBackends(t *testing.T, bs ...backend) {
 	t.Helper()
 	backendsMu.Lock()
 	saved := backends
-	backends = bs
+	backends = nil
 	backendsMu.Unlock()
+	// Register through the same entry point per-platform init functions use.
+	for _, b := range bs {
+		registerBackend(b)
+	}
 	savedFactory := newFileStore
 	newFileStore = func(dir string) (*FileKeyStore, error) { return NewFileKeyStoreForTesting(dir) }
 	t.Cleanup(func() {
@@ -125,6 +127,18 @@ func TestOpen_SucceedingBackendIsUsed(t *testing.T) {
 	assert.Equal(t, AlgorithmECDSAP256, ks.Algorithm())
 	_, statErr := os.Stat(filepath.Join(dir, keyFileName))
 	assert.True(t, os.IsNotExist(statErr), "no file key when hardware succeeds")
+}
+
+func TestOpen_BackendsProbedInRegistrationOrder(t *testing.T) {
+	var tpmCalls, enclaveCalls int
+	withBackends(t,
+		testBackend(ProtectionTPM, &tpmCalls, errors.New("no tpm device")),
+		testBackend(ProtectionSecureEnclave, &enclaveCalls, nil))
+	ks, err := Open(context.Background(), t.TempDir(), testLogger())
+	require.NoError(t, err)
+	assert.Equal(t, 1, tpmCalls)
+	assert.Equal(t, 1, enclaveCalls)
+	assert.Equal(t, ProtectionSecureEnclave, ks.ProtectionLevel())
 }
 
 func TestOpen_ExistingFileKeyProbesNoBackend(t *testing.T) {
