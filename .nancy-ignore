@@ -2,9 +2,14 @@
 # Lines starting with # are comments.  Entries expire automatically on the until= date;
 # once lapsed the scan fails again, forcing a re-review.
 #
-# Policy: only suppress CVEs where no fixed upstream release exists and the finding
-# is therefore unactionable.  Every entry must name the affected package and document
-# why bumping is not possible.  Re-check each entry when the weekly dependency scan
+# Policy: only suppress a CVE in one of two cases:
+#   1. No fixed upstream release exists, so the finding is unactionable.  The entry
+#      documents why bumping is not possible.
+#   2. The scanner database is wrong: the installed version provably contains the
+#      fix.  The entry cites the fix commit, proof that the installed release
+#      contains it, and at least two other databases (OSV, Trivy, govulncheck) that
+#      report the version clean.  Expiry is at most 30 days.
+# Every entry must name the affected package.  Re-check each entry when the weekly dependency scan
 # runs (dependency-pin-check.yml / refresh-pins skill) or when a new release of the
 # affected package appears.
 
@@ -16,3 +21,19 @@
 #                    appears or when this entry lapses on the expiry date below.
 # Expiry           : 2026-11-15 — after this date the scan re-opens automatically.
 CVE-2026-56860 until=2026-11-15
+
+# CVE-2026-84445 — google.golang.org/grpc (scanner database error, policy case 2)
+# Affected package : google.golang.org/grpc v1.84.0 (direct dependency)
+# Reason           : Sonatype still lists v1.84.0 as affected; the fix is in it.
+#                    The fix is grpc-go PR #9365 ("transport: reject requests
+#                    missing :authority and host headers"), cherry-picked to the
+#                    v1.84.x branch as commit d5a41119e0e3 (#9370). GitHub's
+#                    compare d5a41119e0e3...v1.84.0 reports status=ahead,
+#                    ahead_by=3, behind_by=0: the v1.84.0 tag contains the fix.
+#                    OSV GO-2026-6443 (corrected 2026-10-07) lists the 1.84.0-dev
+#                    range as fixed at 1.84.0-dev.0.20260825144003-d5a41119e0e3,
+#                    so v1.84.0 is unaffected. Trivy (0 HIGH/CRITICAL) and
+#                    govulncheck v1.7.0, linux and GOOS=windows (0 affecting)
+#                    agree, measured 2026-10-13 on PR #4971.
+# Expiry           : 2026-11-13 — if Sonatype still flags it then, re-check.
+CVE-2026-84445 until=2026-11-13
