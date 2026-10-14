@@ -203,7 +203,7 @@ func prepareImage(opts prepareImageOptions, svc imageService, in io.Reader, out 
 	for _, p := range plan.remove {
 		var err error
 		if p == keyPath {
-			err = identity.RemoveStoredKey(dir)
+			err = identity.RemoveAllStoredKeys(dir)
 		} else {
 			err = removeNoFollow(p)
 		}

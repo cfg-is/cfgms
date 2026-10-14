@@ -1017,7 +1017,15 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 
 #### Device key algorithm on the wire (ADR-011 Amendment 3)
 
-The registration request and the `/refresh/complete` and `/refresh/claim` requests carry an optional `key_algorithm` field: `ed25519` or `ecdsa-p256`. An absent or empty value means `ed25519`, so stewards that predate the field keep working unchanged. Beside it, `identity_key_pub` is the base64 raw 32-byte key for `ed25519`, or the base64 PKIX (SubjectPublicKeyInfo) DER encoding for `ecdsa-p256`; `device_id` is the lowercase hex SHA-256 of those bytes. The `pop` signature is over the same 32-byte digest for both algorithms; for `ecdsa-p256` it is an ASN.1 DER ECDSA signature with the digest as the hash input. The controller refuses a request whose algorithm differs from the one stored for the `device_id`. Controller behavior is in the [Controller operating model](controller-operating-model.md). Stewards currently send `ed25519` with the field absent.
+The registration request and the `/refresh/complete` and `/refresh/claim` requests carry an optional `key_algorithm` field: `ed25519` or `ecdsa-p256`. An absent or empty value means `ed25519`, so stewards that predate the field keep working unchanged. Beside it, `identity_key_pub` is the base64 raw 32-byte key for `ed25519`, or the base64 PKIX (SubjectPublicKeyInfo) DER encoding for `ecdsa-p256`; `device_id` is the lowercase hex SHA-256 of those bytes. The `pop` signature is over the same 32-byte digest for both algorithms; for `ecdsa-p256` it is an ASN.1 DER ECDSA signature with the digest as the hash input. The controller refuses a request whose algorithm differs from the one stored for the `device_id`. Controller behavior is in the [Controller operating model](controller-operating-model.md). Stewards send `key_algorithm` and `key_protection_level` on every registration request.
+
+**Device key store.** The steward's device key sits behind the `identity.KeyStore` interface (`pkg/registration/identity`), which is algorithm-neutral and backend-neutral: `GenerateOrLoad` returns a `crypto.PublicKey` and an algorithm (`ed25519` or `ecdsa-p256`); `Algorithm()`, `ProtectionLevel()` (`file`, `tpm` or `secure-enclave`), `DeviceID()`, `Sign`, `Regenerate` (clone re-key) and `RemoveKey` (prepare-image) complete it. `Sign` signs wherever the key lives and never exposes private key material. `identity.Open` selects the backend:
+
+- If `device_identity.enc` exists, the file backend is used and no hardware backend is probed.
+- If the stored identity (`steward-identity.json`) records a hardware `key_protection_level`, only that backend is used. If it cannot load, `Open` returns an error, the steward retries with backoff and logs the reason, and no file key is created, because a new key would mint a new DeviceID.
+- Otherwise (first enrollment) registered hardware backends are tried in order, and an absent or failing backend falls back to the file backend with the reason logged. Fallback is decided once, at first enrollment.
+
+The file backend keeps the AES-256-GCM / DPAPI encrypted `device_identity.enc`, uses `ed25519`, and reports `key_protection_level: file`. Hardware backends register through a per-platform hook; none ships yet, so every steward reports `file`.
 
 ### Reconnecting with a Stored Identity
 
