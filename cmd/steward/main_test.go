@@ -1407,7 +1407,7 @@ func TestRunSteward_ControllerUnreachable_StartsDegraded(t *testing.T) {
 
 	var connectAttempts atomic.Int32
 	alwaysFails := connectFuncT(func(ctx context.Context, token, url string,
-		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		trustSrc TrustSource, installCAPEM string, ks identity.KeyStore,
 		publicBeta bool,
 		logger logging.Logger) (*client.TransportClient, error) {
 		connectAttempts.Add(1)
@@ -1443,7 +1443,7 @@ func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
 	// The connect func fails immediately — process should still stay alive
 	// (return nil on ctx cancel) even when the logging provider is unavailable.
 	neverConnects := connectFuncT(func(ctx context.Context, token, url string,
-		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		trustSrc TrustSource, installCAPEM string, ks identity.KeyStore,
 		publicBeta bool,
 		logger logging.Logger) (*client.TransportClient, error) {
 		return nil, fmt.Errorf("no controller")
@@ -1492,7 +1492,7 @@ func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 	defer func() { ControllerURL = savedURL }()
 
 	neverConnects := connectFuncT(func(ctx context.Context, token, url string,
-		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		trustSrc TrustSource, installCAPEM string, ks identity.KeyStore,
 		publicBeta bool,
 		logger logging.Logger) (*client.TransportClient, error) {
 		// Return an error so the retry loop keeps running until ctx is done.

@@ -5,12 +5,19 @@ package identity
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	stewardcrypto "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
@@ -66,7 +73,7 @@ func TestFileKeyStore_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	deviceID2 := ks2.DeviceID()
 
-	assert.Equal(t, []byte(pub1), []byte(pub2), "public key must be identical across load cycles")
+	assert.Equal(t, pub1, pub2, "public key must be identical across load cycles")
 	assert.Equal(t, deviceID1, deviceID2, "DeviceID must be stable across load cycles")
 }
 
@@ -79,7 +86,8 @@ func TestFileKeyStore_DeviceID_IsHexSHA256OfPublicKey(t *testing.T) {
 	pub, _, err := ks.GenerateOrLoad(context.Background())
 	require.NoError(t, err)
 
-	expected := computeDeviceID(pub)
+	expected, err := ComputeDeviceID(AlgorithmEd25519, pub)
+	require.NoError(t, err)
 	assert.Equal(t, expected, ks.DeviceID())
 	assert.Len(t, ks.DeviceID(), 64)
 }
@@ -97,7 +105,7 @@ func TestFileKeyStore_Sign(t *testing.T) {
 	sig, err := ks.Sign(msg)
 	require.NoError(t, err)
 	assert.Len(t, sig, ed25519.SignatureSize)
-	assert.True(t, ed25519.Verify(pub, msg, sig), "signature must verify with the corresponding public key")
+	assert.True(t, ed25519.Verify(pub.(ed25519.PublicKey), msg, sig), "signature must verify with the corresponding public key")
 }
 
 // TestFileKeyStore_Sign_BeforeLoad returns an error when Sign is called without GenerateOrLoad.
@@ -138,7 +146,7 @@ func TestFileKeyStore_GenerateOrLoad_Idempotent(t *testing.T) {
 	pub2, _, err := ks.GenerateOrLoad(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, []byte(pub1), []byte(pub2))
+	assert.Equal(t, pub1, pub2)
 }
 
 // TestFileKeyStore_PublicKey returns the key loaded by GenerateOrLoad.
@@ -151,7 +159,7 @@ func TestFileKeyStore_PublicKey(t *testing.T) {
 	pub, _, err := ks.GenerateOrLoad(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, []byte(pub), []byte(ks.PublicKey()))
+	assert.Equal(t, pub, ks.PublicKey())
 }
 
 func TestRemoveStoredKey_NextLoadGeneratesNewDeviceID(t *testing.T) {
@@ -186,15 +194,18 @@ func TestFileKeyStore_Regenerate_ReplacesKeyAndDeviceID(t *testing.T) {
 	require.NoError(t, err)
 	oldID := ks.DeviceID()
 
-	newPub, newPriv, err := ks.Regenerate(context.Background())
+	newPub, alg, err := ks.Regenerate(context.Background())
 	require.NoError(t, err)
-	assert.NotEqual(t, []byte(oldPub), []byte(newPub), "new public key must differ")
+	assert.NotEqual(t, oldPub, newPub, "new public key must differ")
 	assert.NotEqual(t, oldID, ks.DeviceID(), "DeviceID must change with the key")
-	assert.Equal(t, computeDeviceID(newPub), ks.DeviceID())
+	assert.Equal(t, AlgorithmEd25519, alg)
+	wantID, err := ComputeDeviceID(alg, newPub)
+	require.NoError(t, err)
+	assert.Equal(t, wantID, ks.DeviceID())
 
 	data, err := os.ReadFile(filepath.Join(dir, keyFileName))
 	require.NoError(t, err)
-	assert.NotContains(t, string(data), string(newPriv), "plaintext key never written to disk")
+	assert.NotContains(t, string(data), string(ks.privateKey), "plaintext key never written to disk")
 	block, _ := pem.Decode(data)
 	assert.Nil(t, block, "on-disk bytes must be ciphertext")
 	_, statErr := os.Stat(filepath.Join(dir, keyFileName+".tmp"))
@@ -204,12 +215,81 @@ func TestFileKeyStore_Regenerate_ReplacesKeyAndDeviceID(t *testing.T) {
 	reloaded := newTestKeyStoreInDir(t, dir)
 	gotPub, _, err := reloaded.GenerateOrLoad(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []byte(newPub), []byte(gotPub))
-	assert.NotEqual(t, []byte(oldPub), []byte(gotPub), "old key is no longer loadable")
+	assert.Equal(t, newPub, gotPub)
+	assert.NotEqual(t, oldPub, gotPub, "old key is no longer loadable")
 
 	// The new key signs; the old public key does not verify it.
 	sig, err := ks.Sign([]byte("m"))
 	require.NoError(t, err)
-	assert.True(t, ed25519.Verify(newPub, []byte("m"), sig))
-	assert.False(t, ed25519.Verify(oldPub, []byte("m"), sig))
+	assert.True(t, ed25519.Verify(newPub.(ed25519.PublicKey), []byte("m"), sig))
+	assert.False(t, ed25519.Verify(oldPub.(ed25519.PublicKey), []byte("m"), sig))
+}
+
+// TestFileKeyStore_LoadsPreChangeFile proves a device_identity.enc written by the
+// existing encryptor (raw Ed25519 private key, as before this change) loads with the
+// same key and DeviceID and reports ed25519 / file.
+func TestFileKeyStore_LoadsPreChangeFile(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := stewardcrypto.NewEncryptorFromBytes([]byte("cfgms-test-machine-id"), dir)
+	require.NoError(t, err)
+	wantPub, wantPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	ct, err := enc.Encrypt([]byte(wantPriv))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "device_identity.enc"), ct, 0600))
+
+	ks := newFileKeyStoreWithEncryptor(dir, enc)
+	pub, alg, err := ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, wantPub, pub)
+	assert.Equal(t, AlgorithmEd25519, alg)
+	assert.Equal(t, AlgorithmEd25519, ks.Algorithm())
+	assert.Equal(t, ProtectionFile, ks.ProtectionLevel())
+	sum := sha256.Sum256(wantPub)
+	assert.Equal(t, hex.EncodeToString(sum[:]), ks.DeviceID())
+}
+
+func TestComputeDeviceID_PerAlgorithm(t *testing.T) {
+	edPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	got, err := ComputeDeviceID(AlgorithmEd25519, edPub)
+	require.NoError(t, err)
+	sum := sha256.Sum256(edPub)
+	assert.Equal(t, hex.EncodeToString(sum[:]), got)
+
+	p256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKIXPublicKey(&p256.PublicKey)
+	require.NoError(t, err)
+	got, err = ComputeDeviceID(AlgorithmECDSAP256, &p256.PublicKey)
+	require.NoError(t, err)
+	dsum := sha256.Sum256(der)
+	assert.Equal(t, hex.EncodeToString(dsum[:]), got)
+	assert.Len(t, got, 64)
+	assert.Equal(t, strings.ToLower(got), got)
+
+	enc, err := EncodePublicKey(AlgorithmECDSAP256, &p256.PublicKey)
+	require.NoError(t, err)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(der), enc)
+	enc, err = EncodePublicKey(AlgorithmEd25519, edPub)
+	require.NoError(t, err)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(edPub), enc)
+
+	_, err = ComputeDeviceID(AlgorithmEd25519, &p256.PublicKey)
+	assert.Error(t, err, "algorithm and key type must agree")
+	_, err = ComputeDeviceID(Algorithm("rsa"), edPub)
+	assert.Error(t, err)
+}
+
+func TestFileKeyStore_RemoveKey(t *testing.T) {
+	dir := t.TempDir()
+	ks := newTestKeyStoreInDir(t, dir)
+	_, _, err := ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, ks.RemoveKey())
+	_, statErr := os.Stat(filepath.Join(dir, keyFileName))
+	assert.True(t, os.IsNotExist(statErr))
+	assert.Empty(t, ks.DeviceID())
+	assert.Nil(t, ks.PublicKey())
+	require.NoError(t, ks.RemoveKey(), "removing an absent key is not an error")
 }

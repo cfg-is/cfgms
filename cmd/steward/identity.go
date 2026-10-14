@@ -168,7 +168,12 @@ type StewardIdentity struct {
 	OverlapExpiresAt *time.Time `json:"overlap_expires_at,omitempty"` // Issue #1816: rotation overlap deadline
 	// Device identity fields (Issue #2094): stable across mTLS cert rotations.
 	DeviceID       string `json:"device_id,omitempty"`        // 64-char lowercase hex SHA-256 of Ed25519 public key
-	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (32 bytes)
+	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64 public key: raw 32 bytes (ed25519) or PKIX DER (ecdsa-p256)
+	// KeyAlgorithm and KeyProtectionLevel record the device key's algorithm and
+	// where it lives. identity.Open reads KeyProtectionLevel: a hardware value
+	// means the file backend is never used for this steward (ADR-011 Amendment 3).
+	KeyAlgorithm       string `json:"key_algorithm,omitempty"`
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
 	// Trust anchor fields (ADR-013 §3, Issue #1517).
 	TrustMode        string `json:"trust_mode,omitempty"`         // "compile-baked", "install-pinned", "tofu"
 	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"` // SHA-256 hex of pinned CA cert (install-pinned and TOFU)

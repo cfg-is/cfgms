@@ -43,7 +43,7 @@ complete the handshake.
 **Limit for file-backed keys.** If the device key is stored in a file
 (`key_protection_level: file`), a copy that has the key can also file a refresh
 request. Approve only after verifying the machine that asked. Hardware-backed keys
-(`tpm`) remove that case, because the key cannot be copied.
+(`tpm`, `secure-enclave`) remove that case, because the key cannot be copied.
 
 ### Move
 

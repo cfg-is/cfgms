@@ -158,7 +158,7 @@ func (c *readmitTestController) approve() {
 	c.mu.Unlock()
 }
 
-func newReadmitKeyStore(t *testing.T) *identity.FileKeyStore {
+func newReadmitKeyStore(t *testing.T) identity.KeyStore {
 	t.Helper()
 	ks, err := identity.NewFileKeyStoreForTesting(t.TempDir())
 	require.NoError(t, err)
@@ -167,7 +167,7 @@ func newReadmitKeyStore(t *testing.T) *identity.FileKeyStore {
 	return ks
 }
 
-func readmit(t *testing.T, controller *readmitTestController, dir string, id *StewardIdentity, ks *identity.FileKeyStore) error {
+func readmit(t *testing.T, controller *readmitTestController, dir string, id *StewardIdentity, ks identity.KeyStore) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -304,7 +304,7 @@ func TestRunSteward_RejectedReadmissionKeepsAsking(t *testing.T) {
 	defer func() { rejectedReadmissionRetry = prevRetry }()
 
 	var attempts atomic.Int32
-	rejected := connectFuncT(func(context.Context, string, string, TrustSource, string, *identity.FileKeyStore, bool, logging.Logger) (*client.TransportClient, error) {
+	rejected := connectFuncT(func(context.Context, string, string, TrustSource, string, identity.KeyStore, bool, logging.Logger) (*client.TransportClient, error) {
 		attempts.Add(1)
 		return nil, fmt.Errorf("re-admission: %w", registration.ErrRefreshRejected)
 	})
@@ -329,7 +329,7 @@ func TestRunSteward_PendingReadmissionPollsShortly(t *testing.T) {
 	defer func() { pendingReadmissionPoll = prevPoll }()
 
 	var attempts atomic.Int32
-	pending := connectFuncT(func(context.Context, string, string, TrustSource, string, *identity.FileKeyStore, bool, logging.Logger) (*client.TransportClient, error) {
+	pending := connectFuncT(func(context.Context, string, string, TrustSource, string, identity.KeyStore, bool, logging.Logger) (*client.TransportClient, error) {
 		attempts.Add(1)
 		return nil, &registration.RefreshPendingError{PendingID: "pending-1"}
 	})
@@ -488,7 +488,7 @@ func TestRunSteward_TrustDowngradeKeepsChecking(t *testing.T) {
 	defer func() { rejectedReadmissionRetry = prevRetry }()
 
 	var attempts atomic.Int32
-	downgraded := connectFuncT(func(context.Context, string, string, TrustSource, string, *identity.FileKeyStore, bool, logging.Logger) (*client.TransportClient, error) {
+	downgraded := connectFuncT(func(context.Context, string, string, TrustSource, string, identity.KeyStore, bool, logging.Logger) (*client.TransportClient, error) {
 		attempts.Add(1)
 		return nil, checkTrustDowngrade(trustSourceTOFU, "", &StewardIdentity{TrustMode: "install-pinned"})
 	})

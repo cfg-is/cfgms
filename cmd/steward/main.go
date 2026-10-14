@@ -139,7 +139,7 @@ type connectFuncT func(
 	token, controllerURL string,
 	trustSrc TrustSource,
 	installCAPEM string,
-	ks *identity.FileKeyStore,
+	ks identity.KeyStore,
 	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error)
@@ -475,11 +475,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// Initialise device identity key store before registration so the refresh
 		// handshake path (Issue #2094) has a stable key available. Failure here is
 		// non-fatal: initial registration still works; only the refresh path is disabled.
-		ks, ksErr := identity.NewFileKeyStore(defaultCertStoreDir())
+		ks, ksErr := openDeviceKeyStore(runCtx, defaultCertStoreDir(), logger)
 		if ksErr != nil {
-			logger.Warn("Failed to create device identity key store; registration-refresh disabled", "error", ksErr)
-		} else if _, _, loadErr := ks.GenerateOrLoad(runCtx); loadErr != nil {
-			logger.Warn("Failed to load/generate device identity key; registration-refresh disabled", "error", loadErr)
+			logger.Warn("Failed to open device identity key store; registration-refresh disabled", "error", logging.SanitizeLogValue(ksErr.Error()))
 			ks = nil
 		}
 
@@ -1084,7 +1082,10 @@ type approvedRegistration struct {
 	ServerCert     string
 	SigningCert    string
 	DeviceID       string // stable device identity ID (Issue #2094)
-	IdentityKeyPub string // base64-encoded Ed25519 public key (Issue #2094)
+	IdentityKeyPub string // base64 public key: raw for ed25519, PKIX DER for ecdsa-p256 (Issue #2094)
+	// KeyAlgorithm and KeyProtectionLevel describe the device key (ADR-034 §7).
+	KeyAlgorithm       string
+	KeyProtectionLevel string
 	// IssuerChain is the PEM-concatenated chain from ClientCert's direct issuer up
 	// to (but not including) CACert (Issue #3778). Empty for a self-hosted,
 	// root-only controller.
@@ -1132,7 +1133,7 @@ func loadConnectedRuntimeConfig(publicBeta bool) (stewardconfig.StewardConfig, e
 	return cfg, nil
 }
 
-func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
+func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks identity.KeyStore, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
 	certStoreDir := certStoreDirResolver()
@@ -1251,7 +1252,7 @@ func registerAsClone(
 	certStoreDir, token, controllerURL string,
 	trustSrc TrustSource,
 	installCAPEM, priorCAPinFingerprint string,
-	ks *identity.FileKeyStore,
+	ks identity.KeyStore,
 	runtimeCfg stewardconfig.StewardConfig,
 	publicBeta bool,
 	logger logging.Logger,
@@ -1296,7 +1297,7 @@ func registerNewDevice(
 	certStoreDir, token, controllerURL string,
 	trustSrc TrustSource,
 	installCAPEM, priorCAPinFingerprint string,
-	ks *identity.FileKeyStore,
+	ks identity.KeyStore,
 	cloneOf string,
 	runtimeCfg stewardconfig.StewardConfig,
 	publicBeta bool,
@@ -1314,7 +1315,7 @@ func registerWithToken(
 	certStoreDir, token, controllerURL string,
 	trustSrc TrustSource,
 	installCAPEM, priorCAPinFingerprint string,
-	ks *identity.FileKeyStore,
+	ks identity.KeyStore,
 	cloneOf string,
 	runtimeCfg stewardconfig.StewardConfig,
 	publicBeta bool,
@@ -1392,13 +1393,7 @@ func registerWithToken(
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
-	regReq := registration.RegistrationRequest{Token: token, CloneOf: cloneOf}
-	if ks != nil && ks.DeviceID() != "" {
-		regReq.DeviceID = ks.DeviceID()
-		if pub := ks.PublicKey(); pub != nil {
-			regReq.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
-		}
-	}
+	regReq := buildRegistrationRequest(token, cloneOf, ks)
 	// Seed hostname and OS so the controller is not identity-blind before first DNA sync
 	// (Issue #2640). Mirrors features/steward/dna/dna.go:227 without importing that package.
 	if hostname, err := os.Hostname(); err == nil {
@@ -1596,16 +1591,18 @@ func connectWithApprovedRegistration(
 	// Persist the identity record so that a subsequent restart can reconnect
 	// without HTTP re-registration (Issue #1719).
 	persistedID := StewardIdentity{
-		StewardID:        reg.StewardID,
-		TenantID:         reg.TenantID,
-		TransportAddress: reg.TransportAddress,
-		CACertPEM:        reg.CACert,
-		ServerCertPEM:    reg.ServerCert,
-		SigningCertPEM:   reg.SigningCert,
-		DeviceID:         reg.DeviceID,
-		IdentityKeyPub:   reg.IdentityKeyPub,
-		TrustMode:        trustModeString(trustSrc),
-		CAPinFingerprint: priorCAPinFingerprint,
+		StewardID:          reg.StewardID,
+		TenantID:           reg.TenantID,
+		TransportAddress:   reg.TransportAddress,
+		CACertPEM:          reg.CACert,
+		ServerCertPEM:      reg.ServerCert,
+		SigningCertPEM:     reg.SigningCert,
+		DeviceID:           reg.DeviceID,
+		IdentityKeyPub:     reg.IdentityKeyPub,
+		KeyAlgorithm:       reg.KeyAlgorithm,
+		KeyProtectionLevel: reg.KeyProtectionLevel,
+		TrustMode:          trustModeString(trustSrc),
+		CAPinFingerprint:   priorCAPinFingerprint,
 	}
 
 	// Record the CA pin fingerprint for install-pinned and TOFU modes.
@@ -2136,13 +2133,54 @@ func hasExpiredClientCert(certs []*cert.CertificateInfo) bool {
 
 // enrichApprovedWithDeviceIdentity sets DeviceID and IdentityKeyPub on reg from ks when available,
 // so the identity file persists the device identity across restarts (Issue #2094).
-func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks *identity.FileKeyStore) {
+func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks identity.KeyStore) {
 	if ks == nil || ks.DeviceID() == "" {
 		return
 	}
 	reg.DeviceID = ks.DeviceID()
-	if pub := ks.PublicKey(); pub != nil {
-		reg.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+	if pub, err := identity.EncodePublicKey(ks.Algorithm(), ks.PublicKey()); err == nil {
+		reg.IdentityKeyPub = pub
+	}
+	reg.KeyAlgorithm = string(ks.Algorithm())
+	reg.KeyProtectionLevel = string(ks.ProtectionLevel())
+}
+
+// buildRegistrationRequest builds the base registration request, carrying the
+// device identity, key algorithm and key protection level when ks is loaded.
+func buildRegistrationRequest(token, cloneOf string, ks identity.KeyStore) registration.RegistrationRequest {
+	req := registration.RegistrationRequest{Token: token, CloneOf: cloneOf}
+	if ks != nil && ks.DeviceID() != "" {
+		req.DeviceID = ks.DeviceID()
+		if pub, err := identity.EncodePublicKey(ks.Algorithm(), ks.PublicKey()); err == nil {
+			req.IdentityKeyPub = pub
+		}
+		req.KeyAlgorithm = string(ks.Algorithm())
+		req.KeyProtectionLevel = string(ks.ProtectionLevel())
+	}
+	return req
+}
+
+// openDeviceKeyStore opens the device key store. A steward whose stored identity
+// records a hardware-backed key that cannot be loaded retries with backoff and
+// never falls back to a file key, which would mint a new DeviceID (ADR-011
+// Amendment 3). Any other failure is returned for the caller to degrade on.
+func openDeviceKeyStore(ctx context.Context, dir string, logger logging.Logger) (identity.KeyStore, error) {
+	backoff := 5 * time.Second
+	for {
+		ks, err := identity.Open(ctx, dir, logger)
+		if err == nil || !errors.Is(err, identity.ErrHardwareKeyUnavailable) {
+			return ks, err
+		}
+		logger.Warn("Hardware-backed device key unavailable; retrying",
+			"error", logging.SanitizeLogValue(err.Error()), "retry_in", backoff.String())
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Minute {
+			backoff *= 2
+		}
 	}
 }
 
@@ -2216,7 +2254,7 @@ func completeRefreshWithFreshKeypair(
 func readmitWithDeviceKey(
 	ctx context.Context,
 	id *StewardIdentity,
-	ks *identity.FileKeyStore,
+	ks identity.KeyStore,
 	certStoreDir, token, controllerURL string,
 	trustSrc TrustSource,
 	installCAPEM string,
@@ -2365,7 +2403,7 @@ func hasOpenReadmission(certStoreDir string) bool {
 // signRefreshChallenge obtains a challenge nonce and signs the proof-of-possession
 // digest sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)
 // with the device key (ADR-011 §4); the formula must match the controller's.
-func signRefreshChallenge(ctx context.Context, httpClient *registration.HTTPClient, ks *identity.FileKeyStore) (string, int64, []byte, error) {
+func signRefreshChallenge(ctx context.Context, httpClient *registration.HTTPClient, ks identity.KeyStore) (string, int64, []byte, error) {
 	challengeCtx, challengeCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer challengeCancel()
 

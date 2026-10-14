@@ -31,7 +31,12 @@ import (
 type RegistrationRequest struct {
 	Token          string `json:"token"`
 	DeviceID       string `json:"device_id,omitempty"`        // 64-char hex SHA-256 of Ed25519 public key (Issue #2094)
-	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (Issue #2094)
+	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64 public key: raw Ed25519 or PKIX DER for ecdsa-p256 (Issue #2094)
+
+	// KeyAlgorithm is "ed25519" or "ecdsa-p256"; KeyProtectionLevel is "file",
+	// "tpm" or "secure-enclave" (ADR-034 §7).
+	KeyAlgorithm       string `json:"key_algorithm,omitempty"`
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
 
 	// CloneOf is the steward ID of the device this one was copied from. Set only
 	// by a steward that was refused as a copy and re-keyed (ADR-034 §4). The
