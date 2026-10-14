@@ -25,7 +25,7 @@ func TestNewGitServer_ServesRepoOverVerifiedTLS(t *testing.T) {
 
 	lsRemote := func() ([]byte, error) {
 		// #nosec G204 -- fixed binary; URL produced by the test server.
-		return exec.Command("git", "ls-remote", baseURL+"/served").CombinedOutput()
+		return exec.Command("git", "-c", "http.schannelUseSSLCAInfo=true", "ls-remote", baseURL+"/served").CombinedOutput()
 	}
 
 	t.Setenv("GIT_SSL_CAINFO", "")

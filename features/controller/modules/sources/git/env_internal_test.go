@@ -38,6 +38,7 @@ func TestGitEnv_LockedDown(t *testing.T) {
 func TestGitConfigArgs_LockedDown(t *testing.T) {
 	args := strings.Join(gitConfigArgs("/empty"), " ")
 	assert.Contains(t, args, "http.sslVerify=true")
+	assert.Contains(t, args, "http.schannelUseSSLCAInfo=true")
 	assert.Contains(t, args, "core.hooksPath=/empty")
 	assert.Contains(t, args, "submodule.recurse=false")
 	assert.NotContains(t, args, "sslVerify=false")

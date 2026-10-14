@@ -342,6 +342,10 @@ func gitEnv(environ []string) []string {
 func gitConfigArgs(hooksDir string) []string {
 	return []string{
 		"-c", "http.sslVerify=true",
+		// Git for Windows defaults to schannel, which ignores GIT_SSL_CAINFO
+		// unless told to honour it; the operator's trust root must be effective
+		// there too. Verification stays on. Unknown keys are ignored elsewhere.
+		"-c", "http.schannelUseSSLCAInfo=true",
 		"-c", "core.hooksPath=" + hooksDir,
 		"-c", "submodule.recurse=false",
 		"-c", "core.autocrlf=false",

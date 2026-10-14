@@ -20,6 +20,7 @@ import (
 // (a repository "mod" is cloned from "<base>/mod") and the path of a PEM file
 // holding the server's certificate, which the caller trusts by pointing
 // GIT_SSL_CAINFO at it with t.Setenv — and therefore must not call t.Parallel().
+// On Windows, git (schannel) additionally needs -c http.schannelUseSSLCAInfo=true.
 //
 // It fails the test, never skips, if git or its http-backend is unavailable.
 func NewGitServer(t testing.TB, reposRoot string) (baseURL, caFile string) {
