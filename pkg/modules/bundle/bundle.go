@@ -17,6 +17,48 @@
 //   - Fast verify — ~70k verifications/second on modest hardware
 //   - stdlib — crypto/ed25519 ships with every Go release; zero external deps
 //
+// # Payload, digests and the one layout
+//
+// A bundle's content hash is ComputeContentHashFromDigests over the manifest
+// bytes and the SHA-256 digest of every platform's binary. Bundle.BinaryDigests
+// carries that FULL digest list (hex, per os-arch key) and is persisted in the
+// bundle.yaml sidecar, so a holder of the digests can recompute the hash and a
+// reader can verify a root holding only one platform's binary.
+//
+// A bundle exists in two forms. The installed form (ReadInstalled,
+// DiscoverInstalled) is metadata only. The payload form (Assemble,
+// ReadInstalledPayload) also carries ManifestBytes and BinaryContent in memory;
+// those fields are never serialized.
+//
+// This package is the single place that builds (Assemble), signs (Sign), writes
+// (WriteInstalled) and reads (ReadInstalledPayload, ReadInstalled) the
+// installation-root layout, for any publisher:
+//
+//	<root>/module.yaml   the publisher's manifest, byte for byte
+//	<root>/bundle.yaml   sidecar: binaries present, every platform's digest,
+//	                     signatures, content_hash (an unsigned anchor)
+//	<root>/<file name>   one plain file per binary present in the root
+//
+// # Reader modes
+//
+// Full mode (ReadOptions.Platform empty; used by the cache, the git resolver and
+// the publisher tool) requires every digest to have a file and every file a
+// digest. Own-platform mode (ReadOptions.Platform set; what ReadInstalled and
+// DiscoverInstalled use, for the running os-arch) reads only that platform's
+// binary but still recomputes the content hash from the manifest bytes and the
+// FULL digest list, and requires the binary to match the digest under its key.
+// In both modes Bundle.ContentHash is the RECOMPUTED value, never the sidecar's:
+// the sidecar content_hash is compared against it and a difference is refused.
+//
+// # File rules and caps
+//
+// A root holds nothing but module.yaml, bundle.yaml and the binaries the sidecar
+// names; any other file, directory or symlink is refused unless ReadOptions
+// names it (and then it must be a real directory). Binary file names are one
+// plain name (ValidateBinaryFileName). module.yaml, bundle.yaml and every binary
+// must be regular files, not symlinks. MaxBundleBytes, MaxBundleFileBytes and
+// MaxBundleFiles bound a bundle and are enforced before bytes enter memory.
+//
 // One scheme for v1. cosign/minisign can be added as additional verifiers in a
 // future story without changing the bundle format — the Signatures slice accepts
 // multiple entries, each tagged with an Algorithm field.
@@ -52,12 +94,37 @@ type BundleSignature struct {
 // BundleSidecarFileName beside it — see WriteInstalledSidecar and ReadInstalled
 // in installed.go for the writer/reader that round-trip a Bundle through that
 // on-disk shape.
+//
+// BinaryDigests maps os-arch keys to the hex SHA-256 of that platform's binary.
+// It is the FULL list even when the installation root holds only one binary
+// (Binaries then has one entry and BinaryDigests has one per platform).
+//
+// ManifestBytes and BinaryContent are the in-memory payload of a bundle built by
+// Assemble or read by ReadInstalledPayload; they are never serialized.
 type Bundle struct {
-	Manifest    *modules.ModuleMetadata `yaml:"manifest" json:"manifest"`
-	Binaries    map[string]string       `yaml:"binaries" json:"binaries"`
-	Signatures  []BundleSignature       `yaml:"signatures,omitempty" json:"signatures,omitempty"`
-	ContentHash string                  `yaml:"content_hash" json:"content_hash"`
+	Manifest      *modules.ModuleMetadata `yaml:"manifest" json:"manifest"`
+	Binaries      map[string]string       `yaml:"binaries" json:"binaries"`
+	BinaryDigests map[string]string       `yaml:"binary_digests,omitempty" json:"binary_digests,omitempty"`
+	Signatures    []BundleSignature       `yaml:"signatures,omitempty" json:"signatures,omitempty"`
+	ContentHash   string                  `yaml:"content_hash" json:"content_hash"`
+
+	// ManifestBytes is the exact module.yaml content the hash covers.
+	ManifestBytes []byte `yaml:"-" json:"-"`
+	// BinaryContent maps os-arch keys to binary bytes (payload form only).
+	BinaryContent map[string][]byte `yaml:"-" json:"-"`
 }
+
+const (
+	// MaxBundleBytes bounds the total size of the files of one bundle.
+	MaxBundleBytes int64 = 1 << 30
+	// MaxBundleFileBytes bounds any single file of a bundle.
+	MaxBundleFileBytes int64 = 256 << 20
+	// MaxBundleFiles bounds the number of files in a bundle root: module.yaml,
+	// bundle.yaml and one binary for each of the six allowlisted platforms.
+	MaxBundleFiles = 8
+	// MaxBinaryFileNameLen bounds the length of a binary file name.
+	MaxBinaryFileNameLen = 128
+)
 
 // ContentAddress returns the (publisher, name, version, content_hash) tuple
 // that uniquely identifies this bundle.

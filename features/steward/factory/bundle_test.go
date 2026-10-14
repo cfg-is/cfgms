@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -95,7 +97,7 @@ func installEchoBundle(t *testing.T, installRoot, name, publisher string, privKe
 	t.Helper()
 
 	moduleRoot := filepath.Join(installRoot, name)
-	require.NoError(t, os.MkdirAll(filepath.Join(moduleRoot, "binaries"), 0o755))
+	require.NoError(t, os.MkdirAll(moduleRoot, 0o755))
 
 	binBytes, err := os.ReadFile(echoModuleBin)
 	require.NoError(t, err)
@@ -104,7 +106,7 @@ func installEchoBundle(t *testing.T, installRoot, name, publisher string, privKe
 	if goruntime.GOOS == "windows" {
 		binName += ".exe"
 	}
-	destBin := filepath.Join(moduleRoot, "binaries", binName)
+	destBin := filepath.Join(moduleRoot, binName)
 	require.NoError(t, os.WriteFile(destBin, binBytes, 0o755))
 	require.NoError(t, os.Chmod(destBin, 0o755))
 
@@ -118,14 +120,15 @@ func installEchoBundle(t *testing.T, installRoot, name, publisher string, privKe
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(moduleRoot, bundle.ManifestFileName), manifestBytes, 0o600))
 
-	binRelPath := filepath.ToSlash(filepath.Join("binaries", binName))
 	hash, err := bundle.ComputeContentHash(map[string][]byte{osArch(): binBytes}, manifestBytes)
 	require.NoError(t, err)
 
+	binSum := sha256.Sum256(binBytes)
 	b := &bundle.Bundle{
-		Manifest:    meta,
-		Binaries:    map[string]string{osArch(): binRelPath},
-		ContentHash: hash,
+		Manifest:      meta,
+		Binaries:      map[string]string{osArch(): binName},
+		BinaryDigests: map[string]string{osArch(): hex.EncodeToString(binSum[:])},
+		ContentHash:   hash,
 	}
 
 	if privKey != nil {
@@ -319,18 +322,19 @@ func TestLoadModule_PublisherTrustEnforced_NoProcessSpawned(t *testing.T) {
 	// trust error — making an accidental spawn attempt detectable even though
 	// no OS process list is inspected directly.
 	binContent := []byte("not-a-real-binary")
-	binRelPath := filepath.Join("binaries", "module")
-	require.NoError(t, os.MkdirAll(filepath.Join(moduleRoot, "binaries"), 0o755))
+	binRelPath := "module"
 	require.NoError(t, os.WriteFile(filepath.Join(moduleRoot, binRelPath), binContent, 0o644))
 
 	hash, err := bundle.ComputeContentHash(map[string][]byte{osArch(): binContent}, manifestBytes)
 	require.NoError(t, err)
 
 	sig := ed25519.Sign(unknownPriv, []byte(hash))
+	binSum := sha256.Sum256(binContent)
 	b := &bundle.Bundle{
-		Manifest:    meta,
-		Binaries:    map[string]string{osArch(): filepath.ToSlash(binRelPath)},
-		ContentHash: hash,
+		Manifest:      meta,
+		Binaries:      map[string]string{osArch(): binRelPath},
+		BinaryDigests: map[string]string{osArch(): hex.EncodeToString(binSum[:])},
+		ContentHash:   hash,
 		Signatures: []bundle.BundleSignature{
 			{Publisher: "untrusted-vendor", Algorithm: "ed25519", Signature: sig},
 		},
