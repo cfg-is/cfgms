@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 CFGMS Contributors
+
 // Package git implements a GitSourceResolver that maps module references of the
 // form "publisher/name@version" to git repositories using a module_sources
 // config block, fetches the tagged release and returns a payload-carrying

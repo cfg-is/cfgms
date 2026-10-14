@@ -5,7 +5,7 @@ package testutil
 import (
 	"encoding/pem"
 	"net/http"
-	"net/http/cgi"
+	"net/http/cgi" // #nosec G504 -- test-only git smart-HTTP server for git http-backend; Httpoxy (CVE-2016-5386) fixed in Go >= 1.6.3
 	"net/http/httptest"
 	"os"
 	"os/exec"
