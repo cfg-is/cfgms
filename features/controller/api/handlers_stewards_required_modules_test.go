@@ -196,42 +196,179 @@ func TestHandleUpdateStewardConfig_RequiredModules_UncachedQueuedByResolver_Retu
 	assert.Contains(t, resp.Error.Message, "cfgms/firewall@1.0.0")
 }
 
-// TestHandleUpdateStewardConfig_RequiredModules_UncachedAutoApprovedByResolver_Returns200
-// covers the happy uncached path: cfg push references a module not in the cache,
-// the resolver fetches it, the trust store recognises the publisher signature,
-// the approval workflow returns AutoApprove, and the cfg push succeeds.
-func TestHandleUpdateStewardConfig_RequiredModules_UncachedAutoApprovedByResolver_Returns200(t *testing.T) {
+// serveModuleWith is serveModule for a bundle the caller shapes: mutate may drop
+// or corrupt signatures before the bundle is committed to the served repository.
+func serveModuleWith(t *testing.T, publisher, name, version string, mutate func(*testutil.SignedBundle)) (string, ed25519.PublicKey) {
+	t.Helper()
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: publisher, Name: name, Version: version})
+	if mutate != nil {
+		mutate(sb)
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, name)
+	sb.CommitToRepo(t, repo)
+	// #nosec G204 -- fixed git binary; arguments are test-controlled.
+	out, err := exec.Command("git", "-C", repo, "tag", version).CombinedOutput()
+	require.NoError(t, err, string(out))
+	baseURL, caFile := testutil.NewGitServer(t, root)
+	t.Setenv("GIT_SSL_CAINFO", caFile)
+	return baseURL, sb.PublicKey
+}
+
+// pushRequiredModule wires the real resolver, cache and approval workflow with
+// store and PUTs a cfg requiring publisher/name@version. It returns the HTTP
+// status, the error code (empty on success) and the module cache.
+func pushRequiredModule(t *testing.T, baseURL, publisher, name, version string, store trust.TrustStore) (int, string, *cache.ModuleCache) {
+	t.Helper()
 	server := setupTestServer(t)
-
-	baseURL, pubKey := serveModule(t, "cfgms", "firewall", "1.0.0")
-
 	resolver, err := gitresolver.New(map[string]gitresolver.SourceConfig{
-		"cfgms": {Type: "git", Base: baseURL},
+		publisher: {Type: "git", Base: baseURL},
 	}, t.TempDir(), logging.NewNoopLogger())
 	require.NoError(t, err)
-
 	c, err := cache.New(t.TempDir() + "/module-cache")
 	require.NoError(t, err)
-	wf := approval.New(c)
-	store := trust.NewInMemoryTrustStore()
-	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{
-		Name:      "cfgms",
-		PublicKey: []byte(pubKey),
-		Algorithm: "ed25519",
-	}))
+	server.SetModuleResolution(c, resolver, approval.New(c), store)
 
-	server.SetModuleResolution(c, resolver, wf, store)
+	code, errCode := putRequiredModule(t, server, publisher+"/"+name, version)
+	return code, errCode, c
+}
 
-	body := requiredModulesValidCfgBody(t, "test-steward-required-autoapprove", []map[string]string{
-		{"name": "cfgms/firewall", "version": "1.0.0"},
-	})
-
-	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-autoapprove/config", bytes.NewReader(body))
+func putRequiredModule(t *testing.T, server *Server, name, version string) (int, string) {
+	t.Helper()
+	body := requiredModulesValidCfgBody(t, "test-steward-required-fixture", []map[string]string{{"name": name, "version": version}})
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-fixture/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		return rec.Code, ""
+	}
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Error)
+	return rec.Code, resp.Error.Code
+}
 
-	require.Equal(t, http.StatusOK, rec.Code, "auto-approved module must allow deployment; body: %s", rec.Body.String())
+func onlyCacheStatus(t *testing.T, c *cache.ModuleCache) (cache.ApprovalStatus, bool) {
+	t.Helper()
+	entries, err := c.List()
+	require.NoError(t, err)
+	if len(entries) == 0 {
+		return "", false
+	}
+	require.Len(t, entries, 1)
+	return entries[0].Status, true
+}
+
+// [REQUIRED TEST] Fixture provenance: bundles built by the production
+// Assemble/Sign path, served by the git test server, fetched by the real resolver
+// into the real cache, through the real handleUpdateStewardConfig.
+func TestHandleUpdateStewardConfig_RequiredModules_AdmissionDecisions(t *testing.T) {
+	trusted := func(t *testing.T, pub []byte) trust.TrustStore {
+		store := trust.NewInMemoryTrustStore()
+		require.NoError(t, store.AddPublisher(trust.PublisherIdentity{Name: "acme-corp", PublicKey: pub, Algorithm: "ed25519"}))
+		return store
+	}
+
+	t.Run("unknown publisher is queued pending and blocks the push", func(t *testing.T) {
+		baseURL, _ := serveModule(t, "acme-corp", "firewall", "1.0.0")
+		code, errCode, c := pushRequiredModule(t, baseURL, "acme-corp", "firewall", "1.0.0", trust.NewInMemoryTrustStore())
+		assert.Equal(t, http.StatusUnprocessableEntity, code)
+		assert.Equal(t, "REQUIRED_MODULE_NOT_APPROVED", errCode)
+		status, found := onlyCacheStatus(t, c)
+		require.True(t, found)
+		assert.Equal(t, cache.ApprovalStatusPending, status)
+	})
+
+	t.Run("trusted publisher with a valid signature is queued pending, then a human approval lets the push through", func(t *testing.T) {
+		baseURL, pub := serveModule(t, "acme-corp", "firewall", "1.0.0")
+		store := trusted(t, pub)
+		server := setupTestServer(t)
+		resolver, err := gitresolver.New(map[string]gitresolver.SourceConfig{"acme-corp": {Type: "git", Base: baseURL}}, t.TempDir(), logging.NewNoopLogger())
+		require.NoError(t, err)
+		c, err := cache.New(t.TempDir() + "/module-cache")
+		require.NoError(t, err)
+		wf := approval.New(c)
+		server.SetModuleResolution(c, resolver, wf, store)
+
+		code, errCode := putRequiredModule(t, server, "acme-corp/firewall", "1.0.0")
+		assert.Equal(t, http.StatusUnprocessableEntity, code)
+		assert.Equal(t, "REQUIRED_MODULE_NOT_APPROVED", errCode)
+		status, found := onlyCacheStatus(t, c)
+		require.True(t, found)
+		require.Equal(t, cache.ApprovalStatusPending, status)
+
+		entries, err := c.List()
+		require.NoError(t, err)
+		require.NoError(t, wf.Approve(entries[0].Addr))
+
+		code, errCode = putRequiredModule(t, server, "acme-corp/firewall", "1.0.0")
+		assert.Equal(t, http.StatusOK, code, errCode)
+	})
+
+	t.Run("trusted publisher with a bad signature is rejected and never queued", func(t *testing.T) {
+		baseURL, pub := serveModuleWith(t, "acme-corp", "firewall", "1.0.0", func(sb *testutil.SignedBundle) {
+			sb.Signatures[0].Signature[0] ^= 0xff
+		})
+		code, errCode, c := pushRequiredModule(t, baseURL, "acme-corp", "firewall", "1.0.0", trusted(t, pub))
+		assert.Equal(t, http.StatusUnprocessableEntity, code)
+		assert.Equal(t, "REQUIRED_MODULE_NOT_APPROVED", errCode)
+		status, found := onlyCacheStatus(t, c)
+		require.True(t, found, "the rejected bundle is stored for audit")
+		assert.Equal(t, cache.ApprovalStatusRejected, status, "a bad signature must never be pending")
+	})
+
+	t.Run("zero signatures is rejected and never queued", func(t *testing.T) {
+		baseURL, _ := serveModuleWith(t, "acme-corp", "firewall", "1.0.0", func(sb *testutil.SignedBundle) {
+			sb.Signatures = nil
+		})
+		code, errCode, c := pushRequiredModule(t, baseURL, "acme-corp", "firewall", "1.0.0", trust.NewInMemoryTrustStore())
+		assert.Equal(t, http.StatusUnprocessableEntity, code)
+		assert.NotEmpty(t, errCode)
+		status, found := onlyCacheStatus(t, c)
+		require.True(t, found, "the rejected bundle is stored for audit")
+		assert.Equal(t, cache.ApprovalStatusRejected, status, "an unsigned bundle must never be pending")
+	})
+}
+
+// [REQUIRED TEST] required_modules versions must be exact: ^1.0.0, v1.0.0 and
+// latest are refused with a clear error before any source is contacted; 1.0.0
+// proceeds to resolution.
+func TestHandleUpdateStewardConfig_RequiredModules_NonExactVersionRefused(t *testing.T) {
+	for _, version := range []string{"^1.0.0", "v1.0.0", "latest"} {
+		t.Run(version, func(t *testing.T) {
+			server := setupTestServer(t)
+			// An unreachable https base: contacting it would fail differently from the
+			// exact-version refusal, and the empty trust store would queue, not refuse.
+			resolver, err := gitresolver.New(map[string]gitresolver.SourceConfig{
+				"acme-corp": {Type: "git", Base: "https://127.0.0.1:1/never-contacted"},
+			}, t.TempDir(), logging.NewNoopLogger())
+			require.NoError(t, err)
+			c, err := cache.New(t.TempDir() + "/module-cache")
+			require.NoError(t, err)
+			server.SetModuleResolution(c, resolver, approval.New(c), trust.NewInMemoryTrustStore())
+
+			body := requiredModulesValidCfgBody(t, "test-steward-required-exact", []map[string]string{{"name": "acme-corp/firewall", "version": version}})
+			req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-exact/config", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/yaml")
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "exact version")
+			entries, err := c.List()
+			require.NoError(t, err)
+			assert.Empty(t, entries)
+		})
+	}
+
+	t.Run("1.0.0 proceeds", func(t *testing.T) {
+		baseURL, _ := serveModule(t, "acme-corp", "firewall", "1.0.0")
+		_, errCode, c := pushRequiredModule(t, baseURL, "acme-corp", "firewall", "1.0.0", trust.NewInMemoryTrustStore())
+		assert.Equal(t, "REQUIRED_MODULE_NOT_APPROVED", errCode, "an exact version is resolved and queued")
+		_, found := onlyCacheStatus(t, c)
+		assert.True(t, found)
+	})
 }
 
 // TestHandleUpdateStewardConfig_RequiredModules_DependenciesNotWired_Returns200

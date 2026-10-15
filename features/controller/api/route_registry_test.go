@@ -566,3 +566,31 @@ func formatGoldenRouteTable(entries []routeEntry) string {
 	sb.WriteString("}\n")
 	return sb.String()
 }
+
+// TestModuleRoutesAreExactlyTheKnownSet pins the module route set (Issue #4984).
+// The trusted-publisher set changes only by editing controller.cfg and
+// restarting, so no route may add, change or remove a publisher: any route
+// registered under /api/v1/modules beyond these four fails this test.
+func TestModuleRoutesAreExactlyTheKnownSet(t *testing.T) {
+	s := setupRouteTestServer(t)
+	router, ok := s.GetRouter().(*mux.Router)
+	require.True(t, ok, "GetRouter must return *mux.Router")
+
+	var got []string
+	for _, e := range walkRoutes(t, router) {
+		if e.method == "*" || !strings.HasPrefix(e.path, "/api/v1/modules") {
+			continue
+		}
+		got = append(got, e.String())
+	}
+	sort.Strings(got)
+
+	want := []string{
+		"GET /api/v1/modules",
+		"GET /api/v1/modules/approvals",
+		"POST /api/v1/modules/approvals/{address}/approve",
+		"POST /api/v1/modules/approvals/{address}/reject",
+	}
+	sort.Strings(want)
+	assert.Equal(t, want, got, "the module route set must be exactly the known four routes")
+}

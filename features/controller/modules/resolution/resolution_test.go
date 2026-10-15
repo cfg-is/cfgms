@@ -104,9 +104,9 @@ func TestResolveCfgRequiredModules_AllModulesApprovedInCache_ReturnsNil(t *testi
 	assert.NoError(t, err)
 }
 
-// [REQUIRED TEST] Uncached module: GitSourceResolver + ApprovalWorkflow called; AutoApprove → nil.
-func TestResolveCfgRequiredModules_UncachedModule_AutoApprove_ReturnsNil(t *testing.T) {
-	// A properly signed "firewall" module served over verified TLS.
+// [REQUIRED TEST] Uncached module from a trusted publisher with a valid signature:
+// queued for a human (no automatic approval), blocks until approved, then passes.
+func TestResolveCfgRequiredModules_UncachedModule_TrustedValid_QueuedUntilApproved(t *testing.T) {
 	baseURL, pubKey := serveModule(t, "cfgms", "firewall", "1.0.0")
 	sources := map[string]gitresolver.SourceConfig{
 		"cfgms": {Type: "git", Base: baseURL},
@@ -114,11 +114,9 @@ func TestResolveCfgRequiredModules_UncachedModule_AutoApprove_ReturnsNil(t *test
 	resolver, err := gitresolver.New(sources, t.TempDir(), logging.NewNoopLogger())
 	require.NoError(t, err)
 
-	// Real cache + approval workflow.
 	c := makeTestCache(t)
 	wf := approval.New(c)
 
-	// Trust store that knows "cfgms" with the matching public key → AutoApprove.
 	store := trust.NewInMemoryTrustStore()
 	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{
 		Name:      "cfgms",
@@ -131,7 +129,43 @@ func TestResolveCfgRequiredModules_UncachedModule_AutoApprove_ReturnsNil(t *test
 	}
 
 	err = resolution.ResolveCfgRequiredModules(context.Background(), required, c, resolver, wf, store)
-	assert.NoError(t, err)
+	require.Error(t, err, "a trusted publisher's bundle still waits for a human")
+	assert.Contains(t, err.Error(), "requires approval")
+
+	entries, err := c.List()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, cache.ApprovalStatusPending, entries[0].Status)
+	require.NoError(t, wf.Approve(entries[0].Addr))
+
+	assert.NoError(t, resolution.ResolveCfgRequiredModules(context.Background(), required, c, resolver, wf, store))
+}
+
+// [REQUIRED TEST] Non-exact versions are refused with a clear error before any
+// source is contacted (the resolver has no source: contacting it would yield a
+// different error); 1.0.0 proceeds to the resolver.
+func TestResolveCfgRequiredModules_NonExactVersion_Refused(t *testing.T) {
+	for _, version := range []string{"^1.0.0", "v1.0.0", "latest", "", ">=1.0.0", "1.0"} {
+		t.Run("version="+version, func(t *testing.T) {
+			c := makeTestCache(t)
+			required := []stewardtypes.RequiredModule{{Name: "cfgms/firewall", Version: version}}
+
+			err := resolution.ResolveCfgRequiredModules(context.Background(), required, c, emptyResolver(t),
+				approval.New(c), trust.NewInMemoryTrustStore())
+			require.Error(t, err)
+			assert.ErrorIs(t, err, resolution.ErrVersionNotExact)
+			assert.Contains(t, err.Error(), "exact version")
+			assert.Contains(t, err.Error(), "cfgms/firewall")
+			assert.NotContains(t, err.Error(), "no module source", "the source must not be contacted")
+		})
+	}
+
+	c := makeTestCache(t)
+	required := []stewardtypes.RequiredModule{{Name: "cfgms/firewall", Version: "1.0.0"}}
+	err := resolution.ResolveCfgRequiredModules(context.Background(), required, c, emptyResolver(t),
+		approval.New(c), trust.NewInMemoryTrustStore())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, resolution.ErrVersionNotExact, "1.0.0 is exact and proceeds to resolution")
 }
 
 // [REQUIRED TEST] Uncached module: resolver + workflow called; QueueForReview → blocking error.

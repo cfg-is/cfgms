@@ -2274,6 +2274,22 @@ func (s *Server) ModuleBundleResolver() resolution.BundleResolver {
 	return s.moduleBundleResolver
 }
 
+// ModuleBundleApprover returns the wired approval workflow, or nil (Issue #4984).
+// Exposed for the same reason as ModuleBundleResolver: wiring tests outside the
+// api package assert that production startup supplied it.
+func (s *Server) ModuleBundleApprover() resolution.BundleApprover {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.moduleBundleApprover
+}
+
+// ModuleTrustStore returns the wired module trust store, or nil (Issue #4984).
+func (s *Server) ModuleTrustStore() trust.TrustStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.moduleTrustStore
+}
+
 // SetModuleBundleReviewer wires the human-decision interface for module bundle approval.
 // When nil (default), POST .../approve and POST .../reject return 503.
 // Call after New() but before Start().

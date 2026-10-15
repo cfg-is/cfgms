@@ -3,6 +3,9 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,7 +18,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	moduleGitSource "github.com/cfgis/cfgms/features/controller/modules/sources/git"
 	loggingPkg "github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // envVarPattern matches ${VAR} patterns without defaults
@@ -566,6 +571,93 @@ type Config struct {
 	// cfg push stays inert regardless, since it also needs the (separately
 	// wired) approver and trust store.
 	ModuleSources map[string]ModuleSourceConfig `yaml:"module_sources,omitempty"`
+
+	// ModuleTrust declares additional trusted module publishers (Issue #4984).
+	// It is read only from controller.cfg: no API, CLI command, config-store key
+	// or cfg push field changes it, so the set changes by editing the file and
+	// restarting. Trust is global. Absent: only the baked-in CFGMS identity is trusted.
+	ModuleTrust *ModuleTrustConfig `yaml:"module_trust,omitempty"`
+}
+
+// ModuleTrustConfig is the controller.cfg module_trust section (Issue #4984).
+type ModuleTrustConfig struct {
+	// Publishers are trusted in addition to the baked-in CFGMS publisher identity.
+	Publishers []ModuleTrustPublisher `yaml:"publishers,omitempty"`
+}
+
+// ModuleTrustPublisher declares one trusted module publisher.
+type ModuleTrustPublisher struct {
+	// Name is the publisher name as it appears in bundle manifests and signatures.
+	Name string `yaml:"name"`
+	// PublicKey is the base64 (standard encoding) of the 32-byte Ed25519 public key.
+	PublicKey string `yaml:"public_key"`
+}
+
+// reservedModulePublisherName is the baked-in CFGMS publisher identity name.
+const reservedModulePublisherName = "cfgms"
+
+// Named startup errors for the module_trust and module_sources sections. Each
+// fails controller startup; none is skipped or downgraded to a warning.
+var (
+	ErrModuleTrustEmptyName     = errors.New("module_trust.publishers: publisher name is empty")
+	ErrModuleTrustReservedName  = errors.New("module_trust.publishers: publisher name is reserved for the baked-in CFGMS identity")
+	ErrModuleTrustDuplicateName = errors.New("module_trust.publishers: duplicate publisher name")
+	ErrModuleTrustBadBase64     = errors.New("module_trust.publishers: public_key is not valid base64")
+	ErrModuleTrustBadKeyLength  = errors.New("module_trust.publishers: public_key is not a 32-byte Ed25519 key")
+	ErrModuleTrustUnusableKey   = errors.New("module_trust.publishers: public_key is not a usable Ed25519 identity key")
+	ErrModuleSourceBadBase      = errors.New("module_sources: invalid source base URL")
+)
+
+// ModuleTrustPublishers validates the module_trust section and returns the
+// declared publisher identities. It returns a named error for the first
+// invalid entry; messages carry the publisher's position, not its raw value.
+func (c *Config) ModuleTrustPublishers() ([]trust.PublisherIdentity, error) {
+	if c.ModuleTrust == nil {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(c.ModuleTrust.Publishers))
+	out := make([]trust.PublisherIdentity, 0, len(c.ModuleTrust.Publishers))
+	for i, p := range c.ModuleTrust.Publishers {
+		if strings.TrimSpace(p.Name) == "" {
+			return nil, fmt.Errorf("%w (entry %d)", ErrModuleTrustEmptyName, i)
+		}
+		if strings.EqualFold(p.Name, reservedModulePublisherName) {
+			return nil, fmt.Errorf("%w (entry %d)", ErrModuleTrustReservedName, i)
+		}
+		if _, dup := seen[p.Name]; dup {
+			return nil, fmt.Errorf("%w (entry %d)", ErrModuleTrustDuplicateName, i)
+		}
+		seen[p.Name] = struct{}{}
+
+		key, err := base64.StdEncoding.DecodeString(p.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w (entry %d)", ErrModuleTrustBadBase64, i)
+		}
+		if len(key) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("%w (entry %d: %d bytes)", ErrModuleTrustBadKeyLength, i, len(key))
+		}
+		id := trust.PublisherIdentity{Name: p.Name, PublicKey: key, Algorithm: "ed25519"}
+		if !trust.IsUsableIdentityKey(id) {
+			return nil, fmt.Errorf("%w (entry %d)", ErrModuleTrustUnusableKey, i)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// ValidateModuleTrust validates the module_trust and module_sources sections at
+// controller startup (Issue #4984). A source base is checked with the git
+// resolver's own rule (moduleGitSource.ValidateBase), not a re-implementation.
+func (c *Config) ValidateModuleTrust() error {
+	if _, err := c.ModuleTrustPublishers(); err != nil {
+		return err
+	}
+	for publisher, src := range c.ModuleSources {
+		if err := moduleGitSource.ValidateBase(src.Base); err != nil {
+			return fmt.Errorf("%w: module_sources[%q]: %v", ErrModuleSourceBadBase, publisher, err)
+		}
+	}
+	return nil
 }
 
 // ModuleSourceConfig describes a single publisher's module source repository
@@ -1567,6 +1659,10 @@ func LoadWithPath(configPath string) (*Config, error) {
 	}
 
 	if err := cfg.ValidateNotifications(); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.ValidateModuleTrust(); err != nil {
 		return nil, err
 	}
 

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -73,7 +74,17 @@ var moduleListCmd = &cobra.Command{
 The --status flag filters the output:
   pending   — modules awaiting admin approval (QueueForReview)
   approved  — modules approved and available for steward delivery
-  rejected  — modules rejected due to signature verification failure
+  rejected  — modules rejected: no signature, or a trusted publisher's signature
+              did not verify
+
+For pending modules the SIGNATURES column shows who signed (publisher), the
+first 12 hex characters of the trusted key's SHA-256 fingerprint, and whether
+the signature verifies against the controller's trust store:
+  valid         — trusted publisher, signature verifies
+  invalid       — trusted publisher, signature does not verify
+  unverifiable  — publisher is not in the trust store; review the publisher
+                  before approving. With --json the full fingerprint and the
+                  signed content hash are included.
 
 Examples:
   cfg module list
@@ -92,7 +103,10 @@ The module reference must be in the form publisher/name@version, for example:
   cfgms/hyperv@0.2.1
 
 Only modules in "pending" state (QueueForReview) can be approved. Modules that
-are already approved or rejected return an error.
+are already approved or rejected return an error. Every version needs its own
+approval, including versions from a trusted publisher, and a bundle that carries
+no signature can never be approved. Review the SIGNATURES column of
+"cfg module list" first.
 
 The controller's cache is content-addressed, so more than one distinct bundle can
 be pending under the same publisher/name@version — the publisher name of an
@@ -150,6 +164,19 @@ type moduleCacheEntry struct {
 	Version     string `json:"version"`
 	ContentHash string `json:"content_hash"`
 	Status      string `json:"status"`
+	// Signatures is who signed a pending bundle and whether each signature
+	// verifies against the controller's trust store (Issue #4984).
+	Signatures []moduleSignatureView `json:"signatures,omitempty"`
+}
+
+// moduleSignatureView mirrors one entry of the "signatures" array returned by
+// GET /api/v1/modules/approvals. SignatureValid is "valid", "invalid" or
+// "unverifiable" (publisher not in the controller's trust store).
+type moduleSignatureView struct {
+	Publisher      string `json:"publisher"`
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+	ContentHash    string `json:"content_hash"`
+	SignatureValid string `json:"signature_valid"`
 }
 
 type moduleListResponse struct {
@@ -181,6 +208,18 @@ func runModuleList(cmd *cobra.Command, _ []string) error {
 		path += "?" + params.Encode()
 	}
 
+	// Signatures are reported for queued bundles only, by the approvals endpoint.
+	signaturesByHash := map[string][]moduleSignatureView{}
+	if moduleListStatus == "" || moduleListStatus == "pending" {
+		queue, queueErr := fetchModuleApprovalQueue(client)
+		if queueErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: signature details unavailable: %v\n", queueErr)
+		}
+		for _, e := range queue {
+			signaturesByHash[normalizeContentHash(e.ContentHash)] = e.Signatures
+		}
+	}
+
 	resp, err := client.doRequest(context.Background(), http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
@@ -204,6 +243,13 @@ func runModuleList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to decode module list data: %w", err)
 	}
 
+	for i := range result.Modules {
+		m := &result.Modules[i]
+		if m.Status == "pending" {
+			m.Signatures = signaturesByHash[normalizeContentHash(m.ContentHash)]
+		}
+	}
+
 	if moduleListJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -211,12 +257,13 @@ func runModuleList(cmd *cobra.Command, _ []string) error {
 	}
 
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "PUBLISHER\tNAME\tVERSION\tSTATUS\tCONTENT HASH"); err != nil {
+	if _, err := fmt.Fprintln(w, "PUBLISHER\tNAME\tVERSION\tSTATUS\tCONTENT HASH\tSIGNATURES"); err != nil {
 		return err
 	}
 	for _, m := range result.Modules {
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			m.Publisher, m.Name, m.Version, m.Status, shortHash(m.ContentHash)); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			terminalSafe(m.Publisher), terminalSafe(m.Name), terminalSafe(m.Version), terminalSafe(m.Status),
+			terminalSafe(shortHash(m.ContentHash)), formatModuleSignatures(m.Signatures)); err != nil {
 			return err
 		}
 	}
@@ -226,15 +273,70 @@ func runModuleList(cmd *cobra.Command, _ []string) error {
 // moduleApprovalQueueEntry mirrors one entry of the "pending" array returned by
 // GET /api/v1/modules/approvals (features/controller/api's moduleApprovalEntry).
 type moduleApprovalQueueEntry struct {
-	Address     string `json:"address"`
-	Publisher   string `json:"publisher"`
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	ContentHash string `json:"content_hash"`
+	Address     string                `json:"address"`
+	Publisher   string                `json:"publisher"`
+	Name        string                `json:"name"`
+	Version     string                `json:"version"`
+	ContentHash string                `json:"content_hash"`
+	Signatures  []moduleSignatureView `json:"signatures,omitempty"`
 }
 
 type moduleApprovalQueueResponse struct {
 	Pending []moduleApprovalQueueEntry `json:"pending"`
+}
+
+// fetchModuleApprovalQueue returns the pending entries of GET /api/v1/modules/approvals.
+func fetchModuleApprovalQueue(client *APIClient) ([]moduleApprovalQueueEntry, error) {
+	resp, err := client.doRequest(context.Background(), http.MethodGet, "/api/v1/modules/approvals", nil)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("controller returned %s", resp.Status)
+	}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var queue moduleApprovalQueueResponse
+	if err := json.Unmarshal(envelope.Data, &queue); err != nil {
+		return nil, fmt.Errorf("failed to decode pending approval queue: %w", err)
+	}
+	return queue.Pending, nil
+}
+
+// terminalSafe replaces control characters in a controller-supplied value so it
+// cannot inject terminal escape sequences into the output.
+func terminalSafe(v string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, v)
+}
+
+// formatModuleSignatures renders "publisher[key=fingerprint12]:valid" per signature.
+func formatModuleSignatures(sigs []moduleSignatureView) string {
+	if len(sigs) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(sigs))
+	for _, sg := range sigs {
+		part := terminalSafe(sg.Publisher)
+		if sg.KeyFingerprint != "" {
+			fp := terminalSafe(sg.KeyFingerprint)
+			if len(fp) > 12 {
+				fp = fp[:12]
+			}
+			part += "[key=" + fp + "]"
+		}
+		parts = append(parts, part+":"+terminalSafe(sg.SignatureValid))
+	}
+	return strings.Join(parts, ",")
 }
 
 // urlSafeHashToStandard maps the URL-safe base64 alphabet used in composite

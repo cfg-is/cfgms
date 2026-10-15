@@ -218,7 +218,7 @@ type ModuleTrustConfig struct {
 
 // RequiredModule declares a module bundle that must be present and approved in
 // the controller cache before this cfg file can be deployed to stewards.
-// Name is the full "publisher/name" identifier; Version is a semver constraint.
+// Name is the full "publisher/name" identifier; Version is an exact version (e.g. 1.0.0).
 type RequiredModule struct {
 	Name    string `yaml:"name" json:"name"`
 	Version string `yaml:"version" json:"version"`

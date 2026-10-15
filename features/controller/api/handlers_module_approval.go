@@ -4,6 +4,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -48,6 +51,72 @@ type moduleApprovalEntry struct {
 	Name        string `json:"name"`
 	Version     string `json:"version"`
 	ContentHash string `json:"content_hash"`
+	// Signatures shows admins who signed the bundle. Empty for an entry whose
+	// signatures cannot be read from the cache.
+	Signatures []moduleApprovalSignature `json:"signatures"`
+}
+
+// Values of moduleApprovalSignature.SignatureValid.
+const (
+	// signatureValid: the publisher is in the trust store and the signature verifies.
+	signatureValid = "valid"
+	// signatureInvalid: the publisher is in the trust store and the signature does not verify.
+	signatureInvalid = "invalid"
+	// signatureUnverifiable: the publisher is not in the trust store, so the signature cannot be checked.
+	signatureUnverifiable = "unverifiable"
+)
+
+// moduleApprovalSignature describes one signature on a queued bundle. It is
+// computed live from the trust store the API server holds, never stored.
+type moduleApprovalSignature struct {
+	Publisher string `json:"publisher"`
+	// KeyFingerprint is the lowercase hex SHA-256 of the trusted public key
+	// (the value `cfg module pubkey` prints); empty when the publisher is not in the trust store.
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+	ContentHash    string `json:"content_hash"`
+	SignatureValid string `json:"signature_valid"`
+}
+
+// moduleBundleGetter is implemented by module caches that can return a stored
+// bundle's metadata (cache.ModuleCache does).
+type moduleBundleGetter interface {
+	Get(addr bundle.ContentAddress) (*bundle.Bundle, error)
+}
+
+// moduleApprovalSignatures reports each signature on the bundle at addr against
+// store. A nil store, or a lister that cannot return bundles, yields none.
+func (s *Server) moduleApprovalSignatures(lister any, store trust.TrustStore, addr bundle.ContentAddress) []moduleApprovalSignature {
+	out := make([]moduleApprovalSignature, 0)
+	getter, ok := lister.(moduleBundleGetter)
+	if !ok {
+		return out
+	}
+	b, err := getter.Get(addr)
+	if err != nil {
+		s.logger.Warn("Failed to read module bundle signatures",
+			"address", logging.SanitizeLogValue(formatModuleAddress(addr)), "error", logging.SanitizeLogValue(err.Error()))
+		return out
+	}
+	for _, sig := range b.Signatures {
+		entry := moduleApprovalSignature{
+			Publisher:      logging.SanitizeLogValue(sig.Publisher),
+			ContentHash:    logging.SanitizeLogValue(b.ContentHash),
+			SignatureValid: signatureUnverifiable,
+		}
+		if store != nil {
+			if id, known := store.GetPublisher(sig.Publisher); known {
+				sum := sha256.Sum256(id.PublicKey)
+				entry.KeyFingerprint = hex.EncodeToString(sum[:])
+				if verr := trust.VerifyBundleSignature(b, sig, store); verr == nil {
+					entry.SignatureValid = signatureValid
+				} else {
+					entry.SignatureValid = signatureInvalid
+				}
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // moduleApprovalListResponse is returned by GET /api/v1/modules/approvals.
@@ -63,9 +132,14 @@ func (s *Server) handleListModuleApprovals(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	entries, err := s.moduleCacheLister.List()
+	s.mu.RLock()
+	lister := s.moduleCacheLister
+	store := s.moduleTrustStore
+	s.mu.RUnlock()
+
+	entries, err := lister.List()
 	if err != nil {
-		s.logger.Error("Failed to list module cache", "error", err)
+		s.logger.Error("Failed to list module cache", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list module cache", "INTERNAL_ERROR")
 		return
 	}
@@ -81,6 +155,7 @@ func (s *Server) handleListModuleApprovals(w http.ResponseWriter, r *http.Reques
 			Name:        e.Addr.Name,
 			Version:     e.Addr.Version,
 			ContentHash: e.Addr.ContentHash,
+			Signatures:  s.moduleApprovalSignatures(lister, store, e.Addr),
 		})
 	}
 
@@ -219,6 +294,9 @@ func (s *Server) handleModuleDecisionError(w http.ResponseWriter, err error, act
 		s.logger.Info("Module bundle not in pending state",
 			"action", action, "address", safeAddr, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusConflict, "Module bundle is not pending review", "NOT_PENDING")
+	case errors.Is(err, approval.ErrNoSignature):
+		s.logger.Info("Module bundle carries no signature", "action", action, "address", safeAddr)
+		s.writeErrorResponse(w, http.StatusConflict, "Module bundle carries no signature and cannot be approved", "NO_SIGNATURE")
 	case errors.Is(err, cache.ErrBundleNotFound):
 		s.logger.Info("Module bundle not found", "action", action, "address", safeAddr)
 		s.writeErrorResponse(w, http.StatusNotFound, "Module bundle not found", "BUNDLE_NOT_FOUND")

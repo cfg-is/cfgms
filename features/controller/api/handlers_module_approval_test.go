@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
@@ -669,4 +672,106 @@ func TestFormatAndParseModuleAddress(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, addr, decoded)
 	}
+}
+
+// ---- Issue #4984: signatures in the approvals list, zero-signature approve ----
+
+// listApprovalSignatures stores b pending, wires store as the trust store, calls
+// GET /api/v1/modules/approvals and returns the single entry's signatures.
+func listApprovalSignatures(t *testing.T, b *bundle.Bundle, store trust.TrustStore) []map[string]interface{} {
+	t.Helper()
+	server := setupTestServer(t)
+	mc := makeTestModuleCache(t)
+	require.NoError(t, mc.Put(b))
+	server.SetModuleResolution(mc, nil, nil, store)
+	server.SetModuleBundleReviewer(approval.New(mc))
+
+	listKey := NewTestKey(t, server, []string{"module:list-approvals"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/modules/approvals", nil)
+	req.Header.Set("X-API-Key", listKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	pending := resp.Data.(map[string]interface{})["pending"].([]interface{})
+	require.Len(t, pending, 1)
+	sigs := pending[0].(map[string]interface{})["signatures"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(sigs))
+	for _, s := range sigs {
+		out = append(out, s.(map[string]interface{}))
+	}
+	return out
+}
+
+func trustStoreFor(t *testing.T, name string, pub []byte) trust.TrustStore {
+	t.Helper()
+	store := trust.NewInMemoryTrustStore()
+	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{Name: name, PublicKey: pub, Algorithm: "ed25519"}))
+	return store
+}
+
+func TestHandleListModuleApprovals_SignatureValid(t *testing.T) {
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: "acme-corp", Name: "tool", Platforms: []string{"linux-amd64"}})
+	sigs := listApprovalSignatures(t, sb.Bundle, trustStoreFor(t, "acme-corp", sb.PublicKey))
+
+	require.Len(t, sigs, 1)
+	sum := sha256.Sum256(sb.PublicKey)
+	assert.Equal(t, "acme-corp", sigs[0]["publisher"])
+	assert.Equal(t, hex.EncodeToString(sum[:]), sigs[0]["key_fingerprint"])
+	assert.Equal(t, sb.ContentHash, sigs[0]["content_hash"])
+	assert.Equal(t, "valid", sigs[0]["signature_valid"])
+}
+
+func TestHandleListModuleApprovals_SignatureInvalid(t *testing.T) {
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: "acme-corp", Name: "tool", Platforms: []string{"linux-amd64"}})
+	store := trustStoreFor(t, "acme-corp", sb.PublicKey)
+	bad := *sb.Bundle
+	bad.Signatures = []bundle.BundleSignature{{
+		Publisher: "acme-corp", Algorithm: "ed25519",
+		Signature: append([]byte(nil), sb.Signatures[0].Signature...),
+	}}
+	bad.Signatures[0].Signature[0] ^= 0xff
+
+	sigs := listApprovalSignatures(t, &bad, store)
+	require.Len(t, sigs, 1)
+	assert.Equal(t, "invalid", sigs[0]["signature_valid"])
+	assert.NotEmpty(t, sigs[0]["key_fingerprint"], "a trusted publisher's fingerprint is shown even when the signature is bad")
+}
+
+func TestHandleListModuleApprovals_SignatureUnverifiable(t *testing.T) {
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: "acme-corp", Name: "tool", Platforms: []string{"linux-amd64"}})
+	other := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: "other-corp", Platforms: []string{"linux-amd64"}})
+
+	sigs := listApprovalSignatures(t, sb.Bundle, trustStoreFor(t, "other-corp", other.PublicKey))
+	require.Len(t, sigs, 1)
+	assert.Equal(t, "acme-corp", sigs[0]["publisher"])
+	assert.Equal(t, "unverifiable", sigs[0]["signature_valid"])
+	assert.Empty(t, sigs[0]["key_fingerprint"], "no fingerprint for a publisher outside the trust store")
+	assert.Equal(t, sb.ContentHash, sigs[0]["content_hash"])
+}
+
+// [REQUIRED TEST] REST approve of a zero-signature entry returns a named error
+// and the status is unchanged.
+func TestHandleApproveModuleBundle_ZeroSignatures_NamedErrorStatusUnchanged(t *testing.T) {
+	server, mc, _ := setupModuleApprovalServer(t)
+	b := testutil.NewSignedBundle(t, testutil.BundleOptions{Publisher: "acme-corp", Name: "tool", Platforms: []string{"linux-amd64"}}).Bundle
+	b.Signatures = nil
+	require.NoError(t, mc.Put(b))
+	addr := b.ContentAddress()
+
+	req := makeApproveRequest(t, server, formatModuleAddress(addr), moduleTestStrongPrincipal())
+	rec := httptest.NewRecorder()
+	server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle)).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "NO_SIGNATURE", resp.Error.Code)
+
+	status, err := mc.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status)
 }

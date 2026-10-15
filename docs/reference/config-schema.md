@@ -528,7 +528,7 @@ acts on each key.
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
 | `name` | string | — | required | Full `publisher/name` module identifier |
-| `version` | string | — | required | Semver constraint the approved bundle must satisfy |
+| `version` | string | — | required | Exact version of the approved bundle (e.g. `1.0.0`); constraints, `latest` and a `v` prefix are refused at cfg push |
 
 ---
 

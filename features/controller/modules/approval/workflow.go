@@ -20,13 +20,20 @@ import (
 type ApprovalDecision int
 
 const (
-	// AutoApprove means the bundle is from a trusted publisher with a valid signature.
+	// AutoApprove is reported only for a bundle a human has already approved
+	// (EvaluateAndStore reflects the stored status). Evaluate never returns it:
+	// ADR-006 requires a human to approve each version, trusted publisher or not.
 	AutoApprove ApprovalDecision = iota
-	// QueueForReview means the publisher is unknown; an admin must act before the bundle is staged.
+	// QueueForReview means the bundle waits for a human decision before it is staged.
 	QueueForReview
-	// Reject means the signature verification failed (tampered or malformed bundle).
+	// Reject means the bundle carries no signature, or a trusted publisher's
+	// signature does not verify (tampered or malformed bundle).
 	Reject
 )
+
+// ErrNoSignature is returned by Approve for a bundle that carries no signature.
+// There is no override: an unsigned bundle can never be approved.
+var ErrNoSignature = errors.New("module bundle carries no signature and cannot be approved")
 
 // ErrNotQueued is returned by Approve when the entry is not in QueueForReview (pending) state.
 var ErrNotQueued = errors.New("module is not queued for review")
@@ -45,16 +52,22 @@ func New(c *cache.ModuleCache) *ApprovalWorkflow {
 // Evaluate determines the approval decision for b against store.
 //
 // Decision rules:
-//   - Publisher in trust store AND at least one signature from that publisher passes
-//     VerifyBundleSignature → AutoApprove.
-//   - Publisher NOT in trust store → QueueForReview.
-//   - Publisher in trust store but no valid signature found → Reject.
+//   - No signatures at all → Reject (never queued).
+//   - Publisher in trust store but none of its signatures verifies → Reject
+//     (never queued). The content address is immutable, so that
+//     publisher/name/version stays rejected; the publisher must publish a new version.
+//   - Every other bundle (unknown publisher, or trusted publisher with a valid
+//     signature) → QueueForReview. A human approves each version.
 //
 // Evaluate is a pure read: it does not modify the cache. Use EvaluateAndStore to
 // persist the verdict without discarding a decision already in force.
 func (w *ApprovalWorkflow) Evaluate(b *bundle.Bundle, store trust.TrustStore) (ApprovalDecision, error) {
 	if b == nil || b.Manifest == nil {
 		return Reject, errors.New("bundle or manifest is nil")
+	}
+
+	if len(b.Signatures) == 0 {
+		return Reject, nil
 	}
 
 	publisher := b.Manifest.Publisher
@@ -69,7 +82,7 @@ func (w *ApprovalWorkflow) Evaluate(b *bundle.Bundle, store trust.TrustStore) (A
 			continue
 		}
 		if err := trust.VerifyBundleSignature(b, sig, store); err == nil {
-			return AutoApprove, nil
+			return QueueForReview, nil
 		}
 	}
 
@@ -79,8 +92,19 @@ func (w *ApprovalWorkflow) Evaluate(b *bundle.Bundle, store trust.TrustStore) (A
 
 // Approve transitions a queued (pending) cache entry to approved.
 // Returns ErrNotQueued if the entry is not in pending state.
+// Returns ErrNoSignature if the bundle carries no signature.
 // Returns cache.ErrBundleNotFound if no entry exists for addr.
 func (w *ApprovalWorkflow) Approve(addr bundle.ContentAddress) error {
+	b, err := w.cache.Get(addr)
+	if err != nil {
+		if errors.Is(err, cache.ErrBundleNotFound) {
+			return err
+		}
+		return fmt.Errorf("read bundle for approval: %w", err)
+	}
+	if len(b.Signatures) == 0 {
+		return ErrNoSignature
+	}
 	return w.transition(addr, cache.ApprovalStatusApproved)
 }
 
