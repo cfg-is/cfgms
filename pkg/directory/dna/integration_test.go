@@ -332,7 +332,7 @@ const writeBatchSize = 50
 
 // maxWriteGrowth bounds how much more a write may cost late in a run than its
 // control (see measureWriteGrowth). Without growth the measured ratio is
-// 1.1-1.25 under -race and 1.3-1.8 without it on a Windows host.
+// 0.9-1.15 on a Windows host, with and without -race.
 const maxWriteGrowth = 8
 
 // writeGrowth holds per-batch write costs from measureWriteGrowth.
@@ -369,7 +369,13 @@ func measureWriteGrowth(t *testing.T, store *DirectoryDNAStorageAdapter, newCont
 	controlItems := items[:min(writeBatchSize, len(items))]
 
 	// timeBatch returns the per-write cost of the successful writes, or 0 when
-	// none succeeded.
+	// none succeeded. After timing, it checkpoints the store's write-ahead log.
+	// The main store would otherwise reach SQLite's automatic checkpoint after a
+	// few hundred writes and pay for it inside timed writes from then on, while
+	// a 50-write control never does. On a CI runner with slow disk flushes that
+	// alone made main writes 13x their control at every dataset size. Checkpoint
+	// cost depends on the pages written since the last one, not on n, so taking
+	// it outside the timing in both stores hides no growth with n.
 	timeBatch := func(s *DirectoryDNAStorageAdapter, batch []*DirectoryDNA) (time.Duration, int) {
 		ok := 0
 		start := time.Now()
@@ -379,6 +385,7 @@ func measureWriteGrowth(t *testing.T, store *DirectoryDNAStorageAdapter, newCont
 			}
 		}
 		elapsed := time.Since(start)
+		require.NoError(t, s.backend.Flush())
 		if ok == 0 {
 			return 0, 0
 		}
