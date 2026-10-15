@@ -298,7 +298,6 @@ func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 // goroutine and does not trigger a duplicate run on another node contending
 // for the same lease throughout.
 func TestSingletonJob_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *testing.T) {
-	store := newTestStore(t)
 	// Generous margin (ttl-renewInterval=1.8s of scheduling slack per renewal)
 	// so this test does not race itself when the full suite runs packages in
 	// parallel under load — a tight margin here would make an occasional missed
@@ -324,9 +323,50 @@ func TestSingletonJob_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *testing.T) {
 	// see the story's PR description for the full investigation.
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
-	m1, err := NewManager(store, ttl, renewInterval, renewInterval)
+	runSlowCycleNoDuplicate(t, newTestStore(t), ttl, renewInterval, false)
+}
+
+// delayedAcquireStore delegates every call to a real store after sleeping for
+// delay, modelling a slow store write (e.g. the flatfile atomic-rename path on
+// Windows or an antivirus-scanned temp file on a CI runner). The delay is a
+// real sleep in front of the real store's own grant logic; no decision is
+// faked.
+type delayedAcquireStore struct {
+	business.LeaseStore
+	delay time.Duration
+}
+
+func (s *delayedAcquireStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	time.Sleep(s.delay)
+	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// Issue #5028: a holder whose every store write (the first acquire and each
+// renewal) takes three renew intervals — slow, but inside the safety margin —
+// must keep exclusion across a cycle longer than the TTL. The delay is derived
+// from the renew interval so it scales with the lease's own margin.
+func TestSingletonJob_SlowStoreWrites_WithinMargin_NoDuplicateRun(t *testing.T) {
+	ttl := 2 * time.Second
+	renewInterval := 200 * time.Millisecond
+	runSlowCycleNoDuplicate(t, newTestStore(t), ttl, renewInterval, true)
+}
+
+// runSlowCycleNoDuplicate runs node-1 through a cycle of 1.25*ttl while node-2
+// probes the same lease every renewInterval/2. Node-2's probe is started from
+// inside node-1's fn, i.e. only once node-1 actually holds the lease: starting
+// it earlier races node-1's first acquire (the probe's first tick is 100ms
+// out, and a runner that delays node-1's acquire by more than that lets node-2
+// take the lease first — a test-setup race, not a lease defect, Issue #5028).
+// When slowWrites is set, node-1's store writes are delayed by 3*renewInterval.
+func runSlowCycleNoDuplicate(t *testing.T, base business.LeaseStore, ttl, renewInterval time.Duration, slowWrites bool) {
+	t.Helper()
+	store1 := base
+	if slowWrites {
+		store1 = &delayedAcquireStore{LeaseStore: base, delay: 3 * renewInterval}
+	}
+	m1, err := NewManager(store1, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
-	m2, err := NewManager(store, ttl, renewInterval, renewInterval)
+	m2, err := NewManager(base, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
 
 	job1, err := NewSingletonJob(m1, "slow-sweep", "node-1", ttl, renewInterval, nil)
@@ -337,27 +377,30 @@ func TestSingletonJob_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *testing.T) {
 	var node2Attempts int32
 	stopProbing := make(chan struct{})
 	var probeWG sync.WaitGroup
-	probeWG.Add(1)
-	go func() {
-		defer probeWG.Done()
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopProbing:
-				return
-			case <-ticker.C:
-				job2.RunIfLeader(context.Background(), func(ctx context.Context) {
-					atomic.AddInt32(&node2Attempts, 1)
-				})
+	startProbe := func() {
+		probeWG.Add(1)
+		go func() {
+			defer probeWG.Done()
+			ticker := time.NewTicker(renewInterval / 2)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopProbing:
+					return
+				case <-ticker.C:
+					job2.RunIfLeader(context.Background(), func(ctx context.Context) {
+						atomic.AddInt32(&node2Attempts, 1)
+					})
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	// node-1's cycle runs longer than ttl, proving the background renewal
 	// keeps the lease alive rather than losing it partway through.
-	cycleDuration := ttl + ttl/2
+	cycleDuration := ttl + ttl/4
 	ran1 := job1.RunIfLeader(context.Background(), func(ctx context.Context) {
+		startProbe()
 		time.Sleep(cycleDuration)
 	})
 	close(stopProbing)
