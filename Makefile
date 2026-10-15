@@ -1602,7 +1602,18 @@ test-fast:
 #	the 4-way package parallelism `go test` uses and that crosses 300s, whereupon Go
 #	dumps stacks mid-DDL — a runnable, never-scheduled goroutine, i.e. CPU starvation,
 #	not a deadlock. Do not tighten this to track how long the suite currently takes.
-	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=10m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+#
+#	features/controller/api is excluded here and run through
+#	test-framework-api-sharded instead, the same way `make test` runs it. At 2576
+#	tests the package needs ~487s under -race as a single process even when nothing
+#	else is running (measured 2026-10-15, agent container). Inside this go test
+#	invocation it competes with every other package for CPU and passed the 10m hang
+#	detector (601.6s, stacks dumped mid-DDL in sqlite initializeSchema: starved, not
+#	hung). Sharding splits the package's own tests across processes. Raising the
+#	timeout would only push the same failure further out as the package grows.
+	@pkgs=$$(go list ./pkg/... ./features/... ./api/... ./cmd/... | grep -v '/features/controller/api$$'); \
+	CFGMS_TEST_SHORT=1 go test -short -race -timeout=10m $$pkgs || exit 1
+	@CFGMS_TEST_SHORT=1 $(MAKE) test-framework-api-sharded || exit 1
 	@echo ""
 #	Build-tagged code is invisible to every target above, so nothing catches a
 #	break in it until an e2e image build fails hours later. The test-endpoint
