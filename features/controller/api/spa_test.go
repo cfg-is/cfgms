@@ -368,7 +368,7 @@ type unreadableIndexFS struct{ fs.FS }
 
 func (u unreadableIndexFS) Open(name string) (fs.File, error) {
 	if name == "index.html" {
-		return nil, errors.New("simulated disk failure")
+		return nil, errors.New("index.html unreadable")
 	}
 	return u.FS.Open(name)
 }
