@@ -45,6 +45,7 @@ From the certificate store directory (`/var/lib/cfgms/steward/certs` on Linux,
 | Item | Holds |
 |------|-------|
 | `device_identity.enc` | The device identity key. A new one is generated on first start, which gives the clone a different `DeviceID`. |
+| `device_identity_tpm.blob` | On Linux hosts with a TPM, the TPM-wrapped device identity key. It only loads on the TPM that created it. A new key is generated on first start. |
 | `steward-identity.json` | Steward ID, tenant, device ID, and for trust-on-first-use installs the CA pin. |
 | `steward-pending.json` | Pending registration state. |
 | `steward-refresh-pending.json` | A queued re-admission request. |
@@ -80,6 +81,10 @@ the same CA as the original. A trust-on-first-use steward stores its CA pin in
 CA at first boot. That is a weaker trust path. The command prints a note when it
 finds a trust-on-first-use identity. Use `install --controller-ca` for images you
 clone.
+
+## TPM access on Linux
+
+On a Linux host with a TPM 2.0, the steward keeps its device key inside the TPM and reports `key_protection_level: tpm`. The service account needs read and write access to the resource-managed device `/dev/tpmrm0`, which is normally owned by group `tss` (add the account to that group, for example `usermod -aG tss cfgms-steward`). Without that access, or without a TPM, the steward uses the encrypted file key and reports `file`; the reason is in the steward log and enrollment is unaffected. The backend is chosen once, at first enrollment: a steward that already has a file key stays on it.
 
 ## Running it twice
 
