@@ -272,7 +272,7 @@ func TestV020FeatureAvailability(t *testing.T) {
 		}
 
 		// Test audit record creation
-		record := script.CreateAuditRecord("test-steward", "test-resource", config, result, nil)
+		record := script.CreateAuditRecord("test-steward", "test-resource", config, result, nil, false)
 		assert.NotNil(t, record)
 		assert.Equal(t, "test-steward", record.StewardID)
 		assert.Equal(t, "test-resource", record.ResourceID)

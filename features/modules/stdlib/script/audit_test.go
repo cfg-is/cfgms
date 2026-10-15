@@ -294,7 +294,7 @@ func TestCreateAuditRecord(t *testing.T) {
 		PID:       12345,
 	}
 
-	record := CreateAuditRecord(stewardID, resourceID, config, result, nil)
+	record := CreateAuditRecord(stewardID, resourceID, config, result, nil, false)
 
 	if record.StewardID != stewardID {
 		t.Errorf("Expected steward ID %s, got %s", stewardID, record.StewardID)
@@ -340,7 +340,7 @@ func TestCreateAuditRecord_WithError(t *testing.T) {
 	}
 
 	testError := fmt.Errorf("script execution failed")
-	record := CreateAuditRecord(stewardID, resourceID, config, nil, testError)
+	record := CreateAuditRecord(stewardID, resourceID, config, nil, testError, false)
 
 	if record.Status != StatusFailed {
 		t.Errorf("Expected status %s, got %s", StatusFailed, record.Status)

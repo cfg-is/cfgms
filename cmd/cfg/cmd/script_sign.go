@@ -4,6 +4,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 )
@@ -67,4 +69,38 @@ func runScriptSign(cmd *cobra.Command, args []string) error {
 		fmt.Printf("signed %s → %s.sig\n", filePath, filePath)
 	}
 	return nil
+}
+
+// Authenticode operations accepted by authenticodeCommand.
+const (
+	authenticodeOpSign   = "sign"
+	authenticodeOpVerify = "verify"
+
+	// authenticodePathEnv carries the target file path to PowerShell as data.
+	authenticodePathEnv = "CFGMS_AUTHENTICODE_PATH"
+)
+
+const authenticodeSignScript = `$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1; ` +
+	`if (-not $cert) { Write-Error "no code signing certificate found in CurrentUser\My"; exit 1 }; ` +
+	`$result = Set-AuthenticodeSignature -LiteralPath $env:` + authenticodePathEnv + ` -Certificate $cert; ` +
+	`if ($result.Status -ne 'Valid') { Write-Error "Authenticode signing failed: $($result.StatusMessage)"; exit 1 }`
+
+const authenticodeVerifyScript = `$result = Get-AuthenticodeSignature -LiteralPath $env:` + authenticodePathEnv + `; ` +
+	`if ($result.Status -eq 'Valid') { exit 0 } ` +
+	`elseif ($result.Status -eq 'NotSigned') { Write-Error "no signature found"; exit 1 } ` +
+	`else { Write-Error "signature invalid — $($result.StatusMessage)"; exit 1 }`
+
+// authenticodeCommand builds the PowerShell command for an Authenticode
+// operation (authenticodeOpSign or authenticodeOpVerify). The script text is
+// fixed and contains no caller data; filePath is passed in the child's
+// environment so it can never be parsed as PowerShell code. It is not
+// build-tagged so it can be tested on every platform.
+func authenticodeCommand(op, filePath string) *exec.Cmd {
+	script := authenticodeVerifyScript
+	if op == authenticodeOpSign {
+		script = authenticodeSignScript
+	}
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script) // #nosec G204 — fixed script; filePath passed via environment, not command text
+	cmd.Env = append(os.Environ(), authenticodePathEnv+"="+filePath)
+	return cmd
 }

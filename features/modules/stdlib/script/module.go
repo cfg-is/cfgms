@@ -189,7 +189,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 	}
 
 	// Validate script signature if signing policy requires it
-	if err := m.validateSignature(scriptConfig); err != nil {
+	signatureValidated, err := m.validateSignature(scriptConfig)
+	if err != nil {
 		logger.ErrorCtx(ctx, "Script signature validation failed",
 			"operation", "script_execute",
 			"resource_id", resourceID,
@@ -216,7 +217,7 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 	result, err := executor.Execute(ctx)
 
 	// Create audit record regardless of success/failure
-	auditRecord := CreateAuditRecord(m.stewardID, resourceID, scriptConfig, result, err)
+	auditRecord := CreateAuditRecord(m.stewardID, resourceID, scriptConfig, result, err, signatureValidated)
 	if auditErr := m.auditLogger.LogExecution(ctx, auditRecord); auditErr != nil {
 		// Log audit error but don't fail the execution
 		logger.WarnCtx(ctx, "Failed to log script execution audit",
@@ -367,33 +368,42 @@ func (m *Module) updateExecutionStatus(resourceID string, status ExecutionStatus
 // policy: the more restrictive of the script's own SigningPolicy and the
 // steward-wide floor injected via SetSigningConfig (Issue #4399). A per-script
 // setting may tighten the floor but can never loosen it.
-func (m *Module) validateSignature(config *ScriptConfig) error {
+// The bool result is true only when cryptographic verification ran and succeeded.
+func (m *Module) validateSignature(config *ScriptConfig) (bool, error) {
 	m.mu.RLock()
 	floor := m.signingConfig.Policy
 	m.mu.RUnlock()
 
 	switch config.EffectiveSigningPolicy(floor) {
 	case SigningPolicyNone:
-		// No validation required
-		return nil
+		// No validation required, none performed
+		return false, nil
 
 	case SigningPolicyOptional:
 		// Validate only if signature is present
 		if config.Signature != nil {
-			return m.verifySignature(config)
+			return m.verified(config)
 		}
-		return nil
+		return false, nil
 
 	case SigningPolicyRequired:
 		// Signature must be present and valid
 		if config.Signature == nil {
-			return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
+			return false, fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
 		}
-		return m.verifySignature(config)
+		return m.verified(config)
 
 	default:
-		return fmt.Errorf("%w: invalid signing policy: %s", modules.ErrInvalidInput, config.SigningPolicy)
+		return false, fmt.Errorf("%w: invalid signing policy: %s", modules.ErrInvalidInput, config.SigningPolicy)
 	}
+}
+
+// verified runs verifySignature and reports whether verification ran and succeeded.
+func (m *Module) verified(config *ScriptConfig) (bool, error) {
+	if err := m.verifySignature(config); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // verifySignature performs real cryptographic signature verification.

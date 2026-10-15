@@ -630,39 +630,41 @@ func TestLoadPublicKey_NoPEMBlock(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// escapePSPath (security-critical: prevents PowerShell injection)
+// authenticodeCommand (security-critical: path must reach PowerShell as data)
 // ---------------------------------------------------------------------------
 
-func TestEscapePSPath_NoQuotes(t *testing.T) {
-	input := `C:\Users\agent\script.ps1`
-	got := escapePSPath(input)
-	if got != input {
-		t.Errorf("escapePSPath(%q) = %q, want unchanged", input, got)
+func TestAuthenticodeCommand_PathIsDataNotCode(t *testing.T) {
+	path := "C:\\Users\\o\u2019brien\u2018x\u201a\u201b'; Remove-Item -Recurse C:\\ #$(calc).ps1"
+	for _, op := range []string{authenticodeOpSign, authenticodeOpVerify} {
+		cmd := authenticodeCommand(op, path)
+		for _, arg := range cmd.Args {
+			if strings.Contains(arg, path) || strings.Contains(arg, "\u2019") {
+				t.Errorf("op %s: argument contains caller path: %q", op, arg)
+			}
+		}
+		script := cmd.Args[len(cmd.Args)-1]
+		if !strings.Contains(script, "-LiteralPath") {
+			t.Errorf("op %s: script must use -LiteralPath: %s", op, script)
+		}
+		found := false
+		for _, e := range cmd.Env {
+			if e == authenticodePathEnv+"="+path {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("op %s: path not carried in %s environment variable", op, authenticodePathEnv)
+		}
 	}
 }
 
-func TestEscapePSPath_SingleQuoteDoubled(t *testing.T) {
-	input := `C:\Users\o'brien\script.ps1`
-	want := `C:\Users\o''brien\script.ps1`
-	got := escapePSPath(input)
-	if got != want {
-		t.Errorf("escapePSPath(%q) = %q, want %q", input, got, want)
-	}
-}
-
-func TestEscapePSPath_MultipleQuotes(t *testing.T) {
-	input := `it's a 'test' path`
-	want := `it''s a ''test'' path`
-	got := escapePSPath(input)
-	if got != want {
-		t.Errorf("escapePSPath(%q) = %q, want %q", input, got, want)
-	}
-}
-
-func TestEscapePSPath_EmptyString(t *testing.T) {
-	got := escapePSPath("")
-	if got != "" {
-		t.Errorf("escapePSPath(%q) = %q, want empty", "", got)
+func TestAuthenticodeCommand_ScriptIndependentOfPath(t *testing.T) {
+	for _, op := range []string{authenticodeOpSign, authenticodeOpVerify} {
+		a := authenticodeCommand(op, "a.ps1")
+		b := authenticodeCommand(op, "b\u2019.ps1")
+		if a.Args[len(a.Args)-1] != b.Args[len(b.Args)-1] {
+			t.Errorf("op %s: script text varies with path", op)
+		}
 	}
 }
 

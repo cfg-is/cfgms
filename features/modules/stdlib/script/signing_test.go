@@ -532,7 +532,7 @@ func TestValidateSignature_FloorRequired_UnsignedScript_Refused(t *testing.T) {
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err == nil {
+	if _, err := mod.validateSignature(cfg); err == nil {
 		t.Fatal("unsigned script must be refused when the steward-wide floor is 'required'")
 	}
 }
@@ -548,7 +548,7 @@ func TestValidateSignature_FloorRequired_PerScriptOptionalCannotLoosen(t *testin
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err == nil {
+	if _, err := mod.validateSignature(cfg); err == nil {
 		t.Fatal("a per-script policy that permits unsigned scripts must not override the steward-wide 'required' floor")
 	}
 }
@@ -572,7 +572,7 @@ func TestValidateSignature_FloorRequired_SignedScript_Passes(t *testing.T) {
 		Signature:     sig,
 	}
 
-	if err := mod.validateSignature(cfg); err != nil {
+	if _, err := mod.validateSignature(cfg); err != nil {
 		t.Errorf("a correctly signed script must pass under the 'required' floor, not be refused: %v", err)
 	}
 }
@@ -588,7 +588,7 @@ func TestValidateSignature_FloorOptional_UnsignedScript_Unchanged(t *testing.T) 
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err != nil {
+	if _, err := mod.validateSignature(cfg); err != nil {
 		t.Errorf("steward floor 'optional' must not force a signature on a per-script 'none': %v", err)
 	}
 }
@@ -605,7 +605,7 @@ func TestValidateSignature_FloorAbsent_UnsignedScript_Unchanged(t *testing.T) {
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err != nil {
+	if _, err := mod.validateSignature(cfg); err != nil {
 		t.Errorf("an absent steward-wide policy must match pre-#4399 behavior: %v", err)
 	}
 }
