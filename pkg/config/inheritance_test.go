@@ -1409,3 +1409,37 @@ func TestResolveConfiguration_NoScopeOnContextIsUnaffected(t *testing.T) {
 	_, err := ir.ResolveConfiguration(ctx, "client-b", "steward-1")
 	require.NoError(t, err)
 }
+
+// required_modules accumulate down the tenant chain and a lower level's
+// declaration of a module replaces an ancestor's declaration of the same name.
+func TestResolveConfiguration_RequiredModulesMerge(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+	cs := sm.GetConfigStore()
+
+	rootCfg := stewardconfig.StewardConfig{RequiredModules: []stewardconfig.RequiredModule{
+		{Name: "acme-corp/widget", Version: "1.0.0"},
+		{Name: "acme-corp/gadget", Version: "2.0.0"},
+	}}
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, rootCfg),
+	}))
+	clientCfg := stewardconfig.StewardConfig{RequiredModules: []stewardconfig.RequiredModule{
+		{Name: "acme-corp/widget", Version: "1.0.1"},
+		{Name: "acme-corp/extra", Version: "3.0.0"},
+	}}
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, clientCfg),
+	}))
+
+	effective, err := NewInheritanceResolverWithStorageManager(sm).ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+	assert.Equal(t, []stewardconfig.RequiredModule{
+		{Name: "acme-corp/widget", Version: "1.0.1"},
+		{Name: "acme-corp/gadget", Version: "2.0.0"},
+		{Name: "acme-corp/extra", Version: "3.0.0"},
+	}, effective.Config.RequiredModules)
+}

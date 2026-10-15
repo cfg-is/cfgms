@@ -210,6 +210,7 @@ type Server struct {
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
 	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
+	moduleCache             *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
 	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
 	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
 	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
@@ -2201,6 +2202,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// (Issue #3104, ADR-024 Amendment 1 §3)
 	if moduleCache != nil {
 		srv.observeManifestProvider = &moduleManifestAdapter{cache: moduleCache}
+		srv.moduleCache = moduleCache
 		logger.Info("Tier-2 observe manifest provider wired to module cache")
 	}
 
@@ -2788,6 +2790,13 @@ func (s *Server) Start() error {
 		composite.SetConfigHandler(s.configHandler)
 		composite.SetDNAHandler(dnaHandler)
 		composite.SetBulkHandler(bulkHandler)
+		// Issue #4985: FetchModuleBundle serves approved bundles to the steward
+		// whose own configuration requires them. It shares the DNA/bulk admission
+		// queue so a bucket exhausted by module fetches cannot starve connects.
+		if s.moduleCache != nil && s.configService != nil && s.controllerService != nil {
+			composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(
+				s.moduleCache, s.configService, s.controllerService, tenantQueue, s.logger))
+		}
 		composite.SetLogStreamHandler(logStreamHandler)
 		composite.SetTelemetryHandler(telemetryHandler)
 

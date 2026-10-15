@@ -44,6 +44,45 @@ message ConfigChunk {
   string config_id = 5;
 }
 
+// === Module Bundle Fetch ===
+
+// FetchModuleBundleRequest names one module bundle. It deliberately carries NO
+// steward id and NO content hash: the caller is its certificate, and the
+// controller resolves which bundle is meant from its own records.
+message FetchModuleBundleRequest {
+  string publisher = 1;
+  string name = 2;
+  string version = 3;  // exact version, no "v" prefix
+  string platform = 4; // os-arch key (e.g. "linux-amd64"); a selector only
+}
+
+// ModuleBundleSignature is one publisher signature, carried verbatim.
+message ModuleBundleSignature {
+  string publisher = 1;
+  string algorithm = 2;
+  bytes signature = 3;
+}
+
+// ModuleBundleHeader is carried by the first ModuleBundleChunk of a stream.
+message ModuleBundleHeader {
+  bytes manifest = 1;                             // module.yaml, byte for byte
+  repeated ModuleBundleSignature signatures = 2;  // verbatim, never re-signed
+  map<string, string> binary_digests = 3;         // FULL os-arch -> hex SHA-256 list
+  string content_hash = 4;
+  string file_name = 5;                           // the selected binary's file name
+  int64 file_size = 6;                            // the selected binary's size in bytes
+}
+
+// ModuleBundleChunk is one frame of a FetchModuleBundle stream: the first frame
+// carries the header and no data; every later frame carries a slice of the one
+// platform binary. final is set on the last frame.
+message ModuleBundleChunk {
+  ModuleBundleHeader header = 1;
+  bytes data = 2;
+  int32 chunk_index = 3;
+  bool final = 4;
+}
+
 // === DNA Sync ===
 
 message DNAChunk {

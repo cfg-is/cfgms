@@ -432,6 +432,57 @@ func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 	return b, nil
 }
 
+// Lookup returns the content address of the bundle stored for publisher, name
+// and version, reading only that version's directory and no binary bytes. A
+// version holds at most one content hash (Put refuses a second), so more than
+// one entry is reported as an error rather than guessed between. Returns
+// ErrBundleNotFound if nothing is stored for the triple.
+func (c *ModuleCache) Lookup(publisher, name, version string) (bundle.ContentAddress, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if publisher == hashIndexDirName {
+		return bundle.ContentAddress{}, fmt.Errorf("invalid publisher: %q is a reserved name", hashIndexDirName)
+	}
+	for _, comp := range []string{publisher, name, version} {
+		if err := validateComponent(comp); err != nil {
+			return bundle.ContentAddress{}, fmt.Errorf("invalid address component: %w", err)
+		}
+	}
+	versionDir := filepath.Join(c.rootDir, publisher, name, version)
+	hashes, err := os.ReadDir(versionDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return bundle.ContentAddress{}, ErrBundleNotFound
+	}
+	if err != nil {
+		return bundle.ContentAddress{}, fmt.Errorf("read module cache version directory: %w", err)
+	}
+
+	var found []bundle.ContentAddress
+	for _, h := range hashes {
+		if !h.IsDir() || strings.HasPrefix(h.Name(), stageDirPrefix) {
+			continue
+		}
+		dir := filepath.Join(versionDir, h.Name())
+		if !entryExists(dir) {
+			continue
+		}
+		meta, readErr := bundle.ReadInstalledMetadata(entryRoot(dir), bundle.ReadOptions{})
+		if readErr != nil {
+			return bundle.ContentAddress{}, fmt.Errorf("read cached bundle: %w", readErr)
+		}
+		found = append(found, bundle.ContentAddress{Publisher: publisher, Name: name, Version: version, ContentHash: meta.ContentHash})
+	}
+	switch len(found) {
+	case 0:
+		return bundle.ContentAddress{}, ErrBundleNotFound
+	case 1:
+		return found[0], nil
+	default:
+		return bundle.ContentAddress{}, fmt.Errorf("module cache holds %d entries for one publisher/name/version", len(found))
+	}
+}
+
 // GetPayload retrieves a bundle with its payload and re-verifies the stored
 // bytes against the signed digests and content hash on every call. platform ""
 // reads and verifies every binary; an os-arch key reads only that binary (still

@@ -37,6 +37,13 @@ service StewardTransport {
   // SyncConfig streams configuration from controller to steward.
   rpc SyncConfig(ConfigSyncRequest) returns (stream ConfigChunk);
 
+  // FetchModuleBundle streams one approved module bundle (manifest, signatures,
+  // the full digest list and ONE platform binary) to the steward whose own
+  // current configuration requires that exact publisher/name/version. The
+  // caller is identified by its mTLS certificate only; every refusal looks the
+  // same to the caller (NotFound).
+  rpc FetchModuleBundle(FetchModuleBundleRequest) returns (stream ModuleBundleChunk);
+
   // SyncDNA streams DNA data from steward to controller.
   rpc SyncDNA(stream DNAChunk) returns (DNASyncResponse);
 

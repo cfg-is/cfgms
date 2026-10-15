@@ -27,14 +27,15 @@ import (
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
-	cpHandler        transportpb.StewardTransportServer    // Register, Ping, ControlChannel
-	configHandler    *controllerTransport.ConfigHandler    // SyncConfig (direct handling)
-	dnaHandler       *controllerTransport.DNAHandler       // SyncDNA (direct handling)
-	bulkHandler      *controllerTransport.BulkHandler      // BulkTransfer (direct handling)
-	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
-	telemetryHandler *controllerTransport.TelemetryHandler // TelemetryStream (direct handling)
-	terminalHandler  *controllerTransport.TerminalHandler  // Terminal (direct handling)
-	osqueryHandler   *stewardosquery.OsqueryHandler        // OsqueryQuery (direct handling)
+	cpHandler        transportpb.StewardTransportServer       // Register, Ping, ControlChannel
+	configHandler    *controllerTransport.ConfigHandler       // SyncConfig (direct handling)
+	dnaHandler       *controllerTransport.DNAHandler          // SyncDNA (direct handling)
+	bulkHandler      *controllerTransport.BulkHandler         // BulkTransfer (direct handling)
+	moduleBundle     *controllerTransport.ModuleBundleHandler // FetchModuleBundle (direct handling)
+	logStreamHandler *controllerTransport.LogStreamHandler    // LogStream (direct handling)
+	telemetryHandler *controllerTransport.TelemetryHandler    // TelemetryStream (direct handling)
+	terminalHandler  *controllerTransport.TerminalHandler     // Terminal (direct handling)
+	osqueryHandler   *stewardosquery.OsqueryHandler           // OsqueryQuery (direct handling)
 	logger           logging.Logger
 }
 
@@ -64,6 +65,11 @@ func (c *compositeTransportServer) SetDNAHandler(h *controllerTransport.DNAHandl
 // SetBulkHandler sets the BulkTransfer handler. Call after newCompositeTransportServer.
 func (c *compositeTransportServer) SetBulkHandler(h *controllerTransport.BulkHandler) {
 	c.bulkHandler = h
+}
+
+// SetModuleBundleHandler sets the FetchModuleBundle handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetModuleBundleHandler(h *controllerTransport.ModuleBundleHandler) {
+	c.moduleBundle = h
 }
 
 // SetLogStreamHandler sets the LogStream handler. Call after newCompositeTransportServer.
@@ -113,6 +119,16 @@ func (c *compositeTransportServer) SyncConfig(req *transportpb.ConfigSyncRequest
 		c.logger.Warn("SyncConfig called but config handler not initialized")
 	}
 	return c.UnimplementedStewardTransportServer.SyncConfig(req, stream)
+}
+
+// FetchModuleBundle is handled directly by the module bundle handler. It serves
+// one approved bundle to the steward whose own configuration requires it; when
+// no handler is wired (no module cache) the RPC is Unimplemented.
+func (c *compositeTransportServer) FetchModuleBundle(req *transportpb.FetchModuleBundleRequest, stream grpc.ServerStreamingServer[transportpb.ModuleBundleChunk]) error {
+	if c.moduleBundle != nil {
+		return c.moduleBundle.HandleGRPC(stream.Context(), req, stream)
+	}
+	return c.UnimplementedStewardTransportServer.FetchModuleBundle(req, stream)
 }
 
 // SyncDNA is handled directly by the DNA handler.

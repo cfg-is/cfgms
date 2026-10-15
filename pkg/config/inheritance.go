@@ -638,6 +638,26 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(ctx context.Context,
 		effective.Config.Modules[moduleName] = modulePath
 		effective.Sources[fmt.Sprintf("modules.%s", moduleName)] = source
 	}
+
+	// Apply required_modules: a level's declaration of a module replaces an
+	// ancestor's declaration of the same name (so a child pins its own exact
+	// version), and distinct modules accumulate down the chain. Declaration
+	// order is kept. The module-bundle fetch authorizes a steward against this
+	// effective list, so a level's requirement must not be dropped by the merge.
+	for _, req := range config.RequiredModules {
+		replaced := false
+		for i := range effective.Config.RequiredModules {
+			if effective.Config.RequiredModules[i].Name == req.Name {
+				effective.Config.RequiredModules[i] = req
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			effective.Config.RequiredModules = append(effective.Config.RequiredModules, req)
+		}
+		effective.Sources[fmt.Sprintf("required_modules.%s", req.Name)] = source
+	}
 }
 
 // scriptSigningDeclared reports whether a level's config actually sets any

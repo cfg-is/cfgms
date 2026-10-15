@@ -276,6 +276,294 @@ func (x *ConfigChunk) GetConfigId() string {
 	return ""
 }
 
+// FetchModuleBundleRequest names one module bundle. It deliberately carries NO
+// steward id and NO content hash: the caller is its certificate, and the
+// controller resolves which bundle is meant from its own records.
+type FetchModuleBundleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Publisher     string                 `protobuf:"bytes,1,opt,name=publisher,proto3" json:"publisher,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Version       string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`   // exact version, no "v" prefix
+	Platform      string                 `protobuf:"bytes,4,opt,name=platform,proto3" json:"platform,omitempty"` // os-arch key (e.g. "linux-amd64"); a selector only
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchModuleBundleRequest) Reset() {
+	*x = FetchModuleBundleRequest{}
+	mi := &file_transport_data_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchModuleBundleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchModuleBundleRequest) ProtoMessage() {}
+
+func (x *FetchModuleBundleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchModuleBundleRequest.ProtoReflect.Descriptor instead.
+func (*FetchModuleBundleRequest) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *FetchModuleBundleRequest) GetPublisher() string {
+	if x != nil {
+		return x.Publisher
+	}
+	return ""
+}
+
+func (x *FetchModuleBundleRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *FetchModuleBundleRequest) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *FetchModuleBundleRequest) GetPlatform() string {
+	if x != nil {
+		return x.Platform
+	}
+	return ""
+}
+
+// ModuleBundleSignature is one publisher signature, carried verbatim.
+type ModuleBundleSignature struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Publisher     string                 `protobuf:"bytes,1,opt,name=publisher,proto3" json:"publisher,omitempty"`
+	Algorithm     string                 `protobuf:"bytes,2,opt,name=algorithm,proto3" json:"algorithm,omitempty"`
+	Signature     []byte                 `protobuf:"bytes,3,opt,name=signature,proto3" json:"signature,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModuleBundleSignature) Reset() {
+	*x = ModuleBundleSignature{}
+	mi := &file_transport_data_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModuleBundleSignature) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModuleBundleSignature) ProtoMessage() {}
+
+func (x *ModuleBundleSignature) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModuleBundleSignature.ProtoReflect.Descriptor instead.
+func (*ModuleBundleSignature) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ModuleBundleSignature) GetPublisher() string {
+	if x != nil {
+		return x.Publisher
+	}
+	return ""
+}
+
+func (x *ModuleBundleSignature) GetAlgorithm() string {
+	if x != nil {
+		return x.Algorithm
+	}
+	return ""
+}
+
+func (x *ModuleBundleSignature) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+// ModuleBundleHeader is carried by the first ModuleBundleChunk of a stream.
+type ModuleBundleHeader struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Manifest      []byte                   `protobuf:"bytes,1,opt,name=manifest,proto3" json:"manifest,omitempty"`                                                                                                          // module.yaml, byte for byte
+	Signatures    []*ModuleBundleSignature `protobuf:"bytes,2,rep,name=signatures,proto3" json:"signatures,omitempty"`                                                                                                      // verbatim, never re-signed
+	BinaryDigests map[string]string        `protobuf:"bytes,3,rep,name=binary_digests,json=binaryDigests,proto3" json:"binary_digests,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // FULL os-arch -> hex SHA-256 list
+	ContentHash   string                   `protobuf:"bytes,4,opt,name=content_hash,json=contentHash,proto3" json:"content_hash,omitempty"`
+	FileName      string                   `protobuf:"bytes,5,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`  // the selected binary's file name
+	FileSize      int64                    `protobuf:"varint,6,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"` // the selected binary's size in bytes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModuleBundleHeader) Reset() {
+	*x = ModuleBundleHeader{}
+	mi := &file_transport_data_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModuleBundleHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModuleBundleHeader) ProtoMessage() {}
+
+func (x *ModuleBundleHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModuleBundleHeader.ProtoReflect.Descriptor instead.
+func (*ModuleBundleHeader) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ModuleBundleHeader) GetManifest() []byte {
+	if x != nil {
+		return x.Manifest
+	}
+	return nil
+}
+
+func (x *ModuleBundleHeader) GetSignatures() []*ModuleBundleSignature {
+	if x != nil {
+		return x.Signatures
+	}
+	return nil
+}
+
+func (x *ModuleBundleHeader) GetBinaryDigests() map[string]string {
+	if x != nil {
+		return x.BinaryDigests
+	}
+	return nil
+}
+
+func (x *ModuleBundleHeader) GetContentHash() string {
+	if x != nil {
+		return x.ContentHash
+	}
+	return ""
+}
+
+func (x *ModuleBundleHeader) GetFileName() string {
+	if x != nil {
+		return x.FileName
+	}
+	return ""
+}
+
+func (x *ModuleBundleHeader) GetFileSize() int64 {
+	if x != nil {
+		return x.FileSize
+	}
+	return 0
+}
+
+// ModuleBundleChunk is one frame of a FetchModuleBundle stream: the first frame
+// carries the header and no data; every later frame carries a slice of the one
+// platform binary. final is set on the last frame.
+type ModuleBundleChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        *ModuleBundleHeader    `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	ChunkIndex    int32                  `protobuf:"varint,3,opt,name=chunk_index,json=chunkIndex,proto3" json:"chunk_index,omitempty"`
+	Final         bool                   `protobuf:"varint,4,opt,name=final,proto3" json:"final,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModuleBundleChunk) Reset() {
+	*x = ModuleBundleChunk{}
+	mi := &file_transport_data_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModuleBundleChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModuleBundleChunk) ProtoMessage() {}
+
+func (x *ModuleBundleChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModuleBundleChunk.ProtoReflect.Descriptor instead.
+func (*ModuleBundleChunk) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ModuleBundleChunk) GetHeader() *ModuleBundleHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *ModuleBundleChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *ModuleBundleChunk) GetChunkIndex() int32 {
+	if x != nil {
+		return x.ChunkIndex
+	}
+	return 0
+}
+
+func (x *ModuleBundleChunk) GetFinal() bool {
+	if x != nil {
+		return x.Final
+	}
+	return false
+}
+
 type DNAChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StewardId     string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
@@ -291,7 +579,7 @@ type DNAChunk struct {
 
 func (x *DNAChunk) Reset() {
 	*x = DNAChunk{}
-	mi := &file_transport_data_proto_msgTypes[2]
+	mi := &file_transport_data_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -303,7 +591,7 @@ func (x *DNAChunk) String() string {
 func (*DNAChunk) ProtoMessage() {}
 
 func (x *DNAChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[2]
+	mi := &file_transport_data_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -316,7 +604,7 @@ func (x *DNAChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DNAChunk.ProtoReflect.Descriptor instead.
 func (*DNAChunk) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{2}
+	return file_transport_data_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DNAChunk) GetStewardId() string {
@@ -379,7 +667,7 @@ type DNASyncResponse struct {
 
 func (x *DNASyncResponse) Reset() {
 	*x = DNASyncResponse{}
-	mi := &file_transport_data_proto_msgTypes[3]
+	mi := &file_transport_data_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -391,7 +679,7 @@ func (x *DNASyncResponse) String() string {
 func (*DNASyncResponse) ProtoMessage() {}
 
 func (x *DNASyncResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[3]
+	mi := &file_transport_data_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -404,7 +692,7 @@ func (x *DNASyncResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DNASyncResponse.ProtoReflect.Descriptor instead.
 func (*DNASyncResponse) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{3}
+	return file_transport_data_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DNASyncResponse) GetAccepted() bool {
@@ -443,7 +731,7 @@ type BulkChunk struct {
 
 func (x *BulkChunk) Reset() {
 	*x = BulkChunk{}
-	mi := &file_transport_data_proto_msgTypes[4]
+	mi := &file_transport_data_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -455,7 +743,7 @@ func (x *BulkChunk) String() string {
 func (*BulkChunk) ProtoMessage() {}
 
 func (x *BulkChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[4]
+	mi := &file_transport_data_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -468,7 +756,7 @@ func (x *BulkChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BulkChunk.ProtoReflect.Descriptor instead.
 func (*BulkChunk) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{4}
+	return file_transport_data_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *BulkChunk) GetTransferId() string {
@@ -532,7 +820,7 @@ type TaskMessage struct {
 
 func (x *TaskMessage) Reset() {
 	*x = TaskMessage{}
-	mi := &file_transport_data_proto_msgTypes[5]
+	mi := &file_transport_data_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -544,7 +832,7 @@ func (x *TaskMessage) String() string {
 func (*TaskMessage) ProtoMessage() {}
 
 func (x *TaskMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[5]
+	mi := &file_transport_data_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -557,7 +845,7 @@ func (x *TaskMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskMessage.ProtoReflect.Descriptor instead.
 func (*TaskMessage) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{5}
+	return file_transport_data_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TaskMessage) GetTaskId() string {
@@ -601,7 +889,7 @@ type TerminalData struct {
 
 func (x *TerminalData) Reset() {
 	*x = TerminalData{}
-	mi := &file_transport_data_proto_msgTypes[6]
+	mi := &file_transport_data_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +901,7 @@ func (x *TerminalData) String() string {
 func (*TerminalData) ProtoMessage() {}
 
 func (x *TerminalData) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[6]
+	mi := &file_transport_data_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +914,7 @@ func (x *TerminalData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalData.ProtoReflect.Descriptor instead.
 func (*TerminalData) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{6}
+	return file_transport_data_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TerminalData) GetSessionId() string {
@@ -678,7 +966,7 @@ type LogEntry struct {
 
 func (x *LogEntry) Reset() {
 	*x = LogEntry{}
-	mi := &file_transport_data_proto_msgTypes[7]
+	mi := &file_transport_data_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -690,7 +978,7 @@ func (x *LogEntry) String() string {
 func (*LogEntry) ProtoMessage() {}
 
 func (x *LogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[7]
+	mi := &file_transport_data_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -703,7 +991,7 @@ func (x *LogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
 func (*LogEntry) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{7}
+	return file_transport_data_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *LogEntry) GetStewardId() string {
@@ -758,7 +1046,7 @@ type LogStreamResponse struct {
 
 func (x *LogStreamResponse) Reset() {
 	*x = LogStreamResponse{}
-	mi := &file_transport_data_proto_msgTypes[8]
+	mi := &file_transport_data_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -770,7 +1058,7 @@ func (x *LogStreamResponse) String() string {
 func (*LogStreamResponse) ProtoMessage() {}
 
 func (x *LogStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[8]
+	mi := &file_transport_data_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -783,7 +1071,7 @@ func (x *LogStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogStreamResponse.ProtoReflect.Descriptor instead.
 func (*LogStreamResponse) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{8}
+	return file_transport_data_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *LogStreamResponse) GetEntriesReceived() int64 {
@@ -816,7 +1104,7 @@ type TelemetryRequest struct {
 
 func (x *TelemetryRequest) Reset() {
 	*x = TelemetryRequest{}
-	mi := &file_transport_data_proto_msgTypes[9]
+	mi := &file_transport_data_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -828,7 +1116,7 @@ func (x *TelemetryRequest) String() string {
 func (*TelemetryRequest) ProtoMessage() {}
 
 func (x *TelemetryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[9]
+	mi := &file_transport_data_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -841,7 +1129,7 @@ func (x *TelemetryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetryRequest.ProtoReflect.Descriptor instead.
 func (*TelemetryRequest) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{9}
+	return file_transport_data_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TelemetryRequest) GetStewardId() string {
@@ -886,7 +1174,7 @@ type ProcessSnapshot struct {
 
 func (x *ProcessSnapshot) Reset() {
 	*x = ProcessSnapshot{}
-	mi := &file_transport_data_proto_msgTypes[10]
+	mi := &file_transport_data_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -898,7 +1186,7 @@ func (x *ProcessSnapshot) String() string {
 func (*ProcessSnapshot) ProtoMessage() {}
 
 func (x *ProcessSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[10]
+	mi := &file_transport_data_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -911,7 +1199,7 @@ func (x *ProcessSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessSnapshot.ProtoReflect.Descriptor instead.
 func (*ProcessSnapshot) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{10}
+	return file_transport_data_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ProcessSnapshot) GetFragmentId() string {
@@ -998,16 +1286,16 @@ type ServiceSnapshot struct {
 	FragmentId    string                 `protobuf:"bytes,1,opt,name=fragment_id,json=fragmentId,proto3" json:"fragment_id,omitempty"` // ADR-017 typed entity id: "service:<name>"
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	State         string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	StartType     string                 `protobuf:"bytes,5,opt,name=start_type,json=startType,proto3" json:"start_type,omitempty"` // "auto", "manual", "disabled", ...
+	Pid           int32                  `protobuf:"varint,6,opt,name=pid,proto3" json:"pid,omitempty"`                             // main PID; 0 when not running
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
-	DisplayName   string `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	StartType     string `protobuf:"bytes,5,opt,name=start_type,json=startType,proto3" json:"start_type,omitempty"` // "auto", "manual", "disabled", ...
-	Pid           int32  `protobuf:"varint,6,opt,name=pid,proto3" json:"pid,omitempty"`                             // main PID; 0 when not running
 }
 
 func (x *ServiceSnapshot) Reset() {
 	*x = ServiceSnapshot{}
-	mi := &file_transport_data_proto_msgTypes[11]
+	mi := &file_transport_data_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1019,7 +1307,7 @@ func (x *ServiceSnapshot) String() string {
 func (*ServiceSnapshot) ProtoMessage() {}
 
 func (x *ServiceSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[11]
+	mi := &file_transport_data_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1032,7 +1320,7 @@ func (x *ServiceSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceSnapshot.ProtoReflect.Descriptor instead.
 func (*ServiceSnapshot) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{11}
+	return file_transport_data_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ServiceSnapshot) GetFragmentId() string {
@@ -1081,19 +1369,21 @@ func (x *ServiceSnapshot) GetPid() int32 {
 // It carries one point-in-time view of all running processes and services on the
 // steward host. Produced only while a subscribe=true TelemetryRequest is active.
 type TelemetrySnapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StewardId     string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
-	Processes     []*ProcessSnapshot     `protobuf:"bytes,2,rep,name=processes,proto3" json:"processes,omitempty"`
-	Services      []*ServiceSnapshot     `protobuf:"bytes,3,rep,name=services,proto3" json:"services,omitempty"`
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Host          *HostTotals            `protobuf:"bytes,5,opt,name=host,proto3" json:"host,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StewardId string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	Processes []*ProcessSnapshot     `protobuf:"bytes,2,rep,name=processes,proto3" json:"processes,omitempty"`
+	Services  []*ServiceSnapshot     `protobuf:"bytes,3,rep,name=services,proto3" json:"services,omitempty"`
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// host carries host-level totals (CPU, memory, disk, network). Absent when the
+	// steward predates the field; consumers must treat absence as "not reported".
+	Host          *HostTotals `protobuf:"bytes,5,opt,name=host,proto3" json:"host,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TelemetrySnapshot) Reset() {
 	*x = TelemetrySnapshot{}
-	mi := &file_transport_data_proto_msgTypes[12]
+	mi := &file_transport_data_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1105,7 +1395,7 @@ func (x *TelemetrySnapshot) String() string {
 func (*TelemetrySnapshot) ProtoMessage() {}
 
 func (x *TelemetrySnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[12]
+	mi := &file_transport_data_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1118,7 +1408,7 @@ func (x *TelemetrySnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetrySnapshot.ProtoReflect.Descriptor instead.
 func (*TelemetrySnapshot) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{12}
+	return file_transport_data_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *TelemetrySnapshot) GetStewardId() string {
@@ -1181,7 +1471,7 @@ type OsqueryQueryRequest struct {
 
 func (x *OsqueryQueryRequest) Reset() {
 	*x = OsqueryQueryRequest{}
-	mi := &file_transport_data_proto_msgTypes[13]
+	mi := &file_transport_data_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1193,7 +1483,7 @@ func (x *OsqueryQueryRequest) String() string {
 func (*OsqueryQueryRequest) ProtoMessage() {}
 
 func (x *OsqueryQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[13]
+	mi := &file_transport_data_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1206,7 +1496,7 @@ func (x *OsqueryQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OsqueryQueryRequest.ProtoReflect.Descriptor instead.
 func (*OsqueryQueryRequest) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{13}
+	return file_transport_data_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *OsqueryQueryRequest) GetStewardId() string {
@@ -1246,7 +1536,7 @@ type OsqueryQueryResponse struct {
 
 func (x *OsqueryQueryResponse) Reset() {
 	*x = OsqueryQueryResponse{}
-	mi := &file_transport_data_proto_msgTypes[14]
+	mi := &file_transport_data_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1258,7 +1548,7 @@ func (x *OsqueryQueryResponse) String() string {
 func (*OsqueryQueryResponse) ProtoMessage() {}
 
 func (x *OsqueryQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[14]
+	mi := &file_transport_data_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1271,7 +1561,7 @@ func (x *OsqueryQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OsqueryQueryResponse.ProtoReflect.Descriptor instead.
 func (*OsqueryQueryResponse) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{14}
+	return file_transport_data_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *OsqueryQueryResponse) GetStewardId() string {
@@ -1306,7 +1596,7 @@ type OsqueryRow struct {
 
 func (x *OsqueryRow) Reset() {
 	*x = OsqueryRow{}
-	mi := &file_transport_data_proto_msgTypes[15]
+	mi := &file_transport_data_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1318,7 +1608,7 @@ func (x *OsqueryRow) String() string {
 func (*OsqueryRow) ProtoMessage() {}
 
 func (x *OsqueryRow) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[15]
+	mi := &file_transport_data_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1331,7 +1621,7 @@ func (x *OsqueryRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OsqueryRow.ProtoReflect.Descriptor instead.
 func (*OsqueryRow) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{15}
+	return file_transport_data_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *OsqueryRow) GetColumns() map[string]string {
@@ -1346,7 +1636,7 @@ func (x *OsqueryRow) GetColumns() map[string]string {
 // snapshot and across counter wrap/reset). Network counters exclude loopback.
 type HostTotals struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
-	CpuPercent           float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
+	CpuPercent           float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"` // whole-host CPU busy, 0-100
 	MemoryUsedBytes      uint64                 `protobuf:"varint,2,opt,name=memory_used_bytes,json=memoryUsedBytes,proto3" json:"memory_used_bytes,omitempty"`
 	MemoryTotalBytes     uint64                 `protobuf:"varint,3,opt,name=memory_total_bytes,json=memoryTotalBytes,proto3" json:"memory_total_bytes,omitempty"`
 	DiskReadBytesPerSec  float64                `protobuf:"fixed64,4,opt,name=disk_read_bytes_per_sec,json=diskReadBytesPerSec,proto3" json:"disk_read_bytes_per_sec,omitempty"`
@@ -1361,7 +1651,7 @@ type HostTotals struct {
 
 func (x *HostTotals) Reset() {
 	*x = HostTotals{}
-	mi := &file_transport_data_proto_msgTypes[16]
+	mi := &file_transport_data_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1373,7 +1663,7 @@ func (x *HostTotals) String() string {
 func (*HostTotals) ProtoMessage() {}
 
 func (x *HostTotals) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_data_proto_msgTypes[16]
+	mi := &file_transport_data_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1386,7 +1676,7 @@ func (x *HostTotals) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostTotals.ProtoReflect.Descriptor instead.
 func (*HostTotals) Descriptor() ([]byte, []int) {
-	return file_transport_data_proto_rawDescGZIP(), []int{16}
+	return file_transport_data_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *HostTotals) GetCpuPercent() float64 {
@@ -1468,7 +1758,34 @@ const file_transport_data_proto_rawDesc = "" +
 	"chunkIndex\x12!\n" +
 	"\ftotal_chunks\x18\x03 \x01(\x05R\vtotalChunks\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x12\x1b\n" +
-	"\tconfig_id\x18\x05 \x01(\tR\bconfigId\"\xd4\x01\n" +
+	"\tconfig_id\x18\x05 \x01(\tR\bconfigId\"\x82\x01\n" +
+	"\x18FetchModuleBundleRequest\x12\x1c\n" +
+	"\tpublisher\x18\x01 \x01(\tR\tpublisher\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\x12\x1a\n" +
+	"\bplatform\x18\x04 \x01(\tR\bplatform\"q\n" +
+	"\x15ModuleBundleSignature\x12\x1c\n" +
+	"\tpublisher\x18\x01 \x01(\tR\tpublisher\x12\x1c\n" +
+	"\talgorithm\x18\x02 \x01(\tR\talgorithm\x12\x1c\n" +
+	"\tsignature\x18\x03 \x01(\fR\tsignature\"\xf6\x02\n" +
+	"\x12ModuleBundleHeader\x12\x1a\n" +
+	"\bmanifest\x18\x01 \x01(\fR\bmanifest\x12F\n" +
+	"\n" +
+	"signatures\x18\x02 \x03(\v2&.cfgms.transport.ModuleBundleSignatureR\n" +
+	"signatures\x12]\n" +
+	"\x0ebinary_digests\x18\x03 \x03(\v26.cfgms.transport.ModuleBundleHeader.BinaryDigestsEntryR\rbinaryDigests\x12!\n" +
+	"\fcontent_hash\x18\x04 \x01(\tR\vcontentHash\x12\x1b\n" +
+	"\tfile_name\x18\x05 \x01(\tR\bfileName\x12\x1b\n" +
+	"\tfile_size\x18\x06 \x01(\x03R\bfileSize\x1a@\n" +
+	"\x12BinaryDigestsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9b\x01\n" +
+	"\x11ModuleBundleChunk\x12;\n" +
+	"\x06header\x18\x01 \x01(\v2#.cfgms.transport.ModuleBundleHeaderR\x06header\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1f\n" +
+	"\vchunk_index\x18\x03 \x01(\x05R\n" +
+	"chunkIndex\x12\x14\n" +
+	"\x05final\x18\x04 \x01(\bR\x05final\"\xd4\x01\n" +
 	"\bDNAChunk\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1b\n" +
@@ -1621,54 +1938,62 @@ func file_transport_data_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_data_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_transport_data_proto_goTypes = []any{
-	(TransferType)(0),             // 0: cfgms.transport.TransferType
-	(TaskMessageType)(0),          // 1: cfgms.transport.TaskMessageType
-	(*ConfigSyncRequest)(nil),     // 2: cfgms.transport.ConfigSyncRequest
-	(*ConfigChunk)(nil),           // 3: cfgms.transport.ConfigChunk
-	(*DNAChunk)(nil),              // 4: cfgms.transport.DNAChunk
-	(*DNASyncResponse)(nil),       // 5: cfgms.transport.DNASyncResponse
-	(*BulkChunk)(nil),             // 6: cfgms.transport.BulkChunk
-	(*TaskMessage)(nil),           // 7: cfgms.transport.TaskMessage
-	(*TerminalData)(nil),          // 8: cfgms.transport.TerminalData
-	(*LogEntry)(nil),              // 9: cfgms.transport.LogEntry
-	(*LogStreamResponse)(nil),     // 10: cfgms.transport.LogStreamResponse
-	(*TelemetryRequest)(nil),      // 11: cfgms.transport.TelemetryRequest
-	(*ProcessSnapshot)(nil),       // 12: cfgms.transport.ProcessSnapshot
-	(*ServiceSnapshot)(nil),       // 13: cfgms.transport.ServiceSnapshot
-	(*TelemetrySnapshot)(nil),     // 14: cfgms.transport.TelemetrySnapshot
-	(*OsqueryQueryRequest)(nil),   // 15: cfgms.transport.OsqueryQueryRequest
-	(*OsqueryQueryResponse)(nil),  // 16: cfgms.transport.OsqueryQueryResponse
-	(*OsqueryRow)(nil),            // 17: cfgms.transport.OsqueryRow
-	(*HostTotals)(nil),            // 18: cfgms.transport.HostTotals
-	nil,                           // 19: cfgms.transport.BulkChunk.MetadataEntry
-	nil,                           // 20: cfgms.transport.LogEntry.FieldsEntry
-	nil,                           // 21: cfgms.transport.OsqueryQueryRequest.ParamsEntry
-	nil,                           // 22: cfgms.transport.OsqueryRow.ColumnsEntry
-	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
-	(Severity)(0),                 // 24: cfgms.transport.Severity
+	(TransferType)(0),                // 0: cfgms.transport.TransferType
+	(TaskMessageType)(0),             // 1: cfgms.transport.TaskMessageType
+	(*ConfigSyncRequest)(nil),        // 2: cfgms.transport.ConfigSyncRequest
+	(*ConfigChunk)(nil),              // 3: cfgms.transport.ConfigChunk
+	(*FetchModuleBundleRequest)(nil), // 4: cfgms.transport.FetchModuleBundleRequest
+	(*ModuleBundleSignature)(nil),    // 5: cfgms.transport.ModuleBundleSignature
+	(*ModuleBundleHeader)(nil),       // 6: cfgms.transport.ModuleBundleHeader
+	(*ModuleBundleChunk)(nil),        // 7: cfgms.transport.ModuleBundleChunk
+	(*DNAChunk)(nil),                 // 8: cfgms.transport.DNAChunk
+	(*DNASyncResponse)(nil),          // 9: cfgms.transport.DNASyncResponse
+	(*BulkChunk)(nil),                // 10: cfgms.transport.BulkChunk
+	(*TaskMessage)(nil),              // 11: cfgms.transport.TaskMessage
+	(*TerminalData)(nil),             // 12: cfgms.transport.TerminalData
+	(*LogEntry)(nil),                 // 13: cfgms.transport.LogEntry
+	(*LogStreamResponse)(nil),        // 14: cfgms.transport.LogStreamResponse
+	(*TelemetryRequest)(nil),         // 15: cfgms.transport.TelemetryRequest
+	(*ProcessSnapshot)(nil),          // 16: cfgms.transport.ProcessSnapshot
+	(*ServiceSnapshot)(nil),          // 17: cfgms.transport.ServiceSnapshot
+	(*TelemetrySnapshot)(nil),        // 18: cfgms.transport.TelemetrySnapshot
+	(*OsqueryQueryRequest)(nil),      // 19: cfgms.transport.OsqueryQueryRequest
+	(*OsqueryQueryResponse)(nil),     // 20: cfgms.transport.OsqueryQueryResponse
+	(*OsqueryRow)(nil),               // 21: cfgms.transport.OsqueryRow
+	(*HostTotals)(nil),               // 22: cfgms.transport.HostTotals
+	nil,                              // 23: cfgms.transport.ModuleBundleHeader.BinaryDigestsEntry
+	nil,                              // 24: cfgms.transport.BulkChunk.MetadataEntry
+	nil,                              // 25: cfgms.transport.LogEntry.FieldsEntry
+	nil,                              // 26: cfgms.transport.OsqueryQueryRequest.ParamsEntry
+	nil,                              // 27: cfgms.transport.OsqueryRow.ColumnsEntry
+	(*timestamppb.Timestamp)(nil),    // 28: google.protobuf.Timestamp
+	(Severity)(0),                    // 29: cfgms.transport.Severity
 }
 var file_transport_data_proto_depIdxs = []int32{
-	0,  // 0: cfgms.transport.BulkChunk.transfer_type:type_name -> cfgms.transport.TransferType
-	19, // 1: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
-	1,  // 2: cfgms.transport.TaskMessage.type:type_name -> cfgms.transport.TaskMessageType
-	23, // 3: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
-	24, // 4: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
-	23, // 5: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
-	20, // 6: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
-	12, // 7: cfgms.transport.TelemetrySnapshot.processes:type_name -> cfgms.transport.ProcessSnapshot
-	13, // 8: cfgms.transport.TelemetrySnapshot.services:type_name -> cfgms.transport.ServiceSnapshot
-	23, // 9: cfgms.transport.TelemetrySnapshot.timestamp:type_name -> google.protobuf.Timestamp
-	18, // 10: cfgms.transport.TelemetrySnapshot.host:type_name -> cfgms.transport.HostTotals
-	21, // 11: cfgms.transport.OsqueryQueryRequest.params:type_name -> cfgms.transport.OsqueryQueryRequest.ParamsEntry
-	17, // 12: cfgms.transport.OsqueryQueryResponse.rows:type_name -> cfgms.transport.OsqueryRow
-	22, // 13: cfgms.transport.OsqueryRow.columns:type_name -> cfgms.transport.OsqueryRow.ColumnsEntry
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	5,  // 0: cfgms.transport.ModuleBundleHeader.signatures:type_name -> cfgms.transport.ModuleBundleSignature
+	23, // 1: cfgms.transport.ModuleBundleHeader.binary_digests:type_name -> cfgms.transport.ModuleBundleHeader.BinaryDigestsEntry
+	6,  // 2: cfgms.transport.ModuleBundleChunk.header:type_name -> cfgms.transport.ModuleBundleHeader
+	0,  // 3: cfgms.transport.BulkChunk.transfer_type:type_name -> cfgms.transport.TransferType
+	24, // 4: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
+	1,  // 5: cfgms.transport.TaskMessage.type:type_name -> cfgms.transport.TaskMessageType
+	28, // 6: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
+	29, // 7: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
+	28, // 8: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
+	25, // 9: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
+	16, // 10: cfgms.transport.TelemetrySnapshot.processes:type_name -> cfgms.transport.ProcessSnapshot
+	17, // 11: cfgms.transport.TelemetrySnapshot.services:type_name -> cfgms.transport.ServiceSnapshot
+	28, // 12: cfgms.transport.TelemetrySnapshot.timestamp:type_name -> google.protobuf.Timestamp
+	22, // 13: cfgms.transport.TelemetrySnapshot.host:type_name -> cfgms.transport.HostTotals
+	26, // 14: cfgms.transport.OsqueryQueryRequest.params:type_name -> cfgms.transport.OsqueryQueryRequest.ParamsEntry
+	21, // 15: cfgms.transport.OsqueryQueryResponse.rows:type_name -> cfgms.transport.OsqueryRow
+	27, // 16: cfgms.transport.OsqueryRow.columns:type_name -> cfgms.transport.OsqueryRow.ColumnsEntry
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_transport_data_proto_init() }
@@ -1683,7 +2008,7 @@ func file_transport_data_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_data_proto_rawDesc), len(file_transport_data_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   21,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
