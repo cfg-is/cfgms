@@ -483,18 +483,19 @@ func TestAPIKeyManagement(t *testing.T) {
 }
 
 func TestCORSHeaders(t *testing.T) {
+	t.Setenv("CFGMS_ALLOWED_ORIGINS", "https://app.example.com")
 	server := setupTestServer(t)
 
 	// H-AUTH-3: Test CORS with allowed origin (security audit finding)
 	t.Run("allowed origin returns correct CORS headers", func(t *testing.T) {
 		req := httptest.NewRequest("OPTIONS", "/api/v1/health", nil)
-		req.Header.Set("Origin", "http://localhost:3000") // Default allowed origin
+		req.Header.Set("Origin", "https://app.example.com")
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "http://localhost:3000", rec.Header().Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "https://app.example.com", rec.Header().Get("Access-Control-Allow-Origin"))
 		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "GET")
 		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-API-Key")
 	})
@@ -521,6 +522,68 @@ func TestCORSHeaders(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+	})
+}
+
+func corsPreflight(server *Server, origin string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("OPTIONS", "/api/v1/health", nil)
+	req.Header.Set("Origin", origin)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestCORSDefaultsToSameOrigin(t *testing.T) {
+	t.Setenv("CFGMS_ALLOWED_ORIGINS", "")
+	t.Setenv("CFGMS_ALLOW_DEV_CORS_ORIGINS", "")
+	server := setupTestServer(t)
+
+	for _, origin := range []string{"http://localhost:3000", "http://localhost:3001", "http://localhost:9080", "https://evil.com"} {
+		rec := corsPreflight(server, origin)
+		assert.Equal(t, http.StatusForbidden, rec.Code, origin)
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"), origin)
+	}
+}
+
+func TestCORSConfiguredOriginsTrimmedAndExact(t *testing.T) {
+	t.Setenv("CFGMS_ALLOWED_ORIGINS", " https://app.example.com , ")
+	t.Setenv("CFGMS_ALLOW_DEV_CORS_ORIGINS", "")
+	server := setupTestServer(t)
+
+	rec := corsPreflight(server, "https://app.example.com")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "https://app.example.com", rec.Header().Get("Access-Control-Allow-Origin"))
+
+	rec = corsPreflight(server, "https://app.example.com.evil.com")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCORSDevOptIn(t *testing.T) {
+	t.Run("http localhost entry ignored without opt-in", func(t *testing.T) {
+		t.Setenv("CFGMS_ALLOWED_ORIGINS", "http://localhost:3000,https://app.example.com")
+		t.Setenv("CFGMS_ALLOW_DEV_CORS_ORIGINS", "")
+		server := setupTestServer(t)
+
+		rec := corsPreflight(server, "http://localhost:3000")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "https://app.example.com", corsPreflight(server, "https://app.example.com").Header().Get("Access-Control-Allow-Origin"))
+	})
+
+	t.Run("http localhost entry allowed with opt-in", func(t *testing.T) {
+		t.Setenv("CFGMS_ALLOWED_ORIGINS", "http://localhost:3000, http://127.0.0.1:3001,http://[::1]:3002,http://evil.example.com")
+		t.Setenv("CFGMS_ALLOW_DEV_CORS_ORIGINS", "true")
+		server := setupTestServer(t)
+
+		for _, o := range []string{"http://localhost:3000", "http://127.0.0.1:3001", "http://[::1]:3002"} {
+			rec := corsPreflight(server, o)
+			assert.Equal(t, http.StatusOK, rec.Code, o)
+			assert.Equal(t, o, rec.Header().Get("Access-Control-Allow-Origin"), o)
+		}
+		rec := corsPreflight(server, "http://evil.example.com")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
 		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
 	})
 }
