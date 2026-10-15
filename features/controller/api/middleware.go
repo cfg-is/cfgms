@@ -267,7 +267,10 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 		headers.Set("X-Content-Type-Options", "nosniff")
 		headers.Set("X-Frame-Options", "DENY")
 		headers.Set("Referrer-Policy", "no-referrer")
-		headers.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		// Passkeys (publickey-credentials-get/create) must stay allowed: do not deny them.
+		headers.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), interest-cohort=()")
+		headers.Set("Cross-Origin-Opener-Policy", "same-origin")
+		headers.Set("Cross-Origin-Resource-Policy", "same-origin")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			headers.Set("Cache-Control", "no-store")
 		}
