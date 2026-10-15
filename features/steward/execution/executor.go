@@ -17,14 +17,17 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	"github.com/cfgis/cfgms/features/steward/modules/install"
 	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -111,6 +114,13 @@ type Executor struct {
 	mu           sync.RWMutex
 	driftHandler DriftEventHandler
 	driftMode    config.DriftMode
+
+	// moduleInstaller, when non-nil, pulls required_modules that are not installed
+	// (Issue #4987). securityFailures remembers strict-mode verification refusals
+	// per coordinate so convergence re-runs do not re-fetch until the next config
+	// sync resets them through SetModuleInstaller. Both guarded by mu.
+	moduleInstaller  ModuleInstaller
+	securityFailures map[string]string
 
 	// eventEmitter, when non-nil, receives convergence detection and outcome events
 	// (ADR-012 §2). Enqueue is the only emitter call on the convergence goroutine;
@@ -202,6 +212,17 @@ func (e *Executor) SetDriftEventHandler(handler DriftEventHandler) {
 	e.mu.Unlock()
 }
 
+// SetModuleInstaller registers the installer ApplyConfiguration uses to pull
+// required_modules that are not installed. Pass nil (standalone) to disable
+// pulling. Calling it also forgets earlier security refusals, so call it once
+// per synced configuration.
+func (e *Executor) SetModuleInstaller(installer ModuleInstaller) {
+	e.mu.Lock()
+	e.moduleInstaller = installer
+	e.securityFailures = nil
+	e.mu.Unlock()
+}
+
 // SetDriftMode updates the executor's drift mode. Call this when the
 // controller delivers a new cfg with an updated drift_mode field.
 // An empty string is treated as DriftModeApply (default behavior).
@@ -213,6 +234,13 @@ func (e *Executor) SetDriftMode(mode config.DriftMode) {
 
 // ExecuteConfiguration executes the complete configuration for all resources.
 func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardConfig) ExecutionReport {
+	return e.executeConfiguration(ctx, cfg, nil)
+}
+
+// executeConfiguration runs every resource. A resource whose module bundle name is
+// a key of failedModules is failed with that message without running; its
+// siblings are unaffected.
+func (e *Executor) executeConfiguration(ctx context.Context, cfg config.StewardConfig, failedModules map[string]string) ExecutionReport {
 	report := ExecutionReport{
 		StartTime:       time.Now(),
 		TotalResources:  len(cfg.Resources),
@@ -230,7 +258,17 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 			report.Errors = append(report.Errors, "execution cancelled: "+ctx.Err().Error())
 			return report
 		default:
-			result := e.ExecuteResource(ctx, resource)
+			var result ResourceResult
+			if bundleName, _ := parseModuleRef(resource.Module); failedModules[bundleName] != "" {
+				result = ResourceResult{
+					ResourceName: resource.Name,
+					ModuleName:   resource.Module,
+					Status:       StatusFailed,
+					Error:        failedModules[bundleName],
+				}
+			} else {
+				result = e.ExecuteResource(ctx, resource)
+			}
 			report.ResourceResults = append(report.ResourceResults, result)
 
 			switch result.Status {
@@ -729,7 +767,9 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		ctx = logging.WithTenant(ctx, e.tenantID)
 	}
 
-	execReport := e.ExecuteConfiguration(ctx, cfg)
+	failedModules := e.ensureRequiredModules(ctx, cfg.RequiredModules, version)
+
+	execReport := e.executeConfiguration(ctx, cfg, failedModules)
 
 	report.ExecutionTimeMs = execReport.EndTime.Sub(execReport.StartTime).Milliseconds()
 
@@ -881,4 +921,84 @@ func applyOutcomeStatus(s ResourceStatus) string {
 	default: // StatusFailed, StatusTimeout, unknown
 		return "failed"
 	}
+}
+
+// ModuleInstaller fetches, verifies and installs one module bundle. It is
+// satisfied by *install.Installer.
+type ModuleInstaller interface {
+	Install(ctx context.Context, publisher, name, version string) (*install.Result, error)
+}
+
+const stdlibRequiredMessage = "provided by the installer, not by required_modules"
+
+// ensureRequiredModules pulls every required module that is not installed at its
+// exact publisher/name/version. It returns, keyed by module name, the failure
+// message for each module that is not usable; resources of those modules fail and
+// the rest of the configuration still converges. No installer, or no
+// required_modules, is a no-op.
+func (e *Executor) ensureRequiredModules(ctx context.Context, required []stewardtypes.RequiredModule, configVersion string) map[string]string {
+	e.mu.RLock()
+	installer := e.moduleInstaller
+	e.mu.RUnlock()
+	if installer == nil || len(required) == 0 {
+		return nil
+	}
+
+	installed, discErr := bundle.DiscoverInstalled(install.DefaultRoot())
+	if discErr != nil {
+		// A broken sibling tree must not hide the modules that did load.
+		e.logger.Warn("Installed module discovery reported errors", "error", logging.SanitizeLogValue(discErr.Error()))
+	}
+	stdlib := make(map[string]struct{})
+	for _, n := range install.StdlibModuleNames() {
+		stdlib[n] = struct{}{}
+	}
+
+	failed := make(map[string]string)
+	for _, rm := range required {
+		publisher, name, ok := strings.Cut(rm.Name, "/")
+		if !ok || publisher == "" || name == "" {
+			// Not a coordinate: no resource can name it as a bundle.
+			e.logger.Warn("Ignoring required module without publisher/name form", "module", logging.SanitizeLogValue(rm.Name))
+			continue
+		}
+		coord := fmt.Sprintf("%s/%s@%s", publisher, name, rm.Version)
+		label := logging.SanitizeLogValue(coord)
+
+		if _, isStdlib := stdlib[name]; isStdlib {
+			failed[name] = fmt.Sprintf("required module %s: %s", label, stdlibRequiredMessage)
+			continue
+		}
+		if ib, found := installed[name]; found && ib.Bundle != nil && ib.Bundle.Manifest != nil &&
+			ib.Bundle.Manifest.Publisher == publisher && ib.Bundle.Manifest.Version == rm.Version {
+			continue
+		}
+
+		e.mu.RLock()
+		prior := e.securityFailures[coord]
+		e.mu.RUnlock()
+		if prior != "" {
+			failed[name] = prior
+			continue
+		}
+
+		if _, err := installer.Install(ctx, publisher, name, rm.Version); err != nil {
+			msg := fmt.Sprintf("required module %s could not be installed: %s", label, logging.SanitizeLogValue(err.Error()))
+			if errors.Is(err, install.ErrTrustRefused) || errors.Is(err, install.ErrBinaryDigestMismatch) ||
+				errors.Is(err, install.ErrContentHashMismatch) || errors.Is(err, install.ErrIdentityMismatch) {
+				msg = "security failure: " + msg
+				e.mu.Lock()
+				if e.securityFailures == nil {
+					e.securityFailures = make(map[string]string)
+				}
+				e.securityFailures[coord] = msg
+				e.mu.Unlock()
+			}
+			e.logger.Warn("Required module install failed", "module", label, "error", logging.SanitizeLogValue(err.Error()))
+			failed[name] = msg
+			continue
+		}
+		e.logger.Info("Required module installed", "module", label)
+	}
+	return failed
 }

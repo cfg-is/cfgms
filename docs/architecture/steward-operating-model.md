@@ -193,6 +193,10 @@ Get → Compare → Set → Verify
 - If current matches desired: report compliant
 - If drifted: emit `drift.detected.monitor` upstream event; skip Set and Verify; report `StatusNonCompliant`
 
+### Required-Module Pull (Issue #4987)
+
+Before any resource runs, `ApplyConfiguration` checks the applied configuration's `required_modules` (`publisher/name`, exact version) against the installed bundles. A module that is not installed at that exact publisher, name and version is fetched, verified under the configured `module_trust.mode` and installed by the module installer; the resources that use it then load through the normal installed-bundle path in the same apply. A module that is already installed at that version is not fetched. A failed pull fails only the resources whose `module` names that module, with a sanitized error in the `ConfigStatusReport`; sibling resources converge. A strict-mode verification refusal is reported as a security failure and is not retried until the next config sync delivers a new configuration. A required module already installed under a different publisher is that module's failure, and a name in the stdlib set is never fetched: its resources fail with "provided by the installer, not by required_modules". A steward with no installer (standalone) or no `required_modules` behaves as before.
+
 ### Convergence Event Emitter (ADR-012)
 
 For every resource check that reaches the drift-comparison step, the execution engine emits a correlated detection+outcome event pair over an out-of-band `LogStream` channel to the controller. The emitter runs on its own goroutine, independent of the module-execution goroutine; the convergence loop enqueues events via a non-blocking call and never waits for the send to complete. When the buffer is full, entries are dropped and counted. The emitter reconnects automatically with exponential back-off if the `LogStream` RPC fails.
