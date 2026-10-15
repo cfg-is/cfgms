@@ -4,6 +4,7 @@
 package quic
 
 import (
+	"io"
 	"testing"
 	"time"
 
@@ -97,4 +98,23 @@ func TestConn_Deadlines(t *testing.T) {
 	require.NoError(t, clientConn.SetDeadline(time.Time{}))
 	require.NoError(t, clientConn.SetReadDeadline(time.Time{}))
 	require.NoError(t, clientConn.SetWriteDeadline(time.Time{}))
+}
+
+// TestConn_CloseDeliversWrittenData verifies that bytes written immediately
+// before Close reach the peer. gRPC writes the final status trailers and then
+// closes the connection; losing them surfaces to the client as a transport
+// error instead of the status (Issue #5039).
+func TestConn_CloseDeliversWrittenData(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	for i := 0; i < 20; i++ {
+		serverConn, clientConn := dialPair(t, tlsPair)
+		_, err := serverConn.Write([]byte("trailers"))
+		require.NoError(t, err)
+		require.NoError(t, serverConn.Close())
+
+		require.NoError(t, clientConn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		got, err := io.ReadAll(clientConn)
+		require.NoError(t, err, "iteration %d", i)
+		assert.Equal(t, "trailers", string(got), "iteration %d", i)
+	}
 }

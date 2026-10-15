@@ -26,6 +26,51 @@ type Conn struct {
 	closeOnce  sync.Once
 	closeErr   error
 	onClose    func()
+	// grace, when set, defers the connection-level close after Close so data
+	// already written can be delivered. Nil closes the connection immediately.
+	grace *graceTracker
+}
+
+// graceTracker tracks connections whose CONNECTION_CLOSE is deferred so the
+// owning listener can close them all when it shuts down.
+type graceTracker struct {
+	mu      sync.Mutex
+	closing bool
+	pending map[*quicgo.Conn]struct{}
+}
+
+func newGraceTracker() *graceTracker {
+	return &graceTracker{pending: make(map[*quicgo.Conn]struct{})}
+}
+
+// add registers qc for a deferred close; false means the tracker is already
+// shut down and the caller must close immediately.
+func (g *graceTracker) add(qc *quicgo.Conn) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closing {
+		return false
+	}
+	g.pending[qc] = struct{}{}
+	return true
+}
+
+func (g *graceTracker) remove(qc *quicgo.Conn) {
+	g.mu.Lock()
+	delete(g.pending, qc)
+	g.mu.Unlock()
+}
+
+// closeAll closes every pending connection and refuses further deferrals.
+func (g *graceTracker) closeAll() {
+	g.mu.Lock()
+	g.closing = true
+	pending := g.pending
+	g.pending = make(map[*quicgo.Conn]struct{})
+	g.mu.Unlock()
+	for qc := range pending {
+		_ = qc.CloseWithError(0, "")
+	}
 }
 
 // Compile-time check that Conn implements net.Conn.
@@ -58,18 +103,38 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return c.stream.Write(b)
 }
 
-// Close closes the QUIC stream and the underlying QUIC connection.
+// closeGrace bounds how long a listener-side Close waits for the peer to take delivery of the
+// data written before Close before it tears the QUIC connection down.
+const closeGrace = time.Second
+
+// Close closes the QUIC stream and then the underlying QUIC connection.
 //
-// Both the stream write half (STREAM_FIN) and the QUIC connection
-// (CONNECTION_CLOSE with application error code 0) are closed. Closing at
-// the connection level ensures the peer receives an immediate signal even
-// after the QUIC listener is closed. Without this, gRPC's transport closes
-// only the stream write half, and the peer must wait for the QUIC idle
-// timeout (~90s) to detect the disconnect.
+// The stream write half is closed first (STREAM_FIN after every byte already
+// written). The QUIC connection (CONNECTION_CLOSE with application error code
+// 0) is closed only once the peer has closed the connection itself or
+// closeGrace elapses. CONNECTION_CLOSE discards stream data the peer has not
+// yet received, so closing it immediately lost gRPC's final status trailers
+// and a refused client saw a transport error instead of the status. Closing at
+// the connection level still gives the peer a prompt signal after the QUIC
+// listener is closed, which a stream-only close does not (the peer would wait
+// for the ~90s idle timeout).
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
-		_ = c.stream.Close() // CloseWithError below tears down the whole connection
-		c.closeErr = c.quicConn.CloseWithError(0, "")
+		c.closeErr = c.stream.Close()
+		if c.grace != nil && c.grace.add(c.quicConn) {
+			go func() {
+				t := time.NewTimer(closeGrace)
+				defer t.Stop()
+				select {
+				case <-c.quicConn.Context().Done():
+				case <-t.C:
+				}
+				c.grace.remove(c.quicConn)
+				_ = c.quicConn.CloseWithError(0, "")
+			}()
+		} else {
+			_ = c.quicConn.CloseWithError(0, "")
+		}
 		if c.onClose != nil {
 			c.onClose()
 		}
