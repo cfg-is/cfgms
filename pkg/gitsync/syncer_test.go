@@ -537,3 +537,90 @@ func TestJSONConfigImport(t *testing.T) {
 	assert.Equal(t, cfgconfig.ConfigFormatJSON, entry.Format)
 	assert.Contains(t, string(entry.Data), `"debug"`)
 }
+
+// pushSymlinks commits symlinks (name -> target) into the working clone and
+// pushes them to origin. It skips only when os.Symlink itself fails (for
+// example Windows without Developer Mode).
+func pushSymlinks(t *testing.T, workDir string, links map[string]string) {
+	t.Helper()
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(workDir, name)); err != nil {
+			t.Skipf("cannot create symlink on this platform: %v", err)
+		}
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@test.com",
+		"commit", "-m", "add symlinks")
+	runGit(t, workDir, "push", "origin", "main")
+}
+
+// syncSymlinkRepo syncs a repo containing good.yaml plus the given symlinks and
+// returns the store after TriggerSync.
+func syncSymlinkRepo(t *testing.T, links map[string]string) cfgconfig.ConfigStore {
+	t.Helper()
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{
+		"good.yaml":   "key: good\n",
+		"inside.yaml": "key: inside\n",
+	})
+	pushSymlinks(t, workDir, links)
+
+	syncer, store, bindings := newTestSyncer(t)
+	binding := gitsync.ScopeBinding{
+		TenantPath: "root/test-tenant",
+		Namespace:  "policies",
+		OriginURL:  bareDir,
+		Branch:     "main",
+	}
+	require.NoError(t, bindings.Add(binding))
+	require.NoError(t, syncer.TriggerSync(context.Background(), binding))
+	return store
+}
+
+func requireNoEntry(t *testing.T, store cfgconfig.ConfigStore, name string) {
+	t.Helper()
+	_, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID: "root/test-tenant", Namespace: "policies", Name: name,
+	})
+	require.Error(t, err, "entry %q must not be imported", name)
+}
+
+// TestSyncRefusesSymlinkToOutsideFile verifies a committed symlink pointing
+// outside the checkout is not imported and its target content never reaches
+// the ConfigStore.
+func TestSyncRefusesSymlinkToOutsideFile(t *testing.T) {
+	const secret = "TOP-SECRET-OUTSIDE-CONTENT"
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte(secret), 0600))
+
+	store := syncSymlinkRepo(t, map[string]string{"leak.yaml": outside})
+
+	ctx := context.Background()
+	good, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{
+		TenantID: "root/test-tenant", Namespace: "policies", Name: "good",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "key: good\n", string(good.Data))
+	requireNoEntry(t, store, "leak")
+
+	for _, name := range []string{"good", "inside", "leak"} {
+		e, getErr := store.GetConfig(ctx, &cfgconfig.ConfigKey{
+			TenantID: "root/test-tenant", Namespace: "policies", Name: name,
+		})
+		if getErr == nil {
+			assert.NotContains(t, string(e.Data), secret)
+		}
+	}
+}
+
+// TestSyncRefusesSymlinkInsideCheckout verifies symlinks are refused even when
+// the target is another regular file inside the same checkout.
+func TestSyncRefusesSymlinkInsideCheckout(t *testing.T) {
+	store := syncSymlinkRepo(t, map[string]string{"alias.yaml": "inside.yaml"})
+
+	requireNoEntry(t, store, "alias")
+	e, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID: "root/test-tenant", Namespace: "policies", Name: "inside",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "key: inside\n", string(e.Data))
+}

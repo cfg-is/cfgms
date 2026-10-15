@@ -4,7 +4,9 @@ package gitsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -396,6 +398,14 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 		return fmt.Errorf("gitsync: failed to read repo directory: %w", err)
 	}
 
+	// All reads go through a root handle so a path cannot resolve outside the
+	// checkout, even if an entry is swapped for a link after the type check.
+	root, err := os.OpenRoot(repoDir)
+	if err != nil {
+		return fmt.Errorf("gitsync: failed to open repo directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
 	sourceSHA := sha
 	if len(sourceSHA) > 8 {
 		sourceSHA = sourceSHA[:8]
@@ -425,10 +435,19 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 			continue // skip non-config files
 		}
 
-		// #nosec G304 -- name comes from ReadDir of the freshly synchronized
-		// repository root and only recognized config-file suffixes reach here.
-		data, readErr := os.ReadFile(filepath.Join(repoDir, name))
+		// Only regular files are imported. DirEntry.Type() does not follow
+		// links, so symlinks and other special entries are refused here.
+		if !dirEntry.Type().IsRegular() {
+			s.warnSkippedEntry(b, name)
+			continue
+		}
+
+		data, readErr := readRegularFile(root, name)
 		if readErr != nil {
+			if errors.Is(readErr, errNotRegular) {
+				s.warnSkippedEntry(b, name)
+				continue
+			}
 			return fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)
 		}
 
@@ -546,4 +565,35 @@ func classifyGitError(err error) error {
 	default:
 		return fmt.Errorf("gitsync: git operation failed: %w", err)
 	}
+}
+
+// errNotRegular reports that an opened entry is not a regular file.
+var errNotRegular = errors.New("not a regular file")
+
+// readRegularFile reads name through root and confirms, on the open handle,
+// that it is a regular file before using its bytes.
+func readRegularFile(root *os.Root, name string) ([]byte, error) {
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	return io.ReadAll(f)
+}
+
+// warnSkippedEntry logs a refused non-regular config entry. The link target is
+// deliberately not logged.
+func (s *Syncer) warnSkippedEntry(b ScopeBinding, name string) {
+	s.logger.Warn("gitsync: skipping non-regular config entry",
+		"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+		"namespace", logging.SanitizeLogValue(b.Namespace),
+		"entry", logging.SanitizeLogValue(name))
 }
