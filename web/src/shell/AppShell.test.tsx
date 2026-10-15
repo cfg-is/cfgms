@@ -176,7 +176,7 @@ describe('AppShell', () => {
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok-shell; path=/'
+        document.cookie = '__Host-cfgms_csrf_pre=pre-tok-shell; path=/; Secure'
         return Promise.resolve(new Response(null, { status: 204 }))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {

@@ -26,7 +26,7 @@ function clearCookies() {
   for (const pair of document.cookie.split(';')) {
     const name = pair.split('=')[0]?.trim()
     if (name) {
-      document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`
+      document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; Secure`
     }
   }
 }
@@ -62,8 +62,8 @@ describe('apiFetch', () => {
     expect(init?.credentials).toBe('same-origin')
   })
 
-  it('injects X-CSRF-Token from the cfgms_csrf cookie on POST', async () => {
-    document.cookie = 'cfgms_csrf=tok-abc123; path=/'
+  it('injects X-CSRF-Token from the __Host-cfgms_csrf cookie on POST', async () => {
+    document.cookie = '__Host-cfgms_csrf=tok-abc123; path=/; Secure'
     fetchMock.mockResolvedValue(jsonResponse(200))
     await apiFetch('/api/v1/things', { method: 'POST' })
     const headers = new Headers(fetchMock.mock.calls.at(0)?.[1]?.headers)
@@ -73,7 +73,7 @@ describe('apiFetch', () => {
   it.each(['PUT', 'PATCH', 'DELETE'])(
     'injects X-CSRF-Token on %s',
     async (method) => {
-      document.cookie = 'cfgms_csrf=tok-unsafe; path=/'
+      document.cookie = '__Host-cfgms_csrf=tok-unsafe; path=/; Secure'
       fetchMock.mockResolvedValue(jsonResponse(200))
       await apiFetch('/api/v1/things', { method })
       const headers = new Headers(fetchMock.mock.calls.at(0)?.[1]?.headers)
@@ -82,7 +82,7 @@ describe('apiFetch', () => {
   )
 
   it('does not send X-CSRF-Token on GET', async () => {
-    document.cookie = 'cfgms_csrf=tok-abc123; path=/'
+    document.cookie = '__Host-cfgms_csrf=tok-abc123; path=/; Secure'
     fetchMock.mockResolvedValue(jsonResponse(200))
     await apiFetch('/api/v1/stewards')
     const headers = new Headers(fetchMock.mock.calls.at(0)?.[1]?.headers)
@@ -305,7 +305,7 @@ describe('apiFetch', () => {
   })
 
   it('deduplicated concurrent request re-attaches CSRF on its retry', async () => {
-    document.cookie = 'cfgms_csrf=dedup-csrf-tok; path=/'
+    document.cookie = '__Host-cfgms_csrf=dedup-csrf-tok; path=/; Secure'
 
     // Use a deferred promise so we can resolve the ceremony after both requests start.
     let resolveCeremony!: (r: Response | null) => void
@@ -473,7 +473,7 @@ describe('apiFetch — tenant-crossing challenge (Story #4723)', () => {
   })
 
   it('deduplicates concurrent crossing 401s: one prompt, the second request retries once with a fresh CSRF header', async () => {
-    document.cookie = 'cfgms_csrf=crossing-csrf; path=/'
+    document.cookie = '__Host-cfgms_csrf=crossing-csrf; path=/; Secure'
     let resolvePrompt!: (r: Response | null) => void
     const prompt = new Promise<Response | null>((r) => { resolvePrompt = r })
     const crossing = vi.fn(() => prompt)
@@ -523,7 +523,7 @@ describe('passkeyLoginBeginRequest', () => {
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok-begin; path=/'
+        document.cookie = '__Host-cfgms_csrf_pre=pre-tok-begin; path=/; Secure'
         return Promise.resolve(jsonResponse(204))
       }
       return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
@@ -546,7 +546,7 @@ describe('passkeyLoginBeginRequest', () => {
   it('sends an empty body when no username is provided (discoverable flow)', async () => {
     fetchMock.mockImplementation((input) => {
       if (String(input).endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok-anon; path=/'
+        document.cookie = '__Host-cfgms_csrf_pre=pre-tok-anon; path=/; Secure'
         return Promise.resolve(jsonResponse(204))
       }
       return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
@@ -760,7 +760,7 @@ describe('passkeyEnrollBeginRequest', () => {
   })
 
   it('does NOT include a CSRF header (token is the auth credential)', async () => {
-    document.cookie = 'cfgms_csrf=should-not-be-sent; path=/'
+    document.cookie = '__Host-cfgms_csrf=should-not-be-sent; path=/; Secure'
     fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
 
     await passkeyEnrollBeginRequest('tok')
@@ -928,7 +928,7 @@ describe('logoutRequest', () => {
   })
 
   it('POSTs to the logout endpoint with the session CSRF header', async () => {
-    document.cookie = 'cfgms_csrf=sess-tok; path=/'
+    document.cookie = '__Host-cfgms_csrf=sess-tok; path=/; Secure'
     fetchMock.mockResolvedValue(jsonResponse(204))
     await logoutRequest()
     const call = fetchMock.mock.calls.at(0)
@@ -1064,7 +1064,7 @@ describe('approveCliLoginRequest', () => {
   })
 
   it('POSTs user_code and deny:false for a confirm, with the session CSRF header', async () => {
-    document.cookie = 'cfgms_csrf=sess-tok; path=/'
+    document.cookie = '__Host-cfgms_csrf=sess-tok; path=/; Secure'
     fetchMock.mockResolvedValue(jsonResponse(200, { data: { request_id: 'cli-login-abc', status: 'approved' } }))
 
     const result = await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', false)
@@ -1241,7 +1241,7 @@ describe('approveCredentialRequest', () => {
   })
 
   it('POSTs the fingerprint the caller supplied, the new account username, and the requested markers', async () => {
-    document.cookie = 'cfgms_csrf=sess-tok; path=/'
+    document.cookie = '__Host-cfgms_csrf=sess-tok; path=/; Secure'
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
         data: { id: 'creq-abc123', status: 'approved', account_id: 'acct-1', granted_markers: ['admin'] },

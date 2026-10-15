@@ -149,7 +149,7 @@ func dialWatchWS(t *testing.T, srv *Server, caseID, callerTenant string) (*webso
 	// the handler has actually returned, so one test's watch session cannot
 	// overlap the next test's setup.
 	var inflight sync.WaitGroup
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		inflight.Add(1)
 		defer inflight.Done()
 		srv.router.ServeHTTP(w, r)
@@ -174,7 +174,7 @@ func dialWatchWS(t *testing.T, srv *Server, caseID, callerTenant string) (*webso
 		"Origin":        []string{ts.URL},
 	}
 
-	dialer := websocket.Dialer{}
+	dialer := wsTLSDialer(ts)
 	conn, resp, err := dialer.Dial(wsURL, hdr)
 	if err != nil {
 		status := 0
@@ -359,7 +359,7 @@ func TestHandleCockpitWatch_CaseNotFound_Returns404(t *testing.T) {
 	srv := setupCockpitWatchServer(t, newWatchProbe(t))
 	apiKey := NewEphemeralTestKey(t, srv, []string{"case:read"}, "test-tenant", 5*time.Minute)
 
-	ts := httptest.NewServer(srv.router)
+	ts := httptest.NewTLSServer(srv.router)
 	defer ts.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/cases/nonexistent-id/watch"
@@ -368,7 +368,7 @@ func TestHandleCockpitWatch_CaseNotFound_Returns404(t *testing.T) {
 		"Origin":        []string{ts.URL},
 	}
 
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	_, resp, err := wsTLSDialer(ts).Dial(wsURL, hdr)
 	require.Error(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -389,7 +389,7 @@ func TestHandleCockpitWatch_CrossTenant_Returns404(t *testing.T) {
 
 	apiKey := NewEphemeralTestKey(t, srv, []string{"case:read"}, "test-tenant", 5*time.Minute)
 
-	ts := httptest.NewServer(srv.router)
+	ts := httptest.NewTLSServer(srv.router)
 	defer ts.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/cases/" + caseID + "/watch"
@@ -398,7 +398,7 @@ func TestHandleCockpitWatch_CrossTenant_Returns404(t *testing.T) {
 		"Origin":        []string{ts.URL},
 	}
 
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	_, resp, err := wsTLSDialer(ts).Dial(wsURL, hdr)
 	require.Error(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -419,6 +419,39 @@ func TestHandleCockpitWatch_CrossTenant_Returns404(t *testing.T) {
 // and must never reach the provider subscription — a rejected upgrade that still
 // opened a Watch would leak the case's event stream into a goroutine the caller
 // was never authorised to start.
+// wsTLSDialer returns a WebSocket dialer that trusts the test TLS server.
+func wsTLSDialer(ts *httptest.Server) *websocket.Dialer {
+	return &websocket.Dialer{TLSClientConfig: ts.Client().Transport.(*http.Transport).TLSClientConfig}
+}
+
+// TestHandleCockpitWatch_OriginScheme (Issue #5023) proves the origin guard
+// requires https: the same host over http is refused, over https is accepted.
+func TestHandleCockpitWatch_OriginScheme(t *testing.T) {
+	probe := newWatchProbe(t)
+	srv := setupCockpitWatchServer(t, probe)
+	c, _ := seedWatchCase(t, srv.CasesStore(), "test-tenant")
+	apiKey := NewEphemeralTestKey(t, srv, []string{"case:read"}, "test-tenant", 5*time.Minute)
+	ts := httptest.NewTLSServer(srv.router)
+	defer ts.Close()
+
+	host := strings.TrimPrefix(ts.URL, "https://")
+	wsURL := "wss://" + host + "/api/v1/cases/" + c.ID + "/watch"
+
+	hdr := http.Header{"Authorization": []string{"Bearer " + apiKey}, "Origin": []string{"http://" + host}}
+	conn, resp, err := wsTLSDialer(ts).Dial(wsURL, hdr)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "http:// origin on the same host must be refused")
+
+	hdr.Set("Origin", "https://"+host)
+	conn, _, err = wsTLSDialer(ts).Dial(wsURL, hdr)
+	require.NoError(t, err, "https:// same-host origin must be accepted")
+	_ = conn.Close()
+}
+
 func TestHandleCockpitWatch_RejectsDisallowedOrigin(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -485,6 +518,7 @@ func TestCockpitWatchOriginAllowed(t *testing.T) {
 		{name: "empty Origin header", host: "cfgms.example.com", origin: "", setHdr: true, want: false},
 		{name: "foreign host", host: "cfgms.example.com", origin: "https://evil.example.com", setHdr: true, want: false},
 		{name: "same host, different port", host: "cfgms.example.com:8443", origin: "https://cfgms.example.com:9443", setHdr: true, want: false},
+		{name: "same host over http", host: "cfgms.example.com", origin: "http://cfgms.example.com", setHdr: true, want: false},
 		{name: "unparseable Origin", host: "cfgms.example.com", origin: "http://%zz", setHdr: true, want: false},
 		{name: "Origin with no host", host: "cfgms.example.com", origin: "null", setHdr: true, want: false},
 	}

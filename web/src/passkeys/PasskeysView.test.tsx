@@ -117,7 +117,7 @@ function route(input: RequestInfo | URL, init?: RequestInit): Response {
   const url = String(input)
   // Real AuthProvider login ceremony.
   if (url.endsWith('/api/v1/web/csrf')) {
-    document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+    document.cookie = '__Host-cfgms_csrf_pre=pre-tok; path=/; Secure'
     return jsonResponse(204, null)
   }
   if (url.endsWith('/api/v1/web/passkey/login/begin')) {

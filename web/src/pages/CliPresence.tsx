@@ -50,7 +50,7 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useAuth } from '../auth/AuthContext.tsx'
 import Login from './Login.tsx'
-import { getCliPresenceRequest, type CliPresenceRequestState } from '../api/client.ts'
+import { csrfCookieSession, getCliPresenceRequest, type CliPresenceRequestState } from '../api/client.ts'
 import './CliPresence.css'
 
 // ── CSRF cookie helper (mirrors StepUpModal.tsx's readSessionCsrf) ───────────────
@@ -59,7 +59,7 @@ function readSessionCsrf(): string | null {
   for (const pair of document.cookie.split(';')) {
     const eq = pair.indexOf('=')
     if (eq === -1) continue
-    if (pair.slice(0, eq).trim() === 'cfgms_csrf') {
+    if (pair.slice(0, eq).trim() === csrfCookieSession) {
       return decodeURIComponent(pair.slice(eq + 1).trim())
     }
   }

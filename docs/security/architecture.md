@@ -145,13 +145,13 @@ there is no password hash to attack offline.
 
 ### Web Session Transport (Issue #2492, ADR-018 §1,2)
 
-The controller authenticates browser clients via a `cfgms_session` HttpOnly cookie,
+The controller authenticates browser clients via a `__Host-cfgms_session` HttpOnly cookie,
 using a **second, web-specific session manager** distinct from the `cfg`-CLI manager:
 
 **Cookie flags (ADR-018 §1):**
 
 ```
-Set-Cookie: cfgms_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/
+Set-Cookie: __Host-cfgms_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/
 ```
 
 - **HttpOnly** — token is unreadable from JavaScript; XSS cannot exfiltrate the session.
@@ -186,7 +186,7 @@ carries no `Max-Age`. Server-side revocation takes effect immediately.
 **Credential precedence (security B5.2):**
 
 Any header credential (`Authorization: Bearer`, `X-API-Key`) or admin mTLS identity
-**always wins** over the cookie. When a header credential is present, the `cfgms_session`
+**always wins** over the cookie. When a header credential is present, the `__Host-cfgms_session`
 cookie is ignored entirely — not validated, not renewed, no `Set-Cookie` emitted. This
 ensures existing Bearer/API-key/mTLS clients are byte-identical before and after the
 cookie branch.
@@ -205,17 +205,17 @@ credentialed cross-origin requests are not supported and must never be enabled.
 #### Login flow
 
 ```
-GET  /api/v1/web/csrf                        → Set-Cookie: cfgms_csrf_pre=<token>; Secure; SameSite=Strict; Max-Age=600
+GET  /api/v1/web/csrf                        → Set-Cookie: __Host-cfgms_csrf_pre=<token>; Secure; SameSite=Strict; Max-Age=600
 POST /api/v1/web/passkey/login/begin  (X-CSRF-Token: <token>)
-     → Set-Cookie: cfgms_passkey_ceremony=...; HttpOnly; Secure; SameSite=Strict; Path=/
+     → Set-Cookie: __Host-cfgms_passkey_ceremony=...; HttpOnly; Secure; SameSite=Strict; Path=/
      → { publicKey: <WebAuthn discoverable-assertion challenge> }
 POST /api/v1/web/passkey/login/finish (WebAuthn assertion body)
-     → Set-Cookie: cfgms_session=...; HttpOnly; Secure; SameSite=Strict; Path=/
-     → Set-Cookie: cfgms_csrf=...; Secure; SameSite=Strict; Path=/   (non-HttpOnly)
+     → Set-Cookie: __Host-cfgms_session=...; HttpOnly; Secure; SameSite=Strict; Path=/
+     → Set-Cookie: __Host-cfgms_csrf=...; Secure; SameSite=Strict; Path=/   (non-HttpOnly)
 ```
 
 1. **Pre-session CSRF gate (ADR-018 §3):** `GET /api/v1/web/csrf` issues a 32-byte
-   `crypto/rand` token in `cfgms_csrf_pre` (Secure; SameSite=Strict; Max-Age=600s).
+   `crypto/rand` token in `__Host-cfgms_csrf_pre` (Secure; SameSite=Strict; Max-Age=600s).
    The browser echoes it as `X-CSRF-Token` on the login-begin POST. The server compares
    cookie value to header value with `subtle.ConstantTimeCompare`. Mismatch or
    absence → 403 before any WebAuthn work.
@@ -237,17 +237,17 @@ POST /api/v1/web/passkey/login/finish (WebAuthn assertion body)
    handle, and rejects a non-advancing signature counter as a possible cloned
    authenticator.
 
-5. **Session fixation defence:** any valid `cfgms_session` cookie presented with the
+5. **Session fixation defence:** any valid `__Host-cfgms_session` cookie presented with the
    finish request is revoked server-side before the new session is issued.
 
 6. **Fresh session at Strong assurance (ADR-021 Decision 3):** `webSessionManager.Issue`
    mints a new Basic session, then `Manager.Elevate` immediately raises it to
    `AssuranceStrong` — a login-time passkey assertion is itself phishing-resistant, so it
-   earns Strong directly in one round trip. The raw token is set in `cfgms_session`
+   earns Strong directly in one round trip. The raw token is set in `__Host-cfgms_session`
    (HttpOnly) and never logged.
 
 7. **Session-bound CSRF token:** a second 32-byte `crypto/rand` value is generated,
-   stored server-side keyed by session ID, and written to `cfgms_csrf` (non-HttpOnly
+   stored server-side keyed by session ID, and written to `__Host-cfgms_csrf` (non-HttpOnly
    so the SPA can read it and set `X-CSRF-Token` on subsequent mutations).
 
 8. **Response body:** the authenticated `username`, `tenant_id`, and `root_scope` —
@@ -276,7 +276,7 @@ api subrouter middleware chain does not apply to base-router routes (security A5
 `POST /api/v1/web/logout` is CSRF-checked (session-bound token required). On success:
 - Revokes the server-side session (subsequent cookie use → 401).
 - Removes the server-side CSRF token for the session.
-- Expires both `cfgms_session` and `cfgms_csrf` cookies (`Max-Age=0`).
+- Expires both `__Host-cfgms_session` and `__Host-cfgms_csrf` cookies (`Max-Age=0`).
 
 #### Audit events
 

@@ -107,7 +107,7 @@ function mockBackend(user = 'alice') {
   fetchMock.mockImplementation((input) => {
     const url = new URL(String(input), 'https://controller.test')
     if (url.pathname === '/api/v1/web/csrf') {
-      document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+      document.cookie = '__Host-cfgms_csrf_pre=pre-tok; path=/; Secure'
       return Promise.resolve(new Response(null, { status: 204 }))
     }
     if (url.pathname === '/api/v1/web/passkey/login/begin') {

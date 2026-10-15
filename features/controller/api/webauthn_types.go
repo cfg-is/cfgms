@@ -145,7 +145,7 @@ type StepUpElevateFinishResponse struct {
 // handlePasskeyLoginBegin. Its value is the ceremony ID that keys the pending session
 // in s.passkeyLoginSessions. SameSite=Strict means it is never sent cross-site,
 // providing CSRF protection on the finish endpoint without a separate CSRF check.
-const cookiePasskeyCeremony = "cfgms_passkey_ceremony"
+const cookiePasskeyCeremony = "__Host-cfgms_passkey_ceremony"
 
 // passkeyLoginCeremonyMaxAge is the TTL for the ceremony cookie and the pending session.
 const passkeyLoginCeremonyMaxAge = 5 * 60 // 5 minutes in seconds

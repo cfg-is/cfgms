@@ -608,7 +608,7 @@ func TestRunController_WebAuthnWiring_AnswersPasskeyLoginBegin(t *testing.T) {
 
 	var csrfToken string
 	for _, c := range csrfRec.Result().Cookies() {
-		if c.Name == "cfgms_csrf_pre" {
+		if c.Name == "__Host-cfgms_csrf_pre" {
 			csrfToken = c.Value
 		}
 	}
@@ -616,7 +616,7 @@ func TestRunController_WebAuthnWiring_AnswersPasskeyLoginBegin(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/begin", nil)
 	req.Header.Set("X-CSRF-Token", csrfToken)
-	req.AddCookie(&http.Cookie{Name: "cfgms_csrf_pre", Value: csrfToken})
+	req.AddCookie(&http.Cookie{Name: "__Host-cfgms_csrf_pre", Value: csrfToken})
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -650,7 +650,7 @@ func TestRunController_WebAuthnWiring_UnsetConfigLeaves503(t *testing.T) {
 
 	var csrfToken string
 	for _, c := range csrfRec.Result().Cookies() {
-		if c.Name == "cfgms_csrf_pre" {
+		if c.Name == "__Host-cfgms_csrf_pre" {
 			csrfToken = c.Value
 		}
 	}
@@ -658,7 +658,7 @@ func TestRunController_WebAuthnWiring_UnsetConfigLeaves503(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/begin", nil)
 	req.Header.Set("X-CSRF-Token", csrfToken)
-	req.AddCookie(&http.Cookie{Name: "cfgms_csrf_pre", Value: csrfToken})
+	req.AddCookie(&http.Cookie{Name: "__Host-cfgms_csrf_pre", Value: csrfToken})
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 

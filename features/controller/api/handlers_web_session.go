@@ -27,9 +27,9 @@ import (
 
 // Cookie and header names for the web-session CSRF mechanism (ADR-018 §3).
 const (
-	cookieWebSession  = "cfgms_session"  // HttpOnly; set on login, cleared on logout
-	cookieCSRFSession = "cfgms_csrf"     // session-bound; non-HttpOnly so JS can read it
-	cookieCSRFPre     = "cfgms_csrf_pre" // pre-session; single-use, gates the login POST
+	cookieWebSession  = "__Host-cfgms_session"  // HttpOnly; set on login, cleared on logout
+	cookieCSRFSession = "__Host-cfgms_csrf"     // session-bound; non-HttpOnly so JS can read it
+	cookieCSRFPre     = "__Host-cfgms_csrf_pre" // pre-session; single-use, gates the login POST
 	headerCSRFToken   = "X-CSRF-Token"
 	preCSRFMaxAge     = 10 * 60 // 10 minutes TTL for the pre-session CSRF cookie
 )
@@ -131,11 +131,11 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // clearWebSessionCookies expires both the session and CSRF cookies (Max-Age=0).
-// cfgms_session is HttpOnly (mirrors login-time design); cfgms_csrf is not (JS reads it).
+// __Host-cfgms_session is HttpOnly (mirrors login-time design); __Host-cfgms_csrf is not (JS reads it).
 func clearWebSessionCookies(w http.ResponseWriter) {
 	for _, name := range []string{cookieWebSession, cookieCSRFSession} {
-		// #nosec G124 -- cfgms_csrf is intentionally readable for double-submit;
-		// cfgms_session remains HttpOnly and both deletion cookies are Secure/Strict.
+		// #nosec G124 -- __Host-cfgms_csrf is intentionally readable for double-submit;
+		// __Host-cfgms_session remains HttpOnly and both deletion cookies are Secure/Strict.
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
 			Value:    "",

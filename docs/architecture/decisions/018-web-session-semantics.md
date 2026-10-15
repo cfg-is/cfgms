@@ -48,7 +48,7 @@ as ADR-014 (32 bytes `crypto/rand`, base64url, `SHA-256` stored) and returns it
 in a cookie:
 
 ```
-Set-Cookie: cfgms_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/
+Set-Cookie: __Host-cfgms_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/
 ```
 
 - **HttpOnly** — the token is unreadable from JavaScript, so an XSS defect cannot
@@ -97,7 +97,7 @@ weakened, bypassed, or a same-site subdomain is compromised — every **unsafe
 method (POST/PUT/PATCH/DELETE)** additionally requires a valid CSRF token:
 
 - On login the controller issues a CSRF token in a **non-HttpOnly** companion
-  cookie (readable by the SPA), e.g. `cfgms_csrf`.
+  cookie (readable by the SPA), e.g. `__Host-cfgms_csrf`.
 - The SPA echoes it in an **`X-CSRF-Token`** request header on every unsafe call
   (double-submit). The controller verifies the header matches the cookie and is
   bound to the session; mismatch → `403`.

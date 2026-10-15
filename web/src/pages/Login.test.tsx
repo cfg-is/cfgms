@@ -55,7 +55,7 @@ function mockPasskeyEndpoints(finishStatus: number, finishBody: unknown = {}) {
   fetchMock.mockImplementation((input) => {
     const url = String(input)
     if (url.endsWith('/api/v1/web/csrf')) {
-      document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+      document.cookie = '__Host-cfgms_csrf_pre=pre-tok; path=/; Secure'
       return Promise.resolve(jsonResponse(204))
     }
     if (url.endsWith('/api/v1/web/passkey/login/begin')) {
@@ -292,7 +292,7 @@ describe('no auth data in web storage (security A7.2)', () => {
     // Only the username prefill key should be present — no session/auth keys.
     expect(window.localStorage.length).toBe(1)
     expect(window.localStorage.getItem('cfgms.login.username')).toBe('admin@msp-a')
-    expect(window.localStorage.getItem('cfgms_session')).toBeNull()
+    expect(window.localStorage.getItem('__Host-cfgms_session')).toBeNull()
   })
 })
 
@@ -307,10 +307,10 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     ([path]) => !/\.test\.(ts|tsx)$/.test(path) && !path.includes('/test/'),
   )
 
-  it('no non-test source file references cfgms_session', () => {
+  it('no non-test source file references __Host-cfgms_session', () => {
     expect(appSources.length).toBeGreaterThan(0)
     const offenders = appSources
-      .filter(([, content]) => content.includes('cfgms_session'))
+      .filter(([, content]) => content.includes('__Host-cfgms_session'))
       .map(([path]) => path)
     expect(offenders).toEqual([])
   })

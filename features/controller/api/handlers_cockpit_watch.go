@@ -130,7 +130,7 @@ var cockpitWatchUpgrader = websocket.Upgrader{
 }
 
 // cockpitWatchOriginAllowed accepts WebSocket upgrades from the same host as
-// the request. An absent or unparseable Origin is rejected. This mirrors the
+// the request over https. An absent, unparseable or non-https Origin is rejected. It is stricter than the
 // guard used by the terminal WebSocket handler.
 func cockpitWatchOriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
@@ -141,7 +141,7 @@ func cockpitWatchOriginAllowed(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	return u.Scheme == "https" && strings.EqualFold(u.Host, r.Host)
 }
 
 // pinnedEIDsForWatch extracts all EIDs referenced by a case's pins into a

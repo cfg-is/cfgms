@@ -964,7 +964,7 @@ func TestCrossChannelValidation_InMemoryCachePath(t *testing.T) {
 
 	// CLI token as cookie → uses web manager → rejected (cross-channel).
 	crossReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	crossReq.AddCookie(&http.Cookie{Name: "cfgms_session", Value: cliToken})
+	crossReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: cliToken})
 	crossRec := httptest.NewRecorder()
 	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -982,7 +982,7 @@ func TestCrossChannelValidation_InMemoryCachePath(t *testing.T) {
 
 	// Web token as cookie → uses web manager → validates OK (same channel).
 	webReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	webReq.AddCookie(&http.Cookie{Name: "cfgms_session", Value: webToken})
+	webReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: webToken})
 	webRec := httptest.NewRecorder()
 	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1038,7 +1038,7 @@ func TestCrossChannelValidation_PostRestartStoreRehydrationPath(t *testing.T) {
 
 	// CLI token as cookie (web manager, store-rehydration path) → 401.
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	req2.AddCookie(&http.Cookie{Name: "cfgms_session", Value: cliToken})
+	req2.AddCookie(&http.Cookie{Name: cookieWebSession, Value: cliToken})
 	rec2 := httptest.NewRecorder()
 	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1054,7 +1054,7 @@ func TestCrossChannelValidation_PostRestartStoreRehydrationPath(t *testing.T) {
 
 	// Web token as cookie (web manager, store-rehydration path) → 200.
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	req3.AddCookie(&http.Cookie{Name: "cfgms_session", Value: webToken})
+	req3.AddCookie(&http.Cookie{Name: cookieWebSession, Value: webToken})
 	rec3 := httptest.NewRecorder()
 	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

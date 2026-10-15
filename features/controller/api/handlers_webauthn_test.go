@@ -1759,7 +1759,7 @@ func TestHandlePasskeyLoginBegin_AnswersWithWiredWebAuthn(t *testing.T) {
 	resp := &http.Response{Header: csrfRec.Result().Header}
 	var csrfToken string
 	for _, c := range resp.Cookies() {
-		if c.Name == "cfgms_csrf_pre" {
+		if c.Name == cookieCSRFPre {
 			csrfToken = c.Value
 		}
 	}
@@ -1767,7 +1767,7 @@ func TestHandlePasskeyLoginBegin_AnswersWithWiredWebAuthn(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/begin", nil)
 	req.Header.Set("X-CSRF-Token", csrfToken)
-	req.AddCookie(&http.Cookie{Name: "cfgms_csrf_pre", Value: csrfToken})
+	req.AddCookie(&http.Cookie{Name: cookieCSRFPre, Value: csrfToken})
 	rec := httptest.NewRecorder()
 	server.handlePasskeyLoginBegin(rec, req)
 

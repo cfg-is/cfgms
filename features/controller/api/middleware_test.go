@@ -1350,7 +1350,7 @@ func issueWebSession(t *testing.T, mgr session.Manager, principalID, tenantID st
 	t.Helper()
 	_, tok, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
 	require.NoError(t, err)
-	return &http.Cookie{Name: "cfgms_session", Value: tok}
+	return &http.Cookie{Name: cookieWebSession, Value: tok}
 }
 
 // TestWebSessionCookie_ValidCookie_BuildsPrincipal verifies that a request carrying a
@@ -1558,7 +1558,7 @@ func TestWebSessionCookie_RenewalCookieFlags(t *testing.T) {
 	setCookie := rec.Header().Get("Set-Cookie")
 	require.NotEmpty(t, setCookie, "a valid cookie request must produce a refreshed Set-Cookie")
 
-	assert.Contains(t, setCookie, "cfgms_session=", "Set-Cookie must use name cfgms_session")
+	assert.Contains(t, setCookie, cookieWebSession+"=", "Set-Cookie must use the __Host- session cookie name")
 	assert.Contains(t, setCookie, "HttpOnly", "cookie must be HttpOnly")
 	assert.Contains(t, setCookie, "Secure", "cookie must be Secure")
 	assert.Contains(t, setCookie, "SameSite=Strict", "cookie must be SameSite=Strict")
@@ -1798,7 +1798,7 @@ func TestWebSessionCookie_InvalidToken_Returns401(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
 	// Use a well-formed 43-char base64url string that was never issued.
-	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: strings.Repeat("a", 43)})
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: strings.Repeat("a", 43)})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -2403,7 +2403,7 @@ func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
 		}))
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-		req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: token})
+		req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: token})
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 
@@ -2437,7 +2437,7 @@ func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
 		}))
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-		req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: token})
+		req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: token})
 		// RemoteAddr "192.0.2.1:1234" → sourceIP "192.0.2.1" ≠ BoundIP "10.0.0.1"
 		// → Manager.Validate downgrades web session to AssuranceBasic.
 		rec := httptest.NewRecorder()
@@ -3888,7 +3888,7 @@ func TestWebSessionCookie_PhishingResistantRootScopeAccount_CarriesMarker(t *tes
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: elevatedTok})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -4036,7 +4036,7 @@ func TestWebSessionCookie_RootScopeMarker_RemovedOnAssuranceDowngrade(t *testing
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: elevatedTok})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -4065,7 +4065,7 @@ func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testi
 	require.NoError(t, err)
 	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
 	require.NoError(t, err)
-	cookie := &http.Cookie{Name: "cfgms_session", Value: elevatedTok}
+	cookie := &http.Cookie{Name: cookieWebSession, Value: elevatedTok}
 
 	var captured *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4129,7 +4129,7 @@ func TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension(t 
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-requests/x/approve", nil)
-	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: elevatedTok})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -4232,7 +4232,7 @@ func TestWebSessionCookie_RootScopedAccount_ConfinedByCatchAllBoundaryGate(t *te
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/msp-a", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "msp-a"})
-	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: elevatedTok})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

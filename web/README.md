@@ -162,11 +162,11 @@ The app authenticates against the controller's web session endpoints
   it; a source-scan test fails if any non-test source references it.
 - **CSRF (double-submit).** [`src/api/client.ts`](src/api/client.ts) is the
   single fetch wrapper for cookie-authenticated calls. On every unsafe
-  method (POST/PUT/PATCH/DELETE) it echoes the JS-readable `cfgms_csrf`
+  method (POST/PUT/PATCH/DELETE) it echoes the JS-readable `__Host-cfgms_csrf`
   cookie as the `X-CSRF-Token` header. GET/HEAD carry no CSRF header.
 - **Login pre-flight.** The login POST itself is gated by a **pre-session**
   token: the client first calls `GET /api/v1/web/csrf` (which sets the
-  single-use `cfgms_csrf_pre` cookie) and echoes that value as
+  single-use `__Host-cfgms_csrf_pre` cookie) and echoes that value as
   `X-CSRF-Token` on `POST /api/v1/web/login`. Credentials travel only in
   the JSON body.
 - **401 handling (ADR-018 §4).** Any 401 on a normal API call means the

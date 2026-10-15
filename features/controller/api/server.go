@@ -2092,7 +2092,7 @@ func (s *Server) SetCertManager(mgr *cert.Manager) {
 }
 
 // SetWebSessionManager wires the web session Manager used to authenticate browser
-// clients via the cfgms_session HttpOnly cookie (Issue #2492, ADR-018 §1,2).
+// clients via the __Host-cfgms_session HttpOnly cookie (Issue #2492, ADR-018 §1,2).
 // Uses explicit Config (idle 60m / absolute 12h / grace 30s) — distinct from the
 // cfg-CLI sessionManager (idle 15m / absolute 8h). When nil (default), the cookie
 // branch in authenticationMiddleware is bypassed. Call after New() but before Start().
