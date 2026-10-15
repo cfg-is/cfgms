@@ -116,6 +116,11 @@ func (s *SyslogSubscriber) Initialize(config map[string]interface{}) error {
 		return fmt.Errorf("invalid syslog configuration: %w", err)
 	}
 
+	// Fail closed: TLS syslog is not implemented, so never fall back to plaintext
+	if s.config.EnableTLS {
+		return fmt.Errorf("enable_tls is set but TLS syslog is not supported; refusing to send logs in cleartext")
+	}
+
 	// Set up level filtering
 	s.setupLevelFiltering()
 

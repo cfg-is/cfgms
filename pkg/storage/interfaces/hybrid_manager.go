@@ -266,7 +266,7 @@ func GetRecommendedHybridConfig() HybridStorageConfig {
 				"database":                        "cfgms_ops",
 				"username":                        "cfgms",
 				"password":                        "${POSTGRES_PASSWORD}",
-				"sslmode":                         "require",
+				"sslmode":                         "verify-full",
 				"max_open_connections":            50, // Higher for operational queries
 				"max_idle_connections":            10,
 				"connection_max_lifetime_minutes": 30,

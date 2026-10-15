@@ -326,6 +326,16 @@ func TestEntityGraphDatabaseDSN(t *testing.T) {
 		assert.Equal(t, "host=explicit-host port=5432 dbname=x user=y password=z sslmode=disable", dsn)
 	})
 
+	t.Run("defaults_to_verify_full_and_passes_root_cert", func(t *testing.T) {
+		dsn, err := entityGraphDatabaseDSN(map[string]interface{}{"password": "pw"})
+		require.NoError(t, err)
+		assert.Contains(t, dsn, "sslmode=verify-full")
+
+		dsn, err = entityGraphDatabaseDSN(map[string]interface{}{"password": "pw", "sslrootcert": "/etc/ca.pem"})
+		require.NoError(t, err)
+		assert.Contains(t, dsn, "sslrootcert=/etc/ca.pem")
+	})
+
 	t.Run("builds_dsn_from_individual_fields", func(t *testing.T) {
 		dsn, err := entityGraphDatabaseDSN(map[string]interface{}{
 			"host":     "timescaledb-test",
@@ -356,7 +366,7 @@ func TestEntityGraphDatabaseDSN(t *testing.T) {
 			"password": "only-password-set",
 		})
 		require.NoError(t, err)
-		assert.Equal(t, "host=localhost port=5432 dbname=cfgms user=cfgms password=only-password-set sslmode=require", dsn)
+		assert.Equal(t, "host=localhost port=5432 dbname=cfgms user=cfgms password=only-password-set sslmode=verify-full", dsn)
 	})
 
 	t.Run("requires_password_when_no_dsn", func(t *testing.T) {

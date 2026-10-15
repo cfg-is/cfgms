@@ -7,6 +7,7 @@ package syslog
 
 import (
 	"context"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -367,4 +368,23 @@ func BenchmarkSyslogSubscriber_ParseFacility(b *testing.B) {
 		facility := facilities[i%len(facilities)]
 		subscriber.parseFacility(facility)
 	}
+}
+
+// TestSyslogSubscriber_Initialize_EnableTLSFailsClosed: TLS syslog is not
+// implemented, so enable_tls must be rejected rather than silently sent in
+// cleartext.
+func TestSyslogSubscriber_Initialize_EnableTLSFailsClosed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+
+	subscriber := NewSyslogSubscriber()
+	err = subscriber.Initialize(map[string]interface{}{
+		"network":    "tcp",
+		"address":    ln.Addr().String(),
+		"enable_tls": true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported")
+	assert.Nil(t, subscriber.writer)
 }

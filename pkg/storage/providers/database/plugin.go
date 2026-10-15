@@ -14,6 +14,7 @@ import (
 	_ "github.com/lib/pq" // PostgreSQL driver
 
 	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -596,16 +597,32 @@ func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error)
 	database := getStringFromConfig(config, "database", "cfgms")
 	username := getStringFromConfig(config, "username", "cfgms")
 	password := getStringFromConfig(config, "password", "")
-	sslmode := getStringFromConfig(config, "sslmode", "require")
+	sslmode := getStringFromConfig(config, "sslmode", "verify-full")
+	sslrootcert := getStringFromConfig(config, "sslrootcert", "")
 
 	if password == "" {
 		return "", fmt.Errorf("database password is required")
 	}
 
+	warnIfWeakSSLMode(sslmode)
+
 	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
 		host, port, database, username, password, sslmode)
+	if sslrootcert != "" {
+		dsn += " sslrootcert=" + sslrootcert
+	}
 
 	return dsn, nil
+}
+
+// warnIfWeakSSLMode logs one warning naming an explicitly configured sslmode
+// that does not authenticate the server. It never logs the DSN or password.
+func warnIfWeakSSLMode(sslmode string) {
+	switch sslmode {
+	case "disable", "allow", "prefer", "require":
+		logging.NewLogger("warn").Warn("Database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
+			"sslmode", logging.SanitizeLogValue(sslmode))
+	}
 }
 
 // sharedPool returns the *sql.DB for the connection string config resolves to,

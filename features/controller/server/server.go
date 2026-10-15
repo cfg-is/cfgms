@@ -4786,14 +4786,25 @@ func entityGraphDatabaseDSN(storageConfig map[string]interface{}) (string, error
 	database := entityGraphConfigString(storageConfig, "database", "cfgms")
 	username := entityGraphConfigString(storageConfig, "username", "cfgms")
 	password := entityGraphConfigString(storageConfig, "password", "")
-	sslmode := entityGraphConfigString(storageConfig, "sslmode", "require")
+	sslmode := entityGraphConfigString(storageConfig, "sslmode", "verify-full")
+	sslrootcert := entityGraphConfigString(storageConfig, "sslrootcert", "")
 
 	if password == "" {
 		return "", fmt.Errorf("database password is required")
 	}
 
-	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
-		host, port, database, username, password, sslmode), nil
+	switch sslmode {
+	case "disable", "allow", "prefer", "require":
+		logging.NewLogger("warn").Warn("Entity graph database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
+			"sslmode", logging.SanitizeLogValue(sslmode))
+	}
+
+	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		host, port, database, username, password, sslmode)
+	if sslrootcert != "" {
+		dsn += " sslrootcert=" + sslrootcert
+	}
+	return dsn, nil
 }
 
 func entityGraphConfigString(config map[string]interface{}, key, defaultValue string) string {

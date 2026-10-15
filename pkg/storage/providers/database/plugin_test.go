@@ -246,7 +246,16 @@ func TestDatabaseProvider_DSNGeneration(t *testing.T) {
 			config: map[string]interface{}{
 				"password": "testpass",
 			},
-			expected: "host=localhost port=5432 dbname=cfgms user=cfgms password=testpass sslmode=require",
+			expected: "host=localhost port=5432 dbname=cfgms user=cfgms password=testpass sslmode=verify-full",
+			wantErr:  false,
+		},
+		{
+			name: "sslrootcert passes through",
+			config: map[string]interface{}{
+				"password":    "testpass",
+				"sslrootcert": "/etc/cfgms/ca.pem",
+			},
+			expected: "host=localhost port=5432 dbname=cfgms user=cfgms password=testpass sslmode=verify-full sslrootcert=/etc/cfgms/ca.pem",
 			wantErr:  false,
 		},
 	}

@@ -383,7 +383,7 @@ func clearDNAEnv(t *testing.T) {
 	names := []string{
 		"CFGMS_DNA_DATABASE_URL", "CFGMS_DNA_DATABASE_URL_FILE",
 		"CFGMS_DNA_DB_PASSWORD", "CFGMS_DNA_DB_PASSWORD_FILE",
-		"CFGMS_DNA_DB_HOST", "CFGMS_DNA_DB_PORT", "CFGMS_DNA_DB_NAME", "CFGMS_DNA_DB_USER",
+		"CFGMS_DNA_DB_HOST", "CFGMS_DNA_DB_PORT", "CFGMS_DNA_DB_NAME", "CFGMS_DNA_DB_USER", "CFGMS_DNA_DB_SSLMODE", "CFGMS_DNA_DB_SSLROOTCERT",
 	}
 	for _, name := range names {
 		orig, existed := os.LookupEnv(name)
@@ -417,6 +417,28 @@ func TestBuildDNAConnString_PasswordFromFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, dsn, "s3cr3t-from-file", "password must be read from the file, with the trailing newline stripped")
 	assert.NotContains(t, dsn, "\n", "a trailing newline in the file must not leak into the DSN")
+}
+
+// TestBuildDNAConnString_DefaultsToVerifyFull: with no CFGMS_DNA_DB_SSLMODE the
+// DSN authenticates the server, and CFGMS_DNA_DB_SSLROOTCERT passes through.
+func TestBuildDNAConnString_DefaultsToVerifyFull(t *testing.T) {
+	clearDNAEnv(t)
+	require.NoError(t, os.Setenv("CFGMS_DNA_DB_PASSWORD", "pw"))
+
+	dsn, err := buildDNAConnString()
+	require.NoError(t, err)
+	assert.Contains(t, dsn, "sslmode=verify-full")
+	assert.NotContains(t, dsn, "sslrootcert")
+
+	require.NoError(t, os.Setenv("CFGMS_DNA_DB_SSLROOTCERT", "/etc/ca.pem"))
+	dsn, err = buildDNAConnString()
+	require.NoError(t, err)
+	assert.Contains(t, dsn, "sslrootcert=%2Fetc%2Fca.pem")
+
+	require.NoError(t, os.Setenv("CFGMS_DNA_DB_SSLMODE", "disable"))
+	dsn, err = buildDNAConnString()
+	require.NoError(t, err)
+	assert.Contains(t, dsn, "sslmode=disable")
 }
 
 // TestBuildDNAConnString_DirectValueWinsOverFile is a required test: an

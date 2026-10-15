@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -921,11 +922,20 @@ func buildDNAConnString() (string, error) {
 	}
 	sslMode := os.Getenv("CFGMS_DNA_DB_SSLMODE")
 	if sslMode == "" {
-		sslMode = "require"
+		sslMode = "verify-full"
+	}
+	switch sslMode {
+	case "disable", "allow", "prefer", "require":
+		logging.NewLogger("warn").Warn("DNA database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
+			"sslmode", logging.SanitizeLogValue(sslMode))
 	}
 
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		user, password, host, port, dbName, sslMode), nil
+	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		user, password, host, port, dbName, sslMode)
+	if rootCert := os.Getenv("CFGMS_DNA_DB_SSLROOTCERT"); rootCert != "" {
+		connString += "&sslrootcert=" + url.QueryEscape(rootCert)
+	}
+	return connString, nil
 }
 
 // updateStats updates statistics after storing a record
