@@ -2210,3 +2210,63 @@ func TestHandleListTenants_DeviceCount_StewardStoreFailure_Returns500NoLeak(t *t
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "10.0.0.5", "backend error text must not reach the client")
 }
+
+// TestHandleCreateTenant_StorageFailureDoesNotLeak is a REQUIRED test (Issue #5019).
+// tenant.Manager.CreateTenant wraps raw storage errors ("failed to look up parent
+// tenant: %w"); the handler is the disclosure boundary and must return a generic 500
+// while genuine input rejections keep their 400 message.
+func TestHandleCreateTenant_StorageFailureDoesNotLeak(t *testing.T) {
+	post := func(t *testing.T, server *Server, payload map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, _ := json.Marshal(payload)
+		req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.router.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("closed store returns generic 500", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		// A real storage manager that has been closed: every store call fails with
+		// the provider's own error text.
+		closed := pkgtesting.SetupTestStorage(t)
+		closedStore := closed.GetTenantStore()
+		require.NoError(t, closed.Close())
+		_, lookupErr := closedStore.GetTenant(context.Background(), testRootTenantID)
+		require.Error(t, lookupErr, "closed store must fail so the test exercises the storage path")
+		server.tenantManager = tenant.NewManager(tenant.NewStorageAdapter(closedStore), nil)
+
+		w := post(t, server, map[string]string{"id": "leak-probe", "parent_id": testRootTenantID})
+
+		require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.NotContains(t, w.Body.String(), "failed to")
+		assert.NotContains(t, w.Body.String(), lookupErr.Error())
+	})
+
+	t.Run("input rejection keeps its message", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		w := post(t, server, map[string]string{"id": "Team_Root"})
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "invalid explicit tenant ID")
+	})
+
+	t.Run("suspended parent keeps its message", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "susp-parent", ParentID: testRootTenantID})
+		require.NoError(t, err)
+		_, err = server.tenantManager.SuspendTenant(ctx, "susp-parent")
+		require.NoError(t, err)
+
+		w := post(t, server, map[string]string{"id": "susp-child", "parent_id": "susp-parent"})
+
+		require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+		assert.Contains(t, w.Body.String(), "cannot create tenant under a suspended parent")
+	})
+}

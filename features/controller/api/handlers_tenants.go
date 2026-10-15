@@ -475,7 +475,17 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusConflict, "a top-level tenant already exists; specify parent_id", "TOP_LEVEL_TENANT_EXISTS")
 			return
 		}
-		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "CREATE_FAILED")
+		// Only caller-actionable rejection classes carry their text back. Manager.CreateTenant
+		// wraps raw storage errors ("failed to look up parent tenant: %w", "failed to create
+		// tenant: %w"), so anything unrecognised fails closed to a generic 500 and the detail
+		// goes to the server log only.
+		if isTenantInputRejection(err) {
+			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "CREATE_FAILED")
+			return
+		}
+		s.logger.Error("Tenant create failed",
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "internal server error", "INTERNAL_ERROR")
 		return
 	}
 
@@ -707,6 +717,8 @@ var tenantInputRejectionPrefixes = []string{
 	"validation failed: ",
 	"invalid config source metadata: ",
 	"config source validation failed: ",
+	"invalid explicit tenant ID: ",
+	"cannot create tenant under a ",
 }
 
 // isTenantInputRejection reports whether err rejects caller-supplied request data
