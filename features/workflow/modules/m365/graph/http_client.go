@@ -6,15 +6,60 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 )
+
+// NewRateLimitedHTTPClient creates a Graph client with the Microsoft Graph rate
+// limiter and default retry behaviour applied. Caller options are applied after
+// the defaults and may override them. Every M365 module process builds its
+// client through this constructor.
+func NewRateLimitedHTTPClient(options ...ClientOption) *HTTPClient {
+	base := []ClientOption{
+		WithRateLimiter(NewMicrosoftGraphRateLimiter()),
+		WithRetryConfig(DefaultRetryConfig()),
+	}
+	return NewHTTPClient(append(base, options...)...)
+}
+
+// maxRetryAfterSeconds bounds a parsed Retry-After so a hostile or buggy value
+// cannot overflow time.Duration; the wait is still bounded by ctx.
+const maxRetryAfterSeconds = 24 * 60 * 60
+
+// parseRetryAfter converts a Retry-After header (integer seconds or HTTP-date)
+// to a duration. A missing, unparsable or past value yields zero.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		if secs > maxRetryAfterSeconds {
+			secs = maxRetryAfterSeconds
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(value); err == nil {
+		if d := t.Sub(now); d > 0 {
+			if limit := maxRetryAfterSeconds * time.Second; d > limit {
+				d = limit
+			}
+			return d
+		}
+	}
+	return 0
+}
 
 // HTTPClient implements the Client interface using HTTP requests to Microsoft Graph API
 type HTTPClient struct {
@@ -479,24 +524,29 @@ func (c *HTTPClient) findGroupByName(ctx context.Context, token *auth.AccessToke
 
 // makeRequest makes an HTTP request to the Microsoft Graph API with retry logic
 func (c *HTTPClient) makeRequest(ctx context.Context, token *auth.AccessToken, method, endpoint string, requestBody interface{}, responseBody interface{}) error {
-	// Apply rate limiting if configured
-	if c.rateLimiter != nil {
-		if err := c.rateLimiter.Wait(ctx); err != nil {
-			return fmt.Errorf("rate limiter error: %w", err)
-		}
-	}
-
 	// Retry loop
 	var lastErr error
 	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
 		if attempt > 0 {
 			// Calculate delay for retry
 			delay := c.calculateRetryDelay(attempt)
+			// Honour the server's Retry-After when it asks for longer than our backoff
+			var graphErr *GraphError
+			if errors.As(lastErr, &graphErr) && graphErr.RetryAfter > delay {
+				delay = graphErr.RetryAfter
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(delay):
 				// Continue with retry
+			}
+		}
+
+		// Every attempt, including retries, passes through the rate limiter
+		if c.rateLimiter != nil {
+			if err := c.rateLimiter.Wait(ctx); err != nil {
+				return fmt.Errorf("rate limiter error: %w", err)
 			}
 		}
 
@@ -572,7 +622,11 @@ func (c *HTTPClient) doRequest(ctx context.Context, token *auth.AccessToken, met
 
 	// Check for HTTP errors
 	if resp.StatusCode >= 400 {
-		return c.parseErrorResponse(resp.StatusCode, respBody)
+		parsed := c.parseErrorResponse(resp.StatusCode, respBody)
+		if graphErr, ok := parsed.(*GraphError); ok {
+			graphErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+		return parsed
 	}
 
 	// Parse response body if expected

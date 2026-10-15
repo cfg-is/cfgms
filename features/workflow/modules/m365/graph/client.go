@@ -324,6 +324,8 @@ type GraphError struct {
 	Details    []GraphErrorDetail     `json:"details,omitempty"`
 	InnerError map[string]interface{} `json:"innerError,omitempty"`
 	StatusCode int                    `json:"-"`
+	// RetryAfter is the delay requested by the Retry-After response header; zero if absent.
+	RetryAfter time.Duration `json:"-"`
 }
 
 // GraphErrorDetail represents additional error details
