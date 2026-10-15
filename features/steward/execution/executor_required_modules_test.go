@@ -65,6 +65,9 @@ func requiredModuleBytes(t *testing.T) []byte {
 			return
 		}
 		moduleBinPath = filepath.Join(dir, "yaml_module")
+		if goruntime.GOOS == "windows" {
+			moduleBinPath += ".exe"
+		}
 		if out, err := exec.Command("go", "build", "-o", moduleBinPath, "./testdata/yaml_module").CombinedOutput(); err != nil {
 			moduleBuildErr = fmt.Errorf("build yaml_module: %s: %w", out, err)
 		}
@@ -212,13 +215,18 @@ func newRMExecutor(t *testing.T, mode stewardtypes.ModuleTrustMode, installer ex
 // module `used` and a sibling directory resource.
 func rmConfig(t *testing.T, siblingDir string, used string, required ...stewardtypes.RequiredModule) []byte {
 	t.Helper()
+	siblingCfg := map[string]interface{}{
+		"type": "directory", "allowed_base_path": filepath.Dir(siblingDir), "path": siblingDir,
+	}
+	if goruntime.GOOS != "windows" {
+		// NTFS has no Unix permission bits; the directory module rejects them there.
+		siblingCfg["permissions"] = 493
+	}
 	cfg := map[string]interface{}{
 		"steward": map[string]interface{}{"id": "s", "logging": map[string]string{"level": "info"}},
 		"resources": []map[string]interface{}{
 			{"name": "uses-module", "module": used, "config": map[string]interface{}{"key": "value"}},
-			{"name": "sibling", "module": "directory", "config": map[string]interface{}{
-				"type": "directory", "allowed_base_path": filepath.Dir(siblingDir), "path": siblingDir, "permissions": 493,
-			}},
+			{"name": "sibling", "module": "directory", "config": siblingCfg},
 		},
 		"required_modules": required,
 	}
