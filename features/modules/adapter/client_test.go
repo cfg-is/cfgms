@@ -23,11 +23,12 @@ import (
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	featuremodules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/adapter"
+	"github.com/cfgis/cfgms/features/steward/modules/install"
 	"github.com/cfgis/cfgms/features/steward/modules/runtime"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/contract"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // fakeModuleServer is a minimal, hand-written ModuleService implementation
@@ -227,17 +228,7 @@ func shortRuntimeDir(t *testing.T) string {
 // forked module process via the real steward module runtime, not a stub.
 func TestClient_Get_ModuleProcessExited(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortRuntimeDir(t))
-	b := &bundle.Bundle{
-		Manifest: &featuremodules.ModuleMetadata{
-			Name:      "echo",
-			Version:   "0.1.0",
-			Executors: []string{"steward"},
-			Kind:      "steward",
-			Publisher: "test",
-		},
-		ContentHash: "sha256-echo-test-hash",
-		Binaries:    map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: echoModuleBin},
-	}
+	b := installEchoBundle(t)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
 	require.NoError(t, err)
@@ -273,3 +264,25 @@ func (c *testConfigState) ToYAML() ([]byte, error)       { return []byte("key: v
 func (c *testConfigState) FromYAML([]byte) error         { return nil }
 func (c *testConfigState) Validate() error               { return nil }
 func (c *testConfigState) GetManagedFields() []string    { return nil }
+
+// installEchoBundle installs the compiled echo module as a real installation
+// root (protected parent, production bundle writer) and reads it back, so the
+// runtime can resolve and re-verify the binary against the bundle's InstallRoot.
+func installEchoBundle(t *testing.T) *bundle.Bundle {
+	t.Helper()
+	content, err := os.ReadFile(echoModuleBin)
+	require.NoError(t, err)
+	platform := goruntime.GOOS + "-" + goruntime.GOARCH
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Name:          "echo",
+		Publisher:     "test",
+		BinaryContent: map[string][]byte{platform: content},
+	})
+	parent := t.TempDir()
+	require.NoError(t, install.EnsureProtectedDir(parent))
+	root := filepath.Join(parent, "echo")
+	sb.WriteRoot(t, root, bundle.WriteOptions{})
+	b, err := bundle.ReadInstalled(root)
+	require.NoError(t, err)
+	return b
+}

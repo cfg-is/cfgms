@@ -21,7 +21,6 @@ import (
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/steward/modules/runtime"
 	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
-	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
@@ -61,12 +60,7 @@ func TestStrictModeAcceptsBundleSignedByResolvedAdditionalPublisher(t *testing.T
 	vendorPub, vendorPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeBypassBundle(echoModuleBin)
-	b.Manifest.Publisher = "vendor-a"
-	sig := ed25519.Sign(vendorPriv, []byte(b.ContentHash))
-	b.Signatures = []bundle.BundleSignature{
-		{Publisher: "vendor-a", Algorithm: "ed25519", Signature: sig},
-	}
+	b, _ := installTestBundle(t, echoModuleBin, installOpts{publisher: "vendor-a", key: vendorPriv})
 
 	rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, map[string]pkgtrust.PublisherIdentity{
 		"vendor-a": {Name: "vendor-a", PublicKey: []byte(vendorPub), Algorithm: "ed25519"},
@@ -94,11 +88,7 @@ func TestStrictModeRejectsUnresolvableAdditionalPublisher(t *testing.T) {
 	cfgmsPub, cfgmsPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeBypassBundle(echoModuleBin)
-	sig := ed25519.Sign(cfgmsPriv, []byte(b.ContentHash))
-	b.Signatures = []bundle.BundleSignature{
-		{Publisher: "cfgms", Algorithm: "ed25519", Signature: sig},
-	}
+	b, _ := installTestBundle(t, echoModuleBin, installOpts{publisher: "cfgms", key: cfgmsPriv})
 
 	// Registry holds a different name, so "vendor-missing" cannot be resolved.
 	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
@@ -125,12 +115,7 @@ func TestStrictModeUnresolvableAdditionalPublisherPrecedesPublisherNotTrusted(t 
 	_, unknownPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeBypassBundle(echoModuleBin)
-	b.Manifest.Publisher = "unknown-vendor"
-	sig := ed25519.Sign(unknownPriv, []byte(b.ContentHash))
-	b.Signatures = []bundle.BundleSignature{
-		{Publisher: "unknown-vendor", Algorithm: "ed25519", Signature: sig},
-	}
+	b, _ := installTestBundle(t, echoModuleBin, installOpts{publisher: "unknown-vendor", key: unknownPriv})
 
 	rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, nil)
 
@@ -149,7 +134,7 @@ func TestWrongModuleKindPrecedesUnresolvableAdditionalPublisher(t *testing.T) {
 	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeBypassBundle(echoModuleBin)
+	b := makeBypassBundle(t, echoModuleBin)
 	b.Manifest.Kind = "outpost"
 
 	rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, nil)
@@ -180,7 +165,7 @@ func TestNonStrictModesIgnoreUnresolvableAdditionalPublishers(t *testing.T) {
 			require.NoError(t, err)
 
 			rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, nil)
-			b := makeBypassBundle(echoModuleBin)
+			b := makeBypassBundle(t, echoModuleBin)
 
 			handle, err := rt.Start(b, tc.mode, []string{"vendor-missing"})
 			require.NoError(t, err,

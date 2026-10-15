@@ -112,6 +112,11 @@ type Bundle struct {
 	ManifestBytes []byte `yaml:"-" json:"-"`
 	// BinaryContent maps os-arch keys to binary bytes (payload form only).
 	BinaryContent map[string][]byte `yaml:"-" json:"-"`
+	// InstallRoot is the installation root a bundle was read from (ReadInstalled,
+	// ReadInstalledPayload, DiscoverInstalled). It is in-memory only, never
+	// serialized, and empty for a bundle that was not read from disk. The steward
+	// module runtime resolves and re-verifies the binary against it before exec.
+	InstallRoot string `yaml:"-" json:"-"`
 }
 
 const (

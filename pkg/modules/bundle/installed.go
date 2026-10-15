@@ -586,12 +586,54 @@ func readInstalled(root string, opts ReadOptions, mode readMode) (*Bundle, error
 		BinaryDigests: sidecar.Digests,
 		Signatures:    sidecar.Signatures,
 		ContentHash:   hash,
+		InstallRoot:   root,
 	}
 	if withContent {
 		b.ManifestBytes = manifestBytes
 		b.BinaryContent = content
 	}
 	return b, nil
+}
+
+// VerifyInstalled re-checks the installation root at root for platform
+// immediately before the platform's binary is executed. It recomputes the
+// content hash from the manifest bytes and the FULL digest list, requires the
+// root to hold nothing beyond the files the sidecar names, and compares
+// sha256(binary) against the digest recorded under platform's key. The binary is
+// streamed through the hash, never loaded into memory. Any difference returns an
+// error (wrapping ErrContentHashMismatch for a changed binary).
+//
+// The sidecar is unsigned, so this alone only proves the root is self-consistent;
+// use VerifyInstalledPinned to also bind it to a content hash a signature covers.
+func VerifyInstalled(root, platform string) error {
+	return VerifyInstalledPinned(root, platform, "", "")
+}
+
+// VerifyInstalledPinned is VerifyInstalled that additionally requires the
+// recomputed content hash to equal wantContentHash (the value publisher
+// signatures were verified over), so a sidecar and binary rewritten together
+// after the signature check are refused. An empty wantContentHash skips that
+// comparison.
+//
+// The content hash does not cover binary file names, so wantBinaryPath (the
+// root-relative path the caller is about to execute) must equal the path the
+// sidecar currently names for platform; otherwise the verified file would not be
+// the executed one. An empty wantBinaryPath skips that comparison.
+func VerifyInstalledPinned(root, platform, wantContentHash, wantBinaryPath string) error {
+	if platform == "" {
+		return errors.New("verify installed: platform is required")
+	}
+	b, err := readInstalled(root, ReadOptions{Platform: platform}, readHashed)
+	if err != nil {
+		return err
+	}
+	if wantBinaryPath != "" && b.Binaries[platform] != wantBinaryPath {
+		return fmt.Errorf("%w: sidecar no longer names the binary that would be executed", ErrContentHashMismatch)
+	}
+	if wantContentHash != "" && b.ContentHash != wantContentHash {
+		return fmt.Errorf("%w: installed files no longer hash to the verified content hash", ErrContentHashMismatch)
+	}
+	return nil
 }
 
 // listRoot lists root's entries, reading no more than the file limit (plus the

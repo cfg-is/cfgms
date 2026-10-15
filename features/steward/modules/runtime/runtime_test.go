@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,10 +22,12 @@ import (
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	featuremodules "github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/steward/modules/install"
 	"github.com/cfgis/cfgms/features/steward/modules/runtime"
 	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // echoModuleBin is the path to the compiled echo_module binary. It is set by
@@ -97,20 +100,49 @@ func exeSuffix() string {
 	return ""
 }
 
-// makeBypassBundle creates a minimal steward-kind bundle using the echo_module
-// binary. Trust mode bypass is used by tests that focus on lifecycle, not trust.
-func makeBypassBundle(binPath string) *bundle.Bundle {
-	return &bundle.Bundle{
-		Manifest: &featuremodules.ModuleMetadata{
-			Name:      "echo",
-			Version:   "0.1.0",
-			Executors: []string{"steward"},
-			Kind:      "steward",
-			Publisher: "test",
-		},
-		ContentHash: "sha256-echo-test-hash",
-		Binaries:    map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: binPath},
+// installOpts configures installTestBundle.
+type installOpts struct {
+	name      string
+	publisher string
+	key       ed25519.PrivateKey
+}
+
+// installTestBundle installs the module binary at binPath as a real, signed
+// installation root (built and written through the production bundle code, on a
+// protected parent directory) and returns the bundle read back from it plus the
+// root. The bundle therefore carries InstallRoot and a real content hash.
+func installTestBundle(t *testing.T, binPath string, o installOpts) (*bundle.Bundle, string) {
+	t.Helper()
+	content, err := os.ReadFile(binPath)
+	require.NoError(t, err)
+	if o.name == "" {
+		o.name = "echo"
 	}
+	if o.publisher == "" {
+		o.publisher = "test"
+	}
+	platform := goruntime.GOOS + "-" + goruntime.GOARCH
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Name:          o.name,
+		Publisher:     o.publisher,
+		Key:           o.key,
+		BinaryContent: map[string][]byte{platform: content},
+	})
+	parent := t.TempDir()
+	require.NoError(t, install.EnsureProtectedDir(parent))
+	root := filepath.Join(parent, o.name)
+	sb.WriteRoot(t, root, bundle.WriteOptions{})
+	b, err := bundle.ReadInstalled(root)
+	require.NoError(t, err)
+	return b, root
+}
+
+// makeBypassBundle installs a minimal steward-kind bundle around binPath. Trust
+// mode bypass is used by tests that focus on lifecycle, not trust.
+func makeBypassBundle(t *testing.T, binPath string) *bundle.Bundle {
+	t.Helper()
+	b, _ := installTestBundle(t, binPath, installOpts{})
+	return b
 }
 
 // TestEchoModuleLifecycle verifies the full lifecycle:
@@ -119,7 +151,7 @@ func makeBypassBundle(binPath string) *bundle.Bundle {
 //   - Stop() sends Shutdown RPC and the process exits within 10 s
 func TestEchoModuleLifecycle(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(echoModuleBin)
+	b := makeBypassBundle(t, echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
 	require.NoError(t, err)
@@ -150,7 +182,7 @@ func TestEchoModuleLifecycle(t *testing.T) {
 // handshaked with and trusted whatever other server answered there.
 func TestStartFailsFastWhenModuleExitsBeforeListening(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(exitModuleBin)
+	b := makeBypassBundle(t, exitModuleBin)
 
 	start := time.Now()
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -251,7 +283,7 @@ func TestStrictModeRejectsControllerApprovedUnknownPublisher(t *testing.T) {
 // signature verification.
 func TestControllerModePassesUnsignedBundle(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(echoModuleBin)
+	b := makeBypassBundle(t, echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
@@ -262,7 +294,7 @@ func TestControllerModePassesUnsignedBundle(t *testing.T) {
 // signature verification.
 func TestBypassModePassesUnsignedBundle(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(echoModuleBin)
+	b := makeBypassBundle(t, echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
 	require.NoError(t, err)
@@ -273,7 +305,7 @@ func TestBypassModePassesUnsignedBundle(t *testing.T) {
 // handle does not error or panic.
 func TestStopIsIdempotent(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(echoModuleBin)
+	b := makeBypassBundle(t, echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
 	require.NoError(t, err)
@@ -306,15 +338,151 @@ func TestStrictModeAcceptsCFGMSSignedBundle(t *testing.T) {
 	cfgmsPub, cfgmsPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeBypassBundle(echoModuleBin)
-	b.Manifest.Publisher = "cfgms"
-	sig := ed25519.Sign(cfgmsPriv, []byte(b.ContentHash))
-	b.Signatures = []bundle.BundleSignature{
-		{Publisher: "cfgms", Algorithm: "ed25519", Signature: sig},
-	}
+	b, _ := installTestBundle(t, echoModuleBin, installOpts{publisher: "cfgms", key: cfgmsPriv})
 
 	rt := testEnforcerRuntimeWithKey(t, cfgmsPub)
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeStrict, nil)
 	require.NoError(t, err)
 	require.NoError(t, rt.Stop(handle))
+}
+
+// trustCase is one trust mode with a runtime and signing key that satisfies it.
+type trustCase struct {
+	name string
+	mode stewardtypes.ModuleTrustMode
+}
+
+var allTrustModes = []trustCase{
+	{"controller", stewardtypes.ModuleTrustModeController},
+	{"strict", stewardtypes.ModuleTrustModeStrict},
+	{"bypass", stewardtypes.ModuleTrustModeBypass},
+}
+
+// installForMode installs the echo module signed by a CFGMS identity the
+// returned runtime trusts, so the same bundle starts in every trust mode.
+func installForMode(t *testing.T) (*bundle.Bundle, string, *runtime.ModuleRuntime) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	b, root := installTestBundle(t, echoModuleBin, installOpts{publisher: "cfgms", key: priv})
+	return b, root, testEnforcerRuntimeWithKey(t, pub)
+}
+
+// TestStartRefusesBinaryModifiedAfterInstall: a binary that changed between
+// install and Start is never executed, in any trust mode.
+func TestStartRefusesBinaryModifiedAfterInstall(t *testing.T) {
+	for _, tc := range allTrustModes {
+		t.Run(tc.name, func(t *testing.T) {
+			b, root, rt := installForMode(t)
+			bin := filepath.Join(root, b.Binaries[goruntime.GOOS+"-"+goruntime.GOARCH])
+			orig, err := os.ReadFile(bin)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(bin, append(orig, []byte("tampered")...), 0o755))
+
+			h, err := rt.Start(b, tc.mode, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, bundle.ErrContentHashMismatch)
+			assert.Nil(t, h)
+		})
+	}
+}
+
+// TestStartRefusesExtraFileInRoot: padding next to the binary is refused at Start.
+func TestStartRefusesExtraFileInRoot(t *testing.T) {
+	for _, tc := range allTrustModes {
+		t.Run(tc.name, func(t *testing.T) {
+			b, root, rt := installForMode(t)
+			require.NoError(t, os.WriteFile(filepath.Join(root, "extra.dll"), []byte("x"), 0o644))
+
+			h, err := rt.Start(b, tc.mode, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, bundle.ErrUnexpectedEntry)
+			assert.Nil(t, h)
+		})
+	}
+}
+
+// TestStartRefusesSidecarAndBinaryRewrittenTogether: a binary, its digest and the
+// sidecar's content hash rewritten consistently are self-consistent but no longer
+// hash to the value trust verification covered.
+func TestStartRefusesSidecarAndBinaryRewrittenTogether(t *testing.T) {
+	b, root, rt := installForMode(t)
+	platform := goruntime.GOOS + "-" + goruntime.GOARCH
+
+	other := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Name: "echo", Publisher: "cfgms",
+		BinaryContent: map[string][]byte{platform: []byte("replacement binary")},
+	})
+	replacement := filepath.Join(t.TempDir(), "root")
+	other.WriteRoot(t, replacement, bundle.WriteOptions{})
+	for _, name := range []string{b.Binaries[platform], bundle.BundleSidecarFileName, bundle.ManifestFileName} {
+		data, err := os.ReadFile(filepath.Join(replacement, name))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), data, 0o755))
+	}
+
+	h, err := rt.Start(b, stewardtypes.ModuleTrustModeStrict, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, bundle.ErrContentHashMismatch)
+	assert.Nil(t, h)
+}
+
+// TestStartRunsPlatformOnlyInstallOfMultiPlatformBundle: a root holding only the
+// running platform's binary (digests for others recorded) loads and runs; editing
+// the running platform's digest in the sidecar is refused.
+func TestStartRunsPlatformOnlyInstallOfMultiPlatformBundle(t *testing.T) {
+	platform := goruntime.GOOS + "-" + goruntime.GOARCH
+	otherPlatform := "linux-arm64"
+	if platform == otherPlatform {
+		otherPlatform = "linux-amd64"
+	}
+	content, err := os.ReadFile(echoModuleBin)
+	require.NoError(t, err)
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Name:          "multi",
+		Platforms:     []string{platform, otherPlatform},
+		BinaryContent: map[string][]byte{platform: content},
+	})
+	parent := t.TempDir()
+	require.NoError(t, install.EnsureProtectedDir(parent))
+	root := filepath.Join(parent, "multi")
+	sb.WriteRoot(t, root, bundle.WriteOptions{Platform: platform})
+
+	b, err := bundle.ReadInstalled(root)
+	require.NoError(t, err)
+	assert.Contains(t, b.BinaryDigests, otherPlatform)
+	assert.NotContains(t, b.Binaries, otherPlatform)
+
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
+	h, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	require.NoError(t, err)
+	require.NoError(t, rt.Stop(h))
+
+	// Edit the running platform's digest in the sidecar.
+	sidecar := filepath.Join(root, bundle.BundleSidecarFileName)
+	data, err := os.ReadFile(sidecar)
+	require.NoError(t, err)
+	digest := b.BinaryDigests[platform]
+	flipped := "0" + digest[1:]
+	if digest[0] == '0' {
+		flipped = "1" + digest[1:]
+	}
+	require.NoError(t, os.WriteFile(sidecar, []byte(strings.Replace(string(data), digest, flipped, 1)), 0o644))
+
+	_, err = bundle.ReadInstalled(root)
+	require.Error(t, err, "load must refuse a sidecar whose digest for this platform was edited")
+	h, err = rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	require.Error(t, err, "Start must refuse the edited sidecar too")
+	assert.Nil(t, h)
+}
+
+// TestStartRefusesBundleWithoutInstallRoot: a bundle not read from an
+// installation root has nothing to verify.
+func TestStartRefusesBundleWithoutInstallRoot(t *testing.T) {
+	b := makeBypassBundle(t, echoModuleBin)
+	b.InstallRoot = ""
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
+	h, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	require.ErrorIs(t, err, runtime.ErrNoInstallRoot)
+	assert.Nil(t, h)
 }
