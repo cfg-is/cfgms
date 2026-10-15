@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
 )
 
@@ -84,6 +86,13 @@ func newEnrolledImage(t *testing.T) *enrolledImage {
 	require.NoError(t, os.WriteFile(img.serviceDef,
 		[]byte(`ExecStart=launcher run --child-args "--regtoken `+prepareImageTestToken+`"`), 0600))
 	img.svc = &serviceStandIn{definitionPath: img.serviceDef, elevated: true}
+	if runtime.GOOS == "windows" && !service.New("").IsElevated() {
+		// The machine key store refuses an unelevated process (NTE_PERM), and
+		// prepare-image requires elevation, so this run can only reach the file key.
+		saved := removeDeviceKeys
+		removeDeviceKeys = identity.RemoveStoredKey
+		t.Cleanup(func() { removeDeviceKeys = saved })
+	}
 	return img
 }
 
@@ -165,6 +174,57 @@ func TestPrepareImage_NextStartGeneratesDifferentDeviceID(t *testing.T) {
 	id, err := loadIdentity(img.certStoreDir)
 	require.NoError(t, err)
 	assert.Nil(t, id, "no stored identity may survive, so the first start takes the enrollment path")
+}
+
+// recordKeyRemoval wraps the real key removal and records each directory it ran on.
+func recordKeyRemoval(t *testing.T) *[]string {
+	t.Helper()
+	var dirs []string
+	saved := removeDeviceKeys
+	removeDeviceKeys = func(dir string) error {
+		dirs = append(dirs, dir)
+		return saved(dir)
+	}
+	t.Cleanup(func() { removeDeviceKeys = saved })
+	return &dirs
+}
+
+// TestPrepareImage_RemovesHardwareHeldKey covers a steward whose device key is
+// held in a TPM or Secure Enclave: there is no device_identity.enc, yet the key
+// backends must still be told to remove the key, or the next start reloads it.
+func TestPrepareImage_RemovesHardwareHeldKey(t *testing.T) {
+	img := newEnrolledImage(t)
+	require.NoError(t, identity.RemoveStoredKey(img.certStoreDir))
+	calls := recordKeyRemoval(t)
+
+	out, err := img.run(t, prepareImageOptions{Yes: true})
+	require.NoError(t, err)
+	assert.Equal(t, []string{img.certStoreDir}, *calls)
+	assert.Contains(t, out, "TPM or Secure Enclave")
+	id, err := loadIdentity(img.certStoreDir)
+	require.NoError(t, err)
+	assert.Nil(t, id)
+}
+
+func TestPrepareImage_DryRunRemovesNoKey(t *testing.T) {
+	img := newEnrolledImage(t)
+	calls := recordKeyRemoval(t)
+	_, err := img.run(t, prepareImageOptions{DryRun: true})
+	require.NoError(t, err)
+	assert.Empty(t, *calls)
+}
+
+func TestPrepareImage_KeyRemovalFailureRemovesNothingElse(t *testing.T) {
+	img := newEnrolledImage(t)
+	before := listFiles(t, img.certStoreDir)
+	saved := removeDeviceKeys
+	removeDeviceKeys = func(string) error { return errors.New("key store unavailable") }
+	t.Cleanup(func() { removeDeviceKeys = saved })
+
+	_, err := img.run(t, prepareImageOptions{Yes: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "removed 0 of")
+	assert.ElementsMatch(t, before, listFiles(t, img.certStoreDir))
 }
 
 func TestPrepareImage_DryRunRemovesNothing(t *testing.T) {

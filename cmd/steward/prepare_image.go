@@ -44,6 +44,9 @@ type prepareImageOptions struct {
 	Yes          bool
 }
 
+// removeDeviceKeys deletes the device key from every key backend.
+var removeDeviceKeys = identity.RemoveAllStoredKeys
+
 // identityFileNames are the files directly inside the cert store directory that
 // name or authenticate the enrolled identity.
 func identityFileNames() []string {
@@ -174,6 +177,7 @@ func prepareImage(opts prepareImageOptions, svc imageService, in io.Reader, out 
 	for _, p := range plan.remove {
 		_, _ = fmt.Fprintf(out, "  %s\n", p)
 	}
+	_, _ = fmt.Fprintln(out, "  the device key held in a TPM or Secure Enclave, if any")
 	for _, p := range plan.leftInPlace {
 		_, _ = fmt.Fprintf(out, "  left in place (unexpected subdirectory): %s\n", p)
 	}
@@ -198,17 +202,19 @@ func prepareImage(opts prepareImageOptions, svc imageService, in io.Reader, out 
 		return fmt.Errorf("failed to stop the steward service; nothing was removed: %w", err)
 	}
 
+	// Device keys go first, from every backend. A key held in a TPM or Secure
+	// Enclave has no file in the plan, yet left in place it would be reloaded
+	// on the next start and the image would keep this machine's DeviceID.
+	if err := removeDeviceKeys(dir); err != nil {
+		return fmt.Errorf("removed 0 of %d items before failing: %w", len(plan.remove), err)
+	}
 	removed := 0
 	keyPath := filepath.Join(dir, identity.StoredKeyFileName())
 	for _, p := range plan.remove {
-		var err error
-		if p == keyPath {
-			err = identity.RemoveAllStoredKeys(dir)
-		} else {
-			err = removeNoFollow(p)
-		}
-		if err != nil {
-			return fmt.Errorf("removed %d of %d items before failing: %w", removed, len(plan.remove), err)
+		if p != keyPath {
+			if err := removeNoFollow(p); err != nil {
+				return fmt.Errorf("removed %d of %d items before failing: %w", removed, len(plan.remove), err)
+			}
 		}
 		removed++
 	}
