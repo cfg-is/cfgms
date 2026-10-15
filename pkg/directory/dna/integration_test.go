@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fleetstorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -311,8 +312,7 @@ func TestEndToEndDriftScenario(t *testing.T) {
 }
 
 // durationPercentile returns the p-th percentile (0..1) of durations. The
-// scalability assertion compares the median (p=0.5) of each half; p95 is
-// reported via t.Logf only.
+// scalability check logs the median (p=0.5) of each half's batch costs.
 func durationPercentile(durations []time.Duration, p float64) time.Duration {
 	if len(durations) == 0 {
 		return 0
@@ -322,6 +322,137 @@ func durationPercentile(durations []time.Duration, p float64) time.Duration {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	idx := int(p * float64(len(sorted)-1))
 	return sorted[idx]
+}
+
+// writeBatchSize is the number of writes timed as one sample. Timing a batch
+// instead of a single write keeps each sample far above the clock tick: CI's
+// Windows runners have been observed with ~15.6ms timer granularity, where a
+// single fast write reads exactly 0s (Issue #4931).
+const writeBatchSize = 50
+
+// maxWriteGrowth bounds how much more a write may cost late in a run than its
+// control (see measureWriteGrowth). Without growth the measured ratio is
+// 0.9-1.15 on a Windows host, with and without -race.
+const maxWriteGrowth = 8
+
+// writeGrowth holds per-batch write costs from measureWriteGrowth.
+type writeGrowth struct {
+	storedCount int
+	// main[k] and control[k] are the per-write cost of the k-th main batch and
+	// of the control batch timed right after it.
+	main    []time.Duration
+	control []time.Duration
+}
+
+// measureWriteGrowth writes items through store in batches of writeBatchSize.
+// Right after each batch it writes a control batch of the same size into a
+// fresh store from newControl, so the control always runs at the same small
+// dataset size while the main store grows.
+//
+// The property under test is that the cost of a single write does not grow as
+// the dataset grows: a per-write cost that climbs with table size (an
+// unindexed version lookup, a full-table dedup scan) is the scalability
+// regression this test exists to catch. Wall-clock time cannot show it on its
+// own. This package runs inside `go test -race ./...`, where package binaries
+// compete for the machine, and a shared CI runner can slow down for a whole
+// phase of a run. On 2026-10-14 a native Windows runner wrote the first half of
+// the dataset at a median of 3.3ms per write and the second half at 26.8ms. The
+// same test on a quiet Windows host measures 3.1ms and 3.3ms, and doubling the
+// dataset leaves the per-write cost unchanged, so that whole second half ran
+// slower, not each write growing with n (Issue #5001). The control batch is
+// timed in the same phase as the main batch next to it, so a slowdown inflates
+// both and cancels out of their ratio, while growth with n raises only the main
+// store's cost.
+func measureWriteGrowth(t *testing.T, store *DirectoryDNAStorageAdapter, newControl func() *DirectoryDNAStorageAdapter, items []*DirectoryDNA) writeGrowth {
+	t.Helper()
+	ctx := context.Background()
+	controlItems := items[:min(writeBatchSize, len(items))]
+
+	// timeBatch returns the per-write cost of the successful writes, or 0 when
+	// none succeeded. After timing, it checkpoints the store's write-ahead log.
+	// The main store would otherwise reach SQLite's automatic checkpoint after a
+	// few hundred writes and pay for it inside timed writes from then on, while
+	// a 50-write control never does. On a CI runner with slow disk flushes that
+	// alone made main writes 13x their control at every dataset size. Checkpoint
+	// cost depends on the pages written since the last one, not on n, so taking
+	// it outside the timing in both stores hides no growth with n.
+	timeBatch := func(s *DirectoryDNAStorageAdapter, batch []*DirectoryDNA) (time.Duration, int) {
+		ok := 0
+		start := time.Now()
+		for _, dna := range batch {
+			if err := s.StoreDirectoryDNA(ctx, dna); err == nil {
+				ok++
+			}
+		}
+		elapsed := time.Since(start)
+		require.NoError(t, s.backend.Flush())
+		if ok == 0 {
+			return 0, 0
+		}
+		return elapsed / time.Duration(ok), ok
+	}
+
+	var g writeGrowth
+	for i := 0; i < len(items); i += writeBatchSize {
+		mainCost, ok := timeBatch(store, items[i:min(i+writeBatchSize, len(items))])
+		g.storedCount += ok
+		control := newControl()
+		controlCost, _ := timeBatch(control, controlItems)
+		if mainCost > 0 && controlCost > 0 {
+			g.main = append(g.main, mainCost)
+			g.control = append(g.control, controlCost)
+		}
+	}
+	return g
+}
+
+// ratios returns main/control for each batch.
+func (g writeGrowth) ratios() []float64 {
+	r := make([]float64, len(g.main))
+	for k := range g.main {
+		r[k] = float64(g.main[k]) / float64(g.control[k])
+	}
+	return r
+}
+
+func medianFloat(v []float64) float64 {
+	sorted := append([]float64(nil), v...)
+	sort.Float64s(sorted)
+	return sorted[(len(sorted)-1)/2]
+}
+
+// check fails when writes late in the run cost more than maxWriteGrowth times
+// their control, or grew more than maxWriteGrowth times relative to the early
+// half of the run. Medians are used, so a few outlier batches (a disk stall, a
+// GC pause, a slowdown that starts between a batch and its control) cannot trip
+// it; a per-write cost that depends on n shifts every late batch.
+func (g writeGrowth) check() error {
+	if len(g.main) < 4 {
+		return fmt.Errorf("only %d timed batches; need at least 4", len(g.main))
+	}
+	r := g.ratios()
+	half := len(r) / 2
+	early, late := medianFloat(r[:half]), medianFloat(r[half:])
+	if late >= maxWriteGrowth {
+		return fmt.Errorf("late writes cost %.1fx a write at fixed dataset size (bound %dx)", late, maxWriteGrowth)
+	}
+	if late >= maxWriteGrowth*early {
+		return fmt.Errorf("late/control ratio %.2f is %.1fx the early ratio %.2f (bound %dx)", late, late/early, early, maxWriteGrowth)
+	}
+	return nil
+}
+
+func (g writeGrowth) log(t *testing.T, label string) {
+	t.Helper()
+	if len(g.main) < 2 {
+		return
+	}
+	r := g.ratios()
+	half := len(r) / 2
+	t.Logf("[%s] early: main median=%v control median=%v ratio median=%.2f (batches=%d)",
+		label, durationPercentile(g.main[:half], 0.5), durationPercentile(g.control[:half], 0.5), medianFloat(r[:half]), half)
+	t.Logf("[%s] late:  main median=%v control median=%v ratio median=%.2f (batches=%d)",
+		label, durationPercentile(g.main[half:], 0.5), durationPercentile(g.control[half:], 0.5), medianFloat(r[half:]), len(r)-half)
 }
 
 // runLargeOrganizationSimulation exercises the scalability scenario at a given
@@ -378,101 +509,13 @@ func runLargeOrganizationSimulation(t *testing.T, scale int) {
 	// Should complete within reasonable time
 	assert.Less(t, collectionDuration, 30*time.Second, "Collection took too long for large dataset")
 
-	// Test storage scaling.
-	//
-	// The property under test is that the cost of a single write does not grow
-	// as the dataset grows: a per-write cost that climbs with table size (an
-	// unindexed version lookup, a full-table dedup scan) is the scalability
-	// regression this test exists to catch. That is asserted by comparing an
-	// early cohort of writes against a late cohort of the same run.
-	//
-	// A total wall-clock ceiling cannot express it. This package runs inside
-	// `go test -race ./...`, where up to NumCPU package binaries compete for the
-	// machine: these same writes measured 6.16s for the subtest on an idle
-	// 16-core machine and 1m13s during a full-suite run, so an absolute ceiling
-	// records how much spare CPU the run had, not how the storage path behaved.
-	// Contention inflates both cohorts, so the comparison between them survives
-	// it while still failing on real per-write growth.
-	//
-	// Each cohort's assertion is based on a single block spanning its writes,
-	// not per write. A per-write measurement collapses on a coarse wall clock:
-	// CI's Windows runners have been observed with ~15.6ms timer granularity,
-	// so an individual fast write reads exactly 0s, which starved a per-write
-	// minimum (the earlier p1-based version of this comparison) down to zero
-	// and tripped the "no measurable cost" guard below. A block spanning
-	// hundreds of writes accumulates real elapsed time well past one tick
-	// regardless of any single write's resolution, so the average per-write
-	// cost derived from it stays meaningful on any clock. The median growth
-	// assertion (Issues #4239, #4552) is driven by per-batch average write costs
-	// (batches of 50 writes) rather than single-write timings, so every sample is
-	// well above the clock tick (Issue #4931); the whole-cohort block average is
-	// logged but not asserted.
-	half := len(allDNA) / 2
-	firstHalf := allDNA[:half]
-	secondHalf := allDNA[half:]
+	// Test storage scaling: the cost of a single write must not grow with the
+	// number of objects already stored (see measureWriteGrowth).
+	growth := measureWriteGrowth(t, storage, func() *DirectoryDNAStorageAdapter { return newDirectoryStorageAdapter(t) }, allDNA)
 
-	// perWrite holds one entry per batch of writeBatchSize writes: the batch's
-	// elapsed time divided by its successful writes. Timing a batch instead of a
-	// single write keeps each sample far above the clock tick, so a median of
-	// samples cannot collapse to 0s on a coarse clock (Issue #4931).
-	const writeBatchSize = 50
-	storeCohort := func(items []*DirectoryDNA) (successCount int, blockDuration time.Duration, perWrite []time.Duration) {
-		perWrite = make([]time.Duration, 0, len(items)/writeBatchSize+1)
-		start := time.Now()
-		for i := 0; i < len(items); i += writeBatchSize {
-			end := min(i+writeBatchSize, len(items))
-			batchOK := 0
-			batchStart := time.Now()
-			for _, dna := range items[i:end] {
-				if err := storage.StoreDirectoryDNA(ctx, dna); err == nil {
-					batchOK++
-				}
-			}
-			batchDuration := time.Since(batchStart)
-			if batchOK > 0 {
-				successCount += batchOK
-				perWrite = append(perWrite, batchDuration/time.Duration(batchOK))
-			}
-		}
-		return successCount, time.Since(start), perWrite
-	}
-
-	firstCount, firstDuration, firstPerWrite := storeCohort(firstHalf)
-	secondCount, secondDuration, secondPerWrite := storeCohort(secondHalf)
-	storedCount := firstCount + secondCount
-
-	assert.Greater(t, storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
-	require.GreaterOrEqual(t, firstCount, 100,
-		"need enough successful writes in the early cohort to average")
-	require.GreaterOrEqual(t, secondCount, 100,
-		"need enough successful writes in the late cohort to average")
-
-	// Compare the median per-write cost of each cohort. The bound is set at 8x:
-	// measured on this machine (16 cores, -race) with 24 CPU burners running for
-	// the whole subtest, load arriving mid-run produced an idle first half against
-	// a saturated second half at a ratio of 3.3x, so 8x leaves headroom over
-	// observed contention noise while still failing the order-of-magnitude
-	// per-write growth that a scan-per-write regression produces at this dataset
-	// size.
-	earlyPerWrite := firstDuration / time.Duration(firstCount)
-	latePerWrite := secondDuration / time.Duration(secondCount)
-	require.Positive(t, earlyPerWrite, "no measurable per-write cost to compare against")
-
-	t.Logf("[scale=%dx, n=%d] first-half per-write:  block-avg=%v median=%v p95=%v (writes=%d)",
-		scale, len(allDNA), earlyPerWrite, durationPercentile(firstPerWrite, 0.5), durationPercentile(firstPerWrite, 0.95), firstCount)
-	t.Logf("[scale=%dx, n=%d] second-half per-write: block-avg=%v median=%v p95=%v (writes=%d)",
-		scale, len(allDNA), latePerWrite, durationPercentile(secondPerWrite, 0.5), durationPercentile(secondPerWrite, 0.95), secondCount)
-
-	// Assert on the median of each half, not the block average: a handful of
-	// outlier writes (disk stall, GC pause on a 2-vCPU runner) move the mean by
-	// 10x while the distribution does not grow (Issue #4552). A scan-per-write
-	// regression shifts every write, so it moves the median.
-	earlyMedian := durationPercentile(firstPerWrite, 0.5)
-	lateMedian := durationPercentile(secondPerWrite, 0.5)
-	require.Positive(t, earlyMedian, "no measurable median per-write cost to compare against")
-	assert.Less(t, lateMedian, 8*earlyMedian,
-		"per-write cost grew with dataset size: first-half median %v, second-half median %v",
-		earlyMedian, lateMedian)
+	assert.Greater(t, growth.storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
+	growth.log(t, fmt.Sprintf("scale=%dx, n=%d", scale, len(allDNA)))
+	assert.NoError(t, growth.check(), "per-write cost grew with dataset size")
 
 	// Test query performance
 	start = time.Now()
@@ -500,6 +543,101 @@ func TestScalabilityScenario(t *testing.T) {
 	t.Run("large organization simulation 2x", func(t *testing.T) {
 		runLargeOrganizationSimulation(t, 2)
 	})
+}
+
+// scanningBackend reads back every record stored so far before each write: a
+// real O(n) scan on the real SQLite backend, the shape of a dedup-by-scan
+// regression in the write path.
+type scanningBackend struct {
+	fleetstorage.Backend
+	stored []fleetstorage.DNARecord
+}
+
+func (b *scanningBackend) scan(ctx context.Context) error {
+	for _, r := range b.stored {
+		if _, err := b.GetRecord(ctx, r.ContentHash, r.ShardID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *scanningBackend) StoreRecord(ctx context.Context, record *fleetstorage.DNARecord, data []byte) error {
+	if err := b.scan(ctx); err != nil {
+		return err
+	}
+	if err := b.Backend.StoreRecord(ctx, record, data); err != nil {
+		return err
+	}
+	b.stored = append(b.stored, fleetstorage.DNARecord{ContentHash: record.ContentHash, ShardID: record.ShardID})
+	return nil
+}
+
+func (b *scanningBackend) StoreReference(ctx context.Context, record *fleetstorage.DNARecord) error {
+	if err := b.scan(ctx); err != nil {
+		return err
+	}
+	return b.Backend.StoreReference(ctx, record)
+}
+
+// organizationDNA collects DNA for a synthetic organization of n users.
+func organizationDNA(t *testing.T, n int) []*DirectoryDNA {
+	t.Helper()
+	provider := NewMockDirectoryProvider()
+	for i := 0; i < n; i++ {
+		userID := fmt.Sprintf("user%04d", i)
+		provider.AddUser(createTestUser(userID, "User"+userID))
+	}
+	allDNA, err := NewDirectoryDNACollector(provider, logging.NewNoopLogger()).CollectAll(context.Background())
+	require.NoError(t, err)
+	require.Len(t, allDNA, n)
+	return allDNA
+}
+
+// TestWriteGrowthCheck_DetectsPerWriteScan proves the scalability check fails a
+// write path that does O(n) work per write, on whatever machine runs it.
+func TestWriteGrowthCheck_DetectsPerWriteScan(t *testing.T) {
+	st := newDirectoryStorage(t)
+	store := NewDirectoryDNAStorageAdapter(&scanningBackend{Backend: st.backend}, st.compressor, st.indexer, st.logger)
+	g := measureWriteGrowth(t, store, func() *DirectoryDNAStorageAdapter { return newDirectoryStorageAdapter(t) }, organizationDNA(t, 400))
+	g.log(t, "O(n) scan per write")
+	assert.Error(t, g.check(), "a write path that scans every stored record must fail the growth check")
+}
+
+// TestWriteGrowthCheck_IgnoresUniformSlowdown feeds the check timings in which
+// the whole second half of the run is 8x slower, as observed on a CI runner on
+// 2026-10-14, and timings in which per-write cost grows with n.
+func TestWriteGrowthCheck_IgnoresUniformSlowdown(t *testing.T) {
+	const batches = 24
+	ms := func(f float64) time.Duration { return time.Duration(f * float64(time.Millisecond)) }
+
+	var slow writeGrowth
+	for k := 0; k < batches; k++ {
+		factor := 1.0
+		if k >= batches/2 {
+			factor = 8
+		}
+		slow.main = append(slow.main, ms(3.3*factor))
+		slow.control = append(slow.control, ms(3.1*factor))
+	}
+	assert.NoError(t, slow.check(), "a uniformly slower phase is not growth with n")
+
+	var linear writeGrowth
+	for k := 0; k < batches; k++ {
+		n := float64((k + 1) * writeBatchSize)
+		linear.main = append(linear.main, ms(3+0.03*n)) // 30us of work per stored object
+		linear.control = append(linear.control, ms(3))
+	}
+	assert.Error(t, linear.check(), "per-write cost proportional to n must fail")
+
+	var flat writeGrowth
+	for k := 0; k < batches; k++ {
+		flat.main = append(flat.main, ms(3.3))
+		flat.control = append(flat.control, ms(3.1))
+	}
+	assert.NoError(t, flat.check())
+
+	assert.Error(t, writeGrowth{main: flat.main[:3], control: flat.control[:3]}.check(), "too few batches to judge")
 }
 
 func TestMultiTenantScenario(t *testing.T) {
