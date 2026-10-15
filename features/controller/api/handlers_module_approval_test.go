@@ -4,8 +4,6 @@ package api
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,15 +13,14 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // ---- Test helpers -----------------------------------------------------------
@@ -43,31 +40,9 @@ func makeTestApprovalWorkflow(t *testing.T, c *cache.ModuleCache) *approval.Appr
 // makePendingBundle stores a bundle in pending state in the cache and returns its address.
 func makePendingBundle(t *testing.T, c *cache.ModuleCache, publisher, name, version string) bundle.ContentAddress {
 	t.Helper()
-	_, privKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	meta := &modules.ModuleMetadata{
-		Name:      name,
-		Version:   version,
-		Publisher: publisher,
-		Executors: []string{"steward"},
-	}
-	binaries := map[string][]byte{"linux-amd64": []byte("fake-binary-" + name)}
-	manifestBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-
-	contentHash, err := bundle.ComputeContentHash(binaries, manifestBytes)
-	require.NoError(t, err)
-
-	sig := ed25519.Sign(privKey, []byte(contentHash))
-	b := &bundle.Bundle{
-		Manifest: meta,
-		Binaries: map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures: []bundle.BundleSignature{
-			{Publisher: publisher, Algorithm: "ed25519", Signature: sig},
-		},
-		ContentHash: contentHash,
-	}
+	b := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher: publisher, Name: name, Version: version, Platforms: []string{"linux-amd64"},
+	}).Bundle
 
 	require.NoError(t, c.Put(b))
 	return b.ContentAddress()

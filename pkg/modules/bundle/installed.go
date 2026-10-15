@@ -394,7 +394,7 @@ type ReadOptions struct {
 // relative — not resolved against root. A caller that needs to execute a binary
 // resolves it itself via InstalledBinaryPath(root, ...).
 func ReadInstalled(root string) (*Bundle, error) {
-	return readInstalled(root, ReadOptions{Platform: ownPlatformKey()}, false)
+	return readInstalled(root, ReadOptions{Platform: ownPlatformKey()}, readHashed)
 }
 
 // ReadInstalledPayload reads the installation root at root into the payload
@@ -404,10 +404,35 @@ func ReadInstalled(root string) (*Bundle, error) {
 // files the sidecar names is refused unless opts.IgnoreNames allows it as a
 // real directory. All of ReadInstalled's trust caveats apply.
 func ReadInstalledPayload(root string, opts ReadOptions) (*Bundle, error) {
-	return readInstalled(root, opts, true)
+	return readInstalled(root, opts, readPayload)
 }
 
-func readInstalled(root string, opts ReadOptions, withContent bool) (*Bundle, error) {
+// ReadInstalledMetadata reads the installation root at root in full mode
+// without reading any binary bytes: the manifest, the sidecar and the root's
+// layout are checked and the content hash is recomputed from the manifest bytes
+// and the digest list, but the binaries are only stat-ed, never opened. The
+// result carries no payload. Because no binary is hashed, it proves the
+// metadata is self-consistent and nothing about the binaries — use
+// ReadInstalledPayload for that. All of ReadInstalled's trust caveats apply.
+func ReadInstalledMetadata(root string, opts ReadOptions) (*Bundle, error) {
+	opts.Platform = ""
+	return readInstalled(root, opts, readMetadataOnly)
+}
+
+// readMode selects how much of an installation root readInstalled reads.
+type readMode int
+
+const (
+	// readHashed hashes each binary through a stream without keeping its bytes.
+	readHashed readMode = iota
+	// readPayload reads and keeps each binary's bytes.
+	readPayload
+	// readMetadataOnly opens no binary.
+	readMetadataOnly
+)
+
+func readInstalled(root string, opts ReadOptions, mode readMode) (*Bundle, error) {
+	withContent := mode == readPayload
 	if opts.Platform != "" && !ValidPlatformKey(opts.Platform) {
 		return nil, fmt.Errorf("read installed: platform %q is not an allowed os-arch key", opts.Platform)
 	}
@@ -523,6 +548,9 @@ func readInstalled(root string, opts ReadOptions, withContent bool) (*Bundle, er
 		content = make(map[string][]byte, len(toRead))
 	}
 	for _, key := range toRead {
+		if mode == readMetadataOnly {
+			break
+		}
 		path := filepath.Join(root, sidecar.Binaries[key])
 		var got [32]byte
 		if withContent {

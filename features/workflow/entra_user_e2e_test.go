@@ -5,8 +5,6 @@ package workflow
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"os"
 	"os/exec"
 	goruntime "runtime"
@@ -14,14 +12,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
-	featuremodules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/workflow/runtime"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	"github.com/cfgis/cfgms/pkg/modules/bundle"
 )
 
 // [REQUIRED TEST] Issue #4325: with the m365-entra-user bundle published and
@@ -47,36 +42,9 @@ func TestWorkflowModuleFactory_IntegrationWithEntraUserModule(t *testing.T) {
 		t.Fatalf("failed to build m365-entra-user module binary: %s: %v", out, err)
 	}
 
-	binBytes, err := os.ReadFile(bin) //#nosec G304 -- bin is a path this test just built under t.TempDir()
-	require.NoError(t, err)
-
-	meta := &featuremodules.ModuleMetadata{
-		Name:      "m365-entra-user",
-		Version:   "0.1.0",
-		Publisher: "cfgms",
-		Executors: []string{"controller"},
-		Kind:      "workflow",
-	}
-	manifestBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-
-	osArch := goruntime.GOOS + "-" + goruntime.GOARCH
-	contentHash, err := bundle.ComputeContentHash(map[string][]byte{osArch: binBytes}, manifestBytes)
-	require.NoError(t, err)
-
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	sig := ed25519.Sign(privKey, []byte(contentHash))
-	_ = pubKey // the cache layer under test here does not verify signatures; captured for documentation only.
-
-	b := &bundle.Bundle{
-		Manifest:    meta,
-		Binaries:    map[string]string{osArch: bin},
-		ContentHash: contentHash,
-		Signatures: []bundle.BundleSignature{
-			{Publisher: "cfgms", Algorithm: "ed25519", Signature: sig},
-		},
-	}
+	b := newControllerBundle(t, "m365-entra-user", "cfgms", "0.1.0", bin, nil)
+	require.Len(t, b.Signatures, 1)
+	sig := b.Signatures[0].Signature
 
 	cacheDir := t.TempDir()
 	c, err := cache.New(cacheDir)

@@ -19,10 +19,10 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -152,17 +152,10 @@ func TestWireClusterModuleApprovalStore_NoStoreAvailableIsNoop(t *testing.T) {
 	}
 }
 
-func makeWiringTestBundle(t *testing.T, publisher, name, version, hash string) *bundle.Bundle {
+func makeWiringTestBundle(t *testing.T, publisher, name, version, tag string) *bundle.Bundle {
 	t.Helper()
-	return &bundle.Bundle{
-		Manifest: &modules.ModuleMetadata{
-			Name:      name,
-			Version:   version,
-			Publisher: publisher,
-			Executors: []string{"steward"},
-		},
-		Binaries:    map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures:  []bundle.BundleSignature{{Publisher: publisher, Algorithm: "ed25519", Signature: make([]byte, 64)}},
-		ContentHash: hash,
-	}
+	return testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher: publisher, Name: name, Version: version, Platforms: []string{"linux-amd64"},
+		BinaryContent: map[string][]byte{"linux-amd64": []byte("binary " + tag)},
+	}).Bundle
 }

@@ -5,7 +5,6 @@ package controller
 import (
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -25,14 +24,13 @@ import (
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	cfgapi "github.com/cfgis/cfgms/features/controller/api"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // seedModuleBundle stores a real, signed bundle in c and returns its address.
@@ -40,31 +38,9 @@ import (
 // this package cannot import that test-only helper, so the construction is duplicated.
 func seedModuleBundle(t *testing.T, c *cache.ModuleCache, publisher, name, version string) bundle.ContentAddress {
 	t.Helper()
-	_, privKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	meta := &modules.ModuleMetadata{
-		Name:      name,
-		Version:   version,
-		Publisher: publisher,
-		Executors: []string{"steward"},
-	}
-	binaries := map[string][]byte{"linux-amd64": []byte("fake-binary-" + name)}
-	manifestBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-
-	contentHash, err := bundle.ComputeContentHash(binaries, manifestBytes)
-	require.NoError(t, err)
-
-	sig := ed25519.Sign(privKey, []byte(contentHash))
-	b := &bundle.Bundle{
-		Manifest: meta,
-		Binaries: map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures: []bundle.BundleSignature{
-			{Publisher: publisher, Algorithm: "ed25519", Signature: sig},
-		},
-		ContentHash: contentHash,
-	}
+	b := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher: publisher, Name: name, Version: version, Platforms: []string{"linux-amd64"},
+	}).Bundle
 
 	require.NoError(t, c.Put(b))
 	return b.ContentAddress()

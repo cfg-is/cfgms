@@ -17,6 +17,7 @@ import (
 
 	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // installBundle writes a bundle's manifest and binaries to a fresh directory and
@@ -516,4 +517,31 @@ func digestsOf(binaries map[string][]byte) map[string]string {
 		out[k] = hex.EncodeToString(sum[:])
 	}
 	return out
+}
+
+// ReadInstalledMetadata returns the metadata of a full root without opening any
+// binary: an altered binary does not fail it, an altered manifest does.
+func TestReadInstalledMetadata_ReadsNoBinaryBytes(t *testing.T) {
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{Platforms: []string{"linux-amd64", "windows-amd64"}})
+	root := filepath.Join(t.TempDir(), "root")
+	sb.WriteRoot(t, root, bundle.WriteOptions{})
+
+	got, err := bundle.ReadInstalledMetadata(root, bundle.ReadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, sb.ContentHash, got.ContentHash)
+	assert.Equal(t, sb.BinaryDigests, got.BinaryDigests)
+	assert.Equal(t, sb.Signatures, got.Signatures)
+	assert.Len(t, got.Binaries, 2)
+	assert.Empty(t, got.BinaryContent)
+	assert.Empty(t, got.ManifestBytes)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, sb.Binaries["linux-amd64"]), []byte("altered"), 0o755))
+	_, err = bundle.ReadInstalledMetadata(root, bundle.ReadOptions{})
+	require.NoError(t, err, "metadata reads never open a binary")
+	_, err = bundle.ReadInstalledPayload(root, bundle.ReadOptions{})
+	assert.ErrorIs(t, err, bundle.ErrContentHashMismatch)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, bundle.ManifestFileName), []byte("name: x\n"), 0o644))
+	_, err = bundle.ReadInstalledMetadata(root, bundle.ReadOptions{})
+	assert.Error(t, err)
 }

@@ -10,14 +10,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // testKeys holds an Ed25519 key pair for a named publisher.
@@ -34,31 +33,17 @@ func generateKeys(t *testing.T, publisher string) testKeys {
 	return testKeys{publisher: publisher, pubKey: pubKey, privKey: privKey}
 }
 
-// makeSignedBundle creates a Bundle with a valid Ed25519 signature for the given publisher.
+// makeSignedBundle creates a payload Bundle signed by keys through the
+// production assemble/sign path.
 func makeSignedBundle(t *testing.T, keys testKeys, name, version string) *bundle.Bundle {
 	t.Helper()
-	meta := &modules.ModuleMetadata{
+	return testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher: keys.publisher,
 		Name:      name,
 		Version:   version,
-		Publisher: keys.publisher,
-		Executors: []string{"steward"},
-	}
-	binaries := map[string][]byte{"linux-amd64": []byte("fake-binary-content")}
-	manifestBytes, err := yaml.Marshal(meta)
-	require.NoError(t, err)
-
-	contentHash, err := bundle.ComputeContentHash(binaries, manifestBytes)
-	require.NoError(t, err)
-
-	sig := ed25519.Sign(keys.privKey, []byte(contentHash))
-	return &bundle.Bundle{
-		Manifest: meta,
-		Binaries: map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures: []bundle.BundleSignature{
-			{Publisher: keys.publisher, Algorithm: "ed25519", Signature: sig},
-		},
-		ContentHash: contentHash,
-	}
+		Platforms: []string{"linux-amd64"},
+		Key:       keys.privKey,
+	}).Bundle
 }
 
 func makeWorkflow(t *testing.T) (*approval.ApprovalWorkflow, *cache.ModuleCache) {
@@ -199,21 +184,17 @@ func TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, approval.AutoApprove, decision)
 
-	forged := &bundle.Bundle{
-		Manifest: &modules.ModuleMetadata{
-			Name:      "not-hyperv",
-			Version:   genuine.Manifest.Version,
-			Publisher: genuine.Manifest.Publisher,
-			Executors: []string{"steward"},
-		},
-		Binaries:    genuine.Binaries,
-		Signatures:  genuine.Signatures,
-		ContentHash: genuine.ContentHash,
-	}
+	// The forged bundle carries the genuine bundle's hash, signatures and
+	// payload but claims another module name.
+	forgedMeta := *genuine.Manifest
+	forgedMeta.Name = "not-hyperv"
+	forged := *genuine
+	forged.Manifest = &forgedMeta
 
-	_, err = wf.EvaluateAndStore(forged, store)
+	// The cache recomputes the hash from the manifest bytes, so the claimed
+	// identity cannot be bound to the replayed hash.
+	_, err = wf.EvaluateAndStore(&forged, store)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, cache.ErrContentHashIdentityConflict)
 
 	// The forged identity must never have been recorded as approved.
 	_, statusErr := c.GetApprovalStatus(forged.ContentAddress())
@@ -240,11 +221,11 @@ func TestApprovalWorkflow_EvaluateAndStore_QueueForReview(t *testing.T) {
 func TestApprovalWorkflow_EvaluateAndStore_Reject(t *testing.T) {
 	wf, c := makeWorkflow(t)
 	keys := generateKeys(t, "cfgms")
-	b := makeSignedBundle(t, keys, "hyperv", "0.2.1")
 	store := makeTrustStore(keys)
 
-	// Tamper the bundle.
-	b.ContentHash = "tampered"
+	// A well-formed payload signed by a key the trust store does not hold for
+	// this publisher: it verifies as a bundle but not as a trusted signature.
+	b := makeSignedBundle(t, generateKeys(t, "cfgms"), "hyperv", "0.2.1")
 
 	decision, err := wf.EvaluateAndStore(b, store)
 	require.NoError(t, err)
@@ -481,4 +462,26 @@ func TestApprovalWorkflow_EvaluateAndStore_ReportsExistingApproval(t *testing.T)
 	status, err := c.GetApprovalStatus(addr)
 	require.NoError(t, err)
 	assert.Equal(t, cache.ApprovalStatusApproved, status)
+}
+
+// [REQUIRED TEST] Fixture provenance: a bundle built by the test builder is
+// ingested through the real EvaluateAndStore; the stored signatures are
+// byte-equal to the publisher's and still verify.
+func TestApprovalWorkflow_EvaluateAndStore_SignaturesStoredVerbatim(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	store := makeTrustStore(keys)
+	b := makeSignedBundle(t, keys, "hyperv", "0.2.1")
+	want := append([]bundle.BundleSignature(nil), b.Signatures...)
+
+	decision, err := wf.EvaluateAndStore(b, store)
+	require.NoError(t, err)
+	assert.Equal(t, approval.AutoApprove, decision)
+
+	got, err := c.GetPayload(b.ContentAddress(), "")
+	require.NoError(t, err)
+	require.Len(t, got.Signatures, 1)
+	assert.Equal(t, want, got.Signatures)
+	assert.Equal(t, want[0].Signature, got.Signatures[0].Signature)
+	require.NoError(t, trust.VerifyBundleSignature(got, got.Signatures[0], store))
 }

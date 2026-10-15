@@ -18,26 +18,19 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	gitresolver "github.com/cfgis/cfgms/features/controller/modules/sources/git"
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
-// makeTestBundle creates a Bundle with a stable fake content hash for cache tests.
-func makeTestBundle(publisher, name, version string) *bundle.Bundle {
-	return &bundle.Bundle{
-		Manifest: &modules.ModuleMetadata{
-			Name:      name,
-			Version:   version,
-			Publisher: publisher,
-			Executors: []string{"steward"},
-		},
-		Binaries:    map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures:  []bundle.BundleSignature{{Publisher: publisher, Algorithm: "ed25519", Signature: make([]byte, 64)}},
-		ContentHash: publisher + "-" + name + "-" + version + "-testhash",
-	}
+// makeTestBundle creates a signed payload Bundle through the production
+// assemble/sign path for cache tests.
+func makeTestBundle(t *testing.T, publisher, name, version string) *bundle.Bundle {
+	t.Helper()
+	return testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher: publisher, Name: name, Version: version, Platforms: []string{"linux-amd64"},
+	}).Bundle
 }
 
 // makeTestCache creates a real ModuleCache rooted at a temp directory.
@@ -94,7 +87,7 @@ func TestResolveCfgRequiredModules_NoRequiredModules_ReturnsNil(t *testing.T) {
 // All modules already in cache with approved status → resolver never called, returns nil.
 func TestResolveCfgRequiredModules_AllModulesApprovedInCache_ReturnsNil(t *testing.T) {
 	c := makeTestCache(t)
-	b := makeTestBundle("cfgms", "firewall", "1.0.0")
+	b := makeTestBundle(t, "cfgms", "firewall", "1.0.0")
 	require.NoError(t, c.Put(b))
 	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
 
@@ -170,7 +163,7 @@ func TestResolveCfgRequiredModules_UncachedModule_QueueForReview_BlocksDeploymen
 // [REQUIRED TEST] Module in cache with pending status → error naming the pending module.
 func TestResolveCfgRequiredModules_PendingModule_ReturnsErrorNamingModule(t *testing.T) {
 	c := makeTestCache(t)
-	b := makeTestBundle("cfgms", "firewall", "1.0.0")
+	b := makeTestBundle(t, "cfgms", "firewall", "1.0.0")
 	require.NoError(t, c.Put(b))
 	// Default status after Put is pending — verified by TestModuleCache_List in cache_test.go.
 
@@ -192,7 +185,7 @@ func TestResolveCfgRequiredModules_PendingModule_ReturnsErrorNamingModule(t *tes
 // Rejected module in cache → also blocks deployment.
 func TestResolveCfgRequiredModules_RejectedModule_BlocksDeployment(t *testing.T) {
 	c := makeTestCache(t)
-	b := makeTestBundle("cfgms", "firewall", "1.0.0")
+	b := makeTestBundle(t, "cfgms", "firewall", "1.0.0")
 	require.NoError(t, c.Put(b))
 	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusRejected))
 
@@ -213,11 +206,11 @@ func TestResolveCfgRequiredModules_RejectedModule_BlocksDeployment(t *testing.T)
 func TestResolveCfgRequiredModules_MultipleModules_OnePending_NamesBlockedModule(t *testing.T) {
 	c := makeTestCache(t)
 
-	bFirewall := makeTestBundle("cfgms", "firewall", "1.0.0")
+	bFirewall := makeTestBundle(t, "cfgms", "firewall", "1.0.0")
 	require.NoError(t, c.Put(bFirewall))
 	require.NoError(t, c.SetApprovalStatus(bFirewall.ContentAddress(), cache.ApprovalStatusApproved))
 
-	bPackage := makeTestBundle("cfgms", "package", "2.0.0")
+	bPackage := makeTestBundle(t, "cfgms", "package", "2.0.0")
 	require.NoError(t, c.Put(bPackage))
 	// package is pending (default after Put)
 
