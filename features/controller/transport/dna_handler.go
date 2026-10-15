@@ -349,23 +349,6 @@ func isValidAggregateRoot(s string) bool {
 	return sdna.IsValidAggregateRoot(s)
 }
 
-// HandleGRPC processes a SyncDNA RPC on the shared gRPC-over-QUIC server.
-//
-// It extracts the steward ID from the peer's mTLS certificate and validates it
-// against the steward_id field on the first DNA chunk to close the
-// steward-impersonation gap. A mismatch returns codes.PermissionDenied with
-// the message "steward ID mismatch" — consistent with ConfigHandler.
-//
-// Per-tenant back-pressure: after steward ID validation on the first chunk,
-// Acquire is called with the chunk's tenant_id. If the tenant's queue is full
-// (MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
-//
-// Branch on is_delta:
-//   - false (full snapshot): reassembled and persisted via the configured DNAPersister.
-//   - true (partial delta): fragments are merged with the stored manifest,
-//     the aggregate root is recomputed and validated against the steward's last
-//     claimed root (SE threat #2), and only then is ApplyDelta called.
-//
 // quarantineQueueKey is the per-tenant queue bucket for streams whose peer the
 // registry cannot resolve. It contains a NUL byte, which no tenant path can, so
 // it never collides with a real tenant's bucket.
@@ -414,6 +397,22 @@ func (b *dnaStreamBudget) admit(chunk *transportpb.DNAChunk) error {
 	return nil
 }
 
+// HandleGRPC processes a SyncDNA RPC on the shared gRPC-over-QUIC server.
+//
+// It extracts the steward ID from the peer's mTLS certificate and validates it
+// against the steward_id field on the first DNA chunk to close the
+// steward-impersonation gap. A mismatch returns codes.PermissionDenied with
+// the message "steward ID mismatch" — consistent with ConfigHandler.
+//
+// Per-tenant back-pressure: after steward ID validation on the first chunk,
+// Acquire is called with the chunk's tenant_id. If the tenant's queue is full
+// (MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
+//
+// Branch on is_delta:
+//   - false (full snapshot): reassembled and persisted via the configured DNAPersister.
+//   - true (partial delta): fragments are merged with the stored manifest,
+//     the aggregate root is recomputed and validated against the steward's last
+//     claimed root (SE threat #2), and only then is ApplyDelta called.
 func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse]) error {
 	ctx := stream.Context()
 
