@@ -65,8 +65,46 @@ func TestSecurityHeadersMiddlewareCoversAPIErrorResponses(t *testing.T) {
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"))
 	assert.Equal(t, "no-referrer", rec.Header().Get("Referrer-Policy"))
-	assert.Equal(t, "camera=(), microphone=(), geolocation=()", rec.Header().Get("Permissions-Policy"))
+	assert.Equal(t, expectedPermissionsPolicy, rec.Header().Get("Permissions-Policy"))
+	assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Opener-Policy"))
+	assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Resource-Policy"))
 	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
+const expectedPermissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), interest-cohort=()"
+
+// TestCrossOriginIsolationHeadersOnAllResponses covers Issue #5021: COOP/CORP and the
+// extended Permissions-Policy must be on 200, 401, 404 and 405 responses, and the
+// passkey features the UI relies on must not be denied. COEP is deliberately omitted.
+func TestCrossOriginIsolationHeadersOnAllResponses(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsPlaceholderOnly())
+	srv := setupTestServer(t)
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{"200 health", http.MethodGet, "/api/v1/health", http.StatusOK},
+		{"401 protected", http.MethodGet, "/api/v1/stewards", http.StatusUnauthorized},
+		{"404 unknown", http.MethodGet, "/robots.txt", http.StatusNotFound},
+		{"405 wrong method", http.MethodPost, "/api/v1/health", http.StatusMethodNotAllowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+
+			require.Equal(t, tc.status, rec.Code)
+			assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Opener-Policy"))
+			assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Resource-Policy"))
+			assert.Empty(t, rec.Header().Get("Cross-Origin-Embedder-Policy"))
+			pp := rec.Header().Get("Permissions-Policy")
+			assert.Equal(t, expectedPermissionsPolicy, pp)
+			assert.NotContains(t, pp, "publickey-credentials")
+		})
+	}
 }
 
 // TestRouterNotFoundHandlerSetsSecurityHeaders covers Issue #4183 (DAST 10035/10049):
