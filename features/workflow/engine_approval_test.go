@@ -4,9 +4,11 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,6 +286,13 @@ func TestApproval_KilledResumeIsReclaimedAndCompletesOnce(t *testing.T) {
 	time.Sleep(lease + 50*time.Millisecond)
 	require.NoError(t, e2.RecoverApprovals(context.Background()))
 	eventually(t, "second engine completes the run", func() bool { return execStatus(e2, rec.ExecutionID) == StatusCompleted })
+	// The status turns Completed before the run-completion callback's
+	// finishResume -> MarkResumed lands (runWorkflowSteps), so wait on the
+	// store's own state rather than reading ResumedAt straight after the status.
+	eventually(t, "the completed run is marked resumed in the store", func() bool {
+		cur, getErr := h.store.GetApproval(context.Background(), rec.TenantID, rec.ApprovalID)
+		return getErr == nil && !cur.ResumedAt.IsZero()
+	})
 
 	got, err = h.store.GetApproval(context.Background(), rec.TenantID, rec.ApprovalID)
 	require.NoError(t, err)
@@ -295,6 +304,44 @@ func TestApproval_KilledResumeIsReclaimedAndCompletesOnce(t *testing.T) {
 	unresumed, err := h.store.ListUnresumed(context.Background(), time.Now().Add(time.Hour), lease)
 	require.NoError(t, err)
 	assert.Empty(t, unresumed)
+}
+
+// markResumedFailingStore delegates to a real approval store but fails the first
+// failures MarkResumed calls, as a flatfile write that fails on Windows would.
+type markResumedFailingStore struct {
+	business.ApprovalStore
+	failures int32
+	calls    atomic.Int32
+}
+
+func (s *markResumedFailingStore) MarkResumed(ctx context.Context, tenantID, approvalID string, now time.Time) error {
+	if s.calls.Add(1) <= s.failures {
+		return errors.New("injected transient approval store write failure")
+	}
+	return s.ApprovalStore.MarkResumed(ctx, tenantID, approvalID, now)
+}
+
+// Issue #5028: a completed run whose MarkResumed write fails must still end up
+// marked resumed, otherwise it is claimable again after the lease and its tail
+// runs twice.
+func TestApproval_MarkResumedWriteFailureIsRetriedUntilItLands(t *testing.T) {
+	h := newApprovalHarness(t)
+	failing := &markResumedFailingStore{ApprovalStore: h.store, failures: 3}
+	h.store = failing
+	e := h.engine()
+
+	_, rec := h.runToGate(e, gatedWorkflow(time.Millisecond), nil)
+	h.decide(rec, business.ApprovalStatusApproved)
+	resumed, err := e.ResumeFromApproval(context.Background(), rec.TenantID, rec.ApprovalID)
+	require.NoError(t, err)
+	waitForWorkflowCompletion(t, resumed, 5*time.Second)
+	assert.Equal(t, StatusCompleted, resumed.GetStatus())
+
+	eventually(t, "the resumed approval is marked despite failed writes", func() bool {
+		got, getErr := failing.GetApproval(context.Background(), rec.TenantID, rec.ApprovalID)
+		return getErr == nil && !got.ResumedAt.IsZero()
+	})
+	assert.Equal(t, int32(4), failing.calls.Load(), "three failures then one success")
 }
 
 func TestApproval_CheckpointSecretsNeverReachApprovalStore(t *testing.T) {

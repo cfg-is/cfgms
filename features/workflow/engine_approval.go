@@ -380,13 +380,47 @@ func (e *Engine) finishResume(rec *business.WorkflowApproval, release func(), fi
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), approvalStoreTimeout)
 	defer cancel()
-	if err := e.approvalStore.MarkResumed(ctx, rec.TenantID, rec.ApprovalID, time.Now()); err != nil {
+	if err := e.markResumedWithRetry(ctx, rec); err != nil {
 		e.logger.Warn("Approval could not be marked resumed",
 			"approval_id", logging.SanitizeLogValue(rec.ApprovalID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		return
 	}
 	e.deleteCheckpoint(rec.CheckpointRef)
+}
+
+// markResumedRetryBackoff is the first wait between MarkResumed attempts,
+// doubled each time up to markResumedRetryMaxBackoff.
+const (
+	markResumedRetryBackoff    = 10 * time.Millisecond
+	markResumedRetryMaxBackoff = 500 * time.Millisecond
+)
+
+// markResumedWithRetry marks rec resumed, retrying a failed store write until
+// ctx ends. The run has already completed here; an unmarked approval is
+// claimable again once its lease lapses, so one transient write failure (the
+// flatfile provider's atomic rename on Windows does not retry internally)
+// would otherwise run the tail a second time. A missing or undecided record
+// can never succeed, so those errors return at once.
+func (e *Engine) markResumedWithRetry(ctx context.Context, rec *business.WorkflowApproval) error {
+	backoff := markResumedRetryBackoff
+	for {
+		err := e.approvalStore.MarkResumed(ctx, rec.TenantID, rec.ApprovalID, time.Now())
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, business.ErrApprovalNotFound) || errors.Is(err, business.ErrApprovalNotDecided) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > markResumedRetryMaxBackoff {
+			backoff = markResumedRetryMaxBackoff
+		}
+	}
 }
 
 func (e *Engine) loadCheckpoint(ctx context.Context, rec *business.WorkflowApproval) (*approvalCheckpoint, error) {
