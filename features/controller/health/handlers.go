@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // Handler provides HTTP handlers for health monitoring endpoints
@@ -187,6 +189,7 @@ func (h *Handler) HandleDetailedHealth(w http.ResponseWriter, r *http.Request) {
 
 	healthStatus := HealthStatus{
 		Status:        overallStatus,
+		Version:       version.ShortWithoutPrefix(),
 		Timestamp:     time.Now(),
 		Components:    components,
 		Alerts:        activeAlerts,

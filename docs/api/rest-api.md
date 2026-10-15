@@ -115,7 +115,10 @@ Each item carries the steward's operator-assigned `tags` (omitted when the stewa
 
 #### GET /api/v1/health
 
-Check the health status of the CFGMS controller.
+Check the health status of the CFGMS controller. The unauthenticated response
+carries the overall `status` only (`healthy` or `degraded`, the latter with HTTP
+503). The build version and component detail are served by the authenticated
+`GET /api/v1/health/detailed`.
 
 **Authentication:** None required
 
@@ -124,17 +127,7 @@ Check the health status of the CFGMS controller.
 ```json
 {
   "data": {
-    "status": "healthy",
-    "version": "0.2.0",
-    "timestamp": "2025-01-12T10:30:00Z",
-    "services": {
-      "controller": "healthy",
-      "configuration": "healthy",
-      "rbac": "healthy",
-      "certificate_manager": "healthy",
-      "tenant_manager": "healthy",
-      "rbac_manager": "healthy"
-    }
+    "status": "healthy"
   },
   "timestamp": "2025-01-12T10:30:00Z"
 }

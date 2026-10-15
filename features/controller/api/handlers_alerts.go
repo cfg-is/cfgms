@@ -35,12 +35,12 @@ func (s *Server) handleAcknowledgeAlert(w http.ResponseWriter, r *http.Request) 
 	// A malformed body is a client error and must not be silently ignored.
 	var req AlertAcknowledgeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if s.alertStore == nil {
-		http.Error(w, "alert store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "alert store unavailable")
 		return
 	}
 
@@ -57,7 +57,7 @@ func (s *Server) handleAcknowledgeAlert(w http.ResponseWriter, r *http.Request) 
 			"alert_id", logging.SanitizeLogValue(alertID),
 			"tenant_id", logging.SanitizeLogValue(callerTenant),
 			"error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to acknowledge alert", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to acknowledge alert")
 		return
 	}
 
@@ -80,17 +80,17 @@ func (s *Server) handleSilenceAlert(w http.ResponseWriter, r *http.Request) {
 	alertID := mux.Vars(r)["id"]
 
 	if s.alertStore == nil {
-		http.Error(w, "alert store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "alert store unavailable")
 		return
 	}
 
 	var req AlertSilenceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Until.IsZero() {
-		http.Error(w, "until is required", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "until is required")
 		return
 	}
 
@@ -106,7 +106,7 @@ func (s *Server) handleSilenceAlert(w http.ResponseWriter, r *http.Request) {
 			"alert_id", logging.SanitizeLogValue(alertID),
 			"tenant_id", logging.SanitizeLogValue(callerTenant),
 			"error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to silence alert", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to silence alert")
 		return
 	}
 
@@ -141,7 +141,7 @@ func (s *Server) handleUnsilenceAlert(w http.ResponseWriter, r *http.Request) {
 	alertID := mux.Vars(r)["id"]
 
 	if s.alertStore == nil {
-		http.Error(w, "alert store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "alert store unavailable")
 		return
 	}
 
@@ -154,14 +154,14 @@ func (s *Server) handleUnsilenceAlert(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.alertStore.UnsilenceAlert(r.Context(), callerTenant, alertID, principalID, time.Now().UTC()); err != nil {
 		if errors.Is(err, business.ErrAlertNotFound) {
-			http.Error(w, "alert not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "alert not found")
 			return
 		}
 		s.logger.Error("Failed to unsilence alert",
 			"alert_id", logging.SanitizeLogValue(alertID),
 			"tenant_id", logging.SanitizeLogValue(callerTenant),
 			"error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to unsilence alert", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to unsilence alert")
 		return
 	}
 
@@ -173,7 +173,7 @@ func (s *Server) handleUnsilenceAlert(w http.ResponseWriter, r *http.Request) {
 				"tenant_id", logging.SanitizeLogValue(callerTenant),
 				"error", logging.SanitizeLogValue(err.Error()))
 		}
-		http.Error(w, "failed to read alert state", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to read alert state")
 		return
 	}
 
