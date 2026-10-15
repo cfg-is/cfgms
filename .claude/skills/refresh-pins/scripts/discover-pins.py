@@ -331,6 +331,78 @@ def discover_base_images(root: Path) -> list[dict]:
     return pins
 
 
+def discover_golang_digests(root: Path) -> list[dict]:
+    """One `docker` pin per unique golang:<tag>@sha256:<digest>.
+
+    discover_go_toolchain() tracks the Go *version* and lists the files naming
+    it, but never compares a pinned digest with what the tag resolves to
+    upstream, so a re-push of an unmoved tag (golang:1.27.2-trixie) was
+    invisible. This closes that gap without a second pin for the same edit:
+    these pins are `kind: "docker"` with `role: "go-toolchain-digest"` and are
+    compared by digest only, while the version bump stays the single
+    `lockstep` go-toolchain pin. Dockerfile FROM lines (bare or mirror form)
+    and ci-images.yml entries that carry a digest are the locations; version
+    pre-pull lines belong to the lockstep pin only.
+    """
+    by_pin: dict[tuple[str, str], list[dict]] = {}
+    mirrors: dict[tuple[str, str], str] = {}
+
+    for df in all_dockerfiles(root):
+        try:
+            lines = df.read_text().splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        rel = df.relative_to(root).as_posix()
+        for i, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                continue
+            m = _FROM_RE.match(line)
+            if not m or "$" in m.group("ref"):
+                continue
+            ref = m.group("ref")
+            if ref.startswith(CI_MIRROR_REGISTRY + "/"):
+                ref = ref[len(CI_MIRROR_REGISTRY) + 1:]
+            parsed = parse_image_ref(ref)
+            if parsed is None or not _is_golang(parsed[0]):
+                continue
+            _, tag, digest = parsed
+            if not tag or not digest:
+                continue
+            by_pin.setdefault((tag, digest), []).append(
+                {"file": rel, "line": i, "match": line.strip()}
+            )
+
+    for e in read_ci_images(root):
+        if not _is_golang(e["image"]):
+            continue
+        key = (e["tag"], e["digest"])
+        by_pin.setdefault(key, []).append(
+            {"file": CI_IMAGES_PATH, "line": e["line"], "match": e["match"]}
+        )
+        mirrors[key] = e["mirror_name"]
+
+    pins: list[dict] = []
+    for (tag, digest), locations in sorted(by_pin.items()):
+        pin = {
+            "name": f"docker:golang:{tag}",
+            "kind": "docker",
+            "role": "go-toolchain-digest",
+            "current": digest,
+            "tag": tag,
+            "digest": digest,
+            "release_source": "https://hub.docker.com/_/golang",
+            "ecosystem": None,
+            "package": "golang",
+            "locations": locations,
+        }
+        if (tag, digest) in mirrors:
+            pin["upstream_ref"] = f"golang:{tag}@{digest}"
+            pin["mirror_name"] = mirrors[(tag, digest)]
+            pin["mirror"] = f"{CI_MIRROR_REGISTRY}/{mirrors[(tag, digest)]}:{tag}"
+        pins.append(pin)
+    return pins
+
+
 def discover_go_modules(root: Path) -> list[dict]:
     """Direct module requirements from go.mod.
 
@@ -837,6 +909,7 @@ def main() -> int:
     inventory.extend(discover_github_actions(root))
     inventory.extend(discover_mcp_pins(root))
     inventory.extend(discover_base_images(root))
+    inventory.extend(discover_golang_digests(root))
     inventory.extend(discover_go_modules(root))
     inventory.extend(discover_npm_packages(root))
     json.dump(inventory, sys.stdout, indent=2)
