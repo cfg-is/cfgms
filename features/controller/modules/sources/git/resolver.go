@@ -2,22 +2,57 @@
 // Copyright 2026 CFGMS Contributors
 
 // Package git implements a GitSourceResolver that maps module references of the
-// form "publisher/name@version" to git clone URLs using a module_sources config
-// block, clones the repository, and returns a parsed Bundle.
+// form "publisher/name@version" to git repositories using a module_sources
+// config block, fetches the tagged release and returns a payload-carrying
+// bundle.Bundle.
+//
+// # Repository layout
+//
+// One repository per module, at "<base>/<name>". The repository ROOT at the tag
+// is the bundle installation root (module.yaml, bundle.yaml and the binaries
+// bundle.yaml names; a multi-platform module carries every platform in that one
+// root). The root is read with bundle.ReadInstalledPayload in strict, full mode,
+// so a module repository contains only the bundle files (and .git).
+//
+// # Ref rule
+//
+// The version in the reference must be an exact semantic version without a "v"
+// prefix (bundle.IsExactSemver) and the repository tag must be exactly that
+// string. Branches, HEAD, commit ids, "v"-prefixed versions and any other
+// string are refused; only tags are ever listed or fetched.
+//
+// # Transport rules
+//
+// A source base must be an https or ssh URL (ValidateBase); file://, http://,
+// git://, ext:: and scp-style paths are refused. Every git subprocess runs with
+// an explicit environment: GIT_ALLOW_PROTOCOL=https:ssh, no prompts, no system
+// or user git config, hooks disabled, no submodule recursion, certificate
+// verification locked on, and ssh in BatchMode with normal host-key checking.
+// Operators supply trust roots and ssh options through GIT_SSL_CAINFO and
+// GIT_SSH_COMMAND in the controller's environment, which pass through.
+//
+// # Trust anchor
+//
+// The publisher signature, not the tag and not the transport, is the trust
+// anchor. The returned bundle's ContentHash is recomputed from the fetched
+// bytes (every binary is verified against its digest) and its manifest
+// publisher, name and version must equal the request, so bytes that do not
+// match what was signed are an error and never a bundle. A moved tag yields
+// different bytes and therefore a different hash for the same triple.
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 
-	"gopkg.in/yaml.v3"
-
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 )
@@ -50,6 +85,11 @@ func New(sources map[string]SourceConfig, cloneRoot string, logger logging.Logge
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
+	for publisher, src := range sources {
+		if err := ValidateBase(src.Base); err != nil {
+			return nil, fmt.Errorf("module source for publisher %q: %w", publisher, err)
+		}
+	}
 	if err := os.MkdirAll(cloneRoot, 0750); err != nil {
 		return nil, fmt.Errorf("create clone root: %w", err)
 	}
@@ -60,15 +100,20 @@ func New(sources map[string]SourceConfig, cloneRoot string, logger logging.Logge
 	}, nil
 }
 
-// Resolve fetches the module identified by ref ("publisher/name@version"), clones
-// it from the configured git source, and returns a parsed Bundle.
+// Resolve fetches the module identified by ref ("publisher/name@version") from
+// the configured git source and returns a payload-carrying Bundle.
 //
-// The clone URL is constructed as "<source.Base>/<name>" (no trailing slash).
-// Shallow clone (--depth 1) is used to minimise network and disk usage.
+// The clone URL is "<source.Base>/<name>". version must be an exact semver and
+// name a tag of the repository. The tag is fetched shallowly into a scratch
+// directory that is removed before returning; the Bundle holds the bytes.
+// Errors returned to the caller never contain the clone URL or a filesystem path.
 func (r *GitSourceResolver) Resolve(ctx context.Context, ref string) (*bundle.Bundle, error) {
 	publisher, name, version, err := parseRef(ref)
 	if err != nil {
 		return nil, err
+	}
+	if !bundle.IsExactSemver(version) {
+		return nil, fmt.Errorf("invalid module ref: version %q is not an exact semantic version (no \"v\" prefix, no branch or commit id)", version)
 	}
 
 	src, ok := r.sources[publisher]
@@ -84,12 +129,80 @@ func (r *GitSourceResolver) Resolve(ctx context.Context, ref string) (*bundle.Bu
 		return nil, err
 	}
 
-	cloneDir, err := r.cloneRepo(ctx, publisher, name, version, cloneURL)
+	r.logger.Info("resolving module repository tag",
+		"publisher", logging.SanitizeLogValue(publisher),
+		"name", logging.SanitizeLogValue(name),
+		"version", logging.SanitizeLogValue(version),
+		"url", logging.SanitizeLogValue(cloneURL),
+	)
+
+	cloneDir, err := os.MkdirTemp(r.cloneRoot, "clone-*")
 	if err != nil {
-		return nil, fmt.Errorf("clone %s: %w", logging.SanitizeLogValue(cloneURL), err)
+		return nil, errors.New("create scratch directory for module fetch failed")
+	}
+	defer func() { _ = os.RemoveAll(cloneDir) }()
+
+	if err := r.fetchTag(ctx, cloneURL, version, cloneDir); err != nil {
+		return nil, err
 	}
 
-	return parseBundleFromDir(cloneDir, version)
+	b, err := bundle.ReadInstalledPayload(cloneDir, bundle.ReadOptions{IgnoreNames: []string{".git"}})
+	if err != nil {
+		r.logger.Warn("module repository is not a valid bundle",
+			"publisher", logging.SanitizeLogValue(publisher),
+			"name", logging.SanitizeLogValue(name),
+			"version", logging.SanitizeLogValue(version),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		return nil, scrub(fmt.Sprintf("read module bundle for %s/%s@%s", publisher, name, version), err, cloneDir, cloneURL)
+	}
+	if err := bindIdentity(b, publisher, name, version); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// bindIdentity requires the bundle's manifest and signatures to name exactly the
+// publisher, name and version that were requested.
+func bindIdentity(b *bundle.Bundle, publisher, name, version string) error {
+	if b.Manifest == nil {
+		return errors.New("module manifest missing")
+	}
+	if b.Manifest.Publisher != publisher {
+		return fmt.Errorf("module manifest publisher %q does not match requested publisher %q", b.Manifest.Publisher, publisher)
+	}
+	if b.Manifest.Name != name {
+		return fmt.Errorf("module manifest name %q does not match requested name %q", b.Manifest.Name, name)
+	}
+	if b.Manifest.Version != version {
+		return fmt.Errorf("module manifest version %q does not match requested version %q", b.Manifest.Version, version)
+	}
+	for _, sig := range b.Signatures {
+		if sig.Publisher != b.Manifest.Publisher {
+			return fmt.Errorf("module signature publisher %q does not match manifest publisher %q", sig.Publisher, b.Manifest.Publisher)
+		}
+	}
+	return nil
+}
+
+// scrubbedError carries a message with the clone URL and scratch path removed
+// while keeping the original error reachable through errors.Is / errors.As.
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+func scrub(prefix string, err error, secrets ...string) error {
+	text := err.Error()
+	for _, s := range secrets {
+		if s != "" {
+			text = strings.ReplaceAll(text, s, "<redacted>")
+		}
+	}
+	return &scrubbedError{msg: prefix + ": " + text, err: err}
 }
 
 // ResolveURL returns the git clone URL for the given ref without cloning.
@@ -136,273 +249,197 @@ func parseRef(ref string) (publisher, name, version string, err error) {
 
 // buildCloneURL constructs the git clone URL from base and name.
 func buildCloneURL(base, name string) (string, error) {
-	if base == "" {
-		return "", errors.New("source base URL is empty")
+	if err := ValidateBase(base); err != nil {
+		return "", err
 	}
 	// Strip trailing slash from base before joining.
 	return strings.TrimRight(base, "/") + "/" + name, nil
 }
 
-// cloneRepo resolves version (a tag, branch or commit SHA) to an exact commit on
-// cloneURL, checks that commit out, and returns the directory it was checked out
-// into. The directory name is keyed by the resolved commit — not just the
-// requested version string — so that two requests for the same version can never
-// share a cache entry unless they truly resolved to the same commit, and a
-// mis-keyed first resolution cannot poison later lookups for the same version.
-//
-// Idempotent: if a directory for the resolved commit already exists (has a .git
-// dir), it is reused without a network round-trip beyond the ref resolution.
-func (r *GitSourceResolver) cloneRepo(ctx context.Context, publisher, name, version, cloneURL string) (string, error) {
-	gitBin, err := exec.LookPath("git")
-	if err != nil {
-		return "", fmt.Errorf("git binary not found in PATH: %w", err)
+// ValidateBase reports whether base is an acceptable module source base URL: an
+// absolute https or ssh URL with a host, no password, no query or fragment, and
+// no whitespace or control characters. file://, http://, git://, ext:: and
+// scp-style "host:path" bases are refused. A user name (ssh://git@host/...) is
+// allowed for ssh only; credentials are never part of the URL. It is the single
+// rule applied by New and by controller config validation.
+func ValidateBase(base string) error {
+	if base == "" {
+		return errors.New("source base URL is empty")
 	}
-
-	r.logger.Info("resolving module repository ref",
-		"publisher", logging.SanitizeLogValue(publisher),
-		"name", logging.SanitizeLogValue(name),
-		"version", logging.SanitizeLogValue(version),
-		"url", logging.SanitizeLogValue(cloneURL),
-	)
-
-	// version is usually a tag or branch name, which ls-remote can resolve to a
-	// commit without fetching any objects. This lets the idempotent-reuse check
-	// below run before any clone/fetch happens.
-	commit, lsErr := resolveRemoteRef(ctx, gitBin, cloneURL, version)
-	if lsErr != nil {
-		return r.cloneUnresolvedRef(ctx, gitBin, publisher, name, version, cloneURL, lsErr)
-	}
-
-	cloneDir := filepath.Join(r.cloneRoot, cacheDirName(publisher, name, version, commit))
-	if _, statErr := os.Stat(filepath.Join(cloneDir, ".git")); statErr == nil {
-		return cloneDir, nil
-	}
-	if err := shallowFetchInto(ctx, gitBin, cloneURL, version, cloneDir); err != nil {
-		return "", fmt.Errorf("fetch ref %q: %w", version, err)
-	}
-	return cloneDir, nil
-}
-
-// cloneUnresolvedRef handles a version that ls-remote could not resolve as a tag
-// or branch (it may be a raw commit SHA, or it may simply not exist). It stages a
-// full fetch-then-checkout in a scratch directory so the resolved commit — and
-// therefore the final cache key — is only known once the checkout has actually
-// succeeded. It never falls back to the remote's default branch: checkout always
-// names the exact requested version, so an unresolvable ref fails closed.
-func (r *GitSourceResolver) cloneUnresolvedRef(ctx context.Context, gitBin, publisher, name, version, cloneURL string, lsErr error) (string, error) {
-	stagingDir, err := os.MkdirTemp(r.cloneRoot, ".staging-*")
-	if err != nil {
-		return "", fmt.Errorf("create staging dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(stagingDir) }()
-
-	commit, err := fullFetchCheckout(ctx, gitBin, cloneURL, version, stagingDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve ref %q: %w (ls-remote: %s)", version, err, lsErr)
-	}
-
-	cloneDir := filepath.Join(r.cloneRoot, cacheDirName(publisher, name, version, commit))
-	if _, statErr := os.Stat(filepath.Join(cloneDir, ".git")); statErr == nil {
-		return cloneDir, nil
-	}
-	if err := os.Rename(stagingDir, cloneDir); err != nil {
-		return "", fmt.Errorf("move resolved clone into place: %w", err)
-	}
-	return cloneDir, nil
-}
-
-// cacheDirName derives the local cache directory name from the resolved
-// content-addressed tuple, including a short prefix of the resolved commit so
-// that different commits for the same requested version never collide.
-func cacheDirName(publisher, name, version, commit string) string {
-	short := commit
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	return publisher + "-" + name + "-" + version + "-" + short
-}
-
-// resolveRemoteRef resolves ref (a tag or branch name) to a commit SHA on
-// cloneURL using "git ls-remote", without fetching any objects. Annotated tags
-// are peeled to the commit they point at. Returns an error if ref does not
-// match any tag or branch on the remote.
-func resolveRemoteRef(ctx context.Context, gitBin, cloneURL, ref string) (string, error) {
-	// "--" prevents cloneURL or ref from being interpreted as flags.
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL/ref follow "--"
-	cmd := exec.CommandContext(ctx, gitBin, "ls-remote", "--tags", "--heads", "--", cloneURL, ref)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("ls-remote failed: %w", err)
-	}
-
-	var plain, peeled string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		sha, refName := fields[0], fields[1]
-		if strings.HasSuffix(refName, "^{}") {
-			peeled = sha
-		} else if plain == "" {
-			plain = sha
+	for _, c := range base {
+		if unicode.IsSpace(c) || unicode.IsControl(c) || c == '\\' {
+			return errors.New("source base URL contains whitespace, control or backslash characters")
 		}
 	}
-	if peeled != "" {
-		return peeled, nil
+	if !strings.Contains(base, "://") {
+		return errors.New("source base URL must be an absolute https:// or ssh:// URL")
 	}
-	if plain != "" {
-		return plain, nil
+	u, err := url.Parse(base)
+	if err != nil {
+		return errors.New("source base URL is not a valid URL")
 	}
-	return "", fmt.Errorf("ref %q not found on remote", ref)
-}
-
-// shallowFetchInto initializes an empty repository at destDir and shallow-fetches
-// exactly ref from cloneURL, then checks it out. destDir is removed on failure so
-// a failed fetch never leaves a directory behind under a cache-key name.
-func shallowFetchInto(ctx context.Context, gitBin, cloneURL, ref, destDir string) error {
-	if err := os.MkdirAll(destDir, 0750); err != nil {
-		return fmt.Errorf("create clone dir: %w", err)
+	if u.Scheme != "https" && u.Scheme != "ssh" {
+		return fmt.Errorf("source base URL scheme %q is not allowed (https or ssh only)", u.Scheme)
 	}
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; destDir is controller-generated.
-	if out, err := exec.CommandContext(ctx, gitBin, "init", "--quiet", destDir).CombinedOutput(); err != nil {
-		_ = os.RemoveAll(destDir)
-		return fmt.Errorf("git init failed: %w (output: %s)", err, string(out))
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("source base URL has no host")
 	}
-	// "--" prevents cloneURL or ref from being interpreted as flags.
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL/ref follow "--"
-	fetchCmd := exec.CommandContext(ctx, gitBin, "-C", destDir, "fetch", "--depth", "1", "--", cloneURL, ref)
-	if out, err := fetchCmd.CombinedOutput(); err != nil {
-		_ = os.RemoveAll(destDir)
-		return fmt.Errorf("git fetch failed: %w (output: %s)", err, string(out))
+	if strings.HasPrefix(u.Hostname(), "-") || strings.Contains(u.Host, "%") {
+		return errors.New("source base URL host is invalid")
 	}
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; FETCH_HEAD is a fixed literal.
-	if out, err := exec.CommandContext(ctx, gitBin, "-C", destDir, "checkout", "--quiet", "FETCH_HEAD").CombinedOutput(); err != nil {
-		_ = os.RemoveAll(destDir)
-		return fmt.Errorf("git checkout failed: %w (output: %s)", err, string(out))
+	if u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword || u.Scheme != "ssh" || u.User.Username() == "" || strings.HasPrefix(u.User.Username(), "-") {
+			return errors.New("source base URL must not carry credentials")
+		}
+	}
+	if u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(base, "?#") {
+		return errors.New("source base URL must not carry a query or fragment")
 	}
 	return nil
 }
 
-// fullFetchCheckout initializes an empty repository at destDir, fetches ref from
-// cloneURL (falling back to fetching the full tag/branch namespace if the remote
-// refuses to advertise/fetch the ref directly — e.g. a raw commit SHA on a server
-// without uploadpack.allowReachableSHA1InWant), checks out exactly ref, and
-// returns the resulting HEAD commit SHA. It never checks out anything other than
-// the requested ref, so an unresolvable ref fails closed rather than falling
-// back to the remote's default branch.
-func fullFetchCheckout(ctx context.Context, gitBin, cloneURL, ref, destDir string) (string, error) {
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; destDir is controller-generated.
-	if out, err := exec.CommandContext(ctx, gitBin, "init", "--quiet", destDir).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git init failed: %w (output: %s)", err, string(out))
-	}
-
-	// "--" prevents cloneURL or ref from being interpreted as flags.
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL/ref follow "--"
-	fetchCmd := exec.CommandContext(ctx, gitBin, "-C", destDir, "fetch", "--", cloneURL, ref)
-	out, fetchErr := fetchCmd.CombinedOutput()
-	if fetchErr != nil {
-		// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL follows "--"
-		fetchAllCmd := exec.CommandContext(ctx, gitBin, "-C", destDir, "fetch", "--",
-			cloneURL, "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*")
-		if out2, err2 := fetchAllCmd.CombinedOutput(); err2 != nil {
-			return "", fmt.Errorf("git fetch failed for ref %q: %w (output: %s / %s)", ref, fetchErr, string(out), string(out2))
+// gitEnv returns the explicit environment every git subprocess runs with. Only
+// GIT_SSL_CAINFO and GIT_SSH_COMMAND are passed through from the controller's
+// environment (operator trust roots / ssh options); every other GIT_* variable
+// is dropped. certificate verification is never disabled.
+func gitEnv(environ []string) []string {
+	var env []string
+	var caInfo, sshCmd string
+	for _, kv := range environ {
+		switch {
+		case strings.HasPrefix(kv, "GIT_SSL_CAINFO="):
+			caInfo = strings.TrimPrefix(kv, "GIT_SSL_CAINFO=")
+		case strings.HasPrefix(kv, "GIT_SSH_COMMAND="):
+			sshCmd = strings.TrimPrefix(kv, "GIT_SSH_COMMAND=")
+		case strings.HasPrefix(kv, "GIT_"):
+		default:
+			env = append(env, kv)
 		}
 	}
-
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; ref is a validated path component.
-	if out, err := exec.CommandContext(ctx, gitBin, "-C", destDir, "checkout", "--quiet", ref).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git checkout failed for ref %q: %w (output: %s)", ref, err, string(out))
+	// BatchMode never prompts; StrictHostKeyChecking is left to ssh's default
+	// (or the operator's own command) and is never set here.
+	if sshCmd == "" {
+		sshCmd = "ssh"
 	}
-
-	// #nosec G204 -- gitBin is resolved via exec.LookPath; destDir is controller-generated; "HEAD" is a fixed literal.
-	revParseOut, err := exec.CommandContext(ctx, gitBin, "-C", destDir, "rev-parse", "HEAD").Output()
-	if err != nil {
-		return "", fmt.Errorf("rev-parse HEAD failed: %w", err)
+	sshCmd += " -o BatchMode=yes"
+	env = append(env,
+		"GIT_ALLOW_PROTOCOL=https:ssh",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_SSH_COMMAND="+sshCmd,
+	)
+	if caInfo != "" {
+		env = append(env, "GIT_SSL_CAINFO="+caInfo)
 	}
-	return strings.TrimSpace(string(revParseOut)), nil
+	return env
 }
 
-// parseBundleFromDir reads module.yaml, binary files, and signature files from cloneDir
-// and assembles a Bundle with a computed content hash.
-func parseBundleFromDir(cloneDir, version string) (*bundle.Bundle, error) {
-	// Read module.yaml.
-	metaPath := filepath.Join(cloneDir, "module.yaml")
-	// #nosec G304 -- cloneDir is a controller-created temporary Git checkout
-	// and module.yaml is a fixed filename beneath it.
-	metaData, err := os.ReadFile(metaPath)
+// gitConfigArgs returns the "-c" settings placed before every git subcommand:
+// certificate verification locked on, hooks pointed at an empty directory, no
+// submodule recursion, no filters or line-ending conversion, no protocol other
+// than https and ssh.
+func gitConfigArgs(hooksDir string) []string {
+	return []string{
+		"-c", "http.sslVerify=true",
+		// Git for Windows defaults to schannel, which ignores GIT_SSL_CAINFO
+		// unless told to honour it; the operator's trust root must be effective
+		// there too. Verification stays on. Unknown keys are ignored elsewhere.
+		"-c", "http.schannelUseSSLCAInfo=true",
+		"-c", "core.hooksPath=" + hooksDir,
+		"-c", "submodule.recurse=false",
+		"-c", "core.autocrlf=false",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.symlinks=true",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.https.allow=always",
+		"-c", "protocol.ssh.allow=always",
+		"-c", "transfer.fsckObjects=true",
+	}
+}
+
+// runGit runs a git subcommand with the locked-down environment and arguments.
+// Output is returned for logging only; callers must never put it, the URL or a
+// path in an error returned to an API caller.
+func (r *GitSourceResolver) runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	gitBin, err := exec.LookPath("git")
 	if err != nil {
-		return nil, fmt.Errorf("read module.yaml: %w", err)
+		return "", errors.New("git binary not found in PATH")
 	}
-
-	var meta modules.ModuleMetadata
-	if err := yaml.Unmarshal(metaData, &meta); err != nil {
-		return nil, fmt.Errorf("parse module.yaml: %w", err)
+	hooksDir := filepath.Join(r.cloneRoot, ".empty-hooks")
+	if err := os.MkdirAll(hooksDir, 0750); err != nil {
+		return "", errors.New("create empty hooks directory failed")
 	}
+	full := append(gitConfigArgs(hooksDir), args...)
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; every caller passes
+	// URL and ref after "--" and the ref is a validated exact semver.
+	cmd := exec.CommandContext(ctx, gitBin, full...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv(os.Environ())
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return out.String(), ctxErr
+		}
+		return out.String(), err
+	}
+	return out.String(), nil
+}
 
-	// Discover binary files under binaries/.
-	binDir := filepath.Join(cloneDir, "binaries")
-	binaries := make(map[string]string)
-	binContent := make(map[string][]byte)
-
-	if entries, readErr := os.ReadDir(binDir); readErr == nil {
-		for _, e := range entries {
-			entryPath := filepath.Join(binDir, e.Name())
-			// Use Lstat so symlinks are never followed: only regular files are valid
-			// binary entries. A malicious publisher could commit a symlink whose target
-			// points outside the clone root; rejecting non-regular files prevents that.
-			fi, statErr := os.Lstat(entryPath)
-			if statErr != nil {
-				continue
+// fetchTag shallow-fetches exactly the tag "version" from cloneURL into destDir
+// and checks it out. Errors returned name neither the URL nor destDir.
+func (r *GitSourceResolver) fetchTag(ctx context.Context, cloneURL, version, destDir string) error {
+	tagRef, err := r.resolveRemoteRef(ctx, cloneURL, version)
+	if err != nil {
+		return err
+	}
+	steps := [][]string{
+		{"init", "--quiet", "--template=", "."},
+		{"fetch", "--quiet", "--depth", "1", "--no-tags", "--no-recurse-submodules", "--", cloneURL, "+" + tagRef + ":" + tagRef},
+		{"checkout", "--quiet", "--detach", tagRef},
+	}
+	for _, args := range steps {
+		if out, err := r.runGit(ctx, destDir, args...); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
 			}
-			if !fi.Mode().IsRegular() {
-				continue
-			}
-			relPath := filepath.Join("binaries", e.Name())
-			binaries[e.Name()] = relPath
-			// #nosec G304 -- entryPath comes from ReadDir of cloneDir/binaries
-			// and was lstat-verified as a regular, non-symlink file above.
-			content, readErr := os.ReadFile(entryPath)
-			if readErr != nil {
-				return nil, fmt.Errorf("read binary %q: %w", e.Name(), readErr)
-			}
-			binContent[e.Name()] = content
+			r.logger.Warn("git operation failed",
+				"op", logging.SanitizeLogValue(args[0]),
+				"error", logging.SanitizeLogValue(err.Error()),
+				"output", logging.SanitizeLogValue(out),
+			)
+			return fmt.Errorf("git %s of module tag %q failed", args[0], version)
 		}
 	}
+	return nil
+}
 
-	// Compute content hash from binary content and manifest YAML.
-	contentHash, err := bundle.ComputeContentHash(binContent, metaData)
+// resolveRemoteRef confirms that the exact tag "version" exists on cloneURL and
+// returns its full ref name. Only tags are listed ("--tags"); a branch, HEAD or
+// commit id of the same spelling is never matched.
+func (r *GitSourceResolver) resolveRemoteRef(ctx context.Context, cloneURL, version string) (string, error) {
+	want := "refs/tags/" + version
+	// "--" prevents cloneURL or the pattern from being interpreted as flags.
+	out, err := r.runGit(ctx, r.cloneRoot, "ls-remote", "--tags", "--", cloneURL, want)
 	if err != nil {
-		return nil, fmt.Errorf("compute content hash: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		r.logger.Warn("git ls-remote failed",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"output", logging.SanitizeLogValue(out),
+		)
+		return "", errors.New("module source is unreachable or refused the request")
 	}
-
-	// Read signature files from signatures/.
-	var sigs []bundle.BundleSignature
-	sigDir := filepath.Join(cloneDir, "signatures")
-	if entries, readErr := os.ReadDir(sigDir); readErr == nil {
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-				continue
-			}
-			// #nosec G304 -- e.Name comes from ReadDir of cloneDir/signatures
-			// and is restricted to non-directory .yaml entries.
-			sigData, readErr := os.ReadFile(filepath.Join(sigDir, e.Name()))
-			if readErr != nil {
-				continue
-			}
-			var sig bundle.BundleSignature
-			if yaml.Unmarshal(sigData, &sig) == nil {
-				sigs = append(sigs, sig)
-			}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && (fields[1] == want || fields[1] == want+"^{}") {
+			return want, nil
 		}
 	}
-
-	return &bundle.Bundle{
-		Manifest:    &meta,
-		Binaries:    binaries,
-		Signatures:  sigs,
-		ContentHash: contentHash,
-	}, nil
+	return "", fmt.Errorf("tag %q not found on module source", version)
 }
 
 // validatePathComponent rejects empty strings and path traversal sequences.
