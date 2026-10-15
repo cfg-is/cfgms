@@ -287,6 +287,35 @@ def main() -> int:
               "golang: list entry joins the go-toolchain lockstep locations[]",
               f"saw {[l for l in toolchain['locations'] if 'ci-images' in l['file']]}")
 
+        print("golang digest pins (#5015)")
+        gpins = dp.discover_golang_digests(root)
+        gby = {p["name"]: p for p in gpins}
+        check(all(p["kind"] == "docker" and p["role"] == "go-toolchain-digest"
+                  for p in gpins),
+              "golang digest pins are kind docker with a distinct role, not lockstep",
+              f"saw {gpins}")
+        ga = gby.get("docker:golang:1.26.5-alpine3.23")
+        check(ga is not None and ga["current"] == "sha256:" + "b" * 64
+              and ga["tag"] == "1.26.5-alpine3.23",
+              "golang digest pin carries the pinned digest and the tag",
+              f"saw {ga}")
+        check(ga is not None and {l["file"] for l in ga["locations"]}
+              == {"cmd/controller/Dockerfile", ".github/ci-images.yml"},
+              "golang digest pin lists the Dockerfile and ci-images.yml locations",
+              f"saw {ga and ga['locations']}")
+        check(ga is not None and ga.get("mirror_name") == "golang"
+              and ga.get("upstream_ref") == "golang:1.26.5-alpine3.23@sha256:" + "b" * 64,
+              "list-backed golang digest pin carries upstream_ref and mirror_name")
+        gb = gby.get("docker:golang:1.26.5")
+        check(gb is not None and [l["file"] for l in gb["locations"]]
+              == ["Dockerfile.test-runner"] and gb["current"] == "sha256:" + "a" * 64,
+              "Dockerfile-only golang digest pin is emitted once",
+              f"saw {gb}")
+        check(len(gpins) == 2, "exactly one golang digest pin per unique tag+digest",
+              f"saw {sorted(gby)}")
+        check(toolchain["kind"] == "lockstep",
+              "the Go version stays a single lockstep pin")
+
         print("claude-code-cli exemption (#4473)")
         check(not hasattr(dp, "discover_claude_code_cli"),
               "Claude Code CLI has no discoverer — it is exempt from pin "

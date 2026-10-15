@@ -163,6 +163,15 @@ Dockerfile bases) are `docker` pins too, with `upstream_ref`, `mirror_name` and
 `ghcr.io/cfg-is/ci-mirror` before any bump story exists; the bump story edits
 the list line and every consumer of that ref together.
 
+`golang:` base images are covered twice, deliberately. The Go **version** is the
+single `lockstep` `go-toolchain` pin. The **digest** of each unique
+`golang:<tag>@sha256:<digest>` (Dockerfile `FROM` lines and `.github/ci-images.yml`
+entries) is a separate `docker` pin named `docker:golang:<tag>` with
+`role: "go-toolchain-digest"`. Compare it like any other digest — upstream
+re-pushes a tag (`golang:1.27.2-trixie`) without the version moving. A digest
+bump touches only that pin's `locations[]`; do not fold it into the version
+story, and a version bump supersedes the digest pins for the old tag.
+
 ### 2d. Per-pin research (kinds `lockstep`, `tool`, `mcp`)
 
 For each of these pins (run in parallel where independent — separate Bash calls in one assistant turn):
