@@ -18,7 +18,7 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 ./.github/scripts/install-trivy.sh v0.75.0 \
     c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
 go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 make install-nancy     # Auto-install Nancy for your platform
 
 # 2. Verify installation and run security scan
@@ -160,7 +160,7 @@ staticcheck provides advanced static analysis for Go with curated rule sets that
 
 ```bash
 # Go installation (all platforms) 
-GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 ```
 
 **Configuration**: CFGMS includes a `staticcheck.conf` file with curated rules that:
@@ -428,7 +428,7 @@ Current tool versions (as of v0.3.1):
 - **Trivy**: v0.75.0 (pinned — v0.69.4-v0.69.6 compromised per CVE-2026-33634; v0.75.0 is the post-incident clean release. Install via `./.github/scripts/install-trivy.sh`. NEVER use @latest, NEVER use `go install`.)
 - **Nancy**: v2.1.0
 - **gosec**: v2.28.0 (pinned — avoid @latest)
-- **staticcheck**: 2026.2.1 (pinned — avoid @latest)
+- **staticcheck**: 2026.2.2 (pinned — avoid @latest)
 
 ## Contributing to Security Setup
 
@@ -564,7 +564,7 @@ pre-commit install --install-hooks
 
 ```bash
 # Install missing Go tools
-GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
 
 # Verify PATH

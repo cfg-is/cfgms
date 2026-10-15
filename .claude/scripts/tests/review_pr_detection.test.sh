@@ -447,14 +447,23 @@ cat > "$ADV_ROOT/pipeline-helper.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "helper $*" >> "$ADV_CALLS"
 STUB
-chmod +x "$ADV_ROOT/scripts/project-queue.sh" "$ADV_ROOT/adversarial.sh" "$ADV_ROOT/pipeline-helper.sh"
+# review-pr's same-host container check (`docker ps -a ... | head -1`) runs
+# before the gate under `set -o pipefail`, so on a host without docker the CLI
+# exits 127 there and the gate is never reached. Stub docker as "no existing
+# container" so these cases do not depend on the host having docker installed.
+mkdir -p "$ADV_ROOT/bin"
+cat > "$ADV_ROOT/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$ADV_ROOT/scripts/project-queue.sh" "$ADV_ROOT/adversarial.sh" "$ADV_ROOT/pipeline-helper.sh" "$ADV_ROOT/bin/docker"
 printf '{"state":"OPEN","headRefName":"feature/story-4242-agent","body":"Fixes #4242","labels":[],"headRepositoryOwner":{"login":"cfg-is"},"author":{"login":"jrdnr"},"mergeStateStatus":"CLEAN"}' \
   > "$ADV_ROOT/meta.json"
 
 run_adv_review() {
   ADV_CALLS="$ADV_ROOT/calls-$1.log"; : > "$ADV_CALLS"
   ADV_VERDICT="$2" ADV_CALLS="$ADV_CALLS" GH_FIXTURE="$ADV_ROOT/meta.json" \
-    PATH="$CONFLICT_STUB_DIR:$PATH" HOME="$ADV_ROOT/home" \
+    PATH="$ADV_ROOT/bin:$CONFLICT_STUB_DIR:$PATH" HOME="$ADV_ROOT/home" \
     CFGMS_TEST_CREDS_STATUS="CREDS_OK:test" CFGMS_TEST_REPO_ROOT="$ADV_ROOT" \
     CFGMS_TEST_ADVERSARIAL_SCRIPT="$ADV_ROOT/adversarial.sh" \
     CFGMS_TEST_PIPELINE_HELPER="$ADV_ROOT/pipeline-helper.sh" \
