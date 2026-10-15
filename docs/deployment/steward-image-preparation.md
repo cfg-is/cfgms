@@ -46,6 +46,7 @@ From the certificate store directory (`/var/lib/cfgms/steward/certs` on Linux,
 |------|-------|
 | `device_identity.enc` | The device identity key. A new one is generated on first start, which gives the clone a different `DeviceID`. |
 | `device_identity_tpm.blob` | On Linux hosts with a TPM, the TPM-wrapped device identity key. It only loads on the TPM that created it. A new key is generated on first start. |
+| TPM-held device key (Windows) | On Windows hosts with a TPM, the device identity key is held by the Platform Crypto Provider, not in a file. prepare-image deletes it from the machine key store. A new key is generated on first start. |
 | Keychain item tagged `io.cfgms.steward.device-identity` | On macOS hosts where the Secure Enclave backend is active, the device identity key. It is deleted by image preparation and cannot be copied to another Mac. A new key is generated on first start. |
 | `steward-identity.json` | Steward ID, tenant, device ID, and for trust-on-first-use installs the CA pin. |
 | `steward-pending.json` | Pending registration state. |
@@ -86,6 +87,10 @@ clone.
 ## TPM access on Linux
 
 On a Linux host with a TPM 2.0, the steward keeps its device key inside the TPM and reports `key_protection_level: tpm`. The service account needs read and write access to the resource-managed device `/dev/tpmrm0`, which is normally owned by group `tss` (add the account to that group, for example `usermod -aG tss cfgms-steward`). Without that access, or without a TPM, the steward uses the encrypted file key and reports `file`; the reason is in the steward log and enrollment is unaffected. The backend is chosen once, at first enrollment: a steward that already has a file key stays on it.
+
+## TPM on Windows
+
+On a Windows host with a TPM 2.0, the steward keeps its device key in the TPM through the Platform Crypto Provider and reports `key_protection_level: tpm`. The steward service runs as LocalSystem and needs no extra configuration. A host without a usable TPM uses the DPAPI-encrypted file key and reports `file`. That includes a VM with no virtual TPM, a host whose TPM is disabled in firmware, and a host whose TPM Base Services are stopped. The reason is in the steward log and enrollment is unaffected. To get `tpm` on a Hyper-V VM, enable its virtual TPM before the steward first enrolls. The backend is chosen once, at first enrollment, so enabling a TPM later does not move an enrolled steward off its file key.
 
 ## Secure Enclave on macOS
 
