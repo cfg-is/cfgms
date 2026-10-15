@@ -2720,31 +2720,63 @@ func (s *Server) cleanupExpiredAPIKeys() {
 	}
 }
 
-// configureCORS sets up CORS allowed origins configuration
-// H-AUTH-3: Replace wildcard CORS with configurable allowed origins list
+// envAllowDevCORSOrigins is the development opt-in that lets
+// CFGMS_ALLOWED_ORIGINS contain plain-HTTP loopback origins (localhost,
+// 127.0.0.1, [::1]). Unset, only https:// origins are accepted.
+const envAllowDevCORSOrigins = "CFGMS_ALLOW_DEV_CORS_ORIGINS"
+
+// configureCORS sets up the CORS allowed origins.
+//
+// The default is same-origin only: with CFGMS_ALLOWED_ORIGINS unset the
+// allowlist is empty and no cross-origin request is allowed. Entries are
+// comma-separated, trimmed, and empties dropped. A non-https:// entry is
+// ignored with a warning (not a startup failure), except that
+// CFGMS_ALLOW_DEV_CORS_ORIGINS=true also admits http:// loopback origins.
 func (s *Server) configureCORS() {
-	// Default allowed origins for development and production
-	defaultOrigins := []string{
-		"http://localhost:3000", // Development frontend
-		"http://localhost:3001", // Alternative dev frontend
-		"http://localhost:9080", // API itself (for testing)
+	allowDev := os.Getenv(envAllowDevCORSOrigins) == "true"
+	origins := []string{}
+
+	for _, entry := range strings.Split(os.Getenv("CFGMS_ALLOWED_ORIGINS"), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if !isAcceptableCORSOrigin(entry, allowDev) {
+			s.logger.Warn("Ignoring CORS origin: must be https:// (http:// loopback only with "+envAllowDevCORSOrigins+"=true)",
+				"origin", logging.SanitizeLogValue(entry))
+			continue
+		}
+		origins = append(origins, entry)
 	}
 
-	// Load from environment variable if specified
-	// Format: CFGMS_ALLOWED_ORIGINS="https://portal.example.com,https://app.example.com"
-	if envOrigins := os.Getenv("CFGMS_ALLOWED_ORIGINS"); envOrigins != "" {
-		s.corsConfig = &CORSConfig{
-			AllowedOrigins: strings.Split(envOrigins, ","),
-		}
-		s.logger.Info("CORS configured from environment",
-			"allowed_origins", s.corsConfig.AllowedOrigins)
-	} else {
-		s.corsConfig = &CORSConfig{
-			AllowedOrigins: defaultOrigins,
-		}
-		s.logger.Info("CORS configured with default origins",
-			"allowed_origins", defaultOrigins)
+	s.corsConfig = &CORSConfig{AllowedOrigins: origins}
+	if len(origins) == 0 {
+		s.logger.Info("CORS: same-origin only (no cross-origin requests allowed)")
+		return
 	}
+	s.logger.Info("CORS configured from environment", "allowed_origins", origins)
+}
+
+// isAcceptableCORSOrigin reports whether entry is an https:// origin, or, when
+// allowDev is set, an http:// origin whose host is a loopback name.
+func isAcceptableCORSOrigin(entry string, allowDev bool) bool {
+	u, err := url.Parse(entry)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		if !allowDev {
+			return false
+		}
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return true
+		}
+	}
+	return false
 }
 
 // envAllowEphemeralSecrets is the dev/test-only override that downgrades the

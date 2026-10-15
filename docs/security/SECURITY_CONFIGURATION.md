@@ -101,17 +101,28 @@ The Controller API enforces strict Cross-Origin Resource Sharing (CORS) policies
 export CFGMS_ALLOWED_ORIGINS="https://app.example.com,https://dashboard.example.com"
 ```
 
-#### Default Origins
+#### Default: Same-Origin Only
 
-If `CFGMS_ALLOWED_ORIGINS` is not set, these defaults apply (development only):
+If `CFGMS_ALLOWED_ORIGINS` is not set, the API allows no cross-origin requests: no
+`Access-Control-Allow-Origin` header is sent for any `Origin`, and cross-origin
+preflights are refused with 403.
 
+Entries are comma-separated; surrounding whitespace is trimmed and empty entries are
+dropped. Only `https://` origins are accepted. An entry that is not `https://` is
+ignored and a warning is logged at startup.
+
+#### Development Opt-In
+
+To allow a local frontend over plain HTTP, set the explicit opt-in:
+
+```bash
+export CFGMS_ALLOW_DEV_CORS_ORIGINS=true
+export CFGMS_ALLOWED_ORIGINS="http://localhost:3000"
 ```
-http://localhost:3000    # Development frontend
-http://localhost:3001    # Alternative dev frontend
-http://localhost:9080    # API itself (for testing)
-```
 
-**WARNING**: Default origins are **NOT suitable for production**. Always configure explicit origins.
+With the opt-in, `http://` origins are accepted only when the host is `localhost`,
+`127.0.0.1` or `[::1]`. Any other non-`https://` entry is still ignored. Never set
+`CFGMS_ALLOW_DEV_CORS_ORIGINS` in production.
 
 ### Production Best Practices
 
@@ -138,7 +149,8 @@ http://localhost:9080    # API itself (for testing)
 3. **Separate by Environment**
 
    ```bash
-   # Development
+   # Development (requires the explicit dev opt-in)
+   CFGMS_ALLOW_DEV_CORS_ORIGINS=true
    CFGMS_ALLOWED_ORIGINS="http://localhost:3000"
 
    # Staging
