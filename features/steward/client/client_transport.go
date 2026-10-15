@@ -47,6 +47,8 @@ import (
 	"github.com/cfgis/cfgms/features/steward/driftdiff"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	"github.com/cfgis/cfgms/features/steward/modules/install"
+	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -1787,6 +1789,12 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// This is the only authorised source of DriftMode — local steward.cfg
 	// cannot set it (the local-file loading path clears the field).
 	executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
+
+	// Let the executor pull required_modules that are not installed (Issue #4987).
+	// Built per sync from the current transport client, the configured
+	// module_trust.mode and additional_publishers. Without a transport client
+	// (not a gRPC control plane) the installer is cleared and nothing is pulled.
+	executor.SetModuleInstaller(c.newModuleInstaller())
 
 	// Thread allow_downgrade from the controller-delivered cfg so both
 	// handlePushStewardBinary and triggerVersionConvergence use the current value.
@@ -3804,4 +3812,32 @@ func (c *TransportClient) encodeDriftDiffs() [][]byte {
 		out = append(out, b)
 	}
 	return out
+}
+
+// newModuleInstaller builds the required-module installer from the control-plane
+// transport client and the configured module_trust settings. It returns nil
+// when no transport client is available.
+func (c *TransportClient) newModuleInstaller() execution.ModuleInstaller {
+	c.mu.RLock()
+	cp := c.controlPlane
+	c.mu.RUnlock()
+	grpcProv, ok := cp.(*grpcCP.Provider)
+	if !ok {
+		return nil
+	}
+	tc := grpcProv.TransportClient()
+	if tc == nil {
+		return nil
+	}
+	mode := c.moduleTrustMode
+	if mode == "" {
+		mode = stewardtypes.ModuleTrustModeController
+	}
+	return &install.Installer{
+		Mode:                     mode,
+		AdditionalPublisherNames: c.moduleTrustAdditionalPublishers,
+		Enforcer:                 stewardtrust.NewStewardTrustEnforcer(),
+		Client:                   tc,
+		Logger:                   c.logger,
+	}
 }

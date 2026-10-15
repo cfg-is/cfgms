@@ -162,11 +162,3 @@ packages:
   # the tree. features/controller/directory (below) is unaffected — it is a
   # subdirectory, not part of the deleted root package, and Issue #4406 was
   # scoped to leave its WIRE entry untouched for the sibling wiring story.
-
-  - path: features/steward/modules/install
-    reason: >
-      WIRE (Issue #4986, Epic #4654): the steward module bundle fetch, verify
-      and install package. Its caller — the config-driven trigger that
-      constructs an Installer from module_trust and the transport client — is
-      the S8 story of the same epic, deliberately out of scope here. Delete
-      this entry in the S8 change that imports the package from the steward.
