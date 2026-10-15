@@ -47,9 +47,16 @@ func Run(moduleName string, newModule NewModule) {
 		log.Fatalf("cfgms-module-%s: failed to listen on %s: %v", moduleName, socketPath, err) // #nosec G706 - socketPath is system-set (CFGMS_MODULE_SOCKET), not user input
 	}
 
-	if err := Serve(lis, moduleName, newModule, graph.NewHTTPClient(), true); err != nil {
+	if err := Serve(lis, moduleName, newModule, newGraphClient(), true); err != nil {
 		log.Fatalf("cfgms-module-%s: gRPC server exited with error: %v", moduleName, err)
 	}
+}
+
+// newGraphClient builds the Graph client for a module process: rate limited
+// and retrying, including honouring Retry-After on throttled responses.
+// Options exist so tests can point the client at a local server.
+func newGraphClient(options ...graph.ClientOption) *graph.HTTPClient {
+	return graph.NewRateLimitedHTTPClient(options...)
 }
 
 // Serve registers the module on lis and serves until the server stops. The
