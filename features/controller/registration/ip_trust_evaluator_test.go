@@ -396,3 +396,36 @@ func TestIPTrustEvaluator_MultiTenantIsolation(t *testing.T) {
 	assert.Equal(t, "tenant-A/10.0.0.1/32", calls[0],
 		"only tenant-A must be promoted; tenant-B timer is still running")
 }
+
+// promoteForTest runs a full promotion cycle for ip and returns the CIDRs the
+// store was asked to trust.
+func promoteForTest(t *testing.T, ip string) []string {
+	t.Helper()
+	ev, store := newTestEvaluator(t, time.Hour)
+	ctx := context.Background()
+	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", ip, true))
+	ev.ForceTimerExpiry("tenant-1", ip)
+	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", ip, true))
+	return store.addTrustedRangeCalls()
+}
+
+func TestIPTrustEvaluator_IPv6PromotedAsHostPrefix(t *testing.T) {
+	assert.Equal(t, []string{"tenant-1/2001:db8::1/128"}, promoteForTest(t, "2001:db8::1"))
+}
+
+func TestIPTrustEvaluator_IPv4MappedStoredAsIPv4(t *testing.T) {
+	assert.Equal(t, []string{"tenant-1/10.0.0.7/32"}, promoteForTest(t, "::ffff:10.0.0.7"))
+}
+
+func TestIPTrustEvaluator_IPv4MappedAndIPv4ShareTimer(t *testing.T) {
+	ev, _ := newTestEvaluator(t, time.Hour)
+	require.NoError(t, ev.RecordLiveness(context.Background(), "tenant-1", "s", "::ffff:10.0.0.7", true))
+	assert.True(t, ev.HasTimer("tenant-1", "10.0.0.7"))
+}
+
+func TestIPTrustEvaluator_UnparseableAddressNotPromoted(t *testing.T) {
+	ev, store := newTestEvaluator(t, time.Hour)
+	require.NoError(t, ev.RecordLiveness(context.Background(), "tenant-1", "s", "not-an-ip", true))
+	assert.False(t, ev.HasTimer("tenant-1", "not-an-ip"))
+	assert.Empty(t, store.addTrustedRangeCalls())
+}

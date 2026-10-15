@@ -48,7 +48,7 @@ import (
 )
 
 // testValidDeviceID is a 64-character lowercase hex string used across registration handler tests.
-const testValidDeviceID = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1"
+var testValidDeviceID string
 
 // testValidIdentityKeyPub is a base64-encoded 32-byte Ed25519 public key generated once per
 // test binary run. Using a fixed-per-run key keeps tests deterministic within a run while
@@ -68,6 +68,7 @@ func init() {
 		panic("test setup: failed to generate Ed25519 key: " + err.Error())
 	}
 	testValidIdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+	testValidDeviceID = deviceIDForKey([]byte(pub))
 
 	csrPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -255,6 +256,55 @@ func postRegisterWithBody(server *Server, regReq RegistrationRequest) *httptest.
 	return rec
 }
 
+// seedSiblingPendingEntry stores a second approved-eligible pending entry that
+// asserts the same device_id as an existing one but carries a different identity
+// key. handleRegister now refuses such a request on the wire (device_id must be
+// SHA-256 of the key), so the duplicate-device_id claim guards are exercised by
+// seeding the pending store directly.
+func seedSiblingPendingEntry(t *testing.T, pendingStore business.PendingRegistrationStore, pendingID string, otherKey ed25519.PublicKey) string {
+	t.Helper()
+	orig, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	require.NotNil(t, orig)
+	sibling := *orig
+	sibling.PendingID = orig.PendingID + "-sibling"
+	sibling.StewardID = orig.StewardID + "-sibling"
+	sibling.IdentityKeyPub = []byte(otherKey)
+	require.NoError(t, pendingStore.AddPending(context.Background(), &sibling))
+	return sibling.PendingID
+}
+
+// TestHandleRegister_Ed25519DeviceIDNotBoundToKey_400 verifies that an ed25519
+// registration whose device_id is well-formed but is not SHA-256 of the raw
+// identity key is refused and leaves no pending entry (ADR-010 §1).
+func TestHandleRegister_Ed25519DeviceIDNotBoundToKey_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	const tenantID = "tenant-unbound-device-id"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         "cfgms_reg_unbound_device_id",
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_unbound_device_id",
+		DeviceID:       strings.Repeat("ab", 32),
+		IdentityKeyPub: testValidIdentityKeyPub,
+		KeyAlgorithm:   "ed25519",
+		CSRPEM:         testValidCSRPEM,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	entries, err := pendingStore.ListAll(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a rejected registration must not create a pending entry")
+}
+
 func TestHandleRegister_RevokedToken_Returns401(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, auditMgr := newHandleRegisterServer(t, tokenStore, nil)
@@ -356,7 +406,7 @@ func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) 
 	// One device racing itself. Only one of these may receive a private key —
 	// that is the double-issuance the REST claim exists to prevent.
 	const contenders = 16
-	const deviceID = "00000000000000000000000000000000000000000000000000000000000000ab"
+	deviceID := testValidDeviceID
 	start := make(chan struct{})
 	recorders := make([]*httptest.ResponseRecorder, contenders)
 	var wg sync.WaitGroup
@@ -411,10 +461,12 @@ func TestHandleRegister_PerennialTokenEnrollsManyDevices(t *testing.T) {
 
 	stewardIDs := make(map[string]bool)
 	for i := 0; i < 5; i++ {
+		devicePub, _, keyErr := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, keyErr)
 		rec := postRegisterWithBody(server, RegistrationRequest{
 			Token:          tokenStr,
-			DeviceID:       fmt.Sprintf("%064x", i+1),
-			IdentityKeyPub: testValidIdentityKeyPub,
+			DeviceID:       deviceIDForKey([]byte(devicePub)),
+			IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(devicePub)),
 			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusOK, rec.Code,
@@ -854,7 +906,7 @@ func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *te
 	// retries that lose the race must be handed back that same entry rather than
 	// a second one.
 	const contenders = 16
-	const deviceID = "00000000000000000000000000000000000000000000000000000000000000cd"
+	deviceID := testValidDeviceID
 	start := make(chan struct{})
 	recorders := make([]*httptest.ResponseRecorder, contenders)
 	var wg sync.WaitGroup
@@ -908,12 +960,15 @@ func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *te
 	}))
 
 	pendingIDs := make(map[string]string)
+	deviceKeys := make(map[string]string)
 	for i := 0; i < 3; i++ {
-		deviceID := fmt.Sprintf("%064x", i+1)
+		devicePub, _, keyErr := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, keyErr)
+		deviceID := deviceIDForKey([]byte(devicePub))
 		rec := postRegisterWithBody(server, RegistrationRequest{
 			Token:          tokenStr,
 			DeviceID:       deviceID,
-			IdentityKeyPub: testValidIdentityKeyPub,
+			IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(devicePub)),
 			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code,
@@ -922,6 +977,7 @@ func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *te
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		require.NotEmpty(t, resp.PendingID)
 		pendingIDs[deviceID] = resp.PendingID
+		deviceKeys[deviceID] = base64.StdEncoding.EncodeToString([]byte(devicePub))
 	}
 	assert.Len(t, pendingIDs, 3, "each device must receive a distinct pending_id")
 
@@ -930,7 +986,7 @@ func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *te
 		rec := postRegisterWithBody(server, RegistrationRequest{
 			Token:          tokenStr,
 			DeviceID:       deviceID,
-			IdentityKeyPub: testValidIdentityKeyPub,
+			IdentityKeyPub: deviceKeys[deviceID],
 			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, "retry body: %s", rec.Body.String())
@@ -2205,7 +2261,7 @@ func TestHandleRegister_PersistsDeviceIdentity(t *testing.T) {
 
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	deviceID := "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2"
+	deviceID := deviceIDForKey([]byte(pub))
 	identityKeyPub := base64.StdEncoding.EncodeToString([]byte(pub))
 
 	rec := postRegisterWithBody(server, RegistrationRequest{
@@ -2447,9 +2503,9 @@ func TestHandleRegister_DuplicateDeviceIDCrossTenant_200(t *testing.T) {
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tokA))
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tokB))
 
-	deviceID := "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2"
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	deviceID := deviceIDForKey([]byte(pub))
 	keyPub := base64.StdEncoding.EncodeToString([]byte(pub))
 
 	// Register under tenant-a — must succeed.
@@ -2610,7 +2666,7 @@ func TestHandleRegister_HostnameSeededBeforeDNASync(t *testing.T) {
 
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	deviceID := "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3"
+	deviceID := deviceIDForKey([]byte(pub))
 
 	rec := postRegisterWithBody(server, RegistrationRequest{
 		Token:          "cfgms_reg_hostname_seed",
@@ -3047,7 +3103,7 @@ func TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart(t *testi
 
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	deviceID := "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4"
+	deviceID := deviceIDForKey([]byte(pub))
 	identityKeyPub := base64.StdEncoding.EncodeToString([]byte(pub))
 
 	// Step 1: Register → quarantine (HTTP 202).
@@ -3141,13 +3197,13 @@ func TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant(t *testi
 		ControllerURL: "grpc://controller:7443",
 	}))
 
-	// One device_id, two different identity keys — isValidDeviceID never verifies
-	// device_id == SHA-256(identity_key_pub), so this is reachable from the wire.
-	deviceID := "c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5"
+	// One device_id, two different identity keys — the second pending entry is
+	// seeded directly because handleRegister binds device_id to the key.
 	pubA, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	pubB, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	deviceID := deviceIDForKey([]byte(pubA))
 
 	quarantine := func(identityKeyPub string) string {
 		rec := postRegisterWithBody(server, RegistrationRequest{
@@ -3166,7 +3222,7 @@ func TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant(t *testi
 	// Both registrations happen before either claim, so no StewardRecord exists to
 	// trip the register-time duplicate gate.
 	pendingA := quarantine(base64.StdEncoding.EncodeToString([]byte(pubA)))
-	pendingB := quarantine(base64.StdEncoding.EncodeToString([]byte(pubB)))
+	pendingB := seedSiblingPendingEntry(t, pendingStore, pendingA, pubB)
 	require.NotEqual(t, pendingA, pendingB,
 		"distinct identity keys must yield distinct pending entries for the same device_id")
 
@@ -3278,9 +3334,9 @@ func TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict(t *testing.T) {
 		ControllerURL: "grpc://controller:7443",
 	}))
 
-	deviceID := "f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8"
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	deviceID := deviceIDForKey([]byte(pub))
 	entry := &business.PendingRegistrationEntry{
 		PendingID:      "pend-reclaim",
 		StewardID:      "steward-reclaim",
@@ -3349,11 +3405,11 @@ func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *t
 		ControllerURL: "grpc://controller:7443",
 	}))
 
-	deviceID := "f1e2d3c4b5a6978869504132231405f6e7d8c9b0a1928374655463728190abcd"
 	pubA, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	pubB, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	deviceID := deviceIDForKey([]byte(pubA))
 
 	quarantine := func(identityKeyPub string) string {
 		rec := postRegisterWithBody(server, RegistrationRequest{
@@ -3370,7 +3426,7 @@ func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *t
 	}
 
 	pendingA := quarantine(base64.StdEncoding.EncodeToString([]byte(pubA)))
-	pendingB := quarantine(base64.StdEncoding.EncodeToString([]byte(pubB)))
+	pendingB := seedSiblingPendingEntry(t, pendingStore, pendingA, pubB)
 	require.NotEqual(t, pendingA, pendingB)
 
 	for _, id := range []string{pendingA, pendingB} {
@@ -3498,7 +3554,7 @@ func TestHandleRegistrationStatus_DistinctStewardIDsAcrossConcurrentRegistration
 	for i := 0; i < N; i++ {
 		pub, _, err := ed25519.GenerateKey(rand.Reader)
 		require.NoError(t, err)
-		deviceID := fmt.Sprintf("%064x", i+1)
+		deviceID := deviceIDForKey([]byte(pub))
 
 		rec := postRegisterWithBody(server, RegistrationRequest{
 			Token:          regToken,
