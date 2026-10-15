@@ -52,6 +52,8 @@ require (
 	software.sslmate.com/src/go-pkcs12 v0.7.3
 )
 
+require github.com/ebitengine/purego v0.11.1
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.1 // indirect

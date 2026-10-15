@@ -46,6 +46,7 @@ From the certificate store directory (`/var/lib/cfgms/steward/certs` on Linux,
 |------|-------|
 | `device_identity.enc` | The device identity key. A new one is generated on first start, which gives the clone a different `DeviceID`. |
 | `device_identity_tpm.blob` | On Linux hosts with a TPM, the TPM-wrapped device identity key. It only loads on the TPM that created it. A new key is generated on first start. |
+| Keychain item tagged `io.cfgms.steward.device-identity` | On macOS hosts where the Secure Enclave backend is active, the device identity key. It is deleted by image preparation and cannot be copied to another Mac. A new key is generated on first start. |
 | `steward-identity.json` | Steward ID, tenant, device ID, and for trust-on-first-use installs the CA pin. |
 | `steward-pending.json` | Pending registration state. |
 | `steward-refresh-pending.json` | A queued re-admission request. |
@@ -85,6 +86,10 @@ clone.
 ## TPM access on Linux
 
 On a Linux host with a TPM 2.0, the steward keeps its device key inside the TPM and reports `key_protection_level: tpm`. The service account needs read and write access to the resource-managed device `/dev/tpmrm0`, which is normally owned by group `tss` (add the account to that group, for example `usermod -aG tss cfgms-steward`). Without that access, or without a TPM, the steward uses the encrypted file key and reports `file`; the reason is in the steward log and enrollment is unaffected. The backend is chosen once, at first enrollment: a steward that already has a file key stays on it.
+
+## Secure Enclave on macOS
+
+On a Mac the steward tries to keep its device key in the Secure Enclave and reports `key_protection_level: secure-enclave` with `key_algorithm: ecdsa-p256`. At first enrollment it creates a persistent key, reloads it, signs a test digest and verifies it; only if all of that succeeds is the Secure Enclave used. Otherwise (a virtual machine, an Intel Mac without a T2 chip, or a daemon the Security framework refuses a persistent Secure Enclave key, for example with `OSStatus -34018` for a missing entitlement) the steward uses the encrypted file key and reports `file`; the reason, including the `OSStatus`, is in the steward log and enrollment is unaffected. The backend is chosen once, at first enrollment: a steward that already has a file key stays on it, and a steward that enrolled with the Secure Enclave never falls back to a file key (it retries instead).
 
 ## Running it twice
 

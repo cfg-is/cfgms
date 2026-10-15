@@ -577,6 +577,31 @@ An attribute that cannot be read is omitted, never fabricated. DNA fields are ne
 
 If a second endpoint presents the same steward identity (certificate and key) while another endpoint already holds a control stream, the controller detects the change of peer host and records a high-severity audit event naming both addresses and certificate serials. Detection does not refuse either endpoint; a steward reconnecting from the same host is not treated as a duplicate. Detection is per controller node.
 
+### Device Key Backends (ADR-034 §7)
+
+`identity.Open` chooses the device key backend once, at first enrollment, and reports it as `key_protection_level`. Order: TPM (Linux), Secure Enclave (macOS), then the encrypted file. A steward with an existing `device_identity.enc` stays on `file`; a steward whose stored identity records a hardware level reloads only that backend and returns `ErrHardwareKeyUnavailable` rather than minting a file key.
+
+#### macOS Secure Enclave (Issue #4978)
+
+The backend calls the Security framework through `purego`, so the darwin steward stays `CGO_ENABLED=0`. It creates a P-256 key with `kSecAttrTokenIDSecureEnclave` and `kSecAttrIsPermanent` under the stable application tag `io.cfgms.steward.device-identity`, reloads it by that tag on every start, and signs the 32-byte PoP digest with `kSecKeyAlgorithmECDSASignatureDigestX962SHA256` (no second hash). The public key is the X9.63 point from `SecKeyCopyExternalRepresentation`, converted to PKIX DER; `DeviceID` is its SHA-256.
+
+At first enrollment a self-test must pass before the key is adopted: create the persistent key, reload it by tag (same public key), sign a digest, verify the signature. Any failure deletes the key just created, returns the error with its `OSStatus`, and `Open` falls back to `file` with the reason logged. A non-persistent key is never created, because it could not be reloaded and would change `DeviceID` on every start. An existing key that cannot be loaded is an error, never replaced. `Regenerate` creates and self-tests the replacement under a pending tag, deletes the old key, then moves the replacement to the stable tag.
+
+##### Evidence
+
+Whether a launchd daemon can obtain a persistent Secure Enclave key depends on its signing state; this is measured on real hardware and is not yet available.
+
+| Item | Result |
+|------|--------|
+| macOS version | not yet measured: no Mac available to the pipeline |
+| Hardware | not yet measured |
+| Daemon signing (unsigned / ad-hoc / Developer ID) | not yet measured |
+| Create persistent Secure Enclave key (result, OSStatus) | not yet measured |
+| Reload after restart (result, OSStatus) | not yet measured |
+| Reported level | not yet measured |
+
+What CI established instead (macOS runners are virtual and expose no Secure Enclave): the Security and CoreFoundation bindings resolve; a Keychain software P-256 key through the same create/export/sign code verifies over the digest and yields the expected PKIX DER and `DeviceID`; on the runner `Open` falls back to `file` and logs the `OSStatus`; an injected self-test failure leaves no key. When a Mac is available, run the probe unsigned and ad-hoc signed as a root launchd daemon and fill in this table. If entitlements or signing turn out to be required, the steward reports `file` on macOS until the founder decides on a signing change.
+
 ### Fencing-Token Command Fence (ADR-029 Decision 6; substrate updated by ADR-031 Decision 5 / Issue #3760)
 
 Every inbound `Command` carries a fencing token stamped by the controller that published it (`Command.Term`, #3390). The field name and wire type are unchanged since #3390 — a `uint64` — only its source has moved: originally the Raft term the controller cluster was at (ADR-029 Decision 5), it is now the S3 database lease's monotonic fencing token (ADR-031 Decision 5, Issue #3760). Every controller node stamps it, not only the lease holder (`ha.Manager.CommandTerm()`): the holder uses its local authority, any other node reads the lease's current token from the lease store (cached for 2 s). An unreadable lease stamps 0, which a steward with a set ratchet rejects — it fails closed. Only a cluster deployment (`ha.mode: cluster`) holds that lease and therefore stamps a non-zero token; single-server and blue-green deployments have no lease to draw one from and publish unstamped commands, which the ratchet's first column already covers. The steward tracks the highest value it has observed and enforces a three-state ratchet on the receive path, ahead of command dispatch — this mechanism did not change when the source did:
