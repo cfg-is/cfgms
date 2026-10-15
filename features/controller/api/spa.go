@@ -86,10 +86,44 @@ func validateSPARoot(root fs.FS) error {
 
 // spaCSP is the Content-Security-Policy applied to all SPA responses.
 // 'self' only — no external origins. Vite emits hashed filenames so no inline
-// scripts/styles are generated; no nonce machinery is needed. frame-ancestors,
+// scripts/styles are generated; no nonce machinery is needed. The one exception
+// is style-src-elem: xterm.js (Shell tab) creates <style> elements at runtime
+// (Viewport.ts, DomRenderer.ts), so inline <style> elements are allowed while
+// style attributes and script-src stay locked down. frame-ancestors,
 // base-uri, and object-src close the clickjacking/injection surface (ADR-018,
 // Issue #2494).
-const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'none'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+
+// spaEarlyExitCSP is applied to responses the handler produces without serving
+// the SPA (404, 405, 500): nothing may load or frame them.
+const spaEarlyExitCSP = "default-src 'none'; frame-ancestors 'none'"
+
+// setEarlyExitHeaders sets the cache and CSP headers on non-SPA responses.
+func setEarlyExitHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", spaEarlyExitCSP)
+}
+
+// noDirFS hides directories from http.FileServer so a directory request such
+// as /assets/ falls through to the index.html fallback instead of a listing.
+type noDirFS struct{ fs.FS }
+
+func (n noDirFS) Open(name string) (fs.File, error) {
+	f, err := n.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		_ = f.Close()
+		return nil, fs.ErrNotExist
+	}
+	return f, nil
+}
 
 // spaHandler serves the embedded web UI with SPA fallback routing.
 //
@@ -107,8 +141,8 @@ type spaHandler struct {
 // root, not a parent containing dist/).
 func newSPAHandler(distFS fs.FS) *spaHandler {
 	return &spaHandler{
-		fileServer: http.FileServer(http.FS(distFS)),
-		distFS:     distFS,
+		fileServer: http.FileServer(http.FS(noDirFS{distFS})),
+		distFS:     noDirFS{distFS},
 	}
 }
 
@@ -120,12 +154,14 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the behaviour that existed before the SPA catch-all was added.
 	if strings.HasPrefix(urlPath, "/api/") || urlPath == "/api" ||
 		strings.HasPrefix(urlPath, "/raft/") || urlPath == "/raft" {
+		setEarlyExitHeaders(w)
 		http.NotFound(w, r)
 		return
 	}
 
 	// SPA paths are served only for GET and HEAD.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		setEarlyExitHeaders(w)
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -171,6 +207,7 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		//     redirect to /
 		content, err := fs.ReadFile(h.distFS, "index.html")
 		if err != nil {
+			setEarlyExitHeaders(w)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -200,7 +237,6 @@ func (w *spaResponseWriter) WriteHeader(code int) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", spaCSP)
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		h.Set("Cache-Control", w.cacheControl)
 	}
 	w.ResponseWriter.WriteHeader(code)

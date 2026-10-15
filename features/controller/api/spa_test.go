@@ -4,9 +4,11 @@
 package api
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -236,7 +238,8 @@ func TestSPAHandlerSecurityHeadersOnAsset(t *testing.T) {
 	assert.Contains(t, csp, "default-src 'self'")
 	assert.Contains(t, csp, "frame-ancestors 'none'")
 	assert.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
-	assert.NotEmpty(t, rr.Header().Get("Referrer-Policy"))
+	assert.NotEqual(t, "strict-origin-when-cross-origin", rr.Header().Get("Referrer-Policy"),
+		"the SPA must not override the global Referrer-Policy")
 }
 
 func TestSPAHandlerAPIPathGuard(t *testing.T) {
@@ -290,6 +293,107 @@ func TestSPAHandlerPathTraversalUnit(t *testing.T) {
 				"traversal path %s must serve index.html content, got: %s", urlPath, body)
 			assert.NotContains(t, body, "module github.com/cfgis/cfgms",
 				"traversal path %s must not leak go.mod content", urlPath)
+		})
+	}
+}
+
+const wantSPACSP = "default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'none'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+
+const wantEarlyExitCSP = "default-src 'none'; frame-ancestors 'none'"
+
+// Issue #5020 — end to end through the real router and global middleware.
+func TestSPAHeadersEndToEnd(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupRouteTestServer(t)
+
+	get := func(method, target string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		server.router.ServeHTTP(rr, httptest.NewRequest(method, target, nil))
+		return rr
+	}
+
+	root := get(http.MethodGet, "/")
+	require.Equal(t, http.StatusOK, root.Code)
+	assert.Equal(t, wantSPACSP, root.Header().Get("Content-Security-Policy"))
+	assert.Contains(t, root.Header().Get("Content-Security-Policy"), "script-src 'self';")
+	assert.NotContains(t, root.Header().Get("Content-Security-Policy"), "script-src 'self' 'unsafe-inline'")
+	assert.Equal(t, "no-referrer", root.Header().Get("Referrer-Policy"))
+
+	asset := get(http.MethodGet, "/assets/app-Dh9fZ4zy.js")
+	require.Equal(t, http.StatusOK, asset.Code)
+	assert.Equal(t, "no-referrer", asset.Header().Get("Referrer-Policy"))
+
+	dir := get(http.MethodGet, "/assets/")
+	assert.NotContains(t, dir.Body.String(), "<pre>")
+	assert.NotContains(t, dir.Body.String(), "<a href=")
+
+	post := get(http.MethodPost, "/")
+	assert.Equal(t, http.StatusMethodNotAllowed, post.Code)
+	assert.Equal(t, "no-store", post.Header().Get("Cache-Control"))
+	assert.Equal(t, wantEarlyExitCSP, post.Header().Get("Content-Security-Policy"))
+
+	apiRoot := get(http.MethodGet, "/api")
+	assert.Equal(t, http.StatusNotFound, apiRoot.Code)
+	assert.Equal(t, "no-store", apiRoot.Header().Get("Cache-Control"))
+	assert.Equal(t, wantEarlyExitCSP, apiRoot.Header().Get("Content-Security-Policy"))
+}
+
+func TestSPAHandlerNoDirectoryListing(t *testing.T) {
+	h := newSPAHandler(testSPAFS())
+
+	for _, urlPath := range []string{"/assets/", "/assets", "/assets/."} {
+		t.Run(urlPath, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, urlPath, nil))
+			assert.Contains(t, []int{http.StatusOK, http.StatusNotFound}, rr.Code)
+			body := rr.Body.String()
+			assert.NotContains(t, body, "<pre>")
+			assert.NotContains(t, body, "<a href=")
+			assert.NotContains(t, body, "app-Dh9fZ4zy.js")
+			assert.NotContains(t, body, "style-abc123.css")
+		})
+	}
+}
+
+func TestSPAHandlerStillServesAssetFiles(t *testing.T) {
+	h := newSPAHandler(testSPAFS())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/assets/app-Dh9fZ4zy.js", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "// hashed asset", rr.Body.String())
+}
+
+// unreadableIndexFS is a real fs.FS whose index.html always fails to open.
+type unreadableIndexFS struct{ fs.FS }
+
+func (u unreadableIndexFS) Open(name string) (fs.File, error) {
+	if name == "index.html" {
+		return nil, errors.New("index.html unreadable")
+	}
+	return u.FS.Open(name)
+}
+
+func TestSPAHandlerEarlyExitHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		h      *spaHandler
+		method string
+		target string
+		code   int
+	}{
+		{"404 api", newSPAHandler(testSPAFS()), http.MethodGet, "/api", http.StatusNotFound},
+		{"404 raft", newSPAHandler(testSPAFS()), http.MethodGet, "/raft/x", http.StatusNotFound},
+		{"405", newSPAHandler(testSPAFS()), http.MethodPost, "/", http.StatusMethodNotAllowed},
+		{"500", newSPAHandler(unreadableIndexFS{testSPAFS()}), http.MethodGet, "/", http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			tc.h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, nil))
+			require.Equal(t, tc.code, rr.Code)
+			assert.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
+			assert.Equal(t, wantEarlyExitCSP, rr.Header().Get("Content-Security-Policy"))
+			assert.False(t, strings.Contains(rr.Header().Get("Referrer-Policy"), "strict-origin"))
 		})
 	}
 }
