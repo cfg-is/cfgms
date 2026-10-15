@@ -51,7 +51,7 @@ steward:
 # Required module declarations (top-level; resolved by controller on cfg push)
 required_modules:
   - name: "cfgms/firewall"
-    version: "^1.0.0"
+    version: "1.0.0"
   - name: "cfgms/package"
     version: ">=2.0.0"
 
@@ -172,13 +172,13 @@ The top-level `required_modules:` block declares module bundles that the control
 ```yaml
 required_modules:
   - name: "cfgms/firewall"    # full "publisher/name" identifier
-    version: "^1.0.0"         # semver constraint string
+    version: "1.0.0"          # exact version
 ```
 
 **Fields:**
 
 - `name`: Full module identifier in `publisher/name` format (e.g. `cfgms/firewall`).
-- `version`: Semver constraint string (e.g. `^1.0.0`, `>=2.0.0`). The constraint format is parsed and stored as-is; constraint evaluation against exact bundle versions is performed during resolution.
+- `version`: Exact version (e.g. `1.0.0`). Constraints (`^1.0.0`), aliases (`latest`) and a `v` prefix are refused at cfg push before any source is contacted.
 
 **Resolution behavior on cfg push:**
 
@@ -187,8 +187,8 @@ required_modules:
    - If the module is cached and **approved**: no action needed.
    - If the module is cached but **pending** or **rejected**: cfg deployment is blocked.
    - If the module is **not cached**: the controller calls `GitSourceResolver` to fetch the bundle from the configured module source, then calls `ApprovalWorkflow.EvaluateAndStore` to evaluate the bundle against the trust store.
-     - `AutoApprove` (trusted publisher, valid signature): module is approved and deployment continues.
-     - `QueueForReview` (unknown publisher) or `Reject` (invalid signature): cfg deployment is blocked with an error naming the pending module.
+     - `QueueForReview` (unknown publisher, or trusted publisher with a valid signature): the bundle is queued and waits for a human to approve that version; cfg deployment is blocked with an error naming the pending module.
+     - `Reject` (no signature, or a trusted publisher's signature does not verify): the bundle is stored as rejected and never queued. The publisher must publish a new version.
 3. If any module is blocked, the push is rejected with: `cfg deployment blocked: module <name>@<version> requires approval before deploying`.
 
 ### Resources Section

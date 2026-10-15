@@ -65,7 +65,8 @@ func makeTrustStore(keys ...testKeys) trust.TrustStore {
 	return store
 }
 
-// [REQUIRED TEST] Trusted publisher + valid signature → AutoApprove.
+// [REQUIRED TEST] Trusted publisher + valid signature → QueueForReview: a human
+// approves every version (ADR-006), so Evaluate never returns AutoApprove.
 func TestApprovalWorkflow_Evaluate_TrustedPublisher_ValidSignature(t *testing.T) {
 	wf, _ := makeWorkflow(t)
 	keys := generateKeys(t, "cfgms")
@@ -74,7 +75,55 @@ func TestApprovalWorkflow_Evaluate_TrustedPublisher_ValidSignature(t *testing.T)
 
 	decision, err := wf.Evaluate(b, store)
 	require.NoError(t, err)
-	assert.Equal(t, approval.AutoApprove, decision)
+	assert.Equal(t, approval.QueueForReview, decision)
+}
+
+// unsigned returns a copy of b with every signature removed.
+func unsigned(b *bundle.Bundle) *bundle.Bundle {
+	cp := *b
+	cp.Signatures = nil
+	return &cp
+}
+
+// A bundle with zero signatures is rejected, whether or not its publisher is trusted.
+func TestApprovalWorkflow_Evaluate_ZeroSignatures_Reject(t *testing.T) {
+	wf, _ := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	b := unsigned(makeSignedBundle(t, keys, "hyperv", "0.2.1"))
+
+	for name, store := range map[string]trust.TrustStore{"trusted": makeTrustStore(keys), "unknown": makeTrustStore()} {
+		decision, err := wf.Evaluate(b, store)
+		require.NoError(t, err, name)
+		assert.Equal(t, approval.Reject, decision, name)
+	}
+}
+
+// A zero-signature bundle is stored rejected, never queued.
+func TestApprovalWorkflow_EvaluateAndStore_ZeroSignatures_Rejected(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	b := unsigned(makeSignedBundle(t, generateKeys(t, "acme-corp"), "tool", "1.0.0"))
+
+	decision, err := wf.EvaluateAndStore(b, makeTrustStore())
+	require.NoError(t, err)
+	assert.Equal(t, approval.Reject, decision)
+
+	status, err := c.GetApprovalStatus(b.ContentAddress())
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, status)
+}
+
+// Approve refuses a zero-signature bundle and leaves its status unchanged.
+func TestApprovalWorkflow_Approve_ZeroSignatures_ErrNoSignature(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	b := unsigned(makeSignedBundle(t, generateKeys(t, "acme-corp"), "tool", "1.0.0"))
+	require.NoError(t, c.Put(b))
+
+	err := wf.Approve(b.ContentAddress())
+	assert.ErrorIs(t, err, approval.ErrNoSignature)
+
+	status, err := c.GetApprovalStatus(b.ContentAddress())
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status)
 }
 
 // [REQUIRED TEST] Unknown publisher → QueueForReview.
@@ -150,8 +199,8 @@ func TestApprovalWorkflow_Approve_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, cache.ErrBundleNotFound)
 }
 
-// TestApprovalWorkflow_EvaluateAndStore_AutoApprove persists AutoApprove correctly.
-func TestApprovalWorkflow_EvaluateAndStore_AutoApprove(t *testing.T) {
+// A trusted publisher's valid bundle is queued, not approved, by ingestion.
+func TestApprovalWorkflow_EvaluateAndStore_TrustedValid_Queued(t *testing.T) {
 	wf, c := makeWorkflow(t)
 	keys := generateKeys(t, "cfgms")
 	b := makeSignedBundle(t, keys, "hyperv", "0.2.1")
@@ -159,11 +208,11 @@ func TestApprovalWorkflow_EvaluateAndStore_AutoApprove(t *testing.T) {
 
 	decision, err := wf.EvaluateAndStore(b, store)
 	require.NoError(t, err)
-	assert.Equal(t, approval.AutoApprove, decision)
+	assert.Equal(t, approval.QueueForReview, decision)
 
 	status, err := c.GetApprovalStatus(b.ContentAddress())
 	require.NoError(t, err)
-	assert.Equal(t, cache.ApprovalStatusApproved, status)
+	assert.Equal(t, cache.ApprovalStatusPending, status)
 }
 
 // [REQUIRED TEST] TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement
@@ -182,7 +231,7 @@ func TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement(t *testin
 	genuine := makeSignedBundle(t, keys, "hyperv", "0.2.1")
 	decision, err := wf.EvaluateAndStore(genuine, store)
 	require.NoError(t, err)
-	assert.Equal(t, approval.AutoApprove, decision)
+	assert.Equal(t, approval.QueueForReview, decision)
 
 	// The forged bundle carries the genuine bundle's hash, signatures and
 	// payload but claims another module name.
@@ -476,7 +525,7 @@ func TestApprovalWorkflow_EvaluateAndStore_SignaturesStoredVerbatim(t *testing.T
 
 	decision, err := wf.EvaluateAndStore(b, store)
 	require.NoError(t, err)
-	assert.Equal(t, approval.AutoApprove, decision)
+	assert.Equal(t, approval.QueueForReview, decision)
 
 	got, err := c.GetPayload(b.ContentAddress(), "")
 	require.NoError(t, err)

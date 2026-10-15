@@ -754,6 +754,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if err := cfg.ValidateDeploymentRings(); err != nil {
 		return nil, fmt.Errorf("invalid deployment_rings config: %w", err)
 	}
+	if err := cfg.ValidateModuleTrust(); err != nil {
+		return nil, fmt.Errorf("invalid module config: %w", err)
+	}
 	controllerService.SetRingConfig(cfg.EffectiveRings())
 
 	// Issue #2542: Wire durable SQLite-backed tag store. Nil when SQLite is not
@@ -2161,20 +2164,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if moduleCache != nil {
 		wireClusterModuleApprovalStore(moduleCache, cfg, storageManager, logger)
 		// Issue #4270: wire the human module-approval REST surface (Issue #2728)
-		// to this cache. Without this, GET/POST /api/v1/modules/approvals and
-		// GET /api/v1/modules (Issue #4270) always answer 503 in every real
-		// deployment, despite being fully implemented and handler-tested — only
-		// SetModuleResolution/SetModuleBundleReviewer were never called outside
-		// tests. Approver/store stay nil: those two, together with the resolver,
-		// gate the separate required_modules-on-cfg-push enforcement (Issue
-		// #1884), not this read/approve/reject surface, which only consults the
-		// cache lister and the reviewer set below. The resolver is supplied
-		// (Issue #4409) so it is reachable for the read surface and so cfg push
-		// enforcement is one step from complete, but enforcement itself stays
-		// off until the approver and trust store are also wired.
+		// to this cache. Issue #4984: the approver and trust store are wired too,
+		// so required_modules on cfg push fetches, verifies and queues bundles
+		// for per-version human approval. The trust store comes from the
+		// controller.cfg-only module_trust section; nothing changes it at runtime.
 		gitResolver := newModuleGitSourceResolver(cfg, logger)
-		httpServer.SetModuleResolution(moduleCache, gitResolver, nil, nil)
-		httpServer.SetModuleBundleReviewer(approval.New(moduleCache))
+		moduleTrustStore, trustErr := newModuleTrustStore(cfg, logger)
+		if trustErr != nil {
+			return nil, trustErr
+		}
+		moduleApproval := approval.New(moduleCache)
+		httpServer.SetModuleResolution(moduleCache, gitResolver, moduleApproval, moduleTrustStore)
+		httpServer.SetModuleBundleReviewer(moduleApproval)
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)

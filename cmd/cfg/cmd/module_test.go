@@ -356,3 +356,41 @@ func TestRunModuleApprove_NotFoundInQueue(t *testing.T) {
 	assert.ErrorContains(t, err, "not found in pending approval queue")
 	assert.False(t, approveCalled, "approve must not be called for an unresolved ref")
 }
+
+// TestRunModuleList_ShowsSignatures verifies `cfg module list` joins the
+// approvals endpoint's signature details onto pending entries (Issue #4984):
+// signer, key fingerprint and the three-valued signature_valid, in both the
+// table and --json output, with control characters neutralised.
+func TestRunModuleList_ShowsSignatures(t *testing.T) {
+	_, restore := setupModuleTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/modules/approvals" {
+			_, _ = w.Write([]byte(`{"data":{"pending":[{"address":"a","publisher":"acme-corp","name":"tool","version":"1.0.0","content_hash":"AAAA",
+				"signatures":[{"publisher":"acme-corp","key_fingerprint":"0123456789abcdef0123","content_hash":"AAAA","signature_valid":"valid"},
+				{"publisher":"evil\u001b[2J","content_hash":"AAAA","signature_valid":"unverifiable"}]}]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"modules":[
+			{"publisher":"acme-corp","name":"tool","version":"1.0.0","content_hash":"AAAA","status":"pending"},
+			{"publisher":"acme-corp","name":"old","version":"0.9.0","content_hash":"BBBB","status":"approved"}
+		],"total":2}}`))
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	moduleListCmd.SetOut(&out)
+	t.Cleanup(func() { moduleListCmd.SetOut(nil) })
+	require.NoError(t, runModuleList(moduleListCmd, nil))
+
+	table := out.String()
+	assert.Contains(t, table, "SIGNATURES")
+	assert.Contains(t, table, "acme-corp[key=0123456789ab]:valid")
+	assert.Contains(t, table, "unverifiable")
+	assert.NotContains(t, table, "\x1b", "controller-supplied values must not reach the terminal raw")
+
+	out.Reset()
+	moduleListJSON = true
+	require.NoError(t, runModuleList(moduleListCmd, nil))
+	assert.Contains(t, out.String(), `"key_fingerprint": "0123456789abcdef0123"`)
+	assert.Contains(t, out.String(), `"signature_valid": "valid"`)
+}

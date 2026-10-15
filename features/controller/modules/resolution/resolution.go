@@ -8,6 +8,7 @@ package resolution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -41,6 +42,11 @@ type BundleReviewer interface {
 	RejectPending(addr bundle.ContentAddress) error
 }
 
+// ErrVersionNotExact is returned when a required module version is not an
+// exact semver (a constraint such as ^1.0.0, an alias such as latest, or a
+// "v"-prefixed version). It is returned before any source is contacted.
+var ErrVersionNotExact = errors.New("required module version must be an exact version")
+
 // ResolveCfgRequiredModules verifies that every module listed in required is
 // present and approved in the controller cache before a cfg file is deployed.
 //
@@ -48,8 +54,11 @@ type BundleReviewer interface {
 //   - If the module is in the cache with ApprovalStatusApproved: no action needed.
 //   - If the module is in the cache with pending or rejected status: blocked.
 //   - If the module is not in the cache: resolver is called to fetch the bundle,
-//     then approver.EvaluateAndStore is called. AutoApprove continues; any other
-//     decision blocks deployment.
+//     then approver.EvaluateAndStore is called. AutoApprove (a bundle a human
+//     has already approved) continues; any other decision blocks deployment.
+//
+// Every version must be an exact semver (bundle.IsExactSemver); anything else is
+// refused with ErrVersionNotExact before the cache or any source is consulted.
 //
 // Returns nil when all required modules are approved.
 // Returns a descriptive error listing each blocked module if any are not approved.
@@ -63,6 +72,13 @@ func ResolveCfgRequiredModules(
 ) error {
 	if len(required) == 0 {
 		return nil
+	}
+
+	for _, req := range required {
+		if !bundle.IsExactSemver(req.Version) {
+			return fmt.Errorf("%w: module %q has version %q (use e.g. 1.0.0; constraints, aliases such as latest, and a v prefix are not accepted)",
+				ErrVersionNotExact, req.Name, req.Version)
+		}
 	}
 
 	entries, err := c.List()

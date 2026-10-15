@@ -3,6 +3,9 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1435,4 +1438,70 @@ func TestEmailConfig_ConfiguredAndDefaults(t *testing.T) {
 	assert.Equal(t, "smtp", nilCfg.EmailProvider())
 	assert.False(t, (&EmailConfig{Host: "h"}).Configured())
 	assert.True(t, (&EmailConfig{Host: "h", From: "f@x.example", PasswordSecretKey: "k"}).Configured())
+}
+
+func moduleTrustKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	return base64.StdEncoding.EncodeToString(pub)
+}
+
+func TestModuleTrust_ParsesPublishersFromYAML(t *testing.T) {
+	key := moduleTrustKey(t)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte("module_trust:\n  publishers:\n    - name: acme-corp\n      public_key: "+key+"\n"), &cfg))
+
+	require.NoError(t, cfg.ValidateModuleTrust())
+	ids, err := cfg.ModuleTrustPublishers()
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	assert.Equal(t, "acme-corp", ids[0].Name)
+	assert.Len(t, ids[0].PublicKey, 32)
+}
+
+func TestModuleTrust_AbsentSectionIsValid(t *testing.T) {
+	cfg := &Config{}
+	require.NoError(t, cfg.ValidateModuleTrust())
+	ids, err := cfg.ModuleTrustPublishers()
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
+func TestModuleTrust_InvalidEntriesFailWithNamedErrors(t *testing.T) {
+	good := moduleTrustKey(t)
+	shortKey := base64.StdEncoding.EncodeToString(make([]byte, 16))
+	zeroKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	cases := map[string]struct {
+		publishers []ModuleTrustPublisher
+		want       error
+	}{
+		"bad base64":      {[]ModuleTrustPublisher{{Name: "acme-corp", PublicKey: "!!not-base64!!"}}, ErrModuleTrustBadBase64},
+		"wrong length":    {[]ModuleTrustPublisher{{Name: "acme-corp", PublicKey: shortKey}}, ErrModuleTrustBadKeyLength},
+		"unusable key":    {[]ModuleTrustPublisher{{Name: "acme-corp", PublicKey: zeroKey}}, ErrModuleTrustUnusableKey},
+		"empty name":      {[]ModuleTrustPublisher{{Name: "", PublicKey: good}}, ErrModuleTrustEmptyName},
+		"duplicate name":  {[]ModuleTrustPublisher{{Name: "acme-corp", PublicKey: good}, {Name: "acme-corp", PublicKey: moduleTrustKey(t)}}, ErrModuleTrustDuplicateName},
+		"reserved cfgms":  {[]ModuleTrustPublisher{{Name: "cfgms", PublicKey: good}}, ErrModuleTrustReservedName},
+		"reserved casing": {[]ModuleTrustPublisher{{Name: "CFGMS", PublicKey: good}}, ErrModuleTrustReservedName},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{ModuleTrust: &ModuleTrustConfig{Publishers: tc.publishers}}
+			err := cfg.ValidateModuleTrust()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+func TestModuleSources_BadBaseFailsValidation(t *testing.T) {
+	for _, base := range []string{"", "http://git.acme-corp.example/m", "file:///srv/repos", "git.acme-corp.example:m", "https://user:pw@git.acme-corp.example/m"} {
+		cfg := &Config{ModuleSources: map[string]ModuleSourceConfig{"acme-corp": {Type: "git", Base: base}}}
+		err := cfg.ValidateModuleTrust()
+		require.Error(t, err, base)
+		assert.ErrorIs(t, err, ErrModuleSourceBadBase, base)
+	}
+	ok := &Config{ModuleSources: map[string]ModuleSourceConfig{"acme-corp": {Type: "git", Base: "https://git.acme-corp.example/m"}}}
+	require.NoError(t, ok.ValidateModuleTrust())
 }
