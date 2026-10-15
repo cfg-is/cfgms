@@ -23,17 +23,18 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StewardTransport_Register_FullMethodName        = "/cfgms.transport.StewardTransport/Register"
-	StewardTransport_Ping_FullMethodName            = "/cfgms.transport.StewardTransport/Ping"
-	StewardTransport_ControlChannel_FullMethodName  = "/cfgms.transport.StewardTransport/ControlChannel"
-	StewardTransport_SyncConfig_FullMethodName      = "/cfgms.transport.StewardTransport/SyncConfig"
-	StewardTransport_SyncDNA_FullMethodName         = "/cfgms.transport.StewardTransport/SyncDNA"
-	StewardTransport_BulkTransfer_FullMethodName    = "/cfgms.transport.StewardTransport/BulkTransfer"
-	StewardTransport_TaskStream_FullMethodName      = "/cfgms.transport.StewardTransport/TaskStream"
-	StewardTransport_Terminal_FullMethodName        = "/cfgms.transport.StewardTransport/Terminal"
-	StewardTransport_LogStream_FullMethodName       = "/cfgms.transport.StewardTransport/LogStream"
-	StewardTransport_TelemetryStream_FullMethodName = "/cfgms.transport.StewardTransport/TelemetryStream"
-	StewardTransport_OsqueryQuery_FullMethodName    = "/cfgms.transport.StewardTransport/OsqueryQuery"
+	StewardTransport_Register_FullMethodName          = "/cfgms.transport.StewardTransport/Register"
+	StewardTransport_Ping_FullMethodName              = "/cfgms.transport.StewardTransport/Ping"
+	StewardTransport_ControlChannel_FullMethodName    = "/cfgms.transport.StewardTransport/ControlChannel"
+	StewardTransport_SyncConfig_FullMethodName        = "/cfgms.transport.StewardTransport/SyncConfig"
+	StewardTransport_FetchModuleBundle_FullMethodName = "/cfgms.transport.StewardTransport/FetchModuleBundle"
+	StewardTransport_SyncDNA_FullMethodName           = "/cfgms.transport.StewardTransport/SyncDNA"
+	StewardTransport_BulkTransfer_FullMethodName      = "/cfgms.transport.StewardTransport/BulkTransfer"
+	StewardTransport_TaskStream_FullMethodName        = "/cfgms.transport.StewardTransport/TaskStream"
+	StewardTransport_Terminal_FullMethodName          = "/cfgms.transport.StewardTransport/Terminal"
+	StewardTransport_LogStream_FullMethodName         = "/cfgms.transport.StewardTransport/LogStream"
+	StewardTransport_TelemetryStream_FullMethodName   = "/cfgms.transport.StewardTransport/TelemetryStream"
+	StewardTransport_OsqueryQuery_FullMethodName      = "/cfgms.transport.StewardTransport/OsqueryQuery"
 )
 
 // StewardTransportClient is the client API for StewardTransport service.
@@ -57,6 +58,12 @@ type StewardTransportClient interface {
 	ControlChannel(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ControlMessage, ControlMessage], error)
 	// SyncConfig streams configuration from controller to steward.
 	SyncConfig(ctx context.Context, in *ConfigSyncRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConfigChunk], error)
+	// FetchModuleBundle streams one approved module bundle (manifest, signatures,
+	// the full digest list and ONE platform binary) to the steward whose own
+	// current configuration requires that exact publisher/name/version. The
+	// caller is identified by its mTLS certificate only; every refusal looks the
+	// same to the caller (NotFound).
+	FetchModuleBundle(ctx context.Context, in *FetchModuleBundleRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ModuleBundleChunk], error)
 	// SyncDNA streams DNA data from steward to controller.
 	SyncDNA(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DNAChunk, DNASyncResponse], error)
 	// BulkTransfer handles bidirectional bulk data (packages, scripts, logs).
@@ -139,9 +146,28 @@ func (c *stewardTransportClient) SyncConfig(ctx context.Context, in *ConfigSyncR
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StewardTransport_SyncConfigClient = grpc.ServerStreamingClient[ConfigChunk]
 
+func (c *stewardTransportClient) FetchModuleBundle(ctx context.Context, in *FetchModuleBundleRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ModuleBundleChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[2], StewardTransport_FetchModuleBundle_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[FetchModuleBundleRequest, ModuleBundleChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StewardTransport_FetchModuleBundleClient = grpc.ServerStreamingClient[ModuleBundleChunk]
+
 func (c *stewardTransportClient) SyncDNA(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DNAChunk, DNASyncResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[2], StewardTransport_SyncDNA_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[3], StewardTransport_SyncDNA_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +180,7 @@ type StewardTransport_SyncDNAClient = grpc.ClientStreamingClient[DNAChunk, DNASy
 
 func (c *stewardTransportClient) BulkTransfer(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BulkChunk, BulkChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[3], StewardTransport_BulkTransfer_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[4], StewardTransport_BulkTransfer_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +193,7 @@ type StewardTransport_BulkTransferClient = grpc.BidiStreamingClient[BulkChunk, B
 
 func (c *stewardTransportClient) TaskStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TaskMessage, TaskMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[4], StewardTransport_TaskStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[5], StewardTransport_TaskStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +206,7 @@ type StewardTransport_TaskStreamClient = grpc.BidiStreamingClient[TaskMessage, T
 
 func (c *stewardTransportClient) Terminal(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalData, TerminalData], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[5], StewardTransport_Terminal_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[6], StewardTransport_Terminal_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +219,7 @@ type StewardTransport_TerminalClient = grpc.BidiStreamingClient[TerminalData, Te
 
 func (c *stewardTransportClient) LogStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[LogEntry, LogStreamResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[6], StewardTransport_LogStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[7], StewardTransport_LogStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +232,7 @@ type StewardTransport_LogStreamClient = grpc.ClientStreamingClient[LogEntry, Log
 
 func (c *stewardTransportClient) TelemetryStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TelemetrySnapshot, TelemetryRequest], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[7], StewardTransport_TelemetryStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[8], StewardTransport_TelemetryStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +245,7 @@ type StewardTransport_TelemetryStreamClient = grpc.BidiStreamingClient[Telemetry
 
 func (c *stewardTransportClient) OsqueryQuery(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[OsqueryQueryResponse, OsqueryQueryRequest], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[8], StewardTransport_OsqueryQuery_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[9], StewardTransport_OsqueryQuery_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +277,12 @@ type StewardTransportServer interface {
 	ControlChannel(grpc.BidiStreamingServer[ControlMessage, ControlMessage]) error
 	// SyncConfig streams configuration from controller to steward.
 	SyncConfig(*ConfigSyncRequest, grpc.ServerStreamingServer[ConfigChunk]) error
+	// FetchModuleBundle streams one approved module bundle (manifest, signatures,
+	// the full digest list and ONE platform binary) to the steward whose own
+	// current configuration requires that exact publisher/name/version. The
+	// caller is identified by its mTLS certificate only; every refusal looks the
+	// same to the caller (NotFound).
+	FetchModuleBundle(*FetchModuleBundleRequest, grpc.ServerStreamingServer[ModuleBundleChunk]) error
 	// SyncDNA streams DNA data from steward to controller.
 	SyncDNA(grpc.ClientStreamingServer[DNAChunk, DNASyncResponse]) error
 	// BulkTransfer handles bidirectional bulk data (packages, scripts, logs).
@@ -292,6 +324,9 @@ func (UnimplementedStewardTransportServer) ControlChannel(grpc.BidiStreamingServ
 }
 func (UnimplementedStewardTransportServer) SyncConfig(*ConfigSyncRequest, grpc.ServerStreamingServer[ConfigChunk]) error {
 	return status.Error(codes.Unimplemented, "method SyncConfig not implemented")
+}
+func (UnimplementedStewardTransportServer) FetchModuleBundle(*FetchModuleBundleRequest, grpc.ServerStreamingServer[ModuleBundleChunk]) error {
+	return status.Error(codes.Unimplemented, "method FetchModuleBundle not implemented")
 }
 func (UnimplementedStewardTransportServer) SyncDNA(grpc.ClientStreamingServer[DNAChunk, DNASyncResponse]) error {
 	return status.Error(codes.Unimplemented, "method SyncDNA not implemented")
@@ -389,6 +424,17 @@ func _StewardTransport_SyncConfig_Handler(srv interface{}, stream grpc.ServerStr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StewardTransport_SyncConfigServer = grpc.ServerStreamingServer[ConfigChunk]
 
+func _StewardTransport_FetchModuleBundle_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(FetchModuleBundleRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StewardTransportServer).FetchModuleBundle(m, &grpc.GenericServerStream[FetchModuleBundleRequest, ModuleBundleChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StewardTransport_FetchModuleBundleServer = grpc.ServerStreamingServer[ModuleBundleChunk]
+
 func _StewardTransport_SyncDNA_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(StewardTransportServer).SyncDNA(&grpc.GenericServerStream[DNAChunk, DNASyncResponse]{ServerStream: stream})
 }
@@ -464,6 +510,11 @@ var StewardTransport_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SyncConfig",
 			Handler:       _StewardTransport_SyncConfig_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "FetchModuleBundle",
+			Handler:       _StewardTransport_FetchModuleBundle_Handler,
 			ServerStreams: true,
 		},
 		{

@@ -710,3 +710,41 @@ func TestModuleCache_HasSharedApprovalStore(t *testing.T) {
 	c.SetApprovalStore(pkgtesting.SetupTestModuleApprovalStore())
 	assert.True(t, c.HasSharedApprovalStore(), "a wired cache reports cluster-visible status")
 }
+
+// Lookup resolves the single stored content address of a publisher/name/version,
+// and reports ErrBundleNotFound for an unknown triple or an unsafe component.
+func TestModuleCache_Lookup(t *testing.T) {
+	c := makeTestCache(t)
+	b := makeTestBundle(t, "acme-corp", "widget", "1.0.0", "a")
+	require.NoError(t, c.Put(b))
+
+	addr, err := c.Lookup("acme-corp", "widget", "1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, b.ContentAddress(), addr)
+
+	for _, tc := range [][3]string{
+		{"acme-corp", "widget", "1.0.1"},
+		{"acme-corp", "other", "1.0.0"},
+		{"other", "widget", "1.0.0"},
+	} {
+		_, err := c.Lookup(tc[0], tc[1], tc[2])
+		assert.ErrorIs(t, err, cache.ErrBundleNotFound, "%v", tc)
+	}
+	for _, tc := range [][3]string{
+		{"..", "widget", "1.0.0"},
+		{"acme-corp", "a/b", "1.0.0"},
+		{"acme-corp", "widget", ""},
+		{".cfgms-hash-index", "widget", "1.0.0"},
+	} {
+		_, err := c.Lookup(tc[0], tc[1], tc[2])
+		assert.Error(t, err, "%v", tc)
+	}
+
+	// A second, different bundle for the same triple is refused at ingest, so
+	// the lookup keeps returning the original.
+	other := makeTestBundle(t, "acme-corp", "widget", "1.0.0", "b")
+	require.ErrorIs(t, c.Put(other), cache.ErrContentAddressConflict)
+	addr, err = c.Lookup("acme-corp", "widget", "1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, b.ContentHash, addr.ContentHash)
+}

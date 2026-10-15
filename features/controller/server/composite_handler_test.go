@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // ---------------------------------------------------------------------------
@@ -225,6 +227,32 @@ func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.NoError(t, err, "BulkTransfer with valid handler and empty stream must succeed")
 }
+
+// FetchModuleBundle without a wired handler falls through to Unimplemented; with
+// one, the request is routed to it (an unauthenticated stream context is refused
+// by the handler itself, proving it ran).
+func TestComposite_FetchModuleBundle_Routing(t *testing.T) {
+	cp := newRecordingHandler()
+	composite := newCompositeTransportServer(cp, nil)
+	err := composite.FetchModuleBundle(&transportpb.FetchModuleBundleRequest{}, &emptyModuleBundleStream{ctx: context.Background()})
+	require.Error(t, err)
+	assert.Equal(t, codes.Unimplemented, status.Code(err))
+
+	// Unwired dependencies are fine here: authentication fails before any is used.
+	composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(nil, nil, nil, controllerTransport.NewTenantQueue(), logging.NewNoopLogger()))
+	err = composite.FetchModuleBundle(&transportpb.FetchModuleBundleRequest{}, &emptyModuleBundleStream{ctx: context.Background()})
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+}
+
+// emptyModuleBundleStream implements grpc.ServerStreamingServer[ModuleBundleChunk].
+type emptyModuleBundleStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *emptyModuleBundleStream) Send(*transportpb.ModuleBundleChunk) error { return nil }
+func (s *emptyModuleBundleStream) Context() context.Context                  { return s.ctx }
 
 func TestComposite_SyncConfigWithoutHandler(t *testing.T) {
 	cp := newRecordingHandler()
