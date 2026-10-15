@@ -118,6 +118,10 @@ const closeGrace = time.Second
 // the connection level still gives the peer a prompt signal after the QUIC
 // listener is closed, which a stream-only close does not (the peer would wait
 // for the ~90s idle timeout).
+//
+// The returned error is the stream close error only; the result of the
+// deferred connection close is not reported. With a grace period the listener
+// slot is released when the QUIC connection closes, not when Close returns.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
 		c.closeErr = c.stream.Close()
@@ -131,15 +135,22 @@ func (c *Conn) Close() error {
 				}
 				c.grace.remove(c.quicConn)
 				_ = c.quicConn.CloseWithError(0, "")
+				// The slot is held until the QUIC connection is actually closed so
+				// MaxConnections keeps bounding live connections.
+				c.releaseSlot()
 			}()
-		} else {
-			_ = c.quicConn.CloseWithError(0, "")
+			return
 		}
-		if c.onClose != nil {
-			c.onClose()
-		}
+		_ = c.quicConn.CloseWithError(0, "")
+		c.releaseSlot()
 	})
 	return c.closeErr
+}
+
+func (c *Conn) releaseSlot() {
+	if c.onClose != nil {
+		c.onClose()
+	}
 }
 
 // LocalAddr returns the local QUIC connection address.
