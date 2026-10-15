@@ -22,7 +22,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	gitresolver "github.com/cfgis/cfgms/features/controller/modules/sources/git"
-	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
@@ -57,20 +56,14 @@ func requiredModulesValidCfgBody(t *testing.T, stewardID string, required []map[
 	return body
 }
 
-// testBundle returns a Bundle with a stable fake content hash so cache.Put + List
-// produce a deterministic CacheEntry the resolver/handler can match against.
-func testBundle(publisher, name, version string) *bundle.Bundle {
-	return &bundle.Bundle{
-		Manifest: &modules.ModuleMetadata{
-			Name:      name,
-			Version:   version,
-			Publisher: publisher,
-			Executors: []string{"steward"},
-		},
-		Binaries:    map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures:  []bundle.BundleSignature{{Publisher: publisher, Algorithm: "ed25519", Signature: make([]byte, 64)}},
-		ContentHash: publisher + "-" + name + "-" + version + "-testhash",
-	}
+// testBundle returns a signed payload Bundle built through the production
+// assemble/sign path, so cache.Put + List produce a deterministic CacheEntry the
+// resolver/handler can match against.
+func testBundle(t *testing.T, publisher, name, version string) *bundle.Bundle {
+	t.Helper()
+	return testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher: publisher, Name: name, Version: version, Platforms: []string{"linux-amd64"},
+	}).Bundle
 }
 
 // serveModule publishes a module signed by a fresh key as the root of a git
@@ -101,7 +94,7 @@ func TestHandleUpdateStewardConfig_RequiredModules_PendingInCache_Returns422(t *
 	c, err := cache.New(t.TempDir() + "/module-cache")
 	require.NoError(t, err)
 	// Cache the bundle but leave it in the default pending status.
-	require.NoError(t, c.Put(testBundle("cfgms", "firewall", "1.0.0")))
+	require.NoError(t, c.Put(testBundle(t, "cfgms", "firewall", "1.0.0")))
 
 	wf := approval.New(c)
 	store := trust.NewInMemoryTrustStore()
@@ -138,7 +131,7 @@ func TestHandleUpdateStewardConfig_RequiredModules_ApprovedInCache_Returns200(t 
 
 	c, err := cache.New(t.TempDir() + "/module-cache")
 	require.NoError(t, err)
-	b := testBundle("cfgms", "firewall", "1.0.0")
+	b := testBundle(t, "cfgms", "firewall", "1.0.0")
 	require.NoError(t, c.Put(b))
 	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
 

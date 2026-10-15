@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,18 +132,9 @@ func newCredFixture(t *testing.T, name, publisher, binary string) *credFixture {
 // newCredFixtureSigned is newCredFixture with the bundle's signatures and the
 // factory's CFGMS publisher identity chosen by the test. A nil identityFn keeps
 // the build's own identity (the placeholder in a test binary).
-func newCredFixtureSigned(t *testing.T, name, publisher, binary string, sigs []bundle.BundleSignature, identityFn func() trust.PublisherIdentity) *credFixture {
+func newCredFixtureSigned(t *testing.T, name, publisher, binary string, sign func(contentHash string) []bundle.BundleSignature, identityFn func() trust.PublisherIdentity) *credFixture {
 	t.Helper()
-	meta := &modules.ModuleMetadata{
-		Name: name, Version: "0.1.0", Publisher: publisher,
-		Executors: []string{"controller"}, Kind: "workflow",
-	}
-	b := &bundle.Bundle{
-		Manifest:    meta,
-		ContentHash: "sha256-cred-test-" + name + "-" + publisher,
-		Signatures:  sigs,
-		Binaries:    map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: binary},
-	}
+	b := newControllerBundle(t, name, publisher, "0.1.0", binary, sign)
 	c, err := cache.New(t.TempDir())
 	require.NoError(t, err)
 	require.NoError(t, c.Put(b))
@@ -490,6 +480,13 @@ func testIdentity(pub ed25519.PublicKey) func() trust.PublisherIdentity {
 	}
 }
 
+// signOver returns a signer that signs the bundle's real content hash.
+func signOver(priv ed25519.PrivateKey, publisher string) func(string) []bundle.BundleSignature {
+	return func(hash string) []bundle.BundleSignature {
+		return []bundle.BundleSignature{signHash(priv, publisher, hash)}
+	}
+}
+
 func signHash(priv ed25519.PrivateKey, publisher, hash string) bundle.BundleSignature {
 	return bundle.BundleSignature{Publisher: publisher, Algorithm: "ed25519", Signature: ed25519.Sign(priv, []byte(hash))}
 }
@@ -500,16 +497,17 @@ func TestM365Credential_SignedBuildRequiresCFGMSSignature(t *testing.T) {
 	require.NoError(t, err)
 	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	hash := "sha256-cred-test-m365-entra-user-cfgms"
 
-	for name, sigs := range map[string][]bundle.BundleSignature{
-		"no signature":                          nil,
-		"signature from other key":              {signHash(otherPriv, cfgmsPublisher, hash)},
-		"signature over other hash":             {signHash(priv, cfgmsPublisher, "sha256-something-else")},
-		"valid signature, other publisher name": {signHash(priv, "vendor-a", hash)},
+	for name, sign := range map[string]func(string) []bundle.BundleSignature{
+		"no signature":             nil,
+		"signature from other key": signOver(otherPriv, cfgmsPublisher),
+		"signature over other hash": func(string) []bundle.BundleSignature {
+			return []bundle.BundleSignature{signHash(priv, cfgmsPublisher, "sha256-something-else")}
+		},
+		"valid signature, other publisher name": signOver(priv, "vendor-a"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", dummyBinary(t), sigs, testIdentity(pub))
+			fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", dummyBinary(t), sign, testIdentity(pub))
 			fx.storeConnection(t, testCFGMSTenant)
 
 			mod, err := fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)
@@ -526,8 +524,10 @@ func TestM365Credential_SignedBuildRequiresCFGMSSignature(t *testing.T) {
 		if integrationEchoModuleBin == "" {
 			t.Skip("echo_module binary not available")
 		}
-		sigs := []bundle.BundleSignature{signHash(otherPriv, cfgmsPublisher, hash), signHash(priv, cfgmsPublisher, hash)}
-		fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", integrationEchoModuleBin, sigs, testIdentity(pub))
+		sign := func(hash string) []bundle.BundleSignature {
+			return []bundle.BundleSignature{signHash(otherPriv, cfgmsPublisher, hash), signHash(priv, cfgmsPublisher, hash)}
+		}
+		fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", integrationEchoModuleBin, sign, testIdentity(pub))
 		fx.storeConnection(t, testCFGMSTenant)
 
 		mod, err := fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)
@@ -542,7 +542,7 @@ func TestM365Credential_SignedBuildRequiresCFGMSSignature(t *testing.T) {
 			t.Skip("echo_module binary not available")
 		}
 		fx := newCredFixtureSigned(t, "m365-entra-user", "cfgms", integrationEchoModuleBin,
-			[]bundle.BundleSignature{signHash(priv, cfgmsPublisher, hash)}, testIdentity(pub))
+			signOver(priv, cfgmsPublisher), testIdentity(pub))
 		fx.storeConnection(t, testCFGMSTenant)
 		for i := 0; i < 2; i++ {
 			mod, err := fx.factory.CreateTenantModuleInstance(context.Background(), "m365-entra-user", testCFGMSTenant)

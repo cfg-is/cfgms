@@ -13,10 +13,37 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
-	featuremodules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/runtime"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
+
+// newControllerBundle builds a signed controller-executor (workflow) payload
+// bundle through the production assemble/sign path for the running platform. The
+// binary is the file at binaryPath (a stand-in payload when it does not exist).
+// When sign is non-nil it replaces the publisher signature with the signatures
+// it returns for the bundle's content hash, so a test can present any signature
+// set to a cache that stores signatures verbatim.
+func newControllerBundle(t *testing.T, name, publisher, version, binaryPath string, sign func(contentHash string) []bundle.BundleSignature) *bundle.Bundle {
+	t.Helper()
+	osArch := goruntime.GOOS + "-" + goruntime.GOARCH
+	data, err := os.ReadFile(binaryPath) // #nosec G304 -- test-controlled path to a binary the test built
+	if err != nil {
+		data = []byte("stand-in binary for " + name)
+	}
+	b := testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher:     publisher,
+		Name:          name,
+		Version:       version,
+		Executors:     []string{"controller"},
+		Platforms:     []string{osArch},
+		BinaryContent: map[string][]byte{osArch: data},
+	}).Bundle
+	if sign != nil {
+		b.Signatures = sign(b.ContentHash)
+	}
+	return b
+}
 
 // TestWorkflowModuleFactory_NilCache verifies that a factory built without
 // a cache rejects every CreateModuleInstance call with a clear message —
@@ -60,17 +87,7 @@ func TestWorkflowModuleFactory_NilRuntime(t *testing.T) {
 	require.NoError(t, err)
 
 	// Put an approved controller-kind bundle in the cache.
-	b := &bundle.Bundle{
-		Manifest: &featuremodules.ModuleMetadata{
-			Name:      "my-module",
-			Version:   "1.0.0",
-			Executors: []string{"controller"},
-			Kind:      "workflow",
-			Publisher: "test",
-		},
-		ContentHash: "sha256-nil-runtime-test",
-		Binaries:    map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: "/nonexistent/bin"},
-	}
+	b := newControllerBundle(t, "my-module", "test", "1.0.0", "/nonexistent/bin", nil)
 	require.NoError(t, c.Put(b))
 	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
 
@@ -104,17 +121,7 @@ func TestWorkflowModuleFactory_IntegrationWithEchoModule(t *testing.T) {
 	c, err := cache.New(cacheDir)
 	require.NoError(t, err)
 
-	b := &bundle.Bundle{
-		Manifest: &featuremodules.ModuleMetadata{
-			Name:      "echo",
-			Version:   "0.1.0",
-			Executors: []string{"controller"},
-			Kind:      "workflow",
-			Publisher: "test",
-		},
-		ContentHash: "sha256-echo-integration-hash",
-		Binaries:    map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: integrationEchoModuleBin},
-	}
+	b := newControllerBundle(t, "echo", "test", "0.1.0", integrationEchoModuleBin, nil)
 	require.NoError(t, c.Put(b))
 	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
 

@@ -2,17 +2,14 @@
 // Copyright 2026 CFGMS Contributors
 
 // Package cache implements the controller module cache.
-// Bundles are stored content-addressed under:
-//
-//	<root>/<publisher>/<name>/<version>/<content_hash>/
-//	    manifest.yaml
-//	    binaries.yaml    (os-arch → relative path index)
-//	    signatures.yaml
-//	    approval.yaml    (approval state)
+// See ModuleCache for the on-disk layout.
 package cache
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	modules "github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -30,6 +28,11 @@ import (
 var (
 	// ErrBundleNotFound is returned when the requested bundle is not in the cache.
 	ErrBundleNotFound = errors.New("bundle not found in cache")
+
+	// ErrBundlePayloadMissing is returned by Put when the bundle does not carry
+	// its payload (manifest bytes and every binary's bytes). A cache entry
+	// requires a payload that can be verified against the signed digests.
+	ErrBundlePayloadMissing = errors.New("bundle payload missing: manifest bytes and every binary are required")
 
 	// ErrContentAddressConflict is returned when a different bundle already exists at the
 	// same (publisher, name, version) with a different content hash.
@@ -78,6 +81,28 @@ type approvalRecord struct {
 // ModuleCache is a content-addressed filesystem cache for module bundles.
 // All public methods are safe for concurrent use.
 //
+// # On-disk layout
+//
+// Each entry lives in its own directory:
+//
+//	<root>/<publisher>/<name>/<version>/<content_hash>/
+//	    root/            the complete bundle as an installation root, written by
+//	                     bundle.WriteInstalled (module.yaml, bundle.yaml and
+//	                     every platform's binary); signatures are stored verbatim
+//	    approval.yaml    node-local approval state
+//
+// Put verifies the payload (content hash, every binary against its signed
+// digest, size caps) before anything is created, and never stores a second
+// content hash for one publisher/name/version.
+//
+// # Get versus GetPayload
+//
+// Get returns metadata only (manifest, binary index, digests, signatures,
+// content hash) and reads no binary bytes; it is the cheap catalog read.
+// GetPayload returns the payload and re-verifies the stored bytes on every
+// call, optionally for one platform's binary only; only code that serves
+// bundle bytes uses it.
+//
 // This is not a pkg/cache.Cache and must not be reimplemented on top of one:
 // pkg/cache is an in-memory, TTL-and-eviction keyed cache, whereas this type is
 // a durable on-disk store addressed by (publisher, name, version, content hash).
@@ -95,7 +120,8 @@ type ModuleCache struct { //architecture:allow-custom-cache -- durable content-a
 	// single-node deployments; SetApprovalStore wires a database-backed store
 	// for clustered deployments. Bundle content (manifest/binaries/signatures)
 	// stays local either way — only approval status is shared.
-	store business.ModuleApprovalStore
+	store  business.ModuleApprovalStore
+	logger logging.Logger
 }
 
 // New creates a ModuleCache rooted at rootDir, creating it if needed.
@@ -103,7 +129,18 @@ func New(rootDir string) (*ModuleCache, error) {
 	if err := os.MkdirAll(rootDir, 0750); err != nil {
 		return nil, fmt.Errorf("create module cache root: %w", err)
 	}
-	return &ModuleCache{rootDir: rootDir}, nil
+	return &ModuleCache{rootDir: rootDir, logger: logging.NewNoopLogger()}, nil
+}
+
+// SetLogger sets the logger used for warnings about unreadable entries. nil
+// restores the no-op logger.
+func (c *ModuleCache) SetLogger(l logging.Logger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if l == nil {
+		l = logging.NewNoopLogger()
+	}
+	c.logger = l
 }
 
 // SetApprovalStore wires a cluster-visible, CAS-protected ModuleApprovalStore
@@ -209,7 +246,80 @@ func hashToDir(hash string) string {
 	return r.Replace(hash)
 }
 
-// Put stores b in the cache.
+// installedRootDirName is the entry subdirectory holding the installation root.
+const installedRootDirName = "root"
+
+// stageDirPrefix prefixes the temporary directories Put stages a bundle in.
+const stageDirPrefix = ".stage-"
+
+// entryRoot returns the installation root of the entry at dir.
+func entryRoot(dir string) string { return filepath.Join(dir, installedRootDirName) }
+
+// entryExists reports whether dir holds a stored bundle.
+func entryExists(dir string) bool {
+	_, err := os.Stat(filepath.Join(entryRoot(dir), bundle.ManifestFileName))
+	return err == nil
+}
+
+// verifyPayload checks b's payload without touching the filesystem: the payload
+// must be complete (every digest has its binary, and the reverse), every binary
+// must hash to its digest, the manifest bytes must agree with the bundle's
+// identity and the content hash recomputed from the manifest bytes and the
+// digest list must equal b.ContentHash.
+func verifyPayload(b *bundle.Bundle) error {
+	if b == nil || b.Manifest == nil {
+		return errors.New("bundle has no manifest")
+	}
+	if len(b.ManifestBytes) == 0 || len(b.BinaryContent) == 0 || len(b.BinaryDigests) == 0 {
+		return ErrBundlePayloadMissing
+	}
+	digests := make(map[string][32]byte, len(b.BinaryDigests))
+	for k, h := range b.BinaryDigests {
+		raw, err := hex.DecodeString(h)
+		if err != nil || len(raw) != sha256.Size {
+			return fmt.Errorf("%w: digest for %q is not a SHA-256 hex string", bundle.ErrDigestListInvalid, k)
+		}
+		var d [32]byte
+		copy(d[:], raw)
+		digests[k] = d
+		data, ok := b.BinaryContent[k]
+		if !ok {
+			return fmt.Errorf("%w: digest for %q has no binary", ErrBundlePayloadMissing, k)
+		}
+		if sha256.Sum256(data) != d {
+			return fmt.Errorf("%w: binary for %q does not match its digest", bundle.ErrContentHashMismatch, k)
+		}
+	}
+	for k := range b.BinaryContent {
+		if _, ok := digests[k]; !ok {
+			return fmt.Errorf("%w: binary %q has no digest", bundle.ErrDigestListInvalid, k)
+		}
+	}
+	meta, err := modules.ParseModuleMetadata(bytes.NewReader(b.ManifestBytes))
+	if err != nil {
+		return fmt.Errorf("%w: %w", bundle.ErrManifestInvalid, err)
+	}
+	if meta.Name != b.Manifest.Name || meta.Version != b.Manifest.Version || meta.Publisher != b.Manifest.Publisher {
+		return errors.New("manifest bytes disagree with the bundle's manifest identity")
+	}
+	hash, err := bundle.ComputeContentHashFromDigests(digests, b.ManifestBytes)
+	if err != nil {
+		return err
+	}
+	if hash != b.ContentHash {
+		return fmt.Errorf("%w: manifest and digests hash to %q but the bundle records %q",
+			bundle.ErrContentHashMismatch, hash, b.ContentHash)
+	}
+	return nil
+}
+
+// Put stores b, which must carry its payload, in the cache.
+//
+// Everything is verified before any directory or approval record is created:
+// ErrBundlePayloadMissing without a complete payload, bundle.ErrContentHashMismatch
+// when a binary differs from its digest or the recomputed content hash differs
+// from b.ContentHash, and the bundle size caps. Signatures are stored exactly as
+// received.
 //
 // Idempotent: if b.ContentAddress() already exists in the cache (same content hash),
 // Put returns nil without re-writing any files.
@@ -223,8 +333,12 @@ func hashToDir(hash string) string {
 // afresh (Issue #3886).
 //
 // Returns ErrContentAddressConflict if the same (publisher, name, version) tuple already
-// exists under a different content hash — this indicates tampering or a hash collision.
+// exists under a different content hash: a second hash is never stored, so never served.
 func (c *ModuleCache) Put(b *bundle.Bundle) error {
+	if err := verifyPayload(b); err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -234,14 +348,13 @@ func (c *ModuleCache) Put(b *bundle.Bundle) error {
 		return err
 	}
 
-	if err := c.checkAndRecordHashIdentityLocked(addr); err != nil {
-		return err
-	}
-
 	// Idempotent: exact content address already stored. Still ensure an approval
 	// record exists — content can be present locally while the shared store has
 	// no record for it (content cached before the store was wired).
-	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); err == nil {
+	if entryExists(dir) {
+		if err := c.checkAndRecordHashIdentityLocked(addr); err != nil {
+			return err
+		}
 		_, statusErr := c.seedApprovalStatusLocked(dir, addr, ApprovalStatusPending)
 		return statusErr
 	}
@@ -257,44 +370,37 @@ func (c *ModuleCache) Put(b *bundle.Bundle) error {
 		}
 	}
 
+	// Stage the whole bundle first: WriteInstalled enforces the size and file
+	// caps, so a refusal leaves no entry directory behind.
+	stage, err := os.MkdirTemp(c.rootDir, stageDirPrefix+"*")
+	if err != nil {
+		return fmt.Errorf("stage bundle: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+	staged := filepath.Join(stage, installedRootDirName)
+	if err := bundle.WriteInstalled(b, staged, bundle.WriteOptions{}); err != nil {
+		return fmt.Errorf("store bundle: %w", err)
+	}
+
+	if err := c.checkAndRecordHashIdentityLocked(addr); err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create bundle dir: %w", err)
 	}
-
-	manifestBytes, err := yaml.Marshal(b.Manifest)
-	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
-	}
-	if err := writeFileAtomic(filepath.Join(dir, "manifest.yaml"), manifestBytes, 0640); err != nil {
-		return fmt.Errorf("write manifest: %w", err)
-	}
-
-	sigBytes, err := yaml.Marshal(b.Signatures)
-	if err != nil {
-		return fmt.Errorf("marshal signatures: %w", err)
-	}
-	if err := writeFileAtomic(filepath.Join(dir, "signatures.yaml"), sigBytes, 0640); err != nil {
-		return fmt.Errorf("write signatures: %w", err)
-	}
-
-	binBytes, err := yaml.Marshal(b.Binaries)
-	if err != nil {
-		return fmt.Errorf("marshal binaries index: %w", err)
-	}
-	if err := writeFileAtomic(filepath.Join(dir, "binaries.yaml"), binBytes, 0640); err != nil {
-		return fmt.Errorf("write binaries index: %w", err)
-	}
-
-	// Store the original content hash so List() can recover it from the directory name.
-	if err := writeFileAtomic(filepath.Join(dir, "content_hash.txt"), []byte(addr.ContentHash), 0640); err != nil {
-		return fmt.Errorf("write content hash: %w", err)
+	if err := os.Rename(staged, entryRoot(dir)); err != nil {
+		_ = os.Remove(dir)
+		return fmt.Errorf("install bundle: %w", err)
 	}
 
 	_, statusErr := c.seedApprovalStatusLocked(dir, addr, ApprovalStatusPending)
 	return statusErr
 }
 
-// Get retrieves a bundle from the cache by content address.
+// Get retrieves a bundle's metadata from the cache by content address:
+// manifest, binary index (os-arch to the absolute path of the stored file), digests, signatures and content hash. It reads no
+// binary bytes and does not verify them; use GetPayload to serve a bundle.
 // Returns ErrBundleNotFound if no bundle exists at the given address.
 func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 	c.mu.RLock()
@@ -304,50 +410,54 @@ func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); errors.Is(err, os.ErrNotExist) {
+	if !entryExists(dir) {
 		return nil, ErrBundleNotFound
 	}
-
-	// #nosec G304 -- bundleDir validates the content address and all following
-	// reads use fixed filenames beneath the private cache directory.
-	manifestBytes, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+	b, err := bundle.ReadInstalledMetadata(entryRoot(dir), bundle.ReadOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
+		return nil, fmt.Errorf("read cached bundle: %w", err)
 	}
-	var meta modules.ModuleMetadata
-	if err := yaml.Unmarshal(manifestBytes, &meta); err != nil {
-		return nil, fmt.Errorf("unmarshal manifest: %w", err)
+	if b.ContentHash != addr.ContentHash {
+		return nil, fmt.Errorf("%w: cached entry records a different content hash than its address", bundle.ErrContentHashMismatch)
 	}
+	// Binaries values are absolute paths of the stored files, which is what the
+	// consumers that execute a cached module resolve them to.
+	for k, rel := range b.Binaries {
+		abs, pathErr := bundle.InstalledBinaryPath(entryRoot(dir), rel)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		b.Binaries[k] = abs
+	}
+	return b, nil
+}
 
-	// #nosec G304 -- dir is validated by bundleDir and signatures.yaml is a
-	// fixed cache metadata filename.
-	sigBytes, err := os.ReadFile(filepath.Join(dir, "signatures.yaml"))
+// GetPayload retrieves a bundle with its payload and re-verifies the stored
+// bytes against the signed digests and content hash on every call. platform ""
+// reads and verifies every binary; an os-arch key reads only that binary (still
+// verified against its digest) and returns the full digest list, with the
+// content hash recomputed from the manifest and the full list. Altered stored
+// bytes fail with bundle.ErrContentHashMismatch. Returns ErrBundleNotFound if no
+// bundle exists at the given address.
+func (c *ModuleCache) GetPayload(addr bundle.ContentAddress, platform string) (*bundle.Bundle, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	dir, err := c.bundleDir(addr)
 	if err != nil {
-		return nil, fmt.Errorf("read signatures: %w", err)
+		return nil, err
 	}
-	var sigs []bundle.BundleSignature
-	if err := yaml.Unmarshal(sigBytes, &sigs); err != nil {
-		return nil, fmt.Errorf("unmarshal signatures: %w", err)
+	if !entryExists(dir) {
+		return nil, ErrBundleNotFound
 	}
-
-	// #nosec G304 -- dir is validated by bundleDir and binaries.yaml is a fixed
-	// cache metadata filename.
-	binBytes, err := os.ReadFile(filepath.Join(dir, "binaries.yaml"))
+	b, err := bundle.ReadInstalledPayload(entryRoot(dir), bundle.ReadOptions{Platform: platform})
 	if err != nil {
-		return nil, fmt.Errorf("read binaries index: %w", err)
+		return nil, fmt.Errorf("read cached bundle payload: %w", err)
 	}
-	var binaries map[string]string
-	if err := yaml.Unmarshal(binBytes, &binaries); err != nil {
-		return nil, fmt.Errorf("unmarshal binaries index: %w", err)
+	if b.ContentHash != addr.ContentHash {
+		return nil, fmt.Errorf("%w: cached entry records a different content hash than its address", bundle.ErrContentHashMismatch)
 	}
-
-	return &bundle.Bundle{
-		Manifest:    &meta,
-		Binaries:    binaries,
-		Signatures:  sigs,
-		ContentHash: addr.ContentHash,
-	}, nil
+	return b, nil
 }
 
 // SetApprovalStatus overrides the approval state for a cached bundle,
@@ -363,7 +473,7 @@ func (c *ModuleCache) SetApprovalStatus(addr bundle.ContentAddress, status Appro
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); errors.Is(err, os.ErrNotExist) {
+	if !entryExists(dir) {
 		return ErrBundleNotFound
 	}
 
@@ -535,7 +645,7 @@ func (c *ModuleCache) CompareAndSetApprovalStatus(addr bundle.ContentAddress, ex
 	if err != nil {
 		return false, err
 	}
-	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); errors.Is(err, os.ErrNotExist) {
+	if !entryExists(dir) {
 		return false, ErrBundleNotFound
 	}
 
@@ -605,7 +715,7 @@ func (c *ModuleCache) List() ([]CacheEntry, error) {
 	}
 
 	for _, pub := range publishers {
-		if !pub.IsDir() {
+		if !pub.IsDir() || pub.Name() == hashIndexDirName || strings.HasPrefix(pub.Name(), stageDirPrefix) {
 			continue
 		}
 		names, _ := os.ReadDir(filepath.Join(c.rootDir, pub.Name()))
@@ -624,22 +734,21 @@ func (c *ModuleCache) List() ([]CacheEntry, error) {
 						continue
 					}
 					hashDir := filepath.Join(c.rootDir, pub.Name(), name.Name(), ver.Name(), hash.Name())
-					// Skip incomplete writes.
-					if _, statErr := os.Stat(filepath.Join(hashDir, "manifest.yaml")); statErr != nil {
+					// Skip entries without the installation-root layout (incomplete
+					// writes and entries from before the full bundle was stored).
+					// Only metadata is read: no binary bytes.
+					meta, readErr := bundle.ReadInstalledMetadata(entryRoot(hashDir), bundle.ReadOptions{})
+					if readErr != nil {
+						c.logger.Warn("skipping unreadable module cache entry",
+							"entry", logging.SanitizeLogValue(filepath.Join(pub.Name(), name.Name(), ver.Name(), hash.Name())),
+							"error", logging.SanitizeLogValue(readErr.Error()))
 						continue
-					}
-					// Recover the original content hash (pre-sanitization).
-					originalHash := hash.Name()
-					// #nosec G304 -- hashDir is assembled exclusively from nested
-					// ReadDir entries beneath c.rootDir; filename is fixed.
-					if hashBytes, readErr := os.ReadFile(filepath.Join(hashDir, "content_hash.txt")); readErr == nil {
-						originalHash = strings.TrimSpace(string(hashBytes))
 					}
 					addr := bundle.ContentAddress{
 						Publisher:   pub.Name(),
 						Name:        name.Name(),
 						Version:     ver.Name(),
-						ContentHash: originalHash,
+						ContentHash: meta.ContentHash,
 					}
 					status := ApprovalStatusPending
 					if c.store != nil {

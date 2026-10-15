@@ -10,14 +10,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
 	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // makeListObservableCacheAt creates a real ModuleCache rooted at the given path
@@ -36,17 +39,29 @@ func makeListObservableCache(t *testing.T) *modulecache.ModuleCache {
 	return makeListObservableCacheAt(t, filepath.Join(t.TempDir(), "module-cache"))
 }
 
-// makeListObservableBundle builds a minimal bundle with the given manifest and a
-// stable content hash derived from the name. Signatures carry a zero-filled
-// Ed25519 signature which is sufficient for cache storage tests (signature
-// verification is not exercised here).
-func makeListObservableBundle(manifest *modules.ModuleMetadata, contentHash string) *bundle.Bundle {
-	return &bundle.Bundle{
-		Manifest:    manifest,
-		Binaries:    map[string]string{"linux-amd64": "binaries/linux-amd64"},
-		Signatures:  []bundle.BundleSignature{{Publisher: manifest.Publisher, Algorithm: "ed25519", Signature: make([]byte, 64)}},
-		ContentHash: contentHash,
+// makeListObservableBundle builds a signed payload bundle through the
+// production assemble/sign path whose manifest carries the given manifest's
+// identity, executors and observe settings. tag makes the binary (and so the
+// content hash) unique.
+func makeListObservableBundle(t *testing.T, manifest *modules.ModuleMetadata, tag string) *bundle.Bundle {
+	t.Helper()
+	extra, err := yaml.Marshal(struct {
+		AlwaysPull  bool                       `yaml:"always_pull,omitempty"`
+		ObserveWhen []modules.ObservePredicate `yaml:"observe_when,omitempty"`
+	}{manifest.AlwaysPull, manifest.ObserveWhen})
+	require.NoError(t, err)
+	if strings.TrimSpace(string(extra)) == "{}" {
+		extra = nil
 	}
+	return testutil.NewSignedBundle(t, testutil.BundleOptions{
+		Publisher:     manifest.Publisher,
+		Name:          manifest.Name,
+		Version:       manifest.Version,
+		Executors:     manifest.Executors,
+		ManifestExtra: string(extra),
+		Platforms:     []string{"linux-amd64"},
+		BinaryContent: map[string][]byte{"linux-amd64": []byte("binary " + tag)},
+	}).Bundle
 }
 
 // putApproved adds a bundle to the cache and sets its approval status to Approved.
@@ -80,7 +95,7 @@ func TestListObservableManifests_AlwaysPull_Approved(t *testing.T) {
 		Kind:       "steward",
 		AlwaysPull: true,
 	}
-	b := makeListObservableBundle(manifest, "hash-osq-001")
+	b := makeListObservableBundle(t, manifest, "hash-osq-001")
 	putApproved(t, c, b)
 
 	adapter := &moduleManifestAdapter{cache: c}
@@ -106,7 +121,7 @@ func TestListObservableManifests_AlwaysPull_NotApproved(t *testing.T) {
 		Kind:       "steward",
 		AlwaysPull: true,
 	}
-	b := makeListObservableBundle(manifest, "hash-osq-002")
+	b := makeListObservableBundle(t, manifest, "hash-osq-002")
 	putPending(t, c, b) // Deliberately NOT approved.
 
 	adapter := &moduleManifestAdapter{cache: c}
@@ -131,7 +146,7 @@ func TestListObservableManifests_ObserveWhen_Approved(t *testing.T) {
 			{Fact: "hyperv_enabled", Equals: "true"},
 		},
 	}
-	b := makeListObservableBundle(manifest, "hash-hyperv-001")
+	b := makeListObservableBundle(t, manifest, "hash-hyperv-001")
 	putApproved(t, c, b)
 
 	adapter := &moduleManifestAdapter{cache: c}
@@ -153,7 +168,7 @@ func TestListObservableManifests_NoObserveNoAlwaysPull_Excluded(t *testing.T) {
 		Executors: []string{"steward"},
 		Kind:      "steward",
 	}
-	b := makeListObservableBundle(manifest, "hash-plain-001")
+	b := makeListObservableBundle(t, manifest, "hash-plain-001")
 	putApproved(t, c, b)
 
 	adapter := &moduleManifestAdapter{cache: c}
@@ -173,14 +188,14 @@ func TestListObservableManifests_MixedApprovalStatuses(t *testing.T) {
 		Name: "osquery", Version: "0.1.0", Publisher: "cfgms",
 		Executors: []string{"steward"}, Kind: "steward", AlwaysPull: true,
 	}
-	putApproved(t, c, makeListObservableBundle(osqManifest, "hash-osq-mix-001"))
+	putApproved(t, c, makeListObservableBundle(t, osqManifest, "hash-osq-mix-001"))
 
 	// Pending + AlwaysPull — must NOT appear (approval gate blocks it).
 	osqPendingManifest := &modules.ModuleMetadata{
 		Name: "osquery-pending", Version: "0.1.0", Publisher: "cfgms",
 		Executors: []string{"steward"}, Kind: "steward", AlwaysPull: true,
 	}
-	putPending(t, c, makeListObservableBundle(osqPendingManifest, "hash-osq-mix-002"))
+	putPending(t, c, makeListObservableBundle(t, osqPendingManifest, "hash-osq-mix-002"))
 
 	// Approved + ObserveWhen — must appear.
 	hypervManifest := &modules.ModuleMetadata{
@@ -189,14 +204,14 @@ func TestListObservableManifests_MixedApprovalStatuses(t *testing.T) {
 		Kind:        "steward",
 		ObserveWhen: []modules.ObservePredicate{{Fact: "hyperv_enabled", Equals: "true"}},
 	}
-	putApproved(t, c, makeListObservableBundle(hypervManifest, "hash-hyperv-mix-001"))
+	putApproved(t, c, makeListObservableBundle(t, hypervManifest, "hash-hyperv-mix-001"))
 
 	// Approved + neither — must NOT appear.
 	plainManifest := &modules.ModuleMetadata{
 		Name: "plain", Version: "1.0.0", Publisher: "cfgms",
 		Executors: []string{"steward"}, Kind: "steward",
 	}
-	putApproved(t, c, makeListObservableBundle(plainManifest, "hash-plain-mix-001"))
+	putApproved(t, c, makeListObservableBundle(t, plainManifest, "hash-plain-mix-001"))
 
 	adapter := &moduleManifestAdapter{cache: c}
 	got, err := adapter.ListObservableManifests()
@@ -249,9 +264,9 @@ func TestListObservableManifests_CacheListError(t *testing.T) {
 // returned. One corrupt bundle must not take down observe resolution for the
 // whole fleet.
 //
-// The failure is induced against a real ModuleCache by deleting signatures.yaml
-// from one stored bundle. List still reports the entry (it keys off manifest.yaml)
-// while Get fails, which is exactly the state this branch exists to handle.
+// The failure is induced against a real ModuleCache by deleting the sidecar
+// (bundle.yaml) from one stored bundle, which List skips with a warning (and Get
+// would refuse) rather than aborting the listing.
 func TestListObservableManifests_UnreadableBundleSkipped(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "module-cache")
 	c := makeListObservableCacheAt(t, root)
@@ -260,26 +275,25 @@ func TestListObservableManifests_UnreadableBundleSkipped(t *testing.T) {
 		Name: "osquery-broken", Version: "0.1.0", Publisher: "cfgms",
 		Executors: []string{"steward"}, Kind: "steward", AlwaysPull: true,
 	}
-	putApproved(t, c, makeListObservableBundle(brokenManifest, "hash-osq-broken-001"))
+	putApproved(t, c, makeListObservableBundle(t, brokenManifest, "hash-osq-broken-001"))
 
 	healthyManifest := &modules.ModuleMetadata{
 		Name: "osquery", Version: "0.1.0", Publisher: "cfgms",
 		Executors: []string{"steward"}, Kind: "steward", AlwaysPull: true,
 	}
-	putApproved(t, c, makeListObservableBundle(healthyManifest, "hash-osq-healthy-001"))
+	putApproved(t, c, makeListObservableBundle(t, healthyManifest, "hash-osq-healthy-001"))
 
 	// Locate the broken bundle's directory by walking the cache rather than
-	// reconstructing the content-addressed layout, then remove a file Get
-	// requires but List does not.
+	// reconstructing the content-addressed layout, then remove the sidecar.
 	removed := 0
 	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || d.Name() != "signatures.yaml" {
+		if d.IsDir() || d.Name() != bundle.BundleSidecarFileName {
 			return nil
 		}
-		if filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path)))) != "osquery-broken" {
+		if filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(path))))) != "osquery-broken" {
 			return nil
 		}
 		if rmErr := os.Remove(path); rmErr != nil {
