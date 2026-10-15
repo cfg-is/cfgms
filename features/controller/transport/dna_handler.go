@@ -405,7 +405,8 @@ func (b *dnaStreamBudget) admit(chunk *transportpb.DNAChunk) error {
 // the message "steward ID mismatch" — consistent with ConfigHandler.
 //
 // Per-tenant back-pressure: after steward ID validation on the first chunk,
-// Acquire is called with the chunk's tenant_id. If the tenant's queue is full
+// Acquire is called with the registry-resolved tenant (or quarantineQueueKey for
+// unresolved peers, never the wire tenant_id). If that queue is full
 // (MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
 //
 // Branch on is_delta:
