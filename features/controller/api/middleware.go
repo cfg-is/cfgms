@@ -45,7 +45,7 @@ const (
 	// over URL-derived tenant. Empty means same-tenant (no cross-tenant check).
 	targetTenantContextKey contextKey = "target_tenant"
 	// cookieAuthContextKey is set to true when authentication succeeds via the
-	// cfgms_session cookie (Issue #2493: CSRF middleware uses this to distinguish
+	// __Host-cfgms_session cookie (Issue #2493: CSRF middleware uses this to distinguish
 	// cookie-authenticated requests from Bearer/API-key/mTLS requests).
 	cookieAuthContextKey contextKey = "cookie_authenticated"
 	// webSessionIDContextKey carries the session ID of a cookie-authenticated
@@ -1166,13 +1166,13 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Web session cookie path (Issue #2492, ADR-018 §1,2): authenticate browser clients
-		// via the cfgms_session HttpOnly+Secure+SameSite=Strict cookie. Credential precedence
+		// via the __Host-cfgms_session HttpOnly+Secure+SameSite=Strict cookie. Credential precedence
 		// (security B5.2): any header credential (Bearer or API key) or admin mTLS ALWAYS wins
 		// — when a header credential is present the cookie is ignored entirely (not validated,
 		// not renewed, no Set-Cookie emitted). This branch only fires when no header credential
 		// is present, ensuring existing Bearer/API-key/mTLS clients are byte-identical.
 		if s.webSessionManager != nil && !hasHeaderCredentials(r) {
-			if cookie, cookieErr := r.Cookie("cfgms_session"); cookieErr == nil {
+			if cookie, cookieErr := r.Cookie(cookieWebSession); cookieErr == nil {
 				// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
 				webSourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 				webValidateCtx := session.WithSourceIP(r.Context(), webSourceIP)
@@ -1200,7 +1200,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				_, newToken, renewErr := s.webSessionManager.Renew(webValidateCtx, cookie.Value)
 				if renewErr == nil && newToken != "" {
 					http.SetCookie(w, &http.Cookie{
-						Name:     "cfgms_session",
+						Name:     cookieWebSession,
 						Value:    newToken,
 						HttpOnly: true,
 						Secure:   true,
@@ -2288,7 +2288,7 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 }
 
 // isCookieAuthenticated reports whether this request was authenticated via the
-// cfgms_session HttpOnly cookie (set by authenticationMiddleware on cookie-auth success).
+// __Host-cfgms_session HttpOnly cookie (set by authenticationMiddleware on cookie-auth success).
 func isCookieAuthenticated(r *http.Request) bool {
 	v, _ := r.Context().Value(cookieAuthContextKey).(bool)
 	return v

@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   // Stub the CSRF cookie read (apiFetch reads it for PUT requests).
   Object.defineProperty(document, 'cookie', {
-    get: () => 'cfgms_csrf=test-csrf-token',
+    get: () => '__Host-cfgms_csrf=test-csrf-token',
     configurable: true,
   })
 })

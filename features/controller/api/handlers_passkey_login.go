@@ -7,7 +7,7 @@
 //
 //	POST /api/v1/web/passkey/login/begin
 //	     Pre-session CSRF checked (double-submit). Optional body: PasskeyLoginBeginRequest.
-//	     Returns a WebAuthn discoverable-login assertion challenge; sets cfgms_passkey_ceremony
+//	     Returns a WebAuthn discoverable-login assertion challenge; sets __Host-cfgms_passkey_ceremony
 //	     (HttpOnly) cookie. The username field (if provided) is stored as a session hint only —
 //	     the response is always a discoverable challenge (no allowCredentials) regardless of
 //	     whether the username exists or has enrolled credentials. This prevents account and
@@ -17,7 +17,7 @@
 //	POST /api/v1/web/passkey/login/finish
 //	     Verifies the authenticator assertion (always via FinishDiscoverableLogin). On success:
 //	       - Issues a session immediately at AssuranceStrong (ADR-021 Decision 3).
-//	       - Sets cfgms_session (HttpOnly) and cfgms_csrf (non-HttpOnly) cookies.
+//	       - Sets __Host-cfgms_session (HttpOnly) and __Host-cfgms_csrf (non-HttpOnly) cookies.
 //	       - Revokes any prior session cookie (session-fixation defence).
 //	       - Emits web.passkey.login.success audit event.
 //	     On failure: emits web.passkey.login.failure audit event.
@@ -26,7 +26,7 @@
 //   - No username/credential enumeration: begin always returns a discoverable challenge.
 //   - Per-account and per-IP throttle on failures (no hard lockout).
 //   - SameSite=Strict on the ceremony cookie provides CSRF protection for the finish endpoint.
-//   - Session-fixation defence: an existing cfgms_session is revoked before a new one is issued.
+//   - Session-fixation defence: an existing __Host-cfgms_session is revoked before a new one is issued.
 //   - Issued session revoked on Elevate or CSRF-generation failure (no orphaned Basic sessions).
 package api
 
@@ -83,7 +83,7 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Pre-session CSRF double-submit check (ADR-018 §3): the browser must echo the
-	// cfgms_csrf_pre cookie value as the X-CSRF-Token header. Both must be present and
+	// __Host-cfgms_csrf_pre cookie value as the X-CSRF-Token header. Both must be present and
 	// equal (constant-time). This guards against CSRF on the login form POST itself.
 	csrfCookie, cookieErr := r.Cookie(cookieCSRFPre)
 	csrfHeader := r.Header.Get(headerCSRFToken)

@@ -81,7 +81,7 @@ function mockEndpoints(opts: {
     const url = String(input)
     const method = (init?.method ?? 'GET').toUpperCase()
     if (url.endsWith('/api/v1/web/csrf')) {
-      document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+      document.cookie = '__Host-cfgms_csrf_pre=pre-tok; path=/; Secure'
       return Promise.resolve(jsonResponse(204))
     }
     if (url.endsWith('/api/v1/web/passkey/login/begin')) {
@@ -194,7 +194,7 @@ describe('authentication gate', () => {
       const url = String(input)
       const method = (init?.method ?? 'GET').toUpperCase()
       if (url.endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+        document.cookie = '__Host-cfgms_csrf_pre=pre-tok; path=/; Secure'
         return Promise.resolve(jsonResponse(204))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {

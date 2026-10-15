@@ -486,7 +486,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
 
   it('re-attaches X-CSRF-Token on the elevation retry for unsafe methods', async () => {
     // Set a CSRF cookie readable by the modal's readSessionCsrf().
-    document.cookie = 'cfgms_csrf=csrf-tok-elevate; path=/'
+    document.cookie = '__Host-cfgms_csrf=csrf-tok-elevate; path=/; Secure'
 
     const mockCred = makePublicKeyCredential()
     vi.stubGlobal('navigator', {

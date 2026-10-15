@@ -50,6 +50,8 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // __Host- cookies are Secure-only; jsdom drops them on an http origin.
+    environmentOptions: { jsdom: { url: 'https://localhost:3000/' } },
     setupFiles: ['./src/test/setup.ts'],
   },
 })

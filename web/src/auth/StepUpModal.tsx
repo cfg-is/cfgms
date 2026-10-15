@@ -28,7 +28,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { unwrapEnvelope, type StepUpRequest } from '../api/client.ts'
+import { csrfCookieSession, unwrapEnvelope, type StepUpRequest } from '../api/client.ts'
 import './StepUpModal.css'
 
 // ── CSRF cookie helper (session token only; pre-session is for login) ────────
@@ -37,7 +37,7 @@ function readSessionCsrf(): string | null {
   for (const pair of document.cookie.split(';')) {
     const eq = pair.indexOf('=')
     if (eq === -1) continue
-    if (pair.slice(0, eq).trim() === 'cfgms_csrf') {
+    if (pair.slice(0, eq).trim() === csrfCookieSession) {
       return decodeURIComponent(pair.slice(eq + 1).trim())
     }
   }

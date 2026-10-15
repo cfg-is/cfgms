@@ -23,7 +23,7 @@ func webSessionRequest(t *testing.T, srv *Server, issue func(principalID, tenant
 	srv.cacheAccount(acct)
 	token := issue(acct.ID, acct.TenantID)
 	req := httptest.NewRequest(method, path, nil)
-	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: token})
 	return req
 }
 

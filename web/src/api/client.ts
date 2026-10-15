@@ -8,9 +8,9 @@
  *  - The session cookie is HttpOnly — this module NEVER reads or names it
  *    (enforced by a source-scan test); the browser attaches it automatically
  *    via `credentials: 'same-origin'`.
- *  - `cfgms_csrf` is JS-readable by design; its value is echoed as the
+ *  - `__Host-cfgms_csrf` is JS-readable by design; its value is echoed as the
  *    `X-CSRF-Token` header on every unsafe-method request (double-submit).
- *  - `cfgms_csrf_pre` is the single-use pre-session token that gates the
+ *  - `__Host-cfgms_csrf_pre` is the single-use pre-session token that gates the
  *    login POST itself; obtained from GET /api/v1/web/csrf.
  *  - Any 401 on a normal API call means the session is gone (idle/absolute
  *    expiry or revocation) — a central listener drops the app to the login
@@ -26,8 +26,8 @@
 
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
-const csrfCookieSession = 'cfgms_csrf'
-const csrfCookiePre = 'cfgms_csrf_pre'
+export const csrfCookieSession = '__Host-cfgms_csrf'
+const csrfCookiePre = '__Host-cfgms_csrf_pre'
 const csrfHeader = 'X-CSRF-Token'
 
 /** Read a (non-HttpOnly) cookie value; null when absent. */
@@ -327,7 +327,7 @@ export interface PasskeyBeginResult {
 /**
  * Passkey login begin pre-flight + POST (Issue #2993 / ADR-021 Amendment 1).
  * Obtains the pre-session CSRF token from GET /api/v1/web/csrf (delivered as
- * the `cfgms_csrf_pre` cookie), then echoes it as `X-CSRF-Token` on the begin
+ * the `__Host-cfgms_csrf_pre` cookie), then echoes it as `X-CSRF-Token` on the begin
  * POST. The optional username scopes to a specific account; omitting it starts
  * a discoverable (usernameless) ceremony. A 401 here is a CSRF failure, not
  * "session expired".
@@ -359,7 +359,7 @@ export async function passkeyLoginBeginRequest(username?: string): Promise<Passk
 
 /**
  * Passkey login finish POST (Issue #2993). Sends the WebAuthn assertion to the
- * server; the `cfgms_passkey_ceremony` cookie (SameSite=Strict) provides CSRF
+ * server; the `__Host-cfgms_passkey_ceremony` cookie (SameSite=Strict) provides CSRF
  * protection so no explicit CSRF header is required on this call.
  * Returns the authenticated principal's username and tenant scope on success.
  */

@@ -27,7 +27,7 @@ beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
   Object.defineProperty(document, 'cookie', {
-    get: () => 'cfgms_csrf=test-csrf-token',
+    get: () => '__Host-cfgms_csrf=test-csrf-token',
     configurable: true,
   })
 })

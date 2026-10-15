@@ -54,7 +54,7 @@ because session-token principals also have IsAdmin==true."
 2. **A phished session has the full privileged surface.** CLAUDE.md's threat model
    states that "admin accounts may be phished or taken over for short periods,"
    and that rarely-touched settings should "bound the blast radius of admin or
-   controller compromise." Today nothing does. A stolen `cfgms_session` cookie
+   controller compromise." Today nothing does. A stolen `__Host-cfgms_session` cookie
    confers module-bundle approval — arbitrary code on every managed endpoint —
    indistinguishable from an admin holding a hardware-backed cert. The one gate
    that appears to bound this does not.
