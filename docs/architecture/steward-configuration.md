@@ -53,7 +53,7 @@ required_modules:
   - name: "cfgms/firewall"
     version: "1.0.0"
   - name: "cfgms/package"
-    version: ">=2.0.0"
+    version: "2.0.0"
 
 # Resource configurations
 resources:
