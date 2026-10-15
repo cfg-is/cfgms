@@ -1270,7 +1270,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	switch req.Mode {
 	case "auto_accept", "require_approval", "reject":
 	default:
-		http.Error(w, "invalid mode: must be auto_accept, require_approval, or reject", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid mode: must be auto_accept, require_approval, or reject")
 		return
 	}
 

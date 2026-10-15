@@ -987,7 +987,7 @@ func TestHandleSetRefreshPolicy_InvalidMode_Returns400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.server.router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertJSONError(t, rec, http.StatusBadRequest)
 }
 
 func TestHandleRefreshApprove_NotFound(t *testing.T) {
