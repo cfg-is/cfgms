@@ -709,6 +709,8 @@ func subtreeDeviceCounts(rollup map[string]*tenantRollup, visible []*business.Te
 //   - "validation failed: "             — Manager.validateTenantRequest (name/description rules)
 //   - "invalid config source metadata: " — cfgpkg.ParseConfigSource on caller metadata
 //   - "config source validation failed: " — MountPointValidator rejecting the caller's git source
+//   - "invalid explicit tenant ID: " — create-path validation of the caller-supplied id
+//   - "cannot create tenant under a " — create under a suspended or pending-deletion parent
 //
 // This is an allowlist by construction: an error class added to the manager later,
 // or a rephrased message, is not on the list and therefore fails closed to a
