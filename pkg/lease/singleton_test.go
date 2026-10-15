@@ -520,28 +520,45 @@ func TestSingletonJob_RenewWithRetry_OutageLongerThanLatencyBudget_KeepsLease(t 
 }
 
 // A renewal outage that outlasts the whole safety margin must still give up
-// (cancel fn) before the lease can expire in the store.
+// (cancel fn) before the lease can expire in the store. Time is simulated: the
+// retry backoff waits advance the fake clock instead of sleeping, so the
+// cancellation instant is the one renewWithRetry chose, not one shifted by how
+// fast the host happened to schedule the renewal and fn goroutines.
 func TestSingletonJob_RenewWithRetry_OutageBeyondSafetyMargin_CancelsBeforeExpiry(t *testing.T) {
-	base := newTestStore(t)
-	store := &renewFailingStore{LeaseStore: base, failAfter: 1}
+	clock := newFakeClock()
+	leaseStore := newFakeClockLeaseStore(clock)
+	store := &renewFailingStore{LeaseStore: leaseStore, failAfter: 1} // only the initial acquire succeeds
 	ttl := 1 * time.Second
 	renewInterval := 100 * time.Millisecond
-	m, err := NewManager(store, ttl, renewInterval, renewInterval)
+	m, err := NewManagerWithClock(store, ttl, renewInterval, renewInterval, clock)
 	require.NoError(t, err)
 	job, err := NewSingletonJob(m, "x", "node-1", ttl, renewInterval, nil)
 	require.NoError(t, err)
 
-	start := time.Now()
+	start := clock.Now()
+	var cancelled bool
 	var cancelledAfter time.Duration
-	job.RunIfLeader(context.Background(), func(ctx context.Context) {
+	var leaseAtCancel *business.LeaseState
+	ran := job.RunIfLeader(context.Background(), func(ctx context.Context) {
+		clock.Tick()
 		select {
 		case <-ctx.Done():
-			cancelledAfter = time.Since(start)
-		case <-time.After(3 * time.Second):
+			cancelled = true
+			cancelledAfter = clock.Now().Sub(start)
+			state, getErr := leaseStore.GetLease(context.Background(), "x")
+			require.NoError(t, getErr)
+			leaseAtCancel = state
+		case <-time.After(30 * time.Second): // failure bound only; the passing path waits on the event
 		}
 	})
-	require.NotZero(t, cancelledAfter, "fn's context was never cancelled")
+	require.True(t, ran)
+	require.True(t, cancelled, "fn's context was never cancelled")
+	assert.GreaterOrEqual(t, cancelledAfter, m.SafetyMargin(),
+		"fn must not be cancelled while the holder's local authority is still valid")
 	assert.Less(t, cancelledAfter, ttl, "fn must be cancelled before the lease can expire in the store")
+	require.NotNil(t, leaseAtCancel)
+	assert.True(t, leaseAtCancel.Valid, "the store row must still be unexpired when fn is cancelled")
+	assert.Equal(t, "node-1", leaseAtCancel.HolderID)
 }
 
 func TestSingletonJob_AcquireErrorSkipsCycle(t *testing.T) {
