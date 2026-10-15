@@ -316,7 +316,7 @@ type markResumedFailingStore struct {
 
 func (s *markResumedFailingStore) MarkResumed(ctx context.Context, tenantID, approvalID string, now time.Time) error {
 	if s.calls.Add(1) <= s.failures {
-		return errors.New("simulated transient approval store write failure")
+		return errors.New("injected transient approval store write failure")
 	}
 	return s.ApprovalStore.MarkResumed(ctx, tenantID, approvalID, now)
 }
