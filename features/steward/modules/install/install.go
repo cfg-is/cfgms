@@ -158,7 +158,8 @@ type Result struct {
 const (
 	installedModulesWindowsRoot = `C:\Program Files\CFGMS\modules`
 	installedModulesUnixRoot    = `/usr/local/lib/cfgms/modules`
-	// BundleDirEnvVar overrides DefaultRoot, for test isolation only.
+	// BundleDirEnvVar overrides DefaultRoot, matching the module factory's
+	// override of the same name; it is meant for test isolation.
 	BundleDirEnvVar = "CFGMS_MODULE_BUNDLE_DIR"
 
 	// stagePrefix starts the name of every transient directory under the root;
@@ -356,6 +357,7 @@ func (in *Installer) verify(rec *received, publisher, name, version, platform st
 	h := rec.header
 
 	digests := make(map[string][32]byte, len(h.GetBinaryDigests()))
+	canonical := make(map[string]string, len(h.GetBinaryDigests()))
 	for key, hexDigest := range h.GetBinaryDigests() {
 		if !bundle.ValidPlatformKey(key) {
 			return nil, ErrDigestListInvalid, nil
@@ -367,6 +369,7 @@ func (in *Installer) verify(rec *received, publisher, name, version, platform st
 		var d [32]byte
 		copy(d[:], raw)
 		digests[key] = d
+		canonical[key] = hex.EncodeToString(d[:]) // lowercase, whatever spelling was received
 	}
 	own, ok := digests[platform]
 	if !ok {
@@ -397,7 +400,7 @@ func (in *Installer) verify(rec *received, publisher, name, version, platform st
 		Manifest:      manifest,
 		ManifestBytes: h.GetManifest(),
 		Binaries:      map[string]string{platform: h.GetFileName()},
-		BinaryDigests: h.GetBinaryDigests(),
+		BinaryDigests: canonical,
 		ContentHash:   recomputed,
 		BinaryContent: map[string][]byte{platform: rec.data},
 	}

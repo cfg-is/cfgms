@@ -896,10 +896,25 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 			// at most one manager may ever report true.
 			require.NoError(t, winner.Stop(context.Background()))
 
+			// The two HasLeadership() reads are not one atomic sample, so their
+			// order decides whether a true/true result proves an overlap. The
+			// stopped winner never renews again, so its authority is a single
+			// interval that only ever lapses: if it reports true at the later read,
+			// it was also true at the earlier one. Reading the loser first therefore
+			// makes loser==true && winner==true mean both held authority at the
+			// loser's read instant. Reading the winner first does not: a goroutine
+			// preempted between the two reads for longer than leaseTTL-SafetyMargin
+			// (40ms under FastElectionConfig) sees the winner's true from before
+			// its deadline and the loser's true from after a legitimate takeover —
+			// a false overlap produced by the sampler, not by the managers.
+			bothHoldAuthority := func() bool {
+				return loser.HasLeadership() && winner.HasLeadership()
+			}
+
 			loserAcquired := make(chan bool, 1)
 			go func() { loserAcquired <- loser.WaitForLeadership(ctx) }()
 			for done := false; !done; {
-				require.False(t, winner.HasLeadership() && loser.HasLeadership(),
+				require.False(t, bothHoldAuthority(),
 					"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
 				select {
 				case ok := <-loserAcquired:
@@ -909,7 +924,7 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 					runtime.Gosched()
 				}
 			}
-			require.False(t, winner.HasLeadership() && loser.HasLeadership(),
+			require.False(t, bothHoldAuthority(),
 				"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
 
 			require.NoError(t, loser.Stop(context.Background()))
