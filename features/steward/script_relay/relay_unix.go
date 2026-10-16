@@ -9,15 +9,51 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
+// checkSocketDir refuses a socket directory that another local user could have
+// prepared: a symlink, a non-directory, a directory owned by someone other than
+// the effective user, or one whose mode is not exactly 0700. It uses Lstat so a
+// symlink is never followed.
+func checkSocketDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("stat socket dir: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("socket dir %q is a symlink", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("socket dir %q is not a directory", dir)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("socket dir %q: ownership unavailable", dir)
+	}
+	if int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("socket dir %q is not owned by the current user", dir)
+	}
+	if info.Mode().Perm() != 0700 {
+		return fmt.Errorf("socket dir %q has mode %o, want 0700", dir, info.Mode().Perm())
+	}
+	return nil
+}
+
 // initSocket creates the per-execution directory (mode 0700) and opens a
-// unix socket inside it (mode 0600). The directory is created first so no
-// window exists between bind and chmod where the socket is world-accessible.
+// unix socket inside it (mode 0600). The directory is created fresh and
+// exclusively with an unpredictable name (os.MkdirTemp), so a path planted in
+// the world-writable temp tree is never reused. It is verified before binding,
+// and is created first so no window exists between bind and chmod where the
+// socket is world-accessible.
 func initSocket(r *Relay) error {
-	sockDir := filepath.Join(os.TempDir(), "cfgms-"+r.executionID)
-	if err := os.Mkdir(sockDir, 0700); err != nil && !os.IsExist(err) {
+	sockDir, err := os.MkdirTemp("", "cfgms-")
+	if err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
+	}
+	if err := checkSocketDir(sockDir); err != nil {
+		_ = os.Remove(sockDir)
+		return err
 	}
 
 	sockPath := filepath.Join(sockDir, "api.sock")
