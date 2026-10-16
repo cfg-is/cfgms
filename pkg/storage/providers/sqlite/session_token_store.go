@@ -38,37 +38,45 @@ func (s *SQLiteSessionTokenStore) Close() error {
 	return nil
 }
 
-// Set stores or updates the Session under the given token hash (SHA-256 hex).
-// The raw token is never passed to this method; callers must hash via session.HashToken.
-//
-// Set always inserts with hash_expires_at = NULL (no per-hash expiry). On conflict,
-// session data is updated but hash_expires_at is left untouched so that a grace expiry
-// stamped by StampGraceExpiry is not erased by a subsequent LastActivity sync.
+// Set creates the Session under the given token hash (SHA-256 hex); it is used only
+// when a session is first issued. The raw token is never passed to this method;
+// callers must hash via session.HashToken. Writes to an existing session must use
+// Update so they cannot resurrect a revoked session.
 func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, sess *session.Session) error {
+	return s.upsert(ctx, tokenHash, sess, false)
+}
+
+// Update writes to an existing session (activity sync, token rotation, elevation).
+// The write is a single INSERT ... SELECT ... WHERE EXISTS statement, so the live-row
+// check and the write are one atomic statement under SQLite's writer serialization:
+// a concurrent Delete of the same session either runs first (no row is written and
+// ErrSessionNotFound is returned) or after (and removes the row).
+// hash_expires_at is left untouched on conflict so a grace expiry stamped by
+// StampGraceExpiry is not erased by a subsequent LastActivity sync.
+func (s *SQLiteSessionTokenStore) Update(ctx context.Context, tokenHash string, sess *session.Session) error {
+	return s.upsert(ctx, tokenHash, sess, true)
+}
+
+// sqlExecer is the write surface shared by *sql.DB and *sql.Tx.
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func (s *SQLiteSessionTokenStore) upsert(ctx context.Context, tokenHash string, sess *session.Session, requireLive bool) error {
+	return upsertOn(ctx, s.db, tokenHash, sess, requireLive)
+}
+
+func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session.Session, requireLive bool) error {
 	var lastProvenAt interface{}
 	if !sess.LastProvenAt.IsZero() {
 		lastProvenAt = formatTime(sess.LastProvenAt)
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO session_token_records
-			(token_hash, session_id, principal_id, connection_name, tenant_id,
-			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(token_hash) DO UPDATE SET
-			session_id          = excluded.session_id,
-			principal_id        = excluded.principal_id,
-			connection_name     = excluded.connection_name,
-			tenant_id           = excluded.tenant_id,
-			issued_at           = excluded.issued_at,
-			last_activity       = excluded.last_activity,
-			absolute_expires_at = excluded.absolute_expires_at,
-			assurance           = excluded.assurance,
-			bound_ip            = excluded.bound_ip,
-			last_proven_at      = excluded.last_proven_at,
-			credential_id       = excluded.credential_id,
-			root_scoped         = excluded.root_scoped,
-			channel             = excluded.channel`,
+	guard := ""
+	if requireLive {
+		guard = ` AND EXISTS (SELECT 1 FROM session_token_records
+			WHERE session_id = ? AND (hash_expires_at IS NULL OR hash_expires_at > ?))`
+	}
+	args := []interface{}{
 		tokenHash,
 		sess.ID,
 		sess.PrincipalID,
@@ -83,9 +91,82 @@ func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, ses
 		sess.CredentialID,
 		sess.RootScoped,
 		sess.Channel,
-	)
+	}
+	if requireLive {
+		args = append(args, sess.ID, formatTime(time.Now().UTC()))
+	}
+	// The static query fragments above are constants; all values are bound parameters.
+	result, err := db.ExecContext(ctx, `
+		INSERT INTO session_token_records
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
+			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?
+		WHERE 1 = 1`+guard+`
+		ON CONFLICT(token_hash) DO UPDATE SET
+			session_id          = excluded.session_id,
+			principal_id        = excluded.principal_id,
+			connection_name     = excluded.connection_name,
+			tenant_id           = excluded.tenant_id,
+			issued_at           = excluded.issued_at,
+			last_activity       = excluded.last_activity,
+			absolute_expires_at = excluded.absolute_expires_at,
+			assurance           = excluded.assurance,
+			bound_ip            = excluded.bound_ip,
+			last_proven_at      = excluded.last_proven_at,
+			credential_id       = excluded.credential_id,
+			root_scoped         = excluded.root_scoped,
+			channel             = excluded.channel`, args...)
 	if err != nil {
-		return fmt.Errorf("sqlite: session token set failed: %w", err)
+		return fmt.Errorf("sqlite: session token write failed: %w", err)
+	}
+	if requireLive {
+		if n, _ := result.RowsAffected(); n == 0 {
+			return session.ErrSessionNotFound
+		}
+	}
+	return nil
+}
+
+// Rotate atomically makes newHash the session's current token and records prevExpiry
+// as the grace expiry of prevHash. The transaction's first statement is the guarded
+// UPDATE of prevHash (it matches only while prevHash is the session's current token),
+// so the transaction takes SQLite's write lock before reading anything and is
+// serialized with a concurrent Delete of the same session: Delete either commits first
+// (the UPDATE matches no row and nothing is written) or after (and removes both rows).
+func (s *SQLiteSessionTokenStore) Rotate(ctx context.Context, prevHash, newHash string, sess *session.Session, prevExpiry time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: session token rotate: begin failed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE session_token_records SET hash_expires_at = ?
+		WHERE token_hash = ? AND session_id = ? AND hash_expires_at IS NULL`,
+		formatTime(prevExpiry.UTC()), prevHash, sess.ID)
+	if err != nil {
+		return fmt.Errorf("sqlite: session token rotate failed: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		var one int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1 FROM session_token_records
+			WHERE session_id = ? AND (hash_expires_at IS NULL OR hash_expires_at > ?) LIMIT 1`,
+			sess.ID, formatTime(time.Now().UTC())).Scan(&one)
+		if err == sql.ErrNoRows {
+			return session.ErrSessionNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("sqlite: session token rotate: liveness check failed: %w", err)
+		}
+		return session.ErrTokenRotated
+	}
+	if err := upsertOn(ctx, tx, newHash, sess, false); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: session token rotate: commit failed: %w", err)
 	}
 	return nil
 }
@@ -244,10 +325,8 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 }
 
 // StampGraceExpiry sets the per-hash expiry on a prior-token grace entry.
-// Called by manager.Renew (via the graceStamper type assertion) after rotation
-// so that the old hash is rejected by cluster peers and after controller restarts
-// once the grace window elapses. The manager's in-memory grace tracking (ms.prevExpiry)
-// continues to be authoritative on the issuing node.
+// Rotate stamps the rotated-away hash atomically with writing its successor; this
+// method remains for administrative use and tests.
 func (s *SQLiteSessionTokenStore) StampGraceExpiry(ctx context.Context, tokenHash string, expiresAt time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE session_token_records SET hash_expires_at = ? WHERE token_hash = ?`,

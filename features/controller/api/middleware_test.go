@@ -4261,3 +4261,73 @@ func seedTenantTree(t *testing.T, server *Server) {
 		}
 	}
 }
+
+// renewRevokedStore wraps a real MemStore and lets Validate's activity sync (Update)
+// through but reports the session gone from Renew's rotation (Rotate), reproducing a
+// revocation landing between Validate and Renew.
+type renewRevokedStore struct {
+	*session.MemStore
+	mu      sync.Mutex
+	updates int
+}
+
+func (s *renewRevokedStore) Rotate(_ context.Context, _, _ string, _ *session.Session, _ time.Time) error {
+	return session.ErrSessionNotFound
+}
+
+func (s *renewRevokedStore) Update(ctx context.Context, h string, sess *session.Session) error {
+	s.mu.Lock()
+	s.updates++
+	s.mu.Unlock()
+	return s.MemStore.Update(ctx, h, sess)
+}
+
+// TestAuthenticationMiddleware_RenewReportsRevoked_Returns401 verifies a request whose
+// Renew reports the session revoked is rejected with the invalid-token 401 on both the
+// Bearer and web-cookie paths instead of proceeding.
+func TestAuthenticationMiddleware_RenewReportsRevoked_Returns401(t *testing.T) {
+	for _, viaCookie := range []bool{false, true} {
+		name := "bearer"
+		if viaCookie {
+			name = "cookie"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv := setupTestServer(t)
+			cfg := session.DefaultConfig()
+			if viaCookie {
+				cfg.Channel = "web"
+			} else {
+				cfg.Channel = "cli"
+			}
+			store := &renewRevokedStore{MemStore: session.NewMemStore(cfg, time.Now)}
+			t.Cleanup(store.Close)
+			mgr := session.NewManager(cfg, store, time.Now)
+			if viaCookie {
+				srv.SetWebSessionManager(mgr)
+			} else {
+				srv.SetSessionManager(mgr)
+			}
+			_, token, err := mgr.Issue(context.Background(), "alice", "ctrl", testRootTenantID)
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+			if viaCookie {
+				req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: token})
+			} else {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+			reached := false
+			rec := httptest.NewRecorder()
+			srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})).ServeHTTP(rec, req)
+
+			assert.False(t, reached, "request must not proceed when Renew reports the session revoked")
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Contains(t, rec.Body.String(), "INVALID_SESSION_TOKEN")
+			assert.Empty(t, rec.Header().Get("X-Session-Token"))
+			assert.Empty(t, rec.Header().Get("Set-Cookie"))
+		})
+	}
+}

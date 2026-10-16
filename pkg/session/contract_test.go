@@ -5,6 +5,8 @@ package session_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,7 +56,11 @@ func (s *stubManager) RevokeAllForPrincipal(_ context.Context, _ string) (int, e
 // stubStore satisfies Store for compile-time interface verification.
 type stubStore struct{}
 
-func (s *stubStore) Set(_ context.Context, _ string, _ *session.Session) error     { return nil }
+func (s *stubStore) Set(_ context.Context, _ string, _ *session.Session) error    { return nil }
+func (s *stubStore) Update(_ context.Context, _ string, _ *session.Session) error { return nil }
+func (s *stubStore) Rotate(_ context.Context, _, _ string, _ *session.Session, _ time.Time) error {
+	return nil
+}
 func (s *stubStore) Get(_ context.Context, _ string) (*session.Session, error)     { return nil, nil }
 func (s *stubStore) GetByID(_ context.Context, _ string) (*session.Session, error) { return nil, nil }
 func (s *stubStore) Delete(_ context.Context, _ string) error                      { return nil }
@@ -480,6 +486,229 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 		if gotOrdinary.RootScoped {
 			t.Error("RootScoped: got true for a session issued without the marker, want false")
+		}
+	})
+
+	t.Run("UpdateAfterDeleteFailsAndDoesNotResurrect", func(t *testing.T) {
+		tok := mustGenerateToken(t)
+		hash := session.HashToken(tok)
+		sess := makeTestSession("sc-update-after-delete", cfg)
+		if err := store.Set(ctx, hash, sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		// Update on a live session succeeds, for the same hash and a rotated one.
+		newHash := session.HashToken(mustGenerateToken(t))
+		if err := store.Update(ctx, hash, sess); err != nil {
+			t.Fatalf("Update (live, same hash): %v", err)
+		}
+		if err := store.Update(ctx, newHash, sess); err != nil {
+			t.Fatalf("Update (live, new hash): %v", err)
+		}
+		if err := store.Delete(ctx, sess.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		for name, h := range map[string]string{"same": hash, "new": newHash, "fresh": session.HashToken(mustGenerateToken(t))} {
+			if err := store.Update(ctx, h, sess); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Errorf("Update after Delete (%s hash): got %v, want ErrSessionNotFound", name, err)
+			}
+			if _, err := store.Get(ctx, h); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Errorf("Get after rejected Update (%s hash): got %v, want ErrSessionNotFound", name, err)
+			}
+		}
+		if _, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("GetByID after rejected Update: got %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("UpdateNeverCreatesUnknownSession", func(t *testing.T) {
+		sess := makeTestSession("sc-update-unknown", cfg)
+		hash := session.HashToken(mustGenerateToken(t))
+		if err := store.Update(ctx, hash, sess); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("Update of never-created session: got %v, want ErrSessionNotFound", err)
+		}
+		if _, err := store.Get(ctx, hash); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("Get: got %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("ConcurrentUpdateRacingDeleteLeavesNoLiveRow", func(t *testing.T) {
+		const iterations = 100
+		const writers = 4
+		for i := 0; i < iterations; i++ {
+			sess := makeTestSession(fmt.Sprintf("sc-race-%d", i), cfg)
+			base := session.HashToken(mustGenerateToken(t))
+			if err := store.Set(ctx, base, sess); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			hashes := make([]string, writers)
+			for w := range hashes {
+				hashes[w] = session.HashToken(mustGenerateToken(t))
+			}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for w := 0; w < writers; w++ {
+				wg.Add(1)
+				go func(h string) {
+					defer wg.Done()
+					<-start
+					// Either outcome is fine; the row must not survive Delete.
+					_ = store.Update(ctx, h, sess)
+				}(hashes[w])
+			}
+			var delErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				delErr = store.Delete(ctx, sess.ID)
+			}()
+			close(start)
+			wg.Wait()
+			if delErr != nil {
+				t.Fatalf("iteration %d: Delete: %v", i, delErr)
+			}
+			if _, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Fatalf("iteration %d: live row after Delete returned: GetByID err=%v", i, err)
+			}
+			for _, h := range append(hashes, base) {
+				if _, err := store.Get(ctx, h); !errors.Is(err, session.ErrSessionNotFound) {
+					t.Fatalf("iteration %d: hash still live after Delete: %v", i, err)
+				}
+			}
+		}
+	})
+
+	t.Run("RotateRecordsCurrentHashAndBoundsPrior", func(t *testing.T) {
+		sess := makeTestSession("sc-rotate", cfg)
+		h1 := session.HashToken(mustGenerateToken(t))
+		h2 := session.HashToken(mustGenerateToken(t))
+		h3 := session.HashToken(mustGenerateToken(t))
+		if err := store.Set(ctx, h1, sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		// Rotate h1 -> h2 with a grace expiry already in the past: h1 must be refused
+		// by the store itself while h2 and the session stay live.
+		if err := store.Rotate(ctx, h1, h2, sess, time.Now().Add(-time.Second)); err != nil {
+			t.Fatalf("Rotate h1->h2: %v", err)
+		}
+		if _, err := store.Get(ctx, h1); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("Get(h1) after grace expiry: got %v, want ErrSessionNotFound", err)
+		}
+		if _, err := store.Get(ctx, h2); err != nil {
+			t.Errorf("Get(h2): %v", err)
+		}
+		// The rotated-away hash is no longer current: it cannot be rotated again, even
+		// though the session is live, and the failed attempt writes nothing.
+		if err := store.Rotate(ctx, h1, h3, sess, time.Now().Add(time.Minute)); !errors.Is(err, session.ErrTokenRotated) {
+			t.Fatalf("Rotate from rotated-away hash: got %v, want ErrTokenRotated", err)
+		}
+		if _, err := store.Get(ctx, h3); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("Get(h3) after rejected Rotate: got %v, want ErrSessionNotFound", err)
+		}
+		// A Update through the stale hash must not clear its recorded expiry.
+		if err := store.Update(ctx, h1, sess); err != nil {
+			t.Fatalf("Update(h1): %v", err)
+		}
+		if _, err := store.Get(ctx, h1); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("Get(h1) after Update: got %v, want ErrSessionNotFound (expiry must survive Update)", err)
+		}
+		// Within grace the prior hash is still accepted.
+		if err := store.Rotate(ctx, h2, h3, sess, time.Now().Add(time.Minute)); err != nil {
+			t.Fatalf("Rotate h2->h3: %v", err)
+		}
+		if _, err := store.Get(ctx, h2); err != nil {
+			t.Errorf("Get(h2) within grace: %v", err)
+		}
+	})
+
+	t.Run("RotateAfterDeleteFailsAndDoesNotResurrect", func(t *testing.T) {
+		sess := makeTestSession("sc-rotate-deleted", cfg)
+		h1 := session.HashToken(mustGenerateToken(t))
+		h2 := session.HashToken(mustGenerateToken(t))
+		if err := store.Set(ctx, h1, sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		if err := store.Delete(ctx, sess.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if err := store.Rotate(ctx, h1, h2, sess, time.Now().Add(time.Minute)); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("Rotate after Delete: got %v, want ErrSessionNotFound", err)
+		}
+		for _, h := range []string{h1, h2} {
+			if _, err := store.Get(ctx, h); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Errorf("Get after rejected Rotate: got %v, want ErrSessionNotFound", err)
+			}
+		}
+	})
+
+	t.Run("ConcurrentRotatesFromOneHashSucceedExactlyOnce", func(t *testing.T) {
+		for i := 0; i < 20; i++ {
+			sess := makeTestSession(fmt.Sprintf("sc-rotate-once-%d", i), cfg)
+			h1 := session.HashToken(mustGenerateToken(t))
+			if err := store.Set(ctx, h1, sess); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			const rotators = 4
+			results := make([]error, rotators)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for r := 0; r < rotators; r++ {
+				wg.Add(1)
+				go func(r int) {
+					defer wg.Done()
+					<-start
+					results[r] = store.Rotate(ctx, h1, session.HashToken(mustGenerateToken(t)), sess, time.Now().Add(time.Minute))
+				}(r)
+			}
+			close(start)
+			wg.Wait()
+			ok := 0
+			for _, err := range results {
+				switch {
+				case err == nil:
+					ok++
+				case !errors.Is(err, session.ErrTokenRotated):
+					t.Fatalf("iteration %d: unexpected Rotate error %v", i, err)
+				}
+			}
+			if ok != 1 {
+				t.Fatalf("iteration %d: %d Rotates succeeded from the same hash, want exactly 1", i, ok)
+			}
+		}
+	})
+
+	t.Run("ConcurrentRotateRacingDeleteLeavesNoLiveRow", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			sess := makeTestSession(fmt.Sprintf("sc-rotate-race-%d", i), cfg)
+			h1 := session.HashToken(mustGenerateToken(t))
+			h2 := session.HashToken(mustGenerateToken(t))
+			if err := store.Set(ctx, h1, sess); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			var delErr error
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = store.Rotate(ctx, h1, h2, sess, time.Now().Add(time.Minute))
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				delErr = store.Delete(ctx, sess.ID)
+			}()
+			close(start)
+			wg.Wait()
+			if delErr != nil {
+				t.Fatalf("iteration %d: Delete: %v", i, delErr)
+			}
+			for _, h := range []string{h1, h2} {
+				if _, err := store.Get(ctx, h); !errors.Is(err, session.ErrSessionNotFound) {
+					t.Fatalf("iteration %d: hash live after Delete returned: %v", i, err)
+				}
+			}
 		}
 	})
 }

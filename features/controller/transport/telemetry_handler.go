@@ -272,6 +272,14 @@ func (h *TelemetryHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request
 		case <-browserGone:
 			return
 
+		case <-r.Context().Done():
+			// The API layer cancels the request context when the credential that
+			// authenticated the upgrade is revoked or expires: end the stream.
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "credential no longer valid"),
+				time.Now().Add(wsWriteTimeout))
+			return
+
 		case <-pingTicker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
