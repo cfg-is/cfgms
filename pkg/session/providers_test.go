@@ -417,3 +417,57 @@ func TestNoRawTokenInDurableStore(t *testing.T) {
 		t.Errorf("hash lookup in durable store: got %v, want nil", err)
 	}
 }
+
+// TestRenewDoesNotResurrectSessionRevokedOnAnotherNode: manager B has validated the
+// token (warm cache); manager A revokes; B's Renew must report ErrSessionRevoked and
+// mint no token, and a third manager on the same store rejects every token.
+func TestRenewDoesNotResurrectSessionRevokedOnAnotherNode(t *testing.T) {
+	dir := t.TempDir()
+	p := sqlite.NewSQLiteProvider(dir)
+	dbPath := filepath.Join(dir, "sessions.db")
+	cfg := session.Config{IdleTimeout: 5 * time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: 30 * time.Second}
+	ctx := context.Background()
+
+	newMgr := func() session.Manager {
+		st, err := p.CreateSessionTokenStore(map[string]interface{}{"path": dbPath})
+		if err != nil {
+			t.Fatalf("CreateSessionTokenStore: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		return session.NewManager(cfg, st, time.Now)
+	}
+	mgrA, mgrB, mgrC := newMgr(), newMgr(), newMgr()
+
+	sess, token, err := mgrA.Issue(ctx, "carol", "ctrl", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := mgrB.Validate(ctx, token); err != nil {
+		t.Fatalf("Validate on B: %v", err)
+	}
+	if err := mgrA.Revoke(ctx, sess.ID); err != nil {
+		t.Fatalf("Revoke on A: %v", err)
+	}
+
+	got, newToken, err := mgrB.Renew(ctx, token)
+	if !errors.Is(err, session.ErrSessionRevoked) {
+		t.Fatalf("Renew on B after remote revoke: got err %v, want ErrSessionRevoked", err)
+	}
+	if newToken != "" || got != nil {
+		t.Fatalf("Renew on B returned a session/token after revoke: %v %q", got, newToken)
+	}
+	for _, tok := range []string{token, newToken} {
+		if tok == "" {
+			continue
+		}
+		if _, err := mgrC.Validate(ctx, tok); err == nil {
+			t.Errorf("manager C accepted a token of a revoked session")
+		}
+	}
+	if _, err := mgrC.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("session row resurrected: GetByID err=%v", err)
+	}
+	if _, _, err := mgrB.Elevate(ctx, sess.ID, []byte("cred"), "10.0.0.1"); !errors.Is(err, session.ErrSessionRevoked) {
+		t.Errorf("Elevate on B after remote revoke: got %v, want ErrSessionRevoked", err)
+	}
+}

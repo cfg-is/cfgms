@@ -75,20 +75,51 @@ func (s *DatabaseSessionTokenStore) Close() error {
 	return nil
 }
 
-// Set stores or updates the Session under the given token hash (SHA-256 hex).
-// The raw token is never passed to this method; session.Manager always passes
-// the pre-hashed value. On conflict, session data fields are updated but
-// hash_expires_at is preserved so a grace expiry stamped by StampGraceExpiry
-// is not overwritten by a subsequent LastActivity sync.
+// Set creates the Session under the given token hash (SHA-256 hex); it is used only
+// when a session is first issued. The raw token is never passed to this method;
+// session.Manager always passes the pre-hashed value. Writes to an existing session
+// must use Update so they cannot resurrect a revoked session.
 func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, sess *session.Session) error {
+	return s.write(ctx, tokenHash, sess, false)
+}
+
+// Update writes to an existing session (activity sync, token rotation, elevation).
+// It takes a transaction-scoped advisory lock keyed on the session ID — the same lock
+// Delete takes — and only then checks for a live row and writes. The lock serializes
+// Update against Delete of the same session across all controller nodes, and because
+// the check runs after the lock is acquired (READ COMMITTED) it observes any committed
+// Delete. When no live row remains it returns ErrSessionNotFound and writes nothing.
+// On conflict hash_expires_at is preserved so a grace expiry stamped by
+// StampGraceExpiry is not overwritten by a subsequent LastActivity sync.
+func (s *DatabaseSessionTokenStore) Update(ctx context.Context, tokenHash string, sess *session.Session) error {
+	return s.write(ctx, tokenHash, sess, true)
+}
+
+// lockSession takes a transaction-scoped advisory lock serializing writers and
+// deleters of one session ID. It is released automatically at commit or rollback.
+func lockSession(ctx context.Context, tx *sql.Tx, sessionID string) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, sessionID)
+	return err
+}
+
+func (s *DatabaseSessionTokenStore) write(ctx context.Context, tokenHash string, sess *session.Session, requireLive bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("database: session token set: failed to begin tx: %w", err)
+		return fmt.Errorf("database: session token write: failed to begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if err := setTenantLocal(ctx, tx, sess.TenantID); err != nil {
-		return fmt.Errorf("database: session token set: failed to set tenant context: %w", err)
+		return fmt.Errorf("database: session token write: failed to set tenant context: %w", err)
+	}
+
+	guard := ""
+	if requireLive {
+		if err := lockSession(ctx, tx, sess.ID); err != nil {
+			return fmt.Errorf("database: session token write: failed to lock session: %w", err)
+		}
+		guard = ` WHERE EXISTS (SELECT 1 FROM session_token_store
+			WHERE session_id = $2 AND (hash_expires_at IS NULL OR hash_expires_at > NOW()))`
 	}
 
 	ts := computeStorableSessionTimestamps(sess)
@@ -98,12 +129,14 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		credentialID = sess.CredentialID
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	// The only dynamic fragment is the constant guard above; all values are bound parameters.
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO session_token_store
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
 			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12, $13, $14)
+		SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::timestamptz, $7::timestamptz,
+		       $8::timestamptz, NULL, $9::int, $10::text, $11::timestamptz, $12::bytea, $13::boolean, $14::text`+guard+`
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = EXCLUDED.session_id,
 			principal_id        = EXCLUDED.principal_id,
@@ -134,7 +167,12 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		sess.Channel,
 	)
 	if err != nil {
-		return fmt.Errorf("database: session token set failed: %w", err)
+		return fmt.Errorf("database: session token write failed: %w", err)
+	}
+	if requireLive {
+		if n, _ := result.RowsAffected(); n == 0 {
+			return session.ErrSessionNotFound
+		}
 	}
 	return tx.Commit()
 }
@@ -242,6 +280,10 @@ func (s *DatabaseSessionTokenStore) Delete(ctx context.Context, id string) error
 
 	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
 		return fmt.Errorf("database: session token delete: failed to set tenant context: %w", err)
+	}
+
+	if err := lockSession(ctx, tx, id); err != nil {
+		return fmt.Errorf("database: session token delete: failed to lock session: %w", err)
 	}
 
 	result, err := tx.ExecContext(ctx,

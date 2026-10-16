@@ -59,6 +59,29 @@ func (s *MemStore) Set(_ context.Context, tokenHash string, session *Session) er
 	return nil
 }
 
+// Update writes to an existing session. It returns ErrSessionNotFound, without
+// writing, when the session has no live entry (never created, deleted, or reaped).
+// The existence check and write share one critical section with Delete.
+func (s *MemStore) Update(_ context.Context, tokenHash string, session *Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := false
+	for _, h := range s.byID[session.ID] {
+		if e, ok := s.records[h]; ok && !e.revoked {
+			live = true
+			break
+		}
+	}
+	if !live {
+		return ErrSessionNotFound
+	}
+	if _, exists := s.records[tokenHash]; !exists {
+		s.byID[session.ID] = append(s.byID[session.ID], tokenHash)
+	}
+	s.records[tokenHash] = &storeEntry{session: session}
+	return nil
+}
+
 // Get returns the Session for the given token hash.
 // Returns ErrSessionNotFound when the hash is not present or the entry is revoked.
 func (s *MemStore) Get(_ context.Context, tokenHash string) (*Session, error) {

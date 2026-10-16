@@ -51,6 +51,9 @@ const (
 	// webSessionIDContextKey carries the session ID of a cookie-authenticated
 	// web session. Set alongside cookieAuthContextKey (Issue #2493: CSRF token lookup).
 	webSessionIDContextKey contextKey = "web_session_id"
+	// authSessionContextKey carries the authSessionRef of the session (Bearer or web
+	// cookie) that authenticated the request, so long-lived handlers can re-check it.
+	authSessionContextKey contextKey = "auth_session_ref"
 
 	// presenceTokenHeader is the HTTP request header that carries a short-lived,
 	// single-use presence token minted by POST /api/v1/webauthn/presence/finish.
@@ -1079,6 +1082,12 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// a new token is issued (empty string = prior-token grace path,
 					// no new token to publish). The raw new token is never logged.
 					_, newToken, renewErr := s.sessionManager.Renew(validateCtx, bearerToken)
+					// A session revoked between Validate and Renew (on any node) must not
+					// proceed: answer with the same 401 as an invalid token.
+					if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+						return
+					}
 					if renewErr == nil && newToken != "" {
 						w.Header().Set("X-Session-Token", newToken)
 					}
@@ -1194,6 +1203,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
 					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 					ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(sessionPrincipal))
+					ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.sessionManager, id: sess.ID})
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -1227,12 +1237,14 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// authenticated response (ADR-018 §1). When the session is already in the
 				// grace window (prior token), Renew returns newToken == "" — do not
 				// overwrite a Set-Cookie the client already received.
-				// renewErr is intentionally soft-ignored for ALL error variants (including
-				// ErrSessionRevoked) — the same pattern as the Bearer path above (line ~298).
-				// If revocation races Validate→Renew within nanoseconds, the request still
-				// proceeds; the next request will be rejected by Validate. If stricter
-				// atomicity is needed, merge Validate and Renew into a single operation.
+				// A session revoked between Validate and Renew (on any node) must not
+				// proceed: answer with the same 401 as an invalid token. Other Renew
+				// errors stay soft — the next request is re-validated.
 				_, newToken, renewErr := s.webSessionManager.Renew(webValidateCtx, cookie.Value)
+				if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
+					s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+					return
+				}
 				if renewErr == nil && newToken != "" {
 					http.SetCookie(w, &http.Cookie{
 						Name:     cookieWebSession,
@@ -1336,6 +1348,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// can enforce the session-bound CSRF check on unsafe methods.
 				ctx = context.WithValue(ctx, cookieAuthContextKey, true)
 				ctx = context.WithValue(ctx, webSessionIDContextKey, webSess.ID)
+				ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.webSessionManager, id: webSess.ID})
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -2442,4 +2455,18 @@ func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, perm
 		}
 	}
 	return result, found
+}
+
+// authSessionRef identifies the session that authenticated a request and the manager
+// that owns it. Principals authenticated without a session (mTLS, API key) carry none.
+type authSessionRef struct {
+	manager session.Manager
+	id      string
+}
+
+// stillLive reports whether the session behind ref is still live according to
+// the shared store (manager.GetByID consults it even on an in-memory cache hit).
+func (ref authSessionRef) stillLive(ctx context.Context) bool {
+	_, err := ref.manager.GetByID(ctx, ref.id)
+	return err == nil
 }

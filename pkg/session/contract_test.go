@@ -5,6 +5,8 @@ package session_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +57,7 @@ func (s *stubManager) RevokeAllForPrincipal(_ context.Context, _ string) (int, e
 type stubStore struct{}
 
 func (s *stubStore) Set(_ context.Context, _ string, _ *session.Session) error     { return nil }
+func (s *stubStore) Update(_ context.Context, _ string, _ *session.Session) error  { return nil }
 func (s *stubStore) Get(_ context.Context, _ string) (*session.Session, error)     { return nil, nil }
 func (s *stubStore) GetByID(_ context.Context, _ string) (*session.Session, error) { return nil, nil }
 func (s *stubStore) Delete(_ context.Context, _ string) error                      { return nil }
@@ -480,6 +483,95 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 		if gotOrdinary.RootScoped {
 			t.Error("RootScoped: got true for a session issued without the marker, want false")
+		}
+	})
+
+	t.Run("UpdateAfterDeleteFailsAndDoesNotResurrect", func(t *testing.T) {
+		tok := mustGenerateToken(t)
+		hash := session.HashToken(tok)
+		sess := makeTestSession("sc-update-after-delete", cfg)
+		if err := store.Set(ctx, hash, sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		// Update on a live session succeeds, for the same hash and a rotated one.
+		newHash := session.HashToken(mustGenerateToken(t))
+		if err := store.Update(ctx, hash, sess); err != nil {
+			t.Fatalf("Update (live, same hash): %v", err)
+		}
+		if err := store.Update(ctx, newHash, sess); err != nil {
+			t.Fatalf("Update (live, new hash): %v", err)
+		}
+		if err := store.Delete(ctx, sess.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		for name, h := range map[string]string{"same": hash, "new": newHash, "fresh": session.HashToken(mustGenerateToken(t))} {
+			if err := store.Update(ctx, h, sess); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Errorf("Update after Delete (%s hash): got %v, want ErrSessionNotFound", name, err)
+			}
+			if _, err := store.Get(ctx, h); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Errorf("Get after rejected Update (%s hash): got %v, want ErrSessionNotFound", name, err)
+			}
+		}
+		if _, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("GetByID after rejected Update: got %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("UpdateNeverCreatesUnknownSession", func(t *testing.T) {
+		sess := makeTestSession("sc-update-unknown", cfg)
+		hash := session.HashToken(mustGenerateToken(t))
+		if err := store.Update(ctx, hash, sess); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("Update of never-created session: got %v, want ErrSessionNotFound", err)
+		}
+		if _, err := store.Get(ctx, hash); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("Get: got %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("ConcurrentUpdateRacingDeleteLeavesNoLiveRow", func(t *testing.T) {
+		const iterations = 100
+		const writers = 4
+		for i := 0; i < iterations; i++ {
+			sess := makeTestSession(fmt.Sprintf("sc-race-%d", i), cfg)
+			base := session.HashToken(mustGenerateToken(t))
+			if err := store.Set(ctx, base, sess); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			hashes := make([]string, writers)
+			for w := range hashes {
+				hashes[w] = session.HashToken(mustGenerateToken(t))
+			}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for w := 0; w < writers; w++ {
+				wg.Add(1)
+				go func(h string) {
+					defer wg.Done()
+					<-start
+					// Either outcome is fine; the row must not survive Delete.
+					_ = store.Update(ctx, h, sess)
+				}(hashes[w])
+			}
+			var delErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				delErr = store.Delete(ctx, sess.ID)
+			}()
+			close(start)
+			wg.Wait()
+			if delErr != nil {
+				t.Fatalf("iteration %d: Delete: %v", i, delErr)
+			}
+			if _, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Fatalf("iteration %d: live row after Delete returned: GetByID err=%v", i, err)
+			}
+			for _, h := range append(hashes, base) {
+				if _, err := store.Get(ctx, h); !errors.Is(err, session.ErrSessionNotFound) {
+					t.Fatalf("iteration %d: hash still live after Delete: %v", i, err)
+				}
+			}
 		}
 	})
 }

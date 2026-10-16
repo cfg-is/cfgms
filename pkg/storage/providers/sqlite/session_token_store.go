@@ -38,37 +38,36 @@ func (s *SQLiteSessionTokenStore) Close() error {
 	return nil
 }
 
-// Set stores or updates the Session under the given token hash (SHA-256 hex).
-// The raw token is never passed to this method; callers must hash via session.HashToken.
-//
-// Set always inserts with hash_expires_at = NULL (no per-hash expiry). On conflict,
-// session data is updated but hash_expires_at is left untouched so that a grace expiry
-// stamped by StampGraceExpiry is not erased by a subsequent LastActivity sync.
+// Set creates the Session under the given token hash (SHA-256 hex); it is used only
+// when a session is first issued. The raw token is never passed to this method;
+// callers must hash via session.HashToken. Writes to an existing session must use
+// Update so they cannot resurrect a revoked session.
 func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, sess *session.Session) error {
+	return s.upsert(ctx, tokenHash, sess, false)
+}
+
+// Update writes to an existing session (activity sync, token rotation, elevation).
+// The write is a single INSERT ... SELECT ... WHERE EXISTS statement, so the live-row
+// check and the write are one atomic statement under SQLite's writer serialization:
+// a concurrent Delete of the same session either runs first (no row is written and
+// ErrSessionNotFound is returned) or after (and removes the row).
+// hash_expires_at is left untouched on conflict so a grace expiry stamped by
+// StampGraceExpiry is not erased by a subsequent LastActivity sync.
+func (s *SQLiteSessionTokenStore) Update(ctx context.Context, tokenHash string, sess *session.Session) error {
+	return s.upsert(ctx, tokenHash, sess, true)
+}
+
+func (s *SQLiteSessionTokenStore) upsert(ctx context.Context, tokenHash string, sess *session.Session, requireLive bool) error {
 	var lastProvenAt interface{}
 	if !sess.LastProvenAt.IsZero() {
 		lastProvenAt = formatTime(sess.LastProvenAt)
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO session_token_records
-			(token_hash, session_id, principal_id, connection_name, tenant_id,
-			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(token_hash) DO UPDATE SET
-			session_id          = excluded.session_id,
-			principal_id        = excluded.principal_id,
-			connection_name     = excluded.connection_name,
-			tenant_id           = excluded.tenant_id,
-			issued_at           = excluded.issued_at,
-			last_activity       = excluded.last_activity,
-			absolute_expires_at = excluded.absolute_expires_at,
-			assurance           = excluded.assurance,
-			bound_ip            = excluded.bound_ip,
-			last_proven_at      = excluded.last_proven_at,
-			credential_id       = excluded.credential_id,
-			root_scoped         = excluded.root_scoped,
-			channel             = excluded.channel`,
+	guard := ""
+	if requireLive {
+		guard = ` AND EXISTS (SELECT 1 FROM session_token_records
+			WHERE session_id = ? AND (hash_expires_at IS NULL OR hash_expires_at > ?))`
+	}
+	args := []interface{}{
 		tokenHash,
 		sess.ID,
 		sess.PrincipalID,
@@ -83,9 +82,39 @@ func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, ses
 		sess.CredentialID,
 		sess.RootScoped,
 		sess.Channel,
-	)
+	}
+	if requireLive {
+		args = append(args, sess.ID, formatTime(time.Now().UTC()))
+	}
+	// The static query fragments above are constants; all values are bound parameters.
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO session_token_records
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
+			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?
+		WHERE 1 = 1`+guard+`
+		ON CONFLICT(token_hash) DO UPDATE SET
+			session_id          = excluded.session_id,
+			principal_id        = excluded.principal_id,
+			connection_name     = excluded.connection_name,
+			tenant_id           = excluded.tenant_id,
+			issued_at           = excluded.issued_at,
+			last_activity       = excluded.last_activity,
+			absolute_expires_at = excluded.absolute_expires_at,
+			assurance           = excluded.assurance,
+			bound_ip            = excluded.bound_ip,
+			last_proven_at      = excluded.last_proven_at,
+			credential_id       = excluded.credential_id,
+			root_scoped         = excluded.root_scoped,
+			channel             = excluded.channel`, args...)
 	if err != nil {
-		return fmt.Errorf("sqlite: session token set failed: %w", err)
+		return fmt.Errorf("sqlite: session token write failed: %w", err)
+	}
+	if requireLive {
+		if n, _ := result.RowsAffected(); n == 0 {
+			return session.ErrSessionNotFound
+		}
 	}
 	return nil
 }

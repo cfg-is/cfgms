@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,6 +142,15 @@ func setupCockpitWatchServer(t *testing.T, wp egWatchProvider) *Server {
 func dialWatchWS(t *testing.T, srv *Server, caseID, callerTenant string) (*websocket.Conn, func()) {
 	t.Helper()
 	apiKey := NewEphemeralTestKey(t, srv, []string{"case:read"}, callerTenant, 5*time.Minute)
+	return dialWatchWSWithAuth(t, srv, caseID, func(h http.Header) {
+		h.Set("Authorization", "Bearer "+apiKey)
+	})
+}
+
+// dialWatchWSWithAuth is dialWatchWS with caller-supplied credentials: setAuth adds
+// the authentication headers (API key, web-session cookie, ...) to the upgrade request.
+func dialWatchWSWithAuth(t *testing.T, srv *Server, caseID string, setAuth func(http.Header)) (*websocket.Conn, func()) {
+	t.Helper()
 
 	// httptest.Server.Close does not wait for a handler servicing an UPGRADED
 	// connection: hijacking removes the conn from the server's tracked set, so
@@ -169,10 +179,8 @@ func dialWatchWS(t *testing.T, srv *Server, caseID, callerTenant string) (*webso
 	})
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/cases/" + caseID + "/watch"
-	hdr := http.Header{
-		"Authorization": []string{"Bearer " + apiKey},
-		"Origin":        []string{ts.URL},
-	}
+	hdr := http.Header{"Origin": []string{ts.URL}}
+	setAuth(hdr)
 
 	dialer := wsTLSDialer(ts)
 	conn, resp, err := dialer.Dial(wsURL, hdr)
@@ -181,7 +189,12 @@ func dialWatchWS(t *testing.T, srv *Server, caseID, callerTenant string) (*webso
 		if resp != nil {
 			status = resp.StatusCode
 		}
-		t.Fatalf("dialWatchWS: HTTP %d, err: %v", status, err)
+		body := ""
+		if resp != nil {
+			b, _ := io.ReadAll(resp.Body)
+			body = string(b)
+		}
+		t.Fatalf("dialWatchWS: HTTP %d, err: %v, body: %s", status, err, body)
 	}
 	return conn, func() { _ = conn.Close() }
 }
@@ -721,6 +734,51 @@ func TestHandleCockpitWatch_DeadConnectionCancelsContext(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("provider's watch channel was not closed — dead connection's read pump never cancelled the session context")
 	}
+}
+
+// ── Revoked session ends the stream ─────────────────────────────────────────
+
+// TestHandleCockpitWatch_ClosesWhenSessionRevoked proves an open watch authenticated
+// by a passkey-login web session is closed with a policy-violation frame, within the
+// keepalive interval, once that session is revoked through the real session manager.
+func TestHandleCockpitWatch_ClosesWhenSessionRevoked(t *testing.T) {
+	probe := newWatchProbe(t)
+	srv, username := setupPasskeySessionServer(t)
+	sm := pkgtesting.SetupTestStorage(t)
+	srv.SetCasesStore(sm.GetCaseStore())
+	srv.SetEntityGraphWatchProvider(probe)
+	srv.setWatchKeepalive(2*time.Second, 100*time.Millisecond)
+
+	// case:read is not a grantable permission ID, so the account is root-scoped
+	// (implicit admin) to reach the permission-gated watch route.
+	acct, err := srv.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	acct.RootScope = true
+	require.NoError(t, srv.persistAccount(context.Background(), acct, "test-setup"))
+	srv.cacheAccount(acct)
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login body: %s", loginRec.Body.String())
+	token := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, token)
+
+	c, _ := seedWatchCase(t, srv.CasesStore(), testRootTenantID)
+
+	conn, teardown := dialWatchWSWithAuth(t, srv, c.ID, func(h http.Header) {
+		h.Set("Cookie", cookieWebSession+"="+token)
+	})
+	defer teardown()
+	probe.waitSubscribed(t)
+
+	sess, err := srv.webSessionManager.Validate(context.Background(), token)
+	require.NoError(t, err)
+	require.NoError(t, srv.webSessionManager.Revoke(context.Background(), sess.ID))
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	_, _, err = conn.ReadMessage()
+	var closeErr *websocket.CloseError
+	require.ErrorAs(t, err, &closeErr, "server must close the socket after revocation, got %v", err)
+	assert.Equal(t, websocket.ClosePolicyViolation, closeErr.Code)
 }
 
 // ── Keepalive window is per-Server, with package defaults ──────────────────

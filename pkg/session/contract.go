@@ -210,8 +210,19 @@ type Manager interface {
 //
 // Bootstrap wiring (store selection based on deployment mode) lives in
 // features/controller/server.initializeSessionStore (stories #2774 and #2775).
+//
+// Writes are split by intent so a revoked session can never be resurrected:
+//   - Set creates a session's first row and is used only by Manager.Issue and
+//     Manager.IssueRootScoped.
+//   - Update writes to an existing session (activity sync, token rotation, elevation).
+//     It succeeds only while the session still has a live row and returns
+//     ErrSessionNotFound otherwise. The check and the write are atomic with respect
+//     to a concurrent Delete of the same session ID in every implementation.
 type Store interface {
 	Set(ctx context.Context, tokenHash string, session *Session) error
+	// Update upserts tokenHash for an existing session only if session.ID still has a
+	// live row; otherwise it returns ErrSessionNotFound and writes nothing.
+	Update(ctx context.Context, tokenHash string, session *Session) error
 	Get(ctx context.Context, tokenHash string) (*Session, error)
 	// GetByID returns any live session record for the given session ID.
 	// Used by Revoke's cache-miss branch to verify a session's Channel before

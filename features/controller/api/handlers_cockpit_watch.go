@@ -111,6 +111,14 @@ func (w *watchConnWriter) writePing() error {
 	return w.conn.WriteMessage(websocket.PingMessage, nil)
 }
 
+// writeClose sends a close control frame with the given code and text.
+func (w *watchConnWriter) writeClose(code int, text string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	deadline := time.Now().Add(watchWriteTimeout)
+	return w.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, text), deadline)
+}
+
 // watchFrame is the JSON shape sent to browser clients on the watch WebSocket.
 type watchFrame struct {
 	Type      string `json:"type"`                 // "event" | "resync"
@@ -236,6 +244,10 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 		eidSet[eid.String()] = struct{}{}
 	}
 
+	// The session (if any) that authenticated this upgrade; re-checked once per
+	// keepalive interval below. Captured before the upgrade, while r is still valid.
+	authSession, hasAuthSession := r.Context().Value(authSessionContextKey).(authSessionRef)
+
 	// Upgrade the HTTP connection to a WebSocket before starting the provider
 	// subscription, so connection failures are cleanly reported.
 	conn, err := cockpitWatchUpgrader.Upgrade(w, r, nil)
@@ -319,6 +331,12 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-pingTicker.C:
+			// Revocation/expiry must end the stream: re-check the authenticating
+			// session against the shared store on every keepalive tick.
+			if hasAuthSession && !authSession.stillLive(ctx) {
+				_ = cw.writeClose(websocket.ClosePolicyViolation, "session no longer valid")
+				return
+			}
 			if err := cw.writePing(); err != nil {
 				s.logger.Warn("handleCockpitWatch: ping failed",
 					"case_id", logging.SanitizeLogValue(id),

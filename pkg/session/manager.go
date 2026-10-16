@@ -154,6 +154,41 @@ func (m *manager) loadFromStore(ctx context.Context, hash string) *managedSessio
 	return ms
 }
 
+// verifyInStore confirms the durable store still holds hash. Another node's Revoke
+// deletes every hash of the session, so a miss for a hash whose session has no live
+// row left means remote revocation: ms is marked revoked and ErrSessionRevoked is
+// returned. A miss for only the prior-token hash (its stamped grace expiry elapsed
+// while the current token is still live) is ErrSessionExpired and does not revoke.
+// Non-fatal store errors fall through to the in-memory state (best-effort).
+// The caller must hold ms.mu.
+func (m *manager) verifyInStore(ctx context.Context, hash string, ms *managedSession) error {
+	_, err := m.store.Get(ctx, hash)
+	if err == nil || !(errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionRevoked)) {
+		return nil
+	}
+	if hash == ms.prevHash {
+		if _, idErr := m.store.GetByID(ctx, ms.session.ID); idErr == nil {
+			return ErrSessionExpired
+		}
+	}
+	ms.revoked = true
+	return ErrSessionRevoked
+}
+
+// updateStore writes ms's session under hash to an existing store record. When the
+// store reports the session is gone (revoked on this or another node) it marks ms
+// revoked and returns ErrSessionRevoked. Other store errors are best-effort and
+// ignored, matching the in-memory state being authoritative on this node.
+// The caller must hold ms.mu.
+func (m *manager) updateStore(ctx context.Context, hash string, ms *managedSession) error {
+	err := m.store.Update(ctx, hash, ms.session)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionRevoked) {
+		ms.revoked = true
+		return ErrSessionRevoked
+	}
+	return nil
+}
+
 // Validate authenticates the bearer token and returns the live session, updating
 // LastActivity. It returns ErrSessionExpired or ErrSessionRevoked on failure.
 // Prior-token grace entries (within GraceWindow after a Renew) are also accepted
@@ -185,14 +220,8 @@ func (m *manager) Validate(ctx context.Context, token string) (*Session, error) 
 		return nil, ErrSessionChannelMismatch
 	}
 	// Cross-node revocation: verify the store still holds this token hash.
-	// Another node's Revoke deletes all hashes for the session from the store;
-	// a Get miss here means the session was revoked remotely.
-	if _, storeErr := m.store.Get(ctx, hash); storeErr != nil {
-		if errors.Is(storeErr, ErrSessionNotFound) || errors.Is(storeErr, ErrSessionRevoked) {
-			ms.revoked = true
-			return nil, ErrSessionRevoked
-		}
-		// Non-fatal store errors: proceed with in-memory state (best-effort).
+	if err := m.verifyInStore(ctx, hash, ms); err != nil {
+		return nil, err
 	}
 	now := m.clockFn()
 	if now.After(ms.session.AbsoluteExpiresAt) {
@@ -245,8 +274,12 @@ func (m *manager) Validate(ctx context.Context, token string) (*Session, error) 
 	}
 
 	if needsSync {
-		// best-effort sync to durable store (persists LastActivity and/or downgrade)
-		_ = m.store.Set(ctx, hash, ms.session)
+		// Sync to the durable store (persists LastActivity and/or downgrade). Update
+		// refuses to write when the session was revoked since the check above, so a
+		// concurrent Revoke on another node cannot be undone by this write.
+		if err := m.updateStore(ctx, hash, ms); err != nil {
+			return nil, err
+		}
 	}
 	out := *ms.session
 	return &out, nil
@@ -276,6 +309,11 @@ func (m *manager) Renew(ctx context.Context, token string) (*Session, string, er
 	defer ms.mu.Unlock()
 	if ms.revoked {
 		return nil, "", ErrSessionRevoked
+	}
+	// Cross-node revocation: a node with a stale in-memory copy must not rotate a
+	// session another node has revoked.
+	if err := m.verifyInStore(ctx, hash, ms); err != nil {
+		return nil, "", err
 	}
 	now := m.clockFn()
 	if now.After(ms.session.AbsoluteExpiresAt) {
@@ -312,8 +350,10 @@ func (m *manager) Renew(ctx context.Context, token string) (*Session, string, er
 	m.mu.Lock()
 	m.byHash[newHash] = ms
 	m.mu.Unlock()
-	// best-effort sync of the new token to the durable store
-	_ = m.store.Set(ctx, newHash, ms.session)
+	// Sync the new token to the durable store; refused if the session was revoked.
+	if err := m.updateStore(ctx, newHash, ms); err != nil {
+		return nil, "", err
+	}
 	// Bound the prior token's validity in the durable store so that cross-node and
 	// post-restart lookups of the rotated-away hash are rejected once the grace window elapses.
 	if gs, ok := m.store.(graceStamper); ok {
@@ -441,7 +481,9 @@ func (m *manager) Elevate(ctx context.Context, sessionID string, credentialID []
 	m.mu.Lock()
 	m.byHash[newHash] = ms
 	m.mu.Unlock()
-	_ = m.store.Set(ctx, newHash, ms.session)
+	if err := m.updateStore(ctx, newHash, ms); err != nil {
+		return nil, "", err
+	}
 	if gs, ok := m.store.(graceStamper); ok {
 		_ = gs.StampGraceExpiry(ctx, ms.prevHash, ms.prevExpiry)
 	}
@@ -472,6 +514,12 @@ func (m *manager) GetByID(ctx context.Context, id string) (*Session, error) {
 		}
 		now := m.clockFn()
 		if now.After(ms.session.AbsoluteExpiresAt) || now.After(ms.session.LastActivity.Add(m.cfg.IdleTimeout)) {
+			return nil, ErrSessionNotFound
+		}
+		// A cache hit alone cannot see a revocation made on another node: confirm the
+		// session still has a live row in the shared store.
+		if _, storeErr := m.store.GetByID(ctx, id); errors.Is(storeErr, ErrSessionNotFound) {
+			ms.revoked = true
 			return nil, ErrSessionNotFound
 		}
 		out := *ms.session
