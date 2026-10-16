@@ -137,7 +137,7 @@ func TestCreateAuditRecord_System(t *testing.T) {
 		// ActualUser intentionally empty: system context
 	}
 
-	record := CreateAuditRecord("steward-1", "resource-1", config, result, nil)
+	record := CreateAuditRecord("steward-1", "resource-1", config, result, nil, false)
 
 	assert.Equal(t, ExecutionContextSystem, record.ExecutionContext)
 	assert.Equal(t, ExecutionContextSystem, record.ScriptConfig.ExecutionContext)
@@ -164,7 +164,7 @@ func TestCreateAuditRecord_LoggedInUser(t *testing.T) {
 		ActualUser: "alice",
 	}
 
-	record := CreateAuditRecord("steward-1", "resource-1", config, result, nil)
+	record := CreateAuditRecord("steward-1", "resource-1", config, result, nil, false)
 
 	assert.Equal(t, ExecutionContextLoggedInUser, record.ExecutionContext)
 	assert.Equal(t, ExecutionContextLoggedInUser, record.ScriptConfig.ExecutionContext)
@@ -293,7 +293,7 @@ func TestExecutionContext_Integration_SystemDefault(t *testing.T) {
 	assert.Equal(t, 0, result.ExitCode)
 	assert.Empty(t, result.ActualUser, "system context should leave ActualUser empty")
 
-	record := CreateAuditRecord("test-steward", "test-resource", config, result, nil)
+	record := CreateAuditRecord("test-steward", "test-resource", config, result, nil, false)
 	assert.Equal(t, ExecutionContextSystem, record.ExecutionContext)
 	assert.Empty(t, record.ActualUser)
 }

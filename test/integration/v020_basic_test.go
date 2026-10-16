@@ -102,11 +102,9 @@ func TestV020BasicIntegration(t *testing.T) {
 				SigningPolicy: script.SigningPolicyNone,
 			}
 
-			// We expect some to fail, so don't require NoError for all
-			if err := module.Set(ctx, s.resourceID, config); err != nil {
-				// Log error but continue test - some scenarios are expected to fail
-				_ = err // Explicitly ignore expected test failures
-			}
+			// A non-zero exit is not a Set error: the module records it in the
+			// execution state and the audit log, which are asserted below.
+			require.NoError(t, module.Set(ctx, s.resourceID, config), "script %s should execute", s.resourceID)
 		}
 
 		// Test audit query functionality
@@ -117,14 +115,28 @@ func TestV020BasicIntegration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, allRecords, 3, "Should have all three executions")
 
-		// Query by status (all should be "completed" since execution completed successfully)
+		// Query by status: a non-zero exit is audited as failed, matching the
+		// module's own execution state for that resource.
 		completedQuery := &script.AuditQuery{
 			StewardID: "audit-test-steward",
 			Status:    script.StatusCompleted,
 		}
 		completedRecords, err := module.QueryExecutions(completedQuery)
 		require.NoError(t, err)
-		assert.Len(t, completedRecords, 3, "All executions should be marked as completed")
+		assert.Len(t, completedRecords, 2, "Zero-exit executions should be marked as completed")
+		for _, record := range completedRecords {
+			assert.Equal(t, 0, record.ExitCode)
+		}
+
+		failedQuery := &script.AuditQuery{
+			StewardID: "audit-test-steward",
+			Status:    script.StatusFailed,
+		}
+		failedRecords, err := module.QueryExecutions(failedQuery)
+		require.NoError(t, err)
+		require.Len(t, failedRecords, 1, "Non-zero-exit execution should be marked as failed")
+		assert.Equal(t, "failure-script", failedRecords[0].ResourceID)
+		assert.Equal(t, 1, failedRecords[0].ExitCode)
 
 		// Verify we can distinguish success vs failure by exit code
 		successCount := 0
@@ -272,7 +284,7 @@ func TestV020FeatureAvailability(t *testing.T) {
 		}
 
 		// Test audit record creation
-		record := script.CreateAuditRecord("test-steward", "test-resource", config, result, nil)
+		record := script.CreateAuditRecord("test-steward", "test-resource", config, result, nil, false)
 		assert.NotNil(t, record)
 		assert.Equal(t, "test-steward", record.StewardID)
 		assert.Equal(t, "test-resource", record.ResourceID)

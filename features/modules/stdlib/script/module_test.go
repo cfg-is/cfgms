@@ -435,6 +435,53 @@ func TestScriptModule_Set_StewardFloorRequired_SignedScript_Executes(t *testing.
 	}
 }
 
+// TestScriptModule_Set_AuditSignatureValidated asserts the audit record claims
+// a validated signature only when cryptographic verification actually ran
+// (Issue #5058).
+func TestScriptModule_Set_AuditSignatureValidated(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy SigningPolicy
+		want   bool
+	}{
+		{"policy none does not verify", SigningPolicyNone, false},
+		{"policy required verifies", SigningPolicyRequired, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			module := NewModule()
+			module.SetSigningConfig(ModuleSigningConfig{TrustMode: TrustModeAnyValid})
+
+			content := getTestScript()
+			key := generateRSAKey(t)
+			cfg := &ScriptConfig{
+				Content:       content,
+				Shell:         getTestShell(),
+				Timeout:       10 * time.Second,
+				SigningPolicy: tc.policy,
+				Signature: &ScriptSignature{
+					Algorithm: "rsa-sha256",
+					Signature: signRSASHA256(t, key, []byte(content)),
+					PublicKey: rsaPublicKeyPEM(key),
+				},
+			}
+			if err := module.Set(context.Background(), "audit-sig", cfg); err != nil {
+				t.Fatalf("Set() failed: %v", err)
+			}
+			records, err := module.GetExecutionHistory(10)
+			if err != nil {
+				t.Fatalf("GetExecutionHistory: %v", err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("expected 1 audit record, got %d", len(records))
+			}
+			if records[0].SignatureValidated != tc.want {
+				t.Errorf("SignatureValidated = %v, want %v", records[0].SignatureValidated, tc.want)
+			}
+		})
+	}
+}
+
 func TestScriptModule_ExecutionState(t *testing.T) {
 	module := NewModule()
 	resourceID := "test-execution-state"

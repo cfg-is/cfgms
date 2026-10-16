@@ -18,6 +18,11 @@ func init() {
 	windowsAuthenticodeVerifier = verifyAuthenticodeSignature
 }
 
+// systemPowerShellPath resolves the PowerShell path from the process environment.
+// It lives in this Windows-only file because its sole caller is the Authenticode
+// verifier below; windowsPowerShellPath stays GOOS-neutral so it is tested on every platform.
+func systemPowerShellPath() string { return windowsPowerShellPath(os.Getenv) }
+
 // verifyAuthenticodeSignature verifies a PowerShell script's embedded Authenticode
 // signature by writing the content to a temporary .ps1 file and invoking
 // Get-AuthenticodeSignature via PowerShell.
@@ -60,9 +65,13 @@ func verifyAuthenticodeSignature(content []byte, sig *ScriptSignature, cfg Modul
 
 	// #nosec G204 — the file path is sourced from os.CreateTemp (not user input) and
 	// single-quote characters are escaped via strings.ReplaceAll above. The PowerShell
-	// executable is a fixed string; no user-controlled data reaches the command name.
+	// executable is an absolute path resolved from SystemRoot/windir, never via PATH.
+	psExe := systemPowerShellPath()
+	if psExe == "" {
+		return fmt.Errorf("%w: cannot resolve absolute path to powershell.exe", modules.ErrInvalidInput)
+	}
 	out, err := exec.Command( //nolint:gosec // see #nosec comment above
-		"powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd,
+		psExe, "-NoProfile", "-NonInteractive", "-Command", psCmd,
 	).Output()
 	if err != nil {
 		return fmt.Errorf("%w: Get-AuthenticodeSignature execution failed: %v", modules.ErrInvalidInput, err)
@@ -79,5 +88,5 @@ func verifyAuthenticodeSignature(content []byte, sig *ScriptSignature, cfg Modul
 		certThumbprint = strings.TrimSpace(parts[1])
 	}
 
-	return applyTrustMode(certThumbprint, cfg)
+	return applyTrustMode(cfg, certThumbprint)
 }

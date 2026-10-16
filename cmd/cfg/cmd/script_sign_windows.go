@@ -7,7 +7,6 @@ package cmd
 import (
 	"bytes"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -23,15 +22,7 @@ func init() {
 // CodeSigning EKU. If multiple code-signing certificates are present,
 // PowerShell selects the most recently issued one.
 func authenticodeSign(filePath string) error {
-	script := fmt.Sprintf(
-		`$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1; `+
-			`if (-not $cert) { Write-Error "no code signing certificate found in CurrentUser\My"; exit 1 }; `+
-			`$result = Set-AuthenticodeSignature -FilePath '%s' -Certificate $cert; `+
-			`if ($result.Status -ne 'Valid') { Write-Error "Authenticode signing failed: $($result.StatusMessage)"; exit 1 }`,
-		escapePSPath(filePath),
-	)
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script) // #nosec G204 — filePath is escaped via escapePSPath
+	cmd := authenticodeCommand(authenticodeOpSign, filePath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -47,15 +38,7 @@ func authenticodeSign(filePath string) error {
 // authenticodeVerify invokes Get-AuthenticodeSignature via PowerShell to verify
 // the Authenticode signature embedded in a PowerShell script file.
 func authenticodeVerify(filePath string) error {
-	script := fmt.Sprintf(
-		`$result = Get-AuthenticodeSignature -FilePath '%s'; `+
-			`if ($result.Status -eq 'Valid') { exit 0 } `+
-			`elseif ($result.Status -eq 'NotSigned') { Write-Error "no signature found"; exit 1 } `+
-			`else { Write-Error "signature invalid — $($result.StatusMessage)"; exit 1 }`,
-		escapePSPath(filePath),
-	)
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script) // #nosec G204 — filePath is escaped via escapePSPath
+	cmd := authenticodeCommand(authenticodeOpVerify, filePath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

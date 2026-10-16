@@ -317,19 +317,23 @@ func generateExecutionID(stewardID, resourceID string, executionTime time.Time) 
 	return fmt.Sprintf("%s-%s-%d", stewardID, resourceID, executionTime.Unix())
 }
 
-// CreateAuditRecord creates an audit record from execution state and result
-func CreateAuditRecord(stewardID string, resourceID string, config *ScriptConfig, result *ExecutionResult, err error) *AuditRecord {
+// CreateAuditRecord creates an audit record from execution state and result.
+// signatureValidated must be true only when cryptographic verification ran and succeeded.
+func CreateAuditRecord(stewardID string, resourceID string, config *ScriptConfig, result *ExecutionResult, err error, signatureValidated bool) *AuditRecord {
 	record := &AuditRecord{
 		StewardID:          stewardID,
 		ResourceID:         resourceID,
 		ExecutionTime:      time.Now(),
 		ScriptConfig:       createScriptAuditInfo(config),
-		SignatureValidated: config.Signature != nil,
+		SignatureValidated: signatureValidated,
 		ExecutionContext:   config.ExecutionContext,
 	}
 
 	if result != nil {
 		record.Status = StatusCompleted
+		if result.ExitCode != 0 {
+			record.Status = StatusFailed
+		}
 		record.ExitCode = result.ExitCode
 		record.Stdout = result.Stdout
 		record.Stderr = result.Stderr

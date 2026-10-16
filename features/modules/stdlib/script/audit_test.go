@@ -294,7 +294,7 @@ func TestCreateAuditRecord(t *testing.T) {
 		PID:       12345,
 	}
 
-	record := CreateAuditRecord(stewardID, resourceID, config, result, nil)
+	record := CreateAuditRecord(stewardID, resourceID, config, result, nil, false)
 
 	if record.StewardID != stewardID {
 		t.Errorf("Expected steward ID %s, got %s", stewardID, record.StewardID)
@@ -340,7 +340,7 @@ func TestCreateAuditRecord_WithError(t *testing.T) {
 	}
 
 	testError := fmt.Errorf("script execution failed")
-	record := CreateAuditRecord(stewardID, resourceID, config, nil, testError)
+	record := CreateAuditRecord(stewardID, resourceID, config, nil, testError, false)
 
 	if record.Status != StatusFailed {
 		t.Errorf("Expected status %s, got %s", StatusFailed, record.Status)
@@ -487,5 +487,23 @@ func TestAuditLogger_Pagination(t *testing.T) {
 
 	if len(results) != 3 {
 		t.Errorf("Expected 3 results with offset and limit, got %d", len(results))
+	}
+}
+
+func TestCreateAuditRecord_NonZeroExitIsFailed(t *testing.T) {
+	config := &ScriptConfig{Content: "exit 1", Shell: ShellBash}
+	result := &ExecutionResult{ExitCode: 1, Stderr: "boom"}
+
+	record := CreateAuditRecord("steward-1", "res-1", config, result, nil, false)
+	if record.Status != StatusFailed {
+		t.Errorf("non-zero exit must be audited as failed, got %q", record.Status)
+	}
+	if record.ExitCode != 1 {
+		t.Errorf("exit code = %d, want 1", record.ExitCode)
+	}
+
+	ok := CreateAuditRecord("steward-1", "res-1", config, &ExecutionResult{ExitCode: 0}, nil, false)
+	if ok.Status != StatusCompleted {
+		t.Errorf("zero exit must be completed, got %q", ok.Status)
 	}
 }

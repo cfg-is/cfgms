@@ -532,14 +532,3 @@ func verifyRSASig(pub *rsa.PublicKey, digest, sigBytes []byte, algo string) erro
 	}
 	return rsa.VerifyPKCS1v15(pub, hashID, digest, sigBytes)
 }
-
-// ---------------------------------------------------------------------------
-// escapePSPath escapes a file path for safe embedding in a PowerShell string
-// literal delimited by single quotes. Single quotes within the path are doubled.
-// This is defined here (not in script_sign_windows.go) so it can be tested
-// on all platforms.
-// ---------------------------------------------------------------------------
-
-func escapePSPath(path string) string {
-	return strings.ReplaceAll(path, "'", "''")
-}

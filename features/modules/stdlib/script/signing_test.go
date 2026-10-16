@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"strings"
 	"testing"
 )
 
@@ -267,21 +268,21 @@ func TestVerifyDetachedSignature_KeyTypeMismatch_ECDSA_RSAAlgo(t *testing.T) {
 
 func TestApplyTrustMode_AnyValid_NoThumbprint(t *testing.T) {
 	cfg := ModuleSigningConfig{TrustMode: TrustModeAnyValid}
-	if err := applyTrustMode("", cfg); err != nil {
+	if err := applyTrustMode(cfg, ""); err != nil {
 		t.Errorf("any_valid should accept empty thumbprint: %v", err)
 	}
 }
 
 func TestApplyTrustMode_AnyValid_WithThumbprint(t *testing.T) {
 	cfg := ModuleSigningConfig{TrustMode: TrustModeAnyValid}
-	if err := applyTrustMode("AABBCCDD", cfg); err != nil {
+	if err := applyTrustMode(cfg, "AABBCCDD"); err != nil {
 		t.Errorf("any_valid should accept any thumbprint: %v", err)
 	}
 }
 
 func TestApplyTrustMode_ZeroValue_ActsAsAnyValid(t *testing.T) {
 	// Zero value of ModuleSigningConfig should behave as any_valid.
-	if err := applyTrustMode("anything", ModuleSigningConfig{}); err != nil {
+	if err := applyTrustMode(ModuleSigningConfig{}, "anything"); err != nil {
 		t.Errorf("zero-value config should act as any_valid: %v", err)
 	}
 }
@@ -293,7 +294,7 @@ func TestApplyTrustMode_TrustedKeys_MatchingThumbprint(t *testing.T) {
 			{Name: "corp-cert", Thumbprint: "AABBCCDD"},
 		},
 	}
-	if err := applyTrustMode("AABBCCDD", cfg); err != nil {
+	if err := applyTrustMode(cfg, "AABBCCDD"); err != nil {
 		t.Errorf("matching thumbprint should pass trusted_keys: %v", err)
 	}
 }
@@ -306,7 +307,7 @@ func TestApplyTrustMode_TrustedKeys_CaseInsensitiveMatch(t *testing.T) {
 		},
 	}
 	// Signature uses uppercase thumbprint; allowlist uses lowercase.
-	if err := applyTrustMode("AABBCCDD", cfg); err != nil {
+	if err := applyTrustMode(cfg, "AABBCCDD"); err != nil {
 		t.Errorf("thumbprint match should be case-insensitive: %v", err)
 	}
 }
@@ -318,7 +319,7 @@ func TestApplyTrustMode_TrustedKeys_NonMatchingThumbprint(t *testing.T) {
 			{Name: "corp-cert", Thumbprint: "AABBCCDD"},
 		},
 	}
-	if err := applyTrustMode("11223344", cfg); err == nil {
+	if err := applyTrustMode(cfg, "11223344"); err == nil {
 		t.Error("non-matching thumbprint should fail trusted_keys")
 	}
 }
@@ -331,7 +332,7 @@ func TestApplyTrustMode_TrustedKeys_EmptyThumbprint_Rejected(t *testing.T) {
 		},
 	}
 	// Signature has no thumbprint; cannot match allowlist.
-	if err := applyTrustMode("", cfg); err == nil {
+	if err := applyTrustMode(cfg, ""); err == nil {
 		t.Error("empty thumbprint should fail trusted_keys when allowlist is non-empty")
 	}
 }
@@ -341,7 +342,7 @@ func TestApplyTrustMode_TrustedKeys_EmptyAllowlist_Rejected(t *testing.T) {
 		TrustMode:   TrustModeTrustedKeys,
 		TrustedKeys: []TrustedKeyEntry{}, // no entries
 	}
-	if err := applyTrustMode("AABBCCDD", cfg); err == nil {
+	if err := applyTrustMode(cfg, "AABBCCDD"); err == nil {
 		t.Error("non-empty thumbprint against empty allowlist should fail trusted_keys")
 	}
 }
@@ -354,7 +355,7 @@ func TestApplyTrustMode_TrustedKeysAndPublic_MatchingThumbprint(t *testing.T) {
 		},
 		AllowPublicCA: false,
 	}
-	if err := applyTrustMode("AABBCCDD", cfg); err != nil {
+	if err := applyTrustMode(cfg, "AABBCCDD"); err != nil {
 		t.Errorf("matching trusted key should pass trusted_keys_and_public: %v", err)
 	}
 }
@@ -365,9 +366,31 @@ func TestApplyTrustMode_TrustedKeysAndPublic_NoMatchAllowPublicCA(t *testing.T) 
 		TrustedKeys:   []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
 		AllowPublicCA: true,
 	}
-	// Thumbprint doesn't match the allowlist but AllowPublicCA permits it.
-	if err := applyTrustMode("99887766", cfg); err != nil {
-		t.Errorf("AllowPublicCA=true should accept non-allowlisted key: %v", err)
+	// AllowPublicCA must not accept a non-allowlisted key: no chain validation exists.
+	err := applyTrustMode(cfg, "99887766")
+	if err == nil || !strings.Contains(err.Error(), "allow_public_ca is not supported") {
+		t.Errorf("AllowPublicCA=true must refuse non-allowlisted key with clear error, got: %v", err)
+	}
+	// An allowlisted key is still accepted.
+	if err := applyTrustMode(cfg, "AABBCCDD"); err != nil {
+		t.Errorf("allowlisted key should pass: %v", err)
+	}
+}
+
+func TestWindowsPowerShellPath_AbsoluteUnderSystemRoot(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	want := `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+	for name, m := range map[string]map[string]string{
+		"SystemRoot": {"SystemRoot": `C:\Windows`},
+		"windir":     {"windir": `C:\Windows`},
+		"none":       {},
+	} {
+		if got := windowsPowerShellPath(env(m)); got != want {
+			t.Errorf("%s: got %q want %q", name, got, want)
+		}
+	}
+	if got := windowsPowerShellPath(env(map[string]string{"SystemRoot": `relative\dir`})); got != "" {
+		t.Errorf("relative SystemRoot must yield empty path, got %q", got)
 	}
 }
 
@@ -377,14 +400,14 @@ func TestApplyTrustMode_TrustedKeysAndPublic_NoMatchPublicCAFalse(t *testing.T) 
 		TrustedKeys:   []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
 		AllowPublicCA: false,
 	}
-	if err := applyTrustMode("99887766", cfg); err == nil {
+	if err := applyTrustMode(cfg, "99887766"); err == nil {
 		t.Error("AllowPublicCA=false with non-allowlisted key should fail")
 	}
 }
 
 func TestApplyTrustMode_UnknownMode_Rejected(t *testing.T) {
 	cfg := ModuleSigningConfig{TrustMode: TrustMode("bad_mode")}
-	if err := applyTrustMode("AABBCCDD", cfg); err == nil {
+	if err := applyTrustMode(cfg, "AABBCCDD"); err == nil {
 		t.Error("unknown trust mode should fail")
 	}
 }
@@ -418,21 +441,22 @@ func TestModuleVerifySignature_AnyValid_Passes(t *testing.T) {
 }
 
 func TestModuleVerifySignature_TrustedKeys_MatchingThumbprint_Passes(t *testing.T) {
+	key := generateRSAKey(t)
+	derived := derivedThumbprints(rsaPublicKeyPEM(key))[0]
 	mod := NewModule()
 	mod.SetSigningConfig(ModuleSigningConfig{
 		TrustMode: TrustModeTrustedKeys,
 		TrustedKeys: []TrustedKeyEntry{
-			{Name: "corp-cert", Thumbprint: "AABBCCDD"},
+			{Name: "corp-cert", Thumbprint: derived},
 		},
 	})
 
-	key := generateRSAKey(t)
 	content := "#!/bin/bash\necho hello"
 	sig := &ScriptSignature{
 		Algorithm:  "rsa-sha256",
 		Signature:  signRSASHA256(t, key, []byte(content)),
 		PublicKey:  rsaPublicKeyPEM(key),
-		Thumbprint: "AABBCCDD",
+		Thumbprint: "ignored",
 	}
 
 	cfg := &ScriptConfig{
@@ -532,7 +556,7 @@ func TestValidateSignature_FloorRequired_UnsignedScript_Refused(t *testing.T) {
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err == nil {
+	if _, err := mod.validateSignature(cfg); err == nil {
 		t.Fatal("unsigned script must be refused when the steward-wide floor is 'required'")
 	}
 }
@@ -548,7 +572,7 @@ func TestValidateSignature_FloorRequired_PerScriptOptionalCannotLoosen(t *testin
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err == nil {
+	if _, err := mod.validateSignature(cfg); err == nil {
 		t.Fatal("a per-script policy that permits unsigned scripts must not override the steward-wide 'required' floor")
 	}
 }
@@ -572,7 +596,7 @@ func TestValidateSignature_FloorRequired_SignedScript_Passes(t *testing.T) {
 		Signature:     sig,
 	}
 
-	if err := mod.validateSignature(cfg); err != nil {
+	if _, err := mod.validateSignature(cfg); err != nil {
 		t.Errorf("a correctly signed script must pass under the 'required' floor, not be refused: %v", err)
 	}
 }
@@ -588,7 +612,7 @@ func TestValidateSignature_FloorOptional_UnsignedScript_Unchanged(t *testing.T) 
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err != nil {
+	if _, err := mod.validateSignature(cfg); err != nil {
 		t.Errorf("steward floor 'optional' must not force a signature on a per-script 'none': %v", err)
 	}
 }
@@ -605,7 +629,7 @@ func TestValidateSignature_FloorAbsent_UnsignedScript_Unchanged(t *testing.T) {
 		Signature:     nil,
 	}
 
-	if err := mod.validateSignature(cfg); err != nil {
+	if _, err := mod.validateSignature(cfg); err != nil {
 		t.Errorf("an absent steward-wide policy must match pre-#4399 behavior: %v", err)
 	}
 }
@@ -807,5 +831,40 @@ func TestIsPowerShellScript(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isPowerShellScript(%q) = %v, want %v", tt.shell, got, tt.want)
 		}
+	}
+}
+
+// A valid signature from an untrusted key that claims an allowlisted thumbprint string
+// must be refused: the thumbprint is derived from the presented key, not read from the block.
+func TestModuleVerifySignature_TrustedKeys_ForgedThumbprintString_Refused(t *testing.T) {
+	trusted := generateRSAKey(t)
+	attacker := generateRSAKey(t)
+	trustedTP := derivedThumbprints(rsaPublicKeyPEM(trusted))[0]
+
+	mod := NewModule()
+	mod.SetSigningConfig(ModuleSigningConfig{
+		TrustMode:   TrustModeTrustedKeys,
+		TrustedKeys: []TrustedKeyEntry{{Name: "corp", Thumbprint: trustedTP}},
+	})
+
+	content := "#!/bin/bash\necho hello"
+	cfg := &ScriptConfig{
+		Content:       content,
+		Shell:         ShellBash,
+		SigningPolicy: SigningPolicyRequired,
+		Signature: &ScriptSignature{
+			Algorithm:  "rsa-sha256",
+			Signature:  signRSASHA256(t, attacker, []byte(content)),
+			PublicKey:  rsaPublicKeyPEM(attacker),
+			Thumbprint: trustedTP,
+		},
+	}
+
+	if err := mod.verifySignature(cfg); err == nil {
+		t.Fatal("signature from untrusted key with allowlisted thumbprint string must be refused")
+	}
+	validated, err := mod.validateSignature(cfg)
+	if err == nil || validated {
+		t.Fatalf("validateSignature must fail and not report validated, got validated=%v err=%v", validated, err)
 	}
 }

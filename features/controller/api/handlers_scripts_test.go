@@ -288,7 +288,7 @@ func TestHandleGetScriptMetrics_Real(t *testing.T) {
 		StartTime: time.Now().Add(-1 * time.Second),
 		EndTime:   time.Now(),
 	}
-	rec := script.CreateAuditRecord("steward-metrics", "scripts/test.sh", cfg, result, nil)
+	rec := script.CreateAuditRecord("steward-metrics", "scripts/test.sh", cfg, result, nil, false)
 	require.NoError(t, server.scriptAuditLogger.LogExecution(context.Background(), rec))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/steward-metrics/scripts/metrics", nil)
