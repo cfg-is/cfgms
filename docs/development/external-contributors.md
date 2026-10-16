@@ -28,9 +28,12 @@ A repository maintainer (push+) reviews the PR manually and, when satisfied:
 
 1. Checks that the contributor has signed the CLA (see below).
 2. Reviews the branch name — external authors cannot spoof an internal story link via a `feature/story-N-agent`-style branch name; the pipeline gates on author trust, not branch naming.
-3. Applies the `human-reviewed:ok` label.
+3. Submits an **Approve** review on the PR's current head commit.
+4. Applies the `human-reviewed:ok` label.
 
-The label application event is recorded in the GitHub timeline. When the pipeline next processes the PR, it verifies that the actor who applied the label holds `push`, `maintain`, or `admin` permission. A label applied by another external actor is not accepted.
+The label application event is recorded in the GitHub timeline. When the pipeline next processes the PR, it verifies that the actor who applied the label holds `push`, `maintain`, or `admin` permission, and that the same actor has an approving review whose commit SHA equals the PR's current head SHA. A label applied by another external actor is not accepted.
+
+The release is bound to the reviewed head SHA, not to a timestamp. Any push after the approval, including a normal fast-forward push, moves the head to a commit that nobody approved, and the PR returns to quarantine until a maintainer reviews the new head and approves it again. Commit dates are set by the author and are never used for this check.
 
 Once released, the PR flows through the normal autonomous review and merge path.
 
