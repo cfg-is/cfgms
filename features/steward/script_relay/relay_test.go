@@ -92,7 +92,7 @@ func TestRelay_SocketCreation(t *testing.T) {
 	require.NotEmpty(t, sockPath)
 
 	sockDir := filepath.Dir(sockPath)
-	assert.True(t, strings.HasPrefix(filepath.Base(sockDir), "cfgms-"+execID+"-"),
+	assert.True(t, strings.HasPrefix(filepath.Base(sockDir), "cfgms-"+dirExecID(execID)+"-"),
 		"socket directory %q must be labelled with the execution ID", sockDir)
 
 	// Directory must exist with mode 0700.
@@ -159,16 +159,18 @@ func TestNewRelay_InvalidUIDChownFails(t *testing.T) {
 
 	publish := func(_ context.Context, _ *cpTypes.Event) {}
 	execID := uniqueExecID("test-exec-badchown")
+	before, beforeErr := filepath.Glob(filepath.Join(os.TempDir(), "cfgms-"+dirExecID(execID)+"-*"))
+	require.NoError(t, beforeErr)
 	_, err := NewRelay(execID, "steward-1", 0, publish, logging.NewNoopLogger())
 	require.Error(t, err, "NewRelay must fail when the socket cannot be chowned to the execution UID")
 	assert.Contains(t, err.Error(), "chown")
 
-	// The failed socket directory must not be left behind.
-	// The directory name embeds the execution ID ("cfgms-<execID>-<random>"),
-	// so any leftover directory for this execution matches this glob.
-	matches, globErr := filepath.Glob(filepath.Join(os.TempDir(), "cfgms-"+execID+"-*"))
+	// The failed socket directory must not be left behind: no new directory
+	// carrying this execution's label may exist after the failure.
+	pattern := filepath.Join(os.TempDir(), "cfgms-"+dirExecID(execID)+"-*")
+	matches, globErr := filepath.Glob(pattern)
 	require.NoError(t, globErr)
-	assert.Empty(t, matches, "socket directory must be removed after a failed chown")
+	assert.Equal(t, before, matches, "socket directory must be removed after a failed chown")
 }
 
 // TestRelay_RequestResponseCycle tests the full steward-side relay lifecycle:
@@ -387,12 +389,23 @@ func TestCheckSocketDir(t *testing.T) {
 	}
 }
 
+// TestSocketPathFitsMacOSLimit verifies the socket path for a UUID execution ID
+// under a macOS-length temp base stays below the 104-byte sun_path limit.
+func TestSocketPathFitsMacOSLimit(t *testing.T) {
+	const macTmp = "/var/folders/zz/abcdefghijklmnopqrstuvwxyz012345/T" // 49 bytes
+	const randSuffix = "4294967295"                                     // max os.MkdirTemp suffix
+	execID := "123e4567-e89b-12d3-a456-426614174000"
+	path := macTmp + "/cfgms-" + dirExecID(execID) + "-" + randSuffix + "/api.sock"
+	assert.Less(t, len(path), 104)
+}
+
 // TestDirExecID verifies the execution-ID label embedded in the socket
 // directory name cannot introduce path separators or traversal elements and is
 // bounded in length.
 func TestDirExecID(t *testing.T) {
 	assert.Equal(t, "exec-1_a.b", dirExecID("exec-1_a.b"))
 	assert.Equal(t, ".._.._etc", dirExecID("../../etc"))
+	assert.Equal(t, "exec-relay-lib", dirExecID("exec-relay-lib"))
 	assert.NotContains(t, dirExecID("a/b\\c\x00d"), "/")
 	assert.Len(t, dirExecID(strings.Repeat("x", 200)), maxDirExecIDLen)
 

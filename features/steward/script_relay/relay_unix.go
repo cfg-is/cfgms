@@ -14,8 +14,12 @@ import (
 )
 
 // maxDirExecIDLen bounds how much of the execution ID is embedded in the socket
-// directory name, keeping the socket path under the unix sun_path limit.
-const maxDirExecIDLen = 48
+// directory name. The worst-case socket path is a ~49-byte macOS $TMPDIR +
+// "/cfgms-" (7) + label + "-" (1) + a 10-digit os.MkdirTemp suffix +
+// "/api.sock" (9) = 76 + label bytes, which must stay under the 104-byte macOS
+// sun_path limit. 24 bytes keeps that path at 100 while still carrying enough
+// of the execution ID for CFGMS_API_SOCKET consumers to identify the execution.
+const maxDirExecIDLen = 24
 
 // dirExecID returns the execution ID reduced to characters that are safe in a
 // single path element, truncated to maxDirExecIDLen. It only labels the
@@ -67,8 +71,9 @@ func checkSocketDir(dir string) error {
 
 // initSocket creates the per-execution directory (mode 0700) and opens a
 // unix socket inside it (mode 0600). The directory is created fresh and
-// exclusively with an unpredictable name (os.MkdirTemp: "cfgms-<execID>-<random>"),
-// so a path planted in the world-writable temp tree is never reused. It is verified before binding,
+// exclusively with an unpredictable name (os.MkdirTemp:
+// "cfgms-<short execID label>-<random>"), so a path planted in the
+// world-writable temp tree is never reused. It is verified before binding,
 // and is created first so no window exists between bind and chmod where the
 // socket is world-accessible.
 func initSocket(r *Relay) error {
