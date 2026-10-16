@@ -270,6 +270,8 @@ The steward verifies module bundle signatures according to the `module_trust.mod
 | **`strict`** | Steward independently verifies Ed25519 signatures against its local trust set: the CFGMS publisher identity baked in at build time, plus any publishers listed in `additional_publishers` | High-security environments where a compromised controller must not be able to push arbitrary code to stewards |
 | **`bypass`** | None — no verification | Development and testing only; unavailable in a release build (gated by the `cfgms_dev_bypass` build tag — `ValidateModuleTrustConfig` rejects it from pushed configuration otherwise, Issue #4324) |
 
+A local configuration (`hostname.cfg`) that fails parsing or validation stops the connected steward from starting, in every security profile — the decoded-but-rejected value is never used (for example, `module_trust.mode: bypass` in a release build). Only the absence of any configuration file falls back to defaults. The trust enforcement points (`StewardTrustEnforcer.VerifyForLoad` and `RevocationVerifier.VerifyManifest`) also refuse `bypass` in a build without `cfgms_dev_bypass`.
+
 A transition that weakens this setting (`strict` → `controller` or `strict` → `bypass`) is refused
 during config cascade resolution unless the level making the change also sets
 `module_trust.authorize_downgrade: true`, and the refusal (or the authorized downgrade) is recorded
@@ -614,6 +616,8 @@ Every inbound `Command` carries a fencing token stamped by the controller that p
 |---|---|---|
 | Never seen a stamped command | **Accept** — genuine bootstrap, or mid-rollout behind a controller predating #3390 | **Accept**, record the value as the new high-water mark, set the ratchet |
 | Ratchet set | **Reject — downgrade attempt**, not legacy traffic | Accept iff `term >= highest_seen`; reject and leave the high-water mark unchanged otherwise |
+
+**The ratchet advances only for authenticated commands (Issue #5090).** `Command.Term` is not covered by the command signature, so the receive path splits the fence into two steps: a compare step before dispatch (`checkTermFence`, which never changes state) and a commit step (`commitTermFence`) that runs only after `commands.Handler.HandleCommand` returns nil — that is, after signature, steward ID, timestamp, replay, params-size and script pre-flight checks pass. A command that fails any of those checks leaves the in-memory high-water mark, the ratchet-set flag and the persisted `fence_ratchet.json` untouched, so an unauthenticated command carrying a very large term cannot fence out later legitimate commands.
 
 A rejected command is a refusal, not a transport error — it never reaches the command dispatch pipeline, and it does not disconnect the control channel or trigger a convergence-loop retry. Rejections are logged at `WARN` (every value derived from the rejected command passes through `logging.SanitizeLogValue()`, including the claimed fencing token).
 

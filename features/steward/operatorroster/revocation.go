@@ -166,7 +166,7 @@ func NewRevocationVerifier(caRoots *x509.CertPool) *RevocationVerifier {
 //     to trust the controller's own judgment for other artifacts, so it does the
 //     same here. Anti-rollback still applies.
 //   - bypass: a genuine no-op, matching StewardTrustEnforcer's bypass mode
-//     (development use only) — the manifest is not applied and IsRevoked is
+//     (development use only; an error in a build without cfgms_dev_bypass) — the manifest is not applied and IsRevoked is
 //     unaffected.
 //
 // In strict and controller mode, a manifest whose Version is lower than the last
@@ -177,6 +177,9 @@ func NewRevocationVerifier(caRoots *x509.CertPool) *RevocationVerifier {
 func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustMode) error {
 	switch mode {
 	case stewardtypes.ModuleTrustModeBypass:
+		if !stewardtypes.ModuleTrustBypassAllowed() {
+			return fmt.Errorf("module trust mode %q is unavailable in a release build", mode)
+		}
 		return nil
 	case stewardtypes.ModuleTrustModeController, stewardtypes.ModuleTrustModeStrict:
 		// fall through to the shared parse/apply path below.

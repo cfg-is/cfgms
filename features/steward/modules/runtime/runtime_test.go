@@ -137,9 +137,10 @@ func installTestBundle(t *testing.T, binPath string, o installOpts) (*bundle.Bun
 	return b, root
 }
 
-// makeBypassBundle installs a minimal steward-kind bundle around binPath. Trust
-// mode bypass is used by tests that focus on lifecycle, not trust.
-func makeBypassBundle(t *testing.T, binPath string) *bundle.Bundle {
+// makeUnsignedBundle installs a minimal unsigned steward-kind bundle around
+// binPath. Tests that focus on lifecycle, not trust, start it in controller
+// mode, which loads an unsigned bundle in every build.
+func makeUnsignedBundle(t *testing.T, binPath string) *bundle.Bundle {
 	t.Helper()
 	b, _ := installTestBundle(t, binPath, installOpts{})
 	return b
@@ -151,9 +152,9 @@ func makeBypassBundle(t *testing.T, binPath string) *bundle.Bundle {
 //   - Stop() sends Shutdown RPC and the process exits within 10 s
 func TestEchoModuleLifecycle(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(t, echoModuleBin)
+	b := makeUnsignedBundle(t, echoModuleBin)
 
-	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 	require.NotNil(t, handle)
 	assert.Equal(t, runtime.StateRunning, handle.GetState())
@@ -182,10 +183,10 @@ func TestEchoModuleLifecycle(t *testing.T) {
 // handshaked with and trusted whatever other server answered there.
 func TestStartFailsFastWhenModuleExitsBeforeListening(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(t, exitModuleBin)
+	b := makeUnsignedBundle(t, exitModuleBin)
 
 	start := time.Now()
-	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -223,7 +224,7 @@ func TestStartReturnsErrWrongModuleKindForNonStewardBundle(t *testing.T) {
 				Binaries: map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: "/nonexistent"},
 			}
 
-			_, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+			_, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, runtime.ErrWrongModuleKind)
 		})
@@ -238,7 +239,7 @@ func TestStartReturnsErrWrongModuleKindForNilManifest(t *testing.T) {
 		Manifest: nil,
 		Binaries: map[string]string{goruntime.GOOS + "-" + goruntime.GOARCH: "/nonexistent"},
 	}
-	_, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	_, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, runtime.ErrWrongModuleKind)
 }
@@ -283,20 +284,9 @@ func TestStrictModeRejectsControllerApprovedUnknownPublisher(t *testing.T) {
 // signature verification.
 func TestControllerModePassesUnsignedBundle(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(t, echoModuleBin)
+	b := makeUnsignedBundle(t, echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
-	require.NoError(t, err)
-	require.NoError(t, rt.Stop(handle))
-}
-
-// TestBypassModePassesUnsignedBundle verifies that bypass mode skips
-// signature verification.
-func TestBypassModePassesUnsignedBundle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(t, echoModuleBin)
-
-	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
 	require.NoError(t, err)
 	require.NoError(t, rt.Stop(handle))
 }
@@ -305,9 +295,9 @@ func TestBypassModePassesUnsignedBundle(t *testing.T) {
 // handle does not error or panic.
 func TestStopIsIdempotent(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	b := makeBypassBundle(t, echoModuleBin)
+	b := makeUnsignedBundle(t, echoModuleBin)
 
-	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, rt.Stop(handle))
@@ -352,10 +342,11 @@ type trustCase struct {
 	mode stewardtypes.ModuleTrustMode
 }
 
+// allTrustModes lists the trust modes every build honours. A cfgms_dev_bypass
+// build appends bypass (runtime_bypass_allowed_test.go).
 var allTrustModes = []trustCase{
 	{"controller", stewardtypes.ModuleTrustModeController},
 	{"strict", stewardtypes.ModuleTrustModeStrict},
-	{"bypass", stewardtypes.ModuleTrustModeBypass},
 }
 
 // installForMode installs the echo module signed by a CFGMS identity the
@@ -454,7 +445,7 @@ func TestStartRunsPlatformOnlyInstallOfMultiPlatformBundle(t *testing.T) {
 	assert.NotContains(t, b.Binaries, otherPlatform)
 
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	h, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	h, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 	require.NoError(t, rt.Stop(h))
 
@@ -471,7 +462,7 @@ func TestStartRunsPlatformOnlyInstallOfMultiPlatformBundle(t *testing.T) {
 
 	_, err = bundle.ReadInstalled(root)
 	require.Error(t, err, "load must refuse a sidecar whose digest for this platform was edited")
-	h, err = rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	h, err = rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.Error(t, err, "Start must refuse the edited sidecar too")
 	assert.Nil(t, h)
 }
@@ -479,10 +470,10 @@ func TestStartRunsPlatformOnlyInstallOfMultiPlatformBundle(t *testing.T) {
 // TestStartRefusesBundleWithoutInstallRoot: a bundle not read from an
 // installation root has nothing to verify.
 func TestStartRefusesBundleWithoutInstallRoot(t *testing.T) {
-	b := makeBypassBundle(t, echoModuleBin)
+	b := makeUnsignedBundle(t, echoModuleBin)
 	b.InstallRoot = ""
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	h, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	h, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.ErrorIs(t, err, runtime.ErrNoInstallRoot)
 	assert.Nil(t, h)
 }

@@ -311,6 +311,14 @@ func (h *Handler) UpdateVerifier(v signature.Verifier) {
 	h.mu.Unlock()
 }
 
+// HasVerifier reports whether the handler verifies command signatures. A handler
+// without a verifier skips that check, so its commands are not authenticated.
+func (h *Handler) HasVerifier() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.verifier != nil
+}
+
 // RevocationVerifier returns the operator-certificate revocation verifier wired into
 // this handler (Issue #3699/#4400), so a caller can observe whether a manifest has
 // been verified without this package duplicating operatorroster's own storage. Used

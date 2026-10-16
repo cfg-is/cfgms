@@ -370,14 +370,19 @@ func TestRevocationVerifier_VerifyManifest_ControllerMode_SkipsChainVerification
 	assert.True(t, v.IsRevoked("12345"))
 }
 
-func TestRevocationVerifier_VerifyManifest_BypassMode_NoOp(t *testing.T) {
+func TestRevocationVerifier_VerifyManifest_BypassMode_RejectedInReleaseBuild(t *testing.T) {
+	if stewardtypes.ModuleTrustBypassAllowed() {
+		t.Skip("covered by revocation_bypass_allowed_test.go in a cfgms_dev_bypass build")
+	}
 	ca, caPool := revTestCA(t)
 	signingCert := revTestSigningCert(t, ca)
 	raw := revTestSignManifest(t, signingCert, 1, []string{"12345"})
 
 	v := NewRevocationVerifier(caPool)
-	require.NoError(t, v.VerifyManifest(raw, stewardtypes.ModuleTrustModeBypass))
-	assert.False(t, v.IsRevoked("12345"), "bypass mode must not apply the manifest at all")
+	err := v.VerifyManifest(raw, stewardtypes.ModuleTrustModeBypass)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unavailable in a release build")
+	assert.False(t, v.IsRevoked("12345"))
 }
 
 func TestRevocationVerifier_VerifyManifest_UnknownMode_Rejected(t *testing.T) {

@@ -134,7 +134,7 @@ func TestWrongModuleKindPrecedesUnresolvableAdditionalPublisher(t *testing.T) {
 	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	b := makeBypassBundle(t, echoModuleBin)
+	b := makeUnsignedBundle(t, echoModuleBin)
 	b.Manifest.Kind = "outpost"
 
 	rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, nil)
@@ -147,16 +147,16 @@ func TestWrongModuleKindPrecedesUnresolvableAdditionalPublisher(t *testing.T) {
 }
 
 // TestNonStrictModesIgnoreUnresolvableAdditionalPublishers verifies that
-// controller and bypass modes never consult additional_publishers: an
-// unresolvable name must not block a load that would not have looked at the
-// list anyway.
+// controller mode never consults additional_publishers: an unresolvable name
+// must not block a load that would not have looked at the list anyway. The
+// bypass-mode case lives in runtime_bypass_allowed_test.go, since bypass loads
+// only in a cfgms_dev_bypass build.
 func TestNonStrictModesIgnoreUnresolvableAdditionalPublishers(t *testing.T) {
 	cases := []struct {
 		name string
 		mode stewardtypes.ModuleTrustMode
 	}{
 		{"controller mode", stewardtypes.ModuleTrustModeController},
-		{"bypass mode", stewardtypes.ModuleTrustModeBypass},
 	}
 
 	for _, tc := range cases {
@@ -165,7 +165,7 @@ func TestNonStrictModesIgnoreUnresolvableAdditionalPublishers(t *testing.T) {
 			require.NoError(t, err)
 
 			rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, nil)
-			b := makeBypassBundle(t, echoModuleBin)
+			b := makeUnsignedBundle(t, echoModuleBin)
 
 			handle, err := rt.Start(b, tc.mode, []string{"vendor-missing"})
 			require.NoError(t, err,

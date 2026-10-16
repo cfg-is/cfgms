@@ -258,7 +258,12 @@ type TransportClient struct {
 	// fenceRatchet persists the two fields across restarts (#3437).
 	termRatchetSet  bool
 	highestTermSeen uint64
-	fenceRatchet    *stewardconfig.FenceRatchet
+	// inflightTerms counts stamped commands that passed the fence compare and
+	// have not yet finished dispatch, keyed by term. A concurrent command with a
+	// lower term than any entry is refused, so the compare and the commit cannot
+	// be raced apart (Issue #5090).
+	inflightTerms map[uint64]int
+	fenceRatchet  *stewardconfig.FenceRatchet
 
 	// Script signature verification policy (Issue #1671). Wired into the command
 	// handler by setupCommandHandler so CommandExecuteScript signature enforcement
@@ -1133,8 +1138,18 @@ func (c *TransportClient) receiveCommand(
 		return err
 	}
 	if err := dispatch(ctx, sc); err != nil {
+		c.releaseTermFence(sc)
 		c.reportRejection(ctx, sc, err)
 		return err
+	}
+	// dispatch returned nil, so the command passed signature, steward ID,
+	// timestamp, replay, size and script pre-flight checks. Only now may its
+	// (unsigned) term move the ratchet — and only if the handler actually
+	// verified a signature (a handler without a verifier skips that check).
+	if c.commandsSignatureVerified() {
+		c.commitTermFence(sc)
+	} else {
+		c.releaseTermFence(sc)
 	}
 	return nil
 }
@@ -1225,10 +1240,12 @@ func (c *TransportClient) reportRejection(ctx context.Context, sc *cpTypes.Signe
 //     Raft terms are never 0 once a leader has been elected), and a stamped one
 //     is accepted only when its term is at or above the high-water mark.
 //
-// When the ratchet advances, the new state is persisted to fenceRatchet so it
-// survives a steward process restart (#3437). Persistence failures are logged
-// and do not block command delivery — the in-memory state remains authoritative
-// for the lifetime of this process.
+// checkTermFence is the compare step only: it never changes ratchet state. An
+// admitted stamped command is recorded as in flight under the same lock, and the
+// caller must follow with commitTermFence or releaseTermFence.
+// Command.Term is not covered by the command signature, so an unauthenticated
+// command could otherwise raise the mark and fence out every legitimate command.
+// The ratchet advances in commitTermFence, after the command has authenticated.
 //
 // Every value in the rejection log line is attacker-influenced (a compromised or
 // downgraded controller chooses Command.ID/Type/Term freely — Term is transport-
@@ -1240,6 +1257,14 @@ func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 	c.mu.Lock()
 	ratchetSet := c.termRatchetSet
 	highestSeen := c.highestTermSeen
+	// Terms of commands admitted but not yet committed count toward the mark, so
+	// a lower-term command cannot slip in while a higher one is dispatching.
+	for t, n := range c.inflightTerms {
+		if n > 0 && (!ratchetSet || t > highestSeen) {
+			ratchetSet = true
+			highestSeen = t
+		}
+	}
 
 	if term == 0 {
 		if !ratchetSet {
@@ -1257,20 +1282,11 @@ func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 	}
 
 	if !ratchetSet || term >= highestSeen {
-		c.termRatchetSet = true
-		c.highestTermSeen = term
-		c.mu.Unlock()
-		// Persist the updated ratchet state so it survives a restart (#3437).
-		// Done outside c.mu to avoid holding the client lock during file I/O:
-		// inbound commands run one goroutine per command, so several accepted
-		// commands can reach Save concurrently and in any order. FenceRatchet.Save
-		// is the serialization point — it takes its own mutex, writes through a
-		// uniquely named temp file, and refuses to lower the stored term — so the
-		// persisted high-water mark cannot regress or be truncated by that race.
-		if err := c.fenceRatchet.Save(true, term); err != nil {
-			c.logger.Warn("failed to persist fence ratchet state; in-memory state is still authoritative",
-				"error", logging.SanitizeLogValue(err.Error()))
+		if c.inflightTerms == nil {
+			c.inflightTerms = make(map[uint64]int)
 		}
+		c.inflightTerms[term]++
+		c.mu.Unlock()
 		return nil
 	}
 	c.mu.Unlock()
@@ -1283,6 +1299,69 @@ func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 	)
 	return fmt.Errorf("%w: command %q term %d below highest seen %d",
 		ErrCommandTermFenced, sc.Command.ID, term, highestSeen)
+}
+
+// commitTermFence advances the ratchet to the term of a command that has passed
+// authentication (commands.Handler.HandleCommand returned nil). The new state is
+// persisted to fenceRatchet so it survives a steward process restart (#3437).
+// Persistence failures are logged and do not block command delivery — the
+// in-memory state remains authoritative for the lifetime of this process.
+func (c *TransportClient) commitTermFence(sc *cpTypes.SignedCommand) {
+	term := sc.Command.Term
+	if term == 0 {
+		return
+	}
+
+	c.mu.Lock()
+	c.releaseInflightLocked(term)
+	if c.termRatchetSet && term < c.highestTermSeen {
+		// A concurrent authenticated command already moved the mark past this one.
+		c.mu.Unlock()
+		return
+	}
+	c.termRatchetSet = true
+	c.highestTermSeen = term
+	c.mu.Unlock()
+	// Persist outside c.mu to avoid holding the client lock during file I/O:
+	// inbound commands run one goroutine per command, so several accepted
+	// commands can reach Save concurrently and in any order. FenceRatchet.Save
+	// is the serialization point — it takes its own mutex, writes through a
+	// uniquely named temp file, and refuses to lower the stored term — so the
+	// persisted high-water mark cannot regress or be truncated by that race.
+	if err := c.fenceRatchet.Save(true, term); err != nil {
+		c.logger.Warn("failed to persist fence ratchet state; in-memory state is still authoritative",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// releaseTermFence drops the in-flight reservation taken by checkTermFence for a
+// command that did not authenticate, without moving the ratchet.
+func (c *TransportClient) releaseTermFence(sc *cpTypes.SignedCommand) {
+	if sc.Command.Term == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.releaseInflightLocked(sc.Command.Term)
+	c.mu.Unlock()
+}
+
+// releaseInflightLocked decrements the in-flight count for term. c.mu must be held.
+func (c *TransportClient) releaseInflightLocked(term uint64) {
+	if n := c.inflightTerms[term]; n > 1 {
+		c.inflightTerms[term] = n - 1
+	} else {
+		delete(c.inflightTerms, term)
+	}
+}
+
+// commandsSignatureVerified reports whether the command handler verifies command
+// signatures. With no handler wired (receive-path unit tests) there is nothing to
+// contradict, so it reports true.
+func (c *TransportClient) commandsSignatureVerified() bool {
+	c.mu.RLock()
+	h := c.commandHandler
+	c.mu.RUnlock()
+	return h == nil || h.HasVerifier()
 }
 
 // setupCommandHandler creates and configures the command handler with all command types.
@@ -3257,8 +3336,10 @@ func decodeBase64(s string) ([]byte, error) {
 }
 
 // buildVerifierOnDemand constructs a config/command signature verifier from the
-// controller's certificate PEMs stored in the client. Returns nil when no
-// certificate is available — callers treat a nil verifier as "skip verification".
+// controller's certificate PEMs stored in the client. Returns nil only when no
+// certificate material exists at all. When material exists but cannot become a
+// verifier, it returns a verifier that rejects every signature (fail closed), so
+// commands are refused rather than dispatched unauthenticated.
 //
 // When signingCertPEMs contains multiple entries (rotation overlap window), a
 // MultiVerifier is returned so either cert can verify a signature. When
@@ -3289,7 +3370,7 @@ func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 			verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: []byte(activePEMs[0])})
 			if err != nil {
 				c.logger.Warn("Failed to create signing cert verifier", "error", err)
-				return nil
+				return rejectAllVerifier{}
 			}
 			c.logger.Debug("Signing cert verifier built", "key_fingerprint", verifier.KeyFingerprint())
 			return verifier
@@ -3306,12 +3387,12 @@ func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 			certs = append(certs, x509Cert)
 		}
 		if len(certs) == 0 {
-			return nil
+			return rejectAllVerifier{}
 		}
 		mv, err := signature.NewMultiVerifier(certs)
 		if err != nil {
 			c.logger.Warn("Failed to create multi-signing-cert verifier", "error", err)
-			return nil
+			return rejectAllVerifier{}
 		}
 		c.logger.Debug("Multi-signing-cert verifier built", "cert_count", len(certs), "key_fingerprint", mv.KeyFingerprint())
 		return mv
@@ -3350,11 +3431,21 @@ func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 	verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: certPEM})
 	if err != nil {
 		c.logger.Warn("Failed to create configuration verifier", "error", err)
-		return nil
+		return rejectAllVerifier{}
 	}
 	c.logger.Debug("Configuration signature verifier built", "key_fingerprint", verifier.KeyFingerprint())
 	return verifier
 }
+
+// rejectAllVerifier stands in for a verifier that could not be built from
+// signing material that is present. It rejects every signature.
+type rejectAllVerifier struct{}
+
+func (rejectAllVerifier) Verify([]byte, *signature.ConfigSignature) error {
+	return errors.New("signing certificate unusable; command signatures cannot be verified")
+}
+
+func (rejectAllVerifier) SupportsAlgorithm(signature.Algorithm) bool { return false }
 
 // publishEventWithQueue attempts to publish an event via the control plane.
 // If the control plane is unavailable or the publish fails, the event is

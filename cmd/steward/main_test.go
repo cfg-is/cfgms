@@ -31,6 +31,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/cmd/steward/service"
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
@@ -1711,4 +1712,35 @@ func TestPersistedCAValidatedOnRead(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "persisted CA rejected")
 	})
+}
+
+// writeLocalConfig writes a hostname.cfg into a fresh working directory and
+// changes into it, so LoadConfiguration("") finds it first.
+func writeLocalConfig(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, host+".cfg"), []byte(body), 0o600))
+	t.Chdir(dir)
+}
+
+func TestLoadConnectedRuntimeConfig_RejectedLocalConfigNeverUsed(t *testing.T) {
+	if stewardtypes.ModuleTrustBypassAllowed() {
+		t.Skip("bypass is a valid mode in a cfgms_dev_bypass build")
+	}
+	cases := map[string]string{
+		"bypass trust mode in release build": "steward:\n  id: s1\n  module_trust:\n    mode: bypass\nresources: []\n",
+		"invalid unrelated field":            "steward:\n  id: s1\n  module_trust:\n    mode: strict\n  logging:\n    level: bogus\nresources: []\n",
+	}
+	for name, body := range cases {
+		for _, publicBeta := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/publicBeta=%v", name, publicBeta), func(t *testing.T) {
+				writeLocalConfig(t, body)
+				cfg, err := loadConnectedRuntimeConfig(publicBeta)
+				require.Error(t, err)
+				assert.Empty(t, cfg.Steward.ModuleTrust.Mode, "a rejected configuration must not be returned")
+			})
+		}
+	}
 }

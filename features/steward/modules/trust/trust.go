@@ -177,10 +177,16 @@ func (e *StewardTrustEnforcer) ResolveAdditionalPublishers(names []string) ([]Pu
 //   - strict: the bundle must carry at least one Ed25519 signature that
 //     verifies against the CFGMS publisher identity or any additionalPublishers.
 //   - controller: no-op (the controller has already approved the bundle).
-//   - bypass: no-op (development use only).
+//   - bypass: no-op in a cfgms_dev_bypass build (development use only); an
+//     error in every other build.
 func (e *StewardTrustEnforcer) VerifyForLoad(b *bundle.Bundle, mode TrustMode, additionalPublishers []PublisherIdentity) error {
 	switch mode {
-	case stewardtypes.ModuleTrustModeController, stewardtypes.ModuleTrustModeBypass:
+	case stewardtypes.ModuleTrustModeController:
+		return nil
+	case stewardtypes.ModuleTrustModeBypass:
+		if !stewardtypes.ModuleTrustBypassAllowed() {
+			return fmt.Errorf("module trust mode %q is unavailable in a release build", mode)
+		}
 		return nil
 	case stewardtypes.ModuleTrustModeStrict:
 		return e.verifyStrict(b, additionalPublishers)

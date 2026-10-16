@@ -1224,10 +1224,13 @@ func loadConnectedRuntimeConfig(publicBeta bool) (stewardconfig.StewardConfig, e
 	cfg, err := stewardconfig.LoadConfiguration("")
 	if err != nil {
 		if !errors.Is(err, stewardconfig.ErrNoConfiguration) {
+			// A configuration that failed to parse or validate is never used,
+			// in any security profile: the decoded value may carry settings
+			// (e.g. module_trust.mode: bypass) that validation rejected.
 			if publicBeta {
-				return cfg, fmt.Errorf("public-beta connected configuration is invalid: %w", err)
+				return stewardconfig.StewardConfig{}, fmt.Errorf("public-beta connected configuration is invalid: %w", err)
 			}
-			return cfg, nil
+			return stewardconfig.StewardConfig{}, fmt.Errorf("connected configuration is invalid: %w", err)
 		}
 		if publicBeta {
 			cfg.Steward.ScriptSigning = stewardconfig.ScriptSigningConfig{
