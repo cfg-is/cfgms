@@ -1433,6 +1433,13 @@ func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) 
 // response body. The fault is injected by replacing the cert store's storage directory
 // with a regular file, so persisting the issued certificate fails (ENOTDIR) — the CA
 // itself is already loaded in memory and still signs successfully.
+//
+// The revocation list lives in the same storage directory, and the mTLS middleware
+// fails closed when it cannot determine a peer's revocation status (Issue #5082).
+// Routed through the full router, this fault therefore stops the request at
+// authentication (401) before it reaches the handler — asserted below. The handler's
+// own 500 mapping is then exercised by invoking it directly with a root tenant scope,
+// the same way the TenantScope tests in this file do.
 func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T) {
 	server, certMgr, certStoragePath := setupProvisionTestServer(t)
 	peer := newAdminPeerCert(t, certMgr)
@@ -1440,7 +1447,18 @@ func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T)
 	require.NoError(t, os.RemoveAll(certStoragePath))
 	require.NoError(t, os.WriteFile(certStoragePath, []byte("not a directory"), 0o600))
 
-	rec := postProvision(server, peer, `{"steward_id":"steward-prov-03"}`)
+	authRec := postProvision(server, peer, `{"steward_id":"steward-prov-03"}`)
+	require.Equal(t, http.StatusUnauthorized, authRec.Code,
+		"an unreadable revocation list must fail closed at authentication; body: %s", authRec.Body.String())
+	assert.NotContains(t, authRec.Body.String(), certStoragePath,
+		"the auth error response must not disclose internal filesystem paths")
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-prov-03"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(scopedProvisionContext("")) // root scope
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
 
