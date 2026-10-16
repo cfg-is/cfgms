@@ -1603,7 +1603,10 @@ func connectWithApprovedRegistration(
 				return nil, fmt.Errorf("TOFU CA pin failed: %w", err)
 			}
 			// Persist and trust only the verified single-certificate re-encoding.
-			canonicalPEM, _, _ := service.CanonicalCAPEM(reg.CACert)
+			canonicalPEM, _, cerr := service.CanonicalCAPEM(reg.CACert)
+			if cerr != nil {
+				return nil, fmt.Errorf("TOFU CA pin failed: %w", cerr)
+			}
 			reg.CACert = canonicalPEM
 			persistedID.CACertPEM = canonicalPEM
 		}
