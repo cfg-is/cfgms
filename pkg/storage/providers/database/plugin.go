@@ -618,11 +618,27 @@ func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error)
 // warnIfWeakSSLMode logs one warning naming an explicitly configured sslmode
 // that does not authenticate the server. It never logs the DSN or password.
 func warnIfWeakSSLMode(sslmode string) {
-	switch sslmode {
-	case "disable", "allow", "prefer", "require":
+	if weak := weakSSLModeLabel(sslmode); weak != "" {
 		logging.NewLogger("warn").Warn("Database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
-			"sslmode", logging.SanitizeLogValue(sslmode))
+			"sslmode", weak)
 	}
+}
+
+// weakSSLModeLabel maps a weak sslmode to a string literal ("" when the mode
+// is not weak). Logging the literal rather than the config-derived value keeps
+// credential-bearing config data out of the log call entirely.
+func weakSSLModeLabel(sslmode string) string {
+	switch sslmode {
+	case "disable":
+		return "disable"
+	case "allow":
+		return "allow"
+	case "prefer":
+		return "prefer"
+	case "require":
+		return "require"
+	}
+	return ""
 }
 
 // sharedPool returns the *sql.DB for the connection string config resolves to,

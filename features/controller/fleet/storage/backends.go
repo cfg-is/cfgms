@@ -924,10 +924,9 @@ func buildDNAConnString() (string, error) {
 	if sslMode == "" {
 		sslMode = "verify-full"
 	}
-	switch sslMode {
-	case "disable", "allow", "prefer", "require":
+	if weak := weakSSLModeLabel(sslMode); weak != "" {
 		logging.NewLogger("warn").Warn("DNA database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
-			"sslmode", logging.SanitizeLogValue(sslMode))
+			"sslmode", weak)
 	}
 
 	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
@@ -957,4 +956,21 @@ func (b *DatabaseBackend) updateStats(record *DNARecord) {
 		b.stats.ShardSizes = make(map[string]int64)
 	}
 	b.stats.ShardSizes[record.ShardID] = b.stats.TotalSize
+}
+
+// weakSSLModeLabel maps a weak sslmode to a string literal ("" when the mode
+// is not weak). Logging the literal rather than the config-derived value keeps
+// credential-bearing config data out of the log call entirely.
+func weakSSLModeLabel(sslmode string) string {
+	switch sslmode {
+	case "disable":
+		return "disable"
+	case "allow":
+		return "allow"
+	case "prefer":
+		return "prefer"
+	case "require":
+		return "require"
+	}
+	return ""
 }

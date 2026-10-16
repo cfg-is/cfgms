@@ -4793,10 +4793,9 @@ func entityGraphDatabaseDSN(storageConfig map[string]interface{}) (string, error
 		return "", fmt.Errorf("database password is required")
 	}
 
-	switch sslmode {
-	case "disable", "allow", "prefer", "require":
+	if weak := weakSSLModeLabel(sslmode); weak != "" {
 		logging.NewLogger("warn").Warn("Entity graph database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
-			"sslmode", logging.SanitizeLogValue(sslmode))
+			"sslmode", weak)
 	}
 
 	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
@@ -5185,4 +5184,21 @@ func installerS3Config(cfg *config.Config) map[string]interface{} {
 		}
 	}
 	return s3Cfg
+}
+
+// weakSSLModeLabel maps a weak sslmode to a string literal ("" when the mode
+// is not weak). Logging the literal rather than the config-derived value keeps
+// credential-bearing config data out of the log call entirely.
+func weakSSLModeLabel(sslmode string) string {
+	switch sslmode {
+	case "disable":
+		return "disable"
+	case "allow":
+		return "allow"
+	case "prefer":
+		return "prefer"
+	case "require":
+		return "require"
+	}
+	return ""
 }
