@@ -560,10 +560,15 @@ type scanningBackend struct {
 // the bound of 8, where a local Windows host measured 11.6-43.7. The injected
 // work grows with passes times records, but test time grows with records times
 // that, so more passes over fewer records lift the ratio past the bound at less
-// cost than more records. Six passes over 200 records measured a late ratio of
-// 108-110 locally under -race; the CI runner's per-read cost in that failure
-// gives an estimate near 19 there.
-const scanPasses = 6
+// cost than more records.
+//
+// Records also set the number of batches, and each half's median needs enough
+// of them to absorb one slow control batch. Six passes over 200 records (two
+// batches per half) failed on a Windows CI runner: main writes grew from 6.0ms
+// to 15.1ms, but the late median of two per-batch ratios was 2.57 against
+// control medians of 0.73-0.85ms. Four passes over 300 records give three
+// batches per half. Locally under -race they measure a late ratio of 137-139.
+const scanPasses = 4
 
 func (b *scanningBackend) scan(ctx context.Context) error {
 	for pass := 0; pass < scanPasses; pass++ {
@@ -613,7 +618,7 @@ func organizationDNA(t *testing.T, n int) []*DirectoryDNA {
 func TestWriteGrowthCheck_DetectsPerWriteScan(t *testing.T) {
 	st := newDirectoryStorage(t)
 	store := NewDirectoryDNAStorageAdapter(&scanningBackend{Backend: st.backend}, st.compressor, st.indexer, st.logger)
-	g := measureWriteGrowth(t, store, func() *DirectoryDNAStorageAdapter { return newDirectoryStorageAdapter(t) }, organizationDNA(t, 200))
+	g := measureWriteGrowth(t, store, func() *DirectoryDNAStorageAdapter { return newDirectoryStorageAdapter(t) }, organizationDNA(t, 300))
 	g.log(t, "O(n) scan per write")
 	assert.Error(t, g.check(), "a write path that scans every stored record must fail the growth check")
 }
