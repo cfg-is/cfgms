@@ -9,9 +9,12 @@ import (
 )
 
 // storeEntry is the internal record maintained by MemStore per token hash.
+// expiresAt is the grace expiry recorded by Rotate for a rotated-away hash; it is
+// zero for the session's current token.
 type storeEntry struct {
-	session *Session
-	revoked bool
+	session   *Session
+	revoked   bool
+	expiresAt time.Time
 }
 
 // MemStore is an in-memory Store implementation keyed by token hash.
@@ -45,17 +48,43 @@ func NewMemStore(cfg Config, clockFn func() time.Time) *MemStore {
 	return s
 }
 
+// usable reports whether entry is a live row: not revoked and, for a rotated-away
+// hash, still inside its recorded grace expiry. Caller must hold s.mu.
+func (s *MemStore) usable(e *storeEntry, now time.Time) bool {
+	return !e.revoked && (e.expiresAt.IsZero() || !now.After(e.expiresAt))
+}
+
+// sessionLive reports whether id has at least one usable row. Caller must hold s.mu.
+func (s *MemStore) sessionLive(id string, now time.Time) bool {
+	for _, h := range s.byID[id] {
+		if e, ok := s.records[h]; ok && s.usable(e, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// put stores a private copy of session under tokenHash, preserving any grace expiry
+// already recorded for that hash. Caller must hold s.mu.
+func (s *MemStore) put(tokenHash string, session *Session, expiresAt time.Time) {
+	cp := *session
+	if old, exists := s.records[tokenHash]; exists {
+		if expiresAt.IsZero() {
+			expiresAt = old.expiresAt
+		}
+	} else {
+		s.byID[session.ID] = append(s.byID[session.ID], tokenHash)
+	}
+	s.records[tokenHash] = &storeEntry{session: &cp, expiresAt: expiresAt}
+}
+
 // Set stores or updates the Session under the given token hash.
 // A session may appear under multiple hashes (current + prior-token grace entry);
 // each call registers this hash in the session's index for cleanup via Delete.
 func (s *MemStore) Set(_ context.Context, tokenHash string, session *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.records[tokenHash]; !exists {
-		// Only append to byID when registering a new hash, not on updates.
-		s.byID[session.ID] = append(s.byID[session.ID], tokenHash)
-	}
-	s.records[tokenHash] = &storeEntry{session: session}
+	s.put(tokenHash, session, time.Time{})
 	return nil
 }
 
@@ -65,25 +94,32 @@ func (s *MemStore) Set(_ context.Context, tokenHash string, session *Session) er
 func (s *MemStore) Update(_ context.Context, tokenHash string, session *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live := false
-	for _, h := range s.byID[session.ID] {
-		if e, ok := s.records[h]; ok && !e.revoked {
-			live = true
-			break
-		}
-	}
-	if !live {
+	if !s.sessionLive(session.ID, s.clockFn()) {
 		return ErrSessionNotFound
 	}
-	if _, exists := s.records[tokenHash]; !exists {
-		s.byID[session.ID] = append(s.byID[session.ID], tokenHash)
-	}
-	s.records[tokenHash] = &storeEntry{session: session}
+	s.put(tokenHash, session, time.Time{})
 	return nil
 }
 
-// Get returns the Session for the given token hash.
-// Returns ErrSessionNotFound when the hash is not present or the entry is revoked.
+// Rotate implements Store.Rotate in one critical section shared with Delete.
+func (s *MemStore) Rotate(_ context.Context, prevHash, newHash string, session *Session, prevExpiry time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sessionLive(session.ID, s.clockFn()) {
+		return ErrSessionNotFound
+	}
+	prev, ok := s.records[prevHash]
+	if !ok || prev.session == nil || prev.session.ID != session.ID || !prev.expiresAt.IsZero() {
+		return ErrTokenRotated
+	}
+	prev.expiresAt = prevExpiry
+	s.put(newHash, session, time.Time{})
+	return nil
+}
+
+// Get returns a copy of the Session for the given token hash.
+// Returns ErrSessionNotFound when the hash is not present or has passed its grace
+// expiry, and ErrSessionRevoked when the entry is revoked.
 func (s *MemStore) Get(_ context.Context, tokenHash string) (*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -94,22 +130,24 @@ func (s *MemStore) Get(_ context.Context, tokenHash string) (*Session, error) {
 	if entry.revoked {
 		return nil, ErrSessionRevoked
 	}
-	return entry.session, nil
+	if !entry.expiresAt.IsZero() && s.clockFn().After(entry.expiresAt) {
+		return nil, ErrSessionNotFound
+	}
+	cp := *entry.session
+	return &cp, nil
 }
 
-// GetByID returns any live session record for the given session ID.
-// Returns ErrSessionNotFound when no non-revoked entry exists for id.
+// GetByID returns a copy of any live session record for the given session ID.
+// Returns ErrSessionNotFound when no usable entry exists for id.
 func (s *MemStore) GetByID(_ context.Context, id string) (*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	hashes, ok := s.byID[id]
-	if !ok || len(hashes) == 0 {
-		return nil, ErrSessionNotFound
-	}
-	for _, h := range hashes {
+	now := s.clockFn()
+	for _, h := range s.byID[id] {
 		entry, ok := s.records[h]
-		if ok && !entry.revoked && entry.session != nil {
-			return entry.session, nil
+		if ok && entry.session != nil && s.usable(entry, now) {
+			cp := *entry.session
+			return &cp, nil
 		}
 	}
 	return nil, ErrSessionNotFound
@@ -137,15 +175,17 @@ func (s *MemStore) ListAll(_ context.Context) ([]*Session, error) {
 	defer s.mu.RUnlock()
 	seen := make(map[string]struct{}, len(s.byID))
 	result := make([]*Session, 0, len(s.byID))
+	now := s.clockFn()
 	for _, entry := range s.records {
-		if entry.session == nil {
+		if entry.session == nil || !s.usable(entry, now) {
 			continue
 		}
 		if _, dup := seen[entry.session.ID]; dup {
 			continue
 		}
 		seen[entry.session.ID] = struct{}{}
-		result = append(result, entry.session)
+		cp := *entry.session
+		result = append(result, &cp)
 	}
 	return result, nil
 }

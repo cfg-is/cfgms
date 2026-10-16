@@ -112,12 +112,68 @@ func (s *DatabaseSessionTokenStore) write(ctx context.Context, tokenHash string,
 	if err := setTenantLocal(ctx, tx, sess.TenantID); err != nil {
 		return fmt.Errorf("database: session token write: failed to set tenant context: %w", err)
 	}
-
-	guard := ""
 	if requireLive {
 		if err := lockSession(ctx, tx, sess.ID); err != nil {
 			return fmt.Errorf("database: session token write: failed to lock session: %w", err)
 		}
+	}
+	if err := writeRow(ctx, tx, tokenHash, sess, requireLive); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Rotate atomically makes newHash the session's current token and records prevExpiry
+// as the grace expiry of prevHash. Like Update and Delete it first takes the
+// transaction-scoped advisory lock for the session ID, so it is serialized with a
+// concurrent Delete across all nodes; the guarded UPDATE of prevHash then matches only
+// while prevHash is the session's current token and the session still has that row.
+func (s *DatabaseSessionTokenStore) Rotate(ctx context.Context, prevHash, newHash string, sess *session.Session, prevExpiry time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: session token rotate: failed to begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, sess.TenantID); err != nil {
+		return fmt.Errorf("database: session token rotate: failed to set tenant context: %w", err)
+	}
+	if err := lockSession(ctx, tx, sess.ID); err != nil {
+		return fmt.Errorf("database: session token rotate: failed to lock session: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE session_token_store SET hash_expires_at = $1
+		WHERE token_hash = $2 AND session_id = $3 AND hash_expires_at IS NULL`,
+		roundToStorablePrecision(prevExpiry.UTC()), prevHash, sess.ID)
+	if err != nil {
+		return fmt.Errorf("database: session token rotate failed: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		var one int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1 FROM session_token_store
+			WHERE session_id = $1 AND (hash_expires_at IS NULL OR hash_expires_at > NOW()) LIMIT 1`,
+			sess.ID).Scan(&one)
+		if err == sql.ErrNoRows {
+			return session.ErrSessionNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("database: session token rotate: liveness check failed: %w", err)
+		}
+		return session.ErrTokenRotated
+	}
+	if err := writeRow(ctx, tx, newHash, sess, false); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// writeRow upserts one token-hash row inside tx. When requireLive is set the insert is
+// guarded by an EXISTS check for a live row of the same session; the caller must already
+// hold the session's advisory lock.
+func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.Session, requireLive bool) error {
+	guard := ""
+	if requireLive {
 		guard = ` WHERE EXISTS (SELECT 1 FROM session_token_store
 			WHERE session_id = $2 AND (hash_expires_at IS NULL OR hash_expires_at > NOW()))`
 	}
@@ -174,7 +230,7 @@ func (s *DatabaseSessionTokenStore) write(ctx context.Context, tokenHash string,
 			return session.ErrSessionNotFound
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Get returns the Session for the given token hash.
@@ -353,10 +409,8 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 }
 
 // StampGraceExpiry sets the per-hash expiry on a prior-token grace entry.
-// Called by manager.Renew (via the graceStamper type assertion in manager.go:249)
-// after token rotation so that the old hash is rejected by cluster peers once the
-// grace window elapses. The manager's in-memory prevExpiry continues to be authoritative
-// on the issuing node; this column makes the expiry durable and visible to peer nodes.
+// Rotate stamps the rotated-away hash atomically with writing its successor; this
+// method remains for administrative use and tests.
 func (s *DatabaseSessionTokenStore) StampGraceExpiry(ctx context.Context, tokenHash string, expiresAt time.Time) error {
 	// Determine the tenant from the existing row first (needed for RLS on the UPDATE).
 	var tenantID string

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,10 @@ const (
 	// authSessionContextKey carries the authSessionRef of the session (Bearer or web
 	// cookie) that authenticated the request, so long-lived handlers can re-check it.
 	authSessionContextKey contextKey = "auth_session_ref"
+	// authRecheckContextKey carries the credential re-check for principals that
+	// authenticate without a session (admin mTLS certificate, API key), so long-lived
+	// handlers can end a stream whose credential was revoked, disabled or expired.
+	authRecheckContextKey contextKey = "auth_recheck"
 
 	// presenceTokenHeader is the HTTP request header that carries a short-lived,
 	// single-use presence token minted by POST /api/v1/webauthn/presence/finish.
@@ -1039,6 +1044,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			// Sole call site for ctxkeys.NewRootScope (via scopeForVerifiedAdminCert),
 			// enforced by ctxkeys' restricted-caller architecture test (Issue #4316).
 			ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(adminPrincipal))
+			ctx = context.WithValue(ctx, authRecheckContextKey, s.adminCertRecheck(r.TLS.PeerCertificates[0]))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -1447,6 +1453,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		// API-key principals are never root-scoped (Issue #4316): NewRootScope is
 		// reserved for a verified mTLS admin certificate.
 		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(keyInfo.TenantID))
+		ctx = context.WithValue(ctx, authRecheckContextKey, s.apiKeyRecheck(keyInfo))
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -2469,4 +2476,78 @@ type authSessionRef struct {
 func (ref authSessionRef) stillLive(ctx context.Context) bool {
 	_, err := ref.manager.GetByID(ctx, ref.id)
 	return err == nil
+}
+
+// authRecheck reports whether the credential that authenticated a request is still
+// valid. It is called repeatedly, from one goroutine, by long-lived handlers.
+type authRecheck func(ctx context.Context) bool
+
+// requestAuthRecheck returns the re-check for whichever credential authenticated r
+// (session, API key or admin mTLS certificate), or nil when none was recorded.
+func requestAuthRecheck(r *http.Request) authRecheck {
+	if ref, ok := r.Context().Value(authSessionContextKey).(authSessionRef); ok {
+		return ref.stillLive
+	}
+	if rc, ok := r.Context().Value(authRecheckContextKey).(authRecheck); ok {
+		return rc
+	}
+	return nil
+}
+
+// adminCertRecheck re-validates an admin mTLS credential: the certificate must be
+// unexpired and unrevoked and its bound account, if any, enabled. Every uncertain
+// outcome (a revocation or account store error) fails closed.
+func (s *Server) adminCertRecheck(peerCert *x509.Certificate) authRecheck {
+	serial := peerCert.SerialNumber.String()
+	notAfter := peerCert.NotAfter
+	return func(ctx context.Context) bool {
+		if time.Now().After(notAfter) {
+			return false
+		}
+		if s.certManager != nil {
+			if revoked, err := s.certManager.IsRevoked(serial); err != nil || revoked {
+				return false
+			}
+		}
+		acct, err := s.getAccountByCertSerial(ctx, serial)
+		if err != nil {
+			return false
+		}
+		return acct == nil || !acct.Disabled
+	}
+}
+
+// apiKeyRecheck re-validates an API key against the secret store. A key deleted
+// (on any node) or expired is invalid; a store outage keeps the key valid only
+// within apiKeyMaxStaleness of the last successful confirmation, matching the
+// per-request policy in authenticationMiddleware.
+func (s *Server) apiKeyRecheck(keyInfo *APIKey) authRecheck {
+	current := keyInfo
+	lastOK := keyInfo.validatedAt
+	if lastOK.IsZero() {
+		lastOK = s.apiKeyNow()
+	}
+	return func(ctx context.Context) bool {
+		now := s.apiKeyNow()
+		if current.ExpiresAt != nil && now.After(*current.ExpiresAt) {
+			return false
+		}
+		if current.recordRef == "" {
+			// Env-gated test keys have no durable record: valid while still cached.
+			s.mu.RLock()
+			_, ok := s.apiKeys[current.Key]
+			s.mu.RUnlock()
+			return ok
+		}
+		refreshed, err := s.revalidateCachedAPIKey(ctx, current.Key, current, now)
+		switch {
+		case err == nil:
+			current, lastOK = refreshed, now
+			return true
+		case errors.Is(err, errAPIKeyRevoked):
+			return false
+		default:
+			return now.Sub(lastOK) < apiKeyMaxStaleness
+		}
+	}
 }

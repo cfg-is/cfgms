@@ -471,3 +471,102 @@ func TestRenewDoesNotResurrectSessionRevokedOnAnotherNode(t *testing.T) {
 		t.Errorf("Elevate on B after remote revoke: got %v, want ErrSessionRevoked", err)
 	}
 }
+
+// sharedStoreFactories returns the durable-store shapes two managers can share to
+// model two controller nodes (MemStore is shared in-process, SQLite via one handle).
+func sharedStoreFactories() map[string]func(t *testing.T) session.Store {
+	return map[string]func(t *testing.T) session.Store{
+		"MemStore": func(t *testing.T) session.Store {
+			s := session.NewMemStore(session.DefaultConfig(), time.Now)
+			t.Cleanup(s.Close)
+			return s
+		},
+		"SQLite": newSQLiteSessionStore,
+	}
+}
+
+// TestGraceBoundIsDurableAcrossNodes proves a rotated-away token is refused on every
+// node once its grace expiry passes, independent of the rotating node's memory: a node
+// that cached the token before the rotation and a node that never saw it (a restart).
+func TestGraceBoundIsDurableAcrossNodes(t *testing.T) {
+	for name, newStore := range sharedStoreFactories() {
+		t.Run(name, func(t *testing.T) {
+			store := newStore(t)
+			ctx := context.Background()
+			// A negative GraceWindow stamps the rotated-away token's expiry in the past,
+			// so the bound is exercised deterministically without sleeping.
+			cfg := session.Config{IdleTimeout: 5 * time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: -time.Second}
+			mgrA := session.NewManager(cfg, store, time.Now)
+			mgrB := session.NewManager(cfg, store, time.Now)
+
+			_, oldToken, err := mgrA.Issue(ctx, "erin", "ctrl", "tenant-1")
+			if err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			if _, err := mgrB.Validate(ctx, oldToken); err != nil {
+				t.Fatalf("Validate on B before rotation: %v", err)
+			}
+			_, newToken, err := mgrA.Renew(ctx, oldToken)
+			if err != nil || newToken == "" {
+				t.Fatalf("Renew on A: token=%q err=%v", newToken, err)
+			}
+
+			// B has the old token cached as its current token: the store must refuse it.
+			if _, err := mgrB.Validate(ctx, oldToken); !errors.Is(err, session.ErrSessionExpired) {
+				t.Errorf("B Validate(old) after grace: got %v, want ErrSessionExpired", err)
+			}
+			// A node with no memory of the session (restart) must refuse it too.
+			mgrC := session.NewManager(cfg, store, time.Now)
+			if _, err := mgrC.Validate(ctx, oldToken); err == nil {
+				t.Error("fresh node Validate(old) after grace: expected error, got nil")
+			}
+			if _, _, err := mgrC.Renew(ctx, oldToken); err == nil {
+				t.Error("fresh node Renew(old) after grace: expected error, got nil")
+			}
+			// The refusal of the old token must not revoke the session itself.
+			if _, err := mgrB.Validate(ctx, newToken); err != nil {
+				t.Errorf("B Validate(new): %v", err)
+			}
+			if _, err := mgrC.Validate(ctx, newToken); err != nil {
+				t.Errorf("fresh node Validate(new): %v", err)
+			}
+		})
+	}
+}
+
+// TestStaleNodeCannotRotateRotatedAwayToken proves the store's record of the current
+// token stops a node with a stale cache from rotating a token another node already
+// rotated: it gets no second token, so the grace expiry cannot be extended or forked.
+func TestStaleNodeCannotRotateRotatedAwayToken(t *testing.T) {
+	for name, newStore := range sharedStoreFactories() {
+		t.Run(name, func(t *testing.T) {
+			store := newStore(t)
+			ctx := context.Background()
+			cfg := session.Config{IdleTimeout: 5 * time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: time.Hour}
+			mgrA := session.NewManager(cfg, store, time.Now)
+			mgrB := session.NewManager(cfg, store, time.Now)
+
+			_, oldToken, err := mgrA.Issue(ctx, "frank", "ctrl", "tenant-1")
+			if err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			if _, err := mgrB.Validate(ctx, oldToken); err != nil {
+				t.Fatalf("Validate on B: %v", err)
+			}
+			_, newToken, err := mgrA.Renew(ctx, oldToken)
+			if err != nil || newToken == "" {
+				t.Fatalf("Renew on A: token=%q err=%v", newToken, err)
+			}
+			_, bToken, err := mgrB.Renew(ctx, oldToken)
+			if err != nil {
+				t.Fatalf("Renew(old) on B within grace: %v", err)
+			}
+			if bToken != "" {
+				t.Error("stale node rotated an already-rotated token and minted a second current token")
+			}
+			if _, err := mgrB.Validate(ctx, newToken); err != nil {
+				t.Errorf("B Validate(new): %v", err)
+			}
+		})
+	}
+}

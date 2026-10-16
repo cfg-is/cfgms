@@ -2243,6 +2243,31 @@ func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
 		if !s.authorizeRecordRead(w, r, info.TenantID, "GET /api/v1/telemetry/ws/{id}", notFound) {
 			return
 		}
+		// The upgraded socket outlives the request's authentication: re-check the
+		// credential (session, API key, mTLS certificate) once per keepalive interval
+		// and cancel the request context, which makes the handler close the stream,
+		// when it is revoked, disabled or expired.
+		if recheck := requestAuthRecheck(r); recheck != nil {
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			_, interval := s.watchKeepalive()
+			go func() {
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if !recheck(ctx) {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			r = r.WithContext(ctx)
+		}
 		next.ServeHTTP(w, r)
 	})
 }

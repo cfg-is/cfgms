@@ -244,9 +244,10 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 		eidSet[eid.String()] = struct{}{}
 	}
 
-	// The session (if any) that authenticated this upgrade; re-checked once per
-	// keepalive interval below. Captured before the upgrade, while r is still valid.
-	authSession, hasAuthSession := r.Context().Value(authSessionContextKey).(authSessionRef)
+	// The credential (session, API key or mTLS certificate) that authenticated this
+	// upgrade; re-checked once per keepalive interval below. Captured before the
+	// upgrade, while r is still valid.
+	recheck := requestAuthRecheck(r)
 
 	// Upgrade the HTTP connection to a WebSocket before starting the provider
 	// subscription, so connection failures are cleanly reported.
@@ -332,9 +333,9 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-pingTicker.C:
 			// Revocation/expiry must end the stream: re-check the authenticating
-			// session against the shared store on every keepalive tick.
-			if hasAuthSession && !authSession.stillLive(ctx) {
-				_ = cw.writeClose(websocket.ClosePolicyViolation, "session no longer valid")
+			// credential against its shared store on every keepalive tick.
+			if recheck != nil && !recheck(ctx) {
+				_ = cw.writeClose(websocket.ClosePolicyViolation, "credential no longer valid")
 				return
 			}
 			if err := cw.writePing(); err != nil {

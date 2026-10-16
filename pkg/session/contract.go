@@ -31,6 +31,11 @@ var ErrSessionNotFound = errors.New("session: session not found")
 // disclosing nothing about whether a session exists on another channel.
 var ErrSessionChannelMismatch = errors.New("session: session channel mismatch")
 
+// ErrTokenRotated is returned by Store.Rotate when the presented token hash is no
+// longer the session's current token: another rotation already moved it into its
+// grace slot (or past it). The session itself is still live.
+var ErrTokenRotated = errors.New("session: token has already been rotated")
+
 // Session is the runtime record for a cfg admin session (ADR-014 §2).
 // ID holds the opaque session identifier (not the bearer token; that is never stored).
 // AbsoluteExpiresAt is measured from the original connect, capping even continuously-active sessions.
@@ -223,6 +228,16 @@ type Store interface {
 	// Update upserts tokenHash for an existing session only if session.ID still has a
 	// live row; otherwise it returns ErrSessionNotFound and writes nothing.
 	Update(ctx context.Context, tokenHash string, session *Session) error
+	// Rotate atomically replaces the session's current token. Only if session.ID still
+	// has a live row AND prevHash is its current token (no grace expiry recorded), it
+	// writes newHash as the new current token with the session's fields and records
+	// prevExpiry as the last instant prevHash is accepted. The durable record of which
+	// hash is current, and until when each prior hash is valid, is what bounds a
+	// rotated-away token on every node and across restarts. It returns
+	// ErrSessionNotFound when the session has no live row and ErrTokenRotated when the
+	// session is live but prevHash is no longer current; in both cases nothing is
+	// written. Atomic with respect to Delete of the same session ID.
+	Rotate(ctx context.Context, prevHash, newHash string, session *Session, prevExpiry time.Time) error
 	Get(ctx context.Context, tokenHash string) (*Session, error)
 	// GetByID returns any live session record for the given session ID.
 	// Used by Revoke's cache-miss branch to verify a session's Channel before

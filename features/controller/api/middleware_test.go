@@ -4262,23 +4262,23 @@ func seedTenantTree(t *testing.T, server *Server) {
 	}
 }
 
-// renewRevokedStore wraps a real MemStore and lets the first Update through
-// (Validate's activity sync) but reports the session gone from the second on
-// (Renew's rotation), reproducing a revocation landing between Validate and Renew.
+// renewRevokedStore wraps a real MemStore and lets Validate's activity sync (Update)
+// through but reports the session gone from Renew's rotation (Rotate), reproducing a
+// revocation landing between Validate and Renew.
 type renewRevokedStore struct {
 	*session.MemStore
 	mu      sync.Mutex
 	updates int
 }
 
+func (s *renewRevokedStore) Rotate(_ context.Context, _, _ string, _ *session.Session, _ time.Time) error {
+	return session.ErrSessionNotFound
+}
+
 func (s *renewRevokedStore) Update(ctx context.Context, h string, sess *session.Session) error {
 	s.mu.Lock()
 	s.updates++
-	n := s.updates
 	s.mu.Unlock()
-	if n > 1 {
-		return session.ErrSessionNotFound
-	}
 	return s.MemStore.Update(ctx, h, sess)
 }
 
