@@ -270,16 +270,21 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 }
 
 // containedPath returns absPath rebuilt as absBasePath joined with its relative path, after
-// checking with filepath.IsLocal that the relative path stays inside the base. Probes in
-// resolveMissingTail touch only this returned path, so every filesystem call on a path under
-// validation is guarded by the containment check itself. filepath.IsLocal is also stricter
-// than containmentCheck: it rejects an empty path and, on Windows, reserved device names.
+// the same containment rule as containmentCheck, then confirms the rebuilt path still starts
+// with the base. Probes in resolveMissingTail touch only this returned path, so every
+// filesystem call on a path under validation is guarded by the containment check itself.
+// filepath.IsLocal is not used: on Windows it rejects a component such as "a:b", which must
+// stay a not-yet-existing tail component.
 func containedPath(absBasePath, absPath, userPath string) (string, error) {
 	rel, err := filepath.Rel(absBasePath, absPath)
-	if err != nil || !filepath.IsLocal(rel) {
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
 	}
-	return filepath.Join(absBasePath, rel), nil
+	joined := filepath.Join(absBasePath, rel)
+	if !strings.HasPrefix(joined, absBasePath) {
+		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+	}
+	return joined, nil
 }
 
 // containmentCheck verifies that absUserPath is within absBasePath using filepath.Rel.

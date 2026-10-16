@@ -46,3 +46,21 @@ func TestOpenNoFollowRejectsSymlinkLeaf(t *testing.T) {
 		t.Fatal("openNoFollow must reject a symlink leaf")
 	}
 }
+
+// A component holding ":" (for example a repo ID like "github:owner/repo") is not a
+// valid Windows file name, so Lstat cannot find it: it is a not-yet-existing tail
+// component inside the base, not a traversal.
+func TestColonComponentIsMissingTail(t *testing.T) {
+	base := t.TempDir()
+	got, err := ValidateAndCleanPath(base, `github:test-owner\test-repo`)
+	if err != nil {
+		t.Fatalf("ValidateAndCleanPath must accept a colon component as a new tail: %v", err)
+	}
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(resolvedBase, `github:test-owner\test-repo`); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
