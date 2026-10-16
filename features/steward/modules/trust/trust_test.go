@@ -108,11 +108,18 @@ func TestControllerModePassesUnsignedBundle(t *testing.T) {
 	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeController, nil))
 }
 
-// TestBypassModePassesUnsignedBundle: bypass mode is a no-op.
-func TestBypassModePassesUnsignedBundle(t *testing.T) {
+// TestBypassModeRejectedInReleaseBuild: bypass is unavailable unless the binary
+// was built with cfgms_dev_bypass (the allowed-build case lives in
+// trust_bypass_allowed_test.go).
+func TestBypassModeRejectedInReleaseBuild(t *testing.T) {
+	if stewardtypes.ModuleTrustBypassAllowed() {
+		t.Skip("covered by trust_bypass_allowed_test.go in a cfgms_dev_bypass build")
+	}
 	b := makeTestBundle()
 	enforcer := stewardtrust.NewStewardTrustEnforcer()
-	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeBypass, nil))
+	err := enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeBypass, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unavailable in a release build")
 }
 
 // TestStrictModeAcceptsAdditionalPublisher: bundle signed by a publisher in

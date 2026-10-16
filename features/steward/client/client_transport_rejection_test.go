@@ -93,7 +93,7 @@ func TestReceiveCommand_ReportsRejectionReason(t *testing.T) {
 			setup: func(t *testing.T, h *rejectionHarness) {
 				c := rejectionCommand("seed")
 				c.Command.Term = 5
-				require.NoError(t, h.tc.checkTermFence(c))
+				require.NoError(t, admitCommandTerm(h.tc, c))
 			},
 			build: func() *cpTypes.SignedCommand { return rejectionCommand("fenced") },
 		},

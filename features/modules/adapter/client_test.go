@@ -230,7 +230,7 @@ func TestClient_Get_ModuleProcessExited(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortRuntimeDir(t))
 	b := installEchoBundle(t)
 
-	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 
 	c := adapter.NewClient(handle.Client, "echo")

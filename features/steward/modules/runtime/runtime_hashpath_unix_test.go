@@ -48,9 +48,9 @@ func TestEchoModuleLifecycleWithHashFallbackRuntimeDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(long, 0o755))
 
 	rt := runtime.NewModuleRuntime(long)
-	b := makeBypassBundle(t, echoModuleBin)
+	b := makeUnsignedBundle(t, echoModuleBin)
 
-	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 	require.NotNil(t, handle)
 

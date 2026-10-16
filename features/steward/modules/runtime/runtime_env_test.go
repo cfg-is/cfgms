@@ -81,7 +81,7 @@ func TestStart_ModuleGetsOnlyDeclaredAndBaselineEnv(t *testing.T) {
 	t.Setenv("VENDOR_A_TEST_DECLARED", "declared-value")
 
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
-	h, err := rt.Start(makeEnvBundle(t, bin, []string{"VENDOR_A_TEST_DECLARED"}), stewardtypes.ModuleTrustModeBypass, nil)
+	h, err := rt.Start(makeEnvBundle(t, bin, []string{"VENDOR_A_TEST_DECLARED"}), stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 	defer func() { _ = rt.Stop(h) }()
 
@@ -112,11 +112,11 @@ func TestStart_EnvValuesNeverLogged(t *testing.T) {
 	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	rt.SetLogger(logger)
 
-	h, err := rt.Start(makeEnvBundle(t, bin, []string{"VENDOR_A_TEST_DECLARED", "VENDOR_A_TEST_NOT_SET"}), stewardtypes.ModuleTrustModeBypass, nil)
+	h, err := rt.Start(makeEnvBundle(t, bin, []string{"VENDOR_A_TEST_DECLARED", "VENDOR_A_TEST_NOT_SET"}), stewardtypes.ModuleTrustModeController, nil)
 	require.NoError(t, err)
 	require.NoError(t, rt.Stop(h))
 
-	_, badErr := rt.Start(makeEnvBundle(t, bin, []string{"VENDOR_A_TEST_DECLARED", "BAD=NAME"}), stewardtypes.ModuleTrustModeBypass, nil)
+	_, badErr := rt.Start(makeEnvBundle(t, bin, []string{"VENDOR_A_TEST_DECLARED", "BAD=NAME"}), stewardtypes.ModuleTrustModeController, nil)
 	require.Error(t, badErr)
 
 	var seen []string
@@ -152,7 +152,7 @@ func TestStart_InvalidEnvNameRefusedBeforeExec(t *testing.T) {
 	rt := runtime.NewModuleRuntime(dir)
 
 	for _, bad := range []string{"*", "A=B", "", "1ABC", contract.SocketEnvVar} {
-		h, err := rt.Start(makeEnvBundle(t, bin, []string{bad}), stewardtypes.ModuleTrustModeBypass, nil)
+		h, err := rt.Start(makeEnvBundle(t, bin, []string{bad}), stewardtypes.ModuleTrustModeController, nil)
 		require.Error(t, err, "name %q", bad)
 		assert.Nil(t, h)
 	}

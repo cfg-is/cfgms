@@ -165,6 +165,13 @@ func ValidateConfiguration(config StewardConfig) error {
 	return nil
 }
 
+// ModuleTrustBypassAllowed reports whether this binary was built with the
+// cfgms_dev_bypass tag and so may honour module_trust.mode: bypass. It is false
+// in every release build.
+func ModuleTrustBypassAllowed() bool {
+	return moduleTrustBypassBuildAllowed
+}
+
 // ValidateModuleTrustConfig validates a ModuleTrustConfig for internal consistency.
 func ValidateModuleTrustConfig(cfg ModuleTrustConfig) error {
 	switch cfg.Mode {

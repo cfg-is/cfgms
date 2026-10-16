@@ -13,7 +13,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
@@ -42,16 +45,16 @@ func TestCheckTermFence_AcceptsAtOrAboveHighest_RejectsBelow(t *testing.T) {
 	tc := &TransportClient{logger: newTestLogger(t)}
 
 	// Seed the ratchet at term 5.
-	require.NoError(t, tc.checkTermFence(fencedCommand("seed", 5)))
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("seed", 5)))
 
 	// Equal term: accepted.
-	assert.NoError(t, tc.checkTermFence(fencedCommand("equal", 5)))
+	assert.NoError(t, admitCommandTerm(tc, fencedCommand("equal", 5)))
 
 	// Higher term: accepted, and becomes the new high-water mark.
-	assert.NoError(t, tc.checkTermFence(fencedCommand("higher", 9)))
+	assert.NoError(t, admitCommandTerm(tc, fencedCommand("higher", 9)))
 
 	// Lower than the new high-water mark: rejected.
-	err := tc.checkTermFence(fencedCommand("lower", 6))
+	err := admitCommandTerm(tc, fencedCommand("lower", 6))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommandTermFenced)
 
@@ -69,17 +72,17 @@ func TestCheckTermFence_BootstrapAcceptsMissingOrZeroTerm_AdoptsBaseline(t *test
 	tc := &TransportClient{logger: newTestLogger(t)}
 
 	// Unstamped command pre-ratchet: accepted, ratchet stays unset.
-	require.NoError(t, tc.checkTermFence(fencedCommand("unstamped-1", 0)))
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("unstamped-1", 0)))
 	tc.mu.RLock()
 	ratchetSet := tc.termRatchetSet
 	tc.mu.RUnlock()
 	assert.False(t, ratchetSet, "an unstamped command must not itself set the ratchet")
 
 	// A second unstamped command is still accepted (mid-rollout behind an older controller).
-	require.NoError(t, tc.checkTermFence(fencedCommand("unstamped-2", 0)))
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("unstamped-2", 0)))
 
 	// First stamped command: accepted, adopted as the new baseline.
-	require.NoError(t, tc.checkTermFence(fencedCommand("stamped-1", 3)))
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("stamped-1", 3)))
 	tc.mu.RLock()
 	ratchetSet = tc.termRatchetSet
 	highest := tc.highestTermSeen
@@ -95,9 +98,9 @@ func TestCheckTermFence_BootstrapAcceptsMissingOrZeroTerm_AdoptsBaseline(t *test
 func TestCheckTermFence_DowngradeAfterRatchetSet_RejectsMissingOrZeroTerm(t *testing.T) {
 	tc := &TransportClient{logger: newTestLogger(t)}
 
-	require.NoError(t, tc.checkTermFence(fencedCommand("seed", 4)))
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("seed", 4)))
 
-	err := tc.checkTermFence(fencedCommand("downgrade-attempt", 0))
+	err := admitCommandTerm(tc, fencedCommand("downgrade-attempt", 0))
 	require.Error(t, err, "an unstamped command after the ratchet is set must be refused")
 	assert.ErrorIs(t, err, ErrCommandTermFenced)
 
@@ -124,7 +127,7 @@ func TestCheckTermFence_DowngradeAfterRatchetSet_RejectsMissingOrZeroTerm(t *tes
 // treats as log-and-continue, not as a reason to tear down the connection.
 func TestReceiveCommand_FencedRejection_NeverDispatches(t *testing.T) {
 	tc := &TransportClient{logger: newTestLogger(t)}
-	require.NoError(t, tc.checkTermFence(fencedCommand("seed", 10)))
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("seed", 10)))
 
 	dispatched := false
 	dispatch := func(context.Context, *cpTypes.SignedCommand) error {
@@ -172,7 +175,7 @@ func TestCheckTermFence_ConcurrentCommands_PersistedTermNeverRegresses(t *testin
 			// Rejections are expected and legitimate here: a command whose term is
 			// below the high-water mark reached by a concurrently admitted command
 			// is exactly what the fence is for. Only the persisted outcome is asserted.
-			_ = tc.checkTermFence(fencedCommand(fmt.Sprintf("cmd-%d", term), term))
+			_ = admitCommandTerm(tc, fencedCommand(fmt.Sprintf("cmd-%d", term), term))
 		}(uint64(i))
 	}
 	close(start)
@@ -207,4 +210,79 @@ func TestReceiveCommand_AcceptedCommand_Dispatches(t *testing.T) {
 	err := tc.receiveCommand(context.Background(), cmd, dispatch)
 	require.NoError(t, err)
 	assert.Equal(t, "admitted", gotID)
+}
+
+// admitCommandTerm runs the two fence steps the way receiveCommand does for a
+// command that authenticates: compare, then commit.
+func admitCommandTerm(tc *TransportClient, sc *cpTypes.SignedCommand) error {
+	if err := tc.checkTermFence(sc); err != nil {
+		return err
+	}
+	tc.commitTermFence(sc)
+	return nil
+}
+
+// TestReceiveCommand_UnauthenticatedHighTerm_DoesNotAdvanceFence: Command.Term is
+// not covered by the command signature, so a command that fails authentication
+// must not move the ratchet, in memory or on disk (Issue #5090).
+func TestReceiveCommand_UnauthenticatedHighTerm_DoesNotAdvanceFence(t *testing.T) {
+	dir := t.TempDir()
+	tc := &TransportClient{
+		logger:       newTestLogger(t),
+		fenceRatchet: stewardconfig.NewFenceRatchet(dir),
+	}
+
+	ca, err := cert.NewCA(&cert.CAConfig{Organization: "CFGMS Test", Country: "US", ValidityDays: 1, KeySize: 2048})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+	sc, err := ca.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName: "controller.test", DNSNames: []string{"controller.test"}, ValidityDays: 1, KeySize: 2048,
+	})
+	require.NoError(t, err)
+	signer, err := signature.NewSigner(&signature.SignerConfig{PrivateKeyPEM: sc.PrivateKeyPEM, CertificatePEM: sc.CertificatePEM})
+	require.NoError(t, err)
+	verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: sc.CertificatePEM})
+	require.NoError(t, err)
+
+	h, err := commands.New(&commands.Config{
+		StewardID: "steward-fence-test",
+		OnStatus:  func(context.Context, *cpTypes.Event) {},
+		Logger:    newTestLogger(t),
+		Verifier:  verifier,
+	})
+	require.NoError(t, err)
+	t.Cleanup(h.Wait)
+
+	sign := func(id string, term uint64) *cpTypes.SignedCommand {
+		cmd := fencedCommand(id, term).Command
+		cmd.Params = map[string]interface{}{}
+		raw := cpTypes.InterfaceParamsToStringMap(cmd.Params)
+		b, err := cpTypes.CommandSigningBytes(&cmd, raw)
+		require.NoError(t, err)
+		sig, err := signer.Sign(b)
+		require.NoError(t, err)
+		return &cpTypes.SignedCommand{Command: cmd, Signature: sig}
+	}
+
+	// Establish the mark at term 5 with an authenticated command.
+	require.NoError(t, tc.receiveCommand(context.Background(), sign("seed", 5), h.HandleCommand))
+
+	// An attacker without the signing key sends an unsigned command carrying
+	// an enormous term.
+	forged := fencedCommand("forged", 1<<60)
+	err = tc.receiveCommand(context.Background(), forged, h.HandleCommand)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, commands.ErrUnauthenticatedCommand)
+
+	tc.mu.RLock()
+	highest := tc.highestTermSeen
+	tc.mu.RUnlock()
+	assert.Equal(t, uint64(5), highest)
+	set, persisted, err := stewardconfig.NewFenceRatchet(dir).Load()
+	require.NoError(t, err)
+	assert.True(t, set)
+	assert.Equal(t, uint64(5), persisted)
+
+	// A correctly signed command at the old term is still accepted.
+	require.NoError(t, tc.receiveCommand(context.Background(), sign("legit", 5), h.HandleCommand))
 }

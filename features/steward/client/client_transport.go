@@ -1136,6 +1136,10 @@ func (c *TransportClient) receiveCommand(
 		c.reportRejection(ctx, sc, err)
 		return err
 	}
+	// dispatch returned nil, so the command passed signature, steward ID,
+	// timestamp, replay, size and script pre-flight checks. Only now may its
+	// (unsigned) term move the ratchet.
+	c.commitTermFence(sc)
 	return nil
 }
 
@@ -1225,10 +1229,10 @@ func (c *TransportClient) reportRejection(ctx context.Context, sc *cpTypes.Signe
 //     Raft terms are never 0 once a leader has been elected), and a stamped one
 //     is accepted only when its term is at or above the high-water mark.
 //
-// When the ratchet advances, the new state is persisted to fenceRatchet so it
-// survives a steward process restart (#3437). Persistence failures are logged
-// and do not block command delivery — the in-memory state remains authoritative
-// for the lifetime of this process.
+// checkTermFence is the compare step only: it never changes ratchet state.
+// Command.Term is not covered by the command signature, so an unauthenticated
+// command could otherwise raise the mark and fence out every legitimate command.
+// The ratchet advances in commitTermFence, after the command has authenticated.
 //
 // Every value in the rejection log line is attacker-influenced (a compromised or
 // downgraded controller chooses Command.ID/Type/Term freely — Term is transport-
@@ -1257,20 +1261,7 @@ func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 	}
 
 	if !ratchetSet || term >= highestSeen {
-		c.termRatchetSet = true
-		c.highestTermSeen = term
 		c.mu.Unlock()
-		// Persist the updated ratchet state so it survives a restart (#3437).
-		// Done outside c.mu to avoid holding the client lock during file I/O:
-		// inbound commands run one goroutine per command, so several accepted
-		// commands can reach Save concurrently and in any order. FenceRatchet.Save
-		// is the serialization point — it takes its own mutex, writes through a
-		// uniquely named temp file, and refuses to lower the stored term — so the
-		// persisted high-water mark cannot regress or be truncated by that race.
-		if err := c.fenceRatchet.Save(true, term); err != nil {
-			c.logger.Warn("failed to persist fence ratchet state; in-memory state is still authoritative",
-				"error", logging.SanitizeLogValue(err.Error()))
-		}
 		return nil
 	}
 	c.mu.Unlock()
@@ -1283,6 +1274,38 @@ func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 	)
 	return fmt.Errorf("%w: command %q term %d below highest seen %d",
 		ErrCommandTermFenced, sc.Command.ID, term, highestSeen)
+}
+
+// commitTermFence advances the ratchet to the term of a command that has passed
+// authentication (commands.Handler.HandleCommand returned nil). The new state is
+// persisted to fenceRatchet so it survives a steward process restart (#3437).
+// Persistence failures are logged and do not block command delivery — the
+// in-memory state remains authoritative for the lifetime of this process.
+func (c *TransportClient) commitTermFence(sc *cpTypes.SignedCommand) {
+	term := sc.Command.Term
+	if term == 0 {
+		return
+	}
+
+	c.mu.Lock()
+	if c.termRatchetSet && term < c.highestTermSeen {
+		// A concurrent authenticated command already moved the mark past this one.
+		c.mu.Unlock()
+		return
+	}
+	c.termRatchetSet = true
+	c.highestTermSeen = term
+	c.mu.Unlock()
+	// Persist outside c.mu to avoid holding the client lock during file I/O:
+	// inbound commands run one goroutine per command, so several accepted
+	// commands can reach Save concurrently and in any order. FenceRatchet.Save
+	// is the serialization point — it takes its own mutex, writes through a
+	// uniquely named temp file, and refuses to lower the stored term — so the
+	// persisted high-water mark cannot regress or be truncated by that race.
+	if err := c.fenceRatchet.Save(true, term); err != nil {
+		c.logger.Warn("failed to persist fence ratchet state; in-memory state is still authoritative",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // setupCommandHandler creates and configures the command handler with all command types.

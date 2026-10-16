@@ -193,7 +193,7 @@ func TestLoadModule_BundleBranch_LoadsInstalledBundle_WhenNoBuiltinMatches(t *te
 
 	f := newTestFactory()
 	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
-	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	f.SetModuleRuntime(rt, config.ModuleTrustModeController, nil)
 	t.Cleanup(func() { f.UnloadAllModules() })
 
 	instance, err := f.LoadModule("widget")
@@ -224,7 +224,7 @@ func TestLoadModule_BuiltinWinsOverBundle_WhenBothExist(t *testing.T) {
 
 	f := newTestFactory()
 	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
-	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	f.SetModuleRuntime(rt, config.ModuleTrustModeController, nil)
 	t.Cleanup(func() { f.UnloadAllModules() })
 
 	instance, err := f.LoadModule("file")
@@ -257,7 +257,7 @@ func TestLoadModule_NoBundleDirectory_BehavesLikeToday(t *testing.T) {
 
 	f := newTestFactory()
 	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
-	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	f.SetModuleRuntime(rt, config.ModuleTrustModeController, nil)
 
 	_, err := f.LoadModule("totally-unknown-module")
 	require.Error(t, err)
@@ -397,7 +397,7 @@ func TestUnloadAllModules_StopsBundleModuleProcess(t *testing.T) {
 
 	f := newTestFactory()
 	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
-	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	f.SetModuleRuntime(rt, config.ModuleTrustModeController, nil)
 
 	instance, err := f.LoadModule("widget")
 	require.NoError(t, err)
@@ -425,7 +425,7 @@ func TestUnloadModule_StopsSingleBundleModuleProcess(t *testing.T) {
 
 	f := newTestFactory()
 	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
-	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	f.SetModuleRuntime(rt, config.ModuleTrustModeController, nil)
 
 	instance, err := f.LoadModule("widget")
 	require.NoError(t, err)
@@ -560,7 +560,7 @@ func loadWidget(t *testing.T, installRoot string) error {
 	t.Helper()
 	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
 	f := newTestFactory()
-	f.SetModuleRuntime(moduleruntime.NewModuleRuntime(shortRuntimeDir(t)), config.ModuleTrustModeBypass, nil)
+	f.SetModuleRuntime(moduleruntime.NewModuleRuntime(shortRuntimeDir(t)), config.ModuleTrustModeController, nil)
 	t.Cleanup(func() { f.UnloadAllModules() })
 	_, err := f.LoadModule("widget")
 	return err
