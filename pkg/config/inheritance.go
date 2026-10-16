@@ -338,6 +338,17 @@ func (ir *InheritanceResolver) authorizeTenant(ctx context.Context, tenantID str
 	return fmt.Errorf("tenant %q is outside the caller's authorized scope", tenantID)
 }
 
+// tenantLeafName returns the document name for a tenant-level config. Tenant IDs
+// may be path-style ("fleet-root/fleet-child-a"), but a document name is a single
+// path-safe leaf and the document is already scoped by its ConfigKey.TenantID, so
+// the last path segment names it.
+func tenantLeafName(tenantID string) string {
+	if i := strings.LastIndex(tenantID, "/"); i >= 0 {
+		return tenantID[i+1:]
+	}
+	return tenantID
+}
+
 // applyConfigurationLevel applies configuration from a specific hierarchy level.
 // source is the pre-snapshotted ConfigSourceInfo for this tenant, resolved once by
 // ResolveConfiguration before the cascade loop. In Phase 1 the router always returns
@@ -355,10 +366,10 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 		configName = "global"
 	case LevelClient:
 		configNamespace = "client-policies"
-		configName = tenantID
+		configName = tenantLeafName(tenantID)
 	case LevelGroup:
 		configNamespace = "group-policies"
-		configName = fmt.Sprintf("%s-groups", tenantID)
+		configName = fmt.Sprintf("%s-groups", tenantLeafName(tenantID))
 	default:
 		return nil // Skip unknown levels
 	}

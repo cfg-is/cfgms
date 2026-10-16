@@ -1560,3 +1560,39 @@ func TestResolveConfiguration_ClusterPoliciesNotFound_Succeeds(t *testing.T) {
 	_, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
 }
+
+// TestResolveConfiguration_HierarchicalTenantIDWithOnlyAncestorAndDeviceConfig covers a
+// steward under a path-style tenant ID ("fleet-root/fleet-child-a") with no client- or
+// group-level document. The tenant ID cannot be a leaf document name, so the
+// client/group levels must resolve as absent rather than fail on key validation.
+func TestResolveConfiguration_HierarchicalTenantIDWithOnlyAncestorAndDeviceConfig(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+
+	ts := sm.GetTenantStore()
+	for _, td := range []*business.TenantData{
+		{ID: "fleet-root", Name: "Fleet Root", Status: business.TenantStatusActive},
+		{ID: "fleet-root/fleet-child-a", Name: "Fleet Child A", ParentID: "fleet-root", Status: business.TenantStatusActive},
+	} {
+		require.NoError(t, ts.CreateTenant(ctx, td))
+	}
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "fleet-root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{Steward: stewardconfig.StewardSettings{ConvergeInterval: "45m"}}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "fleet-root/fleet-child-a", Namespace: "stewards", Name: "steward-1"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{{Name: "device-resource", Module: "file"}},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "fleet-root/fleet-child-a", "steward-1")
+	require.NoError(t, err)
+	assert.Equal(t, "45m", effective.Config.Steward.ConvergeInterval, "ancestor level must still cascade")
+	require.Len(t, effective.Config.Resources, 1)
+	assert.Equal(t, "device-resource", effective.Config.Resources[0].Name)
+}
