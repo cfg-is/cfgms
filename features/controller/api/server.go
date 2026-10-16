@@ -1006,7 +1006,12 @@ func (s *Server) setupRouter() {
 		s.logger.Error("Embedded SPA assets unavailable; refusing to route \"/\" (web UI will be unavailable)",
 			"error", logging.SanitizeLogValue(spaErr.Error()))
 	} else {
-		s.router.PathPrefix("/").Handler(spa)
+		// The catch-all must not match /api paths: a method-less match would clear
+		// mux's method-mismatch state, turning a wrong method on an API route into the
+		// SPA handler's 404 instead of the router's JSON 405 (Issue #5022).
+		s.router.PathPrefix("/").MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
+			return !strings.HasPrefix(r.URL.Path, "/api/")
+		}).Handler(spa)
 	}
 }
 

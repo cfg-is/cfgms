@@ -212,6 +212,9 @@ type HealthStatus struct {
 	// Overall status (healthy, degraded, unhealthy)
 	Status string `json:"status"`
 
+	// Controller build version (served only on the authenticated detailed endpoint)
+	Version string `json:"version"`
+
 	// Timestamp
 	Timestamp time.Time `json:"timestamp"`
 

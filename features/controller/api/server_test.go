@@ -332,7 +332,8 @@ func TestHealthEndpoint(t *testing.T) {
 	healthData, ok := response.Data.(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "healthy", healthData["status"])
-	assert.Contains(t, healthData, "services")
+	assert.NotContains(t, healthData, "services", "unauthenticated health must disclose status only")
+	assert.NotContains(t, healthData, "version")
 }
 
 func TestAPIKeyAuthentication(t *testing.T) {

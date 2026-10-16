@@ -5869,15 +5869,25 @@ validate_dispatch_table() {
         table_groups+=("$grp")
     done < <(grep -oE '^[[:space:]]+"test_[a-zA-Z0-9_]+:[a-zA-Z-]+"' "$self_script" | tr -d ' "')
 
-    local fn grp count
+    # Membership and counts use associative arrays, not `printf | grep -q`:
+    # under `set -o pipefail`, grep -q exits on its first match and printf
+    # (line-buffered) can then take SIGPIPE, so the pipeline reports 141 and
+    # a defined function is misreported as "not a defined function" under load.
+    local fn grp
+    local -A defined_set=() table_count=()
     local -a missing=() dup=() extra=() bad_groups=()
     for fn in "${defined_fns[@]}"; do
-        count=$(printf '%s\n' "${table_fns[@]}" | grep -Fxc "$fn")
-        [[ "$count" -eq 0 ]] && missing+=("$fn")
-        [[ "$count" -gt 1 ]] && dup+=("$fn")
+        defined_set["$fn"]=1
     done
     for fn in "${table_fns[@]}"; do
-        printf '%s\n' "${defined_fns[@]}" | grep -Fxq "$fn" || extra+=("$fn")
+        table_count["$fn"]=$(( ${table_count["$fn"]:-0} + 1 ))
+    done
+    for fn in "${defined_fns[@]}"; do
+        [[ ${table_count["$fn"]:-0} -eq 0 ]] && missing+=("$fn")
+        [[ ${table_count["$fn"]:-0} -gt 1 ]] && dup+=("$fn")
+    done
+    for fn in "${table_fns[@]}"; do
+        [[ -n "${defined_set["$fn"]:-}" ]] || extra+=("$fn")
     done
     for grp in "${table_groups[@]}"; do
         case "$grp" in

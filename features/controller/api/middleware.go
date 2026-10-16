@@ -290,16 +290,51 @@ func (s *Server) notFoundHandler() http.Handler {
 	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			// mux reports ErrNotFound rather than ErrMethodMismatch when a method
+			// mismatch happens inside a nested /api/v1 subrouter, so recover the
+			// 405 here by probing which methods the path does serve (Issue #5022).
+			if allowed := s.allowedMethodsForPath(r); len(allowed) > 0 {
+				w.Header().Set("Allow", strings.Join(allowed, ", "))
+				s.writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed", "METHOD_NOT_ALLOWED")
+				return
+			}
+			s.writeErrorResponse(w, http.StatusNotFound, "Not found", "NOT_FOUND")
+			return
+		}
 		http.NotFound(w, r)
 	}))
+}
+
+// allowedMethodsForPath returns the methods for which the root router has a real
+// route matching r's path. It is only consulted after the router found no route
+// for r's own method.
+func (s *Server) allowedMethodsForPath(r *http.Request) []string {
+	var allowed []string
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		if m == r.Method {
+			continue
+		}
+		probe := r.Clone(r.Context())
+		probe.Method = m
+		var match mux.RouteMatch
+		if s.router.Match(probe, &match) && match.MatchErr == nil {
+			allowed = append(allowed, m)
+		}
+	}
+	return allowed
 }
 
 // methodNotAllowedHandler is the router.MethodNotAllowedHandler counterpart to
 // notFoundHandler (Issue #4183) — same unreachable-by-Use() gap, same fix.
 func (s *Server) methodNotAllowedHandler() http.Handler {
-	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			s.writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed", "METHOD_NOT_ALLOWED")
+			return
+		}
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}))
 }
@@ -1540,6 +1575,14 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, statusCode int, messa
 	s.encodeJSONBody(w, errorResponse, "error")
 }
 
+// writeStatusError writes the JSON ErrorResponse for handlers that report a bare
+// status and fixed message (Issue #5022). The code is derived from the status;
+// message must be a fixed string, never a wrapped internal error.
+func (s *Server) writeStatusError(w http.ResponseWriter, statusCode int, message string) {
+	code := strings.ToUpper(strings.ReplaceAll(http.StatusText(statusCode), " ", "_"))
+	s.writeErrorResponse(w, statusCode, message, code)
+}
+
 // encodeJSONBody serializes payload to w and reports an encode failure instead of
 // discarding it. Every rejection path in this file routes through here so that a
 // truncated or unwritable security response is visible in the logs — the same
@@ -2095,7 +2138,7 @@ func (s *Server) generateRequestID() string {
 	return uuid.New().String()
 }
 
-// writeAuthorizationError writes an authorization error response with decision metadata
+// writeAuthorizationError writes a 403 carrying only the code, message and missing permission_id
 func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code string, decision *AuthorizationDecision) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
@@ -2104,8 +2147,10 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 		Error: &APIError{
 			Code:    code,
 			Message: message,
+			// Only the missing permission is disclosed; the full decision (subject,
+			// tenant, reason, timing) is recorded by auditAuthorizationDecision.
 			Details: map[string]interface{}{
-				"authorization_decision": decision,
+				"permission_id": decision.PermissionID,
 			},
 		},
 		Timestamp: time.Now().UTC(),

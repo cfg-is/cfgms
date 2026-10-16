@@ -142,23 +142,24 @@ func claimsEmpty(c eginterfaces.IdentityClaims) bool {
 // Eids resolved outside the caller's tenant subtree are silently dropped (ADR-022 §7).
 func (s *Server) handleCasesIntakeAssist(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
-		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "entity graph unavailable")
 		return
 	}
 
 	var claims eginterfaces.IdentityClaims
 	if err := json.NewDecoder(r.Body).Decode(&claims); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if claimsEmpty(claims) {
-		http.Error(w, "at least one identity claim is required", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "at least one identity claim is required")
 		return
 	}
 
 	if err := validateIntakeClaims(claims); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		s.logger.Debug("Intake claims rejected", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeStatusError(w, http.StatusBadRequest, "invalid identity claims")
 		return
 	}
 
@@ -167,7 +168,7 @@ func (s *Server) handleCasesIntakeAssist(w http.ResponseWriter, r *http.Request)
 		s.logger.Error("handleCasesIntakeAssist: resolve failed",
 			"error", logging.SanitizeLogValue(err.Error()),
 		)
-		http.Error(w, "resolve failed", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "resolve failed")
 		return
 	}
 
@@ -180,7 +181,7 @@ func (s *Server) handleCasesIntakeAssist(w http.ResponseWriter, r *http.Request)
 			s.logger.Error("handleCasesIntakeAssist: entity access check failed",
 				"error", logging.SanitizeLogValue(accessErr.Error()),
 			)
-			http.Error(w, "resolve failed", http.StatusInternalServerError)
+			s.writeStatusError(w, http.StatusInternalServerError, "resolve failed")
 			return
 		}
 		// An eid outside the caller's tenant cut, or in a client tenant a

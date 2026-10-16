@@ -132,7 +132,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "steward_store_unavailable"})
-		http.Error(w, "steward store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "steward store unavailable")
 		return
 	}
 
@@ -143,7 +143,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 				business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
 				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
-			http.Error(w, "device not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "device not found")
 			return
 		}
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
@@ -151,7 +151,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_error"})
-		http.Error(w, "failed to look up device", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to look up device")
 		return
 	}
 
@@ -161,7 +161,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
 			map[string]interface{}{"decision": "denied", "reason": "revoked"})
-		http.Error(w, "device is revoked", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "device is revoked")
 		return
 	}
 
@@ -174,7 +174,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_store_unavailable"})
-		http.Error(w, "nonce store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "nonce store unavailable")
 		return
 	}
 
@@ -186,14 +186,14 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_generation_failed"})
-		http.Error(w, "failed to generate challenge", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to generate challenge")
 		return
 	}
 
 	issuedAt := time.Now().UTC()
 	issuedAtNanos := issuedAt.UnixNano()
 	if issuedAtNanos <= 0 {
-		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to issue challenge")
 		return
 	}
 	// #nosec G115 -- current UTC UnixNano is checked positive above; the
@@ -208,7 +208,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	})
 	if err != nil {
 		s.logger.Error("Failed to marshal nonce entry", "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to issue challenge")
 		return
 	}
 	if err := s.nonceStore.PutNonce(r.Context(), nonceKey, entryBytes, nonceTTL); err != nil {
@@ -217,7 +217,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_write_failed"})
-		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to issue challenge")
 		return
 	}
 
@@ -261,12 +261,12 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 
 	var req RefreshCompleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if s.stewardStore == nil {
-		http.Error(w, "steward store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "steward store unavailable")
 		return
 	}
 
@@ -278,7 +278,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 				business.AuditEventSecurityEvent, "refresh_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
 				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
-			http.Error(w, "device not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "device not found")
 			return
 		}
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
@@ -286,7 +286,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_error"})
-		http.Error(w, "failed to look up device", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to look up device")
 		return
 	}
 
@@ -296,7 +296,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
 			map[string]interface{}{"decision": "denied", "reason": "revoked"})
-		http.Error(w, "device is revoked", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "device is revoked")
 		return
 	}
 
@@ -311,17 +311,17 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	// nonce operation or certificate is signed, mirroring the registration
 	// handler's same two checks (handlers_registration.go handleRegister).
 	if req.CSRPEM == "" {
-		http.Error(w, "csr_pem is required", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "csr_pem is required")
 		return
 	}
 	if containsPrivateKeyMaterial(req.CSRPEM) {
-		http.Error(w, "private key material is not accepted", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "private key material is not accepted")
 		return
 	}
 	if _, err := parseAndVerifyCSR(req.CSRPEM); err != nil {
 		s.logger.Warn("Rejected invalid certificate signing request at refresh complete",
 			"error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "invalid certificate signing request", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid certificate signing request")
 		return
 	}
 
@@ -350,7 +350,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 				business.AuditEventSystemEvent, "refresh_error",
 				business.AuditResultError, business.AuditSeverityMedium,
 				map[string]interface{}{"reason": "policy_store_error"})
-			http.Error(w, "failed to get refresh policy", http.StatusInternalServerError)
+			s.writeStatusError(w, http.StatusInternalServerError, "failed to get refresh policy")
 			return
 		}
 		s.handleRefreshByPolicy(w, r, record, deviceID, req.Provenance, req.CSRPEM, policy)
@@ -369,7 +369,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_store_unavailable"})
-		http.Error(w, "nonce store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "nonce store unavailable")
 		return false
 	}
 
@@ -386,7 +386,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_read_failed"})
-		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "internal error reading challenge")
 		return false
 	}
 	if !found {
@@ -394,7 +394,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_not_found"})
-		http.Error(w, "challenge expired or not found", http.StatusUnauthorized)
+		s.writeStatusError(w, http.StatusUnauthorized, "challenge expired or not found")
 		return false
 	}
 	var nonce refreshNonceEntry
@@ -403,7 +403,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_type_error"})
-		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "internal error reading challenge")
 		return false
 	}
 
@@ -422,7 +422,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 				"stored_key_algorithm":  string(storedAlg),
 				"request_key_algorithm": logging.SanitizeLogValue(reqKeyAlgorithm),
 			})
-		http.Error(w, "proof-of-possession verification failed", http.StatusUnauthorized)
+		s.writeStatusError(w, http.StatusUnauthorized, "proof-of-possession verification failed")
 		return false
 	}
 
@@ -433,7 +433,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_expired_issuedAt"})
-		http.Error(w, "challenge nonce has expired", http.StatusUnauthorized)
+		s.writeStatusError(w, http.StatusUnauthorized, "challenge nonce has expired")
 		return false
 	}
 
@@ -444,7 +444,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "invalid_nonce_encoding"})
-		http.Error(w, "invalid nonce encoding", http.StatusUnauthorized)
+		s.writeStatusError(w, http.StatusUnauthorized, "invalid nonce encoding")
 		return false
 	}
 
@@ -454,7 +454,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "invalid_signature_encoding"})
-		http.Error(w, "invalid signature encoding", http.StatusUnauthorized)
+		s.writeStatusError(w, http.StatusUnauthorized, "invalid signature encoding")
 		return false
 	}
 
@@ -465,7 +465,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityHigh,
 			map[string]interface{}{"reason": "no_identity_key"})
-		http.Error(w, "device has no identity key registered", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "device has no identity key registered")
 		return false
 	}
 
@@ -482,7 +482,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical,
 			map[string]interface{}{"reason": "invalid_pop"})
-		http.Error(w, "proof-of-possession verification failed", http.StatusUnauthorized)
+		s.writeStatusError(w, http.StatusUnauthorized, "proof-of-possession verification failed")
 		return false
 	}
 
@@ -506,22 +506,22 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 
 	var req RefreshClaimRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PendingID == "" {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if s.stewardStore == nil || s.pendingRefreshStore == nil {
-		http.Error(w, "refresh stores unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "refresh stores unavailable")
 		return
 	}
 
 	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), deviceID)
 	if err != nil {
 		if err == business.ErrStewardNotFound {
-			http.Error(w, "device not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "device not found")
 			return
 		}
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to look up device", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to look up device")
 		return
 	}
 	if record.Status == business.StewardStatusRevoked {
@@ -529,7 +529,7 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSecurityEvent, "refresh_claim_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
 			map[string]interface{}{"decision": "denied", "reason": "revoked"})
-		http.Error(w, "device is revoked", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "device is revoked")
 		return
 	}
 	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.KeyAlgorithm, req.IssuedAt) {
@@ -539,24 +539,24 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 	entry, err := s.pendingRefreshStore.GetPendingRefreshByID(r.Context(), req.PendingID)
 	if err != nil {
 		if err == business.ErrPendingRefreshNotFound {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
 		s.logger.Error("Failed to get pending refresh", "pending_id", logging.SanitizeLogValue(req.PendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to get pending refresh")
 		return
 	}
 	// The entry must belong to the device that just proved possession; another
 	// device's pending ID is indistinguishable from an unknown one.
 	if entry.DeviceID != deviceID || entry.TenantID != record.TenantID {
-		http.Error(w, "pending refresh not found", http.StatusNotFound)
+		s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 		return
 	}
 
 	switch entry.Status {
 	case business.PendingRefreshStatusPending:
 		if time.Now().UTC().After(entry.ExpiresAt) {
-			http.Error(w, "pending refresh expired", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh expired")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -566,7 +566,7 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	case business.PendingRefreshStatusApproved:
 		if len(entry.ClaimBundle) == 0 {
-			http.Error(w, "approved refresh has no certificate bundle", http.StatusInternalServerError)
+			s.writeStatusError(w, http.StatusInternalServerError, "approved refresh has no certificate bundle")
 			return
 		}
 		// Compare-and-swap approved -> claimed: of two racing claims exactly one
@@ -574,11 +574,11 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 		claimed, err := s.pendingRefreshStore.ClaimApprovedRefresh(r.Context(), entry.PendingID)
 		if err != nil {
 			s.logger.Error("Failed to mark refresh claimed", "pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(err.Error()))
-			http.Error(w, "failed to claim refresh", http.StatusInternalServerError)
+			s.writeStatusError(w, http.StatusInternalServerError, "failed to claim refresh")
 			return
 		}
 		if !claimed {
-			http.Error(w, "pending refresh not available", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not available")
 			return
 		}
 		s.rebaselineProvenance(r.Context(), record, deviceID, entry.PendingID, req.Provenance)
@@ -594,9 +594,9 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("Failed to write refresh claim bundle", "error", logging.SanitizeLogValue(err.Error()))
 		}
 	case business.PendingRefreshStatusRejected:
-		http.Error(w, "refresh rejected", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "refresh rejected")
 	default: // expired, claimed
-		http.Error(w, "pending refresh not available", http.StatusNotFound)
+		s.writeStatusError(w, http.StatusNotFound, "pending refresh not available")
 	}
 }
 
@@ -657,7 +657,7 @@ func (s *Server) handleRefreshByPolicy(
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityHigh,
 			map[string]interface{}{"reason": "policy_reject", "decision": "rejected"})
-		http.Error(w, "refresh rejected by tenant policy", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "refresh rejected by tenant policy")
 
 	case "auto_accept":
 		// Only compare provenance when a baseline exists. A missing baseline (first
@@ -681,7 +681,7 @@ func (s *Server) handleRefreshByPolicy(
 				business.AuditEventSystemEvent, "refresh_error",
 				business.AuditResultError, business.AuditSeverityMedium,
 				map[string]interface{}{"reason": "cert_issuance_failed"})
-			http.Error(w, "failed to issue certificate", http.StatusInternalServerError)
+			s.writeStatusError(w, http.StatusInternalServerError, "failed to issue certificate")
 			return
 		}
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
@@ -713,7 +713,7 @@ func (s *Server) handleRefreshQueueEntry(
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "pending_store_unavailable"})
-		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "pending refresh store unavailable")
 		return
 	}
 
@@ -742,7 +742,7 @@ func (s *Server) handleRefreshQueueEntry(
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "pending_store_write_failed"})
-		http.Error(w, "failed to queue refresh request", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to queue refresh request")
 		return
 	}
 
@@ -941,7 +941,7 @@ func (s *Server) pendingRefreshHostname(ctx context.Context, e *business.Pending
 // Requires "refresh:list-pending" permission.
 func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Request) {
 	if s.pendingRefreshStore == nil {
-		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "pending refresh store unavailable")
 		return
 	}
 
@@ -960,7 +960,7 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 	entries, err := s.pendingRefreshStore.ListPendingRefresh(r.Context(), tenantID)
 	if err != nil {
 		s.logger.Error("Failed to list pending refreshes", "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to list pending refreshes", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to list pending refreshes")
 		return
 	}
 	scoped := make([]*business.PendingRefreshEntry, 0, len(entries))
@@ -1005,23 +1005,23 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if s.pendingRefreshStore == nil {
-		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "pending refresh store unavailable")
 		return
 	}
 
 	entry, err := s.pendingRefreshStore.GetPendingRefreshByID(r.Context(), pendingID)
 	if err != nil {
 		if err == business.ErrPendingRefreshNotFound {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
 		s.logger.Error("Failed to get pending refresh", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to get pending refresh")
 		return
 	}
 
 	if entry.Status != business.PendingRefreshStatusPending {
-		http.Error(w, "refresh request is not in pending state", http.StatusConflict)
+		s.writeStatusError(w, http.StatusConflict, "refresh request is not in pending state")
 		return
 	}
 
@@ -1030,7 +1030,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers only; a root caller passes authorizeTenantAccess below, refused as 404 like every other outcome
 		if !s.tenantSubtreeContains(r.Context(), callerTenant, entry.TenantID) {
 			// 404 to avoid disclosing existence of pending refreshes across tenants.
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
 	}
@@ -1047,17 +1047,17 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	// principal, Issue #4337), so a bound root-scope caller without the marker is covered.
 	if principal, _ := r.Context().Value(principalContextKey).(*Principal); subjectToTenantCrossingBoundary(principal) {
 		if s.tenantManager == nil {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
 		if s.authorizeTenantAccess(r.Context(), principal, entry.TenantID) != tenantAuthAllowed {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
 	}
 
 	if s.stewardStore == nil {
-		http.Error(w, "steward store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "steward store unavailable")
 		return
 	}
 
@@ -1072,7 +1072,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 				business.AuditEventSystemEvent, "refresh_admin_approve_error",
 				business.AuditResultError, business.AuditSeverityMedium,
 				map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "steward_not_found"})
-			http.Error(w, "steward not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "steward not found")
 			return
 		}
 		s.logger.Error("Failed to get steward for refresh approval", "device_id", logging.SanitizeLogValue(entry.DeviceID), "error", logging.SanitizeLogValue(err.Error()))
@@ -1080,7 +1080,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSystemEvent, "refresh_admin_approve_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "store_error"})
-		http.Error(w, "failed to get steward", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to get steward")
 		return
 	}
 
@@ -1094,7 +1094,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSecurityEvent, "refresh_admin_approve_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
 			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "decision": "denied", "reason": "revoked"})
-		http.Error(w, "device is revoked", http.StatusForbidden)
+		s.writeStatusError(w, http.StatusForbidden, "device is revoked")
 		return
 	}
 
@@ -1105,7 +1105,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSystemEvent, "refresh_admin_approve_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "cert_issuance_failed"})
-		http.Error(w, "failed to issue certificate", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to issue certificate")
 		return
 	}
 
@@ -1114,19 +1114,19 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	bundle, err := json.Marshal(certResp)
 	if err != nil {
 		s.logger.Error("Failed to marshal claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "internal error serializing cert bundle", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "internal error serializing cert bundle")
 		return
 	}
 
 	if err := s.pendingRefreshStore.StoreClaimBundle(r.Context(), pendingID, bundle); err != nil {
 		s.logger.Error("Failed to store claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to store claim bundle", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to store claim bundle")
 		return
 	}
 
 	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusApproved); err != nil {
 		s.logger.Error("Failed to update refresh status to approved", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to update refresh status", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to update refresh status")
 		return
 	}
 
@@ -1167,35 +1167,35 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if s.pendingRefreshStore == nil {
-		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "pending refresh store unavailable")
 		return
 	}
 
 	entry, err := s.pendingRefreshStore.GetPendingRefreshByID(r.Context(), pendingID)
 	if err != nil {
 		if err == business.ErrPendingRefreshNotFound {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
 		s.logger.Error("Failed to get pending refresh for rejection", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to get pending refresh")
 		return
 	}
 
 	if entry.Status != business.PendingRefreshStatusPending {
-		http.Error(w, "refresh request is not in pending state", http.StatusConflict)
+		s.writeStatusError(w, http.StatusConflict, "refresh request is not in pending state")
 		return
 	}
 
 	// Cross-tenant: a scoped caller may only reject refreshes within their tenant hierarchy.
 	if !s.isAuthorizedForTenant(r.Context(), callerTenantScope(r), entry.TenantID, "POST /api/v1/stewards/refresh/{pending_id}/reject") {
-		http.Error(w, "pending refresh not found", http.StatusNotFound)
+		s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 		return
 	}
 
 	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusRejected); err != nil {
 		s.logger.Error("Failed to update refresh status to rejected", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to update refresh status", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to update refresh status")
 		return
 	}
 
@@ -1221,20 +1221,20 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		if !s.tenantSubtreeContains(r.Context(), callerTenant, tenantID) {
-			http.Error(w, "tenant not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "tenant not found")
 			return
 		}
 	}
 
 	if s.refreshPolicyStore == nil {
-		http.Error(w, "refresh policy store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "refresh policy store unavailable")
 		return
 	}
 
 	policy, err := s.refreshPolicyStore.GetPolicy(r.Context(), tenantID)
 	if err != nil {
 		s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to get refresh policy", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to get refresh policy")
 		return
 	}
 
@@ -1256,26 +1256,26 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		if !s.tenantSubtreeContains(r.Context(), callerTenant, tenantID) {
-			http.Error(w, "tenant not found", http.StatusNotFound)
+			s.writeStatusError(w, http.StatusNotFound, "tenant not found")
 			return
 		}
 	}
 
 	var req AdminRefreshPolicyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	switch req.Mode {
 	case "auto_accept", "require_approval", "reject":
 	default:
-		http.Error(w, "invalid mode: must be auto_accept, require_approval, or reject", http.StatusBadRequest)
+		s.writeStatusError(w, http.StatusBadRequest, "invalid mode: must be auto_accept, require_approval, or reject")
 		return
 	}
 
 	if s.refreshPolicyStore == nil {
-		http.Error(w, "refresh policy store unavailable", http.StatusServiceUnavailable)
+		s.writeStatusError(w, http.StatusServiceUnavailable, "refresh policy store unavailable")
 		return
 	}
 
@@ -1286,7 +1286,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := s.refreshPolicyStore.SetPolicy(r.Context(), policy); err != nil {
 		s.logger.Error("Failed to set refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "failed to set refresh policy", http.StatusInternalServerError)
+		s.writeStatusError(w, http.StatusInternalServerError, "failed to set refresh policy")
 		return
 	}
 

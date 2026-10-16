@@ -248,9 +248,7 @@ func TestHandleHealth_ReturnsDegradedWhenDraining(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
 	data, ok := envelope["data"].(map[string]interface{})
 	require.True(t, ok, "response must have a data field")
-	services, ok := data["services"].(map[string]interface{})
-	require.True(t, ok, "data must have a services field")
-	assert.Equal(t, "draining", services["drain"])
+	assert.NotContains(t, data, "services", "drain detail must not be disclosed unauthenticated")
 	assert.Equal(t, "degraded", data["status"])
 }
 

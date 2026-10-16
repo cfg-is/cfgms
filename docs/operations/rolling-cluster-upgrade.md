@@ -53,7 +53,7 @@ curl -o /dev/null -w "%{http_code}\n" \
 # Expected: 503
 ```
 
-The `"services"` field in the response body will include `"drain": "draining"`.
+The response body reports `"status": "degraded"`.
 The load balancer stops routing new steward connections once it sees the 503.
 
 ### 4. Observe session drain

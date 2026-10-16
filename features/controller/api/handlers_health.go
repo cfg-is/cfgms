@@ -4,9 +4,8 @@ package api
 
 import (
 	"net/http"
-	"time"
 
-	"github.com/cfgis/cfgms/pkg/version"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // handleReady handles GET /api/v1/ready — the controller's REAL-STATE readiness
@@ -17,110 +16,42 @@ import (
 // Unauthenticated (registered on the base router) so the probe needs no creds.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	ready := ReadinessStatus{
-		Status:    "ready",
-		Version:   version.ShortWithoutPrefix(),
-		Timestamp: time.Now().UTC(),
-		Checks:    make(map[string]string),
+		Status: "ready",
 	}
 	statusCode := http.StatusOK
 
 	if s.controllerService == nil {
 		ready.Status = "not_ready"
-		ready.Checks["controller"] = "unavailable"
 		statusCode = http.StatusServiceUnavailable
 	} else if err := s.controllerService.StorageReady(r.Context()); err != nil {
 		// Log the cause server-side for diagnostics; do not leak it in the
 		// response body (no information disclosure).
-		s.logger.Warn("Readiness probe: storage round-trip failed", "error", err)
+		s.logger.Warn("Readiness probe: storage round-trip failed", "error", logging.SanitizeLogValue(err.Error()))
 		ready.Status = "not_ready"
-		ready.Checks["dna_storage"] = "unavailable"
 		statusCode = http.StatusServiceUnavailable
-	} else {
-		ready.Checks["controller"] = "ok"
-		ready.Checks["dna_storage"] = "ok"
 	}
 
 	s.writeResponse(w, statusCode, ready)
 }
 
-// handleHealth handles GET /api/v1/health
+// handleHealth handles GET /api/v1/health. It is unauthenticated, so the body is
+// the overall status only (Issue #5022); per-service detail and the build version
+// are served by the authenticated GET /api/v1/health/detailed.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	// Create health status
-	health := HealthStatus{
-		Status:    "healthy",
-		Version:   version.ShortWithoutPrefix(),
-		Timestamp: time.Now().UTC(),
-		Services:  make(map[string]string),
-	}
+	health := HealthStatus{Status: "healthy"}
 
-	// Issue #2283: drain gate — must be first so the LB health check fails
-	// as soon as an operator initiates a drain, before any session drains.
-	if s.clusterDraining.Load() {
-		health.Status = "degraded"
-		health.Services["drain"] = "draining"
-	}
+	// Issue #2283: drain gate — fails the LB health check as soon as an operator
+	// initiates a drain, before any session drains.
+	degraded := s.clusterDraining.Load() ||
+		s.controllerService == nil ||
+		s.configService == nil ||
+		s.rbacService == nil ||
+		s.tenantManager == nil ||
+		s.rbacManager == nil
 
-	// Check gRPC services
-	if s.controllerService != nil {
-		health.Services["controller"] = "healthy"
-	} else {
-		health.Services["controller"] = "unavailable"
-		health.Status = "degraded"
-	}
-
-	if s.configService != nil {
-		health.Services["configuration"] = "healthy"
-	} else {
-		health.Services["configuration"] = "unavailable"
-		health.Status = "degraded"
-	}
-
-	if s.certProvisioningService != nil {
-		health.Services["certificate_provisioning"] = "healthy"
-	} else {
-		health.Services["certificate_provisioning"] = "unavailable"
-	}
-
-	if s.rbacService != nil {
-		health.Services["rbac"] = "healthy"
-	} else {
-		health.Services["rbac"] = "unavailable"
-		health.Status = "degraded"
-	}
-
-	// Certificate manager status
-	if s.certManager != nil {
-		health.Services["certificate_manager"] = "healthy"
-	} else {
-		health.Services["certificate_manager"] = "unavailable"
-	}
-
-	// Tenant manager status
-	if s.tenantManager != nil {
-		health.Services["tenant_manager"] = "healthy"
-	} else {
-		health.Services["tenant_manager"] = "unavailable"
-		health.Status = "degraded"
-	}
-
-	// RBAC manager status
-	if s.rbacManager != nil {
-		health.Services["rbac_manager"] = "healthy"
-	} else {
-		health.Services["rbac_manager"] = "unavailable"
-		health.Status = "degraded"
-	}
-
-	// Workflow engine status (Issue #414)
-	if s.workflowHandler != nil && s.workflowHandler.engine != nil {
-		health.Services["workflow_engine"] = "healthy"
-	} else {
-		health.Services["workflow_engine"] = "unavailable"
-	}
-
-	// Return appropriate HTTP status
 	statusCode := http.StatusOK
-	if health.Status == "degraded" {
+	if degraded {
+		health.Status = "degraded"
 		statusCode = http.StatusServiceUnavailable
 	}
 
