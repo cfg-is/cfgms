@@ -543,7 +543,7 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 
 	executions, err := d.queue.DequeueForDevice(deviceID)
 	if err != nil {
-		d.logger.Error("Failed to dequeue for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+		d.logger.Error("Failed to dequeue for device", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
 		d.releaseDevice(deviceID)
 		return
 	}
@@ -573,8 +573,8 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	if err != nil {
 		d.logger.Error("Failed to prepare execution",
 			"device_id", logging.SanitizeLogValue(deviceID),
-			"execution_id", exec.ExecutionID,
-			"error", err)
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		d.releaseDevice(deviceID)
 		return
 	}
@@ -582,8 +582,8 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	if err := d.sendCommand(ctx, deviceID, exec, prepared); err != nil {
 		d.logger.Error("Failed to send execute_script command",
 			"device_id", logging.SanitizeLogValue(deviceID),
-			"execution_id", exec.ExecutionID,
-			"error", err)
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		// Release lock — the dispatched entry will be re-queued by background maintenance.
 		d.releaseDevice(deviceID)
 		return
@@ -737,8 +737,8 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 
 	d.logger.Info("Sent execute_script command",
 		"device_id", logging.SanitizeLogValue(deviceID),
-		"execution_id", exec.ExecutionID,
-		"shell", exec.Shell)
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"shell", logging.SanitizeLogValue(string(exec.Shell)))
 
 	return nil
 }
@@ -883,12 +883,12 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	if err := d.queue.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
 		d.logger.Error("Failed to acknowledge completion; recording terminal outcome anyway",
 			"device_id", logging.SanitizeLogValue(deviceID),
-			"execution_id", executionID,
-			"error", err)
+			"execution_id", logging.SanitizeLogValue(executionID),
+			"error", logging.SanitizeLogValue(err.Error()))
 	} else {
 		d.logger.Info("Script execution completed",
 			"device_id", logging.SanitizeLogValue(deviceID),
-			"execution_id", executionID,
+			"execution_id", logging.SanitizeLogValue(executionID),
 			"state", state)
 	}
 
@@ -916,7 +916,7 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			d.logger.Error("Failed to re-queue idempotent execution after failure",
 				"device_id", logging.SanitizeLogValue(deviceID),
 				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			d.logger.Info("Re-queued idempotent execution after failure",
 				"device_id", logging.SanitizeLogValue(deviceID),
@@ -955,7 +955,7 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 				"device_id", logging.SanitizeLogValue(deviceID),
 				"execution_id", logging.SanitizeLogValue(executionID),
 				"run_id", logging.SanitizeLogValue(runID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 

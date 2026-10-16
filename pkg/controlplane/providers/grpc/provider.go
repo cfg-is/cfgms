@@ -472,7 +472,7 @@ func (p *Provider) startServer() error {
 		grpcSrv := p.grpcServer
 		go func() {
 			if err := grpcSrv.Serve(ql); err != nil {
-				p.logger.Error("gRPC server stopped", "error", err)
+				p.logger.Error("gRPC server stopped", "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}()
 
@@ -759,7 +759,7 @@ func (p *Provider) clientReceiveLoop() {
 				return
 			default:
 			}
-			p.logger.Error("ControlChannel receive error", "error", err)
+			p.logger.Error("ControlChannel receive error", "error", logging.SanitizeLogValue(err.Error()))
 			p.setState(StateDisconnected)
 			p.mu.Lock()
 			p.lastDisconnectedAt = time.Now()
@@ -877,7 +877,7 @@ func (p *Provider) reconnectLoop() {
 
 		// Attempt to reconnect
 		if err := p.dialAndOpenStream(); err != nil {
-			p.logger.Warn("reconnection failed", "error", err, "attempt", attempt)
+			p.logger.Warn("reconnection failed", "error", logging.SanitizeLogValue(err.Error()), "attempt", attempt)
 			continue
 		}
 
@@ -1289,7 +1289,7 @@ func (p *Provider) dispatchEvent(event *types.Event) {
 		handler := sub.handler
 		go func() {
 			if err := handler(p.ctx, event); err != nil {
-				p.logger.Error("event handler error", "event_id", event.ID, "error", err)
+				p.logger.Error("event handler error", "event_id", logging.SanitizeLogValue(event.ID), "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}()
 	}
@@ -1308,7 +1308,7 @@ func (p *Provider) dispatchHeartbeat(hb *types.Heartbeat) {
 		handler := handler
 		go func() {
 			if err := handler(p.ctx, hb); err != nil {
-				p.logger.Error("heartbeat handler error", "steward_id", logging.SanitizeLogValue(hb.StewardID), "error", err)
+				p.logger.Error("heartbeat handler error", "steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}()
 	}
@@ -1657,7 +1657,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	if s.provider.onConnectHook != nil {
 		if hookErr := s.provider.onConnectHook.OnConnect(stream.Context(), stewardID); hookErr != nil {
 			s.provider.logger.Warn("on-connect hook error, steward continues (fail-open)",
-				"steward_id", logging.SanitizeLogValue(stewardID), "error", hookErr)
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hookErr.Error()))
 		}
 	}
 
@@ -1712,7 +1712,7 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			s.provider.logger.Info("steward ControlChannel closed", "steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			s.provider.logger.Info("steward ControlChannel closed", "steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 			return
 		}
 

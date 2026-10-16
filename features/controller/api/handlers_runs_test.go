@@ -843,6 +843,23 @@ func TestGetRun_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestPostRunScript_UnsupportedShell_ReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
+		"target":    "all",
+		"script_id": "s1",
+		"shell":     "evil\nforged=1",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "UNSUPPORTED_SHELL", resp.Error.Code)
+	assert.NotContains(t, resp.Error.Message, "\n")
+}
+
 // ---- POST /api/v1/runs/command ----------------------------------------------
 
 func TestPostRunScript_MissingScriptID_ReturnsBadRequest(t *testing.T) {

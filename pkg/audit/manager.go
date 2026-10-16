@@ -193,10 +193,28 @@ func scanValue(v interface{}) interface{} {
 		}
 		return out
 	case string:
-		return redactErrorMessage(val)
-	default:
+		return logging.SanitizeLogValue(redactErrorMessage(val))
+	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
 		return v
+	case error:
+		return logging.SanitizeLogValue(redactErrorMessage(val.Error()))
+	default:
+		return scanOpaqueValue(v)
 	}
+}
+
+// scanOpaqueValue neutralizes a value whose Go type scanValue does not walk
+// directly ([]string, map[string]string, structs, fmt.Stringers, ...). The value
+// is normalized through its JSON form so its strings reach scanValue; a value
+// that cannot be marshaled is stored as its sanitized string form.
+func scanOpaqueValue(v interface{}) interface{} {
+	if b, err := json.Marshal(v); err == nil {
+		var norm interface{}
+		if json.Unmarshal(b, &norm) == nil {
+			return scanValue(norm)
+		}
+	}
+	return logging.SanitizeLogValue(redactErrorMessage(fmt.Sprint(v)))
 }
 
 // redactErrorMessage replaces the value portion of key/value pairs in msg where the
@@ -1086,13 +1104,13 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 	entry.Action = b.action
 	entry.UserID = b.userID
 	entry.UserType = b.userType
-	entry.SessionID = b.sessionID
+	entry.SessionID = logging.SanitizeLogValue(b.sessionID)
 	entry.ResourceType = b.resourceType
-	entry.ResourceID = b.resourceID
+	entry.ResourceID = logging.SanitizeLogValue(b.resourceID)
 	entry.ResourceName = logging.SanitizeLogValue(b.resourceName)
 	entry.Result = b.result
-	entry.ErrorCode = b.errorCode
-	entry.RequestID = b.requestID
+	entry.ErrorCode = logging.SanitizeLogValue(b.errorCode)
+	entry.RequestID = logging.SanitizeLogValue(b.requestID)
 	entry.IPAddress = logging.SanitizeLogValue(b.ipAddress)
 	entry.UserAgent = logging.SanitizeLogValue(b.userAgent)
 	entry.Method = logging.SanitizeLogValue(b.method)
@@ -1105,8 +1123,13 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 			Fields: b.changes.Fields,
 		}
 	}
-	entry.ErrorMessage = redactErrorMessage(b.errorMessage)
-	entry.Tags = b.tags
+	entry.ErrorMessage = logging.SanitizeLogValue(redactErrorMessage(b.errorMessage))
+	if b.tags != nil {
+		entry.Tags = make([]string, len(b.tags))
+		for i, t := range b.tags {
+			entry.Tags[i] = logging.SanitizeLogValue(t)
+		}
+	}
 	entry.Severity = b.severity
 }
 

@@ -5,9 +5,15 @@ package grpc
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -120,4 +126,66 @@ func TestControlPlaneProvider_reconnectLoop_logsWarning(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(mockLog.GetLogs("warn")) > 0
 	}, 10*time.Second, 50*time.Millisecond, "expected at least one warn log from reconnect loop")
+}
+
+// verbatimLogger writes each Error call's message and key/value pairs verbatim
+// (no quoting) so a raw control character splits the record across lines.
+type verbatimLogger struct {
+	logging.Logger
+	mu      sync.Mutex
+	records []string
+}
+
+func (l *verbatimLogger) Error(msg string, kv ...interface{}) {
+	var sb strings.Builder
+	sb.WriteString("msg=" + msg)
+	for i := 0; i+1 < len(kv); i += 2 {
+		fmt.Fprintf(&sb, " %v=%v", kv[i], kv[i+1])
+	}
+	l.mu.Lock()
+	l.records = append(l.records, sb.String())
+	l.mu.Unlock()
+}
+
+func (l *verbatimLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.records...)
+}
+
+// TestDispatchEvent_HandlerErrorLogNeutralizesControlCharacters verifies that a
+// steward-supplied event ID and a handler error carrying a newline cannot
+// split the "event handler error" log record (Issue #5079).
+func TestDispatchEvent_HandlerErrorLogNeutralizesControlCharacters(t *testing.T) {
+	vl := &verbatimLogger{Logger: logging.NewNoopLogger()}
+	p := New(ModeServer)
+	require.NoError(t, p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"grpc_server": grpc.NewServer(grpc.Creds(quictransport.TransportCredentials())),
+		"logger":      vl,
+	}))
+	require.NoError(t, p.Start(context.Background()))
+	defer func() { _ = p.Stop(context.Background()) }()
+
+	require.NoError(t, p.SubscribeEvents(context.Background(), nil,
+		func(context.Context, *types.Event) error {
+			return errors.New("handler failed\nforged=1")
+		}))
+
+	p.dispatchEvent(&types.Event{ID: "evt\nforged=1"})
+
+	require.Eventually(t, func() bool {
+		for _, r := range vl.snapshot() {
+			if strings.HasPrefix(r, "msg=event handler error") {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond)
+	for _, r := range vl.snapshot() {
+		if strings.HasPrefix(r, "msg=event handler error") {
+			assert.NotContains(t, r, "\n")
+			assert.NotContains(t, r, "\r")
+		}
+	}
 }
