@@ -116,6 +116,13 @@ type EdgeView struct {
 type TimeRange struct {
 	From time.Time
 	To   time.Time
+
+	// TenantFilter and TenantSubtreeIDs are the caller's tenant cut. GetTimeline
+	// drops a same-as event whose peer entity is owned outside the cut (a peer with
+	// no index row is outside it too). A zero value applies no cut. The other
+	// temporal reads ignore them.
+	TenantFilter     string
+	TenantSubtreeIDs []string
 }
 
 // ObservationRecord is a historical observation entry returned by GetHistory.

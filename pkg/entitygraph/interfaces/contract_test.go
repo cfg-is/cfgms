@@ -84,6 +84,7 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	// Issue #5080: the same-as walk is bounded and applies the tenant cut during the walk.
 	t.Run("CollapseGroupBoundCurrentState", func(t *testing.T) { testEGCollapseGroupBound(t, factory, false) })
 	t.Run("CollapseGroupBoundAsOf", func(t *testing.T) { testEGCollapseGroupBound(t, factory, true) })
+	t.Run("TimelineSameAsTenantCut", func(t *testing.T) { testEGTimelineSameAsTenantCut(t, factory) })
 	t.Run("CollapseGroupAsOfRetraction", func(t *testing.T) { testEGCollapseGroupAsOfRetraction(t, factory) })
 	// Story-7: Watch — durable cursor-replayable feed (Issue #2877)
 	t.Run("WatchCursorReplay", func(t *testing.T) { testEGWatchCursorReplay(t, factory) })         // AC 1
@@ -3018,4 +3019,52 @@ func testEGCollapseGroupAsOfRetraction(t *testing.T, factory EntityGraphProvider
 			assert.Len(t, f.members(view), 3, "start %s", start)
 		}
 	})
+}
+
+// testEGTimelineSameAsTenantCut verifies that a same-as edge whose peer is owned
+// by another tenant does not appear in a timeline read made with a cut that
+// excludes the peer, while an in-cut peer and an uncut read still show it.
+func testEGTimelineSameAsTenantCut(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	head := egEID(t, "host:tlcut-auth/head")
+	inCut := egEID(t, "host:tlcut-auth/in-cut")
+	outCut := egEID(t, "host:tlcut-auth/out-cut")
+
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+	for eid, tenant := range map[string]string{
+		head.String(): "root/tlcut-a", inCut.String(): "root/tlcut-a", outCut.String(): "root/tlcut-b",
+	} {
+		egReport(ctx, t, p, "operator-assertion:admin", eid, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": tenant,
+		})
+	}
+	egReportEdge(ctx, t, p, "operator-assertion:admin", head.String(), inCut.String(), "same-as")
+	egReportEdge(ctx, t, p, "operator-assertion:admin", outCut.String(), head.String(), "same-as")
+
+	tr := interfaces.TimeRange{From: t0, To: time.Now().UTC().Add(time.Minute)}
+	peers := func(r interfaces.TimeRange) []string {
+		events, err := p.GetTimeline(ctx, []interfaces.EIDRef{head}, r)
+		require.NoError(t, err)
+		var out []string
+		for _, e := range events {
+			if e.Kind != "same-as-change" {
+				continue
+			}
+			out = append(out, e.Detail["edge_subject"].(string))
+		}
+		return out
+	}
+
+	all := peers(tr)
+	require.Len(t, all, 2, "an uncut read sees both same-as events")
+
+	cut := tr
+	cut.TenantFilter = "root/tlcut-a"
+	got := peers(cut)
+	require.Len(t, got, 1, "the cross-tenant same-as event must not appear in the other tenant's timeline")
+	assert.Contains(t, got[0], inCut.String())
+	assert.NotContains(t, got[0], outCut.String())
 }

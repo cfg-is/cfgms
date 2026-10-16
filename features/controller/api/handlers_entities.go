@@ -715,7 +715,8 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 
 // handleGetTimeline handles GET /api/v1/entities/timeline.
 // Query params: eid (repeatable, at least one required), from, to (RFC 3339, required).
-// GetTimeline has no per-eid tenant filter; each EID is verified via GetEntity first (ADR-022 §7).
+// Each EID is verified via GetEntity first (ADR-022 §7); the cut is also passed to
+// GetTimeline so same-as events whose peer is outside it are dropped.
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
 		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
@@ -770,6 +771,7 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 
 	var events []*eginterfaces.TimelineEvent
 	if len(eids) > 0 {
+		tr.TenantFilter, tr.TenantSubtreeIDs = tenant, ids
 		events, err = s.egProvider.GetTimeline(r.Context(), eids, tr)
 	} else {
 		events = []*eginterfaces.TimelineEvent{}
