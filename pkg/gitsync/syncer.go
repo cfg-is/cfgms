@@ -74,6 +74,8 @@ type ScopeStatus struct {
 // any git origin.
 type Syncer struct {
 	mu            sync.RWMutex
+	scopeWG       sync.WaitGroup // running polling goroutines; Stop waits for them
+	stopped       bool           // set by Stop under mu; no polling goroutine starts after it
 	store         cfgconfig.ConfigStore
 	bindings      *BindingStore
 	workDir       string // local directory for cloned repos
@@ -224,6 +226,9 @@ func (s *Syncer) startScope(b ScopeBinding) {
 	if b.PollingInterval == 0 {
 		return // webhook-only scope; no polling goroutine
 	}
+	if s.stopped {
+		return
+	}
 
 	// Cancel existing polling goroutine if any.
 	if cancel, ok := s.cancelFuncs[key]; ok {
@@ -249,7 +254,9 @@ func (s *Syncer) startScope(b ScopeBinding) {
 		}
 	}
 
+	s.scopeWG.Add(1)
 	go func() {
+		defer s.scopeWG.Done()
 		tickCh, stopTicker := s.newTickerFunc(b.PollingInterval)
 		defer stopTicker()
 		for {
@@ -270,10 +277,16 @@ func (s *Syncer) startScope(b ScopeBinding) {
 	}()
 }
 
-// Stop shuts down all polling goroutines. After Stop returns, no further
-// syncs are initiated.
+// Stop shuts down all polling goroutines and waits for them to return, so a
+// sync that was in flight has finished writing to the work directory and the
+// store by the time Stop returns. After Stop returns, no further polling syncs
+// are initiated.
 func (s *Syncer) Stop() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
 	s.cancel()
+	s.scopeWG.Wait()
 }
 
 // TriggerSync performs an immediate sync for the given scope binding.
