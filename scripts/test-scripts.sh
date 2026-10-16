@@ -3738,8 +3738,14 @@ exit 1
 DISPEOF
     chmod +x "${tmp_dir}/mock-dispatch.sh"
 
+    # enqueue reads the head SHA before the trust check; stub gh to supply it.
+    mkdir -p "${tmp_dir}/bin"
+    printf '#!/usr/bin/env bash\necho aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "${tmp_dir}/bin/gh"
+    chmod +x "${tmp_dir}/bin/gh"
+
     local output exit_code=0
     output=$(
+        PATH="${tmp_dir}/bin:$PATH" \
         CFGMS_TEST_DISPATCH="${tmp_dir}/mock-dispatch.sh" \
         bash "$po_act_script" enqueue 9999 2>&1
     ) || exit_code=$?

@@ -30,7 +30,7 @@ def _load_preflight():
 def _make_raw_pr(number=999, head_ref="feature/story-999-agent", author_login="someuser",
                  is_draft=False, labels=None, timeline_items=None, comments=None,
                  status_rollup=None, body="", mergeable="MERGEABLE", merge_state="CLEAN",
-                 latest_commit_date=None):
+                 latest_commit_date=None, head_changed_at="2026-05-01T00:00:00Z"):
     """Build a minimal PR node as returned by gh_graphql_pipeline_overview (prs list)."""
     return {
         "number": number,
@@ -47,6 +47,7 @@ def _make_raw_pr(number=999, head_ref="feature/story-999-agent", author_login="s
         "comments": comments if comments is not None else [],
         "statusCheckRollup": status_rollup if status_rollup is not None else [],
         "latest_commit_date": latest_commit_date,
+        "head_changed_at": head_changed_at,
     }
 
 
@@ -224,6 +225,40 @@ class TestBuildPrSummaries(unittest.TestCase):
         summaries = self.pf._build_pr_summaries(prs)
         self.assertTrue(summaries[0]["is_external"])
         self.assertTrue(summaries[0]["is_released"])
+
+    def test_release_before_head_change_does_not_release(self):
+        """A release label granted before a later push does not cover the new head."""
+        self._set_perm_map({"external-user": "read", "maintainer": "push"})
+        timeline = [
+            {"label": {"name": "human-reviewed:ok"}, "actor": {"login": "maintainer"},
+             "createdAt": "2026-06-01T00:00:00Z"},
+        ]
+        prs = [_make_raw_pr(
+            number=999,
+            author_login="external-user",
+            labels=[{"name": "human-reviewed:ok"}],
+            timeline_items=timeline,
+            head_changed_at="2026-06-02T00:00:00Z",
+        )]
+        summaries = self.pf._build_pr_summaries(prs)
+        self.assertTrue(summaries[0]["is_external"])
+        self.assertFalse(summaries[0]["is_released"])
+
+    def test_release_with_unknown_head_time_fails_closed(self):
+        """Missing head timestamp -> not released."""
+        self._set_perm_map({"external-user": "read", "maintainer": "push"})
+        timeline = [
+            {"label": {"name": "human-reviewed:ok"}, "actor": {"login": "maintainer"},
+             "createdAt": "2026-06-01T00:00:00Z"},
+        ]
+        prs = [_make_raw_pr(
+            number=999,
+            author_login="external-user",
+            labels=[{"name": "human-reviewed:ok"}],
+            timeline_items=timeline,
+            head_changed_at="",
+        )]
+        self.assertFalse(self.pf._build_pr_summaries(prs)[0]["is_released"])
 
     def test_human_reviewed_ok_by_triage_does_not_release(self):
         """AC5: triage actor applying human-reviewed:ok does NOT release an external PR."""

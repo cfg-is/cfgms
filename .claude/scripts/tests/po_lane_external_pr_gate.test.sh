@@ -75,6 +75,7 @@ case "$1 $2" in
     case "$*" in
       *author,labels*) echo '{"author":{"login":"ext-user"},"labels":[{"name":"human-reviewed:ok"}]}' ;;
       *baseRefName*)   echo develop ;;
+      *headRefOid*)    cat "$HEAD_SHA_FILE" 2>/dev/null ;;
       *)               echo '' ;;
     esac ;;
   "pr comment") ;;
@@ -84,9 +85,12 @@ exit 0
 GHEOF
 chmod +x "$TMP/bin/gh"
 
+SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf '%s\n' "$SHA_A" > "$TMP/head_sha"
+
 run_enqueue() {  # run_enqueue <label_time> <head_time> <actor_perm>
   : > "$TMP/gh.log"
-  PATH="$TMP/bin:$PATH" GH_LOG="$TMP/gh.log" \
+  PATH="$TMP/bin:$PATH" GH_LOG="$TMP/gh.log" HEAD_SHA_FILE="$TMP/head_sha" \
     CFGMS_TEST_COLLAB_PERM=read CFGMS_TEST_ACTOR_LOGIN=maint CFGMS_TEST_ACTOR_PERM="$3" \
     CFGMS_TEST_LABEL_TIME="$1" CFGMS_TEST_HEAD_TIME="$2" \
     bash "${REPO_ROOT}/.claude/scripts/po-act.sh" enqueue 9999 2>&1 || true
@@ -103,6 +107,17 @@ check "released, head changed after release -> no gh pr merge issued" "$(merged)
 
 out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" push)"
 check "released, head unchanged -> not refused" "$(grep -c 'ENQUEUE_REFUSED' <<<"$out")" "0"
+
+# Merge is bound to the head SHA captured before the trust check, so a push
+# between the check and the merge cannot be merged.
+check "released, head unchanged -> merge bound to checked head" \
+  "$(grep -c -- "^pr merge 9999 .*--match-head-commit ${SHA_A}\$" "$TMP/gh.log")" "1"
+
+# Unknown head -> refuse before any merge.
+: > "$TMP/head_sha"
+out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" push)"
+check "head SHA unreadable -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:head_unknown' <<<"$out")" "1"
+check "head SHA unreadable -> no gh pr merge issued" "$(merged)" "not_merged"
 
 [[ $fail -eq 0 ]] || { printf '%d check(s) failed\n' "$fail"; exit 1; }
 echo "all checks passed"

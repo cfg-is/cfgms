@@ -358,7 +358,7 @@ Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 
 **Branch protection config:** Squash merge only, no review requirements (solo-friendly), merge queue enabled on develop (Story #801) — the queue auto-rebases each PR against current develop tip and re-runs all required checks before merging. Manual rebase is only needed for genuine content conflicts.
 
-**Merging:** PRs merge via the GitHub merge queue. Interactive mode: use `gh pr merge --squash` after `/pr-review` approval (the queue handles rebase + re-validation). Agent-dispatched PRs: acceptance reviewer uses `gh pr merge --squash` to enqueue when there are zero findings. If the acceptance reviewer finds any issues (even low severity), it must post the concerns on the PR and tag it for manual `/pr-review` — no auto-merge with findings.
+**Merging:** PRs merge via the GitHub merge queue. Interactive mode: use `.claude/scripts/po-act.sh enqueue <PR>` after `/pr-review` approval (it re-checks author trust and binds the merge to the checked head SHA; the queue handles rebase + re-validation). Agent-dispatched PRs: acceptance reviewer uses `po-act.sh enqueue` to enqueue when there are zero findings. If the acceptance reviewer finds any issues (even low severity), it must post the concerns on the PR and tag it for manual `/pr-review` — no auto-merge with findings.
 
 **`make test-complete` coverage:**
 - All pre-commit validation, fast comprehensive tests, production-critical tests
