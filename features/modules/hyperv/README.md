@@ -941,6 +941,11 @@ name with `ErrClusterNotDeclared` **before invoking any PowerShell cmdlet** — 
 host can never be steered into reading a cluster it was not declared against.
 `cluster_role_names` further bounds the clustered VM roles in scope.
 
+A cluster resource's `name` and a VM's `ha_role.cluster_name` must be the
+cluster's NetBIOS name: letters, digits and hyphens, 1 to 15 characters
+(`^[A-Za-z0-9-]{1,15}$`). `Validate` rejects anything else, including an FQDN,
+with `ErrInvalidClusterName`.
+
 ### Module trust: strict
 
 The `hyperv.cluster` surface requires `module_trust.required_mode: strict` (set

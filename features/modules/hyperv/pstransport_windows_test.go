@@ -340,3 +340,23 @@ func hexBytes(b []byte) []string {
 	}
 	return out
 }
+
+// TestPSHost_ClusterAccessHintQuotesClusterName: the operator-facing
+// Grant-ClusterAccess hint built by Cfgms-GetClusterAccessSelf single-quotes the
+// cluster name and doubles embedded single quotes, so a copied hint passes it as
+// one literal argument. The hint expression is taken from the production
+// preamble and evaluated in a real PowerShell host.
+func TestPSHost_ClusterAccessHintQuotesClusterName(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-GetClusterAccessSelf")
+	start := strings.Index(body, `("Grant-ClusterAccess`)
+	require.NotEqual(t, -1, start, "remediation hint not found")
+	end := strings.Index(body[start:], "$me)")
+	require.NotEqual(t, -1, end)
+	hint := body[start : start+end+len("$me)")]
+
+	tr := newTestPSHost(t)
+	out, err := tr.run(context.Background(),
+		`$ClusterName = 'lab''hv; Stop-Computer'; $me = 'LAB\NODE1$'; `+hint)
+	require.NoError(t, err)
+	assert.Equal(t, `Grant-ClusterAccess -Cluster 'lab''hv; Stop-Computer' -User 'LAB\NODE1$' -Full`, strings.TrimSpace(out))
+}

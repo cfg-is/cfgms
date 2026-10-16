@@ -832,12 +832,14 @@ function Cfgms-GetClusterResourceOwner {
 # node's computer account holds cluster-management access (#2306 onboarding).
 # Read-only; a denied/absent Get-ClusterAccess read yields access_ok=false. The
 # account and the exact remediation grant come from here, never composed in Go.
+# The cluster name is single-quoted in the hint, with ASCII and Unicode single
+# quotes doubled, so a copied hint passes it as one literal argument.
 function Cfgms-GetClusterAccessSelf {
     param([Parameter(Mandatory)][string]$ClusterName)
     $me = '{0}\{1}$' -f $env:USERDOMAIN, $env:COMPUTERNAME
     $acl = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue)
     $ok = @($acl | Where-Object { $_.IdentityReference -ieq $me }).Count -gt 0
-    ConvertTo-Json @{ account = $me; access_ok = $ok; remediation = ("Grant-ClusterAccess -Cluster {0} -User '{1}' -Full" -f $ClusterName, $me) } -Compress
+    ConvertTo-Json @{ account = $me; access_ok = $ok; remediation = ("Grant-ClusterAccess -Cluster '{0}' -User '{1}' -Full" -f ($ClusterName -replace "['\u2018-\u201B]", '$0$0'), $me) } -Compress
 }
 
 # ── Failover cluster write (#2202 S2) ─────────────────────────────────

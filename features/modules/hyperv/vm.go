@@ -537,6 +537,11 @@ func (c *VMConfig) Validate() error {
 			return err
 		}
 	}
+	// ha_role.cluster_name must satisfy the same cluster-name allowlist as the
+	// cluster resource's name.
+	if c.HARole != nil && !clusterNamePattern.MatchString(c.HARole.ClusterName) {
+		return ErrInvalidClusterName
+	}
 	// HA-role CSV seed-dir rule: when the primary VHDX is on a Cluster Shared
 	// Volume, the provisioning seed_dir must be host-local — empty or also-on-CSV
 	// would hang the build, so reject it eagerly here.
