@@ -45,8 +45,15 @@ machines, configure virtual switches, and read failover-cluster topology and
 ownership — all by invoking host-native Hyper-V / Failover-Clustering PowerShell
 cmdlets through the in-host `psHostTransport`. A VM's network connection is
 declared on the VM itself (`switch_name`); the module converges its adapters to
-match. All user-supplied values travel via PowerShell `ArgumentList` — never
-composed into script text.
+match. No user-supplied value is ever composed into script text. Each call
+writes its values to a per-call JSON args file (UTF-8, created with a generated
+temp name and removed when the call ends), and the only script text sent to
+PowerShell is the fixed `Cfgms-Invoke -Verb '<verb>' -ArgsFile '<path>'`, where
+the verb is a constant from the module's dispatch table. `Cfgms-Invoke` parses
+the file as JSON, refuses any value that is not a string, number or boolean, and
+binds the values to the verb's named, typed parameters, so PowerShell never
+parses a value as code. Integer parameters are parsed in Go first; a value that
+is not an integer is refused before PowerShell runs.
 
 The module's scope includes:
 
@@ -781,8 +788,8 @@ existing VM as a highly-available role and (gated) removing one. Cluster
 **formation** (`New-Cluster`, `Add-ClusterNode`, `Remove-ClusterNode`, quorum)
 remains out of scope. The module reads and writes cluster state by invoking the
 host-native Failover-Clustering cmdlets through the in-host `psHostTransport`;
-every cluster and role name travels via `ArgumentList`, never composed into
-PowerShell text.
+every cluster and role name travels in the per-call JSON args file described
+under Convergence, never composed into PowerShell text.
 
 `Get("cluster:<name>")` returns a `ClusterStatus` whose observed fields are:
 

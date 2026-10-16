@@ -220,7 +220,7 @@ func newTestPSHost(t *testing.T) *psHostTransport {
 }
 
 // TestPSHost_IntegerSubexpressionIsNotEvaluated is the [REQUIRED TEST] for
-// the demonstrated hole. Before #5111, intArg spliced the trimmed MemoryMB
+// the demonstrated hole. Before #5111, the dispatcher spliced the trimmed MemoryMB
 // string into the command text unquoted, so a subexpression ran at parameter
 // binding as LocalSystem — before Set-VM was ever reached. Now the value must
 // fail integer parsing and run nothing.
