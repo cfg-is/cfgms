@@ -347,6 +347,11 @@ func repairPersistedCAFile(path, pin string) (string, error) {
 	if err := os.Chmod(tmp.Name(), 0444); err != nil {
 		return "", fmt.Errorf("repair persisted CA: %w", err)
 	}
+	// Windows refuses to rename over a read-only file; the 0444 target must be
+	// removed first. The directory is service-owned, so this is not a trust change.
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return "", fmt.Errorf("repair persisted CA: %w", err)
 	}
