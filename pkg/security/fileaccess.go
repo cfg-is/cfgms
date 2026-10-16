@@ -230,24 +230,29 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 	}
 	for i, component := range components {
 		if resolved, evalErr := filepath.EvalSymlinks(filepath.Join(resolvedDir, component)); evalErr == nil {
+			inBase, err := containedPath(absBasePath, resolved, userPath)
+			if err != nil {
+				return "", err
+			}
 			// On Windows, EvalSymlinks does not evaluate mount points (Go 1.23+): a dangling
 			// junction comes back unchanged with no error. Lstat reports it as irregular and
 			// Stat, which follows it, fails.
-			if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.Mode()&os.ModeIrregular != 0 {
-				if _, statErr := os.Stat(resolved); statErr != nil {
+			if info, lstatErr := os.Lstat(inBase); lstatErr == nil && info.Mode()&os.ModeIrregular != 0 {
+				if _, statErr := os.Stat(inBase); statErr != nil {
 					return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
 				}
 			}
-			if err := containmentCheck(absBasePath, resolved, userPath); err != nil {
-				return "", err
-			}
-			resolvedDir = resolved
+			resolvedDir = inBase
 			continue
 		}
 		// resolvedDir is canonical and inside the base, so joining one component onto it
 		// cannot traverse a link. os.Lstat never follows the leaf; on Windows it reports a
 		// dangling junction as a reparse point where a Root-relative Lstat did not.
-		info, lstatErr := os.Lstat(filepath.Join(resolvedDir, component))
+		candidate, err := containedPath(absBasePath, filepath.Join(resolvedDir, component), userPath)
+		if err != nil {
+			return "", err
+		}
+		info, lstatErr := os.Lstat(candidate)
 		if lstatErr != nil {
 			if os.IsPermission(lstatErr) {
 				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
@@ -262,6 +267,19 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 		return "", fmt.Errorf("failed to resolve path component of %s", userPath)
 	}
 	return resolvedDir, nil
+}
+
+// containedPath returns absPath rebuilt as absBasePath joined with its relative path, after
+// checking with filepath.IsLocal that the relative path stays inside the base. Probes in
+// resolveMissingTail touch only this returned path, so every filesystem call on a path under
+// validation is guarded by the containment check itself. filepath.IsLocal is also stricter
+// than containmentCheck: it rejects an empty path and, on Windows, reserved device names.
+func containedPath(absBasePath, absPath, userPath string) (string, error) {
+	rel, err := filepath.Rel(absBasePath, absPath)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+	}
+	return filepath.Join(absBasePath, rel), nil
 }
 
 // containmentCheck verifies that absUserPath is within absBasePath using filepath.Rel.
