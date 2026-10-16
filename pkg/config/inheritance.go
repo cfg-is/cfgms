@@ -250,6 +250,11 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 		clusterNames := ir.clusterRegistry.MemberClusters(stewardID)
 		for _, clusterName := range clusterNames {
 			if err := ir.applyClusterConfiguration(ctx, effective, tenantID, clusterName); err != nil {
+				// A storage read failure fails closed: continuing would silently drop policies.
+				var readErr *clusterReadError
+				if errors.As(err, &readErr) {
+					return nil, fmt.Errorf("failed to resolve cluster-policies for steward: %w", err)
+				}
 				// Non-fatal: parse failure for one cluster must not block others.
 				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
 				// so an error here signals a corrupt document that must be surfaced, not swallowed.
@@ -396,6 +401,14 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	return nil
 }
 
+// clusterReadError marks a storage read failure (as opposed to a parse failure) of a
+// cluster-policies document. Resolution fails closed on it: a storage fault must not
+// silently drop cluster policies.
+type clusterReadError struct{ err error }
+
+func (e *clusterReadError) Error() string { return e.err.Error() }
+func (e *clusterReadError) Unwrap() error { return e.err }
+
 // applyClusterConfiguration looks up cluster-policies/<clusterName> for the given tenant
 // and merges it into effective. Missing cluster configs are non-fatal (same as missing
 // tenant-level configs in applyConfigurationLevel). The config key uses the device's own
@@ -413,7 +426,7 @@ func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, ef
 		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
 			return nil
 		}
-		return fmt.Errorf("failed to read cluster configuration for %q: %w", clusterName, err)
+		return fmt.Errorf("failed to read cluster configuration for %q: %w", clusterName, &clusterReadError{err: err})
 	}
 
 	var clusterConfig stewardconfig.StewardConfig

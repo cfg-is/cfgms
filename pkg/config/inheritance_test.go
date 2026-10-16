@@ -1531,3 +1531,46 @@ func TestResolveConfiguration_FailingStrictAncestor_NeverYieldsConfigWithoutStri
 	require.Error(t, err, "a failing read at the strict ancestor must not produce a partial configuration")
 	assert.Nil(t, eff)
 }
+
+// namespaceFailingConfigStore injects an error for reads in one namespace only.
+type namespaceFailingConfigStore struct {
+	cfgconfig.ConfigStore
+	namespace string
+	err       error
+}
+
+func (f *namespaceFailingConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	if key.Namespace == f.namespace {
+		return nil, f.err
+	}
+	return f.ConfigStore.GetConfig(ctx, key)
+}
+
+func TestResolveConfiguration_ClusterPoliciesReadError_FailsClosed(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	storageErr := errors.New("transient storage fault")
+	store := &namespaceFailingConfigStore{ConfigStore: sm.GetConfigStore(), namespace: "cluster-policies", err: storageErr}
+	registry := buildClusterRegistry(t, "steward-1", "cfg-lab")
+	ir := NewInheritanceResolverWithClusters(&cfgStoreAsRouter{ConfigStore: store}, sm.GetTenantStore(), registry)
+
+	eff, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.Error(t, err, "a cluster-policies storage read error must fail resolution")
+	assert.ErrorIs(t, err, storageErr)
+	assert.Nil(t, eff)
+}
+
+func TestResolveConfiguration_ClusterPoliciesNotFound_Succeeds(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	store := &namespaceFailingConfigStore{ConfigStore: sm.GetConfigStore(), namespace: "cluster-policies", err: cfgconfig.ErrConfigNotFound}
+	registry := buildClusterRegistry(t, "steward-1", "cfg-lab")
+	ir := NewInheritanceResolverWithClusters(&cfgStoreAsRouter{ConfigStore: store}, sm.GetTenantStore(), registry)
+
+	_, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+}
