@@ -114,6 +114,9 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 	// Wire collapse-group resolution when requested (ADR-022 §3).
 	if opts.CollapseGroup {
 		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, interfaces.NewTenantCut(opts.TenantFilter, opts.TenantSubtreeIDs))
+		if errors.Is(err, interfaces.ErrCollapseGroupTooLarge) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: resolve collapse group: %w", err)
 		}

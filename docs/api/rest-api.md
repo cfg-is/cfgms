@@ -3430,7 +3430,7 @@ Get the current state, provenance, and freshness for a single entity.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `as_of` | RFC 3339 | Project entity state as of this timestamp |
-| `collapse_group` | `true` | Include the merged same-as group view (`CollapseGroup`) |
+| `collapse_group` | `true` | Include the merged same-as group view (`CollapseGroup`). The group is limited to 256 members inside the caller's tenant subtree |
 
 **Response (200):** `EntityView` (see example fields above)
 
@@ -3440,6 +3440,7 @@ Get the current state, provenance, and freshness for a single entity.
 |--------|-----------|
 | 400 | Malformed EID, or `as_of` not RFC 3339 |
 | 404 | Entity does not exist, or is outside the caller's tenant subtree |
+| 422 | `collapse_group` was set and the same-as group has more than 256 members inside the caller's tenant subtree (code `COLLAPSE_GROUP_TOO_LARGE`). Returned only to a caller who may read the entity; the same read without `collapse_group` succeeds |
 
 #### GET /api/v1/entities/{eid}/edges
 

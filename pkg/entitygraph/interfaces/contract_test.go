@@ -81,6 +81,10 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("MovedEntityHistoricalScan", func(t *testing.T) { testEGMovedEntityHistoricalScan(t, factory) })   // AC 4 REQUIRED
 	t.Run("CollapseGroupConflictsRetained", func(t *testing.T) { testEGCollapseGroupConflicts(t, factory) }) // AC 5
 	t.Run("CollapseGroupMultiMember", func(t *testing.T) { testEGCollapseGroupMultiMember(t, factory) })     // AC 6
+	// Issue #5080: the same-as walk is bounded and applies the tenant cut during the walk.
+	t.Run("CollapseGroupBoundCurrentState", func(t *testing.T) { testEGCollapseGroupBound(t, factory, false) })
+	t.Run("CollapseGroupBoundAsOf", func(t *testing.T) { testEGCollapseGroupBound(t, factory, true) })
+	t.Run("CollapseGroupAsOfRetraction", func(t *testing.T) { testEGCollapseGroupAsOfRetraction(t, factory) })
 	// Story-7: Watch — durable cursor-replayable feed (Issue #2877)
 	t.Run("WatchCursorReplay", func(t *testing.T) { testEGWatchCursorReplay(t, factory) })         // AC 1
 	t.Run("WatchFilterKinds", func(t *testing.T) { testEGWatchFilterKinds(t, factory) })           // AC 2
@@ -2789,4 +2793,229 @@ func (n *noopProvider) RunRetentionGC(_ context.Context, _ interfaces.RetentionP
 }
 func (n *noopProvider) SetRetentionPolicy(_ context.Context, _ interfaces.RetentionPolicy) error {
 	return interfaces.ErrNotImplemented
+}
+
+// --- Collapse-group walk bound (Issue #5080) ---
+
+// egBoundFixture builds same-as fixtures through the provider's own write path.
+// Entity subjects contain '/' and ':' like the other contract fixtures. When
+// asOf is true every observation is stamped in the past and reads pass AsOf.
+type egBoundFixture struct {
+	t     *testing.T
+	p     interfaces.EntityGraphProvider
+	ctx   context.Context
+	asOf  bool
+	base  time.Time
+	space string
+}
+
+func newEGBoundFixture(t *testing.T, factory EntityGraphProviderFactory, asOf bool, space string) *egBoundFixture {
+	return &egBoundFixture{
+		t: t, p: factory(t), ctx: context.Background(), asOf: asOf, space: space,
+		base: time.Now().UTC().Add(-time.Hour),
+	}
+}
+
+func (f *egBoundFixture) eid(name string) interfaces.EIDRef {
+	return egEID(f.t, "host:"+f.space+"/"+name)
+}
+
+// entities reports one entity per name, owned by tenant, in a single batch.
+func (f *egBoundFixture) entities(tenant string, names []string) {
+	obs := make([]types.Observation, 0, len(names))
+	for _, n := range names {
+		obs = append(obs, egObservation(f.eid(n).String(), "observer:scan", f.base,
+			map[string]interface{}{"entity_kind": "host", "owning_tenant": tenant}))
+	}
+	require.NoError(f.t, f.p.ReportObservations(f.ctx, interfaces.ObservationBatch{Source: "observer:scan", Observations: obs}))
+}
+
+// edgeObs builds a same-as observation at base+offset.
+func (f *egBoundFixture) edgeObs(from, to string, kind types.ObservationKind, offset time.Duration) types.Observation {
+	subject := "same-as|" + f.eid(from).String() + "|" + f.eid(to).String()
+	o := egObservation(subject, "operator-assertion:admin", f.base.Add(offset), map[string]interface{}{})
+	o.Kind = kind
+	if kind == types.ObservationKindAbsence {
+		o.Payload = nil
+	}
+	return o
+}
+
+func (f *egBoundFixture) edges(pairs [][2]string, kind types.ObservationKind, offset time.Duration) {
+	obs := make([]types.Observation, 0, len(pairs))
+	for _, pr := range pairs {
+		obs = append(obs, f.edgeObs(pr[0], pr[1], kind, offset))
+	}
+	require.NoError(f.t, f.p.ReportObservations(f.ctx, interfaces.ObservationBatch{Source: "operator-assertion:admin", Observations: obs}))
+}
+
+func (f *egBoundFixture) names(prefix string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s%04d", prefix, i)
+	}
+	return out
+}
+
+func (f *egBoundFixture) chain(names []string) [][2]string {
+	var pairs [][2]string
+	for i := 1; i < len(names); i++ {
+		pairs = append(pairs, [2]string{names[i-1], names[i]})
+	}
+	return pairs
+}
+
+func (f *egBoundFixture) hub(hub string, spokes []string) [][2]string {
+	var pairs [][2]string
+	for _, s := range spokes {
+		pairs = append(pairs, [2]string{hub, s})
+	}
+	return pairs
+}
+
+func (f *egBoundFixture) read(name, tenant string) (*types.EntityView, error) {
+	opts := interfaces.GetEntityOpts{CollapseGroup: true, TenantFilter: tenant}
+	if f.asOf {
+		at := time.Now().UTC()
+		opts.AsOf = &at
+	}
+	return f.p.GetEntity(f.ctx, f.eid(name), opts)
+}
+
+func (f *egBoundFixture) members(view *types.EntityView) []string {
+	require.NotNil(f.t, view)
+	require.NotNil(f.t, view.CollapseGroup, "expected a collapsed group")
+	var out []string
+	for _, m := range view.CollapseGroup.Members {
+		out = append(out, m.String())
+	}
+	return out
+}
+
+// testEGCollapseGroupBound covers AC 6 (a)-(c) for one walk path.
+func testEGCollapseGroupBound(t *testing.T, factory EntityGraphProviderFactory, asOf bool) {
+	max := interfaces.MaxCollapseGroupMembers
+	const tenantA = "root/bound-a"
+	const tenantB = "root/bound-b"
+
+	t.Run("ChainOverLimitErrors", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, asOf, "bch-over")
+		names := f.names("n", max+1)
+		f.entities(tenantA, names)
+		f.edges(f.chain(names), types.ObservationKindState, time.Minute)
+		_, err := f.read(names[0], "")
+		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
+		_, err = f.read(names[0], tenantA)
+		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
+
+		// A read without CollapseGroup is not affected.
+		view, err := f.p.GetEntity(f.ctx, f.eid(names[0]), interfaces.GetEntityOpts{TenantFilter: tenantA})
+		require.NoError(t, err)
+		require.NotNil(t, view)
+	})
+
+	t.Run("ChainAtLimitSucceeds", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, asOf, "bch-at")
+		names := f.names("n", max)
+		f.entities(tenantA, names)
+		f.edges(f.chain(names), types.ObservationKindState, time.Minute)
+		view, err := f.read(names[0], tenantA)
+		require.NoError(t, err)
+		assert.Len(t, f.members(view), max)
+	})
+
+	t.Run("HubOverLimitErrors", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, asOf, "bhub-over")
+		spokes := f.names("s", max)
+		f.entities(tenantA, append([]string{"hub"}, spokes...))
+		f.edges(f.hub("hub", spokes), types.ObservationKindState, time.Minute)
+		_, err := f.read("hub", tenantA)
+		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
+	})
+
+	t.Run("HubExtraEdgesOutsideCutSucceeds", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, asOf, "bhub-cut")
+		inCut := f.names("a", 3)
+		foreign := f.names("b", max+5)
+		f.entities(tenantA, append([]string{"hub"}, inCut...))
+		f.entities(tenantB, foreign)
+		f.edges(f.hub("hub", append(append([]string{}, inCut...), foreign...)), types.ObservationKindState, time.Minute)
+
+		view, err := f.read("hub", tenantA)
+		require.NoError(t, err)
+		got := f.members(view)
+		assert.Len(t, got, 4, "hub plus its three in-cut spokes")
+		for _, m := range got {
+			assert.NotContains(t, m, "/b0", "out-of-cut members must not appear")
+		}
+
+		_, err = f.read("hub", "")
+		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge, "no cut: the whole hub counts")
+	})
+
+	t.Run("ChainTailOutsideCutSucceeds", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, asOf, "btail")
+		head := f.names("h", 3)
+		tail := f.names("t", max+5)
+		f.entities(tenantA, head)
+		f.entities(tenantB, tail)
+		f.edges(f.chain(append(append([]string{}, head...), tail...)), types.ObservationKindState, time.Minute)
+
+		view, err := f.read(head[0], tenantA)
+		require.NoError(t, err)
+		got := f.members(view)
+		assert.Len(t, got, 3, "only the in-cut head is reachable")
+		for _, m := range got {
+			assert.NotContains(t, m, "/t0")
+		}
+
+		_, err = f.read(head[0], "")
+		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
+	})
+}
+
+// testEGCollapseGroupAsOfRetraction covers AC 6 (d): retracted edges and
+// re-assertions on the as-of path.
+func testEGCollapseGroupAsOfRetraction(t *testing.T, factory EntityGraphProviderFactory) {
+	max := interfaces.MaxCollapseGroupMembers
+	const tenant = "root/retract"
+
+	t.Run("RetractedEdgesDoNotCountTowardLimit", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, true, "rt-count")
+		spokes := f.names("s", max+10)
+		f.entities(tenant, append([]string{"hub", "keep"}, spokes...))
+		f.edges(f.hub("hub", spokes), types.ObservationKindState, time.Minute)
+		f.edges(f.hub("hub", spokes), types.ObservationKindAbsence, 2*time.Minute)
+		f.edges([][2]string{{"hub", "keep"}}, types.ObservationKindState, 3*time.Minute)
+
+		view, err := f.read("hub", tenant)
+		require.NoError(t, err)
+		assert.Len(t, f.members(view), 2, "only the live edge is followed")
+	})
+
+	t.Run("RetractedEdgeNotFollowedReassertedIs", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, true, "rt-reassert")
+		f.entities(tenant, []string{"x", "gone", "back"})
+		f.edges([][2]string{{"x", "gone"}, {"x", "back"}}, types.ObservationKindState, time.Minute)
+		f.edges([][2]string{{"x", "gone"}, {"x", "back"}}, types.ObservationKindAbsence, 2*time.Minute)
+		f.edges([][2]string{{"x", "back"}}, types.ObservationKindState, 3*time.Minute)
+
+		view, err := f.read("x", tenant)
+		require.NoError(t, err)
+		got := f.members(view)
+		require.Len(t, got, 2)
+		assert.Contains(t, got, f.eid("back").String())
+		assert.NotContains(t, got, f.eid("gone").String())
+	})
+
+	t.Run("WalksBothEdgeDirections", func(t *testing.T) {
+		f := newEGBoundFixture(t, factory, true, "rt-dir")
+		f.entities(tenant, []string{"left", "mid", "right"})
+		f.edges([][2]string{{"left", "mid"}, {"mid", "right"}}, types.ObservationKindState, time.Minute)
+		for _, start := range []string{"left", "mid", "right"} {
+			view, err := f.read(start, tenant)
+			require.NoError(t, err)
+			assert.Len(t, f.members(view), 3, "start %s", start)
+		}
+	})
 }
