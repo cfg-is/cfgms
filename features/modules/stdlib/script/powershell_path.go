@@ -2,8 +2,6 @@
 // Copyright 2026 Jordan Ritz
 package script
 
-import "os"
-
 // windowsPowerShellPath resolves powershell.exe via an absolute path under %SystemRoot%
 // (then %windir%, then C:\Windows) rather than %PATH%, so a planted powershell.exe earlier
 // on PATH cannot stand in for the Authenticode verifier. It returns "" if the result is
@@ -24,6 +22,3 @@ func windowsPowerShellPath(getenv func(string) string) string {
 	}
 	return p
 }
-
-// systemPowerShellPath resolves the PowerShell path from the process environment.
-func systemPowerShellPath() string { return windowsPowerShellPath(os.Getenv) }

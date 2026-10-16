@@ -18,6 +18,11 @@ func init() {
 	windowsAuthenticodeVerifier = verifyAuthenticodeSignature
 }
 
+// systemPowerShellPath resolves the PowerShell path from the process environment.
+// It lives in this Windows-only file because its sole caller is the Authenticode
+// verifier below; windowsPowerShellPath stays GOOS-neutral so it is tested on every platform.
+func systemPowerShellPath() string { return windowsPowerShellPath(os.Getenv) }
+
 // verifyAuthenticodeSignature verifies a PowerShell script's embedded Authenticode
 // signature by writing the content to a temporary .ps1 file and invoking
 // Get-AuthenticodeSignature via PowerShell.
