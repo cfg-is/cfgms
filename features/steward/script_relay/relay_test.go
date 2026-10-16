@@ -32,12 +32,8 @@ import (
 var testIDCounter int64
 
 // uniqueExecID returns a process-unique execution ID derived from base. The
-// per-execution socket path is deterministic (/tmp/cfgms-<id>/api.sock), so two
-// relays sharing an execution ID would bind the same path and the second
-// net.Listen fails with EADDRINUSE. Fixed IDs collide when the harness runs this
-// package in overlapping or concurrent test-binary invocations (smart-mode
-// selection pass + full pass); folding in the PID and a per-process counter
-// makes every socket path unique so no two invocations can ever collide.
+// socket directory name is random, so the ID no longer affects the socket path;
+// it stays unique so event attribution in concurrent test binaries is distinct.
 func uniqueExecID(base string) string {
 	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), atomic.AddInt64(&testIDCounter, 1))
 }
@@ -96,6 +92,8 @@ func TestRelay_SocketCreation(t *testing.T) {
 	require.NotEmpty(t, sockPath)
 
 	sockDir := filepath.Dir(sockPath)
+	assert.True(t, strings.HasPrefix(filepath.Base(sockDir), "cfgms-"+dirExecID(execID)+"-"),
+		"socket directory %q must be labelled with the execution ID", sockDir)
 
 	// Directory must exist with mode 0700.
 	dirInfo, err := os.Stat(sockDir)
@@ -161,14 +159,18 @@ func TestNewRelay_InvalidUIDChownFails(t *testing.T) {
 
 	publish := func(_ context.Context, _ *cpTypes.Event) {}
 	execID := uniqueExecID("test-exec-badchown")
+	before, beforeErr := filepath.Glob(filepath.Join(os.TempDir(), "cfgms-"+dirExecID(execID)+"-*"))
+	require.NoError(t, beforeErr)
 	_, err := NewRelay(execID, "steward-1", 0, publish, logging.NewNoopLogger())
 	require.Error(t, err, "NewRelay must fail when the socket cannot be chowned to the execution UID")
 	assert.Contains(t, err.Error(), "chown")
 
-	// The failed socket directory must not be left behind.
-	sockDir := filepath.Join(os.TempDir(), "cfgms-"+execID)
-	_, statErr := os.Stat(sockDir)
-	assert.True(t, os.IsNotExist(statErr), "socket directory must be cleaned up after a failed chown")
+	// The failed socket directory must not be left behind: no new directory
+	// carrying this execution's label may exist after the failure.
+	pattern := filepath.Join(os.TempDir(), "cfgms-"+dirExecID(execID)+"-*")
+	matches, globErr := filepath.Glob(pattern)
+	require.NoError(t, globErr)
+	assert.Equal(t, before, matches, "socket directory must be removed after a failed chown")
 }
 
 // TestRelay_RequestResponseCycle tests the full steward-side relay lifecycle:
@@ -334,4 +336,81 @@ func TestRelay_ExecutionIDInEvent(t *testing.T) {
 	})
 
 	wg.Wait()
+}
+
+// TestNewRelay_IgnoresPlantedPredictablePath verifies a directory (or symlink)
+// planted at the old predictable path is never used: the socket lives in a
+// fresh directory and the planted one stays untouched.
+func TestNewRelay_IgnoresPlantedPredictablePath(t *testing.T) {
+	execID := uniqueExecID("test-exec-planted")
+	planted := filepath.Join(os.TempDir(), "cfgms-"+execID)
+	require.NoError(t, os.Mkdir(planted, 0777))
+	t.Cleanup(func() { _ = os.RemoveAll(planted) })
+
+	r, _ := newTestRelay(t, execID)
+	require.NoError(t, r.Start(context.Background()))
+	defer r.Stop()
+
+	assert.NotEqual(t, planted, filepath.Dir(r.SocketPath()))
+	entries, err := os.ReadDir(planted)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "planted directory must not receive the socket")
+}
+
+func TestCheckSocketDir(t *testing.T) {
+	base := t.TempDir()
+
+	good := filepath.Join(base, "good")
+	require.NoError(t, os.Mkdir(good, 0700))
+	require.NoError(t, os.Chmod(good, 0700))
+	assert.NoError(t, checkSocketDir(good))
+
+	loose := filepath.Join(base, "loose")
+	require.NoError(t, os.Mkdir(loose, 0700))
+	require.NoError(t, os.Chmod(loose, 0755))
+	assert.Error(t, checkSocketDir(loose), "mode other than 0700 must be refused")
+
+	link := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(good, link))
+	assert.Error(t, checkSocketDir(link), "symlink must be refused")
+
+	file := filepath.Join(base, "file")
+	require.NoError(t, os.WriteFile(file, nil, 0600))
+	assert.Error(t, checkSocketDir(file), "non-directory must be refused")
+
+	assert.Error(t, checkSocketDir(filepath.Join(base, "missing")))
+
+	// A directory owned by another user is refused (needs root to create).
+	if os.Getuid() == 0 {
+		other := filepath.Join(base, "other")
+		require.NoError(t, os.Mkdir(other, 0700))
+		require.NoError(t, os.Chown(other, 12345, -1))
+		assert.Error(t, checkSocketDir(other), "foreign-owned directory must be refused")
+	}
+}
+
+// TestSocketPathFitsMacOSLimit verifies the socket path for a UUID execution ID
+// under a macOS-length temp base stays below the 104-byte sun_path limit.
+func TestSocketPathFitsMacOSLimit(t *testing.T) {
+	const macTmp = "/var/folders/zz/abcdefghijklmnopqrstuvwxyz012345/T" // 49 bytes
+	const randSuffix = "4294967295"                                     // max os.MkdirTemp suffix
+	execID := "123e4567-e89b-12d3-a456-426614174000"
+	path := macTmp + "/cfgms-" + dirExecID(execID) + "-" + randSuffix + "/api.sock"
+	assert.Less(t, len(path), 104)
+}
+
+// TestDirExecID verifies the execution-ID label embedded in the socket
+// directory name cannot introduce path separators or traversal elements and is
+// bounded in length.
+func TestDirExecID(t *testing.T) {
+	assert.Equal(t, "exec-1_a.b", dirExecID("exec-1_a.b"))
+	assert.Equal(t, ".._.._etc", dirExecID("../../etc"))
+	assert.Equal(t, "exec-relay-lib", dirExecID("exec-relay-lib"))
+	assert.NotContains(t, dirExecID("a/b\\c\x00d"), "/")
+	assert.Len(t, dirExecID(strings.Repeat("x", 200)), maxDirExecIDLen)
+
+	// A traversal-shaped execution ID still yields a directory directly under
+	// the temp root.
+	r, _ := newTestRelay(t, "../"+uniqueExecID("trav"))
+	assert.Equal(t, filepath.Clean(os.TempDir()), filepath.Dir(filepath.Dir(r.SocketPath())))
 }
