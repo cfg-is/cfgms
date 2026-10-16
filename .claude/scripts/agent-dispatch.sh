@@ -1063,8 +1063,10 @@ check_existing_prs_for_issue() {
 # Exit 0 only when the human-reviewed:ok label was applied strictly after the
 # PR's current head commit and after the latest head force-push. A push after
 # the release therefore voids it. Fail-closed on any lookup error or missing
-# timestamp. Limit: commit dates are author-supplied, so the force-push event
-# (server time) is the authoritative signal for rewritten heads.
+# timestamp. Commit dates are author-supplied (a backdated push would otherwise
+# stay released), so the head's arrival time is the earliest check-suite
+# createdAt on the head commit (server-set when the push is received); no check
+# suite -> fail closed. The force-push event (server time) covers rewritten heads.
 # Test hook: CFGMS_TEST_HEAD_TIME overrides the head-change lookup.
 _release_covers_head() {
   local pr_num="$1" label_time="$2" head_time
@@ -1073,8 +1075,8 @@ _release_covers_head() {
     head_time="${CFGMS_TEST_HEAD_TIME}"
   else
     local q
-    q="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { commits(last: 1) { nodes { commit { committedDate pushedDate } } } timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 1) { nodes { ... on HeadRefForcePushedEvent { createdAt } } } } } }"
-    head_time=$(gh api graphql -f "query=${q}" --jq '.data.repository.pullRequest | [(.commits.nodes[0].commit | .committedDate, .pushedDate), (.timelineItems.nodes[0].createdAt)] | map(select(. != null)) | max // ""' 2>/dev/null || echo "")
+    q="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { commits(last: 1) { nodes { commit { committedDate pushedDate checkSuites(first: 100) { nodes { createdAt } } } } } timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 1) { nodes { ... on HeadRefForcePushedEvent { createdAt } } } } } }"
+    head_time=$(gh api graphql -f "query=${q}" --jq '.data.repository.pullRequest | (.commits.nodes[0].commit.checkSuites.nodes | map(.createdAt) | min) as $arrival | if $arrival == null then "" else [(.commits.nodes[0].commit | .committedDate, .pushedDate), $arrival, (.timelineItems.nodes[0].createdAt)] | map(select(. != null)) | max end' 2>/dev/null || echo "")
   fi
   [[ -n "$head_time" ]] || return 1
   [[ "$label_time" > "$head_time" ]]

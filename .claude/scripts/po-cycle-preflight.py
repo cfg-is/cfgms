@@ -478,6 +478,7 @@ query {
             commit {
               committedDate
               pushedDate
+              checkSuites(first: 100) { nodes { createdAt } }
               statusCheckRollup {
                 state
                 contexts(first: 100) {
@@ -538,8 +539,17 @@ query {
             latest_commit = (commits_nodes[0] or {}).get("commit") or {}
             rollup = latest_commit.get("statusCheckRollup")
             latest_commit_date = latest_commit.get("committedDate")
-            head_times = [latest_commit_date, latest_commit.get("pushedDate")]
-        head_times += [
+            # committedDate is author-supplied (a backdated push would stay
+            # released); the earliest check-suite createdAt is the server-set
+            # arrival time of the head. No check suite -> unknown -> fail closed.
+            arrivals = [
+                (cs or {}).get("createdAt")
+                for cs in (((latest_commit.get("checkSuites") or {}).get("nodes")) or [])
+                if (cs or {}).get("createdAt")
+            ]
+            if arrivals:
+                head_times = [latest_commit_date, latest_commit.get("pushedDate"), min(arrivals)]
+        head_times += [] if not head_times else [
             (f or {}).get("createdAt")
             for f in (((n.get("forcePushes") or {}).get("nodes")) or [])
         ]
