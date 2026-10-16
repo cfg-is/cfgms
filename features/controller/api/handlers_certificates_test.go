@@ -1431,27 +1431,16 @@ func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) 
 // TestHandleProvisionCertificate_ProvisioningFailure_Returns500 verifies that a real
 // failure inside the provisioning service surfaces as 500 with no internal detail in the
 // response body. The fault is injected by replacing the cert store's storage directory
-// with a regular file, so persisting the issued certificate fails (ENOTDIR) — the CA
-// itself is already loaded in memory and still signs successfully.
-//
-// The revocation list lives in the same storage directory, and the mTLS middleware
-// fails closed when it cannot determine a peer's revocation status (Issue #5082).
-// Routed through the full router, this fault therefore stops the request at
-// authentication (401) before it reaches the handler — asserted below. The handler's
-// own 500 mapping is then exercised by invoking it directly with a root tenant scope,
-// the same way the TenantScope tests in this file do.
+// with a regular file, so persisting the issued certificate fails — the CA itself is
+// already loaded in memory and still signs successfully. The handler is invoked directly
+// with a root tenant scope (the same way the TenantScope tests in this file do) because
+// the same fault also makes the revocation list unreadable on some platforms, which
+// stops a routed request at authentication; that behaviour has its own test below.
 func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T) {
-	server, certMgr, certStoragePath := setupProvisionTestServer(t)
-	peer := newAdminPeerCert(t, certMgr)
+	server, _, certStoragePath := setupProvisionTestServer(t)
 
 	require.NoError(t, os.RemoveAll(certStoragePath))
 	require.NoError(t, os.WriteFile(certStoragePath, []byte("not a directory"), 0o600))
-
-	authRec := postProvision(server, peer, `{"steward_id":"steward-prov-03"}`)
-	require.Equal(t, http.StatusUnauthorized, authRec.Code,
-		"an unreadable revocation list must fail closed at authentication; body: %s", authRec.Body.String())
-	assert.NotContains(t, authRec.Body.String(), certStoragePath,
-		"the auth error response must not disclose internal filesystem paths")
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
 		strings.NewReader(`{"steward_id":"steward-prov-03"}`))
@@ -1471,6 +1460,25 @@ func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T)
 		"the error response must not disclose internal filesystem paths")
 	assert.NotContains(t, body, "BEGIN",
 		"no certificate material may be returned on the failure path")
+}
+
+// TestHandleProvisionCertificate_UnreadableRevocationList_Returns401 verifies the mTLS
+// middleware fails closed when the revocation list cannot be read (Issue #5082). The
+// fault is a directory in place of revocation.json: reading it fails on Linux, macOS
+// and Windows alike, whereas a missing path is treated as an empty list on Windows.
+func TestHandleProvisionCertificate_UnreadableRevocationList_Returns401(t *testing.T) {
+	server, certMgr, certStoragePath := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	revPath := filepath.Join(certStoragePath, "revocation.json")
+	require.NoError(t, os.RemoveAll(revPath))
+	require.NoError(t, os.Mkdir(revPath, 0o700))
+
+	rec := postProvision(server, peer, `{"steward_id":"steward-prov-04"}`)
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"an unreadable revocation list must fail closed at authentication; body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), certStoragePath,
+		"the auth error response must not disclose internal filesystem paths")
 }
 
 // TestHandleProvisionCertificate_TenantScope_SiblingTenant_Returns403 is the
