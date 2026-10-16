@@ -976,7 +976,7 @@ type failingReadBlobStore struct {
 }
 
 func (failingReadBlobStore) GetBlob(context.Context, blob.BlobKey) (io.ReadCloser, blob.BlobMeta, error) {
-	return nil, blob.BlobMeta{}, errors.New("simulated read failure")
+	return nil, blob.BlobMeta{}, errors.New("injected read failure")
 }
 
 func TestInstallerArtifact_UploadAuditedWhenMetadataReReadFails(t *testing.T) {
