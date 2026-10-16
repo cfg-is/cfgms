@@ -4,6 +4,7 @@
 package service
 
 import (
+	"fmt"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
@@ -470,6 +471,11 @@ func TestStewardMigration_OnConnectReturnsImmediatelyAndPoolIsCapped(t *testing.
 	c.elect(t)
 	n := c.newNode(t, 0)
 	n.svc.SetMaxWorkers(2)
+	// A step that outlives its timeout leaves the steward unconfirmed until the
+	// retry backoff, which this test's hour-long backoff never lets elapse. The
+	// simulated 150ms completion must therefore never race the step timeout, so
+	// the timeout is far above it: only a real stall can exceed it.
+	n.svc.SetTimings(10*time.Second, time.Hour, time.Hour)
 
 	const stewards = 12
 	var ids []string
@@ -488,12 +494,16 @@ func TestStewardMigration_OnConnectReturnsImmediatelyAndPoolIsCapped(t *testing.
 	assert.Less(t, time.Since(start), 100*time.Millisecond, "OnConnect must not wait on any steward")
 
 	eventually(t, "all confirmed", func() bool {
+		var missing []string
 		for _, id := range ids {
 			if !c.confirmed(id) {
-				return false
+				missing = append(missing, id+fmt.Sprintf("(pushes=%d)", len(n.cp.pushes(id))))
 			}
 		}
-		return true
+		if len(missing) > 0 {
+			t.Logf("unconfirmed stewards: %v", missing)
+		}
+		return len(missing) == 0
 	})
 	n.cp.mu.Lock()
 	defer n.cp.mu.Unlock()
