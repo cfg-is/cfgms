@@ -217,18 +217,12 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 // resolveMissingTail resolves rel (relative to the canonical base absBasePath) when the full
 // path does not exist. It walks the components top-down, resolving each existing prefix with
 // filepath.EvalSymlinks so the walk always stands in a fully resolved directory inside the
-// base. The first component that does not resolve is probed with a no-follow Lstat through an
-// os.Root anchored at the base, so the probe can never touch a file outside it. A missing
+// base. The first component that does not resolve is probed with os.Lstat, which never follows
+// the leaf, on the canonical directory already checked to be inside the base. A missing
 // component starts the non-existent tail. A symlink or Windows reparse point that does not
 // resolve is rejected, because re-joining it unresolved would let a later create follow it.
 // A prefix that resolves outside the base is rejected as traversal.
 func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
-	baseRoot, err := os.OpenRoot(absBasePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open base path: %w", err)
-	}
-	defer func() { _ = baseRoot.Close() }()
-
 	resolvedDir := absBasePath
 	var components []string
 	if rel != "." {
@@ -242,14 +236,10 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 			resolvedDir = resolved
 			continue
 		}
-		// resolvedDir is canonical and inside the base, so this base-relative path has no
-		// link in any intermediate component: the Root never has to follow one (os.Root
-		// refuses absolute link targets even when they point inside the base).
-		dirRel, relErr := filepath.Rel(absBasePath, resolvedDir)
-		if relErr != nil {
-			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
-		}
-		info, lstatErr := baseRoot.Lstat(filepath.Join(dirRel, component))
+		// resolvedDir is canonical and inside the base, so joining one component onto it
+		// cannot traverse a link. os.Lstat never follows the leaf; on Windows it reports a
+		// dangling junction as a reparse point where a Root-relative Lstat did not.
+		info, lstatErr := os.Lstat(filepath.Join(resolvedDir, component))
 		if lstatErr != nil {
 			if os.IsPermission(lstatErr) {
 				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
