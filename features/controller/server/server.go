@@ -2267,7 +2267,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #666: Wire git-sync component when a data directory is configured.
 	// The syncer writes through to the controller's config store.
 	if cfg.DataDir != "" {
-		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger, haManager)
+		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger, haManager, auditManager)
 		if gitSyncer != nil {
 			srv.gitSyncer = gitSyncer
 			srv.webhookHandler = webhookHandler // Issue #681: retain for shutdown drain
@@ -2295,6 +2295,7 @@ func initializeGitSync(
 	configStore cfgconfig.ConfigStore,
 	logger logging.Logger,
 	haManager *ha.Manager,
+	auditManager *audit.Manager,
 ) (*gitsync.Syncer, *gitsync.WebhookHandler) {
 	workDir := filepath.Join(dataDir, ".gitsync", "repos")
 	bindingStore, err := gitsync.NewBindingStore(dataDir)
@@ -2309,7 +2310,7 @@ func initializeGitSync(
 	leaseJobFactory := func(name string) (lease.SingletonJob, error) {
 		return haManager.NewBackgroundLoopLease(name, logger)
 	}
-	syncer, err := gitsync.NewSyncer(configStore, bindingStore, workDir, logger, gitsync.WithLeaseJobFactory(leaseJobFactory))
+	syncer, err := gitsync.NewSyncer(configStore, bindingStore, workDir, logger, gitsync.WithLeaseJobFactory(leaseJobFactory), gitsync.WithAuditManager(auditManager))
 	if err != nil {
 		logger.Warn("git-sync: failed to create syncer, git-sync disabled", "error", err)
 		return nil, nil
