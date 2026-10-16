@@ -230,6 +230,14 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 	}
 	for i, component := range components {
 		if resolved, evalErr := filepath.EvalSymlinks(filepath.Join(resolvedDir, component)); evalErr == nil {
+			// On Windows, EvalSymlinks does not evaluate mount points (Go 1.23+): a dangling
+			// junction comes back unchanged with no error. Lstat reports it as irregular and
+			// Stat, which follows it, fails.
+			if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.Mode()&os.ModeIrregular != 0 {
+				if _, statErr := os.Stat(resolved); statErr != nil {
+					return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
+				}
+			}
 			if err := containmentCheck(absBasePath, resolved, userPath); err != nil {
 				return "", err
 			}
