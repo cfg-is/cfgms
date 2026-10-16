@@ -18,20 +18,23 @@ package cert_trust
 import (
 	"encoding/pem"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
 // darwinExecutor manages the macOS system trust store via security(1).
 type darwinExecutor struct {
-	// tmpDir is used to stage cert files for security command operations.
+	// tmpDir is the staging base directory for security command operations.
+	// Overridable for testing.
 	tmpDir string
 }
 
+// darwinStagingBase is the root-owned directory certificates are staged in.
+// It is not under /tmp, which any local user can write to.
+const darwinStagingBase = "/var/lib/cfgms/staging"
+
 func newExecutor() trustStoreExecutor {
-	return &darwinExecutor{tmpDir: os.TempDir()}
+	return &darwinExecutor{tmpDir: darwinStagingBase}
 }
 
 // list returns all certificates in the System keychain via security find-certificate.
@@ -105,14 +108,12 @@ func parseSecurityFindCertificateOutput(out string) []certEntry {
 // install adds the DER-encoded certificate to the System keychain and marks it
 // as trusted for all purposes via security add-trusted-cert.
 func (e *darwinExecutor) install(certDER []byte) error {
-	fp := certFingerprint(certDER)
-	tmpFile := filepath.Join(e.tmpDir, "cfgms-cert-install-"+fp+".pem")
-
 	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	if err := os.WriteFile(tmpFile, pemData, 0600); err != nil {
-		return fmt.Errorf("write temp cert file: %w", err)
+	tmpFile, cleanup, err := stageForTrustCommand(e.tmpDir, pemData)
+	if err != nil {
+		return fmt.Errorf("stage cert file: %w", err)
 	}
-	defer func() { _ = os.Remove(tmpFile) }()
+	defer cleanup()
 
 	// -d system stores in the System keychain; -r trustRoot trusts for all purposes.
 	out, err := exec.Command("security", "add-trusted-cert", // #nosec G204 - tmpFile is an internal path

@@ -6,6 +6,7 @@
 package cert_trust
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -157,5 +158,37 @@ func TestParseSecurityFindCertificateOutput_HashResetBetweenBlocks(t *testing.T)
 	}
 	if entries[0].Fingerprint != fp1 {
 		t.Errorf("Fingerprint = %q, want %q", entries[0].Fingerprint, fp1)
+	}
+}
+
+// TestNewExecutor_StagingBase verifies the darwin executor stages under the
+// root-owned /var/lib/cfgms/staging rather than the world-writable temp dir.
+func TestNewExecutor_StagingBase(t *testing.T) {
+	e, ok := newExecutor().(*darwinExecutor)
+	if !ok {
+		t.Fatalf("newExecutor returned %T, want *darwinExecutor", newExecutor())
+	}
+	if e.tmpDir != "/var/lib/cfgms/staging" {
+		t.Errorf("staging base = %q, want /var/lib/cfgms/staging", e.tmpDir)
+	}
+}
+
+// TestDarwinInstall_FailureLeavesNoStagedFile verifies the staged file and its
+// directory are removed when the security command fails (invalid DER is
+// rejected by security add-trusted-cert).
+func TestDarwinInstall_FailureLeavesNoStagedFile(t *testing.T) {
+	base := t.TempDir()
+	e := &darwinExecutor{tmpDir: base}
+
+	if err := e.install([]byte("not a certificate")); err == nil {
+		t.Fatal("install of invalid certificate unexpectedly succeeded")
+	}
+
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("staging base has %d leftover entries, want 0", len(entries))
 	}
 }
