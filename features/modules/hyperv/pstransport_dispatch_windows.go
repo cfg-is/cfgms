@@ -8,13 +8,16 @@ package hyperv
 import (
 	"context"
 	"fmt"
-	"strings"
 )
 
-// ExecutePS satisfies the winrmTransport interface. Pattern-matches the
-// incoming psCommand against the known psXxx const set from vm.go and
-// vswitch.go and dispatches the equivalent Cfgms-* verb over the
-// persistent PS host.
+// ExecutePS satisfies the winrmTransport interface. It looks psCommand up in
+// psDispatchTable (pstransport_args_windows.go), converts psArgs to typed
+// values, and runs the matching Cfgms-* verb on the row's run mode.
+//
+// No psArgs value is ever composed into script text. The values go to a
+// per-call JSON args file; the script text is always the fixed
+// `Cfgms-Invoke -Verb '<constant>' -ArgsFile '<generated path>'`, and
+// Cfgms-Invoke binds the parsed values to the verb's named parameters.
 //
 // Unknown psCommand strings return an error rather than silently no-op'ing.
 // We don't fall back to WinRM here — the wholesale-WinRM-fallback model
@@ -24,293 +27,73 @@ import (
 // Cfgms-* function, that's a build-time omission, not a runtime graceful
 // degradation candidate.
 func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
-	// External vSwitch creation is the one psCommand that's built by a
-	// function (psCreateVSwitchExternal) rather than declared as a const,
-	// because the AllowManagementOS bool is embedded in the script text.
-	// We check it BEFORE the const-based switch because its text starts
-	// with "New-VMSwitch ... -SwitchType External ..." and otherwise
-	// wouldn't match anything.
-	if strings.Contains(psCommand, "-SwitchType External -NetAdapterName") {
-		return t.dispatchCreateVSwitchExternal(ctx, psCommand, psArgs)
+	call, err := planPSCall(psCommand, psArgs)
+	if err != nil {
+		return "", err
 	}
-
-	switch psCommand {
-	// ── VM ──────────────────────────────────────────────────────────
-	case psGetVM:
-		return t.run(ctx, "Cfgms-GetVM -Name "+quoteArg(psArgs, "Name"))
-	case psCreateVM:
-		// -Path is optional (#2411): the VM home (dir(vhd_path)); omitted when
-		// no vhd_path directory is derivable so New-VM keeps the host default.
-		return t.run(ctx,
-			"Cfgms-CreateVM -Name "+quoteArg(psArgs, "Name")+
-				" -MemoryMB "+intArg(psArgs, "MemoryMB")+
-				" -CPU "+intArg(psArgs, "CPU")+
-				" -VHDPath "+quoteArg(psArgs, "VHDPath")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
-				" -Generation "+intArg(psArgs, "Generation")+
-				optArg(psArgs, "Path", "Path"))
-	case psRemoveVM:
-		return t.run(ctx, "Cfgms-RemoveVM -Name "+quoteArg(psArgs, "Name"))
-	case psRenameVM:
-		return t.run(ctx, "Cfgms-RenameVM -OldName "+quoteArg(psArgs, "OldName")+
-			" -NewName "+quoteArg(psArgs, "NewName"))
-	case psStartVM:
-		return t.run(ctx, "Cfgms-StartVM -Name "+quoteArg(psArgs, "Name"))
-	case psStopVM:
-		return t.run(ctx, "Cfgms-StopVM -Name "+quoteArg(psArgs, "Name"))
-	case psSetVMProcessor:
-		return t.run(ctx,
-			"Cfgms-SetVMProcessor -Name "+quoteArg(psArgs, "Name")+
-				" -CPU "+intArg(psArgs, "CPU"))
-	case psSetVMMemory:
-		return t.run(ctx,
-			"Cfgms-SetVMMemory -Name "+quoteArg(psArgs, "Name")+
-				" -MemoryMB "+intArg(psArgs, "MemoryMB"))
-
-	// ── Declarative checkpoint policy (#2627) ────────────────────────
-	case psGetVMSnapshots:
-		return t.run(ctx, "Cfgms-GetVMSnapshots -Name "+quoteArg(psArgs, "Name"))
-	case psRemoveVMSnapshot:
-		return t.run(ctx,
-			"Cfgms-RemoveVMSnapshot -Name "+quoteArg(psArgs, "Name")+
-				" -SnapshotName "+quoteArg(psArgs, "SnapshotName"))
-
-	// ── VM provisioning: seed VHDX disk ops (#2044) ──────────────────
-	// These four use runFresh (a fresh `powershell -File` process), NOT the
-	// persistent `-Command -` host: Mount-VHD/Dismount-VHD deadlock there
-	// (async Virtual Disk Service). Media-attach + firmware below stay on the
-	// persistent host (Add-VM*/Set-VMFirmware are synchronous and work there).
-	case psNewSeedVHD:
-		return t.runFresh(ctx,
-			"Cfgms-NewSeedVHD -Path "+quoteArg(psArgs, "Path")+
-				" -SizeBytes "+intArg(psArgs, "SizeBytes"))
-	case psMountSeedVHD:
-		// -Label is optional: omitted for the legacy CFGMS_SEED path (PS default),
-		// passed as CIDATA for the cloud-init NoCloud seed.
-		return t.runFresh(ctx, "Cfgms-MountSeedVHD -Path "+quoteArg(psArgs, "Path")+
-			optArg(psArgs, "Label", "Label"))
-	case psCopyToSeedVHD:
-		// -Label / -FileName2 / -Content2 / -StewardDest are optional: absent for
-		// the legacy single-file CFGMS_SEED path (PS defaults), present for the
-		// cloud-init CIDATA seed (user-data + meta-data + cfgms-steward).
-		return t.runFresh(ctx,
-			"Cfgms-CopyToSeedVHD -SeedPath "+quoteArg(psArgs, "SeedPath")+
-				" -FileName "+quoteArg(psArgs, "FileName")+
-				" -Content "+quoteArg(psArgs, "Content")+
-				optArg(psArgs, "Label", "Label")+
-				optArg(psArgs, "FileName2", "FileName2")+
-				optArg(psArgs, "Content2", "Content2")+
-				optArg(psArgs, "StewardDest", "StewardDest")+
-				optArg(psArgs, "LauncherSrc", "LauncherSrc")+
-				optArg(psArgs, "LauncherDest", "LauncherDest")+
-				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
-				" -CASrc "+quoteArg(psArgs, "CASrc"))
-	case psDetachSeedVHD:
-		return t.runFresh(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
-	case psDeleteSeedMedia:
-		return t.run(ctx, "Cfgms-DeleteSeedMedia -Path "+quoteArg(psArgs, "Path"))
-	case psAttachSeedDisk:
-		// runFresh: Add-VMHardDiskDrive opens the seed VHD, which hits the same
-		// async-VHD deadlock as Mount-VHD in the persistent -Command - host.
-		return t.runFresh(ctx,
-			"Cfgms-AttachSeedDisk -Name "+quoteArg(psArgs, "Name")+
-				" -SeedPath "+quoteArg(psArgs, "SeedPath"))
-	case psAttachDVD:
-		// runFresh: Add-VMDvdDrive opens the install ISO (same reason).
-		return t.runFresh(ctx,
-			"Cfgms-AttachDVD -Name "+quoteArg(psArgs, "Name")+
-				" -ISOPath "+quoteArg(psArgs, "ISOPath"))
-	case psSetVMFirmware:
-		return t.run(ctx,
-			"Cfgms-SetVMFirmware -Name "+quoteArg(psArgs, "Name")+
-				" -Template "+quoteArg(psArgs, "Template"))
-	case psDisableVMFirmwareSecureBoot:
-		return t.run(ctx, "Cfgms-DisableVMFirmwareSecureBoot -Name "+quoteArg(psArgs, "Name"))
-	case psSetDVDFirstBoot:
-		// runFresh: Set-VMFirmware -FirstBootDevice references the DVD/ISO and
-		// deadlocks in the persistent host (the secure-boot case above does not).
-		return t.runFresh(ctx,
-			"Cfgms-SetDVDFirstBoot -Name "+quoteArg(psArgs, "Name")+
-				" -ISOPath "+quoteArg(psArgs, "ISOPath"))
-	case psBuildAnswerIso:
-		// runFresh: IMAPI2 COM + file I/O; heavy, must not run in the persistent host.
-		return t.runFresh(ctx,
-			"Cfgms-BuildAnswerIso -IsoPath "+quoteArg(psArgs, "IsoPath")+
-				" -FileName "+quoteArg(psArgs, "FileName")+
-				" -Content "+quoteArg(psArgs, "Content")+
-				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
-				" -CASrc "+quoteArg(psArgs, "CASrc"))
-	case psBootKeypress:
-		// runFresh: blocks ~40s driving the VM keyboard.
-		return t.runFresh(ctx, "Cfgms-BootKeypress -Name "+quoteArg(psArgs, "Name"))
-
-	// ── cloud-init (Linux VM-from-cloud-image) ───────────────────────
-	case psPrepCloudBootDisk:
-		// runFresh: Convert-VHD is heavy file I/O.
-		return t.runFresh(ctx,
-			"Cfgms-PrepCloudBootDisk -ImagePath "+quoteArg(psArgs, "ImagePath")+
-				" -VhdPath "+quoteArg(psArgs, "VhdPath")+
-				" -ResizeBytes "+intArg(psArgs, "ResizeBytes"))
-	case psCreateVMFromDisk:
-		// Persistent host (like Cfgms-CreateVM): New-VM does not mount the disk.
-		return t.run(ctx,
-			"Cfgms-CreateVMFromDisk -Name "+quoteArg(psArgs, "Name")+
-				" -MemoryMB "+intArg(psArgs, "MemoryMB")+
-				" -CPU "+intArg(psArgs, "CPU")+
-				" -VHDPath "+quoteArg(psArgs, "VHDPath")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
-				" -Generation "+intArg(psArgs, "Generation")+
-				optArg(psArgs, "Path", "Path"))
-	case psSetHddFirstBoot:
-		// runFresh: Set-VMFirmware -FirstBootDevice referencing a disk deadlocks
-		// in the persistent host (same as Cfgms-SetDVDFirstBoot).
-		return t.runFresh(ctx,
-			"Cfgms-SetHddFirstBoot -Name "+quoteArg(psArgs, "Name")+
-				" -VHDPath "+quoteArg(psArgs, "VHDPath"))
-
-	// ── VM storage location (#2411) ──────────────────────────────────
-	case psSetVMHome:
-		// runFresh: Move-VMStorage engages the storage-migration service —
-		// async storage ops deadlock in the persistent -Command - host.
-		return t.runFresh(ctx,
-			"Cfgms-SetVMHome -Name "+quoteArg(psArgs, "Name")+
-				" -VMHome "+quoteArg(psArgs, "Home"))
-	case psVMStorageMovePreflight:
-		// runFresh: Get-Volume is a Storage-module cmdlet (same family as the
-		// seed-disk ops that deadlock in the persistent host).
-		return t.runFresh(ctx,
-			"Cfgms-VMStorageMovePreflight -Name "+quoteArg(psArgs, "Name")+
-				" -DestDir "+quoteArg(psArgs, "DestDir"))
-	case psMoveVMStorage:
-		// runDetached: the live migration can run for minutes-to-hours; the
-		// module call must return as soon as the migration process starts
-		// (executor per-call deadline, ADR-012 §7). The MoveRecord is the
-		// source of truth for "started"; failure surfaces via the error
-		// marker probed by Cfgms-GetVMMoveError.
-		return t.runDetached(
-			"Cfgms-MoveVMStorage -Name " + quoteArg(psArgs, "Name") +
-				" -VMHome " + quoteArg(psArgs, "Home"))
-	case psGetVMMoveError:
-		return t.run(ctx, "Cfgms-GetVMMoveError -Name "+quoteArg(psArgs, "Name"))
-	case psClearVMMoveError:
-		return t.run(ctx, "Cfgms-ClearVMMoveError -Name "+quoteArg(psArgs, "Name"))
-
-	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
-	case psConnectVMNic:
-		return t.run(ctx,
-			"Cfgms-ConnectVMNic -Name "+quoteArg(psArgs, "Name")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
-	case psDisconnectVMNic:
-		return t.run(ctx,
-			"Cfgms-DisconnectVMNic -Name "+quoteArg(psArgs, "Name")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
-
-	// ── VSwitch ─────────────────────────────────────────────────────
-	case psGetVSwitch:
-		return t.run(ctx, "Cfgms-GetVSwitch -Name "+quoteArg(psArgs, "Name"))
-	case psRemoveVSwitch:
-		return t.run(ctx, "Cfgms-RemoveVSwitch -Name "+quoteArg(psArgs, "Name"))
-	case psCreateVSwitchInternal:
-		return t.run(ctx, "Cfgms-CreateVSwitchInternal -Name "+quoteArg(psArgs, "Name"))
-	case psCreateVSwitchPrivate:
-		return t.run(ctx, "Cfgms-CreateVSwitchPrivate -Name "+quoteArg(psArgs, "Name"))
-
-	// ── Failover cluster (read-only, #2199 S1) ──────────────────────
-	case psGetCluster:
-		return t.run(ctx, "Cfgms-GetCluster -ClusterName "+quoteArg(psArgs, "ClusterName"))
-	case psGetClusterOwnerNode:
-		return t.run(ctx, "Cfgms-GetClusterOwnerNode -ClusterName "+quoteArg(psArgs, "ClusterName"))
-	case psGetClusterResourceOwner:
-		return t.run(ctx, "Cfgms-GetClusterResourceOwner -ClusterName "+quoteArg(psArgs, "ClusterName"))
-	case psGetClusterAccessSelf:
-		return t.run(ctx, "Cfgms-GetClusterAccessSelf -ClusterName "+quoteArg(psArgs, "ClusterName"))
-
-	// ── Failover cluster (write, #2202 S2) ──────────────────────────
-	case psAddClusterVMRole:
-		return t.run(ctx,
-			"Cfgms-AddClusterVMRole -ClusterName "+quoteArg(psArgs, "ClusterName")+
-				" -VMName "+quoteArg(psArgs, "VMName"))
-	case psRemoveClusterResource:
-		return t.run(ctx, "Cfgms-RemoveClusterResource -Name "+quoteArg(psArgs, "Name"))
-
-	// ── Failover cluster-role properties (write, #2306 PROPERTIES-B) ─
-	case psSetClusterRolePreferredOwners:
-		return t.run(ctx, "Cfgms-SetClusterRolePreferredOwners -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -GroupName "+quoteArg(psArgs, "GroupName")+" -Owners "+quoteArg(psArgs, "Owners"))
-	case psSetClusterRolePossibleOwners:
-		return t.run(ctx, "Cfgms-SetClusterRolePossibleOwners -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -ResourceName "+quoteArg(psArgs, "ResourceName")+" -Owners "+quoteArg(psArgs, "Owners"))
-	case psSetClusterGroupPriority:
-		return t.run(ctx, "Cfgms-SetClusterGroupPriority -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -GroupName "+quoteArg(psArgs, "GroupName")+" -Priority "+quoteArg(psArgs, "Priority"))
-	case psSetClusterGroupAutoStart:
-		return t.run(ctx, "Cfgms-SetClusterGroupAutoStart -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -GroupName "+quoteArg(psArgs, "GroupName")+" -AutoStart "+quoteArg(psArgs, "AutoStart"))
-	case psSetClusterGroupAntiAffinity:
-		return t.run(ctx, "Cfgms-SetClusterGroupAntiAffinity -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -GroupName "+quoteArg(psArgs, "GroupName")+" -ClassName "+quoteArg(psArgs, "ClassName"))
-
-	// ── Cluster-access lifecycle (write, #2306 option 3, privileged) ─
-	case psListClusterAccessNodes:
-		return t.run(ctx, "Cfgms-ListClusterAccessNodes -ClusterName "+quoteArg(psArgs, "ClusterName"))
-	case psGrantClusterAccess:
-		return t.run(ctx, "Cfgms-GrantClusterAccess -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -NodeName "+quoteArg(psArgs, "NodeName"))
-	case psRevokeClusterAccess:
-		return t.run(ctx, "Cfgms-RevokeClusterAccess -ClusterName "+quoteArg(psArgs, "ClusterName")+
-			" -NodeName "+quoteArg(psArgs, "NodeName"))
+	switch call.Mode {
+	case psModeHost:
+		return t.runCall(ctx, call)
+	case psModeFresh:
+		return t.runFreshCall(ctx, call)
+	case psModeDetached:
+		return t.runDetachedCall(call)
 	}
-
-	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table); add a Cfgms-* function and a case here")
+	return "", fmt.Errorf("hyperv-ps-host: Cfgms-%s has no run mode", call.Verb)
 }
 
-// dispatchCreateVSwitchExternal handles the one dynamic psCommand —
-// psCreateVSwitchExternal builds its string body with an embedded $true /
-// $false literal because AllowManagementOS is a Go bool. We recover the
-// bool by inspecting the suffix.
-func (t *psHostTransport) dispatchCreateVSwitchExternal(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
-	allow := "$false"
-	if strings.HasSuffix(strings.TrimSpace(psCommand), "$true | Out-Null") {
-		allow = "$true"
+// runCall runs a planned call in the persistent host. The args file is
+// removed when the call returns, on success, error or panic.
+func (t *psHostTransport) runCall(ctx context.Context, call psCall) (string, error) {
+	argsPath, remove, err := writeArgsFile(call)
+	if err != nil {
+		return "", err
 	}
-	return t.run(ctx,
-		"Cfgms-CreateVSwitchExternal -Name "+quoteArg(psArgs, "Name")+
-			" -NetAdapter "+quoteArg(psArgs, "NetAdapter")+
-			" -AllowManagementOS "+allow)
+	defer remove()
+	expression, err := invokeExpression(call.Verb, argsPath)
+	if err != nil {
+		return "", err
+	}
+	return t.run(ctx, expression)
 }
 
-// quoteArg returns the named psArgs value PS-quoted (single quotes,
-// doubled-up internal single quotes). Missing keys return an empty quoted
-// string so the generated invocation still parses; the upstream
-// vm.go/vswitch.go callers always populate every key required
-// by the verb they're invoking, so an empty here would itself indicate a
-// caller bug — but we don't try to detect it here because the existing
-// const-based call sites already validate the inputs.
-func quoteArg(psArgs map[string]string, key string) string {
-	return quoteForPS(psArgs[key])
+// runFreshCall runs a planned call in a fresh powershell.exe process. The
+// args file is removed after the process exits, including after a deadline
+// kill.
+func (t *psHostTransport) runFreshCall(ctx context.Context, call psCall) (string, error) {
+	argsPath, remove, err := writeArgsFile(call)
+	if err != nil {
+		return "", err
+	}
+	defer remove()
+	expression, err := invokeExpression(call.Verb, argsPath)
+	if err != nil {
+		return "", err
+	}
+	return t.runFresh(ctx, call.Verb, expression, func() {
+		t.dismountAfterKill(call.Verb, call.psArgs)
+	})
 }
 
-// optArg renders an OPTIONAL named parameter: when psArgs[key] is non-empty it
-// returns " -<paramName> '<quoted value>'", otherwise the empty string so the PS
-// function's own default applies. This lets the cloud-init path pass extra args
-// (Label, FileName2, Content2, StewardDest) to the shared seed functions while
-// the legacy CFGMS_SEED single-file call sites stay byte-for-byte unchanged.
-func optArg(psArgs map[string]string, paramName, key string) string {
-	if psArgs[key] == "" {
-		return ""
+// runDetachedCall starts a planned call in a detached process. The args file
+// outlives this function: the goroutine that reaps the process removes it
+// once the process exits. On a start failure it is removed here.
+func (t *psHostTransport) runDetachedCall(call psCall) (out string, err error) {
+	argsPath, remove, err := writeArgsFile(call)
+	if err != nil {
+		return "", err
 	}
-	return " -" + paramName + " " + quoteForPS(psArgs[key])
-}
-
-// intArg returns the named psArgs value rendered as an unquoted bare
-// integer literal. PowerShell's [int] / [long] type coercion handles the
-// parameter casting; we just need a valid numeric literal. Non-numeric
-// values would fail at the PS function's parameter binding stage with a
-// clear error message that propagates back via the stderr drain.
-func intArg(psArgs map[string]string, key string) string {
-	v := strings.TrimSpace(psArgs[key])
-	if v == "" {
-		return "0"
+	started := false
+	defer func() {
+		if !started {
+			remove()
+		}
+	}()
+	expression, err := invokeExpression(call.Verb, argsPath)
+	if err != nil {
+		return "", err
 	}
-	return v
+	out, err = t.runDetached(expression, remove)
+	started = err == nil
+	return out, err
 }

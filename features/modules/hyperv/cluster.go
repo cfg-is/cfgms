@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,16 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// clusterNamePattern is the allowlist for failover-cluster names: the cluster's
+// NetBIOS name (letters, digits, hyphen; 1-15 characters). The scope cap compares
+// it with the name Get-Cluster reports, which is the NetBIOS name. It is also an
+// injection-safety guard: the name reaches cmdlet parameters and the
+// operator-facing Grant-ClusterAccess remediation hint.
+var clusterNamePattern = regexp.MustCompile(`^[A-Za-z0-9\-]{1,15}$`)
+
+// ErrInvalidClusterName is returned when a cluster name fails clusterNamePattern.
+var ErrInvalidClusterName = errors.New("hyperv: invalid cluster name: must match ^[A-Za-z0-9-]{1,15}$ (NetBIOS name)")
 
 // ErrClusterNotDeclared is returned by getCluster / clusterOwnershipHelper when
 // the requested cluster name does not match the steward's configured
@@ -88,10 +99,14 @@ type ClusterRoleProperties struct {
 	AntiAffinityClass string `yaml:"anti_affinity_class,omitempty"`
 }
 
-// Validate checks the ClusterConfig fields. Name is required.
+// Validate checks the ClusterConfig fields. Name is required and must satisfy
+// clusterNamePattern.
 func (c *ClusterConfig) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return errors.New("hyperv: cluster name is required")
+	}
+	if !clusterNamePattern.MatchString(c.Name) {
+		return ErrInvalidClusterName
 	}
 	return nil
 }

@@ -9,8 +9,10 @@ package hyperv
 // defines the Cfgms-* verb functions and sets safe defaults.
 //
 // Each function corresponds to exactly one psXxx const elsewhere in this
-// package; the dispatcher in pstransport_dispatch_windows.go maps the
-// existing psXxx → Cfgms-VerbName + args.
+// package; the dispatch table in pstransport_args_windows.go maps the
+// existing psXxx → Cfgms-VerbName + typed args. Every verb is reached
+// through Cfgms-Invoke, which binds the values from a JSON args file to the
+// verb's named parameters, so no value is ever parsed as script text.
 //
 // Function design rules (intentional, do not relax):
 //   - Each function wraps EXACTLY ONE cmdlet (or a tiny ConvertTo-Json
@@ -36,6 +38,50 @@ const psHostPreamble = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference   = 'SilentlyContinue'
 $WarningPreference    = 'SilentlyContinue'
+
+# ── Dispatch entry point ──────────────────────────────────────────────
+# Cfgms-Invoke is the only function the Go transport calls. -Verb names a
+# Cfgms-* function (letters only); -ArgsFile is a JSON object of that
+# function's named parameters. The values are parsed as JSON data and
+# splatted by name: they bind to typed parameters and are never evaluated.
+# A property value that is not a string, number or boolean is refused.
+function Cfgms-Invoke {
+    param([Parameter(Mandatory)][string]$Verb, [Parameter(Mandatory)][string]$ArgsFile)
+    if ($Verb -cnotmatch '\A[A-Za-z]+\z') { throw 'Cfgms-Invoke: verb must be letters only' }
+    $fn = Get-Command -Name ('Cfgms-' + $Verb) -CommandType Function -ErrorAction SilentlyContinue
+    if (-not $fn) { throw ('Cfgms-Invoke: unknown verb Cfgms-' + $Verb) }
+    $data = Get-Content -LiteralPath $ArgsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $params = @{}
+    if ($null -ne $data) {
+        foreach ($p in $data.PSObject.Properties) {
+            if ($p.Name -cnotmatch '\A[A-Za-z][A-Za-z0-9]*\z') { throw 'Cfgms-Invoke: invalid parameter name' }
+            $v = $p.Value
+            if (-not ($v -is [string] -or $v -is [bool] -or $v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal])) {
+                throw ('Cfgms-Invoke: parameter ' + $p.Name + ' is not a string, number or boolean')
+            }
+            $params[$p.Name] = $v
+        }
+    }
+    & $fn @params
+}
+
+# ── Domain observe ────────────────────────────────────────────────────
+# Mirror psEnumerateVMs (vm.go), psEnumerateVSwitches (vswitch.go) and
+# psGetClusterSelf (cluster.go) exactly. Read-only; no parameters.
+function Cfgms-EnumerateVMs {
+    ConvertTo-Json @{vms=@(Get-VM -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })} -Compress
+}
+function Cfgms-EnumerateVSwitches {
+    $sw = @(Get-VMSwitch -ErrorAction SilentlyContinue | ForEach-Object { @{Name=$_.Name; SwitchType=$_.SwitchType.ToString()} })
+    ConvertTo-Json @{switches=$sw} -Compress -Depth 4
+}
+function Cfgms-GetClusterSelf {
+    $c = Get-Cluster -ErrorAction SilentlyContinue
+    if (-not $c) { Write-Output '{"found":false}'; return }
+    $nodes = @(Get-ClusterNode -Cluster $c.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    $csv = @(Get-ClusterSharedVolume -Cluster $c.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName })
+    ConvertTo-Json @{ found=$true; Name=$c.Name; MemberNodes=$nodes; CsvPaths=$csv } -Compress -Depth 4
+}
 
 # ── VM read ───────────────────────────────────────────────────────────
 function Cfgms-GetVM {
@@ -250,7 +296,7 @@ function Cfgms-DisconnectVMNic {
 # creating the parent directory first (seed_dir may be a fresh local path).
 function Cfgms-NewSeedVHD {
     param([Parameter(Mandatory)][string]$Path, [int]$SizeBytes = 67108864)
-    New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Path))
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
     New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null
 }
@@ -344,8 +390,8 @@ function Cfgms-CopyToSeedVHD {
             Where-Object { $_.FileSystemLabel -eq $Label } |
             Select-Object -First 1).DriveLetter
         if (-not $letter) { throw ('seed volume with label ' + $Label + ' not found after mount: ' + $SeedPath) }
-        Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
-        if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
+        Set-Content -LiteralPath ($letter + ':\' + $FileName) -Value $Content -NoNewline
+        if ($FileName2) { Set-Content -LiteralPath ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
         if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
         if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
         if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
@@ -490,7 +536,7 @@ function Cfgms-PrepCloudBootDisk {
         [Parameter(Mandatory)][string]$VhdPath,
         [long]$ResizeBytes = 0
     )
-    New-Item -ItemType Directory -Force -Path (Split-Path -Path $VhdPath -Parent) | Out-Null
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($VhdPath))
     if (Test-Path -LiteralPath $VhdPath) { Remove-Item -LiteralPath $VhdPath -Force }
     $ext = [IO.Path]::GetExtension($ImagePath).ToLowerInvariant()
     if ($ext -eq '.vhdx') {
@@ -559,12 +605,12 @@ public static class CfgmsIsoWriter {
 }
 '@
     $tmp = Join-Path $env:TEMP ('cfgms-ans-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    [void][System.IO.Directory]::CreateDirectory($tmp)
     try {
-        Set-Content -Path (Join-Path $tmp $FileName) -Value $Content -NoNewline
+        Set-Content -LiteralPath (Join-Path $tmp $FileName) -Value $Content -NoNewline
         if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination (Join-Path $tmp 'cfgms-steward.exe') -Force }
         if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination (Join-Path $tmp 'controller-ca.crt') -Force }
-        Remove-Item $IsoPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $IsoPath -Force -ErrorAction SilentlyContinue
         $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
         $fsi.FileSystemsToCreate = 7
         $fsi.VolumeName = 'CFGMS_ANS'
@@ -572,7 +618,7 @@ public static class CfgmsIsoWriter {
         $res = $fsi.CreateResultImage()
         [CfgmsIsoWriter]::Save($res.ImageStream, $IsoPath)
     } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -665,7 +711,7 @@ function Cfgms-MoveVMStorage {
         [Parameter(Mandatory)][string]$VMHome
     )
     $errFile = Cfgms-VMMoveErrFile -Name $Name
-    New-Item -ItemType Directory -Force -Path (Split-Path -Path $errFile -Parent) | Out-Null
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($errFile))
     try {
         $vhds = @()
         foreach ($d in @(Get-VMHardDiskDrive -VMName $Name)) {
@@ -786,12 +832,14 @@ function Cfgms-GetClusterResourceOwner {
 # node's computer account holds cluster-management access (#2306 onboarding).
 # Read-only; a denied/absent Get-ClusterAccess read yields access_ok=false. The
 # account and the exact remediation grant come from here, never composed in Go.
+# The cluster name is single-quoted in the hint, with ASCII and Unicode single
+# quotes doubled, so a copied hint passes it as one literal argument.
 function Cfgms-GetClusterAccessSelf {
     param([Parameter(Mandatory)][string]$ClusterName)
     $me = '{0}\{1}$' -f $env:USERDOMAIN, $env:COMPUTERNAME
     $acl = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue)
     $ok = @($acl | Where-Object { $_.IdentityReference -ieq $me }).Count -gt 0
-    ConvertTo-Json @{ account = $me; access_ok = $ok; remediation = ("Grant-ClusterAccess -Cluster {0} -User '{1}' -Full" -f $ClusterName, $me) } -Compress
+    ConvertTo-Json @{ account = $me; access_ok = $ok; remediation = ("Grant-ClusterAccess -Cluster '{0}' -User '{1}' -Full" -f ($ClusterName -replace "['\u2018-\u201B]", '$0$0'), $me) } -Compress
 }
 
 # ── Failover cluster write (#2202 S2) ─────────────────────────────────

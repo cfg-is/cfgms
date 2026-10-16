@@ -1215,3 +1215,40 @@ func TestClusterStatus_AsMap_ContainsEdgesDirectionExplicit(t *testing.T) {
 			"edge 'to' must be host:<node> (got %q); cluster is the FROM side", to)
 	}
 }
+
+// unsafeClusterNames are names that must never reach a cmdlet parameter or the
+// remediation hint: shell metacharacters, quotes, whitespace, a newline, a dotted
+// FQDN, and an over-long name (NetBIOS cluster names are at most 15 characters).
+var unsafeClusterNames = []string{
+	"lab-hv;Stop-Computer",
+	"lab'hv",
+	"lab’hv",
+	"lab-hv\nWrite-Output x",
+	"lab hv",
+	"$(x)",
+	"lab-hv.corp.local",
+	"cluster-name-016",
+}
+
+// TestClusterConfig_Validate_RejectsUnsafeName: the cluster resource's name must
+// satisfy clusterNamePattern, not only be non-empty.
+func TestClusterConfig_Validate_RejectsUnsafeName(t *testing.T) {
+	for _, name := range unsafeClusterNames {
+		err := (&ClusterConfig{Name: name}).Validate()
+		assert.ErrorIs(t, err, ErrInvalidClusterName, "cluster name %q must be rejected", name)
+	}
+	for _, name := range []string{"lab-hv", "example-cluster", "HV01"} {
+		assert.NoError(t, (&ClusterConfig{Name: name}).Validate(), "cluster name %q must be accepted", name)
+	}
+}
+
+// TestVMConfig_Validate_RejectsUnsafeHARoleClusterName: ha_role.cluster_name is
+// held to the same allowlist as the cluster resource's name.
+func TestVMConfig_Validate_RejectsUnsafeHARoleClusterName(t *testing.T) {
+	for _, name := range append([]string{""}, unsafeClusterNames...) {
+		cfg := &VMConfig{Name: "ha-vm", HARole: &HARoleConfig{ClusterName: name}}
+		assert.ErrorIs(t, cfg.Validate(), ErrInvalidClusterName, "ha_role.cluster_name %q must be rejected", name)
+	}
+	cfg := &VMConfig{Name: "ha-vm", HARole: &HARoleConfig{ClusterName: "lab-hv"}}
+	assert.NoError(t, cfg.Validate())
+}

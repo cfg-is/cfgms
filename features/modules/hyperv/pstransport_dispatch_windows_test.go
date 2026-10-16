@@ -6,8 +6,13 @@
 package hyperv
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,225 +20,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// recordingPSTransport satisfies the same shape as psHostTransport's run() for
-// dispatch-table testing. It captures the expression sent to run() without
-// spawning a PowerShell subprocess.
-type recordingPSTransport struct {
-	psHostTransport
-	calls []string
-}
-
-func (r *recordingPSTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
-	// Reproduce the dispatch logic locally — pattern-match psCommand the same
-	// way ExecutePS does, then capture the synthesised expression instead of
-	// sending it to a real PS host.
-	exprFn := func(expr string) (string, error) {
-		r.calls = append(r.calls, expr)
-		return "", nil
-	}
-	return dispatchForTest(ctx, psCommand, psArgs, exprFn)
-}
-
-// dispatchForTest mirrors psHostTransport.ExecutePS's switch but routes the
-// generated expression to a caller-supplied function instead of run(). Keeping
-// this separate from the production switch would normally invite drift; we
-// avoid that by asserting in TestDispatch_AllKnownCommands that every psXxx
-// constant the production code uses is exercised here.
-func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]string, emit func(string) (string, error)) (string, error) {
-	if strings.Contains(psCommand, "-SwitchType External -NetAdapterName") {
-		allow := "$false"
-		if strings.HasSuffix(strings.TrimSpace(psCommand), "$true | Out-Null") {
-			allow = "$true"
-		}
-		return emit("Cfgms-CreateVSwitchExternal -Name " + quoteArg(psArgs, "Name") +
-			" -NetAdapter " + quoteArg(psArgs, "NetAdapter") +
-			" -AllowManagementOS " + allow)
-	}
-
-	switch psCommand {
-	case psGetVM:
-		return emit("Cfgms-GetVM -Name " + quoteArg(psArgs, "Name"))
-	case psCreateVM:
-		return emit("Cfgms-CreateVM -Name " + quoteArg(psArgs, "Name") +
-			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
-			" -CPU " + intArg(psArgs, "CPU") +
-			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
-			" -Generation " + intArg(psArgs, "Generation") +
-			optArg(psArgs, "Path", "Path"))
-	case psNewSeedVHD:
-		return emit("Cfgms-NewSeedVHD -Path " + quoteArg(psArgs, "Path") +
-			" -SizeBytes " + intArg(psArgs, "SizeBytes"))
-	case psMountSeedVHD:
-		return emit("Cfgms-MountSeedVHD -Path " + quoteArg(psArgs, "Path") +
-			optArg(psArgs, "Label", "Label"))
-	case psCopyToSeedVHD:
-		return emit("Cfgms-CopyToSeedVHD -SeedPath " + quoteArg(psArgs, "SeedPath") +
-			" -FileName " + quoteArg(psArgs, "FileName") +
-			" -Content " + quoteArg(psArgs, "Content") +
-			optArg(psArgs, "Label", "Label") +
-			optArg(psArgs, "FileName2", "FileName2") +
-			optArg(psArgs, "Content2", "Content2") +
-			optArg(psArgs, "StewardDest", "StewardDest") +
-			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
-			" -CASrc " + quoteArg(psArgs, "CASrc"))
-	case psDetachSeedVHD:
-		return emit("Cfgms-DetachSeedVHD -Path " + quoteArg(psArgs, "Path"))
-	case psDeleteSeedMedia:
-		return emit("Cfgms-DeleteSeedMedia -Path " + quoteArg(psArgs, "Path"))
-	case psPrepCloudBootDisk:
-		return emit("Cfgms-PrepCloudBootDisk -ImagePath " + quoteArg(psArgs, "ImagePath") +
-			" -VhdPath " + quoteArg(psArgs, "VhdPath") +
-			" -ResizeBytes " + intArg(psArgs, "ResizeBytes"))
-	case psCreateVMFromDisk:
-		return emit("Cfgms-CreateVMFromDisk -Name " + quoteArg(psArgs, "Name") +
-			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
-			" -CPU " + intArg(psArgs, "CPU") +
-			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
-			" -Generation " + intArg(psArgs, "Generation") +
-			optArg(psArgs, "Path", "Path"))
-	case psSetVMHome:
-		return emit("Cfgms-SetVMHome -Name " + quoteArg(psArgs, "Name") +
-			" -VMHome " + quoteArg(psArgs, "Home"))
-	case psVMStorageMovePreflight:
-		return emit("Cfgms-VMStorageMovePreflight -Name " + quoteArg(psArgs, "Name") +
-			" -DestDir " + quoteArg(psArgs, "DestDir"))
-	case psMoveVMStorage:
-		return emit("Cfgms-MoveVMStorage -Name " + quoteArg(psArgs, "Name") +
-			" -VMHome " + quoteArg(psArgs, "Home"))
-	case psGetVMMoveError:
-		return emit("Cfgms-GetVMMoveError -Name " + quoteArg(psArgs, "Name"))
-	case psClearVMMoveError:
-		return emit("Cfgms-ClearVMMoveError -Name " + quoteArg(psArgs, "Name"))
-	case psSetHddFirstBoot:
-		return emit("Cfgms-SetHddFirstBoot -Name " + quoteArg(psArgs, "Name") +
-			" -VHDPath " + quoteArg(psArgs, "VHDPath"))
-	case psAttachSeedDisk:
-		return emit("Cfgms-AttachSeedDisk -Name " + quoteArg(psArgs, "Name") +
-			" -SeedPath " + quoteArg(psArgs, "SeedPath"))
-	case psAttachDVD:
-		return emit("Cfgms-AttachDVD -Name " + quoteArg(psArgs, "Name") +
-			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
-	case psSetVMFirmware:
-		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
-			" -Template " + quoteArg(psArgs, "Template"))
-	case psDisableVMFirmwareSecureBoot:
-		return emit("Cfgms-DisableVMFirmwareSecureBoot -Name " + quoteArg(psArgs, "Name"))
-	case psSetDVDFirstBoot:
-		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name") +
-			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
-	case psBuildAnswerIso:
-		return emit("Cfgms-BuildAnswerIso -IsoPath " + quoteArg(psArgs, "IsoPath") +
-			" -FileName " + quoteArg(psArgs, "FileName") +
-			" -Content " + quoteArg(psArgs, "Content") +
-			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
-			" -CASrc " + quoteArg(psArgs, "CASrc"))
-	case psBootKeypress:
-		return emit("Cfgms-BootKeypress -Name " + quoteArg(psArgs, "Name"))
-	case psRemoveVM:
-		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
-	case psStartVM:
-		return emit("Cfgms-StartVM -Name " + quoteArg(psArgs, "Name"))
-	case psStopVM:
-		return emit("Cfgms-StopVM -Name " + quoteArg(psArgs, "Name"))
-	case psSetVMProcessor:
-		return emit("Cfgms-SetVMProcessor -Name " + quoteArg(psArgs, "Name") +
-			" -CPU " + intArg(psArgs, "CPU"))
-	case psSetVMMemory:
-		return emit("Cfgms-SetVMMemory -Name " + quoteArg(psArgs, "Name") +
-			" -MemoryMB " + intArg(psArgs, "MemoryMB"))
-	case psConnectVMNic:
-		return emit("Cfgms-ConnectVMNic -Name " + quoteArg(psArgs, "Name") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
-	case psDisconnectVMNic:
-		return emit("Cfgms-DisconnectVMNic -Name " + quoteArg(psArgs, "Name") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
-	case psGetVSwitch:
-		return emit("Cfgms-GetVSwitch -Name " + quoteArg(psArgs, "Name"))
-	case psRemoveVSwitch:
-		return emit("Cfgms-RemoveVSwitch -Name " + quoteArg(psArgs, "Name"))
-	case psCreateVSwitchInternal:
-		return emit("Cfgms-CreateVSwitchInternal -Name " + quoteArg(psArgs, "Name"))
-	case psCreateVSwitchPrivate:
-		return emit("Cfgms-CreateVSwitchPrivate -Name " + quoteArg(psArgs, "Name"))
-	case psGetCluster:
-		return emit("Cfgms-GetCluster -ClusterName " + quoteArg(psArgs, "ClusterName"))
-	case psGetClusterOwnerNode:
-		return emit("Cfgms-GetClusterOwnerNode -ClusterName " + quoteArg(psArgs, "ClusterName"))
-	case psGetClusterResourceOwner:
-		return emit("Cfgms-GetClusterResourceOwner -ClusterName " + quoteArg(psArgs, "ClusterName"))
-	case psGetClusterAccessSelf:
-		return emit("Cfgms-GetClusterAccessSelf -ClusterName " + quoteArg(psArgs, "ClusterName"))
-	case psAddClusterVMRole:
-		return emit("Cfgms-AddClusterVMRole -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -VMName " + quoteArg(psArgs, "VMName"))
-	case psRemoveClusterResource:
-		return emit("Cfgms-RemoveClusterResource -Name " + quoteArg(psArgs, "Name"))
-	case psSetClusterRolePreferredOwners:
-		return emit("Cfgms-SetClusterRolePreferredOwners -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -GroupName " + quoteArg(psArgs, "GroupName") + " -Owners " + quoteArg(psArgs, "Owners"))
-	case psSetClusterRolePossibleOwners:
-		return emit("Cfgms-SetClusterRolePossibleOwners -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -ResourceName " + quoteArg(psArgs, "ResourceName") + " -Owners " + quoteArg(psArgs, "Owners"))
-	case psSetClusterGroupPriority:
-		return emit("Cfgms-SetClusterGroupPriority -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -GroupName " + quoteArg(psArgs, "GroupName") + " -Priority " + quoteArg(psArgs, "Priority"))
-	case psSetClusterGroupAutoStart:
-		return emit("Cfgms-SetClusterGroupAutoStart -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -GroupName " + quoteArg(psArgs, "GroupName") + " -AutoStart " + quoteArg(psArgs, "AutoStart"))
-	case psSetClusterGroupAntiAffinity:
-		return emit("Cfgms-SetClusterGroupAntiAffinity -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -GroupName " + quoteArg(psArgs, "GroupName") + " -ClassName " + quoteArg(psArgs, "ClassName"))
-	case psListClusterAccessNodes:
-		return emit("Cfgms-ListClusterAccessNodes -ClusterName " + quoteArg(psArgs, "ClusterName"))
-	case psGrantClusterAccess:
-		return emit("Cfgms-GrantClusterAccess -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -NodeName " + quoteArg(psArgs, "NodeName"))
-	case psRevokeClusterAccess:
-		return emit("Cfgms-RevokeClusterAccess -ClusterName " + quoteArg(psArgs, "ClusterName") +
-			" -NodeName " + quoteArg(psArgs, "NodeName"))
-	}
-	// Mirror production ExecutePS: an unknown psCommand is an error, not a
-	// silent success — keeps this test mirror honest to the production contract.
-	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table)")
-}
-
 // TestPSDispatch_VMVerbs covers every VM-lifecycle psXxx constant and asserts
-// the synthesised Cfgms-* invocation has the right verb name, parameter
-// names, and PS-quoted argument values.
+// the production planPSCall picks the right verb and produces the right
+// parameter names, order and JSON types.
 func TestPSDispatch_VMVerbs(t *testing.T) {
-	ctx := context.Background()
-
 	cases := []struct {
 		name      string
 		psCommand string
 		psArgs    map[string]string
-		want      string
+		wantVerb  string
+		wantJSON  string
 	}{
 		{
 			name:      "Get-VM",
 			psCommand: psGetVM,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
-			want:      "Cfgms-GetVM -Name 'cfgms-t__web-01'",
+			wantVerb:  "GetVM",
+			wantJSON:  `{"Name":"cfgms-t__web-01"}`,
 		},
 		{
 			name:      "Start-VM",
 			psCommand: psStartVM,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
-			want:      "Cfgms-StartVM -Name 'cfgms-t__web-01'",
+			wantVerb:  "StartVM",
+			wantJSON:  `{"Name":"cfgms-t__web-01"}`,
 		},
 		{
 			name:      "Stop-VM",
 			psCommand: psStopVM,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
-			want:      "Cfgms-StopVM -Name 'cfgms-t__web-01'",
+			wantVerb:  "StopVM",
+			wantJSON:  `{"Name":"cfgms-t__web-01"}`,
 		},
 		{
 			name:      "Remove-VM",
 			psCommand: psRemoveVM,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
-			want:      "Cfgms-RemoveVM -Name 'cfgms-t__web-01'",
+			wantVerb:  "RemoveVM",
+			wantJSON:  `{"Name":"cfgms-t__web-01"}`,
 		},
 		{
 			name:      "New-VM",
@@ -246,7 +70,8 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"SwitchName": "External",
 				"Generation": "2",
 			},
-			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External' -Generation 2",
+			wantVerb: "CreateVM",
+			wantJSON: `{"Name":"cfgms-t__web-01","MemoryMB":4096,"CPU":4,"VHDPath":"C:\\VMs\\web-01.vhdx","SwitchName":"External","Generation":2}`,
 		},
 		{
 			name:      "New-VM Gen1",
@@ -259,19 +84,22 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"SwitchName": "External",
 				"Generation": "1",
 			},
-			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 2048 -CPU 2 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External' -Generation 1",
+			wantVerb: "CreateVM",
+			wantJSON: `{"Name":"cfgms-t__web-01","MemoryMB":2048,"CPU":2,"VHDPath":"C:\\VMs\\web-01.vhdx","SwitchName":"External","Generation":1}`,
 		},
 		{
 			name:      "New-VHD seed",
 			psCommand: psNewSeedVHD,
 			psArgs:    map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "SizeBytes": "67108864"},
-			want:      "Cfgms-NewSeedVHD -Path 'C:\\VMs\\cfgms-seed-web-01.vhdx' -SizeBytes 67108864",
+			wantVerb:  "NewSeedVHD",
+			wantJSON:  `{"Path":"C:\\VMs\\cfgms-seed-web-01.vhdx","SizeBytes":67108864}`,
 		},
 		{
 			name:      "Mount-VHD seed",
 			psCommand: psMountSeedVHD,
 			psArgs:    map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"},
-			want:      "Cfgms-MountSeedVHD -Path 'C:\\VMs\\cfgms-seed-web-01.vhdx'",
+			wantVerb:  "MountSeedVHD",
+			wantJSON:  `{"Path":"C:\\VMs\\cfgms-seed-web-01.vhdx"}`,
 		},
 		{
 			name:      "Copy seed answer file",
@@ -281,37 +109,43 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"FileName": "autounattend.xml",
 				"Content":  "<!-- placeholder autounattend -->",
 			},
-			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->' -StewardSrc '' -CASrc ''",
+			wantVerb: "CopyToSeedVHD",
+			wantJSON: `{"SeedPath":"C:\\VMs\\cfgms-seed-web-01.vhdx","FileName":"autounattend.xml","Content":"\u003c!-- placeholder autounattend --\u003e","StewardSrc":"","CASrc":""}`,
 		},
 		{
 			name:      "Attach seed disk",
 			psCommand: psAttachSeedDisk,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"},
-			want:      "Cfgms-AttachSeedDisk -Name 'cfgms-t__web-01' -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx'",
+			wantVerb:  "AttachSeedDisk",
+			wantJSON:  `{"Name":"cfgms-t__web-01","SeedPath":"C:\\VMs\\cfgms-seed-web-01.vhdx"}`,
 		},
 		{
 			name:      "Attach install ISO DVD",
 			psCommand: psAttachDVD,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"},
-			want:      "Cfgms-AttachDVD -Name 'cfgms-t__web-01' -ISOPath 'C:\\ISO\\server.iso'",
+			wantVerb:  "AttachDVD",
+			wantJSON:  `{"Name":"cfgms-t__web-01","ISOPath":"C:\\ISO\\server.iso"}`,
 		},
 		{
 			name:      "Set firmware secure-boot template",
 			psCommand: psSetVMFirmware,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"},
-			want:      "Cfgms-SetVMFirmware -Name 'cfgms-t__web-01' -Template 'MicrosoftWindows'",
+			wantVerb:  "SetVMFirmware",
+			wantJSON:  `{"Name":"cfgms-t__web-01","Template":"MicrosoftWindows"}`,
 		},
 		{
 			name:      "Set-VMProcessor",
 			psCommand: psSetVMProcessor,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "CPU": "8"},
-			want:      "Cfgms-SetVMProcessor -Name 'cfgms-t__web-01' -CPU 8",
+			wantVerb:  "SetVMProcessor",
+			wantJSON:  `{"Name":"cfgms-t__web-01","CPU":8}`,
 		},
 		{
 			name:      "Set-VMMemory",
 			psCommand: psSetVMMemory,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "8192"},
-			want:      "Cfgms-SetVMMemory -Name 'cfgms-t__web-01' -MemoryMB 8192",
+			wantVerb:  "SetVMMemory",
+			wantJSON:  `{"Name":"cfgms-t__web-01","MemoryMB":8192}`,
 		},
 		{
 			// #2411: -Path (the VM home, dir(vhd_path)) rides New-VM as an
@@ -327,7 +161,8 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"Generation": "2",
 				"Path":       "C:\\VMs\\web-01",
 			},
-			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01\\web-01.vhdx' -SwitchName 'External' -Generation 2 -Path 'C:\\VMs\\web-01'",
+			wantVerb: "CreateVM",
+			wantJSON: `{"Name":"cfgms-t__web-01","MemoryMB":4096,"CPU":4,"VHDPath":"C:\\VMs\\web-01\\web-01.vhdx","SwitchName":"External","Generation":2,"Path":"C:\\VMs\\web-01"}`,
 		},
 		{
 			// #2411: the create-time config-only home move. NOTE the parameter is
@@ -336,53 +171,56 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 			name:      "SetVMHome",
 			psCommand: psSetVMHome,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\VMs\\web-01"},
-			want:      "Cfgms-SetVMHome -Name 'cfgms-t__web-01' -VMHome 'C:\\VMs\\web-01'",
+			wantVerb:  "SetVMHome",
+			wantJSON:  `{"Name":"cfgms-t__web-01","VMHome":"C:\\VMs\\web-01"}`,
 		},
 		{
 			name:      "VMStorageMovePreflight",
 			psCommand: psVMStorageMovePreflight,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "DestDir": "C:\\ClusterStorage\\CSV01\\web-01"},
-			want:      "Cfgms-VMStorageMovePreflight -Name 'cfgms-t__web-01' -DestDir 'C:\\ClusterStorage\\CSV01\\web-01'",
+			wantVerb:  "VMStorageMovePreflight",
+			wantJSON:  `{"Name":"cfgms-t__web-01","DestDir":"C:\\ClusterStorage\\CSV01\\web-01"}`,
 		},
 		{
 			name:      "MoveVMStorage",
 			psCommand: psMoveVMStorage,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\ClusterStorage\\CSV01\\web-01"},
-			want:      "Cfgms-MoveVMStorage -Name 'cfgms-t__web-01' -VMHome 'C:\\ClusterStorage\\CSV01\\web-01'",
+			wantVerb:  "MoveVMStorage",
+			wantJSON:  `{"Name":"cfgms-t__web-01","VMHome":"C:\\ClusterStorage\\CSV01\\web-01"}`,
 		},
 		{
 			name:      "GetVMMoveError",
 			psCommand: psGetVMMoveError,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
-			want:      "Cfgms-GetVMMoveError -Name 'cfgms-t__web-01'",
+			wantVerb:  "GetVMMoveError",
+			wantJSON:  `{"Name":"cfgms-t__web-01"}`,
 		},
 		{
 			name:      "ClearVMMoveError",
 			psCommand: psClearVMMoveError,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
-			want:      "Cfgms-ClearVMMoveError -Name 'cfgms-t__web-01'",
+			wantVerb:  "ClearVMMoveError",
+			wantJSON:  `{"Name":"cfgms-t__web-01"}`,
 		},
 		{
 			name:      "Connect-VMNic",
 			psCommand: psConnectVMNic,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"},
-			want:      "Cfgms-ConnectVMNic -Name 'cfgms-t__web-01' -SwitchName 'External'",
+			wantVerb:  "ConnectVMNic",
+			wantJSON:  `{"Name":"cfgms-t__web-01","SwitchName":"External"}`,
 		},
 		{
 			name:      "Disconnect-VMNic",
 			psCommand: psDisconnectVMNic,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "Mgmt"},
-			want:      "Cfgms-DisconnectVMNic -Name 'cfgms-t__web-01' -SwitchName 'Mgmt'",
+			wantVerb:  "DisconnectVMNic",
+			wantJSON:  `{"Name":"cfgms-t__web-01","SwitchName":"Mgmt"}`,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := &recordingPSTransport{}
-			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
-			require.NoError(t, err)
-			require.Len(t, tr.calls, 1)
-			assert.Equal(t, tc.want, tr.calls[0])
+			assertPlanned(t, tc.psCommand, tc.psArgs, tc.wantVerb, tc.wantJSON)
 		})
 	}
 }
@@ -391,59 +229,60 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 // SwitchType variants and the dynamic-script External case where the
 // AllowManagementOS bool is recovered from the suffix.
 func TestPSDispatch_VSwitchVerbs(t *testing.T) {
-	ctx := context.Background()
-
 	cases := []struct {
 		name      string
 		psCommand string
 		psArgs    map[string]string
-		want      string
+		wantVerb  string
+		wantJSON  string
 	}{
 		{
 			name:      "Get-VMSwitch",
 			psCommand: psGetVSwitch,
 			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
-			want:      "Cfgms-GetVSwitch -Name 'cfgms-t__sw01'",
+			wantVerb:  "GetVSwitch",
+			wantJSON:  `{"Name":"cfgms-t__sw01"}`,
 		},
 		{
 			name:      "Remove-VMSwitch",
 			psCommand: psRemoveVSwitch,
 			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
-			want:      "Cfgms-RemoveVSwitch -Name 'cfgms-t__sw01'",
+			wantVerb:  "RemoveVSwitch",
+			wantJSON:  `{"Name":"cfgms-t__sw01"}`,
 		},
 		{
 			name:      "New-VMSwitch Internal",
 			psCommand: psCreateVSwitchInternal,
 			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
-			want:      "Cfgms-CreateVSwitchInternal -Name 'cfgms-t__sw01'",
+			wantVerb:  "CreateVSwitchInternal",
+			wantJSON:  `{"Name":"cfgms-t__sw01"}`,
 		},
 		{
 			name:      "New-VMSwitch Private",
 			psCommand: psCreateVSwitchPrivate,
 			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
-			want:      "Cfgms-CreateVSwitchPrivate -Name 'cfgms-t__sw01'",
+			wantVerb:  "CreateVSwitchPrivate",
+			wantJSON:  `{"Name":"cfgms-t__sw01"}`,
 		},
 		{
 			name:      "New-VMSwitch External AllowManagementOS=true",
 			psCommand: psCreateVSwitchExternal(true),
 			psArgs:    map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"},
-			want:      "Cfgms-CreateVSwitchExternal -Name 'cfgms-t__sw01' -NetAdapter 'Ethernet0' -AllowManagementOS $true",
+			wantVerb:  "CreateVSwitchExternal",
+			wantJSON:  `{"Name":"cfgms-t__sw01","NetAdapter":"Ethernet0","AllowManagementOS":true}`,
 		},
 		{
 			name:      "New-VMSwitch External AllowManagementOS=false",
 			psCommand: psCreateVSwitchExternal(false),
 			psArgs:    map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"},
-			want:      "Cfgms-CreateVSwitchExternal -Name 'cfgms-t__sw01' -NetAdapter 'Ethernet0' -AllowManagementOS $false",
+			wantVerb:  "CreateVSwitchExternal",
+			wantJSON:  `{"Name":"cfgms-t__sw01","NetAdapter":"Ethernet0","AllowManagementOS":false}`,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := &recordingPSTransport{}
-			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
-			require.NoError(t, err)
-			require.Len(t, tr.calls, 1)
-			assert.Equal(t, tc.want, tr.calls[0])
+			assertPlanned(t, tc.psCommand, tc.psArgs, tc.wantVerb, tc.wantJSON)
 		})
 	}
 }
@@ -458,169 +297,375 @@ func TestPSDispatch_VSwitchVerbs(t *testing.T) {
 // Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName,
 // so the wrapper param is -ClusterName (NOT the real cmdlet's -Cluster).
 func TestPSDispatch_ClusterVerbs(t *testing.T) {
-	ctx := context.Background()
-
 	cases := []struct {
 		name      string
 		psCommand string
 		psArgs    map[string]string
-		want      string
+		wantVerb  string
+		wantJSON  string
 	}{
 		{
 			name:      "Get-Cluster",
 			psCommand: psGetCluster,
 			psArgs:    map[string]string{"ClusterName": "lab-hv"},
-			want:      "Cfgms-GetCluster -ClusterName 'lab-hv'",
+			wantVerb:  "GetCluster",
+			wantJSON:  `{"ClusterName":"lab-hv"}`,
 		},
 		{
 			name:      "Get-ClusterOwnerNode",
 			psCommand: psGetClusterOwnerNode,
 			psArgs:    map[string]string{"ClusterName": "lab-hv"},
-			want:      "Cfgms-GetClusterOwnerNode -ClusterName 'lab-hv'",
+			wantVerb:  "GetClusterOwnerNode",
+			wantJSON:  `{"ClusterName":"lab-hv"}`,
 		},
 		{
 			name:      "Get-ClusterResourceOwner",
 			psCommand: psGetClusterResourceOwner,
 			psArgs:    map[string]string{"ClusterName": "lab-hv"},
-			want:      "Cfgms-GetClusterResourceOwner -ClusterName 'lab-hv'",
+			wantVerb:  "GetClusterResourceOwner",
+			wantJSON:  `{"ClusterName":"lab-hv"}`,
 		},
 		{
 			name:      "Add-ClusterVMRole",
 			psCommand: psAddClusterVMRole,
 			psArgs:    map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"},
-			want:      "Cfgms-AddClusterVMRole -ClusterName 'lab-hv' -VMName 'web-01'",
+			wantVerb:  "AddClusterVMRole",
+			wantJSON:  `{"ClusterName":"lab-hv","VMName":"web-01"}`,
 		},
 		{
 			name:      "Remove-ClusterResource",
 			psCommand: psRemoveClusterResource,
 			psArgs:    map[string]string{"Name": "web-01"},
-			want:      "Cfgms-RemoveClusterResource -Name 'web-01'",
+			wantVerb:  "RemoveClusterResource",
+			wantJSON:  `{"Name":"web-01"}`,
 		},
 		{
 			name:      "SetClusterRolePreferredOwners",
 			psCommand: psSetClusterRolePreferredOwners,
 			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "Owners": "NODE1,NODE2"},
-			want:      "Cfgms-SetClusterRolePreferredOwners -ClusterName 'lab-hv' -GroupName 'web-01' -Owners 'NODE1,NODE2'",
+			wantVerb:  "SetClusterRolePreferredOwners",
+			wantJSON:  `{"ClusterName":"lab-hv","GroupName":"web-01","Owners":"NODE1,NODE2"}`,
 		},
 		{
 			name:      "SetClusterRolePossibleOwners",
 			psCommand: psSetClusterRolePossibleOwners,
 			psArgs:    map[string]string{"ClusterName": "lab-hv", "ResourceName": "web-01", "Owners": "NODE1"},
-			want:      "Cfgms-SetClusterRolePossibleOwners -ClusterName 'lab-hv' -ResourceName 'web-01' -Owners 'NODE1'",
+			wantVerb:  "SetClusterRolePossibleOwners",
+			wantJSON:  `{"ClusterName":"lab-hv","ResourceName":"web-01","Owners":"NODE1"}`,
 		},
 		{
 			name:      "SetClusterGroupPriority",
 			psCommand: psSetClusterGroupPriority,
 			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "Priority": "2000"},
-			want:      "Cfgms-SetClusterGroupPriority -ClusterName 'lab-hv' -GroupName 'web-01' -Priority '2000'",
+			wantVerb:  "SetClusterGroupPriority",
+			wantJSON:  `{"ClusterName":"lab-hv","GroupName":"web-01","Priority":"2000"}`,
 		},
 		{
 			name:      "SetClusterGroupAutoStart",
 			psCommand: psSetClusterGroupAutoStart,
 			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "AutoStart": "1"},
-			want:      "Cfgms-SetClusterGroupAutoStart -ClusterName 'lab-hv' -GroupName 'web-01' -AutoStart '1'",
+			wantVerb:  "SetClusterGroupAutoStart",
+			wantJSON:  `{"ClusterName":"lab-hv","GroupName":"web-01","AutoStart":"1"}`,
 		},
 		{
 			name:      "SetClusterGroupAntiAffinity",
 			psCommand: psSetClusterGroupAntiAffinity,
 			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "ClassName": "db-tier"},
-			want:      "Cfgms-SetClusterGroupAntiAffinity -ClusterName 'lab-hv' -GroupName 'web-01' -ClassName 'db-tier'",
+			wantVerb:  "SetClusterGroupAntiAffinity",
+			wantJSON:  `{"ClusterName":"lab-hv","GroupName":"web-01","ClassName":"db-tier"}`,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := &recordingPSTransport{}
-			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
-			require.NoError(t, err)
-			require.Len(t, tr.calls, 1)
-			assert.Equal(t, tc.want, tr.calls[0])
+			assertPlanned(t, tc.psCommand, tc.psArgs, tc.wantVerb, tc.wantJSON)
 		})
 	}
 }
 
-// TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
-// psXxx constant defined in vm.go and vswitch.go without silently returning
-// an empty expression. This guards against the production dispatch switch
-// (pstransport_dispatch_windows.go) and dispatchForTest drifting apart: if a
-// new psXxx const is added in a resource file but not in either switch table,
-// this test fails with an empty-expression assertion.
-func TestDispatch_AllKnownCommands(t *testing.T) {
-	ctx := context.Background()
+// assertPlanned plans psCommand with the production planPSCall and checks the
+// verb and the exact args JSON (keys in table order, typed values).
+func assertPlanned(t *testing.T, psCommand string, psArgs map[string]string, wantVerb, wantJSON string) {
+	t.Helper()
+	call, err := planPSCall(psCommand, psArgs)
+	require.NoError(t, err)
+	assert.Equal(t, wantVerb, call.Verb)
+	got, err := call.argsJSON()
+	require.NoError(t, err)
+	assert.Equal(t, wantJSON, string(got))
+}
 
-	commands := []struct {
-		name    string
-		command string
-		args    map[string]string
-	}{
-		// VM verbs (vm.go)
-		{"psGetVM", psGetVM, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw", "Generation": "2"}},
-		{"psRemoveVM", psRemoveVM, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psStartVM", psStartVM, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psStopVM", psStopVM, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psSetVMProcessor", psSetVMProcessor, map[string]string{"Name": "cfgms-t__web-01", "CPU": "2"}},
-		{"psSetVMMemory", psSetVMMemory, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048"}},
-		{"psConnectVMNic", psConnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
-		{"psDisconnectVMNic", psDisconnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
-		// VM provisioning verbs (#2044)
-		{"psNewSeedVHD", psNewSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "SizeBytes": "67108864"}},
-		{"psMountSeedVHD", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
-		{"psCopyToSeedVHD", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "FileName": "preseed.cfg", "Content": "# placeholder preseed"}},
-		{"psDetachSeedVHD", psDetachSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
-		{"psDeleteSeedMedia", psDeleteSeedMedia, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
-		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
-		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
-		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
-		{"psDisableVMFirmwareSecureBoot", psDisableVMFirmwareSecureBoot, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
-		{"psBuildAnswerIso", psBuildAnswerIso, map[string]string{"IsoPath": "C:\\cfgms-seeds\\a.iso", "FileName": "autounattend.xml", "Content": "<x/>", "StewardSrc": "", "CASrc": ""}},
-		{"psBootKeypress", psBootKeypress, map[string]string{"Name": "cfgms-t__web-01"}},
-		// cloud-init (Linux VM-from-cloud-image) verbs (#2080)
-		{"psPrepCloudBootDisk", psPrepCloudBootDisk, map[string]string{"ImagePath": "C:\\images\\debian.raw", "VhdPath": "C:\\VMs\\web-01.vhdx", "ResizeBytes": "21474836480"}},
-		{"psCreateVMFromDisk", psCreateVMFromDisk, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048", "CPU": "2", "VHDPath": "C:\\VMs\\web-01.vhdx", "SwitchName": "External", "Generation": "2"}},
-		{"psSetHddFirstBoot", psSetHddFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "VHDPath": "C:\\VMs\\web-01.vhdx"}},
-		// cloud-init CIDATA seed reuses psMountSeedVHD/psCopyToSeedVHD with extra optional args
-		{"psMountSeedVHD/cidata", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA"}},
-		{"psCopyToSeedVHD/cidata", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA", "FileName": "user-data", "Content": "#cloud-config", "FileName2": "meta-data", "Content2": "instance-id: x", "StewardSrc": "C:\\s\\cfgms-steward-linux", "StewardDest": "cfgms-steward", "LauncherSrc": "C:\\s\\cfgms-steward-launcher-linux", "LauncherDest": "cfgms-steward-launcher", "CASrc": "C:\\s\\ca.crt"}},
-		// VSwitch verbs (vswitch.go)
-		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
-		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
-		{"psCreateVSwitchInternal", psCreateVSwitchInternal, map[string]string{"Name": "cfgms-t__sw01"}},
-		{"psCreateVSwitchPrivate", psCreateVSwitchPrivate, map[string]string{"Name": "cfgms-t__sw01"}},
-		// Dynamic psCreateVSwitchExternal (vswitch.go) — both AllowManagementOS values
-		{"psCreateVSwitchExternal/true", psCreateVSwitchExternal(true), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
-		{"psCreateVSwitchExternal/false", psCreateVSwitchExternal(false), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
-		// Failover cluster read-only verbs (cluster.go, #2199 S1)
-		{"psGetCluster", psGetCluster, map[string]string{"ClusterName": "lab-hv"}},
-		{"psGetClusterOwnerNode", psGetClusterOwnerNode, map[string]string{"ClusterName": "lab-hv"}},
-		{"psGetClusterResourceOwner", psGetClusterResourceOwner, map[string]string{"ClusterName": "lab-hv"}},
-		{"psGetClusterAccessSelf", psGetClusterAccessSelf, map[string]string{"ClusterName": "lab-hv"}},
-		// Failover cluster write verbs (cluster.go, #2202 S2)
-		{"psAddClusterVMRole", psAddClusterVMRole, map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"}},
-		{"psRemoveClusterResource", psRemoveClusterResource, map[string]string{"Name": "web-01"}},
-		// VM storage location verbs (vm_storage.go, #2411)
-		{"psCreateVM/homePath", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\VMs\\w\\test.vhdx", "SwitchName": "sw", "Generation": "2", "Path": "C:\\VMs\\w"}},
-		{"psCreateVMFromDisk/homePath", psCreateVMFromDisk, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048", "CPU": "2", "VHDPath": "C:\\VMs\\w\\web-01.vhdx", "SwitchName": "External", "Generation": "2", "Path": "C:\\VMs\\w"}},
-		{"psSetVMHome", psSetVMHome, map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\VMs\\w"}},
-		{"psVMStorageMovePreflight", psVMStorageMovePreflight, map[string]string{"Name": "cfgms-t__web-01", "DestDir": "C:\\ClusterStorage\\CSV01\\w"}},
-		{"psMoveVMStorage", psMoveVMStorage, map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\ClusterStorage\\CSV01\\w"}},
-		{"psGetVMMoveError", psGetVMMoveError, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psClearVMMoveError", psClearVMMoveError, map[string]string{"Name": "cfgms-t__web-01"}},
+// knownPSCommands names every psXxx value the package passes to ExecutePS.
+// TestDispatch_EveryExecutePSCommandHasARow checks this list against the
+// source, so a new caller cannot be added without a table row.
+var knownPSCommands = map[string]string{
+	"psEnumerateVMs":                  psEnumerateVMs,
+	"psEnumerateVSwitches":            psEnumerateVSwitches,
+	"psGetClusterSelf":                psGetClusterSelf,
+	"psGetVM":                         psGetVM,
+	"psCreateVM":                      psCreateVM,
+	"psRemoveVM":                      psRemoveVM,
+	"psRenameVM":                      psRenameVM,
+	"psStartVM":                       psStartVM,
+	"psStopVM":                        psStopVM,
+	"psSetVMProcessor":                psSetVMProcessor,
+	"psSetVMMemory":                   psSetVMMemory,
+	"psGetVMSnapshots":                psGetVMSnapshots,
+	"psRemoveVMSnapshot":              psRemoveVMSnapshot,
+	"psNewSeedVHD":                    psNewSeedVHD,
+	"psMountSeedVHD":                  psMountSeedVHD,
+	"psCopyToSeedVHD":                 psCopyToSeedVHD,
+	"psDetachSeedVHD":                 psDetachSeedVHD,
+	"psDeleteSeedMedia":               psDeleteSeedMedia,
+	"psAttachSeedDisk":                psAttachSeedDisk,
+	"psAttachDVD":                     psAttachDVD,
+	"psSetVMFirmware":                 psSetVMFirmware,
+	"psDisableVMFirmwareSecureBoot":   psDisableVMFirmwareSecureBoot,
+	"psSetDVDFirstBoot":               psSetDVDFirstBoot,
+	"psBuildAnswerIso":                psBuildAnswerIso,
+	"psBootKeypress":                  psBootKeypress,
+	"psPrepCloudBootDisk":             psPrepCloudBootDisk,
+	"psCreateVMFromDisk":              psCreateVMFromDisk,
+	"psSetHddFirstBoot":               psSetHddFirstBoot,
+	"psSetVMHome":                     psSetVMHome,
+	"psVMStorageMovePreflight":        psVMStorageMovePreflight,
+	"psMoveVMStorage":                 psMoveVMStorage,
+	"psGetVMMoveError":                psGetVMMoveError,
+	"psClearVMMoveError":              psClearVMMoveError,
+	"psConnectVMNic":                  psConnectVMNic,
+	"psDisconnectVMNic":               psDisconnectVMNic,
+	"psGetVSwitch":                    psGetVSwitch,
+	"psRemoveVSwitch":                 psRemoveVSwitch,
+	"psCreateVSwitchInternal":         psCreateVSwitchInternal,
+	"psCreateVSwitchPrivate":          psCreateVSwitchPrivate,
+	"psCreateVSwitchExternal(true)":   psCreateVSwitchExternal(true),
+	"psCreateVSwitchExternal(false)":  psCreateVSwitchExternal(false),
+	"psGetCluster":                    psGetCluster,
+	"psGetClusterOwnerNode":           psGetClusterOwnerNode,
+	"psGetClusterResourceOwner":       psGetClusterResourceOwner,
+	"psGetClusterAccessSelf":          psGetClusterAccessSelf,
+	"psAddClusterVMRole":              psAddClusterVMRole,
+	"psRemoveClusterResource":         psRemoveClusterResource,
+	"psSetClusterRolePreferredOwners": psSetClusterRolePreferredOwners,
+	"psSetClusterRolePossibleOwners":  psSetClusterRolePossibleOwners,
+	"psSetClusterGroupPriority":       psSetClusterGroupPriority,
+	"psSetClusterGroupAutoStart":      psSetClusterGroupAutoStart,
+	"psSetClusterGroupAntiAffinity":   psSetClusterGroupAntiAffinity,
+	"psListClusterAccessNodes":        psListClusterAccessNodes,
+	"psGrantClusterAccess":            psGrantClusterAccess,
+	"psRevokeClusterAccess":           psRevokeClusterAccess,
+}
+
+// TestDispatch_EveryExecutePSCommandHasARow is the [REQUIRED TEST] coverage
+// check. It scans the package source for every psXxx passed to ExecutePS
+// (directly, or through vswitch.go's psCmd variable) and requires each one
+// to be in knownPSCommands, and every knownPSCommands value to plan through
+// the production planPSCall without error.
+func TestDispatch_EveryExecutePSCommandHasARow(t *testing.T) {
+	direct := regexp.MustCompile(`ExecutePS\(\s*ctx,\s*(ps[A-Z]\w*)`)
+	viaVar := regexp.MustCompile(`psCmd = (ps[A-Z]\w*)`)
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	seen := map[string]bool{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		require.NoError(t, err)
+		for _, re := range []*regexp.Regexp{direct, viaVar} {
+			for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+				seen[m[1]] = true
+			}
+		}
 	}
+	require.NotEmpty(t, seen, "the source scan found no ExecutePS call sites")
+	for name := range seen {
+		switch name {
+		case "psCmd", "psCommand":
+			// Variables, not constants: vswitch.go's psCmd is resolved by
+			// viaVar; psCommand is the transports' own parameter.
+			continue
+		}
+		if name == "psCreateVSwitchExternal" {
+			assert.Contains(t, knownPSCommands, "psCreateVSwitchExternal(true)")
+			continue
+		}
+		assert.Contains(t, knownPSCommands, name, "%s is passed to ExecutePS but has no entry in knownPSCommands", name)
+	}
+	for name, cmd := range knownPSCommands {
+		_, err := planPSCall(cmd, map[string]string{})
+		assert.NoError(t, err, "%s has no dispatch table row", name)
+	}
+}
 
-	for _, tc := range commands {
-		t.Run(tc.name, func(t *testing.T) {
-			var captured []string
-			_, err := dispatchForTest(ctx, tc.command, tc.args, func(expr string) (string, error) {
-				captured = append(captured, expr)
-				return "", nil
-			})
-			require.NoError(t, err, "dispatchForTest must not error for known command %s", tc.name)
-			require.Len(t, captured, 1, "dispatchForTest must emit exactly one expression for known command %s", tc.name)
-			assert.NotEmpty(t, captured[0], "dispatchForTest must produce a non-empty expression for %s", tc.name)
+// TestDispatch_RunModes pins which verbs leave the persistent host. The
+// fresh-process verbs deadlock in the `-Command -` host (async Virtual Disk
+// Service, storage cmdlets); the storage move must not wait.
+func TestDispatch_RunModes(t *testing.T) {
+	fresh := map[string]bool{
+		"NewSeedVHD": true, "MountSeedVHD": true, "CopyToSeedVHD": true, "DetachSeedVHD": true,
+		"AttachSeedDisk": true, "AttachDVD": true, "SetDVDFirstBoot": true, "BuildAnswerIso": true,
+		"BootKeypress": true, "PrepCloudBootDisk": true, "SetHddFirstBoot": true, "SetVMHome": true,
+		"VMStorageMovePreflight": true,
+	}
+	for cmd, spec := range psDispatchTable {
+		want := psModeHost
+		switch {
+		case spec.Verb == "MoveVMStorage":
+			want = psModeDetached
+		case fresh[spec.Verb]:
+			want = psModeFresh
+		}
+		assert.Equal(t, want, spec.Mode, "run mode of Cfgms-%s (%.40q)", spec.Verb, cmd)
+	}
+	assert.Equal(t, psModeHost, psCreateVSwitchExternalSpec.Mode)
+}
+
+// hostileValue is a value that would break out of, or execute inside, any
+// PowerShell string literal or expression it was composed into.
+func hostileValue(i int) string {
+	return fmt.Sprintf("v%d' \u2018\u2019\u201a\u201b; $(New-Item x) `n \"\r\nWrite-Output pwned #", i)
+}
+
+// TestDispatch_NoValueReachesScriptText is the [REQUIRED TEST] that no config
+// value appears in dispatched script text. For every table row it fills every
+// string parameter with a hostile value, plans the call, writes the real args
+// file, and builds the real expression and fresh-process script body. The
+// expression must be exactly the fixed form, neither text may hold any value,
+// and the args JSON must carry every value unchanged and typed.
+func TestDispatch_NoValueReachesScriptText(t *testing.T) {
+	type row struct {
+		cmd  string
+		spec psVerbSpec
+	}
+	rows := []row{{psCreateVSwitchExternal(true), psCreateVSwitchExternalSpec}}
+	for cmd, spec := range psDispatchTable {
+		rows = append(rows, row{cmd, spec})
+	}
+	for _, r := range rows {
+		t.Run(r.spec.Verb, func(t *testing.T) {
+			psArgs := map[string]string{}
+			var values []string
+			for i, p := range r.spec.Params {
+				switch p.Kind {
+				case psInt:
+					psArgs[p.Key] = "4096"
+				case psBool:
+					// AllowManagementOS comes from the psCommand suffix.
+				default:
+					v := hostileValue(i)
+					psArgs[p.Key] = v
+					values = append(values, v)
+				}
+			}
+
+			call, err := planPSCall(r.cmd, psArgs)
+			require.NoError(t, err)
+			argsPath, remove, err := writeArgsFile(call)
+			require.NoError(t, err)
+			t.Cleanup(remove)
+
+			expr, err := invokeExpression(call.Verb, argsPath)
+			require.NoError(t, err)
+			assert.Equal(t, "Cfgms-Invoke -Verb '"+r.spec.Verb+"' -ArgsFile '"+argsPath+"'", expr)
+			body := freshScriptBody(expr)
+			for _, v := range values {
+				assert.NotContains(t, expr, v)
+				assert.NotContains(t, body, v)
+			}
+
+			raw, err := os.ReadFile(argsPath)
+			require.NoError(t, err)
+			assert.False(t, bytes.HasPrefix(raw, []byte{0xEF, 0xBB, 0xBF}), "args file must have no BOM")
+			var decoded map[string]any
+			require.NoError(t, json.Unmarshal(raw, &decoded))
+			for _, p := range r.spec.Params {
+				switch p.Kind {
+				case psInt:
+					assert.Equal(t, float64(4096), decoded[p.Param], "%s must be a JSON number", p.Param)
+				case psBool:
+					assert.Equal(t, true, decoded[p.Param], "%s must be a JSON boolean", p.Param)
+				default:
+					assert.Equal(t, psArgs[p.Key], decoded[p.Param], "%s must arrive unchanged", p.Param)
+				}
+			}
 		})
 	}
+}
+
+// TestPlanPSCall_TypedValues covers the int, optional and bool rules.
+func TestPlanPSCall_TypedValues(t *testing.T) {
+	// 64-bit ints: ResizeBytes exceeds int32.
+	assertPlanned(t, psPrepCloudBootDisk,
+		map[string]string{"ImagePath": `C:\i.raw`, "VhdPath": `C:\v.vhdx`, "ResizeBytes": " 21474836480 "},
+		"PrepCloudBootDisk", `{"ImagePath":"C:\\i.raw","VhdPath":"C:\\v.vhdx","ResizeBytes":21474836480}`)
+	// An empty int keeps today's 0; an empty optional string is omitted; an
+	// empty required string is sent empty.
+	assertPlanned(t, psCreateVM, map[string]string{"Name": "web-01"},
+		"CreateVM", `{"Name":"web-01","MemoryMB":0,"CPU":0,"VHDPath":"","SwitchName":"","Generation":0}`)
+	// Priority and AutoStart stay strings.
+	assertPlanned(t, psSetClusterGroupPriority,
+		map[string]string{"ClusterName": "c", "GroupName": "g", "Priority": "2000"},
+		"SetClusterGroupPriority", `{"ClusterName":"c","GroupName":"g","Priority":"2000"}`)
+	// The caller's map is not modified by the external-switch bool recovery.
+	in := map[string]string{"Name": "sw", "NetAdapter": "Ethernet0"}
+	assertPlanned(t, psCreateVSwitchExternal(false), in,
+		"CreateVSwitchExternal", `{"Name":"sw","NetAdapter":"Ethernet0","AllowManagementOS":false}`)
+	assert.Len(t, in, 2)
+}
+
+// TestDispatch_FailsClosed is the fail-closed criterion: a non-numeric int,
+// an unknown psCommand, and an args path holding a quote or control
+// character each return an error and run no PowerShell. The transport here
+// is a zero value with no PowerShell process, so reaching run() would panic
+// on its nil stdin.
+func TestDispatch_FailsClosed(t *testing.T) {
+	ctx := context.Background()
+	tr := &psHostTransport{}
+
+	t.Run("non-numeric int", func(t *testing.T) {
+		bad := "$(New-Item -ItemType File -Path marker)"
+		_, err := tr.ExecutePS(ctx, psSetVMMemory, map[string]string{"Name": "web-01", "MemoryMB": bad})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not an integer")
+		assert.NotContains(t, err.Error(), bad, "the error must not echo the value")
+	})
+
+	t.Run("unknown psCommand", func(t *testing.T) {
+		_, err := tr.ExecutePS(ctx, "Get-Process | Stop-Process", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown psCommand")
+	})
+
+	for name, dir := range map[string]string{
+		"ascii quote in args path":   "o'q",
+		"unicode quote in args path": "o\u2019q",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmp := filepath.Join(t.TempDir(), dir)
+			require.NoError(t, os.Mkdir(tmp, 0o700))
+			t.Setenv("TMP", tmp)
+			t.Setenv("TEMP", tmp)
+			for _, cmd := range []string{psGetVM, psMountSeedVHD, psMoveVMStorage} {
+				_, err := tr.ExecutePS(ctx, cmd, map[string]string{"Name": "web-01", "Path": `C:\s.vhdx`})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "refusing args path")
+			}
+			left, err := os.ReadDir(tmp)
+			require.NoError(t, err)
+			assert.Empty(t, left, "a refused call must remove its args file")
+		})
+	}
+
+	t.Run("control character or bad verb", func(t *testing.T) {
+		_, err := invokeExpression("GetVM", "C:\\t\\a\nb.json")
+		require.Error(t, err)
+		for _, verb := range []string{"", "Get VM", "GetVM'", "Get-VM", "GetVM;x"} {
+			_, err := invokeExpression(verb, `C:\t\a.json`)
+			assert.Error(t, err, "verb %q must be refused", verb)
+		}
+	})
 }
 
 // TestPreamble_RemoveVMStopsRunningVMFirst guards the regression that shipped
@@ -758,25 +803,6 @@ func preambleFunctionBody(t *testing.T, name string) string {
 	}
 	t.Fatalf("unbalanced braces for function %s in psHostPreamble", name)
 	return ""
-}
-
-// TestQuoteForPS_SingleQuoteEscapes verifies the WQL-style single-quote
-// doubling for embedded apostrophes. The hyperv module's name allowlist
-// rejects apostrophes for resource names, but the quoting layer must still
-// be safe against any value that ever flows through.
-func TestQuoteForPS_SingleQuoteEscapes(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"simple", "'simple'"},
-		{"", "''"},
-		{"O'Brien", "'O''Brien'"},
-		{"two''apostrophes", "'two''''apostrophes'"},
-	}
-	for _, tc := range cases {
-		assert.Equal(t, tc.want, quoteForPS(tc.in))
-	}
 }
 
 // ── #3168 seed-mount leak guards ───────────────────────────────────────────
