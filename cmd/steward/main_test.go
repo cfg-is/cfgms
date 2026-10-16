@@ -1587,3 +1587,43 @@ func TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs(t *testing.T) {
 	assert.NotEmpty(t, attrs, "CollectAttributes must return host attrs even without a module source")
 	assert.Contains(t, attrs, "hostname", "host-fact attributes must be present in hardware-facts-only mode")
 }
+
+// TestMultiBlockCAPEMRejected verifies that a CA PEM whose first block matches
+// the pin but which carries extra certificates is rejected on first TOFU pin,
+// on re-enroll, and on the refresh-complete downgrade check, and that nothing
+// is written.
+func TestMultiBlockCAPEMRejected(t *testing.T) {
+	certPEM, fingerprint := generateMainTestCACert(t)
+	extraPEM, _ := generateMainTestCACert(t)
+	multi := certPEM + extraPEM
+
+	t.Run("first pin", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		id := &StewardIdentity{}
+		require.Error(t, pinTOFUCA(caPath, multi, id))
+		assert.Empty(t, id.CAPinFingerprint)
+		_, statErr := os.Stat(caPath)
+		assert.True(t, os.IsNotExist(statErr), "nothing may be written for a multi-block CA")
+	})
+
+	t.Run("re-enroll", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		id := &StewardIdentity{CAPinFingerprint: fingerprint}
+		require.Error(t, pinTOFUCA(caPath, multi, id))
+		_, statErr := os.Stat(caPath)
+		assert.True(t, os.IsNotExist(statErr))
+	})
+
+	t.Run("refresh-complete", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "install-pinned", CAPinFingerprint: fingerprint}
+		require.Error(t, checkTrustDowngrade(trustSourceInstallPinned, multi, id))
+	})
+
+	t.Run("first pin writes re-encoded DER", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		require.NoError(t, pinTOFUCA(caPath, "\n"+certPEM+"\n", &StewardIdentity{}))
+		got, err := os.ReadFile(caPath)
+		require.NoError(t, err)
+		assert.Equal(t, certPEM, string(got))
+	})
+}

@@ -9,12 +9,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -213,17 +210,10 @@ func trustSourceFromMode(mode string) TrustSource {
 }
 
 // computeCAPEMFingerprint returns the SHA-256 hex fingerprint of the DER bytes
-// of the first certificate block in caPEM.
+// of caPEM, which must hold exactly one CERTIFICATE block and no other data.
 func computeCAPEMFingerprint(caPEM string) (string, error) {
-	block, _ := pem.Decode([]byte(caPEM))
-	if block == nil {
-		return "", fmt.Errorf("no PEM block found in CA PEM")
-	}
-	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-		return "", fmt.Errorf("invalid CA certificate: %w", err)
-	}
-	sum := sha256.Sum256(block.Bytes)
-	return hex.EncodeToString(sum[:]), nil
+	_, fp, err := service.CanonicalCAPEM(caPEM)
+	return fp, err
 }
 
 // resolveTrustSource determines the effective trust level and controller URL.
@@ -275,7 +265,7 @@ func checkTrustDowngrade(current TrustSource, currentCAPEM string, id *StewardId
 // records the fingerprint in id and writes the CA to caPath at 0444 (public,
 // immutable). On subsequent calls it verifies the CA matches the pinned value.
 func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
-	fp, err := computeCAPEMFingerprint(caPEM)
+	canonicalPEM, fp, err := service.CanonicalCAPEM(caPEM)
 	if err != nil {
 		return fmt.Errorf("compute TOFU CA fingerprint: %w", err)
 	}
@@ -294,7 +284,7 @@ func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
 		}
 		// #nosec G306 -- a CA certificate is public verification material; 0444
 		// makes the TOFU pin service-readable and immutable by the service user.
-		if err := os.WriteFile(caPath, []byte(caPEM), 0444); err != nil {
+		if err := os.WriteFile(caPath, []byte(canonicalPEM), 0444); err != nil {
 			return fmt.Errorf("write TOFU CA cert: %w", err)
 		}
 	}
@@ -1612,6 +1602,10 @@ func connectWithApprovedRegistration(
 			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, &persistedID); err != nil {
 				return nil, fmt.Errorf("TOFU CA pin failed: %w", err)
 			}
+			// Persist and trust only the verified single-certificate re-encoding.
+			canonicalPEM, _, _ := service.CanonicalCAPEM(reg.CACert)
+			reg.CACert = canonicalPEM
+			persistedID.CACertPEM = canonicalPEM
 		}
 	case trustSourceInstallPinned:
 		if installCAPEM != "" {

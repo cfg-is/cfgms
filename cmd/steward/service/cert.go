@@ -38,6 +38,19 @@ func parseSingleCACert(caCertPEM string) (*x509.Certificate, error) {
 	return cert, nil
 }
 
+// CanonicalCAPEM validates caCertPEM with the single-certificate rule and
+// returns the PEM re-encoding of the verified DER together with its SHA-256 hex
+// fingerprint. Callers must persist and trust the returned PEM, never the raw
+// input, so that the fingerprint covers every byte that is trusted.
+func CanonicalCAPEM(caCertPEM string) (canonicalPEM, fingerprint string, err error) {
+	cert, err := parseSingleCACert(caCertPEM)
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})), hex.EncodeToString(sum[:]), nil
+}
+
 // verifyCACertFingerprint checks that the SHA-256 fingerprint of caCertPEM matches
 // expectedFingerprint (case-insensitive hex). Returns an error if the PEM cannot
 // be parsed or the fingerprints do not match.

@@ -429,3 +429,35 @@ func TestIPTrustEvaluator_UnparseableAddressNotPromoted(t *testing.T) {
 	assert.False(t, ev.HasTimer("tenant-1", "not-an-ip"))
 	assert.Empty(t, store.addTrustedRangeCalls())
 }
+
+// TestIPTrustEvaluator_RevokedWiderRangeBlocksContainedHost verifies that a
+// revoked range blocks promotion of any host inside it (IPv4 and IPv6), and
+// that a revoked range not containing the host does not.
+func TestIPTrustEvaluator_RevokedWiderRangeBlocksContainedHost(t *testing.T) {
+	cases := []struct {
+		name, revoked, ip string
+		wantPromoted      bool
+	}{
+		{"ipv4 wider range", "10.0.0.0/24", "10.0.0.7", false},
+		{"ipv6 wider range", "2001:db8::/32", "2001:db8::1", false},
+		{"ipv4-mapped host in revoked ipv4 range", "10.0.0.0/24", "::ffff:10.0.0.7", false},
+		{"ipv4 unrelated range", "10.1.0.0/24", "10.0.0.7", true},
+		{"ipv6 unrelated range", "2001:db9::/32", "2001:db8::1", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, store := newTestEvaluator(t, time.Hour)
+			ctx := context.Background()
+			require.NoError(t, store.AddTrustedRange(ctx, "tenant-1", tc.revoked, false))
+			require.NoError(t, store.RevokeTrustedRange(ctx, "tenant-1", tc.revoked))
+			before := len(store.addTrustedRangeCalls())
+
+			require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "s", tc.ip, true))
+			ev.ForceTimerExpiry("tenant-1", tc.ip)
+			require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "s", tc.ip, true))
+
+			promoted := len(store.addTrustedRangeCalls()) > before
+			assert.Equal(t, tc.wantPromoted, promoted)
+		})
+	}
+}
