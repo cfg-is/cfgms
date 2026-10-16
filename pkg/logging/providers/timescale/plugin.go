@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,8 @@ type TimescaleConfig struct {
 	Username string `json:"username"` // Database username
 	Password string `json:"password"` // Database password
 	SSLMode  string `json:"ssl_mode"` // SSL mode (disable, require, verify-ca, verify-full)
+	// SSLRootCert is an optional path to the CA file used to verify the server certificate
+	SSLRootCert string `json:"ssl_root_cert"`
 
 	// TimescaleDB-specific settings
 	TableName        string        `json:"table_name"`        // Log entries table name (default: log_entries)
@@ -66,7 +69,7 @@ func DefaultTimescaleConfig() *TimescaleConfig {
 		Database:          "cfgms_logs",
 		Username:          "cfgms_logger",
 		Password:          "",
-		SSLMode:           "prefer",
+		SSLMode:           "verify-full",
 		TableName:         "log_entries",
 		ChunkInterval:     7 * 24 * time.Hour,  // 7 days
 		CompressionAfter:  7 * 24 * time.Hour,  // 7 days
@@ -379,6 +382,13 @@ func (p *TimescaleProvider) createConnection() (*sql.DB, error) {
 	if p.config.Password != "" {
 		connStr += " password=" + p.config.Password
 	}
+	if p.config.SSLRootCert != "" {
+		connStr += " sslrootcert=" + p.config.SSLRootCert
+	}
+	switch p.config.SSLMode {
+	case "disable", "allow", "prefer", "require":
+		log.Printf("WARN: timescale logging connection uses weak ssl_mode %q that does not verify the server certificate and host name; use verify-full in production", p.config.SSLMode)
+	}
 
 	// Connect to database
 	db, err := sql.Open("postgres", connStr)
@@ -433,6 +443,10 @@ func (p *TimescaleProvider) parseConfig(config map[string]interface{}) error {
 
 	if sslMode, ok := config["ssl_mode"].(string); ok {
 		p.config.SSLMode = sslMode
+	}
+
+	if sslRootCert, ok := config["ssl_root_cert"].(string); ok {
+		p.config.SSLRootCert = sslRootCert
 	}
 
 	if tableName, ok := config["table_name"].(string); ok {

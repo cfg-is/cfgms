@@ -250,6 +250,8 @@ An existing git-backed deployment is migrated once with
 
 The `CFGMS_STORAGE_DATABASE_*` pair is read first; the shorter `CFGMS_DB_*` form is a fallback.
 
+The database provider's `sslmode` defaults to `verify-full` (server certificate and host name are verified). Set `storage.config["sslrootcert"]` to the CA file path to verify against a private CA. `disable`, `allow`, `prefer` and `require` remain available as explicit choices and log a startup warning naming the mode. The DNA backend follows the same default through `CFGMS_DNA_DB_SSLMODE`, with `CFGMS_DNA_DB_SSLROOTCERT` for the CA file. The TimescaleDB logging provider's `ssl_mode` also defaults to `verify-full`, with `ssl_root_cert` for the CA file.
+
 #### `storage.cluster`
 
 `features/controller/config/config.go` `ClusterStorageConfig`

@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -921,11 +922,19 @@ func buildDNAConnString() (string, error) {
 	}
 	sslMode := os.Getenv("CFGMS_DNA_DB_SSLMODE")
 	if sslMode == "" {
-		sslMode = "require"
+		sslMode = "verify-full"
+	}
+	if weak := weakSSLModeLabel(sslMode); weak != "" {
+		logging.NewLogger("warn").Warn("DNA database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
+			"sslmode", weak)
 	}
 
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		user, password, host, port, dbName, sslMode), nil
+	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		user, password, host, port, dbName, sslMode)
+	if rootCert := os.Getenv("CFGMS_DNA_DB_SSLROOTCERT"); rootCert != "" {
+		connString += "&sslrootcert=" + url.QueryEscape(rootCert)
+	}
+	return connString, nil
 }
 
 // updateStats updates statistics after storing a record
@@ -947,4 +956,21 @@ func (b *DatabaseBackend) updateStats(record *DNARecord) {
 		b.stats.ShardSizes = make(map[string]int64)
 	}
 	b.stats.ShardSizes[record.ShardID] = b.stats.TotalSize
+}
+
+// weakSSLModeLabel maps a weak sslmode to a string literal ("" when the mode
+// is not weak). Logging the literal rather than the config-derived value keeps
+// credential-bearing config data out of the log call entirely.
+func weakSSLModeLabel(sslmode string) string {
+	switch sslmode {
+	case "disable":
+		return "disable"
+	case "allow":
+		return "allow"
+	case "prefer":
+		return "prefer"
+	case "require":
+		return "require"
+	}
+	return ""
 }

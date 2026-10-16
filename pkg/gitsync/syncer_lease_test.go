@@ -3,7 +3,9 @@
 package gitsync_test
 
 import (
+	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +32,10 @@ func manualTicker() (func(d time.Duration) (<-chan time.Time, func()), chan time
 // lease under name via leaseManager, contending as holderID. A manually
 // controlled ticker and a sync-notify channel let the test drive and observe
 // individual polling cycles without a real ticker interval.
-func newLeaseGatedSyncer(t *testing.T, leaseManager *lease.Manager, holderID string) (*gitsync.Syncer, chan time.Time, chan struct{}) {
+//
+// The returned func reports the lease name the syncer's per-scope job was
+// built with, so the test can read the lease row back from the store.
+func newLeaseGatedSyncer(t *testing.T, leaseManager *lease.Manager, holderID string) (*gitsync.Syncer, chan time.Time, chan struct{}, func() string) {
 	t.Helper()
 	root := t.TempDir()
 
@@ -41,15 +46,26 @@ func newLeaseGatedSyncer(t *testing.T, leaseManager *lease.Manager, holderID str
 	tickerFactory, tickCh := manualTicker()
 	notify := make(chan struct{}, 4)
 
+	var nameMu sync.Mutex
+	var leaseName string
+
 	syncer, err := gitsync.NewSyncer(store, bindings, filepath.Join(root, "repos"), logging.NewNoopLogger(),
 		gitsync.WithTickerFunc(tickerFactory),
 		gitsync.WithSyncNotify(notify),
 		gitsync.WithLeaseJobFactory(func(name string) (lease.SingletonJob, error) {
+			nameMu.Lock()
+			leaseName = name
+			nameMu.Unlock()
 			return lease.NewSingletonJob(leaseManager, name, holderID, leaseManager.LeaseTTL(), 200*time.Millisecond, nil)
 		}),
 	)
 	require.NoError(t, err)
-	return syncer, tickCh, notify
+	t.Cleanup(syncer.Stop)
+	return syncer, tickCh, notify, func() string {
+		nameMu.Lock()
+		defer nameMu.Unlock()
+		return leaseName
+	}
 }
 
 // [REQUIRED TEST] A two-node simulation proves exactly one node executes a
@@ -66,8 +82,8 @@ func TestSyncer_PerScopeLease_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	m2, err := lease.NewManager(leaseStore, ttl, renew, renew)
 	require.NoError(t, err)
 
-	syncerA, tickA, notifyA := newLeaseGatedSyncer(t, m1, "node-a")
-	syncerB, tickB, notifyB := newLeaseGatedSyncer(t, m2, "node-b")
+	syncerA, tickA, notifyA, _ := newLeaseGatedSyncer(t, m1, "node-a")
+	syncerB, tickB, notifyB, leaseNameB := newLeaseGatedSyncer(t, m2, "node-b")
 
 	binding := gitsync.ScopeBinding{
 		TenantPath: "root/tenant-x",
@@ -120,15 +136,54 @@ func TestSyncer_PerScopeLease_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 
 	// Once the lease expires, node-b's next tick must succeed — the exclusion
 	// is bounded by TTL, not permanent.
-	time.Sleep(ttl)
-	cycleStart = time.Now()
-	tickB <- time.Now()
-	select {
-	case <-notifyB:
-		t.Logf("node-b's cycle completed in %s", time.Since(cycleStart))
-	case <-time.After(nodeCycleHangBudget):
-		t.Fatalf("node-b never ran after node-a's lease expired within %s", nodeCycleHangBudget)
+	//
+	// The lease's actual expiry is not "node-a's notify + ttl": node-a's
+	// renewal goroutine (RenewInterval=200ms) keeps extending ExpiresAt for as
+	// long as its cycle runs, and a renewal write already in flight when the
+	// cycle ends still lands afterwards, stamped with the store's clock at
+	// write time. Under a loaded runner a single flatfile write can take well
+	// over a second (node-a's acquire+cycle measured 1.59s in the run that
+	// exposed this), so a lone tick fired at a fixed "notify + ttl" instant
+	// could still find node-a's lease valid and be refused — and with no
+	// further tick, node-b would never run. Instead, keep offering node-b
+	// ticks (one per contention attempt, exactly as its polling loop would see
+	// them) until it acquires, and assert the TTL bound directly: node-a
+	// acquired no earlier than nodeACycleStart, so the earliest instant its
+	// lease can have expired is nodeACycleStart+ttl.
+	nodeACycleStart := cycleStart
+	retryTicker := time.NewTicker(100 * time.Millisecond)
+	defer retryTicker.Stop()
+	deadline := time.After(ttl + nodeCycleHangBudget)
+	offerTickB := func() {
+		select {
+		case tickB <- time.Now():
+		default: // a tick is already pending for node-b's loop
+		}
 	}
+	offerTickB()
+	var nodeBRanAt time.Time
+waitNodeB:
+	for {
+		select {
+		case <-notifyB:
+			nodeBRanAt = time.Now()
+			break waitNodeB
+		case <-retryTicker.C:
+			offerTickB()
+		case <-deadline:
+			t.Fatalf("node-b never ran within %s of node-a's cycle (ttl=%s)", ttl+nodeCycleHangBudget, ttl)
+		}
+	}
+	t.Logf("node-b ran %s after node-a's cycle started", nodeBRanAt.Sub(nodeACycleStart))
+	assert.False(t, nodeBRanAt.Before(nodeACycleStart.Add(ttl)),
+		"node-b ran %s after node-a's cycle started, before node-a's lease (ttl=%s) could have expired",
+		nodeBRanAt.Sub(nodeACycleStart), ttl)
+
+	require.NotEmpty(t, leaseNameB(), "node-b's per-scope lease job must have been built")
+	holder, _, _, ok, err := m2.CurrentHolder(context.Background(), leaseNameB())
+	require.NoError(t, err)
+	require.True(t, ok, "lease row must exist after node-b's cycle")
+	assert.Equal(t, "node-b", holder, "node-b must have run by acquiring the scope lease, not ungated")
 
 	assert.NotNil(t, syncerA)
 	assert.NotNil(t, syncerB)

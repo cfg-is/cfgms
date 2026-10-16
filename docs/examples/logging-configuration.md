@@ -158,7 +158,6 @@ controller:
         config:
           network: "tcp"
           address: "siem-collector.acme-corp.example:514"
-          enable_tls: true
           facility: "local0"
           tag: "cfgms-prod"
           levels: ["INFO", "WARN", "ERROR", "FATAL"]
@@ -196,7 +195,8 @@ controller:
       database: "cfgms_logs"
       username: "cfgms_logger"
       password: "${CFGMS_LOG_DB_PASSWORD}"  # Environment variable
-      ssl_mode: "require"
+      ssl_mode: "verify-full"     # Default; set ssl_root_cert for a private CA
+      # ssl_root_cert: "/etc/cfgms/pki/db-ca.pem"
       table_name: "log_entries"
       schema_name: "public"
       chunk_interval: "7d"         # TimescaleDB chunk size (7 days)

@@ -467,3 +467,19 @@ func createTestProviderWithCleanup(t *testing.T, tableSuffix string) (*Timescale
 
 	return provider, config
 }
+
+func TestDefaultTimescaleConfig_SSLModeVerifyFull(t *testing.T) {
+	if got := DefaultTimescaleConfig().SSLMode; got != "verify-full" {
+		t.Fatalf("default SSLMode = %q, want verify-full", got)
+	}
+}
+
+func TestTimescaleProvider_ParseConfigSSLRootCert(t *testing.T) {
+	p := &TimescaleProvider{config: DefaultTimescaleConfig()}
+	if err := p.parseConfig(map[string]interface{}{"ssl_root_cert": "/etc/ca.pem"}); err != nil {
+		t.Fatal(err)
+	}
+	if p.config.SSLRootCert != "/etc/ca.pem" {
+		t.Fatalf("SSLRootCert = %q", p.config.SSLRootCert)
+	}
+}
