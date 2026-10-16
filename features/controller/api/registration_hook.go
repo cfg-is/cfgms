@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 	"unicode"
@@ -133,7 +134,7 @@ func (h *IPTrustApprovalHook) Evaluate(ctx context.Context, input RegistrationIn
 	if h.store == nil {
 		return DecisionQuarantine, "", nil
 	}
-	trusted, err := h.store.IsTrusted(ctx, input.Token.TenantID, input.SourceIP)
+	trusted, err := h.sourceIPTrusted(ctx, input.Token.TenantID, input.SourceIP)
 	if err != nil {
 		if h.logger != nil {
 			// SourceIP flows from the HTTP request into IsTrusted and may be echoed
@@ -149,6 +150,54 @@ func (h *IPTrustApprovalHook) Evaluate(ctx context.Context, input RegistrationIn
 		return DecisionApprove, "", nil
 	}
 	return DecisionQuarantine, "", nil
+}
+
+// sourceIPTrusted reports whether ip falls inside a non-revoked trust entry that
+// is valid. A promoted (non-pre-seeded) IPv6 entry shorter than a /128 can only
+// come from the pre-fix evaluator, which recorded <ipv6>/32 and so trusted a very
+// large block; it is ignored (and logged) rather than honoured. Pre-seeded
+// entries are operator-chosen ranges and are always honoured.
+func (h *IPTrustApprovalHook) sourceIPTrusted(ctx context.Context, tenantID, ip string) (bool, error) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false, fmt.Errorf("invalid IP address: %s", ip)
+	}
+	addr = addr.Unmap().WithZone("")
+	entries, err := h.store.ListTrustedRanges(ctx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Revoked {
+			continue
+		}
+		p, perr := netip.ParsePrefix(e.CIDR)
+		if perr != nil {
+			continue
+		}
+		pa := p.Addr().WithZone("")
+		bits := p.Bits()
+		if pa.Is4In6() {
+			pa = pa.Unmap()
+			bits -= 96
+			if bits < 0 {
+				continue
+			}
+		}
+		p = netip.PrefixFrom(pa, bits).Masked()
+		if !e.PreSeeded && p.Addr().Is6() && p.Bits() < p.Addr().BitLen() {
+			if h.logger != nil {
+				h.logger.Warn("IPTrustApprovalHook: ignoring promoted IPv6 trust entry shorter than a host prefix",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"cidr", logging.SanitizeLogValue(e.CIDR))
+			}
+			continue
+		}
+		if p.Contains(addr) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // WorkflowApprovalHook delegates registration approval to the workflow engine.
