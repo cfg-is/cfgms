@@ -575,9 +575,6 @@ func TestLoadModule_RefusesExtraFileNextToBinary(t *testing.T) {
 }
 
 func TestLoadModule_RefusesTreeWritableByOthers(t *testing.T) {
-	if goruntime.GOOS == "windows" {
-		t.Skip("Unix mode bits; the Windows ACL rule is covered by the install package's native Windows tests")
-	}
 	for _, target := range []string{"root", "module"} {
 		t.Run(target, func(t *testing.T) {
 			installRoot := t.TempDir()
@@ -586,8 +583,14 @@ func TestLoadModule_RefusesTreeWritableByOthers(t *testing.T) {
 			if target == "module" {
 				dir = moduleRoot
 			}
-			// #nosec G302 -- deliberately unsafe mode under test.
-			require.NoError(t, os.Chmod(dir, 0o777))
+			if goruntime.GOOS == "windows" {
+				// Grant Users (S-1-5-32-545) write on the directory.
+				out, err := exec.Command("icacls", dir, "/grant", "*S-1-5-32-545:(OI)(CI)W").CombinedOutput()
+				require.NoError(t, err, string(out))
+			} else {
+				// #nosec G302 -- deliberately unsafe mode under test.
+				require.NoError(t, os.Chmod(dir, 0o777))
+			}
 
 			// LoadModule folds every errBundleModuleNotAvailable refusal into its
 			// ordinary "not found" error.
