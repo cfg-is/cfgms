@@ -52,5 +52,57 @@ else
   printf '  FAIL  quarantine bullet lacks never-merged rule\n'; fail=$((fail + 1))
 fi
 
+# --- The lane's merge path (po-act.sh enqueue) enforces the gate in code ------
+# po.md routes lane merges through `po-act.sh enqueue`, never a raw gh pr merge.
+if grep -F 'Land open green PRs in my lane' "$POMD" | grep -qF 'po-act.sh enqueue'; then
+  printf '  ok    lane merge routed through po-act.sh enqueue\n'
+else
+  printf '  FAIL  lane bullet does not route merges through po-act.sh enqueue\n'; fail=$((fail + 1))
+fi
+if grep -F 'Land open green PRs in my lane' "$POMD" | grep -qE 'gh pr merge --squash'; then
+  printf '  FAIL  lane bullet still instructs a raw gh pr merge\n'; fail=$((fail + 1))
+else
+  printf '  ok    lane bullet has no raw gh pr merge\n'
+fi
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *author,labels*) echo '{"author":{"login":"ext-user"},"labels":[{"name":"human-reviewed:ok"}]}' ;;
+      *baseRefName*)   echo develop ;;
+      *)               echo '' ;;
+    esac ;;
+  "pr comment") ;;
+  *) ;;
+esac
+exit 0
+GHEOF
+chmod +x "$TMP/bin/gh"
+
+run_enqueue() {  # run_enqueue <label_time> <head_time> <actor_perm>
+  : > "$TMP/gh.log"
+  PATH="$TMP/bin:$PATH" GH_LOG="$TMP/gh.log" \
+    CFGMS_TEST_COLLAB_PERM=read CFGMS_TEST_ACTOR_LOGIN=maint CFGMS_TEST_ACTOR_PERM="$3" \
+    CFGMS_TEST_LABEL_TIME="$1" CFGMS_TEST_HEAD_TIME="$2" \
+    bash "${REPO_ROOT}/.claude/scripts/po-act.sh" enqueue 9999 2>&1 || true
+}
+merged() { grep -q '^pr merge' "$TMP/gh.log" && echo merged || echo not_merged; }
+
+out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" triage)"
+check "external, not released (label actor lacks push) -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
+check "external, not released -> no gh pr merge issued" "$(merged)" "not_merged"
+
+out="$(run_enqueue "2026-01-01T00:00:00Z" "2026-01-02T00:00:00Z" push)"
+check "released, head changed after release -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
+check "released, head changed after release -> no gh pr merge issued" "$(merged)" "not_merged"
+
+out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" push)"
+check "released, head unchanged -> not refused" "$(grep -c 'ENQUEUE_REFUSED' <<<"$out")" "0"
+
 [[ $fail -eq 0 ]] || { printf '%d check(s) failed\n' "$fail"; exit 1; }
 echo "all checks passed"

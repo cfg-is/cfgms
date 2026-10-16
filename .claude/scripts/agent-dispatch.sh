@@ -1059,6 +1059,27 @@ check_existing_prs_for_issue() {
 # External-author trust gate helpers (Issue #1786)
 # ---------------------------------------------------------------------------
 
+# _release_covers_head <pr_num> <label_time_iso8601>
+# Exit 0 only when the human-reviewed:ok label was applied strictly after the
+# PR's current head commit and after the latest head force-push. A push after
+# the release therefore voids it. Fail-closed on any lookup error or missing
+# timestamp. Limit: commit dates are author-supplied, so the force-push event
+# (server time) is the authoritative signal for rewritten heads.
+# Test hook: CFGMS_TEST_HEAD_TIME overrides the head-change lookup.
+_release_covers_head() {
+  local pr_num="$1" label_time="$2" head_time
+  [[ -n "$label_time" ]] || return 1
+  if [[ -n "${CFGMS_TEST_HEAD_TIME+x}" ]]; then
+    head_time="${CFGMS_TEST_HEAD_TIME}"
+  else
+    local q
+    q="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { commits(last: 1) { nodes { commit { committedDate pushedDate } } } timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 1) { nodes { ... on HeadRefForcePushedEvent { createdAt } } } } } }"
+    head_time=$(gh api graphql -f "query=${q}" --jq '.data.repository.pullRequest | [(.commits.nodes[0].commit | .committedDate, .pushedDate), (.timelineItems.nodes[0].createdAt)] | map(select(. != null)) | max // ""' 2>/dev/null || echo "")
+  fi
+  [[ -n "$head_time" ]] || return 1
+  [[ "$label_time" > "$head_time" ]]
+}
+
 # _check_author_permission <login> [<pr_num>] [<pr_labels_newline_separated>]
 # Classifies a PR author as "internal" or "external:<reason>".
 # Trusts only push/maintain/admin collaborators (fail-closed on any API error).
@@ -1097,15 +1118,24 @@ _check_author_permission() {
   # External author — check for a valid human-reviewed:ok release marker (AC5).
   # Only the label presence is checked here; actor affiliation is verified below.
   if [[ -n "$pr_num" ]] && echo "$pr_labels_str" | grep -qx "human-reviewed:ok" 2>/dev/null; then
-    local actor_login
+    local actor_login label_time
     if [[ -n "${CFGMS_TEST_ACTOR_LOGIN+x}" ]]; then
       actor_login="${CFGMS_TEST_ACTOR_LOGIN}"
+      label_time="${CFGMS_TEST_LABEL_TIME:-}"
     else
-      local tl_gql
-      tl_gql="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { timelineItems(itemTypes: [LABELED_EVENT], first: 50) { nodes { ... on LabeledEvent { label { name } actor { login } } } } } } }"
-      actor_login=$(gh api graphql -f "query=${tl_gql}" \
-        --jq '[.data.repository.pullRequest.timelineItems.nodes[] | select(.label.name == "human-reviewed:ok") | .actor.login] | last // ""' \
+      local tl_gql tl_out
+      tl_gql="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { timelineItems(itemTypes: [LABELED_EVENT], first: 50) { nodes { ... on LabeledEvent { createdAt label { name } actor { login } } } } } } }"
+      tl_out=$(gh api graphql -f "query=${tl_gql}" \
+        --jq '[.data.repository.pullRequest.timelineItems.nodes[] | select(.label.name == "human-reviewed:ok")] | last | if . == null then "" else "\(.actor.login // "")\t\(.createdAt)" end' \
         2>/dev/null || echo "")
+      actor_login="${tl_out%%$'\t'*}"
+      label_time="${tl_out#*$'\t'}"
+      [[ "$tl_out" == *$'\t'* ]] || label_time=""
+    fi
+    # A release covers only the head it was granted for: the label must have
+    # been applied after the head commit landed (fail closed otherwise).
+    if [[ -n "$actor_login" ]] && ! _release_covers_head "$pr_num" "$label_time"; then
+      actor_login=""
     fi
     if [[ -n "$actor_login" ]]; then
       local actor_perm

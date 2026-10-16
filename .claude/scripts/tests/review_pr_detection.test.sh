@@ -144,6 +144,8 @@ assert_author_trust_with_release() {
   actual=$(CFGMS_TEST_COLLAB_PERM="$author_perm" \
     CFGMS_TEST_ACTOR_LOGIN="$actor_login" \
     CFGMS_TEST_ACTOR_PERM="$actor_perm" \
+    CFGMS_TEST_LABEL_TIME="${CFGMS_TEST_LABEL_TIME-2026-01-02T00:00:00Z}" \
+    CFGMS_TEST_HEAD_TIME="${CFGMS_TEST_HEAD_TIME-2026-01-01T00:00:00Z}" \
     "$DISPATCH" _test-check-author "$login" "42" "$labels")
   if [[ "$actual" == "$expected_prefix"* ]]; then
     printf '  ok    %s\n' "$description"
@@ -182,6 +184,24 @@ assert_author_trust_with_release \
 assert_author_trust_with_release \
   "AC5: no human-reviewed:ok label → not released despite push+ actor" \
   "external-user" "read" "trusted-maintainer" "push" "some-other-label" \
+  "external:"
+
+# Release is bound to the head it was granted for: a push after the label voids it.
+CFGMS_TEST_HEAD_TIME="2026-01-03T00:00:00Z" assert_author_trust_with_release \
+  "release bound to head: push after label voids the release" \
+  "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
+  "external:"
+
+# Fail closed when the head time cannot be determined.
+CFGMS_TEST_HEAD_TIME="" assert_author_trust_with_release \
+  "release bound to head: unknown head time fails closed" \
+  "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
+  "external:"
+
+# Fail closed when the label time is missing.
+CFGMS_TEST_LABEL_TIME="" assert_author_trust_with_release \
+  "release bound to head: unknown label time fails closed" \
+  "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
   "external:"
 
 echo
