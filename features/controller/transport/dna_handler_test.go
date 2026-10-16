@@ -726,8 +726,9 @@ func TestDNAHandler_QueueFull_ReturnsResourceExhausted(t *testing.T) {
 	queue := NewTenantQueue()
 	h := NewDNAHandler(logging.NewNoopLogger(), queue, nil)
 
+	// No resolver is wired, so the stream is counted against the quarantine bucket.
 	for i := 0; i < MaxConcurrentPerTenant; i++ {
-		require.NoError(t, queue.Acquire("tenant-full"))
+		require.NoError(t, queue.Acquire(quarantineQueueKey))
 	}
 
 	ctx := peerContextWithCA(t, ca, "steward-full")
@@ -1524,4 +1525,125 @@ func TestIsValidAggregateRoot(t *testing.T) {
 	assert.False(t, isValidAggregateRoot(strings.ToUpper(realRoot)))
 	assert.False(t, isValidAggregateRoot(strings.Repeat("g", aggregateRootHexLen)))
 	assert.False(t, isValidAggregateRoot(strings.Repeat("a", aggregateRootHexLen-2)+"\r\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Stream bounds (Issue #5045)
+// ---------------------------------------------------------------------------
+
+// TestDNAHandler_DeltaGRPC_EmptyChunkFlood_Rejected: chunks with empty data add
+// nothing to the byte sum, so the chunk count itself must be bounded inside the
+// receive loop, and the handler must stop receiving at the bound.
+func TestDNAHandler_DeltaGRPC_EmptyChunkFlood_Rejected(t *testing.T) {
+	ca := newTestCA(t)
+	const stewardID = "steward-delta-flood"
+	h, _ := deltaBoundsFixture(t, stewardID, []*common.Fragment{fragmentWithID("frag-0")})
+
+	total := maxDNAChunks + 50
+	chunks := make([]*transportpb.DNAChunk, 0, total)
+	for i := 0; i < total; i++ {
+		chunks = append(chunks, &transportpb.DNAChunk{
+			StewardId: stewardID, TenantId: "t1", ChunkIndex: int32(i),
+			TotalChunks: int32(total), IsDelta: true,
+		})
+	}
+	stream := newTestDNAStream(peerContextWithCA(t, ca, stewardID), chunks...)
+	err := h.HandleGRPC(stream)
+	require.Error(t, err)
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+	assert.Equal(t, maxDNAChunks+1, stream.pos, "the flood must be cut off at the cap, not drained")
+}
+
+// TestDNAHandler_HeaderStringsCountAgainstByteCap: tiny data but large
+// tenant_id / dna_hash strings must still exhaust the byte cap on both paths.
+func TestDNAHandler_HeaderStringsCountAgainstByteCap(t *testing.T) {
+	ca := newTestCA(t)
+	for _, isDelta := range []bool{false, true} {
+		name := "snapshot"
+		limit := maxReassembledDNABytes
+		if isDelta {
+			name = "delta"
+			limit = maxDeltaStreamBytes
+		}
+		t.Run(name, func(t *testing.T) {
+			stewardID := "steward-hdr-" + name
+			h, _ := deltaBoundsFixture(t, stewardID, []*common.Fragment{fragmentWithID("frag-0")})
+
+			const hdrSize = 1 << 20
+			bigTenant := strings.Repeat("t", hdrSize)
+			bigHash := strings.Repeat("h", hdrSize)
+			total := limit/(2*hdrSize) + 2
+			require.Less(t, total, maxDNAChunks, "must exercise the byte cap, not the chunk cap")
+			chunks := make([]*transportpb.DNAChunk, 0, total)
+			for i := 0; i < total; i++ {
+				chunks = append(chunks, &transportpb.DNAChunk{
+					StewardId: stewardID, TenantId: bigTenant, DnaHash: bigHash,
+					Data: []byte("x"), ChunkIndex: int32(i), TotalChunks: int32(total), IsDelta: isDelta,
+				})
+			}
+			err := h.HandleGRPC(newTestDNAStream(peerContextWithCA(t, ca, stewardID), chunks...))
+			require.Error(t, err)
+			assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+		})
+	}
+}
+
+// TestDNAHandler_UnknownPeerUsesQuarantineBucket: with a real resolver that does
+// not know the peer, the claimed wire tenant is never the queue key.
+func TestDNAHandler_UnknownPeerUsesQuarantineBucket(t *testing.T) {
+	ca := newTestCA(t)
+	svc := registeredService(t, "steward-someone-else") // does not know "steward-unknown"
+
+	t.Run("claimed tenants share the quarantine bucket", func(t *testing.T) {
+		queue := NewTenantQueue()
+		for i := 0; i < MaxConcurrentPerTenant; i++ {
+			require.NoError(t, queue.Acquire(quarantineQueueKey))
+		}
+		h := NewDNAHandler(logging.NewNoopLogger(), queue, svc).WithTenantResolver(svc)
+		for _, claimed := range []string{"tenant-a", "tenant-b"} {
+			err := h.HandleGRPC(newTestDNAStream(peerContextWithCA(t, ca, "steward-unknown"),
+				&transportpb.DNAChunk{StewardId: "steward-unknown", TenantId: claimed}))
+			require.Error(t, err)
+			assert.Equal(t, codes.ResourceExhausted, status.Code(err), claimed)
+		}
+	})
+
+	t.Run("full claimed-tenant queue does not reject", func(t *testing.T) {
+		queue := NewTenantQueue()
+		for _, claimed := range []string{"tenant-a", "tenant-b"} {
+			for i := 0; i < MaxConcurrentPerTenant; i++ {
+				require.NoError(t, queue.Acquire(claimed))
+			}
+		}
+		h := NewDNAHandler(logging.NewNoopLogger(), queue, nil).WithTenantResolver(svc)
+		for _, claimed := range []string{"tenant-a", "tenant-b"} {
+			err := h.HandleGRPC(newTestDNAStream(peerContextWithCA(t, ca, "steward-unknown"),
+				&transportpb.DNAChunk{StewardId: "steward-unknown", TenantId: claimed}))
+			require.NoError(t, err, claimed)
+		}
+	})
+}
+
+// TestDNAHandler_LaterChunkIdentityMismatch_Rejected: every chunk after the first
+// must carry the first chunk's steward_id and tenant_id, on both paths.
+func TestDNAHandler_LaterChunkIdentityMismatch_Rejected(t *testing.T) {
+	ca := newTestCA(t)
+	const stewardID = "steward-ident"
+	for _, isDelta := range []bool{false, true} {
+		for _, tc := range []struct{ name, steward, tenant string }{
+			{"steward_id", "steward-other", "t1"},
+			{"tenant_id", stewardID, "t2"},
+		} {
+			t.Run(fmt.Sprintf("delta=%v/%s", isDelta, tc.name), func(t *testing.T) {
+				h, _ := deltaBoundsFixture(t, stewardID, []*common.Fragment{fragmentWithID("frag-0")})
+				stream := newTestDNAStream(peerContextWithCA(t, ca, stewardID),
+					&transportpb.DNAChunk{StewardId: stewardID, TenantId: "t1", Data: []byte("a"), TotalChunks: 2, IsDelta: isDelta},
+					&transportpb.DNAChunk{StewardId: tc.steward, TenantId: tc.tenant, Data: []byte("b"), ChunkIndex: 1, TotalChunks: 2, IsDelta: isDelta},
+				)
+				err := h.HandleGRPC(stream)
+				require.Error(t, err)
+				assert.Equal(t, codes.InvalidArgument, status.Code(err))
+			})
+		}
+	}
 }

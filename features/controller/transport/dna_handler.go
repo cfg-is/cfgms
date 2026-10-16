@@ -349,6 +349,54 @@ func isValidAggregateRoot(s string) bool {
 	return sdna.IsValidAggregateRoot(s)
 }
 
+// quarantineQueueKey is the per-tenant queue bucket for streams whose peer the
+// registry cannot resolve. It contains a NUL byte, which no tenant path can, so
+// it never collides with a real tenant's bucket.
+const quarantineQueueKey = "\x00unresolved-peer-quarantine"
+
+// dnaStreamBudget bounds what one DNA stream may make the controller buffer. It
+// charges the whole wire size of every chunk (proto.Size, so steward_id,
+// tenant_id and dna_hash count as well as data), caps the chunk count, and pins
+// every later chunk to the first chunk's steward_id and tenant_id.
+type dnaStreamBudget struct {
+	maxBytes  int
+	bytes     int
+	count     int
+	stewardID string
+	tenantID  string
+}
+
+// newDNAStreamBudget starts a budget with the first chunk already charged.
+func newDNAStreamBudget(first *transportpb.DNAChunk, maxBytes int) *dnaStreamBudget {
+	return &dnaStreamBudget{
+		maxBytes:  maxBytes,
+		bytes:     proto.Size(first),
+		count:     1,
+		stewardID: first.GetStewardId(),
+		tenantID:  first.GetTenantId(),
+	}
+}
+
+// admit charges chunk against the budget. It must be called before the chunk is
+// appended to the reassembly buffer.
+func (b *dnaStreamBudget) admit(chunk *transportpb.DNAChunk) error {
+	if b.count >= maxDNAChunks {
+		return status.Errorf(codes.ResourceExhausted,
+			"DNA stream exceeds the %d chunk limit", maxDNAChunks)
+	}
+	if chunk.GetStewardId() != b.stewardID || chunk.GetTenantId() != b.tenantID {
+		return status.Error(codes.InvalidArgument, "chunk identity does not match the first chunk")
+	}
+	size := proto.Size(chunk)
+	if size > b.maxBytes-b.bytes {
+		return status.Errorf(codes.ResourceExhausted,
+			"DNA stream exceeds the %d byte limit", b.maxBytes)
+	}
+	b.bytes += size
+	b.count++
+	return nil
+}
+
 // HandleGRPC processes a SyncDNA RPC on the shared gRPC-over-QUIC server.
 //
 // It extracts the steward ID from the peer's mTLS certificate and validates it
@@ -357,7 +405,8 @@ func isValidAggregateRoot(s string) bool {
 // the message "steward ID mismatch" — consistent with ConfigHandler.
 //
 // Per-tenant back-pressure: after steward ID validation on the first chunk,
-// Acquire is called with the chunk's tenant_id. If the tenant's queue is full
+// Acquire is called with the registry-resolved tenant (or quarantineQueueKey for
+// unresolved peers, never the wire tenant_id). If that queue is full
 // (MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
 //
 // Branch on is_delta:
@@ -405,10 +454,10 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 	// firstChunk.GetStewardId()), so resolving through it — the same reasoning
 	// HandleHeartbeatRoot already applies to the tenant field it deliberately
 	// never forwards — binds the queue key to the registered steward's real
-	// tenant. Fall back to the wire value only when no resolver is wired
-	// (test / degenerate; production always wires one in server.go) or the peer
-	// is not yet known to the registry.
-	tenantID := firstChunk.GetTenantId()
+	// tenant. When no resolver is wired or the peer is unknown to the registry,
+	// the stream is counted against the fixed quarantine bucket — the wire tenant
+	// is never used as a queue key in any branch.
+	tenantID := quarantineQueueKey
 	if h.tenantResolver != nil {
 		if resolvedTenant, known := h.tenantResolver.TenantForDevice(peerID); known {
 			tenantID = resolvedTenant
@@ -427,8 +476,8 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 	// Bound accumulation as chunks arrive so a hostile stream can never buffer more
 	// than maxReassembledDNABytes / maxDNAChunks before it is rejected. Checking only
 	// after the stream drains would already have paid the memory cost.
+	budget := newDNAStreamBudget(firstChunk, maxReassembledDNABytes)
 	chunks := []*transportpb.DNAChunk{firstChunk}
-	payloadBytes := len(firstChunk.GetData())
 	for {
 		chunk, recvErr := stream.Recv()
 		if recvErr == io.EOF {
@@ -437,15 +486,9 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		if recvErr != nil {
 			return fmt.Errorf("failed to receive DNA chunk: %w", recvErr)
 		}
-		if len(chunks) >= maxDNAChunks {
-			return status.Errorf(codes.ResourceExhausted,
-				"DNA snapshot exceeds the %d chunk limit", maxDNAChunks)
+		if admitErr := budget.admit(chunk); admitErr != nil {
+			return admitErr
 		}
-		if payloadBytes+len(chunk.GetData()) > maxReassembledDNABytes {
-			return status.Errorf(codes.ResourceExhausted,
-				"DNA snapshot exceeds the %d byte limit", maxReassembledDNABytes)
-		}
-		payloadBytes += len(chunk.GetData())
 		chunks = append(chunks, chunk)
 	}
 
@@ -516,11 +559,11 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStreamingServer[transportpb.DNAChunk, transportpb.DNASyncResponse], firstChunk *transportpb.DNAChunk, peerID string) error {
 	safePeerID := logging.SanitizeLogValue(peerID)
 
-	chunks := []*transportpb.DNAChunk{firstChunk}
 	// A stream may carry any number of chunks, so the reassembly buffer itself
 	// needs a cap: without it a steward drives unbounded controller memory growth
 	// before a single content check has run.
-	streamBytes := len(firstChunk.GetData())
+	budget := newDNAStreamBudget(firstChunk, maxDeltaStreamBytes)
+	chunks := []*transportpb.DNAChunk{firstChunk}
 	for {
 		chunk, recvErr := stream.Recv()
 		if recvErr == io.EOF {
@@ -529,12 +572,10 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 		if recvErr != nil {
 			return fmt.Errorf("failed to receive delta DNA chunk: %w", recvErr)
 		}
-		streamBytes += len(chunk.GetData())
-		if streamBytes > maxDeltaStreamBytes {
-			h.logger.Warn("delta rejected — stream exceeds the reassembly limit",
-				"peer_id", safePeerID, "limit_bytes", maxDeltaStreamBytes)
-			return status.Errorf(codes.ResourceExhausted,
-				"delta stream exceeds the %d byte limit", maxDeltaStreamBytes)
+		if admitErr := budget.admit(chunk); admitErr != nil {
+			h.logger.Warn("delta rejected — stream exceeds the reassembly bounds",
+				"peer_id", safePeerID, "error", logging.SanitizeLogValue(admitErr.Error()))
+			return admitErr
 		}
 		chunks = append(chunks, chunk)
 	}
