@@ -11,18 +11,32 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/security"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// defaultWebhookLeaseRetry is how long a webhook-triggered sync waits before
+// re-contending for a scope lease another node holds.
+const defaultWebhookLeaseRetry = 2 * time.Second
+
+// webhookLeaseMaxWait bounds how long a webhook-triggered sync keeps
+// contending for a held scope lease before giving up. The holder's own sync
+// pulls the origin head, so a webhook that never wins the lease is not lost
+// work as long as the holder started after the push; a later poll or webhook
+// converges the rest.
+const webhookLeaseMaxWait = 2 * time.Minute
 
 // gitsyncLeaseNamePrefix namespaces per-scope lease names so they cannot
 // collide with any other package's cluster-singleton lease population
@@ -66,6 +80,7 @@ type Syncer struct {
 	logger        logging.Logger
 	statusMap     map[string]*ScopeStatus
 	cancelFuncs   map[string]context.CancelFunc
+	scopeLocks    sync.Map // scope key -> *sync.Mutex; serializes syncScope per scope
 	ctx           context.Context
 	cancel        context.CancelFunc
 	newTickerFunc func(d time.Duration) (<-chan time.Time, func())
@@ -76,10 +91,17 @@ type Syncer struct {
 	// lease claim (ADR-031 Decision 4) each scope's polling cycle runs behind.
 	// nil (the default) means no shared lease substrate is wired — polling runs
 	// unconditionally, the correct behavior for a single-node deployment.
-	// Webhook-triggered syncs (pkg/gitsync/webhook.go) never consult this: a
-	// webhook must run on whichever node received the HTTP request, not on
-	// whichever node holds the scope's polling lease.
+	// Webhook-triggered syncs (TriggerWebhookSync) contend for the same lease,
+	// so a webhook and a poll, or webhooks on different nodes, never sync one
+	// scope at the same time.
 	leaseJobFactory LeaseJobFactory
+
+	// auditManager, when non-nil, receives one event per store entry pruned
+	// because its config file was removed at the origin.
+	auditManager *audit.Manager
+
+	webhookPending    sync.Map // scope key -> *atomic.Bool; a webhook sync is waiting for the lease
+	webhookLeaseRetry time.Duration
 }
 
 // Option is a functional option for NewSyncer.
@@ -121,6 +143,22 @@ func WithLeaseJobFactory(f LeaseJobFactory) Option {
 	}
 }
 
+// WithAuditManager configures the audit manager that records every store
+// entry pruned by a sync. When nil (the default), prunes are not audited.
+func WithAuditManager(m *audit.Manager) Option {
+	return func(s *Syncer) {
+		s.auditManager = m
+	}
+}
+
+// WithWebhookLeaseRetry overrides the interval at which a webhook-triggered
+// sync re-contends for a scope lease held elsewhere. Intended for testing.
+func WithWebhookLeaseRetry(d time.Duration) Option {
+	return func(s *Syncer) {
+		s.webhookLeaseRetry = d
+	}
+}
+
 // NewSyncer creates a new Syncer. workDir is used for local git clones and is
 // created if it does not already exist. Optional functional options (see
 // WithTickerFunc, WithSyncNotify) may be provided for testing.
@@ -136,14 +174,15 @@ func NewSyncer(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Syncer{
-		store:       store,
-		bindings:    bindings,
-		workDir:     workDir,
-		logger:      logger,
-		statusMap:   make(map[string]*ScopeStatus),
-		cancelFuncs: make(map[string]context.CancelFunc),
-		ctx:         ctx,
-		cancel:      cancel,
+		store:             store,
+		bindings:          bindings,
+		workDir:           workDir,
+		logger:            logger,
+		statusMap:         make(map[string]*ScopeStatus),
+		cancelFuncs:       make(map[string]context.CancelFunc),
+		ctx:               ctx,
+		cancel:            cancel,
+		webhookLeaseRetry: defaultWebhookLeaseRetry,
 		newTickerFunc: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTicker(d)
 			return t.C, t.Stop
@@ -286,9 +325,77 @@ func (s *Syncer) TriggerSync(ctx context.Context, b ScopeBinding) error {
 	return err
 }
 
+// TriggerWebhookSync syncs b like TriggerSync, but only while holding the
+// scope's cluster lease (the one polling uses), so syncs of one scope never run
+// on two nodes at once. If the lease is held elsewhere the call keeps
+// contending until it is free or webhookLeaseMaxWait elapses. Webhooks for a
+// scope that arrive while one is already waiting are coalesced into it: the
+// waiting sync pulls the latest head when it runs.
+func (s *Syncer) TriggerWebhookSync(ctx context.Context, b ScopeBinding) error {
+	key := b.key()
+	pendingV, _ := s.webhookPending.LoadOrStore(key, &atomic.Bool{})
+	pending := pendingV.(*atomic.Bool)
+	if !pending.CompareAndSwap(false, true) {
+		return nil // coalesced into the waiting sync
+	}
+	claimed := true
+	release := func() {
+		if claimed {
+			claimed = false
+			pending.Store(false)
+		}
+	}
+	defer release()
+
+	leaseJob := lease.SingletonJob{}
+	if s.leaseJobFactory != nil {
+		job, err := s.leaseJobFactory(gitsyncLeaseNamePrefix + key)
+		if err != nil {
+			return fmt.Errorf("gitsync: failed to construct per-scope lease job: %w", err)
+		}
+		leaseJob = job
+	}
+
+	deadline := time.NewTimer(webhookLeaseMaxWait)
+	defer deadline.Stop()
+	var syncErr error
+	for {
+		ran := leaseJob.RunIfLeader(ctx, func(runCtx context.Context) {
+			// Triggers arriving from here on start a fresh sync.
+			release()
+			syncErr = s.TriggerSync(runCtx, b)
+		})
+		if ran {
+			return syncErr
+		}
+		retry := time.NewTimer(s.webhookLeaseRetry)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-s.ctx.Done():
+			retry.Stop()
+			return s.ctx.Err()
+		case <-deadline.C:
+			retry.Stop()
+			return fmt.Errorf("gitsync: scope lease still held elsewhere after %s", webhookLeaseMaxWait)
+		case <-retry.C:
+		}
+	}
+}
+
 // syncScope performs the actual git clone/pull and config import for one
 // binding.
+//
+// Syncs of one scope are serialized: webhook goroutines and the polling loop
+// may call in concurrently, and an interleaved import/prune/SHA update could
+// delete entries the other sync just wrote.
 func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
+	lk, _ := s.scopeLocks.LoadOrStore(b.key(), &sync.Mutex{})
+	mu := lk.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// sanitizeKey already replaces "/" (TenantPath and Namespace are attacker-
 	// influenceable via the binding API), but a ".."-only segment or a stray
 	// backslash on Windows could otherwise still walk outside workDir — bound
@@ -361,7 +468,13 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 	}
 
 	// Import all config files from the repo root.
-	if err := s.importConfigs(ctx, b, repoDir, currentSHA); err != nil {
+	written, err := s.importConfigs(ctx, b, repoDir, currentSHA)
+	if err != nil {
+		return err
+	}
+
+	// Remove store entries for config files deleted or renamed at the origin.
+	if err := s.pruneRemoved(ctx, b, written); err != nil {
 		return err
 	}
 
@@ -391,26 +504,29 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 
 // importConfigs scans the top-level directory of repoDir for YAML and JSON
 // files and writes each one as a ConfigEntry to the ConfigStore. Subdirectories
-// are skipped (v1 flat-file-per-config layout only).
-func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha string) error {
+// are skipped (v1 flat-file-per-config layout only). It returns the set of
+// config names written; the set is only valid when the error is nil.
+func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha string) (map[string]struct{}, error) {
 	dirEntries, err := os.ReadDir(repoDir)
 	if err != nil {
-		return fmt.Errorf("gitsync: failed to read repo directory: %w", err)
+		return nil, fmt.Errorf("gitsync: failed to read repo directory: %w", err)
 	}
 
 	// All reads go through a root handle so a path cannot resolve outside the
 	// checkout, even if an entry is swapped for a link after the type check.
 	root, err := os.OpenRoot(repoDir)
 	if err != nil {
-		return fmt.Errorf("gitsync: failed to open repo directory: %w", err)
+		return nil, fmt.Errorf("gitsync: failed to open repo directory: %w", err)
 	}
 	defer func() { _ = root.Close() }()
+
+	written := make(map[string]struct{})
 
 	sourceSHA := sha
 	if len(sourceSHA) > 8 {
 		sourceSHA = sourceSHA[:8]
 	}
-	sourceTag := "git-sync:" + logging.SanitizeLogValue(b.OriginURL) + "@" + sourceSHA
+	sourceTag := gitSyncSourcePrefix + logging.SanitizeLogValue(b.OriginURL) + "@" + sourceSHA
 
 	for _, dirEntry := range dirEntries {
 		if dirEntry.IsDir() {
@@ -448,7 +564,7 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 				s.warnSkippedEntry(b, name)
 				continue
 			}
-			return fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)
+			return nil, fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)
 		}
 
 		configEntry := &cfgconfig.ConfigEntry{
@@ -465,10 +581,80 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 		}
 
 		if storeErr := s.store.StoreConfig(ctx, configEntry); storeErr != nil {
-			return fmt.Errorf("gitsync: failed to store config %s: %w", configName, storeErr)
+			return nil, fmt.Errorf("gitsync: failed to store config %s: %w", configName, storeErr)
 		}
+		written[configName] = struct{}{}
+	}
+	return written, nil
+}
+
+// gitSyncSourcePrefix marks store entries written by importConfigs.
+const gitSyncSourcePrefix = "git-sync:"
+
+// pruneRemoved deletes every entry in the binding's tenant and namespace that
+// git sync wrote (Source starts with "git-sync:") but whose name is not in
+// written. A tenant and namespace pair has exactly one binding, so any such
+// entry belongs to it. Entries not written by git sync are never deleted.
+func (s *Syncer) pruneRemoved(ctx context.Context, b ScopeBinding, written map[string]struct{}) error {
+	entries, err := s.store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
+		TenantID:  b.TenantPath,
+		Namespace: b.Namespace,
+	})
+	if err != nil {
+		return fmt.Errorf("gitsync: failed to list configs for pruning: %w", err)
+	}
+
+	var stale []*cfgconfig.ConfigKey
+	for _, e := range entries {
+		if e == nil || e.Key == nil || !strings.HasPrefix(e.Source, gitSyncSourcePrefix) {
+			continue
+		}
+		if _, ok := written[e.Key.Name]; ok {
+			continue
+		}
+		stale = append(stale, e.Key)
+	}
+
+	if len(stale) > 0 && len(written) == 0 {
+		s.logger.Warn("gitsync: repository root yielded no config files, removing all git-sync entries",
+			"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+			"namespace", logging.SanitizeLogValue(b.Namespace),
+			"count", len(stale))
+	}
+
+	for _, key := range stale {
+		if delErr := s.store.DeleteConfig(ctx, key); delErr != nil {
+			return fmt.Errorf("gitsync: failed to delete config %s: %w", key.Name, delErr)
+		}
+		s.auditPrune(ctx, b, key)
 	}
 	return nil
+}
+
+// auditPrune records that a sync removed key from the store. A failure to
+// record is logged, not returned: the delete already happened and a retry
+// would not repeat it.
+func (s *Syncer) auditPrune(ctx context.Context, b ScopeBinding, key *cfgconfig.ConfigKey) {
+	if s.auditManager == nil {
+		return
+	}
+	if err := s.auditManager.RecordEvent(ctx, audit.NewEventBuilder().
+		Tenant(b.TenantPath).
+		Type(business.AuditEventConfiguration).
+		Action("git_sync_config_pruned").
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("config", key.Name, key.Name).
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh).
+		Detail("tenant_path", logging.SanitizeLogValue(b.TenantPath)).
+		Detail("namespace", logging.SanitizeLogValue(b.Namespace)).
+		Detail("config_name", logging.SanitizeLogValue(key.Name)).
+		Detail("origin_url", logging.SanitizeLogValue(b.OriginURL))); err != nil {
+		s.logger.Warn("gitsync: failed to record prune audit event",
+			"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+			"namespace", logging.SanitizeLogValue(b.Namespace),
+			"error_category", "audit_failure")
+	}
 }
 
 // Status returns a snapshot of the current sync status for all known scopes.

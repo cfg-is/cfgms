@@ -152,11 +152,11 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Shutdown waits on h.wg and TriggerSync applies provider operation bounds.
 		go func() {
 			defer h.wg.Done()
-			if syncErr := h.syncer.TriggerSync(context.Background(), bindingCopy); syncErr != nil {
+			if syncErr := h.syncer.TriggerWebhookSync(context.Background(), bindingCopy); syncErr != nil {
 				h.logger.Error("gitsync: webhook-triggered sync failed",
 					"tenant_path", logging.SanitizeLogValue(bindingCopy.TenantPath),
 					"namespace", logging.SanitizeLogValue(bindingCopy.Namespace),
-					"error", syncErr.Error())
+					"error", logging.SanitizeLogValue(syncErr.Error()))
 			}
 		}()
 		triggered++

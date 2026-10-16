@@ -4,10 +4,13 @@ package gitsync_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -623,4 +626,190 @@ func TestSyncRefusesSymlinkInsideCheckout(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "key: inside\n", string(e.Data))
+}
+
+// failDeleteStore wraps a real ConfigStore and fails every DeleteConfig.
+type failDeleteStore struct {
+	cfgconfig.ConfigStore
+}
+
+func (failDeleteStore) DeleteConfig(context.Context, *cfgconfig.ConfigKey) error {
+	return errors.New("injected delete failure")
+}
+
+func commitRemoval(t *testing.T, workDir string, remove, rename map[string]string) {
+	t.Helper()
+	for _, name := range keysOf(remove) {
+		runGit(t, workDir, "rm", name)
+	}
+	for from, to := range rename {
+		runGit(t, workDir, "mv", from, to)
+	}
+	runGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@test.com",
+		"commit", "-m", "remove files")
+	runGit(t, workDir, "push", "origin", "main")
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func getEntry(store cfgconfig.ConfigStore, ns, name string) error {
+	_, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID: "root/test-tenant", Namespace: ns, Name: name,
+	})
+	return err
+}
+
+func TestSyncDeletesEntriesRemovedAtOrigin(t *testing.T) {
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{
+		"a.yaml": "a: 1\n",
+		"b.yaml": "b: 1\n",
+	})
+	syncer, store, bindings := newTestSyncer(t)
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+
+	// Entries that must survive: manual entry in the same namespace and a
+	// git-sync entry in another namespace.
+	require.NoError(t, store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "root/test-tenant", Namespace: "policies", Name: "manual"},
+		Data: []byte("m: 1\n"), Format: cfgconfig.ConfigFormatYAML, Source: "ui", CreatedBy: "admin", UpdatedBy: "admin",
+	}))
+	require.NoError(t, store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "root/test-tenant", Namespace: "other", Name: "b"},
+		Data: []byte("o: 1\n"), Format: cfgconfig.ConfigFormatYAML, Source: "git-sync:elsewhere@abcd1234", CreatedBy: "git-sync", UpdatedBy: "git-sync",
+	}))
+
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+	require.NoError(t, getEntry(store, "policies", "b"))
+
+	commitRemoval(t, workDir, map[string]string{"b.yaml": ""}, nil)
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+
+	assert.Error(t, getEntry(store, "policies", "b"), "removed file's entry must be deleted")
+	assert.NoError(t, getEntry(store, "policies", "a"))
+	assert.NoError(t, getEntry(store, "policies", "manual"))
+	assert.NoError(t, getEntry(store, "other", "b"))
+
+	head := runGit(t, workDir, "rev-parse", "HEAD")
+	got, ok := bindings.Get("root/test-tenant", "policies")
+	require.True(t, ok)
+	assert.Equal(t, strings.TrimSpace(head), got.LastSyncedSHA)
+}
+
+func TestSyncRenameRemovesOldName(t *testing.T) {
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{"a.yaml": "a: 1\n"})
+	syncer, store, bindings := newTestSyncer(t)
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+	commitRemoval(t, workDir, nil, map[string]string{"a.yaml": "c.yaml"})
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+
+	assert.NoError(t, getEntry(store, "policies", "c"))
+	assert.Error(t, getEntry(store, "policies", "a"))
+}
+
+func TestSyncDeleteErrorKeepsLastSyncedSHA(t *testing.T) {
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{
+		"a.yaml": "a: 1\n",
+		"b.yaml": "b: 1\n",
+	})
+	root := t.TempDir()
+	real := pkgtesting.SetupTestStorage(t).GetConfigStore()
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+
+	good, err := gitsync.NewSyncer(real, bindings, filepath.Join(root, "repos"), logging.ForComponent("gitsync-test"))
+	require.NoError(t, err)
+	failing, err := gitsync.NewSyncer(failDeleteStore{real}, bindings, filepath.Join(root, "repos"), logging.ForComponent("gitsync-test"))
+	require.NoError(t, err)
+
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+
+	require.NoError(t, good.TriggerSync(ctx, binding))
+	before, _ := bindings.Get("root/test-tenant", "policies")
+	require.NotEmpty(t, before.LastSyncedSHA)
+
+	commitRemoval(t, workDir, map[string]string{"b.yaml": ""}, nil)
+	require.Error(t, failing.TriggerSync(ctx, binding))
+
+	after, _ := bindings.Get("root/test-tenant", "policies")
+	assert.Equal(t, before.LastSyncedSHA, after.LastSyncedSHA, "SHA must not advance when deletion fails")
+
+	// Retry with a working store converges.
+	require.NoError(t, good.TriggerSync(ctx, binding))
+	assert.Error(t, getEntry(real, "policies", "b"))
+}
+
+// overlapStore wraps a real ConfigStore and records the highest number of
+// ListConfigs calls (made by the prune step) in flight at once.
+type overlapStore struct {
+	cfgconfig.ConfigStore
+	inFlight, maxInFlight atomic.Int32
+}
+
+func (o *overlapStore) ListConfigs(ctx context.Context, f *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	n := o.inFlight.Add(1)
+	defer o.inFlight.Add(-1)
+	for {
+		m := o.maxInFlight.Load()
+		if n <= m || o.maxInFlight.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	return o.ConfigStore.ListConfigs(ctx, f)
+}
+
+func TestConcurrentSyncsOfOneScopeAreSerialized(t *testing.T) {
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{
+		"a.yaml": "a: 1\n",
+		"b.yaml": "b: 1\n",
+	})
+	root := t.TempDir()
+	real := pkgtesting.SetupTestStorage(t).GetConfigStore()
+	store := &overlapStore{ConfigStore: real}
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+	syncer, err := gitsync.NewSyncer(store, bindings, filepath.Join(root, "repos"), logging.ForComponent("gitsync-test"))
+	require.NoError(t, err)
+
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+	store.maxInFlight.Store(0)
+
+	commitRemoval(t, workDir, map[string]string{"b.yaml": ""}, nil)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = syncer.TriggerSync(ctx, binding)
+		}()
+	}
+	wg.Wait()
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
+
+	assert.EqualValues(t, 1, store.maxInFlight.Load(), "syncs of one scope must not overlap")
+	assert.NoError(t, getEntry(real, "policies", "a"))
+	assert.Error(t, getEntry(real, "policies", "b"))
+	got, _ := bindings.Get("root/test-tenant", "policies")
+	assert.Equal(t, runGit(t, workDir, "rev-parse", "HEAD"), got.LastSyncedSHA)
 }
