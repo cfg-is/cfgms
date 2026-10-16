@@ -753,7 +753,12 @@ func TestHandleCockpitWatch_ClosesWhenSessionRevoked(t *testing.T) {
 	// (implicit admin) to reach the permission-gated watch route.
 	acct, err := srv.getAccount(context.Background(), username)
 	require.NoError(t, err)
+	// Moving to the root storage tenant: remove the old record so the store holds
+	// exactly one record for the username (two would make lookup order-dependent).
+	oldKey := accountStorageTenant(acct.TenantID) + "/" + accountStoreKey(acct.Username)
+	require.NoError(t, srv.secretStore.DeleteSecret(context.Background(), oldKey))
 	acct.RootScope = true
+	acct.TenantID = ""
 	require.NoError(t, srv.persistAccount(context.Background(), acct, "test-setup"))
 	srv.cacheAccount(acct)
 
