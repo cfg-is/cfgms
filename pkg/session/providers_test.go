@@ -570,3 +570,62 @@ func TestStaleNodeCannotRotateRotatedAwayToken(t *testing.T) {
 		})
 	}
 }
+
+// TestFreshSessionAfterRevokeIsAccepted pins that revocation is per session: after a
+// principal's session is revoked, a freshly issued session for the same principal and
+// connection validates, renews and rotates on every node, while the revoked session's
+// token stays rejected.
+func TestFreshSessionAfterRevokeIsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	p := sqlite.NewSQLiteProvider(dir)
+	dbPath := filepath.Join(dir, "sessions.db")
+	cfg := session.Config{IdleTimeout: 5 * time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: 30 * time.Second}
+	ctx := context.Background()
+
+	newMgr := func() session.Manager {
+		st, err := p.CreateSessionTokenStore(map[string]interface{}{"path": dbPath})
+		if err != nil {
+			t.Fatalf("CreateSessionTokenStore: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		return session.NewManager(cfg, st, time.Now)
+	}
+	mgrA, mgrB := newMgr(), newMgr()
+
+	old, oldToken, err := mgrA.Issue(ctx, "carol", "ctrl", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := mgrB.Validate(ctx, oldToken); err != nil {
+		t.Fatalf("Validate on B: %v", err)
+	}
+	if err := mgrA.Revoke(ctx, old.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	fresh, freshToken, err := mgrB.Issue(ctx, "carol", "ctrl", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue after revoke: %v", err)
+	}
+	if fresh.ID == old.ID {
+		t.Fatalf("fresh session reused the revoked session ID")
+	}
+	for name, m := range map[string]session.Manager{"A": mgrA, "B": mgrB} {
+		if _, err := m.Validate(ctx, freshToken); err != nil {
+			t.Errorf("Validate fresh token on %s: %v", name, err)
+		}
+		if _, err := m.Validate(ctx, oldToken); err == nil {
+			t.Errorf("revoked token accepted on %s", name)
+		}
+	}
+	if _, rotated, err := mgrA.Renew(ctx, freshToken); err != nil {
+		t.Errorf("Renew fresh token: %v", err)
+	} else if rotated != "" {
+		if _, err := mgrB.Validate(ctx, rotated); err != nil {
+			t.Errorf("rotated fresh token rejected on B: %v", err)
+		}
+	}
+	if _, _, err := mgrB.Renew(ctx, oldToken); !errors.Is(err, session.ErrSessionRevoked) && !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("Renew of revoked token: got %v, want revoked/not found", err)
+	}
+}
