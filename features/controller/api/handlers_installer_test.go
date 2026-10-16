@@ -26,10 +26,13 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newFSBlobStore creates a temporary filesystem BlobStore for tests.
@@ -915,4 +918,52 @@ func TestHandleDownloadInstallPackage_NoLegacyRootNamespace(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
 	})
+}
+
+// TestInstallerArtifact_UploadAndDeleteAreAudited verifies that an upload followed
+// by a delete records two audit entries naming the caller, and that the upload
+// entry carries the same checksum the response reports.
+func TestInstallerArtifact_UploadAndDeleteAreAudited(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	principal := &Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}
+	prep := func(req *http.Request) *http.Request {
+		req = withTenant(req, "test-tenant")
+		req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+		return withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+	}
+
+	up := httptest.NewRecorder()
+	server.handleUploadInstallerArtifact(up, prep(httptest.NewRequest(http.MethodPut,
+		"/api/v1/installer/artifacts/linux/amd64", bytes.NewBufferString("installer-bytes"))))
+	require.Equal(t, http.StatusOK, up.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(up.Body.Bytes(), &resp))
+	checksum := resp.Data.(map[string]interface{})["checksum"].(string)
+	require.NotEmpty(t, checksum)
+
+	del := httptest.NewRecorder()
+	server.handleDeleteInstallerArtifact(del, prep(httptest.NewRequest(http.MethodDelete,
+		"/api/v1/installer/artifacts/linux/amd64", nil)))
+	require.Equal(t, http.StatusNoContent, del.Code)
+
+	ctx := context.Background()
+	require.NoError(t, auditMgr.Flush(ctx))
+	uploads, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"installer.artifact.uploaded"}})
+	require.NoError(t, err)
+	require.Len(t, uploads, 1)
+	assert.Equal(t, "admin-bob", uploads[0].UserID)
+	assert.Equal(t, "test-tenant", uploads[0].TenantID)
+	assert.Equal(t, checksum, uploads[0].Details["checksum"])
+	assert.Equal(t, "linux", uploads[0].Details["platform"])
+	assert.Equal(t, "amd64", uploads[0].Details["arch"])
+
+	deletes, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"installer.artifact.deleted"}})
+	require.NoError(t, err)
+	require.Len(t, deletes, 1)
+	assert.Equal(t, "admin-bob", deletes[0].UserID)
 }

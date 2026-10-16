@@ -291,6 +291,9 @@ func TestHandleConfigPush_AuditEventEmitted(t *testing.T) {
 	require.Len(t, entries, 1, "expected exactly one config.push.initiated audit entry")
 	assert.Equal(t, payload.TenantID, entries[0].TenantID)
 	assert.Equal(t, "config.push.initiated", entries[0].Action)
+	assert.Equal(t, "api-key:"+payload.TenantID, entries[0].UserID, "audit event must name the authenticated principal")
+	assert.NotEqual(t, audit.SystemUserID, entries[0].UserID)
+	assert.Equal(t, business.AuditUserTypeAPI, entries[0].UserType)
 }
 
 // syncedControlPlane is a real ControlPlaneProvider for handler-level fanout tests.
@@ -616,6 +619,13 @@ func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
 	assert.Equal(t, payload.Version, record.Version)
 	assert.NotEmpty(t, record.ID)
 	assert.NotEmpty(t, record.Data, "push record must have marshalled payload for replay")
+	assert.Equal(t, "api-key:"+payload.TenantID, record.InitiatedBy, "push record must name the initiating principal")
+
+	require.NoError(t, auditMgr.Flush(ctx))
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"config.push.initiated"}})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, record.InitiatedBy, entries[0].UserID)
 }
 
 // failingControlPlane is a ControlPlaneProvider whose SendCommand always returns an error,

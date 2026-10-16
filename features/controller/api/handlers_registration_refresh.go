@@ -1284,11 +1284,32 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 		Mode:            req.Mode,
 		MaxDormancyDays: req.MaxDormancyDays,
 	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	details := map[string]interface{}{
+		"tenant_id": tenantID,
+		"new_mode":  req.Mode,
+	}
+	if req.MaxDormancyDays != nil {
+		details["new_max_dormancy_days"] = *req.MaxDormancyDays
+	}
+	if old, getErr := s.refreshPolicyStore.GetPolicy(r.Context(), tenantID); getErr == nil && old != nil {
+		details["old_mode"] = old.Mode
+		if old.MaxDormancyDays != nil {
+			details["old_max_dormancy_days"] = *old.MaxDormancyDays
+		}
+	}
 	if err := s.refreshPolicyStore.SetPolicy(r.Context(), policy); err != nil {
 		s.logger.Error("Failed to set refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
+		s.emitOperatorAudit(r, principal, tenantID, business.AuditEventConfiguration,
+			"refresh_policy.changed", "refresh_policy", tenantID,
+			business.AuditResultFailure, business.AuditSeverityHigh, details)
 		s.writeStatusError(w, http.StatusInternalServerError, "failed to set refresh policy")
 		return
 	}
+
+	s.emitOperatorAudit(r, principal, tenantID, business.AuditEventConfiguration,
+		"refresh_policy.changed", "refresh_policy", tenantID,
+		business.AuditResultSuccess, business.AuditSeverityHigh, details)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
