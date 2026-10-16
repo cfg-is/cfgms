@@ -348,23 +348,28 @@ def is_external(login):
     return perm not in _TRUSTED_PERMS
 
 
-def _release_marker_created_at(timeline_items):
-    """Return createdAt of the most recent 'human-reviewed:ok' LABELED_EVENT ("" if none)."""
-    created = ""
-    for item in (timeline_items or []):
-        if (((item.get("label") or {}).get("name")) or "") == "human-reviewed:ok":
-            created = item.get("createdAt") or ""
-    return created
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def release_covers_head(label_created_at, head_changed_at):
-    """True only when the release label postdates the PR's latest head change.
+def release_covers_head(actor_login, head_oid, approvals):
+    """True only when the release actor approved the PR's current head SHA.
 
-    Mirrors agent-dispatch.sh `_release_covers_head`: a release covers only the
-    head it was granted for. Fails closed when either timestamp is missing.
-    ISO-8601 UTC timestamps compare correctly as strings.
+    Mirrors agent-dispatch.sh `_release_covers_head`. A release covers only the
+    head it was granted for, and the binding is by SHA, never by timestamp:
+    commit dates are author-supplied (a backdated normal push would otherwise
+    stay released) and `pushedDate` is no longer populated by GitHub. The
+    actor who applied `human-reviewed:ok` must also have submitted an APPROVED
+    review whose `commit.oid` (set by the server when the review is submitted)
+    equals the current `headRefOid`. Any push after that approval moves the
+    head to a SHA nobody approved and voids the release. `approvals` is a list
+    of {"login", "oid"} dicts. Fails closed on a missing actor or head SHA.
     """
-    return bool(label_created_at and head_changed_at and label_created_at > head_changed_at)
+    if not actor_login or not head_oid or not _SHA_RE.match(head_oid):
+        return False
+    return any(
+        (a or {}).get("login") == actor_login and (a or {}).get("oid") == head_oid
+        for a in (approvals or [])
+    )
 
 
 def _release_marker_actor_login(timeline_items):
@@ -467,18 +472,15 @@ query {
             }
           }
         }
-        forcePushes: timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 1) {
-          nodes {
-            ... on HeadRefForcePushedEvent { createdAt }
-          }
+        headRefOid
+        approvals: reviews(states: [APPROVED], last: 50) {
+          nodes { author { login } commit { oid } }
         }
         comments(first: 30) { nodes { author { login } body createdAt } }
         commits(last: 1) {
           nodes {
             commit {
               committedDate
-              pushedDate
-              checkSuites(first: 100) { nodes { createdAt } }
               statusCheckRollup {
                 state
                 contexts(first: 100) {
@@ -534,25 +536,10 @@ query {
         commits_nodes = ((n.get("commits") or {}).get("nodes")) or []
         rollup = None
         latest_commit_date = None
-        head_times = []
         if commits_nodes:
             latest_commit = (commits_nodes[0] or {}).get("commit") or {}
             rollup = latest_commit.get("statusCheckRollup")
             latest_commit_date = latest_commit.get("committedDate")
-            # committedDate is author-supplied (a backdated push would stay
-            # released); the earliest check-suite createdAt is the server-set
-            # arrival time of the head. No check suite -> unknown -> fail closed.
-            arrivals = [
-                (cs or {}).get("createdAt")
-                for cs in (((latest_commit.get("checkSuites") or {}).get("nodes")) or [])
-                if (cs or {}).get("createdAt")
-            ]
-            if arrivals:
-                head_times = [latest_commit_date, latest_commit.get("pushedDate"), min(arrivals)]
-        head_times += [] if not head_times else [
-            (f or {}).get("createdAt")
-            for f in (((n.get("forcePushes") or {}).get("nodes")) or [])
-        ]
         prs.append({
             "number": n.get("number"),
             "title": n.get("title", ""),
@@ -585,9 +572,16 @@ query {
             "comments": ((n.get("comments") or {}).get("nodes")) or [],
             "statusCheckRollup": _normalize_status_check_rollup(rollup),
             "latest_commit_date": latest_commit_date,
-            # Latest moment the head changed (commit, push, or force-push);
-            # empty when unknown. A release must postdate this (fail closed).
-            "head_changed_at": max((t for t in head_times if t), default=""),
+            # Server-bound head binding for the external-PR release check:
+            # the current head SHA and the SHA each APPROVED review was
+            # submitted against. A release covers only an approved head.
+            "head_oid": n.get("headRefOid") or "",
+            "approvals": [
+                {"login": ((r.get("author") or {}).get("login")) or "",
+                 "oid": ((r.get("commit") or {}).get("oid")) or ""}
+                for r in (((n.get("approvals") or {}).get("nodes")) or [])
+                if r
+            ],
         })
 
     body_ref_nodes = ((data.get("data") or {}).get("bodyRefs") or {}).get("nodes") or []
@@ -2460,8 +2454,9 @@ def _build_pr_summaries(prs):
             actor_login = _release_marker_actor_login(pr.get("timeline_items", []))
             if (actor_login and not is_external(actor_login)
                     and release_covers_head(
-                        _release_marker_created_at(pr.get("timeline_items", [])),
-                        pr.get("head_changed_at", ""))):
+                        actor_login,
+                        pr.get("head_oid", ""),
+                        pr.get("approvals", []))):
                 pr_is_released = True
 
         # story_number only assigned to internal-author PRs.

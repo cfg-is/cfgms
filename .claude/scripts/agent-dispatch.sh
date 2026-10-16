@@ -1059,34 +1059,60 @@ check_existing_prs_for_issue() {
 # External-author trust gate helpers (Issue #1786)
 # ---------------------------------------------------------------------------
 
-# _release_covers_head <pr_num> <label_time_iso8601>
-# Exit 0 only when the human-reviewed:ok label was applied strictly after the
-# PR's current head commit and after the latest head force-push. A push after
-# the release therefore voids it. Fail-closed on any lookup error or missing
-# timestamp. Commit dates are author-supplied (a backdated push would otherwise
-# stay released), so the head's arrival time is the earliest check-suite
-# createdAt on the head commit (server-set when the push is received); no check
-# suite -> fail closed. The force-push event (server time) covers rewritten heads.
-# Test hook: CFGMS_TEST_HEAD_TIME overrides the head-change lookup.
+# _release_covers_head <pr_num> <actor_login> [<expected_head_sha>]
+# Exit 0 only when <actor_login> (the account that applied human-reviewed:ok)
+# has an APPROVED review on the PR whose commit.oid equals the PR's current
+# headRefOid. When <expected_head_sha> is given (the SHA a caller will bind a
+# merge to with --match-head-commit), the approval must be on exactly that SHA
+# and the live headRefOid must equal it too: a second, independent head lookup
+# would let an author swap the head between the caller's capture and this
+# check (TOCTOU), so the caller's SHA is the one that is judged. The binding is by SHA, never by timestamp: commit dates are
+# author-supplied (a backdated normal push would otherwise stay released) and
+# GitHub no longer populates Commit.pushedDate. The review's commit.oid is set
+# by the server when the review is submitted, so any push after the approval --
+# fast-forward or force -- moves the head to a SHA nobody approved and voids the
+# release. Fail closed on any lookup error, missing actor, or malformed SHA.
+# Mirrors po-cycle-preflight.py release_covers_head().
+# Test hooks: CFGMS_TEST_HEAD_OID overrides the head SHA lookup;
+# CFGMS_TEST_APPROVALS overrides the approved-review lookup (newline-separated
+# "<login> <oid>" lines). Both must be set together.
 _release_covers_head() {
-  local pr_num="$1" label_time="$2" head_time
-  [[ -n "$label_time" ]] || return 1
-  if [[ -n "${CFGMS_TEST_HEAD_TIME+x}" ]]; then
-    head_time="${CFGMS_TEST_HEAD_TIME}"
-  else
-    local q
-    q="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { commits(last: 1) { nodes { commit { committedDate pushedDate checkSuites(first: 100) { nodes { createdAt } } } } } timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 1) { nodes { ... on HeadRefForcePushedEvent { createdAt } } } } } }"
-    head_time=$(gh api graphql -f "query=${q}" --jq '.data.repository.pullRequest | (.commits.nodes[0].commit.checkSuites.nodes | map(.createdAt) | min) as $arrival | if $arrival == null then "" else [(.commits.nodes[0].commit | .committedDate, .pushedDate), $arrival, (.timelineItems.nodes[0].createdAt)] | map(select(. != null)) | max end' 2>/dev/null || echo "")
+  local pr_num="$1" actor_login="$2" expected_head="${3:-}" head_oid approvals
+  [[ -n "$actor_login" && "$pr_num" =~ ^[0-9]+$ ]] || return 1
+  if [[ -n "$expected_head" && ! "$expected_head" =~ ^[0-9a-f]{40}$ ]]; then
+    return 1
   fi
-  [[ -n "$head_time" ]] || return 1
-  [[ "$label_time" > "$head_time" ]]
+  if [[ -n "${CFGMS_TEST_HEAD_OID+x}" ]]; then
+    head_oid="${CFGMS_TEST_HEAD_OID}"
+    approvals="${CFGMS_TEST_APPROVALS:-}"
+  else
+    local q out
+    q="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { headRefOid reviews(states: [APPROVED], last: 50) { nodes { author { login } commit { oid } } } } } }"
+    out=$(gh api graphql -f "query=${q}" --jq '.data.repository.pullRequest | (.headRefOid // ""), (.reviews.nodes[] | "\(.author.login // "") \(.commit.oid // "")")' 2>/dev/null) || return 1
+    head_oid="${out%%$'\n'*}"
+    approvals=""
+    [[ "$out" == *$'\n'* ]] && approvals="${out#*$'\n'}"
+  fi
+  [[ "$head_oid" =~ ^[0-9a-f]{40}$ ]] || return 1
+  if [[ -n "$expected_head" ]]; then
+    # The head moved since the caller captured it: fail closed.
+    [[ "$head_oid" == "$expected_head" ]] || return 1
+    head_oid="$expected_head"
+  fi
+  local login oid
+  while read -r login oid; do
+    [[ "$login" == "$actor_login" && "$oid" == "$head_oid" ]] && return 0
+  done <<< "$approvals"
+  return 1
 }
 
-# _check_author_permission <login> [<pr_num>] [<pr_labels_newline_separated>]
+# _check_author_permission <login> [<pr_num>] [<pr_labels_newline_separated>] [<expected_head_sha>]
 # Classifies a PR author as "internal" or "external:<reason>".
 # Trusts only push/maintain/admin collaborators (fail-closed on any API error).
 # When external and the release marker human-reviewed:ok is present (and was
 # applied by a push+ actor), returns "internal" (PR has been released).
+# <expected_head_sha>, when given, is passed to _release_covers_head so the
+# release must cover exactly that SHA (see its header).
 #
 # Test hooks (all env vars, only active when set):
 #   CFGMS_TEST_COLLAB_PERM   — override the author's permission lookup
@@ -1098,6 +1124,7 @@ _check_author_permission() {
   local login="$1"
   local pr_num="${2:-}"
   local pr_labels_str="${3:-}"
+  local expected_head="${4:-}"
 
   if [[ -z "$login" ]]; then
     echo "external:null_author"
@@ -1120,23 +1147,19 @@ _check_author_permission() {
   # External author — check for a valid human-reviewed:ok release marker (AC5).
   # Only the label presence is checked here; actor affiliation is verified below.
   if [[ -n "$pr_num" ]] && echo "$pr_labels_str" | grep -qx "human-reviewed:ok" 2>/dev/null; then
-    local actor_login label_time
+    local actor_login
     if [[ -n "${CFGMS_TEST_ACTOR_LOGIN+x}" ]]; then
       actor_login="${CFGMS_TEST_ACTOR_LOGIN}"
-      label_time="${CFGMS_TEST_LABEL_TIME:-}"
     else
-      local tl_gql tl_out
-      tl_gql="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { timelineItems(itemTypes: [LABELED_EVENT], first: 50) { nodes { ... on LabeledEvent { createdAt label { name } actor { login } } } } } } }"
-      tl_out=$(gh api graphql -f "query=${tl_gql}" \
-        --jq '[.data.repository.pullRequest.timelineItems.nodes[] | select(.label.name == "human-reviewed:ok")] | last | if . == null then "" else "\(.actor.login // "")\t\(.createdAt)" end' \
+      local tl_gql
+      tl_gql="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { timelineItems(itemTypes: [LABELED_EVENT], first: 50) { nodes { ... on LabeledEvent { label { name } actor { login } } } } } } }"
+      actor_login=$(gh api graphql -f "query=${tl_gql}" \
+        --jq '[.data.repository.pullRequest.timelineItems.nodes[] | select(.label.name == "human-reviewed:ok")] | last | if . == null then "" else (.actor.login // "") end' \
         2>/dev/null || echo "")
-      actor_login="${tl_out%%$'\t'*}"
-      label_time="${tl_out#*$'\t'}"
-      [[ "$tl_out" == *$'\t'* ]] || label_time=""
     fi
-    # A release covers only the head it was granted for: the label must have
-    # been applied after the head commit landed (fail closed otherwise).
-    if [[ -n "$actor_login" ]] && ! _release_covers_head "$pr_num" "$label_time"; then
+    # A release covers only the head it was granted for: the label actor must
+    # have approved the current head SHA (fail closed otherwise).
+    if [[ -n "$actor_login" ]] && ! _release_covers_head "$pr_num" "$actor_login" "$expected_head"; then
       actor_login=""
     fi
     if [[ -n "$actor_login" ]]; then
@@ -1167,7 +1190,7 @@ _post_quarantine_comment() {
   local pr_num="$1"
   local author_login="${2:-unknown}"
   gh pr comment "$pr_num" --repo cfg-is/cfgms \
-    --body "**External-author PR quarantined.** Author \`${author_login}\` is not a trusted (\`push\`/\`maintain\`/\`admin\`) repository collaborator. The autonomous pipeline will not fetch, review, rebase, fix, or merge this PR until a maintainer applies the \`human-reviewed:ok\` label (verified to push+ actor). See \`docs/development/external-contributors.md\` for the contributor triage and release process." \
+    --body "**External-author PR quarantined.** Author \`${author_login}\` is not a trusted (\`push\`/\`maintain\`/\`admin\`) repository collaborator. The autonomous pipeline will not fetch, review, rebase, fix, or merge this PR until a maintainer approves the current head commit and applies the \`human-reviewed:ok\` label (verified to push+ actor; a later push voids the release). See \`docs/development/external-contributors.md\` for the contributor triage and release process." \
     2>/dev/null || true
 }
 
@@ -4920,17 +4943,25 @@ PY
 
   check-pr-author)
     # Public API used by po-act.sh (Issue #1786).
-    # check-pr-author <PR_NUM>
+    # check-pr-author <PR_NUM> [<HEAD_SHA>]
     # Exits 0 (internal) or 3 (external/quarantined).
-    [[ $# -eq 1 ]] || { echo "check-pr-author requires exactly one PR number"; exit 1; }
+    # <HEAD_SHA>: the head the caller will bind a merge to (--match-head-commit).
+    # When given, an external author's release must cover exactly that SHA, so
+    # the trust decision and the merge judge the same commit (no TOCTOU gap).
+    [[ $# -eq 1 || $# -eq 2 ]] || { echo "check-pr-author requires <PR_NUM> [<HEAD_SHA>]"; exit 1; }
     _cpa_pr="$1"
+    _cpa_head="${2:-}"
+    if [[ -n "$_cpa_head" && ! "$_cpa_head" =~ ^[0-9a-f]{40}$ ]]; then
+      echo "AUTHOR_CHECK_ERROR:${_cpa_pr}:bad_head_sha"
+      exit 3
+    fi
     _cpa_meta=$(gh pr view "$_cpa_pr" --json author,labels 2>/dev/null) || {
       echo "AUTHOR_CHECK_ERROR:${_cpa_pr}:api_error"
       exit 3
     }
     _cpa_login=$(echo "$_cpa_meta" | jq -r '.author.login // empty')
     _cpa_labels=$(echo "$_cpa_meta" | jq -r '.labels[].name')
-    _cpa_trust=$(_check_author_permission "$_cpa_login" "$_cpa_pr" "$_cpa_labels")
+    _cpa_trust=$(_check_author_permission "$_cpa_login" "$_cpa_pr" "$_cpa_labels" "$_cpa_head")
     if [[ "$_cpa_trust" == "internal" ]]; then
       echo "AUTHOR_TRUSTED:${_cpa_pr}:${_cpa_login}"
       exit 0

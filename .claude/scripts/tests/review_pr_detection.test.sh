@@ -130,6 +130,10 @@ assert_author_trust "external author despite story branch name → external" "im
 echo
 echo "--- dispatch-gate: AC5 release-marker (issue #1786) ---"
 
+# Default: the label actor approved the current head (SHA A).
+REL_SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+REL_SHA_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
 assert_author_trust_with_release() {
   local description="$1"
   local login="$2"
@@ -144,8 +148,8 @@ assert_author_trust_with_release() {
   actual=$(CFGMS_TEST_COLLAB_PERM="$author_perm" \
     CFGMS_TEST_ACTOR_LOGIN="$actor_login" \
     CFGMS_TEST_ACTOR_PERM="$actor_perm" \
-    CFGMS_TEST_LABEL_TIME="${CFGMS_TEST_LABEL_TIME-2026-01-02T00:00:00Z}" \
-    CFGMS_TEST_HEAD_TIME="${CFGMS_TEST_HEAD_TIME-2026-01-01T00:00:00Z}" \
+    CFGMS_TEST_HEAD_OID="${REL_HEAD_OID-$REL_SHA_A}" \
+    CFGMS_TEST_APPROVALS="${REL_APPROVALS-${actor_login} ${REL_SHA_A}}" \
     "$DISPATCH" _test-check-author "$login" "42" "$labels")
   if [[ "$actual" == "$expected_prefix"* ]]; then
     printf '  ok    %s\n' "$description"
@@ -186,21 +190,29 @@ assert_author_trust_with_release \
   "external-user" "read" "trusted-maintainer" "push" "some-other-label" \
   "external:"
 
-# Release is bound to the head it was granted for: a push after the label voids it.
-CFGMS_TEST_HEAD_TIME="2026-01-03T00:00:00Z" assert_author_trust_with_release \
-  "release bound to head: push after label voids the release" \
+# Release is bound by SHA to the head it was granted for. A normal (non-force)
+# push after the approval -- even with a backdated committer date, which this
+# check never reads -- moves the head to SHA B, which nobody approved.
+REL_HEAD_OID="$REL_SHA_B" assert_author_trust_with_release \
+  "release bound to head: backdated normal push after approval voids the release" \
   "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
   "external:"
 
-# Fail closed when the head time cannot be determined.
-CFGMS_TEST_HEAD_TIME="" assert_author_trust_with_release \
-  "release bound to head: unknown head time fails closed" \
+# Label without any approval of the head is not a release.
+REL_APPROVALS="" assert_author_trust_with_release \
+  "release bound to head: label without head approval does not release" \
   "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
   "external:"
 
-# Fail closed when the label time is missing.
-CFGMS_TEST_LABEL_TIME="" assert_author_trust_with_release \
-  "release bound to head: unknown label time fails closed" \
+# Approval of the head by someone other than the label actor does not count.
+REL_APPROVALS="someone-else ${REL_SHA_A}" assert_author_trust_with_release \
+  "release bound to head: head approval by another login does not release" \
+  "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
+  "external:"
+
+# Fail closed when the head SHA cannot be determined.
+REL_HEAD_OID="" REL_APPROVALS="trusted-maintainer " assert_author_trust_with_release \
+  "release bound to head: unknown head SHA fails closed" \
   "external-user" "read" "trusted-maintainer" "push" "human-reviewed:ok" \
   "external:"
 

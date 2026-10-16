@@ -88,34 +88,52 @@ chmod +x "$TMP/bin/gh"
 SHA_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf '%s\n' "$SHA_A" > "$TMP/head_sha"
 
-run_enqueue() {  # run_enqueue <label_time> <head_time> <actor_perm>
+SHA_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+run_enqueue() {  # run_enqueue <released_head_oid> <approvals> <actor_perm>
   : > "$TMP/gh.log"
   PATH="$TMP/bin:$PATH" GH_LOG="$TMP/gh.log" HEAD_SHA_FILE="$TMP/head_sha" \
     CFGMS_TEST_COLLAB_PERM=read CFGMS_TEST_ACTOR_LOGIN=maint CFGMS_TEST_ACTOR_PERM="$3" \
-    CFGMS_TEST_LABEL_TIME="$1" CFGMS_TEST_HEAD_TIME="$2" \
+    CFGMS_TEST_HEAD_OID="$1" CFGMS_TEST_APPROVALS="$2" \
     bash "${REPO_ROOT}/.claude/scripts/po-act.sh" enqueue 9999 2>&1 || true
 }
 merged() { grep -q '^pr merge' "$TMP/gh.log" && echo merged || echo not_merged; }
 
-out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" triage)"
+out="$(run_enqueue "$SHA_A" "maint $SHA_A" triage)"
 check "external, not released (label actor lacks push) -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
 check "external, not released -> no gh pr merge issued" "$(merged)" "not_merged"
 
-out="$(run_enqueue "2026-01-01T00:00:00Z" "2026-01-02T00:00:00Z" push)"
-check "released, head changed after release -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
-check "released, head changed after release -> no gh pr merge issued" "$(merged)" "not_merged"
+# A normal (non-force) push after the approval -- committer date backdated or
+# not, it is never read -- moves the head to SHA B, which nobody approved.
+out="$(run_enqueue "$SHA_B" "maint $SHA_A" push)"
+check "released, normal push after approval -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
+check "released, normal push after approval -> no gh pr merge issued" "$(merged)" "not_merged"
 
-out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" push)"
-check "released, head unchanged -> not refused" "$(grep -c 'ENQUEUE_REFUSED' <<<"$out")" "0"
+out="$(run_enqueue "$SHA_A" "" push)"
+check "label without head approval -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
+
+out="$(run_enqueue "$SHA_A" "maint $SHA_A" push)"
+check "released, approved head unchanged -> not refused" "$(grep -c 'ENQUEUE_REFUSED' <<<"$out")" "0"
 
 # Merge is bound to the head SHA captured before the trust check, so a push
 # between the check and the merge cannot be merged.
 check "released, head unchanged -> merge bound to checked head" \
   "$(grep -c -- "^pr merge 9999 .*--match-head-commit ${SHA_A}\$" "$TMP/gh.log")" "1"
 
+# TOCTOU: the author leaves unapproved SHA A as head while enqueue captures it,
+# then swaps to the approved SHA B for the trust check. The check must judge
+# the captured SHA A, not a second head lookup, so the release does not cover it.
+out="$(run_enqueue "$SHA_B" "maint $SHA_B" push)"
+check "head swapped to approved SHA after capture -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
+check "head swapped to approved SHA after capture -> no gh pr merge issued" "$(merged)" "not_merged"
+
+# Approval exists on the captured SHA but the live head has moved -> refused.
+out="$(run_enqueue "$SHA_B" "maint $SHA_A" push)"
+check "approval on captured SHA but live head moved -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:external_author' <<<"$out")" "1"
+
 # Unknown head -> refuse before any merge.
 : > "$TMP/head_sha"
-out="$(run_enqueue "2026-01-02T00:00:00Z" "2026-01-01T00:00:00Z" push)"
+out="$(run_enqueue "$SHA_A" "maint $SHA_A" push)"
 check "head SHA unreadable -> refused" "$(grep -c 'ENQUEUE_REFUSED:9999:head_unknown' <<<"$out")" "1"
 check "head SHA unreadable -> no gh pr merge issued" "$(merged)" "not_merged"
 

@@ -938,9 +938,11 @@ except Exception: print('')" 2>/dev/null || echo "")
   enqueue)
     pr="${1:?PR number required}"
     story="${2:-}"
-    # Capture the head SHA BEFORE the trust check and bind the merge to it with
-    # --match-head-commit: a push after the check cannot be merged. Fail closed
-    # if the head cannot be read.
+    # Capture the head SHA ONCE, judge trust against that exact SHA, and bind
+    # the merge to it with --match-head-commit. The trust check is passed this
+    # SHA so it cannot re-read a different head (an author swapping heads
+    # between capture and check); a push after the check cannot be merged.
+    # Fail closed if the head cannot be read.
     head_sha=$(gh pr view "$pr" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
     if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
       echo "ENQUEUE_REFUSED:${pr}:head_unknown"
@@ -949,7 +951,7 @@ except Exception: print('')" 2>/dev/null || echo "")
     # TOCTOU re-check: verify author trust at enqueue time (Issue #1786).
     # Even if review-pr passed earlier, labels or collaborator status may have
     # changed between review and merge. Fail-closed: refuse if not internal.
-    if ! "$DISPATCH" check-pr-author "$pr"; then
+    if ! "$DISPATCH" check-pr-author "$pr" "$head_sha"; then
       echo "ENQUEUE_REFUSED:${pr}:external_author"
       exit 3
     fi

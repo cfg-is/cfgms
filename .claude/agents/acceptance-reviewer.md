@@ -45,7 +45,7 @@ If the exit code is non-zero (`AUTHOR_EXTERNAL:…`):
   ```
 - Exit with verdict `SKIPPED_EXTERNAL_AUTHOR`. Do NOT enqueue or merge.
 
-A maintainer must apply the `human-reviewed:ok` label (verified to push+ actor) before the pipeline will process this PR. See `docs/development/external-contributors.md`.
+A maintainer must approve the current head commit and apply the `human-reviewed:ok` label (verified to push+ actor; a later push voids the release) before the pipeline will process this PR. See `docs/development/external-contributors.md`.
 
 ## Phase 0: Draft-PR Short-Circuit (BLOCKING)
 
