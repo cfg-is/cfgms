@@ -180,7 +180,18 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	// This must happen before the final containment check so both paths are canonical.
 	resolved, resolveErr := filepath.EvalSymlinks(absUserPath)
 	if resolveErr == nil {
-		absUserPath = resolved
+		// EvalSymlinks leaves a Windows junction unresolved (Go 1.23+), so an existing path
+		// is walked component by component like a missing tail: every reparse point on it
+		// must lead back inside the base.
+		rel, relErr := filepath.Rel(absBasePath, resolved)
+		if relErr != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+		}
+		walked, walkErr := resolveMissingTail(absBasePath, rel, userPath)
+		if walkErr != nil {
+			return "", walkErr
+		}
+		absUserPath = walked
 	} else if errors.Is(resolveErr, os.ErrNotExist) {
 		// Non-existent target: resolve the deepest existing ancestor, then re-join the
 		// non-existing tail components. This handles paths like "newdir/newfile.txt"
@@ -221,7 +232,9 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 // the leaf, on the canonical directory already checked to be inside the base. A missing
 // component starts the non-existent tail. A symlink or Windows reparse point that does not
 // resolve is rejected, because re-joining it unresolved would let a later create follow it.
-// A prefix that resolves outside the base is rejected as traversal.
+// An existing reparse point that EvalSymlinks returns unchanged (a live Windows junction) is
+// followed to its target by followReparsePoints. A prefix that resolves outside the base,
+// directly or through a junction, is rejected as traversal.
 func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 	resolvedDir := absBasePath
 	var components []string
@@ -234,15 +247,11 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			// On Windows, EvalSymlinks does not evaluate mount points (Go 1.23+): a dangling
-			// junction comes back unchanged with no error. Lstat reports it as irregular and
-			// Stat, which follows it, fails.
-			if info, lstatErr := os.Lstat(inBase); lstatErr == nil && info.Mode()&os.ModeIrregular != 0 {
-				if _, statErr := os.Stat(inBase); statErr != nil {
-					return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
-				}
+			followed, err := followReparsePoints(absBasePath, inBase, userPath)
+			if err != nil {
+				return "", err
 			}
-			resolvedDir = inBase
+			resolvedDir = followed
 			continue
 		}
 		// resolvedDir is canonical and inside the base, so joining one component onto it
@@ -267,6 +276,48 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 		return "", fmt.Errorf("failed to resolve path component of %s", userPath)
 	}
 	return resolvedDir, nil
+}
+
+// maxReparseHops bounds followReparsePoints so a junction cycle cannot loop forever.
+const maxReparseHops = 32
+
+// followReparsePoints returns the canonical in-base path that p, already checked to be inside
+// the base, leads to. On Windows, EvalSymlinks does not evaluate mount points (Go 1.23+): a
+// junction comes back unchanged with no error, and Lstat reports it as irregular. Each such
+// reparse point is read with os.Readlink, its target canonicalized, and that target checked
+// to be inside the base before it is followed. A dangling target, a target that cannot be
+// read, or a target outside the base is rejected, so a later create can never pass through it.
+func followReparsePoints(absBasePath, p, userPath string) (string, error) {
+	for hops := 0; ; hops++ {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, err)
+		}
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			return p, nil
+		}
+		if hops >= maxReparseHops {
+			return "", fmt.Errorf("too many links or reparse points in path %s: refusing to follow", userPath)
+		}
+		// Stat follows the reparse point; a dangling one fails here.
+		if _, statErr := os.Stat(p); statErr != nil {
+			return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
+		}
+		target, err := os.Readlink(p)
+		if err != nil {
+			return "", fmt.Errorf("unresolvable link or reparse point in path %s: refusing to follow", userPath)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(p), target)
+		}
+		canonical, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			return "", fmt.Errorf("unresolvable link or reparse point in path %s: refusing to follow", userPath)
+		}
+		if p, err = containedPath(absBasePath, canonical, userPath); err != nil {
+			return "", err
+		}
+	}
 }
 
 // containedPath returns absPath rebuilt as absBasePath joined with its relative path, after
