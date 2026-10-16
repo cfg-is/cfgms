@@ -361,7 +361,13 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 	}
 
 	// Import all config files from the repo root.
-	if err := s.importConfigs(ctx, b, repoDir, currentSHA); err != nil {
+	written, err := s.importConfigs(ctx, b, repoDir, currentSHA)
+	if err != nil {
+		return err
+	}
+
+	// Remove store entries for config files deleted or renamed at the origin.
+	if err := s.pruneRemoved(ctx, b, written); err != nil {
 		return err
 	}
 
@@ -391,26 +397,29 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 
 // importConfigs scans the top-level directory of repoDir for YAML and JSON
 // files and writes each one as a ConfigEntry to the ConfigStore. Subdirectories
-// are skipped (v1 flat-file-per-config layout only).
-func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha string) error {
+// are skipped (v1 flat-file-per-config layout only). It returns the set of
+// config names written; the set is only valid when the error is nil.
+func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha string) (map[string]struct{}, error) {
 	dirEntries, err := os.ReadDir(repoDir)
 	if err != nil {
-		return fmt.Errorf("gitsync: failed to read repo directory: %w", err)
+		return nil, fmt.Errorf("gitsync: failed to read repo directory: %w", err)
 	}
 
 	// All reads go through a root handle so a path cannot resolve outside the
 	// checkout, even if an entry is swapped for a link after the type check.
 	root, err := os.OpenRoot(repoDir)
 	if err != nil {
-		return fmt.Errorf("gitsync: failed to open repo directory: %w", err)
+		return nil, fmt.Errorf("gitsync: failed to open repo directory: %w", err)
 	}
 	defer func() { _ = root.Close() }()
+
+	written := make(map[string]struct{})
 
 	sourceSHA := sha
 	if len(sourceSHA) > 8 {
 		sourceSHA = sourceSHA[:8]
 	}
-	sourceTag := "git-sync:" + logging.SanitizeLogValue(b.OriginURL) + "@" + sourceSHA
+	sourceTag := gitSyncSourcePrefix + logging.SanitizeLogValue(b.OriginURL) + "@" + sourceSHA
 
 	for _, dirEntry := range dirEntries {
 		if dirEntry.IsDir() {
@@ -448,7 +457,7 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 				s.warnSkippedEntry(b, name)
 				continue
 			}
-			return fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)
+			return nil, fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)
 		}
 
 		configEntry := &cfgconfig.ConfigEntry{
@@ -465,7 +474,50 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 		}
 
 		if storeErr := s.store.StoreConfig(ctx, configEntry); storeErr != nil {
-			return fmt.Errorf("gitsync: failed to store config %s: %w", configName, storeErr)
+			return nil, fmt.Errorf("gitsync: failed to store config %s: %w", configName, storeErr)
+		}
+		written[configName] = struct{}{}
+	}
+	return written, nil
+}
+
+// gitSyncSourcePrefix marks store entries written by importConfigs.
+const gitSyncSourcePrefix = "git-sync:"
+
+// pruneRemoved deletes every entry in the binding's tenant and namespace that
+// git sync wrote (Source starts with "git-sync:") but whose name is not in
+// written. A tenant and namespace pair has exactly one binding, so any such
+// entry belongs to it. Entries not written by git sync are never deleted.
+func (s *Syncer) pruneRemoved(ctx context.Context, b ScopeBinding, written map[string]struct{}) error {
+	entries, err := s.store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
+		TenantID:  b.TenantPath,
+		Namespace: b.Namespace,
+	})
+	if err != nil {
+		return fmt.Errorf("gitsync: failed to list configs for pruning: %w", err)
+	}
+
+	var stale []*cfgconfig.ConfigKey
+	for _, e := range entries {
+		if e == nil || e.Key == nil || !strings.HasPrefix(e.Source, gitSyncSourcePrefix) {
+			continue
+		}
+		if _, ok := written[e.Key.Name]; ok {
+			continue
+		}
+		stale = append(stale, e.Key)
+	}
+
+	if len(stale) > 0 && len(written) == 0 {
+		s.logger.Warn("gitsync: repository root yielded no config files, removing all git-sync entries",
+			"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+			"namespace", logging.SanitizeLogValue(b.Namespace),
+			"count", len(stale))
+	}
+
+	for _, key := range stale {
+		if delErr := s.store.DeleteConfig(ctx, key); delErr != nil {
+			return fmt.Errorf("gitsync: failed to delete config %s: %w", key.Name, delErr)
 		}
 	}
 	return nil

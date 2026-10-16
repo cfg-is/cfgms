@@ -45,7 +45,7 @@ The previous architecture treated Git as a first-class storage backend (one comm
 5. Unbound scopes live natively in the backend.
 6. The read path is always the backend. Git is the *editing surface* for bound scopes, not a query target.
 
-**v1 is strictly one-way, read-only** (git → backend). The controller never writes to the git origin. For bound scopes, all edits happen at the git origin — the admin opens a PR, merges it, and git-sync pulls the result. UI-initiated edits on bound scopes are not supported in v1; they either fail or fall through to unbound scopes. Bidirectional sync is out of scope for v1 and will be a future ADR if demand emerges.
+**v1 is strictly one-way, read-only** (git → backend). The controller never writes to the git origin. For bound scopes, all edits happen at the git origin — the admin opens a PR, merges it, and git-sync pulls the result. A config file deleted or renamed at the origin is removed from the store on the next sync; only entries written by git-sync are removed. UI-initiated edits on bound scopes are not supported in v1; they either fail or fall through to unbound scopes. Bidirectional sync is out of scope for v1 and will be a future ADR if demand emerges.
 
 ### Why one component, two backends
 
