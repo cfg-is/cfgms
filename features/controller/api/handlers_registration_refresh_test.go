@@ -821,6 +821,11 @@ func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
 	assert.NotEmpty(t, entry.Details["device_id"], "device_id in audit")
 	assert.NotEmpty(t, entry.Details["tenant_id"], "tenant_id in audit")
 	assert.Equal(t, "approved", entry.Details["decision"])
+	// The audit entry names the approving operator, not the device.
+	assert.Equal(t, req.TLS.PeerCertificates[0].Subject.CommonName, entry.UserID,
+		"refresh_admin_approved must record the authenticated principal")
+	assert.NotEqual(t, testDeviceID, entry.UserID)
+	assert.Equal(t, testDeviceID, entry.Details["device_id"])
 }
 
 // TestHandleRefreshApprove_RevokedDeviceRejected verifies the security gate added
@@ -919,6 +924,11 @@ func TestHandleRefreshReject_RejectsEntry(t *testing.T) {
 	entry := f.findAuditAction(t, "refresh_admin_rejected")
 	require.NotNil(t, entry, "refresh_admin_rejected audit event expected")
 	assert.Equal(t, "rejected", entry.Details["decision"])
+	// The audit entry names the rejecting operator, not the device.
+	assert.NotEmpty(t, entry.UserID)
+	assert.NotEqual(t, testDeviceID, entry.UserID,
+		"refresh_admin_rejected must record the authenticated principal")
+	assert.Equal(t, testDeviceID, entry.Details["device_id"])
 }
 
 func TestHandleListPendingRefreshes_ReturnsList(t *testing.T) {

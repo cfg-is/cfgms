@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -966,4 +967,48 @@ func TestInstallerArtifact_UploadAndDeleteAreAudited(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, deletes, 1)
 	assert.Equal(t, "admin-bob", deletes[0].UserID)
+}
+
+// failingReadBlobStore is a real BlobStore whose GetBlob always fails, used to
+// prove the upload audit does not depend on the post-store metadata re-read.
+type failingReadBlobStore struct {
+	blob.BlobStore
+}
+
+func (failingReadBlobStore) GetBlob(context.Context, blob.BlobKey) (io.ReadCloser, blob.BlobMeta, error) {
+	return nil, blob.BlobMeta{}, errors.New("simulated read failure")
+}
+
+func TestInstallerArtifact_UploadAuditedWhenMetadataReReadFails(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	server.blobStore = failingReadBlobStore{BlobStore: store}
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	principal := &Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}
+	payload := []byte("installer-bytes")
+	req := withTenant(httptest.NewRequest(http.MethodPut,
+		"/api/v1/installer/artifacts/linux/amd64", bytes.NewReader(payload)), "test-tenant")
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+
+	rec := httptest.NewRecorder()
+	server.handleUploadInstallerArtifact(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	// The artifact is stored despite the failed re-read.
+	rc, _, err := store.GetBlob(context.Background(), blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"})
+	require.NoError(t, err)
+	_ = rc.Close()
+
+	ctx := context.Background()
+	require.NoError(t, auditMgr.Flush(ctx))
+	uploads, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"installer.artifact.uploaded"}})
+	require.NoError(t, err)
+	require.Len(t, uploads, 1)
+	sum := sha256.Sum256(payload)
+	assert.Equal(t, "admin-bob", uploads[0].UserID)
+	assert.Equal(t, hex.EncodeToString(sum[:]), uploads[0].Details["checksum"])
 }

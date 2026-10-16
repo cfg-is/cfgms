@@ -1130,16 +1130,22 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
-		business.AuditEventAuthentication, "refresh_admin_approved",
-		business.AuditResultSuccess, business.AuditSeverityHigh,
-		map[string]interface{}{
-			"pending_id": logging.SanitizeLogValue(pendingID),
-			"device_id":  logging.SanitizeLogValue(entry.DeviceID),
-			"tenant_id":  logging.SanitizeLogValue(entry.TenantID),
-			"decision":   "approved",
-			"reason":     logging.SanitizeLogValue(req.Reason),
-		})
+	details := map[string]interface{}{
+		"pending_id": logging.SanitizeLogValue(pendingID),
+		"device_id":  logging.SanitizeLogValue(entry.DeviceID),
+		"tenant_id":  logging.SanitizeLogValue(entry.TenantID),
+		"decision":   "approved",
+		"reason":     logging.SanitizeLogValue(req.Reason),
+	}
+	if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil {
+		s.emitOperatorAudit(r, principal, entry.TenantID, business.AuditEventAuthentication,
+			"refresh_admin_approved", "steward", entry.DeviceID,
+			business.AuditResultSuccess, business.AuditSeverityHigh, details)
+	} else {
+		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+			business.AuditEventAuthentication, "refresh_admin_approved",
+			business.AuditResultSuccess, business.AuditSeverityHigh, details)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -1199,16 +1205,22 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
-		business.AuditEventSecurityEvent, "refresh_admin_rejected",
-		business.AuditResultDenied, business.AuditSeverityMedium,
-		map[string]interface{}{
-			"pending_id": logging.SanitizeLogValue(pendingID),
-			"device_id":  logging.SanitizeLogValue(entry.DeviceID),
-			"tenant_id":  logging.SanitizeLogValue(entry.TenantID),
-			"decision":   "rejected",
-			"reason":     logging.SanitizeLogValue(req.Reason),
-		})
+	details := map[string]interface{}{
+		"pending_id": logging.SanitizeLogValue(pendingID),
+		"device_id":  logging.SanitizeLogValue(entry.DeviceID),
+		"tenant_id":  logging.SanitizeLogValue(entry.TenantID),
+		"decision":   "rejected",
+		"reason":     logging.SanitizeLogValue(req.Reason),
+	}
+	if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil {
+		s.emitOperatorAudit(r, principal, entry.TenantID, business.AuditEventSecurityEvent,
+			"refresh_admin_rejected", "steward", entry.DeviceID,
+			business.AuditResultDenied, business.AuditSeverityMedium, details)
+	} else {
+		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+			business.AuditEventSecurityEvent, "refresh_admin_rejected",
+			business.AuditResultDenied, business.AuditSeverityMedium, details)
+	}
 
 	w.WriteHeader(http.StatusOK)
 }

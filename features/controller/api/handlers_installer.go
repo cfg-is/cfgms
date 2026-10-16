@@ -6,7 +6,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -90,7 +92,9 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		Name:      platform + "-" + arch,
 	}
 
-	if err := s.blobStore.PutBlob(r.Context(), key, r.Body, blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil {
+	hasher := sha256.New()
+	body := io.TeeReader(r.Body, hasher)
+	if err := s.blobStore.PutBlob(r.Context(), key, body, blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil {
 		s.logger.Error("Failed to store installer artifact",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
@@ -99,6 +103,9 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
 		return
 	}
+	// Audit immediately: a stored artifact must always have an audit record,
+	// independent of the metadata re-read below.
+	s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, hex.EncodeToString(hasher.Sum(nil)), business.AuditResultSuccess)
 	if tenantID == s.rootTenantID(r.Context()) {
 		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
 	}
@@ -115,8 +122,6 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 	}
 	// Close without reading content — the metadata sidecar is populated by PutBlob.
 	_ = rc.Close()
-
-	s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, storedMeta.Checksum, business.AuditResultSuccess)
 
 	s.writeSuccessResponse(w, installerUploadResponse{
 		Platform: platform,
