@@ -31,7 +31,7 @@ func TestGetVM_VHDPathEcho_DirectoryCompliant_NoDrift(t *testing.T) {
 	// Actual disk: SAME home directory, OLD leaf (Rename-VM did not rename it).
 	const actualDisk = `C:\ClusterStorage\CSV01\lab-01\cfgms-ci-01.vhdx`
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		getVMJSONWithPath(vmName, `C:\\ClusterStorage\\CSV01\\lab-01\\cfgms-ci-01.vhdx`),
 	}}
 	m := vmModuleWithTransport(transport, "t")
@@ -57,7 +57,7 @@ func TestGetVM_VHDPathEcho_WrongDirectory_ReportsActual(t *testing.T) {
 	const desiredPath = `C:\ClusterStorage\CSV01\lab-01\lab-01.vhdx`
 	const actualDisk = `C:\VMs\lab-01.vhdx` // wrong home directory
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		getVMJSONWithPath(vmName, `C:\\VMs\\lab-01.vhdx`),
 	}}
 	m := vmModuleWithTransport(transport, "t")
@@ -78,7 +78,7 @@ func TestGetVM_VHDPathEcho_NoDesiredRecorded_ReportsActual(t *testing.T) {
 	const vmName = "lab-01"
 	const actualDisk = `C:\ClusterStorage\CSV01\lab-01\cfgms-ci-01.vhdx`
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		getVMJSONWithPath(vmName, `C:\\ClusterStorage\\CSV01\\lab-01\\cfgms-ci-01.vhdx`),
 	}}
 	m := vmModuleWithTransport(transport, "t")

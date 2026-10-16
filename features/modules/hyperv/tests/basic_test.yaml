@@ -1,5 +1,5 @@
 name: Basic Hyper-V Operations
-description: Tests basic Hyper-V VM lifecycle management via WinRM
+description: Tests basic Hyper-V VM lifecycle management
 tests:
   - name: Create a Generation 2 VM
     config:

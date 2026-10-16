@@ -204,9 +204,8 @@ func newClusterHAModule(t *testing.T, p clusterHAParams, roleNames []string) (*h
 		"cluster_poll_interval": clusterPollInterval,
 	}))
 	t.Cleanup(func() { _ = m.auditMgr.Stop(context.Background()) })
-	// On a real Hyper-V host the ps-host transport must have been selected; a WinRM
-	// fallback (which Configure takes only when powershell.exe is missing) would
-	// not exercise the live host path this story validates.
+	// On a real Hyper-V host the ps-host transport must have been selected; Configure
+	// returns an error when powershell.exe cannot start.
 	require.IsType(t, &psHostTransport{}, m.transport,
 		"HA integration test requires the live ps-host transport")
 	return m, auditStore

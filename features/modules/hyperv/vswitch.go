@@ -303,7 +303,7 @@ func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCmd, psArgs)
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VMSwitch", cfgResourceID, nil, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "New-VMSwitch", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: create vswitch %q: %w", switchName, psErr)
 	}
@@ -327,7 +327,7 @@ func (m *hypervModule) removeVSwitch(ctx context.Context, switchName string, bef
 	cfgResourceID := "vswitch:" + switchName
 
 	_, psErr := m.transport.ExecutePS(ctx, psRemoveVSwitch, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMSwitch", cfgResourceID, before, nil, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Remove-VMSwitch", cfgResourceID, before, nil, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: remove vswitch %q: %w", switchName, psErr)
 	}

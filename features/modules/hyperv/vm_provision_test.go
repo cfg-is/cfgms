@@ -19,7 +19,7 @@ import (
 // real in-memory SecretStore is injected so the windows create path can resolve
 // the .ppkg host-path secret ({{ secret "ppkg-path-key" }}) when rendering the
 // autounattend answer file (#2047) — no mock framework is used.
-func provisionModuleWithTransport(t *testing.T, transport winrmTransport) *hypervModule {
+func provisionModuleWithTransport(t *testing.T, transport psTransport) *hypervModule {
 	t.Helper()
 	m := &hypervModule{
 		executor:       &stubHypervExecutor{},
@@ -84,7 +84,7 @@ func TestProvisionVM_SecureBootTemplate(t *testing.T) {
 // block and asserts no Set-VMFirmware PS call is issued (Gen1 has no secure
 // boot), while the seed VHDX + ISO attach + create still run.
 func TestProvisionVM_Gen1SkipsFirmware(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -96,13 +96,13 @@ func TestProvisionVM_Gen1SkipsFirmware(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, callsContaining(calls, "Set-VMFirmware"),
+	assert.Empty(t, callsContaining(calls, psSetVMFirmware),
 		"Gen1 VMs must not issue Set-VMFirmware — Gen1 has no UEFI/secure boot")
 
 	// Create + seed build + attach still happen on the Gen1 path.
 	require.Len(t, callsContaining(calls, "New-VM"), 1, "Gen1 VM must still be created")
-	assert.NotEmpty(t, callsContaining(calls, "New-VHD"), "seed VHDX must still be built")
-	assert.NotEmpty(t, callsContaining(calls, "Add-VMDvdDrive"), "install ISO must still be attached")
+	assert.NotEmpty(t, callsContaining(calls, psNewSeedVHD), "seed VHDX must still be built")
+	assert.NotEmpty(t, callsContaining(calls, psAttachDVD), "install ISO must still be attached")
 }
 
 // ── REQUIRED TEST: seed path validation ─────────────────────────────────────
@@ -132,37 +132,12 @@ func TestProvisionVM_SeedPathValidation(t *testing.T) {
 	}
 }
 
-// ── REQUIRED TEST: stale seed VHDX on disk (#3802) ──────────────────────────
-
-// TestPsNewSeedVHD_DeletesExistingFileBeforeCreate guards the WinRM-transport
-// half of the stale-seed-VHDX fix (Issue #3802): a bounded auto-retry re-enters
-// creating against the SAME seed path a killed attempt already partially built,
-// and New-VHD has no -Force/overwrite option — without a pre-create delete it
-// fails with "The file exists. (0x80070050)", wedging every retry. This asserts
-// the psNewSeedVHD script constant (the bare script the WinRM transport runs
-// directly — the ps-host transport instead dispatches to the already-fixed
-// Cfgms-NewSeedVHD preamble function, Issue #2466) deletes any existing file at
-// $Path BEFORE calling New-VHD.
-func TestPsNewSeedVHD_DeletesExistingFileBeforeCreate(t *testing.T) {
-	assert.Contains(t, psNewSeedVHD, "Remove-Item",
-		"psNewSeedVHD must delete a stale file at $Path before New-VHD")
-	assert.Contains(t, psNewSeedVHD, "New-VHD",
-		"psNewSeedVHD must still create the seed VHD")
-
-	removeIdx := strings.Index(psNewSeedVHD, "Remove-Item")
-	newVHDIdx := strings.Index(psNewSeedVHD, "New-VHD")
-	require.NotEqual(t, -1, removeIdx)
-	require.NotEqual(t, -1, newVHDIdx)
-	assert.Less(t, removeIdx, newVHDIdx,
-		"the stale-file delete must run BEFORE New-VHD, or a leftover seed VHDX still blocks creation")
-}
-
 // ── Gen1 create emits -Generation 1 ─────────────────────────────────────────
 
 // TestProvisionVM_Gen1CreatePassesGeneration drives an absent Gen1 VM (no
 // source) and asserts the New-VM call carries Generation 1 in args.
 func TestProvisionVM_Gen1CreatePassesGeneration(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -193,7 +168,7 @@ func TestProvisionVM_Gen1CreatePassesGeneration(t *testing.T) {
 // TestProvisionVM_Gen2CreateDefaultsGeneration drives an absent VM with
 // generation unset (0) and asserts New-VM defaults to Generation 2.
 func TestProvisionVM_Gen2CreateDefaultsGeneration(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -224,7 +199,7 @@ func TestProvisionVM_Gen2CreateDefaultsGeneration(t *testing.T) {
 // with a source block and asserts Set-VMFirmware travels with the
 // MicrosoftWindows template via args (never interpolated).
 func TestProvisionVM_Gen2WindowsFirmwareTemplate(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -236,21 +211,21 @@ func TestProvisionVM_Gen2WindowsFirmwareTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	fw := callsContaining(calls, "SecureBootTemplate")
+	fw := callsContaining(calls, psSetVMFirmware)
 	require.Len(t, fw, 1, "Gen2 VM must set the secure-boot template exactly once")
 	assert.True(t, argsContain(fw[0], "MicrosoftWindows"),
 		"windows os_family must select the MicrosoftWindows template")
 	assert.NotContains(t, fw[0].scriptBlock, "MicrosoftWindows",
 		"firmware template must travel via args, not the script text")
 	// Gen2 must also make the install DVD the first boot device.
-	require.Len(t, callsContaining(calls, "FirstBootDevice"), 1,
+	require.Len(t, callsContaining(calls, psSetDVDFirstBoot), 1,
 		"Gen2 VM must set the install DVD as the first boot device")
 }
 
 // TestProvisionVM_Gen2LinuxFirmwareTemplate asserts the linux os_family selects
 // the MicrosoftUEFICertificateAuthority template on the Gen2 source path.
 func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -262,7 +237,7 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	fw := callsContaining(calls, "SecureBootTemplate")
+	fw := callsContaining(calls, psSetVMFirmware)
 	require.Len(t, fw, 1)
 	assert.True(t, argsContain(fw[0], "MicrosoftUEFICertificateAuthority"),
 		"linux os_family must select the MicrosoftUEFICertificateAuthority template")
@@ -277,7 +252,7 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 // VHDX path is Linux-only; Windows delivers its answer file on an ISO (see
 // TestProvisionVM_WindowsBuildsAnswerISO).
 func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -290,35 +265,35 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 	transport.mu.Unlock()
 
 	// Each provisioning verb runs exactly once.
-	require.Len(t, callsContaining(calls, "New-VHD"), 1, "one New-VHD (seed create)")
-	require.Len(t, callsContaining(calls, "Format-Volume"), 1, "one Format-Volume (seed mount/format)")
-	require.Len(t, callsContaining(calls, "Set-Content"), 1, "one Set-Content (answer file copy)")
-	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "one Add-VMHardDiskDrive (seed attach)")
-	require.Len(t, callsContaining(calls, "Add-VMDvdDrive"), 1, "one Add-VMDvdDrive (install ISO)")
+	require.Len(t, callsContaining(calls, psNewSeedVHD), 1, "one New-VHD (seed create)")
+	require.Len(t, callsContaining(calls, psMountSeedVHD), 1, "one Format-Volume (seed mount/format)")
+	require.Len(t, callsContaining(calls, psCopyToSeedVHD), 1, "one Set-Content (answer file copy)")
+	require.Len(t, callsContaining(calls, psAttachSeedDisk), 1, "one Add-VMHardDiskDrive (seed attach)")
+	require.Len(t, callsContaining(calls, psAttachDVD), 1, "one Add-VMDvdDrive (install ISO)")
 
 	// Assert ordering by scanning the recorded call sequence.
 	order := map[string]int{}
 	for i, c := range calls {
-		for _, verb := range []string{"New-VHD", "Format-Volume", "Set-Content", "Add-VMHardDiskDrive", "Add-VMDvdDrive", "Start-VM"} {
+		for _, verb := range []string{psNewSeedVHD, psMountSeedVHD, psCopyToSeedVHD, psAttachSeedDisk, psAttachDVD, "Start-VM"} {
 			if _, seen := order[verb]; !seen && strings.Contains(c.scriptBlock, verb) {
 				order[verb] = i
 			}
 		}
 	}
-	assert.Less(t, order["New-VHD"], order["Format-Volume"], "New-VHD before Format-Volume")
-	assert.Less(t, order["Format-Volume"], order["Set-Content"], "Format before copy")
-	assert.Less(t, order["Set-Content"], order["Add-VMHardDiskDrive"], "copy before seed attach")
-	assert.Less(t, order["Add-VMHardDiskDrive"], order["Add-VMDvdDrive"], "seed attach before ISO attach")
-	assert.Less(t, order["Add-VMDvdDrive"], order["Start-VM"], "media attached before power on")
+	assert.Less(t, order[psNewSeedVHD], order[psMountSeedVHD], "seed create before format")
+	assert.Less(t, order[psMountSeedVHD], order[psCopyToSeedVHD], "format before copy")
+	assert.Less(t, order[psCopyToSeedVHD], order[psAttachSeedDisk], "copy before seed attach")
+	assert.Less(t, order[psAttachSeedDisk], order[psAttachDVD], "seed attach before ISO attach")
+	assert.Less(t, order[psAttachDVD], order["Start-VM"], "media attached before power on")
 
 	// The seed path and answer file name travel via args, never the script.
-	seedNew := callsContaining(calls, "New-VHD")[0]
+	seedNew := callsContaining(calls, psNewSeedVHD)[0]
 	assert.True(t, argsContain(seedNew, `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`),
 		"seed path must derive from the VM VHD directory and travel via args")
 	assert.NotContains(t, seedNew.scriptBlock, "cfgms-seed-stw-01",
 		"seed path must not be interpolated into the script text")
 
-	copy := callsContaining(calls, "Set-Content")[0]
+	copy := callsContaining(calls, psCopyToSeedVHD)[0]
 	assert.True(t, argsContain(copy, "preseed.cfg"),
 		"linux os_family must seed preseed.cfg")
 }
@@ -329,7 +304,7 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 // the install DVD first boot, and drives the boot keypress — and never builds a
 // seed VHDX.
 func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
@@ -340,10 +315,10 @@ func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
 	transport.mu.Unlock()
 
 	require.Len(t, callsContaining(calls, "Cfgms-BuildAnswerIso"), 1, "one answer-ISO build")
-	require.Len(t, callsContaining(calls, "Add-VMDvdDrive"), 2, "two DVDs: answer ISO + install ISO")
+	require.Len(t, callsContaining(calls, psAttachDVD), 2, "two DVDs: answer ISO + install ISO")
 	require.Len(t, callsContaining(calls, "Cfgms-BootKeypress"), 1, "one boot keypress")
-	assert.Empty(t, callsContaining(calls, "New-VHD"), "windows must NOT build a seed VHDX")
-	assert.Empty(t, callsContaining(calls, "Add-VMHardDiskDrive"), "windows attaches no seed disk")
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD), "windows must NOT build a seed VHDX")
+	assert.Empty(t, callsContaining(calls, psAttachSeedDisk), "windows attaches no seed disk")
 
 	build := callsContaining(calls, "Cfgms-BuildAnswerIso")[0]
 	assert.True(t, argsContain(build, "autounattend.xml"), "windows answer file is autounattend.xml")
@@ -354,7 +329,7 @@ func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
 // TestProvisionVM_AttachesInstallISOFromHostPath asserts the install ISO is
 // attached from the host path via args, never repacked or interpolated.
 func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -366,7 +341,7 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	dvd := callsContaining(calls, "Add-VMDvdDrive")
+	dvd := callsContaining(calls, psAttachDVD)
 	require.Len(t, dvd, 1)
 	assert.True(t, argsContain(dvd[0], `C:\ClusterStorage\CSV01\iso\server.iso`),
 		"install ISO host path must travel via args")
@@ -407,7 +382,7 @@ func cloudInitVMConfigMap(generation int) map[string]interface{} {
 // meta-data + cfgms-steward) is built and attached; the OS disk is made the first
 // boot device; and there is NO install ISO, NO answer ISO, and NO boot keypress.
 func TestProvisionVM_CloudInitPath(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
 	// The linux steward + launcher binaries + CA host paths the seed stages (ADR-010).
 	// The launcher is required for a launcher-managed (push-upgradeable) install.
@@ -433,10 +408,10 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 
 	// NoCloud CIDATA seed: New-VHD → Format → Set-Content (user-data + meta-data)
 	// → Add-VMHardDiskDrive. The seed carries the steward binary too.
-	require.Len(t, callsContaining(calls, "New-VHD"), 1, "one New-VHD (CIDATA seed)")
-	require.Len(t, callsContaining(calls, "Set-Content"), 1, "one Set-Content (seed write)")
-	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "one seed attach")
-	copyCall := callsContaining(calls, "Set-Content")[0]
+	require.Len(t, callsContaining(calls, psNewSeedVHD), 1, "one New-VHD (CIDATA seed)")
+	require.Len(t, callsContaining(calls, psCopyToSeedVHD), 1, "one Set-Content (seed write)")
+	require.Len(t, callsContaining(calls, psAttachSeedDisk), 1, "one seed attach")
+	copyCall := callsContaining(calls, psCopyToSeedVHD)[0]
 	assert.True(t, argsContain(copyCall, "CIDATA"), "seed volume is labelled CIDATA")
 	assert.True(t, argsContain(copyCall, "user-data"), "seed carries user-data")
 	assert.True(t, argsContain(copyCall, "meta-data"), "seed carries meta-data")
@@ -447,7 +422,7 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 	// OS disk made first boot; no installer media; no keypress.
 	require.Len(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"), 1,
 		"cloud-init must make the OS disk the first boot device")
-	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"), "cloud-init attaches no install ISO")
+	assert.Empty(t, callsContaining(calls, psAttachDVD), "cloud-init attaches no install ISO")
 	assert.Empty(t, callsContaining(calls, "Cfgms-BuildAnswerIso"), "cloud-init builds no answer ISO")
 	assert.Empty(t, callsContaining(calls, "Cfgms-BootKeypress"), "cloud-init needs no boot keypress")
 	require.Len(t, callsContaining(calls, "Start-VM"), 1, "VM is powered on")
@@ -458,7 +433,7 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 // Cfgms-SetHddFirstBoot is NOT issued (Gen1 uses BIOS startup order, not UEFI
 // firmware boot device — same Gen1 contract as the install-media path).
 func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(1)}
@@ -470,12 +445,12 @@ func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
 
 	assert.Empty(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"),
 		"Gen1 cloud-init VMs must not set a UEFI first boot device")
-	assert.Empty(t, callsContaining(calls, "Set-VMFirmware"),
+	assert.Empty(t, callsContaining(calls, psSetVMFirmware),
 		"Gen1 has no secure boot / firmware step")
 	// The cloud-init seed build + boot-disk prep still happen on Gen1.
 	require.Len(t, callsContaining(calls, "Cfgms-PrepCloudBootDisk"), 1, "Gen1 still preps the cloud boot disk")
-	require.Len(t, callsContaining(calls, "New-VHD"), 1, "Gen1 still builds the CIDATA seed")
-	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "Gen1 still attaches the seed")
+	require.Len(t, callsContaining(calls, psNewSeedVHD), 1, "Gen1 still builds the CIDATA seed")
+	require.Len(t, callsContaining(calls, psAttachSeedDisk), 1, "Gen1 still attaches the seed")
 }
 
 // cloudInitVMConfigMapWithSecureBoot returns cloudInitVMConfigMap with an
@@ -487,7 +462,7 @@ func cloudInitVMConfigMapWithSecureBoot(generation int, secureBoot string) map[s
 	return m
 }
 
-// firmwareFailingTransport wraps testWinRMTransport and injects a failure
+// firmwareFailingTransport wraps testPSTransport and injects a failure
 // specifically on the Set-VMFirmware secure-boot-template call (matched by
 // psCommand identity, not call index — robust against unrelated call-sequence
 // changes), simulating #3169's reproducible "'MicrosoftUEFICertificateAuthority'
@@ -495,12 +470,12 @@ func cloudInitVMConfigMapWithSecureBoot(generation int, secureBoot string) map[s
 // call (psDisableVMFirmwareSecureBoot) is a different const and is unaffected,
 // so it can still be asserted as the best-effort recovery step.
 type firmwareFailingTransport struct {
-	*testWinRMTransport
+	*testPSTransport
 	firmwareErr error
 }
 
 func (t *firmwareFailingTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
-	out, err := t.testWinRMTransport.ExecutePS(ctx, psCommand, psArgs)
+	out, err := t.testPSTransport.ExecutePS(ctx, psCommand, psArgs)
 	if psCommand == psSetVMFirmware {
 		return out, t.firmwareErr
 	}
@@ -513,10 +488,10 @@ func (t *firmwareFailingTransport) ExecutePS(ctx context.Context, psCommand stri
 // default ("enforce", and no secure_boot field at all) mode is unchanged from
 // pre-#3169 behavior: a Set-VMFirmware failure fails provisioning outright.
 func TestProvisionVM_SecureBootEnforce_BlocksOnFirmwareFailure(t *testing.T) {
-	base := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	base := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	transport := &firmwareFailingTransport{
-		testWinRMTransport: base,
-		firmwareErr:        fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
+		testPSTransport: base,
+		firmwareErr:     fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
 	}
 	m := provisionModuleWithTransport(t, transport)
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
@@ -532,10 +507,10 @@ func TestProvisionVM_SecureBootEnforce_BlocksOnFirmwareFailure(t *testing.T) {
 	base.mu.Lock()
 	calls := base.calls
 	base.mu.Unlock()
-	assert.Empty(t, callsContaining(calls, "EnableSecureBoot Off"),
+	assert.Empty(t, callsContaining(calls, psDisableVMFirmwareSecureBoot),
 		"enforce must never fall back to disabling secure boot")
 	// Provisioning stopped at the firmware step — the seed/CIDATA build never ran.
-	assert.Empty(t, callsContaining(calls, "New-VHD"),
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD),
 		"enforce must block before any further provisioning work")
 }
 
@@ -544,10 +519,10 @@ func TestProvisionVM_SecureBootEnforce_BlocksOnFirmwareFailure(t *testing.T) {
 // secure boot off, and lets provisioning proceed to completion instead of
 // blocking convergence forever every cycle (#3169 Branch B).
 func TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure(t *testing.T) {
-	base := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	base := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	transport := &firmwareFailingTransport{
-		testWinRMTransport: base,
-		firmwareErr:        fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
+		testPSTransport: base,
+		firmwareErr:     fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
 	}
 	m := provisionModuleWithTransport(t, transport)
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
@@ -562,14 +537,14 @@ func TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure(t *testing
 	calls := base.calls
 	base.mu.Unlock()
 
-	fw := callsContaining(calls, "SecureBootTemplate")
+	fw := callsContaining(calls, psSetVMFirmware)
 	require.Len(t, fw, 1, "the template call is still attempted first")
-	disable := callsContaining(calls, "EnableSecureBoot Off")
+	disable := callsContaining(calls, psDisableVMFirmwareSecureBoot)
 	require.Len(t, disable, 1, "secure boot is explicitly turned off after the template call fails")
 	assert.True(t, argsContain(disable[0], "stw-01"), "disable call targets the VM by name via args")
 
 	// Provisioning continued past the firmware step to completion.
-	require.Len(t, callsContaining(calls, "New-VHD"), 1, "CIDATA seed build still runs")
+	require.Len(t, callsContaining(calls, psNewSeedVHD), 1, "CIDATA seed build still runs")
 	require.Len(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"), 1, "OS disk still made first boot device")
 	require.Len(t, callsContaining(calls, "Start-VM"), 1, "VM still powered on")
 }
@@ -578,7 +553,7 @@ func TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure(t *testing
 // secure_boot: disabled skips the template call entirely and goes straight to
 // disabling secure boot.
 func TestProvisionVM_SecureBootDisabled_NeverAttemptsTemplate(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
 	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
@@ -591,9 +566,9 @@ func TestProvisionVM_SecureBootDisabled_NeverAttemptsTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, callsContaining(calls, "SecureBootTemplate"),
+	assert.Empty(t, callsContaining(calls, psSetVMFirmware),
 		"disabled must never attempt the template call")
-	require.Len(t, callsContaining(calls, "EnableSecureBoot Off"), 1,
+	require.Len(t, callsContaining(calls, psDisableVMFirmwareSecureBoot), 1,
 		"disabled must explicitly turn secure boot off")
 }
 
@@ -619,7 +594,7 @@ func TestSourceConfig_Validate_SecureBoot(t *testing.T) {
 // controller-supplied token + CA fingerprint and the CorrelationID, with list-form
 // runcmd and no banned patterns.
 func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
@@ -629,7 +604,7 @@ func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	copyCall := callsContaining(calls, "Set-Content")[0]
+	copyCall := callsContaining(calls, psCopyToSeedVHD)[0]
 	var userData string
 	for _, a := range copyCall.args {
 		if s, ok := a.(string); ok && strings.Contains(s, "#cloud-config") && len(s) > len(userData) {
@@ -672,7 +647,7 @@ func runningSourceVMJSON() string {
 func TestProvision_InstallingToFinalizingDetachesSeed(t *testing.T) {
 	// getVM is queried twice before detach: once by setVM (existence) and once
 	// by vmIsRunning inside finalizeProvision. Both report Running.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: runningSourceVMJSON(),
 	}
 	store := NewMemProvisionStore()
@@ -694,7 +669,7 @@ func TestProvision_InstallingToFinalizingDetachesSeed(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	detach := callsContaining(calls, "Dismount-VHD")
+	detach := callsContaining(calls, psDetachSeedVHD)
 	require.Len(t, detach, 1, "finalizing must issue exactly one Cfgms-DetachSeedVHD (Dismount-VHD)")
 	assert.True(t, argsContain(detach[0], `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`),
 		"seed path must travel via args, derived from the VM VHD directory")
@@ -713,7 +688,7 @@ func TestProvision_InstallingToFinalizingDetachesSeed(t *testing.T) {
 // installing record has not yet passed the settle window is left at installing
 // with no seed detach — the conservative completion guard (ADR-009 §8).
 func TestProvision_InstallingNotSettledDoesNotDetach(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: runningSourceVMJSON(),
 	}
 	store := NewMemProvisionStore()
@@ -733,7 +708,7 @@ func TestProvision_InstallingNotSettledDoesNotDetach(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, callsContaining(calls, "Dismount-VHD"),
+	assert.Empty(t, callsContaining(calls, psDetachSeedVHD),
 		"install not yet settled must not detach the seed")
 
 	rec, err := store.GetProvision(context.Background(), "stw-01")
@@ -747,7 +722,7 @@ func TestProvision_InstallingNotSettledDoesNotDetach(t *testing.T) {
 // resolved registration-token secret and the CorrelationID hostname hint
 // present, and no banned patterns.
 func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -760,7 +735,7 @@ func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	copyCalls := callsContaining(calls, "Set-Content")
+	copyCalls := callsContaining(calls, psCopyToSeedVHD)
 	require.Len(t, copyCalls, 1, "one Set-Content (answer file copy)")
 	// The answer file name is preseed.cfg for linux.
 	assert.True(t, argsContain(copyCalls[0], "preseed.cfg"), "linux must seed preseed.cfg")
@@ -802,7 +777,7 @@ func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
 // path advances the provisioning record absent → creating → installing with
 // timestamps and the correlation identity baked in.
 func TestProvisionVM_AdvancesRecordAbsentToInstalling(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
@@ -825,7 +800,7 @@ func TestProvisionVM_AdvancesRecordAbsentToInstalling(t *testing.T) {
 // create-from-source path while a record already sits at installing does not
 // rebuild the seed or re-attach media (no restart from absent — ADR-009 §2).
 func TestProvisionVM_ResumeFromInstallingDoesNotRestart(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
@@ -847,11 +822,11 @@ func TestProvisionVM_ResumeFromInstallingDoesNotRestart(t *testing.T) {
 	// The VM is still absent on the host (getVM → not found) so createVM runs,
 	// but provisionVM must short-circuit on the installing record: no seed
 	// rebuild, no media re-attach, no firmware re-apply.
-	assert.Empty(t, callsContaining(calls, "New-VHD"),
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD),
 		"resume from installing must not rebuild the seed VHDX")
-	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"),
+	assert.Empty(t, callsContaining(calls, psAttachDVD),
 		"resume from installing must not re-attach the install ISO")
-	assert.Empty(t, callsContaining(calls, "Set-VMFirmware"),
+	assert.Empty(t, callsContaining(calls, psSetVMFirmware),
 		"resume from installing must not re-apply firmware")
 }
 
@@ -859,7 +834,7 @@ func TestProvisionVM_ResumeFromInstallingDoesNotRestart(t *testing.T) {
 // source) takes the normal lifecycle path: no seed build, no media attach, and
 // no provisioning record written.
 func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
@@ -881,9 +856,9 @@ func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, callsContaining(calls, "New-VHD"), "no source: no seed build")
-	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"), "no source: no ISO attach")
-	assert.Empty(t, callsContaining(calls, "Set-VMFirmware"), "no source: no firmware step")
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD), "no source: no seed build")
+	assert.Empty(t, callsContaining(calls, psAttachDVD), "no source: no ISO attach")
+	assert.Empty(t, callsContaining(calls, psSetVMFirmware), "no source: no firmware step")
 
 	_, err := store.GetProvision(context.Background(), "plain-vm")
 	assert.ErrorIs(t, err, ErrProvisionNotFound, "no source: no provisioning record")
@@ -905,7 +880,7 @@ func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
 // on the same (now-finalizing) record issues no further Remove-Item calls,
 // proving system-level idempotency.
 func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: runningSourceVMJSON(),
 	}
 	store := NewMemProvisionStore()
@@ -927,7 +902,7 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 
 	// Detach must precede delete — both path values travel via args, never the
 	// script text (ADR-009 §5 — no user-controlled value in script).
-	detach := callsContaining(calls, "Dismount-VHD")
+	detach := callsContaining(calls, psDetachSeedVHD)
 	require.Len(t, detach, 1, "finalizing must issue exactly one Dismount-VHD")
 	assert.True(t, argsContain(detach[0], `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`),
 		"seed path must travel via args")
@@ -936,7 +911,7 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 
 	// Remove-Item is issued for both the seed VHDX and the answer ISO — both
 	// paths travel via args only. SilentlyContinue makes it idempotent.
-	deletes := callsContaining(calls, "Remove-Item")
+	deletes := callsContaining(calls, psDeleteSeedMedia)
 	require.GreaterOrEqual(t, len(deletes), 2, "finalizing must issue Remove-Item for both seed VHDX and answer ISO")
 	seedPaths := make([]string, 0, len(deletes))
 	for _, d := range deletes {
@@ -949,8 +924,6 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 	assert.Contains(t, seedPaths, `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`,
 		"seed VHDX must be deleted via args")
 	for _, d := range deletes {
-		assert.Contains(t, d.scriptBlock, "SilentlyContinue",
-			"seed media delete must be idempotent (SilentlyContinue)")
 		assert.NotContains(t, d.scriptBlock, "cfgms-seed-stw-01",
 			"path must not be interpolated into the delete script text")
 	}
@@ -959,10 +932,10 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 	detachIdx := -1
 	firstDeleteIdx := -1
 	for i, c := range calls {
-		if strings.Contains(c.scriptBlock, "Dismount-VHD") && detachIdx < 0 {
+		if strings.Contains(c.scriptBlock, psDetachSeedVHD) && detachIdx < 0 {
 			detachIdx = i
 		}
-		if strings.Contains(c.scriptBlock, "Remove-Item") && firstDeleteIdx < 0 {
+		if strings.Contains(c.scriptBlock, psDeleteSeedMedia) && firstDeleteIdx < 0 {
 			firstDeleteIdx = i
 		}
 	}
@@ -988,9 +961,9 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 	calls2 := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, callsContaining(calls2, "Dismount-VHD"),
+	assert.Empty(t, callsContaining(calls2, psDetachSeedVHD),
 		"second cycle on finalizing record must not re-detach the seed")
-	assert.Empty(t, callsContaining(calls2, "Remove-Item"),
+	assert.Empty(t, callsContaining(calls2, psDeleteSeedMedia),
 		"second cycle on finalizing record must not re-delete seed media")
 }
 
@@ -1002,7 +975,7 @@ func TestProvision_WindowsFinalizeDeletesAnswerISO(t *testing.T) {
 	vmJSON := `{"found":true,"Name":"stw-01","MemoryStartupBytes":4294967296,` +
 		`"ProcessorCount":2,"Generation":2,"Path":"C:\\ClusterStorage\\CSV01\\stw-01.vhdx",` +
 		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"Running"}`
-	transport := &testWinRMTransport{output: vmJSON}
+	transport := &testPSTransport{output: vmJSON}
 	store := NewMemProvisionStore()
 	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
 		VMName:        "stw-01",
@@ -1020,7 +993,7 @@ func TestProvision_WindowsFinalizeDeletesAnswerISO(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	deletes := callsContaining(calls, "Remove-Item")
+	deletes := callsContaining(calls, psDeleteSeedMedia)
 	require.GreaterOrEqual(t, len(deletes), 1, "windows finalization must issue Remove-Item for answer ISO")
 
 	isoPaths := make([]string, 0)
@@ -1050,7 +1023,7 @@ func TestProvision_FinalizeDeleteSeedMediaErrorDoesNotBlockAdvance(t *testing.T)
 	//   3: psDeleteSeedMedia (seed VHDX path)       → ERROR (simulated transient failure)
 	//   4: psDeleteSeedMedia (answer ISO path)      → success (continue after error)
 	deleteErr := fmt.Errorf("PS host: Remove-Item failed (access denied)")
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output:        runningSourceVMJSON(),
 		perCallErrors: []error{nil, nil, nil, deleteErr},
 	}
@@ -1075,9 +1048,9 @@ func TestProvision_FinalizeDeleteSeedMediaErrorDoesNotBlockAdvance(t *testing.T)
 	transport.mu.Unlock()
 
 	// Detach must still run.
-	require.Len(t, callsContaining(calls, "Dismount-VHD"), 1)
+	require.Len(t, callsContaining(calls, psDetachSeedVHD), 1)
 	// Both Remove-Item calls must be issued (error on first does not skip second).
-	require.Len(t, callsContaining(calls, "Remove-Item"), 2,
+	require.Len(t, callsContaining(calls, psDeleteSeedMedia), 2,
 		"both seed VHDX and answer ISO Remove-Item calls must be attempted even after error on first")
 
 	// Record must advance to finalizing despite the failed delete.
@@ -1092,7 +1065,7 @@ func TestProvision_FinalizeDeleteSeedMediaErrorDoesNotBlockAdvance(t *testing.T)
 func TestProvision_SweepNilGuardsAreNoop(t *testing.T) {
 	// nil provisionStore
 	m1 := &hypervModule{
-		transport:      &testWinRMTransport{},
+		transport:      &testPSTransport{},
 		provisionStore: nil,
 		vms:            make(map[string]VMConfig),
 	}
@@ -1113,7 +1086,7 @@ func TestProvision_SweepNilGuardsAreNoop(t *testing.T) {
 // issues Remove-Item for a stale provision record's seed paths when the record
 // is older than seedMediaTTL, without affecting a fresh record.
 func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
-	transport := &testWinRMTransport{output: runningSourceVMJSON()}
+	transport := &testPSTransport{output: runningSourceVMJSON()}
 	store := NewMemProvisionStore()
 
 	// Stale record: updated 48h ago — well past seedMediaTTL.
@@ -1149,7 +1122,7 @@ func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	deletes := callsContaining(calls, "Remove-Item")
+	deletes := callsContaining(calls, psDeleteSeedMedia)
 	require.GreaterOrEqual(t, len(deletes), 1, "sweep must issue Remove-Item for the stale record")
 
 	// The stale-vm seed paths must appear in the delete args.
@@ -1182,7 +1155,7 @@ func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
 // evidence for #3168 (CIDATA seed race) from ordinary lab usage without
 // requiring a specially scheduled provisioning batch.
 func TestProvisionVM_CloudInitSeedAttachToVMStartTimingLogged(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
 	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`

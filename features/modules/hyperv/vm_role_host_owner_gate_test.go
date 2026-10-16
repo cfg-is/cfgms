@@ -24,7 +24,7 @@ import (
 // CNO-ownership gate this silently skipped, so a VM on any non-CNO node could
 // never be promoted via config.
 func TestRoleMembership_HostOwner_NonCNO_Promotes(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE2"}`,                      // helper: CNO owner is NODE2 — this node (NODE1) does NOT own the CNO
 			`{"owners":{}}`,                          // helper: resource owners → web-01 not yet a clustered role
@@ -58,7 +58,7 @@ func TestRoleMembership_HostOwner_NonCNO_Promotes(t *testing.T) {
 // ownership, not CNO ownership. It records a host-gated skip and issues no
 // cluster write. (Another node hosts the VM and owns its reconcile.)
 func TestRoleMembership_NotHost_Skips(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // helper: this node (NODE1) DOES own the CNO ...
 			`{"owners":{"web-01":"NODE2"}}`, // ... but the VM's role is owned/hosted by NODE2
@@ -93,7 +93,7 @@ func TestRoleMembership_NotHost_Skips(t *testing.T) {
 // demote path: a node that does not host the VM issues no Remove even with
 // allowDestructive true.
 func TestRoleMembership_NotHost_Demote_Skips(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // helper: this node owns the CNO
 			`{"owners":{"web-01":"NODE2"}}`, // role hosted by NODE2

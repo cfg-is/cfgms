@@ -341,14 +341,11 @@ func TestConfigure_WiresConfigBackedProfileStore(t *testing.T) {
 
 	secrets := newInlineStore()
 	m := newModuleWithDetector(secrets, &fakeDetector{result: true})
+	m.transport, m.transportPinned = &testPSTransport{}, true
 
 	require.NoError(t, m.Configure(mapConfigState{
-		"tenant_id":         "tenant-x",
-		"config_store":      cfgconfig.ConfigStore(store),
-		"winrm_host":        "host.example",
-		"winrm_user_secret": "user-key",
-		"winrm_pass_secret": "pass-key",
-		"transport":         "winrm",
+		"tenant_id":    "tenant-x",
+		"config_store": cfgconfig.ConfigStore(store),
 	}))
 
 	require.NotNil(t, m.profileStore, "config_store should wire a ProfileStore")
@@ -365,13 +362,9 @@ func TestConfigure_WiresConfigBackedProfileStore(t *testing.T) {
 func TestConfigure_NoConfigStoreLeavesProfileStoreNil(t *testing.T) {
 	secrets := newInlineStore()
 	m := newModuleWithDetector(secrets, &fakeDetector{result: true})
+	m.transport, m.transportPinned = &testPSTransport{}, true
 
-	require.NoError(t, m.Configure(mapConfigState{
-		"winrm_host":        "host.example",
-		"winrm_user_secret": "user-key",
-		"winrm_pass_secret": "pass-key",
-		"transport":         "winrm",
-	}))
+	require.NoError(t, m.Configure(mapConfigState{}))
 
 	assert.Nil(t, m.profileStore)
 }

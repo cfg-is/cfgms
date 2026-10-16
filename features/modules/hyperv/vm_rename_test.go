@@ -11,7 +11,7 @@ import (
 )
 
 // callUsed reports whether any recorded transport call used the given script.
-func callUsed(transport *testWinRMTransport, script string) bool {
+func callUsed(transport *testPSTransport, script string) bool {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
 	for _, c := range transport.calls {
@@ -29,7 +29,7 @@ func TestVMRename_OldExistsNewAbsent_RenamesInPlace(t *testing.T) {
 	const oldName = "cfgms-ci-lin-01"
 	const newName = "lab-lin-01"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,                       // call0: getVMLocal(newName) → absent
 			hostVMJSON(oldName, "stopped", 2, 4096), // call1: getVMLocal(oldName) → found
@@ -62,7 +62,7 @@ func TestVMRename_NewAlreadyExists_Idempotent(t *testing.T) {
 	const oldName = "cfgms-ci-lin-01"
 	const newName = "lab-lin-01"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			hostVMJSON(newName, "stopped", 2, 4096), // call0: getVMLocal(newName) → already exists
 		},
@@ -79,7 +79,7 @@ func TestVMRename_NewAlreadyExists_Idempotent(t *testing.T) {
 // TestRenameFromOldName_OldAbsent_NoOp verifies renameFromOldName is a clean no-op
 // when the old-named VM does not exist (so the caller creates the new VM fresh).
 func TestRenameFromOldName_OldAbsent_NoOp(t *testing.T) {
-	transport := &testWinRMTransport{output: `{"found":false}`} // getVMLocal(old) → absent
+	transport := &testPSTransport{output: `{"found":false}`} // getVMLocal(old) → absent
 	m := vmModuleWithTransport(transport, "t")
 
 	cfg := &VMConfig{Name: "lab-lin-01", OldName: "cfgms-ci-lin-01"}
@@ -97,7 +97,7 @@ func TestRenameFromOldName_MigratesProvisionRecord(t *testing.T) {
 	const newName = "lab-lin-01"
 	ctx := context.Background()
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			hostVMJSON(oldName, "stopped", 2, 4096), // call0: getVMLocal(oldName) → found
 			``,                                      // call1: Rename-VM

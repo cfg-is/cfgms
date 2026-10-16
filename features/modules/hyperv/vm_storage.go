@@ -281,7 +281,7 @@ func (m *hypervModule) convergeStorageLocation(ctx context.Context, vmName, host
 		"Name": hostName,
 		"Home": home,
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Move-VMStorage", "vm:"+vmName, before, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Move-VMStorage", "vm:"+vmName, before, after, psErr)
 	if psErr != nil {
 		return false, m.failMove(ctx, vmName, ensureMoveRecord(record, vmName, home), fmt.Errorf("hyperv: dispatch storage move for VM %q: %w", vmName, psErr))
 	}
@@ -389,7 +389,7 @@ func (m *hypervModule) execSetVMHome(ctx context.Context, cfgResourceID, hostNam
 		"Home": home,
 	})
 	after := map[string]interface{}{"configuration_location": home}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Move-VMStorage", cfgResourceID, nil, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Move-VMStorage", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: home configuration files for VM %q at %q: %w", hostName, home, psErr)
 	}

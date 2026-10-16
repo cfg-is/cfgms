@@ -91,10 +91,27 @@ func TestGenericConfigState_ExcludesIdentifierFields(t *testing.T) {
 	assert.NotContains(t, fields, "name")
 }
 
+// TestGenericConfigState_RemovedWinRMKeysNotExcluded verifies that the keys of
+// the removed WinRM transport are ordinary managed fields again: a stale key now
+// fails in the module's Configure instead of being hidden from drift.
+func TestGenericConfigState_RemovedWinRMKeysNotExcluded(t *testing.T) {
+	state := &genericConfigState{data: map[string]interface{}{
+		"winrm_host":        "127.0.0.1",
+		"winrm_user_secret": "secret/user",
+		"winrm_pass_secret": "secret/pass",
+		"state":             "present",
+	}}
+
+	fields := state.GetManagedFields()
+
+	assert.Contains(t, fields, "winrm_host")
+	assert.Contains(t, fields, "winrm_user_secret")
+	assert.Contains(t, fields, "winrm_pass_secret")
+}
+
 // TestGenericConfigState_ExcludesModuleOperationalKeys verifies that the
 // fields used by a module to set up its transport/identity at Configure
-// time — `transport`, `tenant_id`, `audit_manager`, `steward_id`, and the
-// `winrm_*` credential pointers — are not surfaced as managed fields. A
+// time — `transport`, `tenant_id`, `audit_manager`, and `steward_id` — are not surfaced as managed fields. A
 // module's Get response never includes them, so leaving them in the
 // comparison set produces false-positive "added" drift on every
 // convergence cycle.
@@ -111,13 +128,10 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 		"path": "vswitch:test",
 		"name": "test",
 		// Module-operational keys — newly excluded.
-		"transport":         "ps-host",
-		"tenant_id":         "tenant-x",
-		"steward_id":        "steward-y",
-		"audit_manager":     "ignored-pointer-shaped",
-		"winrm_host":        "127.0.0.1",
-		"winrm_user_secret": "secret/user",
-		"winrm_pass_secret": "secret/pass",
+		"transport":     "ps-host",
+		"tenant_id":     "tenant-x",
+		"steward_id":    "steward-y",
+		"audit_manager": "ignored-pointer-shaped",
 		// Create-time / provisioning directives — never reported by a module's Get,
 		// so comparing them drifts every cycle on a provisioned resource.
 		"source":                   map[string]interface{}{"image": "x.raw"},
@@ -135,7 +149,6 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 	for _, key := range []string{
 		"path", "name",
 		"transport", "tenant_id", "steward_id", "audit_manager",
-		"winrm_host", "winrm_user_secret", "winrm_pass_secret",
 		"source", "enroll_launcher_path", "debug_ssh_authorized_key", "old_name",
 	} {
 		assert.NotContains(t, fields, key,

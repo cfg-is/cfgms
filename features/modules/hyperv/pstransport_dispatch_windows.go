@@ -10,7 +10,7 @@ import (
 	"fmt"
 )
 
-// ExecutePS satisfies the winrmTransport interface. It looks psCommand up in
+// ExecutePS satisfies the psTransport interface. It looks psCommand up in
 // psDispatchTable (pstransport_args_windows.go), converts psArgs to typed
 // values, and runs the matching Cfgms-* verb on the row's run mode.
 //
@@ -20,10 +20,7 @@ import (
 // Cfgms-Invoke binds the parsed values to the verb's named parameters.
 //
 // Unknown psCommand strings return an error rather than silently no-op'ing.
-// We don't fall back to WinRM here — the wholesale-WinRM-fallback model
-// from earlier #1887 drafts assumed WinRM worked; in this codebase it's
-// reliably broken on the same-host deployment shape (see #1852 F16–F21).
-// If a future verb gets added in vm.go/vswitch.go without a matching
+// There is no fallback transport here. If a future verb gets added in vm.go/vswitch.go without a matching
 // Cfgms-* function, that's a build-time omission, not a runtime graceful
 // degradation candidate.
 func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {

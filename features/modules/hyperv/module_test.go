@@ -12,7 +12,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/masterzen/winrm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -24,24 +23,24 @@ import (
 
 // ─── Test doubles ──────────────────────────────────────────────────────────────
 
-// testWinRMTransport implements winrmTransport and records every ExecutePS call.
+// testPSTransport implements psTransport and records every ExecutePS call.
 // Stories 2–4 tests use this to assert that user-supplied values appear in args,
 // never embedded in the scriptBlock (psCommand) text.
 //
 // Per-call overrides: if perCallOutputs or perCallErrors are non-empty, the
 // element at the call's zero-based index is used instead of output/execErr.
 // Beyond the slice length the defaults (output, execErr) apply.
-type testWinRMTransport struct {
+type testPSTransport struct {
 	mu             sync.Mutex
-	calls          []winRMCall
+	calls          []recordedPSCall
 	output         string
 	execErr        error
 	perCallOutputs []string
 	perCallErrors  []error
 }
 
-// winRMCall records a single ExecutePS invocation.
-type winRMCall struct {
+// recordedPSCall records a single ExecutePS invocation.
+type recordedPSCall struct {
 	// scriptBlock is the psCommand argument — the PS code body.
 	// It must contain only $-prefixed param references, never literal user values.
 	scriptBlock string
@@ -49,7 +48,7 @@ type winRMCall struct {
 	args []interface{}
 }
 
-func (t *testWinRMTransport) ExecutePS(_ context.Context, psCommand string, psArgs map[string]string) (string, error) {
+func (t *testPSTransport) ExecutePS(_ context.Context, psCommand string, psArgs map[string]string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -65,7 +64,7 @@ func (t *testWinRMTransport) ExecutePS(_ context.Context, psCommand string, psAr
 	}
 
 	callIdx := len(t.calls)
-	t.calls = append(t.calls, winRMCall{scriptBlock: psCommand, args: args})
+	t.calls = append(t.calls, recordedPSCall{scriptBlock: psCommand, args: args})
 
 	out := t.output
 	err := t.execErr
@@ -77,45 +76,6 @@ func (t *testWinRMTransport) ExecutePS(_ context.Context, psCommand string, psAr
 	}
 
 	return out, err
-}
-
-// recordingShell implements winrmShell and captures the scriptBlock and args
-// passed to RunPS for injection-safety assertions.
-type recordingShell struct {
-	mu                  sync.Mutex
-	capturedScriptBlock string
-	capturedArgs        []string
-}
-
-func (r *recordingShell) RunPS(_ context.Context, scriptBlock string, args []string) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.capturedScriptBlock = scriptBlock
-	r.capturedArgs = make([]string, len(args))
-	copy(r.capturedArgs, args)
-	return "", nil
-}
-
-func (r *recordingShell) Close() error { return nil }
-
-// countingSecretStore wraps a real SecretStore and counts GetSecret calls per key.
-type countingSecretStore struct {
-	secretsif.SecretStore
-	mu    sync.Mutex
-	count map[string]int
-}
-
-func (c *countingSecretStore) GetSecret(ctx context.Context, key string) (*secretsif.Secret, error) {
-	c.mu.Lock()
-	c.count[key]++
-	c.mu.Unlock()
-	return c.SecretStore.GetSecret(ctx, key)
-}
-
-func (c *countingSecretStore) getCount(key string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.count[key]
 }
 
 // inlineSecretStore is a minimal, non-mock in-memory SecretStore for unit tests
@@ -270,173 +230,6 @@ func newModuleWithDetector(store secretsif.SecretStore, detector HypervDetector)
 	return m
 }
 
-// ─── WinRM client injection-safety tests ───────────────────────────────────────
-
-// TestWinRMClient_UsesInvokeCommandArgumentList verifies that winrmClient.ExecutePS
-// constructs the WinRM command with injection safety:
-// (a) the script block text contains param(...) with only $-prefixed parameter
-//
-//	variables — no literal user values embedded in the script text, and
-//
-// (b) the user-supplied values appear in the args slice passed to RunPS,
-//
-//	NOT in the scriptBlock text.
-func TestWinRMClient_UsesInvokeCommandArgumentList(t *testing.T) {
-	const dangerousValue = "vm'; Remove-Item -Recurse -Force C:\\; $x = '"
-
-	recorder := &recordingShell{}
-	store := newInlineStore("user-key", "admin", "pass-key", "hunter2")
-
-	client := &winrmClient{
-		host:         "testhost",
-		userStoreRef: "user-key",
-		passStoreRef: "pass-key",
-		store:        store,
-		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
-	}
-
-	_, err := client.ExecutePS(context.Background(), "Get-VM -Name $VMName", map[string]string{
-		"VMName": dangerousValue,
-	})
-	require.NoError(t, err)
-
-	recorder.mu.Lock()
-	scriptBlock := recorder.capturedScriptBlock
-	capturedArgs := recorder.capturedArgs
-	recorder.mu.Unlock()
-
-	// (a) The script block text must contain param($VMName) and reference only $-prefixed vars.
-	assert.Contains(t, scriptBlock, "param($VMName)", "script block must declare $VMName parameter")
-	assert.NotContains(t, scriptBlock, dangerousValue, "user value must NOT be embedded in script block text")
-
-	// (b) The user-supplied value must appear in the args slice, not the script text.
-	require.Len(t, capturedArgs, 1, "one argument value expected")
-	assert.Equal(t, dangerousValue, capturedArgs[0], "user value must appear in WinRM Arguments, not script text")
-}
-
-// TestWinRMClient_NoArgsCase verifies that commands with no psArgs are passed through
-// unchanged (no spurious param() declaration added).
-func TestWinRMClient_NoArgsCase(t *testing.T) {
-	recorder := &recordingShell{}
-	store := newInlineStore("u", "admin", "p", "pass")
-
-	client := &winrmClient{
-		host:         "h",
-		userStoreRef: "u",
-		passStoreRef: "p",
-		store:        store,
-		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
-	}
-
-	const cmd = "Get-VM | Select-Object Name"
-	_, err := client.ExecutePS(context.Background(), cmd, nil)
-	require.NoError(t, err)
-
-	recorder.mu.Lock()
-	scriptBlock := recorder.capturedScriptBlock
-	capturedArgs := recorder.capturedArgs
-	recorder.mu.Unlock()
-
-	assert.Equal(t, cmd, scriptBlock, "command with no args should pass through unchanged")
-	assert.Empty(t, capturedArgs)
-}
-
-// TestWinRMClient_DeterministicArgOrder verifies that argument order is stable
-// regardless of map iteration order.
-func TestWinRMClient_DeterministicArgOrder(t *testing.T) {
-	recorder := &recordingShell{}
-	store := newInlineStore("u", "admin", "p", "pass")
-
-	client := &winrmClient{
-		host:         "h",
-		userStoreRef: "u",
-		passStoreRef: "p",
-		store:        store,
-		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
-	}
-
-	// Multiple params in non-alphabetical key insertion order.
-	_, err := client.ExecutePS(context.Background(), "Invoke-Cmd -A $ZZZ -B $AAA", map[string]string{
-		"ZZZ": "last-value",
-		"AAA": "first-value",
-	})
-	require.NoError(t, err)
-
-	recorder.mu.Lock()
-	scriptBlock := recorder.capturedScriptBlock
-	capturedArgs := recorder.capturedArgs
-	recorder.mu.Unlock()
-
-	// Sorted order: AAA before ZZZ.
-	assert.Contains(t, scriptBlock, "param($AAA, $ZZZ)", "param declarations must be in sorted key order")
-	require.Len(t, capturedArgs, 2)
-	assert.Equal(t, "first-value", capturedArgs[0], "AAA value first (sorted order)")
-	assert.Equal(t, "last-value", capturedArgs[1], "ZZZ value second (sorted order)")
-}
-
-// ─── Auth restriction tests ────────────────────────────────────────────────────
-
-// TestWinRMAuth_NoBasicAuth asserts that the production WinRM parameters use NTLM
-// transport — there is no code path that enables Basic auth.
-func TestWinRMAuth_NoBasicAuth(t *testing.T) {
-	params := productionWinRMParams()
-	require.NotNil(t, params.TransportDecorator, "TransportDecorator must be set to enforce NTLM")
-
-	transport := params.TransportDecorator()
-	_, isNTLM := transport.(*winrm.ClientNTLM)
-	require.True(t, isNTLM, "transport must be ClientNTLM, not Basic auth")
-
-	// Verify the transport is not the basic HTTP client (which would allow Basic auth).
-	_, isBasic := transport.(*winrm.ClientAuthRequest)
-	assert.False(t, isBasic, "Basic auth (ClientAuthRequest) must never be used")
-}
-
-// TestWinRMClient_InsecureSkipVerifyFalse verifies that InsecureSkipVerify is
-// explicitly set to false on the WinRM endpoint — TLS verification is never disabled.
-func TestWinRMClient_InsecureSkipVerifyFalse(t *testing.T) {
-	// We validate by checking that realWinRMShell constructs the endpoint correctly.
-	// We cannot call realWinRMShell without a live host, so we verify via productionWinRMParams
-	// which is the only function that configures auth, and by checking the Endpoint contract.
-	endpoint := winrm.NewEndpoint("testhost", 5986, true, false, nil, nil, nil, 0)
-	endpoint.Insecure = false // explicit assignment as required by spec
-	assert.False(t, endpoint.Insecure, "InsecureSkipVerify must be explicitly false")
-	assert.True(t, endpoint.HTTPS, "WinRM must connect over TLS (HTTPS)")
-	assert.Equal(t, 5986, endpoint.Port, "WinRM must connect on TLS port 5986")
-}
-
-// ─── Credential lifetime tests ─────────────────────────────────────────────────
-
-// TestCredentialLifetime verifies that two sequential ExecutePS calls each trigger
-// fresh SecretStore lookups — credentials are never cached between invocations.
-func TestCredentialLifetime(t *testing.T) {
-	base := newInlineStore("user-key", "admin", "pass-key", "hunter2")
-	counting := &countingSecretStore{
-		SecretStore: base,
-		count:       make(map[string]int),
-	}
-
-	recorder := &recordingShell{}
-	client := &winrmClient{
-		host:         "testhost",
-		userStoreRef: "user-key",
-		passStoreRef: "pass-key",
-		store:        counting,
-		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
-	}
-
-	ctx := context.Background()
-
-	_, err := client.ExecutePS(ctx, "Get-VM", nil)
-	require.NoError(t, err)
-
-	_, err = client.ExecutePS(ctx, "Get-VM", nil)
-	require.NoError(t, err)
-
-	// Each ExecutePS must fetch both credentials — two calls × two keys = 2 per key.
-	assert.Equal(t, 2, counting.getCount("user-key"), "user secret must be fetched on every invocation")
-	assert.Equal(t, 2, counting.getCount("pass-key"), "pass secret must be fetched on every invocation")
-}
-
 // ─── Log sanitization tests ────────────────────────────────────────────────────
 
 // TestModule_NoCredentialInLogs verifies that credential values are never written
@@ -451,12 +244,9 @@ func TestModule_NoCredentialInLogs(t *testing.T) {
 	require.NoError(t, m.SetLogger(bufLog))
 	require.NoError(t, m.SetSecretStore(store))
 
-	cfg := mapConfigState{
-		"winrm_host":        "hyper-v.example.com",
-		"winrm_user_secret": "user-key",
-		"winrm_pass_secret": "pass-key",
-	}
-	err := m.Configure(cfg)
+	m.transport = &testPSTransport{}
+	m.transportPinned = true
+	err := m.Configure(mapConfigState{"tenant_id": "ops"})
 	require.NoError(t, err)
 
 	// Password value must not appear in any logged output.
@@ -473,12 +263,9 @@ func TestModule_NoCredentialInLogs_TransportError(t *testing.T) {
 	store := newInlineStore("user-key", "admin", "pass-key", "s3cr3t")
 
 	m := &hypervModule{
-		executor:     &stubHypervExecutor{},
-		host:         "testhost",
-		userStoreRef: "user-key",
-		passStoreRef: "pass-key",
-		detector:     &fakeDetector{result: true},
-		transport: &testWinRMTransport{
+		executor: &stubHypervExecutor{},
+		detector: &fakeDetector{result: true},
+		transport: &testPSTransport{
 			execErr: errors.New("connection refused"),
 		},
 	}
@@ -495,31 +282,6 @@ func TestModule_NoCredentialInLogs_TransportError(t *testing.T) {
 
 // ─── Module.Configurable tests ─────────────────────────────────────────────────
 
-// TestModule_Configure_ExtractsAllKeys_WinRM verifies that Configure correctly
-// extracts winrm_host, winrm_user_secret, and winrm_pass_secret when the
-// operator pins transport: "winrm" (the named-fallback path). The default
-// transport is the local PS host; tests that need to exercise the WinRM
-// path specifically must pin it here.
-func TestModule_Configure_ExtractsAllKeys_WinRM(t *testing.T) {
-	store := newInlineStore()
-	m := &hypervModule{executor: &stubHypervExecutor{}}
-	require.NoError(t, m.SetSecretStore(store))
-
-	cfg := mapConfigState{
-		"transport":         "winrm",
-		"winrm_host":        "10.0.0.1",
-		"winrm_user_secret": "svc-user",
-		"winrm_pass_secret": "svc-pass",
-	}
-	err := m.Configure(cfg)
-	require.NoError(t, err)
-
-	assert.Equal(t, "10.0.0.1", m.host)
-	assert.Equal(t, "svc-user", m.userStoreRef)
-	assert.Equal(t, "svc-pass", m.passStoreRef)
-	assert.NotNil(t, m.transport, "transport must be wired after Configure")
-}
-
 // TestModule_Configure_ClusterNameFromHARole verifies that Configure derives the
 // S5 cluster scope cap from a vm resource's nested ha_role.cluster_name when no
 // top-level cluster_name key is present. A cascaded ha_role vm resource carries
@@ -529,19 +291,13 @@ func TestModule_Configure_ExtractsAllKeys_WinRM(t *testing.T) {
 // converge cycle — never reporting converged (Story #2577).
 func TestModule_Configure_ClusterNameFromHARole(t *testing.T) {
 	store := newInlineStore()
-	m := &hypervModule{executor: &stubHypervExecutor{}}
+	m := &hypervModule{executor: &stubHypervExecutor{}, transport: &testPSTransport{}, transportPinned: true}
 	require.NoError(t, m.SetSecretStore(store))
 
 	// A representative cascaded ha_role vm resource: cluster name only nested.
-	// Pin transport: "winrm" so this test compiles and passes on Linux CI (the
-	// ps-host path falls through to winrm on non-Windows and requires winrm_host).
 	cfg := mapConfigState{
-		"transport":         "winrm",
-		"winrm_host":        "hyperv-host.local",
-		"winrm_user_secret": "svc-user",
-		"winrm_pass_secret": "svc-pass",
-		"name":              "cfgms-e2e-ha-01",
-		"vhd_path":          `C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx`,
+		"name":     "cfgms-e2e-ha-01",
+		"vhd_path": `C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx`,
 		"ha_role": map[string]interface{}{
 			"cluster_name": "cfg-lab",
 		},
@@ -557,18 +313,12 @@ func TestModule_Configure_ClusterNameFromHARole(t *testing.T) {
 // is absent — it never overrides an operator-declared scope cap).
 func TestModule_Configure_TopLevelClusterNameWins(t *testing.T) {
 	store := newInlineStore()
-	m := &hypervModule{executor: &stubHypervExecutor{}}
+	m := &hypervModule{executor: &stubHypervExecutor{}, transport: &testPSTransport{}, transportPinned: true}
 	require.NoError(t, m.SetSecretStore(store))
 
-	// Pin transport: "winrm" so this test passes on Linux CI (ps-host falls through
-	// to winrm on non-Windows and requires winrm_host).
 	cfg := mapConfigState{
-		"transport":         "winrm",
-		"winrm_host":        "hyperv-host.local",
-		"winrm_user_secret": "svc-user",
-		"winrm_pass_secret": "svc-pass",
-		"name":              "cfgms-e2e-ha-01",
-		"cluster_name":      "explicit-cluster",
+		"name":         "cfgms-e2e-ha-01",
+		"cluster_name": "explicit-cluster",
 		"ha_role": map[string]interface{}{
 			"cluster_name": "cfg-lab",
 		},
@@ -587,53 +337,57 @@ func TestModule_Configure_NilConfig(t *testing.T) {
 
 func TestModule_Configure_MissingSecretStore(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
-	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_host": "h", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
+	err := m.Configure(mapConfigState{})
 	assert.ErrorIs(t, err, errSecretStoreRequired)
 }
 
-// TestModule_Configure_MissingHost_WinRM, _MissingUserSecretKey_WinRM, and
-// _MissingPassSecretKey_WinRM verify the WinRM-fallback path's required-
-// field errors. Each pins transport: "winrm" explicitly because the default
-// PS-host path does not consult any winrm_* keys.
-func TestModule_Configure_MissingHost_WinRM(t *testing.T) {
-	m := &hypervModule{executor: &stubHypervExecutor{}}
-	require.NoError(t, m.SetSecretStore(newInlineStore()))
-	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
-	assert.ErrorIs(t, err, errHostRequired)
-}
-
-func TestModule_Configure_MissingUserSecretKey_WinRM(t *testing.T) {
-	m := &hypervModule{executor: &stubHypervExecutor{}}
-	require.NoError(t, m.SetSecretStore(newInlineStore()))
-	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_host": "h", "winrm_pass_secret": "p"})
-	assert.ErrorIs(t, err, errUserSecretKeyRequired)
-}
-
-func TestModule_Configure_MissingPassSecretKey_WinRM(t *testing.T) {
-	m := &hypervModule{executor: &stubHypervExecutor{}}
-	require.NoError(t, m.SetSecretStore(newInlineStore()))
-	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_host": "h", "winrm_user_secret": "u"})
-	assert.ErrorIs(t, err, errPassSecretKeyRequired)
+// TestModule_Configure_WinRMTransportRemoved verifies the fail-clear contract:
+// a config that still asks for the removed WinRM transport — by transport name,
+// or by any winrm_* key with no transport — fails with an error naming the
+// removal and selects no transport.
+func TestModule_Configure_WinRMTransportRemoved(t *testing.T) {
+	cases := map[string]mapConfigState{
+		"transport winrm": {"transport": "winrm"},
+		"transport winrm with keys": {
+			"transport": "winrm", "winrm_host": "h", "winrm_user_secret": "u", "winrm_pass_secret": "p",
+		},
+		"winrm_host only":        {"winrm_host": "h"},
+		"winrm_user_secret only": {"winrm_user_secret": "u"},
+		"winrm_pass_secret only": {"winrm_pass_secret": "p"},
+		"explicit ps-host with winrm_host": {
+			"transport": "ps-host", "winrm_host": "h",
+		},
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := &hypervModule{executor: &stubHypervExecutor{}}
+			require.NoError(t, m.SetSecretStore(newInlineStore()))
+			err := m.Configure(cfg)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errWinRMRemoved)
+			assert.Contains(t, err.Error(), "WinRM transport was removed")
+			assert.Nil(t, m.transport, "a removed transport must not select any other transport")
+		})
+	}
 }
 
 // TestWithHostCommandTransport_PinIsUsedAndSurvivesConfigure verifies the
 // exported host-boundary seam (WithHostCommandTransport): the pinned transport
 // is the one the module actually issues its PowerShell through, and Configure —
-// which runs on every convergence pass and would otherwise select a PS-host or
-// WinRM transport — wires the rest of the module without replacing it. Without
+// which runs on every convergence pass and would otherwise start a PS-host
+// transport — wires the rest of the module without replacing it. Without
 // the survival half, a caller outside this package could not drive the real
 // module through the real executor at all: the executor calls Configure before
 // every Get/Set.
 func TestWithHostCommandTransport_PinIsUsedAndSurvivesConfigure(t *testing.T) {
-	transport := &testWinRMTransport{output: `{"found":false}`}
+	transport := &testPSTransport{output: `{"found":false}`}
 	mod := New(&fakeDetector{result: true}, WithHostCommandTransport(transport))
 	m, ok := mod.(*hypervModule)
 	require.True(t, ok)
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
 
-	// No winrm_* keys and no transport key: the unpinned path would take the
-	// ps-host branch and, where no PS host exists, fall through to WinRM and
-	// fail with errHostRequired.
+	// No transport key: the unpinned path would start the PS host and, where
+	// none can start, fail.
 	require.NoError(t, m.Configure(mapConfigState{"tenant_id": "ops"}),
 		"a pinned host transport must make Configure's transport selection a no-op")
 	assert.Same(t, transport, m.transport, "Configure must not replace a pinned transport")
@@ -660,8 +414,8 @@ func TestWithHostCommandTransport_NilLeavesSelectionInPlace(t *testing.T) {
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
 	assert.False(t, m.transportPinned)
 
-	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
-	assert.ErrorIs(t, err, errHostRequired,
+	err := m.Configure(mapConfigState{"transport": "winrm"})
+	assert.ErrorIs(t, err, errWinRMRemoved,
 		"a nil transport must leave the normal Configure-driven selection (and its validation) in place")
 }
 
@@ -673,6 +427,9 @@ func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {
 	err := m.Configure(mapConfigState{"transport": "bogus"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown transport")
+	assert.Contains(t, err.Error(), `valid: "ps-host")`, "ps-host must be the only listed transport")
+	assert.NotContains(t, err.Error(), "winrm")
+	assert.Nil(t, m.transport)
 }
 
 // TestModule_Configure_RejectsInvalidDebugSSHKey verifies Configure rejects a
@@ -701,12 +458,9 @@ func TestModule_Configure_RejectsInvalidDebugSSHKey(t *testing.T) {
 // Configure's allowlist.
 func TestModule_Configure_AcceptsValidDebugSSHKey(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
+	m.transport, m.transportPinned = &testPSTransport{}, true
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
 	cfg := mapConfigState{
-		"transport":                "winrm",
-		"winrm_host":               "10.0.0.1",
-		"winrm_user_secret":        "svc-user",
-		"winrm_pass_secret":        "svc-pass",
 		"debug_ssh_authorized_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADEBUGKEY operator@lab",
 	}
 	require.NoError(t, m.Configure(cfg))
@@ -877,26 +631,6 @@ func TestModule_LogsDeclineOnNonHypervHost(t *testing.T) {
 	})
 }
 
-// ─── buildInvokeCommand unit tests ─────────────────────────────────────────────
-
-func TestBuildInvokeCommand_NoArgs(t *testing.T) {
-	const cmd = "Get-VM | Select-Object Name, State"
-	block, args := buildInvokeCommand(cmd, nil)
-	assert.Equal(t, cmd, block)
-	assert.Empty(t, args)
-}
-
-func TestBuildInvokeCommand_SingleArg(t *testing.T) {
-	block, args := buildInvokeCommand("Get-VM -Name $VMName", map[string]string{
-		"VMName": "test-vm",
-	})
-	assert.Contains(t, block, "param($VMName)")
-	assert.Contains(t, block, "Get-VM -Name $VMName")
-	assert.Contains(t, block, "-ArgumentList")
-	assert.NotContains(t, block, "test-vm", "literal value must not appear in script block")
-	assert.Equal(t, []string{"test-vm"}, args)
-}
-
 // ─── Registry roundtrip test ───────────────────────────────────────────────────
 
 // TestModule_RegistrationRoundtrip verifies that the module can be registered into
@@ -916,18 +650,6 @@ func TestModule_RegistrationRoundtrip(t *testing.T) {
 	instance, err := registry.GetModule("hyperv")
 	require.NoError(t, err, "GetModule must succeed after registration")
 	require.NotNil(t, instance, "retrieved module must not be nil")
-}
-
-func TestBuildInvokeCommand_MultipleArgs_SortedOrder(t *testing.T) {
-	block, args := buildInvokeCommand("New-VM -Name $Name -Path $Path", map[string]string{
-		"Path": "/vms/myvm",
-		"Name": "myvm",
-	})
-	// Sorted: Name before Path
-	assert.Contains(t, block, "param($Name, $Path)")
-	assert.Equal(t, []string{"myvm", "/vms/myvm"}, args)
-	assert.NotContains(t, block, "myvm")
-	assert.NotContains(t, block, "/vms/myvm")
 }
 
 // ─── module.yaml executor declaration test ────────────────────────────────────

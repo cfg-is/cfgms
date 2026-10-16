@@ -330,7 +330,7 @@ func TestAutounattend_NoBannedPatterns_CommandBearingElementCaught(t *testing.T)
 // renders a real autounattend (not the placeholder), with the CorrelationID
 // baked in and a generated AdminPassword present.
 func TestRenderSeedAnswerFile_WindowsRendersAutounattend(t *testing.T) {
-	m := provisionModuleWithTransport(t, &testWinRMTransport{})
+	m := provisionModuleWithTransport(t, &testPSTransport{})
 	src := &SourceConfig{ISO: `C:\iso\ws2025.iso`, OSFamily: "windows"}
 
 	content, err := m.renderSeedAnswerFile(context.Background(), "stw-win-09", src, "stw-win-09")

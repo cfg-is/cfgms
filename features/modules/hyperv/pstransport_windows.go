@@ -22,8 +22,8 @@ import (
 
 // psHostTransport is the post-#1894 in-host transport for the Hyper-V module.
 //
-// Replaces the broken WinRM stack (F16–F21 in #1852) by running powershell.exe
-// as a long-lived subprocess of the steward and dispatching each Hyper-V
+// It runs powershell.exe as a long-lived subprocess of the steward and
+// dispatches each Hyper-V
 // primitive (Get-VM, Start-VM, New-VMSwitch, etc.) as a function call sent
 // over stdin. Functions are defined once at session startup via a hardcoded
 // preamble.
@@ -59,14 +59,12 @@ import (
 // matches the way the host's WMI providers serialise too — there's no
 // throughput win from parallel invocations against the same host.
 //
-// # Why not WinRM
+// # Why a local subprocess
 //
-// Same-host steward + Hyper-V: WinRM adds a TCP listener, NTLM auth, a TLS
-// cert, an LSA loopback dance, and a service-level ACL we have to grant.
-// All of those have to be exactly right or the call fails. Local subprocess
-// has none of those concerns — the steward already runs as LocalSystem on
-// the Hyper-V host (#1853 + #1854 install path) which has full Hyper-V
-// admin rights natively.
+// Same-host steward + Hyper-V: a local subprocess needs no network listener,
+// remote authentication, TLS cert, or service-level ACL — the steward already
+// runs as LocalSystem on the Hyper-V host (#1853 + #1854 install path) which
+// has full Hyper-V admin rights natively.
 //
 // # Why not WMI
 //

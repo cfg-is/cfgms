@@ -20,7 +20,7 @@ import (
 // whole-domain observe path — without requiring a declared hyperv.cluster
 // resource. This is the motivating AC2 scenario from issue #2891.
 func TestObserveLocalCluster_NonCNONode(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// psGetClusterSelf: self-discovery, no -Name parameter
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
@@ -54,7 +54,7 @@ func TestObserveLocalCluster_NonCNONode(t *testing.T) {
 // TestObserveLocalCluster_CNOOwner verifies that the CNO-owning node populates
 // its own hostname as CNOOwnerNode.
 func TestObserveLocalCluster_CNOOwner(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			// clusterOwnershipHelper: NODE1 is the CNO owner
@@ -77,7 +77,7 @@ func TestObserveLocalCluster_CNOOwner(t *testing.T) {
 // TestObserveLocalCluster_Standalone verifies that a standalone (non-clustered)
 // host returns Found=false with no error.
 func TestObserveLocalCluster_Standalone(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,
 		},
@@ -109,7 +109,7 @@ func TestObserveLocalCluster_NoTransport(t *testing.T) {
 // works even when m.clusterName is empty (no declared hyperv.cluster resource),
 // which is the primary non-CNO-node use case.
 func TestObserveLocalCluster_ScopeCapNotRequired(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`,
@@ -134,7 +134,7 @@ func TestObserveLocalCluster_ScopeCapNotRequired(t *testing.T) {
 // observeLocalCluster only executes read-only PowerShell scripts (Get-* cmdlets)
 // and never issues any write-mutating command.
 func TestObserveLocalCluster_ReadOnly(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`,
@@ -151,7 +151,7 @@ func TestObserveLocalCluster_ReadOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	transport.mu.Lock()
-	calls := make([]winRMCall, len(transport.calls))
+	calls := make([]recordedPSCall, len(transport.calls))
 	copy(calls, transport.calls)
 	transport.mu.Unlock()
 
@@ -172,7 +172,7 @@ func TestObserveLocalCluster_ReadOnly(t *testing.T) {
 // TestObserveDomain_ReadOnly extends AC3 to the full domain summary path —
 // GetDomain and getDomainSummary must only issue read-only PS scripts.
 func TestObserveDomain_ReadOnly(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// observeLocalCluster
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
@@ -194,7 +194,7 @@ func TestObserveDomain_ReadOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	transport.mu.Lock()
-	calls := make([]winRMCall, len(transport.calls))
+	calls := make([]recordedPSCall, len(transport.calls))
 	copy(calls, transport.calls)
 	transport.mu.Unlock()
 
@@ -224,7 +224,7 @@ func TestObserveDomain_ReadOnly(t *testing.T) {
 // in its remediation output — it is not an actual cmdlet call in that script.
 // The allowlist-based check in TestObserve*_ReadOnly already guards this; this
 // helper focuses on patterns that appear only as true cmdlet invocations.
-func assertNoWriteCmdlets(t *testing.T, calls []winRMCall) {
+func assertNoWriteCmdlets(t *testing.T, calls []recordedPSCall) {
 	t.Helper()
 	writePatterns := []string{
 		"New-VM", "Remove-VM", "Rename-VM", "Move-VMStorage",
@@ -248,7 +248,7 @@ func assertNoWriteCmdlets(t *testing.T, calls []winRMCall) {
 // ── enumerateVMNames tests ─────────────────────────────────────────────────────
 
 func TestEnumerateVMNames_ReturnsNames(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"vms":["web-01","db-01","jump-01"]}`,
 		},
@@ -262,7 +262,7 @@ func TestEnumerateVMNames_ReturnsNames(t *testing.T) {
 }
 
 func TestEnumerateVMNames_EmptyHost(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"vms":[]}`},
 	}
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
@@ -285,7 +285,7 @@ func TestEnumerateVMNames_NoTransport(t *testing.T) {
 // ── observeVSwitchDomain tests ─────────────────────────────────────────────────
 
 func TestObserveVSwitchDomain_ReturnsAllSwitches(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"switches":[{"Name":"External","SwitchType":"External"},{"Name":"Mgmt","SwitchType":"Internal"}]}`,
 		},
@@ -304,7 +304,7 @@ func TestObserveVSwitchDomain_ReturnsAllSwitches(t *testing.T) {
 }
 
 func TestObserveVSwitchDomain_NoSwitches(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"switches":[]}`},
 	}
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
@@ -327,7 +327,7 @@ func TestObserveVSwitchDomain_NoTransport(t *testing.T) {
 // ── getDomainSummary tests ─────────────────────────────────────────────────────
 
 func TestGetDomainSummary_ClusterMember(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`,
@@ -353,7 +353,7 @@ func TestGetDomainSummary_ClusterMember(t *testing.T) {
 }
 
 func TestGetDomainSummary_Standalone(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,
 			`{"vms":[]}`,
@@ -377,7 +377,7 @@ func TestGetDomainSummary_Standalone(t *testing.T) {
 // getDomainSummary must never issue any PS write-mutating command, confirming
 // that the domain observe path does not change existing convergence behaviour.
 func TestObserveDomain_NoSetCalls(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`,
@@ -396,7 +396,7 @@ func TestObserveDomain_NoSetCalls(t *testing.T) {
 	require.NoError(t, err)
 
 	transport.mu.Lock()
-	calls := make([]winRMCall, len(transport.calls))
+	calls := make([]recordedPSCall, len(transport.calls))
 	copy(calls, transport.calls)
 	transport.mu.Unlock()
 
@@ -405,10 +405,10 @@ func TestObserveDomain_NoSetCalls(t *testing.T) {
 
 // ── AC6: Conformance — determinism + no ephemeral fields ──────────────────────
 
-// buildDomainTestTransport builds a testWinRMTransport pre-loaded with enough
+// buildDomainTestTransport builds a testPSTransport pre-loaded with enough
 // outputs for two successive calls to Get("domain:hyperv") — each call issues
 // the same sequence of PS reads, so outputs repeat twice for determinism testing.
-func buildDomainTestTransport() *testWinRMTransport {
+func buildDomainTestTransport() *testPSTransport {
 	oneCycle := []string{
 		`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 		`{"owner":"NODE1"}`,
@@ -418,7 +418,7 @@ func buildDomainTestTransport() *testWinRMTransport {
 		`{"vms":["web-01"]}`,
 		`{"switches":[{"Name":"External","SwitchType":"External"}]}`,
 	}
-	return &testWinRMTransport{
+	return &testPSTransport{
 		perCallOutputs: append(append([]string{}, oneCycle...), oneCycle...),
 	}
 }
@@ -438,7 +438,7 @@ func TestGetDomain_Deterministic(t *testing.T) {
 // conformance.AssertNoEphemeralFields to confirm DomainObservation.AsMap()
 // contains no banned runtime values (ADR-016 §4).
 func TestGetDomain_NoEphemeralFields(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`,
@@ -511,7 +511,7 @@ func clusterMemberVMDomainOutputs() []string {
 // carrying the parsed VMGUID + NetworkAdapters (the #2891 readVMState additions),
 // and one vswitch:<name> entry — all from a single read-only sweep.
 func TestGetDomain_HappyPath(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
+	transport := &testPSTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
 	m.transport = transport
 	m.nodeHostname = "NODE2"
@@ -551,7 +551,7 @@ func TestGetDomain_HappyPath(t *testing.T) {
 // TestGetDomain_Standalone verifies GetDomain on a standalone (non-clustered)
 // host: no cluster:<name> entry is emitted, only the VM and vswitch entries.
 func TestGetDomain_Standalone(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// observeLocalCluster → standalone
 			`{"found":false}`,
@@ -582,7 +582,7 @@ func TestGetDomain_Standalone(t *testing.T) {
 // abort the whole sweep: an unparseable psGetVM response for one VM is skipped
 // (GetDomain lines 101-104) while the healthy VM is still emitted.
 func TestGetDomain_SkipsUnreadableVM(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,
 			// two VMs enumerated
@@ -608,7 +608,7 @@ func TestGetDomain_SkipsUnreadableVM(t *testing.T) {
 // found=false on the follow-up read (a race: destroyed between enumerate and
 // read) is skipped rather than emitted as an empty entry.
 func TestGetDomain_SkipsAbsentVM(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,
 			`{"vms":["ghost-01"]}`,
@@ -629,7 +629,7 @@ func TestGetDomain_SkipsAbsentVM(t *testing.T) {
 // TestGetDomain_ClusterError verifies GetDomain wraps and returns a cluster
 // observation error (GetDomain line 90) rather than swallowing it.
 func TestGetDomain_ClusterError(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		// Malformed psGetClusterSelf output → observeLocalCluster parse error.
 		perCallOutputs: []string{`not-json`},
 	}
@@ -646,7 +646,7 @@ func TestGetDomain_ClusterError(t *testing.T) {
 // TestGetDomain_VMEnumError verifies GetDomain wraps and returns a VM
 // enumeration error (GetDomain line 98).
 func TestGetDomain_VMEnumError(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,
 			// Malformed enumerateVMNames output → parse error.
@@ -665,7 +665,7 @@ func TestGetDomain_VMEnumError(t *testing.T) {
 // TestGetDomain_VSwitchError verifies GetDomain wraps and returns a vswitch
 // enumeration error (GetDomain line 110).
 func TestGetDomain_VSwitchError(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,
 			`{"vms":[]}`,
@@ -689,7 +689,7 @@ func TestGetDomain_VSwitchError(t *testing.T) {
 // "self") for a VM whose name appears in the cluster's RoleOwners map, and
 // connects-to edges for each switch in SwitchNames.
 func TestGetDomain_Edges_ClusteredVM(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// observeLocalCluster: NODE1 is CNO owner, web-01 is a cluster role
 			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
@@ -727,7 +727,7 @@ func TestGetDomain_Edges_ClusteredVM(t *testing.T) {
 // It verifies that GetDomain emits a runs-on: self edge for a VM on a host that
 // is not a cluster member.
 func TestGetDomain_Edges_StandaloneVM(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// standalone host — no cluster
 			`{"found":false}`,
@@ -761,7 +761,7 @@ func TestGetDomain_Edges_StandaloneVM(t *testing.T) {
 // TestGetDomain_Edges_ClusterContains verifies that the cluster entry in GetDomain
 // carries contains edges for each cluster member node, directed cluster→host.
 func TestGetDomain_Edges_ClusterContains(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
+	transport := &testPSTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
 	m.transport = transport
 	m.nodeHostname = "NODE2"
@@ -783,7 +783,7 @@ func TestGetDomain_Edges_ClusterContains(t *testing.T) {
 // TestObserveDomain_ReadOnly). Every PS script issued must be an allowed Get-*
 // read, and no write-mutating cmdlet may appear.
 func TestGetDomain_ReadOnly(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
+	transport := &testPSTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
 	m.transport = transport
 	m.nodeHostname = "NODE2"
@@ -792,7 +792,7 @@ func TestGetDomain_ReadOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	transport.mu.Lock()
-	calls := make([]winRMCall, len(transport.calls))
+	calls := make([]recordedPSCall, len(transport.calls))
 	copy(calls, transport.calls)
 	transport.mu.Unlock()
 

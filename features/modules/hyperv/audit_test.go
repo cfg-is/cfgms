@@ -146,7 +146,7 @@ func TestAuditRecordHypervOp_ErrorPath(t *testing.T) {
 // TestAuditRecordHypervOp_ErrorMessageSanitized verifies that the opErr text
 // persisted as the audit record's ErrorMessage passes through
 // logging.SanitizeLogValue. The text comes back from the Hyper-V host
-// (PowerShell/WinRM output), so it is attacker-influenced: a newline in it must
+// (PowerShell output), so it is attacker-influenced: a newline in it must
 // not be able to forge a second line in anything that renders the record.
 // make lint-log-injection cannot see this call site — AuditEventBuilder.Error
 // only shares a logger method's name — so this test is the guard.
@@ -462,7 +462,7 @@ func TestChangedFields_NoChange(t *testing.T) {
 // vmModuleWithAudit returns a hypervModule wired with both the given transport
 // and an audit manager over a real audit store, for tests that need to inspect
 // audit entries.
-func vmModuleWithAudit(t *testing.T, transport winrmTransport, tenantID string) (*hypervModule, *recordingAuditStore) {
+func vmModuleWithAudit(t *testing.T, transport psTransport, tenantID string) (*hypervModule, *recordingAuditStore) {
 	t.Helper()
 	store := newRecordingAuditStore(t)
 	mgr, err := audit.NewManager(store, "hyperv-test-vm")
@@ -483,7 +483,7 @@ func vmModuleWithAudit(t *testing.T, transport winrmTransport, tenantID string) 
 func TestAuditVM_ResizePopulatesBeforeAfter(t *testing.T) {
 	const vmName = "resize-me"
 	// Current host state: 2 CPUs, 4096 MB, stopped.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON(vmName, "stopped", 2, 4096)},
 	}
 	m, store := vmModuleWithAudit(t, transport, "t1")
@@ -550,7 +550,7 @@ func TestAuditVM_DeleteEmptyAfter(t *testing.T) {
 	const vmName = "del-vm"
 	// Transport: first call (getVM in absent path) returns current VM state;
 	// second call (Remove-VM) returns empty.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			hostVMJSON(vmName, "stopped", 2, 2048),
 			"", // Remove-VM response ignored
@@ -586,7 +586,7 @@ func TestAuditVM_DeleteEmptyAfter(t *testing.T) {
 func TestAuditVM_CreateEmptyBefore(t *testing.T) {
 	const vmName = "new-vm"
 	// Transport: first call (getVM) returns absent; second call (New-VM) succeeds.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m, store := vmModuleWithAudit(t, transport, "t3")
@@ -633,7 +633,7 @@ func TestAuditVM_SecurityNoLiveNames(t *testing.T) {
 	const switchName = "corp-internal"
 
 	// Host reports the VM with the VHD path and switch name.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			fmt.Sprintf(`{"found":true,"Name":%q,"MemoryStartupBytes":%d,"ProcessorCount":%d,"Generation":2,"Path":%q,"SwitchName":%q,"SwitchNames":[%q],"State":"Off"}`,
 				vmName, int64(4096)*1024*1024, 2, vhdPath, switchName, switchName),
@@ -677,7 +677,7 @@ func TestAuditVM_SecurityNoLiveNames(t *testing.T) {
 func TestAuditVM_PowerStateBeforeAfter(t *testing.T) {
 	const vmName = "power-vm"
 	// VM is running; desired state is stopped.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON(vmName, "running", 2, 4096)},
 	}
 	m, store := vmModuleWithAudit(t, transport, "t5")
