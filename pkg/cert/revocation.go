@@ -15,12 +15,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 )
 
-const revocationFileName = "revocation.json"
+const (
+	revocationFileName     = "revocation.json"
+	revocationLockFileName = revocationFileName + ".lock"
+)
 
 // RevocationEntry records a revoked certificate serial with metadata.
 type RevocationEntry = certinterfaces.RevocationEntry
@@ -88,20 +92,38 @@ func (rs *revocationStore) loadLocked() error {
 	return nil
 }
 
-// addAndPersist adds the entry to the in-memory map and atomically saves to disk.
-// If the serial is already revoked the call is a no-op (original timestamp preserved).
-// The write lock is held for the duration of the update.
+// addAndPersist merges the entry into the on-disk list under an exclusive
+// cross-process lock. The file is re-read under the lock so a revocation written
+// by another process since this store last loaded is never overwritten. If the
+// serial is already present the call is a no-op (original timestamp preserved).
+// If the lock cannot be taken or the re-read fails, nothing is written (fail
+// closed). Lock order: rs.mu first, then the file lock.
 func (rs *revocationStore) addAndPersist(entry RevocationEntry) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
+
+	unlock, err := lockRevocationFile(filepath.Join(filepath.Dir(rs.filePath), revocationLockFileName))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if err := rs.loadLocked(); err != nil {
+		return err
+	}
 	if _, exists := rs.bySerial[entry.Serial]; exists {
 		return nil
 	}
 	rs.bySerial[entry.Serial] = entry
-	return rs.saveLocked()
+	if err := rs.saveLocked(); err != nil {
+		delete(rs.bySerial, entry.Serial)
+		return err
+	}
+	return nil
 }
 
-// saveLocked serializes bySerial to disk atomically. Must be called with the write lock held.
+// saveLocked serializes bySerial to disk atomically via a uniquely named temp
+// file in the same directory. Must be called with the write lock and file lock held.
 func (rs *revocationStore) saveLocked() error {
 	entries := make([]RevocationEntry, 0, len(rs.bySerial))
 	for _, e := range rs.bySerial {
@@ -114,11 +136,29 @@ func (rs *revocationStore) saveLocked() error {
 		return fmt.Errorf("failed to marshal revocation list: %w", err)
 	}
 
-	tmpPath := rs.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(rs.filePath), revocationFileName+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("failed to write revocation list: %w", err)
 	}
-
+	tmpPath := tmp.Name()
+	fail := func(msg string, err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+	if err := tmp.Chmod(0600); err != nil && runtime.GOOS != "windows" {
+		return fail("failed to write revocation list", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail("failed to write revocation list", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail("failed to sync revocation list", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to write revocation list: %w", err)
+	}
 	if err := os.Rename(tmpPath, rs.filePath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to finalize revocation list: %w", err)

@@ -3,8 +3,12 @@
 package cert
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,4 +200,102 @@ func TestRevokeIdempotent(t *testing.T) {
 	require.Len(t, entries2, 1, "revocation list must not grow on double-revoke")
 	assert.Equal(t, firstRevokedAt, entries2[0].RevokedAt,
 		"original RevokedAt timestamp must be preserved on double-revoke")
+}
+
+// TestRevocationStore_TwoStoresDoNotLoseRevocations verifies that a store that
+// loaded before another store wrote still preserves the other store's entry.
+func TestRevocationStore_TwoStoresDoNotLoseRevocations(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := newRevocationStore(dir)
+	require.NoError(t, err)
+	second, err := newRevocationStore(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, first.addAndPersist(RevocationEntry{Serial: "A", Reason: "first"}))
+	require.NoError(t, second.addAndPersist(RevocationEntry{Serial: "B", Reason: "second"}))
+
+	fresh, err := newRevocationStore(dir)
+	require.NoError(t, err)
+	assert.True(t, fresh.isRevoked("A"), "serial A written by the first store must survive")
+	assert.True(t, fresh.isRevoked("B"))
+}
+
+// TestRevocationStore_ConcurrentIndependentStores verifies every serial persists
+// when several independent stores revoke at the same time.
+func TestRevocationStore_ConcurrentIndependentStores(t *testing.T) {
+	dir := t.TempDir()
+	const n = 8
+
+	stores := make([]*revocationStore, n)
+	for i := range stores {
+		s, err := newRevocationStore(dir)
+		require.NoError(t, err)
+		stores[i] = s
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range stores {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = stores[i].addAndPersist(RevocationEntry{Serial: fmt.Sprintf("serial-%d", i)})
+		}(i)
+	}
+	wg.Wait()
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
+
+	fresh, err := newRevocationStore(dir)
+	require.NoError(t, err)
+	for i := 0; i < n; i++ {
+		assert.True(t, fresh.isRevoked(fmt.Sprintf("serial-%d", i)), "serial-%d lost", i)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "revocation.json.*"))
+	require.NoError(t, err)
+	for _, m := range matches {
+		assert.Equal(t, revocationLockFileName, filepath.Base(m), "leftover temp file")
+	}
+}
+
+// TestRevocationStore_CorruptFileFailsClosed verifies a corrupt revocation file
+// makes addAndPersist return an error and leaves the file untouched.
+func TestRevocationStore_CorruptFileFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	rs, err := newRevocationStore(dir)
+	require.NoError(t, err)
+
+	path := filepath.Join(dir, revocationFileName)
+	corrupt := []byte("{not json")
+	require.NoError(t, os.WriteFile(path, corrupt, 0600))
+
+	require.Error(t, rs.addAndPersist(RevocationEntry{Serial: "X"}))
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, corrupt, got)
+}
+
+// TestRevocationStore_ExistingEntryKeepsTimestamp verifies an already-present
+// serial (written by another store) is a no-op that keeps its original entry.
+func TestRevocationStore_ExistingEntryKeepsTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	first, err := newRevocationStore(dir)
+	require.NoError(t, err)
+	second, err := newRevocationStore(dir)
+	require.NoError(t, err)
+
+	orig := RevocationEntry{Serial: "A", Reason: "original", RevokedAt: time.Unix(1000, 0).UTC()}
+	require.NoError(t, first.addAndPersist(orig))
+	require.NoError(t, second.addAndPersist(RevocationEntry{Serial: "A", Reason: "later", RevokedAt: time.Unix(2000, 0).UTC()}))
+
+	fresh, err := newRevocationStore(dir)
+	require.NoError(t, err)
+	entries := fresh.allEntries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "original", entries[0].Reason)
+	assert.True(t, orig.RevokedAt.Equal(entries[0].RevokedAt))
 }
