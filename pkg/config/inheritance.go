@@ -349,6 +349,23 @@ func tenantLeafName(tenantID string) string {
 	return tenantID
 }
 
+// TenantLevelConfigKey returns the ConfigKey of the policy document for a tenant at
+// the given hierarchy level. It is the single naming rule shared by the inheritance
+// reader and every writer of tenant-level documents, so a document is always saved
+// where resolution reads it. ok is false for levels that have no tenant document.
+func TenantLevelConfigKey(level InheritanceLevel, tenantID string) (key *cfgconfig.ConfigKey, ok bool) {
+	switch level {
+	case LevelMSP:
+		return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "msp-policies", Name: "global"}, true
+	case LevelClient:
+		return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "client-policies", Name: tenantLeafName(tenantID)}, true
+	case LevelGroup:
+		return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "group-policies", Name: fmt.Sprintf("%s-groups", tenantLeafName(tenantID))}, true
+	default:
+		return nil, false
+	}
+}
+
 // applyConfigurationLevel applies configuration from a specific hierarchy level.
 // source is the pre-snapshotted ConfigSourceInfo for this tenant, resolved once by
 // ResolveConfiguration before the cascade loop. In Phase 1 the router always returns
@@ -356,29 +373,11 @@ func tenantLeafName(tenantID string) string {
 // Phase 2 (Story C) will use source.Type to dispatch to a git store.
 func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string, level int, source *ConfigSourceInfo) error {
 	_ = source // Phase 1: routing handled internally by configStore (always controller)
-	// Try to get configuration at this level
-	var configNamespace string
-	var configName string
-
-	switch InheritanceLevel(level) {
-	case LevelMSP:
-		configNamespace = "msp-policies"
-		configName = "global"
-	case LevelClient:
-		configNamespace = "client-policies"
-		configName = tenantLeafName(tenantID)
-	case LevelGroup:
-		configNamespace = "group-policies"
-		configName = fmt.Sprintf("%s-groups", tenantLeafName(tenantID))
-	default:
+	configKey, ok := TenantLevelConfigKey(InheritanceLevel(level), tenantID)
+	if !ok {
 		return nil // Skip unknown levels
 	}
-
-	configKey := &cfgconfig.ConfigKey{
-		TenantID:  tenantID,
-		Namespace: configNamespace,
-		Name:      configName,
-	}
+	configName := configKey.Name
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
@@ -403,7 +402,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 		ConfigName: configName,
 		Version:    configEntry.Version,
 		UpdatedAt:  configEntry.UpdatedAt,
-		Source:     fmt.Sprintf("Level %d (%s)", level, configNamespace),
+		Source:     fmt.Sprintf("Level %d (%s)", level, configKey.Namespace),
 	}
 
 	// Apply configuration using declarative merging (named resources replace entirely)

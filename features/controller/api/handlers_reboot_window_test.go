@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -154,6 +156,38 @@ func TestGetStewardRebootWindow_CascadeResolvesInheritedWindow(t *testing.T) {
 	assert.NotEmpty(t, data["next_occurrence"], "next_occurrence must be set when a window cascades")
 	assert.NotEmpty(t, data["next_occurrence_display"], "next_occurrence_display must be set")
 	assert.Equal(t, stewardID, data["steward_id"])
+}
+
+// TestPutTenantRebootWindow_PathStyleTenantID_ResolvesThroughInheritance verifies the
+// tenant PUT writes the window where the inheritance resolver reads it when the tenant
+// ID is path-style: the document name is the tenant's leaf name, not the full ID.
+// It fails if the writer uses the raw tenant ID as the document name.
+func TestPutTenantRebootWindow_PathStyleTenantID_ResolvesThroughInheritance(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	v, ok := testTenantStores.Load(server.tenantManager)
+	require.True(t, ok)
+	tenantID := testRootTenantID + "/path-client"
+	require.NoError(t, v.(tenant.Store).CreateTenant(ctx, &business.TenantData{
+		ID: tenantID, Name: "Path Client", ParentID: testRootTenantID, Status: business.TenantStatusActive,
+	}))
+
+	// The router cannot carry "/" in {tenant_id}, so invoke the handler directly.
+	putBody, err := json.Marshal(rebootWindowPutRequest{ScheduleYAML: sampleScheduleYAML})
+	require.NoError(t, err)
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/x/reboot-window", bytes.NewReader(putBody))
+	putReq = mux.SetURLVars(putReq, map[string]string{"tenant_id": tenantID})
+	putReq = putReq.WithContext(context.WithValue(putReq.Context(), principalContextKey,
+		&Principal{ID: "admin", GlobalScope: true, ImplicitAdmin: true}))
+	putRec := httptest.NewRecorder()
+	server.handlePutTenantRebootWindow(putRec, putReq)
+	require.Equal(t, http.StatusOK, putRec.Code, "tenant PUT should succeed: %s", putRec.Body.String())
+
+	rootCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	effective, err := server.configService.GetEffectiveConfiguration(rootCtx, tenantID, "")
+	require.NoError(t, err)
+	require.NotNil(t, effective.Config.Steward.RebootWindow, "tenant reboot window must be applied by inheritance")
 }
 
 // TestGetStewardRebootWindow_UnrestrictedWhenNoWindowDeclared verifies that the GET
