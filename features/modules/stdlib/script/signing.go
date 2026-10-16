@@ -264,9 +264,10 @@ func applyTrustMode(cfg ModuleSigningConfig, thumbprints ...string) error {
 			return nil
 		}
 		if cfg.AllowPublicCA {
-			// The script was signed by a key not in the allowlist, but AllowPublicCA
-			// permits any signature that was already cryptographically valid.
-			return nil
+			// No certificate chain is validated to a system root (with a code-signing EKU)
+			// yet, so accepting "publicly trusted" signers would accept any key that merely
+			// verifies cryptographically. Refuse until chain validation exists.
+			return fmt.Errorf("%w: allow_public_ca is not supported: public CA chain validation is not implemented; add the signing key to the trusted keys allowlist", modules.ErrInvalidInput)
 		}
 		return fmt.Errorf("%w: signing key thumbprint %q is not in the trusted keys allowlist and allow_public_ca is false", modules.ErrInvalidInput, thumbprint)
 

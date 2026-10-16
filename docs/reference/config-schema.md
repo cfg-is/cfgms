@@ -605,7 +605,7 @@ Child tenants inherit the parent's script signing config. Policy may only be **t
 | `policy` | string | `""` (none) | optional | Enforcement level: `none`, `optional`, or `required` |
 | `trust_mode` | string | `""` | optional | Which signing keys are accepted: `any_valid`, `trusted_keys`, or `trusted_keys_and_public` |
 | `trusted_keys` | list[object] | `[]` | cond | Trusted signing keys, required when `trust_mode` is `trusted_keys` or `trusted_keys_and_public` |
-| `allow_public_ca` | boolean | `false` | optional | Also accept signatures from public CAs when `trust_mode: trusted_keys_and_public` |
+| `allow_public_ca` | boolean | `false` | optional | Reserved: public CA chain validation is not implemented, so a signature from a key outside `trusted_keys` is refused when this is `true` (`trust_mode: trusted_keys_and_public`) |
 | `require_signed_adhoc` | boolean | `false` | optional | Require a valid signature on every ad-hoc script command. Rejected when `policy` is `none` or empty. Inherited from the parent when the parent sets it. |
 
 **`trusted_keys[]` entries:** `features/config/stewardtypes/types.go` `TrustedKeyRef`

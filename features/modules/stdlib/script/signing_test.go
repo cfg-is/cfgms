@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"strings"
 	"testing"
 )
 
@@ -365,9 +366,31 @@ func TestApplyTrustMode_TrustedKeysAndPublic_NoMatchAllowPublicCA(t *testing.T) 
 		TrustedKeys:   []TrustedKeyEntry{{Name: "corp-cert", Thumbprint: "AABBCCDD"}},
 		AllowPublicCA: true,
 	}
-	// Thumbprint doesn't match the allowlist but AllowPublicCA permits it.
-	if err := applyTrustMode(cfg, "99887766"); err != nil {
-		t.Errorf("AllowPublicCA=true should accept non-allowlisted key: %v", err)
+	// AllowPublicCA must not accept a non-allowlisted key: no chain validation exists.
+	err := applyTrustMode(cfg, "99887766")
+	if err == nil || !strings.Contains(err.Error(), "allow_public_ca is not supported") {
+		t.Errorf("AllowPublicCA=true must refuse non-allowlisted key with clear error, got: %v", err)
+	}
+	// An allowlisted key is still accepted.
+	if err := applyTrustMode(cfg, "AABBCCDD"); err != nil {
+		t.Errorf("allowlisted key should pass: %v", err)
+	}
+}
+
+func TestWindowsPowerShellPath_AbsoluteUnderSystemRoot(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	want := `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+	for name, m := range map[string]map[string]string{
+		"SystemRoot": {"SystemRoot": `C:\Windows`},
+		"windir":     {"windir": `C:\Windows`},
+		"none":       {},
+	} {
+		if got := windowsPowerShellPath(env(m)); got != want {
+			t.Errorf("%s: got %q want %q", name, got, want)
+		}
+	}
+	if got := windowsPowerShellPath(env(map[string]string{"SystemRoot": `relative\dir`})); got != "" {
+		t.Errorf("relative SystemRoot must yield empty path, got %q", got)
 	}
 }
 

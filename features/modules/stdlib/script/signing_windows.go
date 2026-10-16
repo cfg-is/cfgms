@@ -61,8 +61,12 @@ func verifyAuthenticodeSignature(content []byte, sig *ScriptSignature, cfg Modul
 	// #nosec G204 — the file path is sourced from os.CreateTemp (not user input) and
 	// single-quote characters are escaped via strings.ReplaceAll above. The PowerShell
 	// executable is a fixed string; no user-controlled data reaches the command name.
+	psExe := systemPowerShellPath()
+	if psExe == "" {
+		return fmt.Errorf("%w: cannot resolve absolute path to powershell.exe", modules.ErrInvalidInput)
+	}
 	out, err := exec.Command( //nolint:gosec // see #nosec comment above
-		"powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd,
+		psExe, "-NoProfile", "-NonInteractive", "-Command", psCmd,
 	).Output()
 	if err != nil {
 		return fmt.Errorf("%w: Get-AuthenticodeSignature execution failed: %v", modules.ErrInvalidInput, err)
