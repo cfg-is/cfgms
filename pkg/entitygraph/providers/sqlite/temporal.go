@@ -5,7 +5,9 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -219,6 +221,7 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 		return nil, nil
 	}
 
+	cut := interfaces.NewTenantCut(r.TenantFilter, r.TenantSubtreeIDs)
 	var events []*interfaces.TimelineEvent
 
 	for _, eid := range eids {
@@ -290,6 +293,8 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 			return nil, fmt.Errorf("entitygraph/sqlite: timeline same-as scan for %s: %w", subject, err)
 		}
 
+		var saEvents []*interfaces.TimelineEvent
+		var saPeers []string
 		for saRows.Next() {
 			var id int64
 			var observedAt, kind, edgeSubject string
@@ -299,7 +304,11 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 			}
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
 			_, fromSubj, toSubj, _ := parseEdgeSubject(edgeSubject)
-			events = append(events, &interfaces.TimelineEvent{
+			peer := fromSubj
+			if fromSubj == subject {
+				peer = toSubj
+			}
+			saEvents = append(saEvents, &interfaces.TimelineEvent{
 				Subject:    eid,
 				OccurredAt: oa,
 				Kind:       "same-as-change",
@@ -311,12 +320,26 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 					"version":          id,
 				},
 			})
+			saPeers = append(saPeers, peer)
 		}
 		if err := saRows.Err(); err != nil {
 			_ = saRows.Close()
 			return nil, fmt.Errorf("entitygraph/sqlite: iterate same-as timeline rows for %s: %w", subject, err)
 		}
 		_ = saRows.Close()
+
+		// The correlator writes cross-tenant same-as edges by design; an event
+		// carries both ends, so it is dropped unless the peer is inside the cut. The
+		// check runs after the rows are closed so it never holds a second connection.
+		for i, ev := range saEvents {
+			visible, err := p.subjectVisible(ctx, cut, saPeers[i])
+			if err != nil {
+				return nil, err
+			}
+			if visible {
+				events = append(events, ev)
+			}
+		}
 	}
 
 	// Merge all events into a single time-ordered stream.
@@ -330,4 +353,24 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 	})
 
 	return events, nil
+}
+
+// subjectVisible reports whether subject is owned inside cut. It is true for an
+// inactive cut; a subject with no entity index row is outside an active cut, as
+// in applyTenantCut.
+func (p *SQLiteEntityGraphProvider) subjectVisible(ctx context.Context, cut interfaces.TenantCut, subject string) (bool, error) {
+	if !cut.Active() {
+		return true, nil
+	}
+	var owningTenant string
+	err := p.db.QueryRowContext(ctx,
+		`SELECT owning_tenant FROM eg_entity_index WHERE subject = ?`, subject,
+	).Scan(&owningTenant)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("entitygraph/sqlite: timeline tenant cut for %s: %w", subject, err)
+	}
+	return cut.Visible(owningTenant), nil
 }

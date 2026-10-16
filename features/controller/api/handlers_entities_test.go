@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -1338,4 +1339,73 @@ func TestHandleGetDesiredState_HappyPath_Returns200(t *testing.T) {
 	var view egtypes.DesiredStateView
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &view))
 	assert.Equal(t, "rev-test-1", view.ConfigRevision)
+}
+
+// reportSameAsChain reports n entities owned by tenant and links them in one
+// same-as chain through the provider's own write path.
+func reportSameAsChain(t *testing.T, p *sqlite.SQLiteEntityGraphProvider, prefix string, tenant string, n int) []string {
+	t.Helper()
+	now := time.Now().UTC()
+	eids := make([]string, n)
+	var obs []egtypes.Observation
+	for i := range eids {
+		eids[i] = fmt.Sprintf("host:%s-n%04d", prefix, i)
+		obs = append(obs, egtypes.Observation{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now, Subject: eids[i],
+			Kind: egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{"entity_kind": "host", "owning_tenant": tenant},
+		})
+	}
+	for i := 1; i < n; i++ {
+		obs = append(obs, egtypes.Observation{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: "same-as|" + eids[i-1] + "|" + eids[i],
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		})
+	}
+	require.NoError(t, p.ReportObservations(context.Background(),
+		eginterfaces.ObservationBatch{Source: "test:reporter", Observations: obs}))
+	return eids
+}
+
+func TestHandleGetEntity_CollapseGroupTooLarge_Returns422(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	eids := reportSameAsChain(t, p, "cgtl", "test-tenant", eginterfaces.MaxCollapseGroupMembers+1)
+	path := "/api/v1/entities/" + eids[0]
+
+	t.Run("authorized caller gets 422", func(t *testing.T) {
+		apiKey := NewTestKey(t, srv, []string{"entity:read"})
+		req := httptest.NewRequest(http.MethodGet, path+"?collapse_group=true", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.Error)
+		assert.Equal(t, "COLLAPSE_GROUP_TOO_LARGE", resp.Error.Code)
+	})
+
+	t.Run("same read without collapse_group is unaffected", func(t *testing.T) {
+		apiKey := NewTestKey(t, srv, []string{"entity:read"})
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("unauthorized caller gets the not-found answer", func(t *testing.T) {
+		apiKey := NewEphemeralTestKey(t, srv, []string{"entity:read"}, "tenant-a", 5*time.Minute)
+		req := httptest.NewRequest(http.MethodGet, path+"?collapse_group=true", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"a caller who may not read the entity must not learn a group exists: %s", rec.Body.String())
+	})
 }

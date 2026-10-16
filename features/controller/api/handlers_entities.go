@@ -423,7 +423,28 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 		opts.CollapseGroup = true
 	}
 
+	const route = "GET /api/v1/entities/{eid}"
 	view, err := s.egProvider.GetEntity(r.Context(), eid, opts)
+	if err != nil && opts.CollapseGroup && errors.Is(err, eginterfaces.ErrCollapseGroupTooLarge) {
+		// Answering 422 would reveal that a group exists, so first prove the
+		// caller may read the entity itself: re-read without the group and run
+		// the same authorization as a successful read.
+		plain := opts
+		plain.CollapseGroup = false
+		entityView, perr := s.egProvider.GetEntity(r.Context(), eid, plain)
+		if perr != nil || entityView == nil || entityView.Entity == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !s.authorizeRecordRead(w, r, entityView.Entity.OwningTenant, route, func() {
+			http.Error(w, "not found", http.StatusNotFound)
+		}) {
+			return
+		}
+		s.writeErrorResponse(w, http.StatusUnprocessableEntity,
+			"same-as group has too many members to collapse", "COLLAPSE_GROUP_TOO_LARGE")
+		return
+	}
 	if err != nil {
 		if isEntityNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -441,7 +462,6 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const route = "GET /api/v1/entities/{eid}"
 	if !s.authorizeRecordRead(w, r, view.Entity.OwningTenant, route, func() {
 		http.Error(w, "not found", http.StatusNotFound)
 	}) {
@@ -455,6 +475,11 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 		opts.TenantFilter = view.Entity.OwningTenant
 		opts.TenantSubtreeIDs = nil
 		if view, err = s.egProvider.GetEntity(r.Context(), eid, opts); err != nil || view == nil {
+			if errors.Is(err, eginterfaces.ErrCollapseGroupTooLarge) {
+				s.writeErrorResponse(w, http.StatusUnprocessableEntity,
+					"same-as group has too many members to collapse", "COLLAPSE_GROUP_TOO_LARGE")
+				return
+			}
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -690,7 +715,8 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 
 // handleGetTimeline handles GET /api/v1/entities/timeline.
 // Query params: eid (repeatable, at least one required), from, to (RFC 3339, required).
-// GetTimeline has no per-eid tenant filter; each EID is verified via GetEntity first (ADR-022 §7).
+// Each EID is verified via GetEntity first (ADR-022 §7); the cut is also passed to
+// GetTimeline so same-as events whose peer is outside it are dropped.
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
 		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
@@ -745,6 +771,7 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 
 	var events []*eginterfaces.TimelineEvent
 	if len(eids) > 0 {
+		tr.TenantFilter, tr.TenantSubtreeIDs = tenant, ids
 		events, err = s.egProvider.GetTimeline(r.Context(), eids, tr)
 	} else {
 		events = []*eginterfaces.TimelineEvent{}

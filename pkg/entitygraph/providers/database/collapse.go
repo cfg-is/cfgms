@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -41,39 +42,82 @@ func tenantSubtreeCond(col string, cut interfaces.TenantCut, n *int, args *[]int
 	return fmt.Sprintf("%s IN (%s)", col, strings.Join(phs, ", "))
 }
 
+// groupWalk is the bounded breadth-first state shared by both same-as walks.
+type groupWalk struct {
+	visited map[string]struct{}
+	queue   []string
+}
+
+func newGroupWalk(start string) *groupWalk {
+	return &groupWalk{visited: map[string]struct{}{start: {}}, queue: []string{start}}
+}
+
+// add records peer as a group member. It fails with ErrCollapseGroupTooLarge as
+// soon as the distinct member count passes MaxCollapseGroupMembers.
+func (w *groupWalk) add(peer string) error {
+	if _, seen := w.visited[peer]; seen {
+		return nil
+	}
+	if len(w.visited) >= interfaces.MaxCollapseGroupMembers {
+		return interfaces.ErrCollapseGroupTooLarge
+	}
+	w.visited[peer] = struct{}{}
+	w.queue = append(w.queue, peer)
+	return nil
+}
+
 // resolveGroupMembersCurrentState walks the same-as graph from eid using the
 // current edge projection (fast path for non-temporal reads). Returns all group
 // member EIDs including the subject itself. The group is traversed as an
-// undirected graph: the same-as edge is symmetric.
-func (p *DatabaseEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.Context, eid interfaces.EIDRef) ([]interfaces.EIDRef, error) {
-	visited := map[string]struct{}{eid.String(): {}}
-	queue := []string{eid.String()}
+// undirected graph: the same-as edge is symmetric. The walk is bounded by
+// MaxCollapseGroupMembers and, when the cut is active, only follows edges whose
+// both ends are owned inside the cut.
+func (p *DatabaseEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.Context, eid interfaces.EIDRef, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
+	w := newGroupWalk(eid.String())
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for len(w.queue) > 0 {
+		current := w.queue[0]
+		w.queue = w.queue[1:]
 
-		rows, err := p.db.QueryContext(ctx,
-			`SELECT DISTINCT from_subject, to_subject
-			 FROM eg_edge_projection
-			 WHERE edge_type = 'same-as'
-			   AND (from_subject = $1 OR to_subject = $2)`,
-			current, current,
-		)
+		query := `SELECT DISTINCT ep.from_subject, ep.to_subject
+			 FROM eg_edge_projection ep`
+		args := []interface{}{current}
+		n := 2
+		conds := []string{"ep.edge_type = 'same-as'", "(ep.from_subject = $1 OR ep.to_subject = $1)"}
+		if cut.Active() {
+			query += `
+			 JOIN eg_entity_index fi ON fi.subject = ep.from_subject
+			 JOIN eg_entity_index ti ON ti.subject = ep.to_subject`
+			conds = append(conds,
+				tenantSubtreeCond("fi.owning_tenant", cut, &n, &args),
+				tenantSubtreeCond("ti.owning_tenant", cut, &n, &args),
+			)
+		}
+		args = append(args, interfaces.MaxCollapseGroupMembers+1)
+		// #nosec G202 -- conds holds fixed predicates and generated $N
+		// placeholders; every value, including tenant IDs, is bound through args.
+		query += " WHERE " + strings.Join(conds, " AND ") + fmt.Sprintf(" LIMIT $%d", n)
+
+		rows, err := p.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: resolve group edges for %s: %w", current, err)
 		}
 
+		count := 0
 		for rows.Next() {
 			var fromSubj, toSubj string
 			if err := rows.Scan(&fromSubj, &toSubj); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("entitygraph/database: scan group edge: %w", err)
 			}
+			if count++; count > interfaces.MaxCollapseGroupMembers {
+				_ = rows.Close()
+				return nil, interfaces.ErrCollapseGroupTooLarge
+			}
 			for _, peer := range []string{fromSubj, toSubj} {
-				if _, seen := visited[peer]; !seen {
-					visited[peer] = struct{}{}
-					queue = append(queue, peer)
+				if err := w.add(peer); err != nil {
+					_ = rows.Close()
+					return nil, err
 				}
 			}
 		}
@@ -84,55 +128,86 @@ func (p *DatabaseEntityGraphProvider) resolveGroupMembersCurrentState(ctx contex
 		_ = rows.Close()
 	}
 
-	return sortedGroupMembers(visited), nil
+	return sortedGroupMembers(w.visited), nil
+}
+
+// asOfPeerBranch builds one branch of the as-of peer query: the latest same-as
+// observation row per edge subject at or before asOf that matches the LIKE
+// pattern in $likeIdx, reduced to the peer subject by peerExpr, with retracted
+// edges (judged on the latest row, not any older one) and peers outside the cut
+// removed in SQL. $asOfIdx is the asOf bound; n is the next free placeholder.
+func asOfPeerBranch(likeIdx, asOfIdx int, peerExpr string, cut interfaces.TenantCut, n *int, args *[]interface{}) string {
+	q := fmt.Sprintf(`SELECT b.peer FROM (
+				SELECT %s AS peer, l.kind AS kind
+				FROM eg_observation_log l
+				WHERE l.subject LIKE $%d ESCAPE '\'
+				  AND l.observed_at <= $%d
+				  AND NOT EXISTS (
+				      SELECT 1 FROM eg_observation_log m
+				      WHERE m.subject = l.subject AND m.observed_at <= $%d
+				        AND (m.observed_at > l.observed_at
+				             OR (m.observed_at = l.observed_at AND m.id > l.id))
+				  )
+			) b
+			WHERE b.kind <> 'absence'`, peerExpr, likeIdx, asOfIdx, asOfIdx)
+	if cut.Active() {
+		q += " AND b.peer IN (SELECT subject FROM eg_entity_index WHERE " +
+			tenantSubtreeCond("owning_tenant", cut, n, args) + ")"
+	}
+	return q
 }
 
 // resolveGroupMembersAsOf walks the same-as graph from eid using the observation
 // log, considering only edges that were active (not absent) at or before asOf.
-// Uses DISTINCT ON to pick the latest kind per edge subject at or before asOf.
-func (p *DatabaseEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Context, eid interfaces.EIDRef, asOf time.Time) ([]interfaces.EIDRef, error) {
+// Retracted edges and peers outside the cut are removed in SQL, so they never
+// count toward MaxCollapseGroupMembers.
+func (p *DatabaseEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Context, eid interfaces.EIDRef, asOf time.Time, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
 	asOfStr := asOf.UTC().Format(time.RFC3339Nano)
-	visited := map[string]struct{}{eid.String(): {}}
-	queue := []string{eid.String()}
+	w := newGroupWalk(eid.String())
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for len(w.queue) > 0 {
+		current := w.queue[0]
+		w.queue = w.queue[1:]
 
-		// DISTINCT ON picks the most-recent log row per edge subject at or before asOf.
-		rows, err := p.db.QueryContext(ctx, `
-			SELECT DISTINCT ON (l.subject) l.subject, l.kind
-			FROM eg_observation_log l
-			WHERE (l.subject LIKE $1 ESCAPE '\' OR l.subject LIKE $2 ESCAPE '\')
-			  AND l.observed_at <= $3
-			ORDER BY l.subject, l.observed_at DESC, l.id DESC`,
-			"same-as|"+escapeLIKE(current)+"|%",
-			"same-as|%|"+escapeLIKE(current),
+		// Edge subjects are "same-as|<from>|<to>". Lengths are in characters
+		// because SQL substr/length count characters, not bytes.
+		fromPrefixLen := utf8.RuneCountInString("same-as|" + current + "|")
+		toLen := utf8.RuneCountInString(current)
+
+		// $1 from-pattern, $2 to-pattern, $3 asOf, $4 peer offset, $5 current length.
+		args := []interface{}{
+			"same-as|" + escapeLIKE(current) + "|%",
+			"same-as|%|" + escapeLIKE(current),
 			asOfStr,
-		)
+			fromPrefixLen + 1,
+			toLen,
+		}
+		n := 6
+		fromBranch := asOfPeerBranch(1, 3, "substr(l.subject, $4::int)", cut, &n, &args)
+		toBranch := asOfPeerBranch(2, 3, "substr(l.subject, 9, length(l.subject) - 9 - $5::int)", cut, &n, &args)
+		args = append(args, interfaces.MaxCollapseGroupMembers+1)
+
+		// #nosec G202 -- the branches hold fixed SQL and generated $N
+		// placeholders; every value, including tenant IDs, is bound through args.
+		rows, err := p.db.QueryContext(ctx, fromBranch+" UNION "+toBranch+fmt.Sprintf(" LIMIT $%d", n), args...)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: resolve group as-of for %s: %w", current, err)
 		}
 
+		count := 0
 		for rows.Next() {
-			var edgeSubject, kind string
-			if err := rows.Scan(&edgeSubject, &kind); err != nil {
+			var peer string
+			if err := rows.Scan(&peer); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("entitygraph/database: scan group as-of edge: %w", err)
 			}
-			// Absence means the edge was retracted at asOf.
-			if kind == string(types.ObservationKindAbsence) {
-				continue
+			if count++; count > interfaces.MaxCollapseGroupMembers {
+				_ = rows.Close()
+				return nil, interfaces.ErrCollapseGroupTooLarge
 			}
-			_, fromSubj, toSubj, err := parseEdgeSubject(edgeSubject)
-			if err != nil {
-				continue
-			}
-			for _, peer := range []string{fromSubj, toSubj} {
-				if _, seen := visited[peer]; !seen {
-					visited[peer] = struct{}{}
-					queue = append(queue, peer)
-				}
+			if err := w.add(peer); err != nil {
+				_ = rows.Close()
+				return nil, err
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -142,7 +217,7 @@ func (p *DatabaseEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Contex
 		_ = rows.Close()
 	}
 
-	return sortedGroupMembers(visited), nil
+	return sortedGroupMembers(w.visited), nil
 }
 
 // sortedGroupMembers converts a visited-set map to a sorted EID slice.
@@ -270,6 +345,16 @@ func buildConflicts(entries []sourceEntry, merged map[string]interface{}) map[st
 //  2. Apply tenant cut (current-ownership axis) before any merge.
 //  3. Per-attribute precedence merge across visible members.
 //
+// Bound and cut: the walk is bounded by interfaces.MaxCollapseGroupMembers
+// distinct members including the requested entity (exactly that many succeeds).
+// When the cut is active it is applied during the walk, in SQL: an edge is
+// followed only when its peer (and, on the current-state path, both ends) is
+// owned inside the cut, so out-of-cut entities never count toward the limit and
+// never connect members. Retracted edges never count either. A group with more
+// members than the limit returns interfaces.ErrCollapseGroupTooLarge, an error
+// rather than a truncated group; applyTenantCut and the member-source loads
+// never run on it.
+//
 // Returns nil when the entity has no same-as group or all other group members
 // are cut by the tenant filter (single-visible-member group is a no-op).
 func (p *DatabaseEntityGraphProvider) resolveCollapseGroup(ctx context.Context, eid interfaces.EIDRef, asOf *time.Time, cut interfaces.TenantCut) (*types.CollapseGroupView, error) {
@@ -277,9 +362,9 @@ func (p *DatabaseEntityGraphProvider) resolveCollapseGroup(ctx context.Context, 
 	var members []interfaces.EIDRef
 	var err error
 	if asOf != nil {
-		members, err = p.resolveGroupMembersAsOf(ctx, eid, *asOf)
+		members, err = p.resolveGroupMembersAsOf(ctx, eid, *asOf, cut)
 	} else {
-		members, err = p.resolveGroupMembersCurrentState(ctx, eid)
+		members, err = p.resolveGroupMembersCurrentState(ctx, eid, cut)
 	}
 	if err != nil {
 		return nil, err

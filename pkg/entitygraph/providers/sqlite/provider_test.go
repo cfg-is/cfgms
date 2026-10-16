@@ -478,7 +478,7 @@ func TestLIKEWildcardInEID_CollapseAsOf(t *testing.T) {
 	}))
 
 	testEID := mustEID(t, subject)
-	members, err := p.resolveGroupMembersAsOf(ctx, testEID, now.Add(time.Second))
+	members, err := p.resolveGroupMembersAsOf(ctx, testEID, now.Add(time.Second), interfaces.TenantCut{})
 	require.NoError(t, err)
 	// The subject has no same-as edges; only itself should be returned.
 	require.Len(t, members, 1, "subject with %% in EID must not match decoy's edges via unescaped LIKE")

@@ -178,7 +178,15 @@ them:
 - The read contract can **collapse** a `same-as` group into one logical entity view on request
   (§9); the stored graph never merges records. The collapse rule is deterministic:
   1. **Tenant cut first (required, security):** members outside the caller's tenant subtree are
-     removed *before* any merging; their attributes never appear in the collapsed view.
+     removed *before* any merging; their attributes never appear in the collapsed view. The cut is
+     applied *during* the group walk, not after it: the walk only follows a `same-as` edge whose
+     peer (and, on the current-state path, both ends) is owned inside the cut, so an entity the
+     caller cannot see neither joins the group nor connects other members.
+  1a. **Bounded group:** a group has at most `MaxCollapseGroupMembers` (256) distinct members,
+     including the requested entity. Members outside the cut and retracted edges do not count. A
+     larger group is an error (`ErrCollapseGroupTooLarge`), never a truncated group, and no
+     attribute merge runs on it. A read of the same entity without the collapse option is not
+     affected.
   2. Per attribute, the value from the highest-precedence source class (§4) wins; ties break by
      latest `observed_at`.
   3. Conflicting values are not discarded — the collapsed view carries per-attribute provenance
@@ -343,7 +351,7 @@ the mandatory tenant filter, and entity-targeted reads accept a `same-as` collap
 
 | Operation | Answers |
 |---|---|
-| `GetEntity(eid, opts)` | current state + provenance + freshness (+ collapsed `same-as` view) |
+| `GetEntity(eid, opts)` | current state + provenance + freshness (+ collapsed `same-as` view; `ErrCollapseGroupTooLarge` when the in-cut group exceeds 256 members) |
 | `GetDesiredState(eid)` | desired state + originating config revision |
 | `QueryEntities(filter, page)` | entities by type / attribute predicates / text, paged |
 | `GetEdges(filter)` | edges by endpoint / type / source |

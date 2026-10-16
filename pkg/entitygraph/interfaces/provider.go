@@ -33,6 +33,17 @@ var ErrCursorExpired = errors.New("entitygraph: watch cursor expired; resync via
 // deliberately indistinguishable from missing entities (ADR-022 §7).
 var ErrNotFound = errors.New("entitygraph: not found")
 
+// MaxCollapseGroupMembers bounds a same-as group read: the most distinct members,
+// including the requested entity, a collapse-group walk accepts. A group of
+// exactly this size succeeds; one more member is ErrCollapseGroupTooLarge.
+const MaxCollapseGroupMembers = 256
+
+// ErrCollapseGroupTooLarge is returned by GetEntity with CollapseGroup set when
+// the same-as group reachable inside the caller's tenant cut has more than
+// MaxCollapseGroupMembers members. The result is an error, never a truncated
+// group: a partial merge would silently drop attributes and conflicts.
+var ErrCollapseGroupTooLarge = errors.New("entitygraph: collapse group too large")
+
 // EIDRef is an alias for types.EID so callers can import only this package.
 type EIDRef = types.EID
 
@@ -105,6 +116,13 @@ type EdgeView struct {
 type TimeRange struct {
 	From time.Time
 	To   time.Time
+
+	// TenantFilter and TenantSubtreeIDs are the caller's tenant cut. GetTimeline
+	// drops a same-as event whose peer entity is owned outside the cut (a peer with
+	// no index row is outside it too). A zero value applies no cut. The other
+	// temporal reads ignore them.
+	TenantFilter     string
+	TenantSubtreeIDs []string
 }
 
 // ObservationRecord is a historical observation entry returned by GetHistory.
