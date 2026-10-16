@@ -767,3 +767,68 @@ func TestFindConfigFile_ReturnsValidationErrorNotNotFound(t *testing.T) {
 	assert.NotEqual(t, cfgconfig.ErrConfigNotFound, err,
 		"path traversal must return a validation error, not ErrConfigNotFound")
 }
+
+// lockDir makes dir unreadable and restores it on cleanup. It skips where
+// directory mode bits are not enforced.
+func lockDir(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory mode bits not enforced")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("directory mode bits not enforced when running as root")
+	}
+	require.NoError(t, os.Chmod(dir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+func TestReadErrorIsNotConfigNotFound(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileConfigStore(root)
+	require.NoError(t, err)
+
+	require.NoError(t, store.StoreConfig(ctx, testEntry("root/msp-a", "firewall", "rules", []byte(`parent`), cfgconfig.ConfigFormatJSON)))
+	require.NoError(t, store.StoreConfig(ctx, testEntry("root/msp-a/client-1", "firewall", "rules", []byte(`child`), cfgconfig.ConfigFormatJSON)))
+
+	childKey := &cfgconfig.ConfigKey{TenantID: "root/msp-a/client-1", Namespace: "firewall", Name: "rules"}
+
+	// A genuinely missing file is still ErrConfigNotFound.
+	_, err = store.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root/msp-a/client-1", Namespace: "firewall", Name: "missing"})
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+
+	lockDir(t, filepath.Join(root, "root", "msp-a", "client-1", "configs", "firewall"))
+
+	_, err = store.GetConfig(ctx, childKey)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+
+	// The inherited lookup must not fall through to the parent document.
+	got, err := store.ResolveConfigWithInheritance(ctx, childKey)
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+
+	// DeleteConfig must not report an unreadable document as absent.
+	err = store.DeleteConfig(ctx, childKey)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+
+	// StoreConfig over an unreadable existing document returns the error.
+	err = store.StoreConfig(ctx, testEntry("root/msp-a/client-1", "firewall", "rules", []byte(`new`), cfgconfig.ConfigFormatJSON))
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+
+	require.NoError(t, os.Chmod(filepath.Join(root, "root", "msp-a", "client-1", "configs", "firewall"), 0o755))
+	got, err = store.GetConfig(ctx, childKey)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), got.Version, "failed StoreConfig must keep the version")
+	assert.Equal(t, []byte(`child`), got.Data)
+}
+
+func TestInvalidKeyIsNotConfigNotFound(t *testing.T) {
+	store := newTestConfigStore(t)
+	_, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{TenantID: "root", Namespace: "../etc", Name: "x"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+}

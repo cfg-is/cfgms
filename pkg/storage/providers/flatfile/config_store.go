@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,16 +107,20 @@ func (s *FlatFileConfigStore) configPath(key *cfgconfig.ConfigKey, format cfgcon
 }
 
 // findConfigFile locates the file for a config key, trying .yaml then .json.
-// Returns ErrConfigNotFound if neither exists. Path validation errors are
-// returned directly so rejections are not hidden as missing-config errors.
+// Returns ErrConfigNotFound only if neither file exists. Path validation and
+// other Stat errors are returned wrapped so they are not hidden as missing-config errors.
 func (s *FlatFileConfigStore) findConfigFile(key *cfgconfig.ConfigKey) (string, error) {
 	for _, format := range []cfgconfig.ConfigFormat{cfgconfig.ConfigFormatYAML, cfgconfig.ConfigFormatJSON} {
 		path, err := safeJoin(s.root, key.TenantID, "configs", key.Namespace, configFileName(key, format))
 		if err != nil {
 			return "", fmt.Errorf("invalid path components: %w", err)
 		}
-		if _, err := os.Stat(path); err == nil {
+		_, statErr := os.Stat(path)
+		if statErr == nil {
 			return path, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("failed to stat config file: %w", statErr)
 		}
 	}
 	return "", cfgconfig.ErrConfigNotFound
@@ -178,7 +183,7 @@ func dataChecksum(data []byte) string {
 func (s *FlatFileConfigStore) readConfigFile(key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
 	path, err := s.findConfigFile(key)
 	if err != nil {
-		return nil, cfgconfig.ErrConfigNotFound
+		return nil, err
 	}
 
 	// readFile retries Windows ERROR_SHARING_VIOLATION (a concurrent
@@ -186,7 +191,7 @@ func (s *FlatFileConfigStore) readConfigFile(key *cfgconfig.ConfigKey) (*cfgconf
 	// it is a direct os.ReadFile and contention does not arise.
 	raw, err := readFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, cfgconfig.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -220,7 +225,10 @@ func (s *FlatFileConfigStore) StoreConfig(ctx context.Context, config *cfgconfig
 
 	now := time.Now().UTC()
 
-	existing, _ := s.readConfigFile(config.Key)
+	existing, err := s.readConfigFile(config.Key)
+	if err != nil && !errors.Is(err, cfgconfig.ErrConfigNotFound) {
+		return fmt.Errorf("failed to read existing config: %w", err)
+	}
 
 	entry := *config
 	if existing != nil {
@@ -285,11 +293,11 @@ func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.C
 
 	path, err := s.findConfigFile(key)
 	if err != nil {
-		return cfgconfig.ErrConfigNotFound
+		return err
 	}
 
 	if err := os.Remove(path); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return cfgconfig.ErrConfigNotFound
 		}
 		return fmt.Errorf("failed to delete config: %w", err)
@@ -535,7 +543,7 @@ func (s *FlatFileConfigStore) StoreConfigBatch(ctx context.Context, configs []*c
 func (s *FlatFileConfigStore) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
 	for _, key := range keys {
 		err := s.DeleteConfig(ctx, key)
-		if err != nil && err != cfgconfig.ErrConfigNotFound {
+		if err != nil && !errors.Is(err, cfgconfig.ErrConfigNotFound) {
 			return fmt.Errorf("batch delete failed at %v: %w", key, err)
 		}
 	}
@@ -574,6 +582,9 @@ func (s *FlatFileConfigStore) ResolveConfigWithInheritance(ctx context.Context, 
 		entry, err := s.readConfigFile(searchKey)
 		if err == nil {
 			return entry, nil
+		}
+		if !errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, err
 		}
 	}
 	return nil, cfgconfig.ErrConfigNotFound

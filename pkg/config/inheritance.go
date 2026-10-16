@@ -5,6 +5,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -249,6 +250,11 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 		clusterNames := ir.clusterRegistry.MemberClusters(stewardID)
 		for _, clusterName := range clusterNames {
 			if err := ir.applyClusterConfiguration(ctx, effective, tenantID, clusterName); err != nil {
+				// A storage read failure fails closed: continuing would silently drop policies.
+				var readErr *clusterReadError
+				if errors.As(err, &readErr) {
+					return nil, fmt.Errorf("failed to resolve cluster-policies for steward: %w", err)
+				}
 				// Non-fatal: parse failure for one cluster must not block others.
 				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
 				// so an error here signals a corrupt document that must be surfaced, not swallowed.
@@ -332,6 +338,34 @@ func (ir *InheritanceResolver) authorizeTenant(ctx context.Context, tenantID str
 	return fmt.Errorf("tenant %q is outside the caller's authorized scope", tenantID)
 }
 
+// tenantLeafName returns the document name for a tenant-level config. Tenant IDs
+// may be path-style ("fleet-root/fleet-child-a"), but a document name is a single
+// path-safe leaf and the document is already scoped by its ConfigKey.TenantID, so
+// the last path segment names it.
+func tenantLeafName(tenantID string) string {
+	if i := strings.LastIndex(tenantID, "/"); i >= 0 {
+		return tenantID[i+1:]
+	}
+	return tenantID
+}
+
+// TenantLevelConfigKey returns the ConfigKey of the policy document for a tenant at
+// the given hierarchy level. It is the single naming rule shared by the inheritance
+// reader and every writer of tenant-level documents, so a document is always saved
+// where resolution reads it. ok is false for levels that have no tenant document.
+func TenantLevelConfigKey(level InheritanceLevel, tenantID string) (key *cfgconfig.ConfigKey, ok bool) {
+	switch level {
+	case LevelMSP:
+		return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "msp-policies", Name: "global"}, true
+	case LevelClient:
+		return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "client-policies", Name: tenantLeafName(tenantID)}, true
+	case LevelGroup:
+		return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "group-policies", Name: fmt.Sprintf("%s-groups", tenantLeafName(tenantID))}, true
+	default:
+		return nil, false
+	}
+}
+
 // applyConfigurationLevel applies configuration from a specific hierarchy level.
 // source is the pre-snapshotted ConfigSourceInfo for this tenant, resolved once by
 // ResolveConfiguration before the cascade loop. In Phase 1 the router always returns
@@ -339,34 +373,20 @@ func (ir *InheritanceResolver) authorizeTenant(ctx context.Context, tenantID str
 // Phase 2 (Story C) will use source.Type to dispatch to a git store.
 func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string, level int, source *ConfigSourceInfo) error {
 	_ = source // Phase 1: routing handled internally by configStore (always controller)
-	// Try to get configuration at this level
-	var configNamespace string
-	var configName string
-
-	switch InheritanceLevel(level) {
-	case LevelMSP:
-		configNamespace = "msp-policies"
-		configName = "global"
-	case LevelClient:
-		configNamespace = "client-policies"
-		configName = tenantID
-	case LevelGroup:
-		configNamespace = "group-policies"
-		configName = fmt.Sprintf("%s-groups", tenantID)
-	default:
+	configKey, ok := TenantLevelConfigKey(InheritanceLevel(level), tenantID)
+	if !ok {
 		return nil // Skip unknown levels
 	}
-
-	configKey := &cfgconfig.ConfigKey{
-		TenantID:  tenantID,
-		Namespace: configNamespace,
-		Name:      configName,
-	}
+	configName := configKey.Name
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		// No configuration at this level is OK - continue with inheritance
-		return nil
+		// Only a genuinely absent document means "no config at this level";
+		// any other error must not let the level silently drop out.
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read configuration at level %d for tenant %q: %w", level, tenantID, err)
 	}
 
 	// Parse the configuration
@@ -382,7 +402,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 		ConfigName: configName,
 		Version:    configEntry.Version,
 		UpdatedAt:  configEntry.UpdatedAt,
-		Source:     fmt.Sprintf("Level %d (%s)", level, configNamespace),
+		Source:     fmt.Sprintf("Level %d (%s)", level, configKey.Namespace),
 	}
 
 	// Apply configuration using declarative merging (named resources replace entirely)
@@ -390,6 +410,14 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 
 	return nil
 }
+
+// clusterReadError marks a storage read failure (as opposed to a parse failure) of a
+// cluster-policies document. Resolution fails closed on it: a storage fault must not
+// silently drop cluster policies.
+type clusterReadError struct{ err error }
+
+func (e *clusterReadError) Error() string { return e.err.Error() }
+func (e *clusterReadError) Unwrap() error { return e.err }
 
 // applyClusterConfiguration looks up cluster-policies/<clusterName> for the given tenant
 // and merges it into effective. Missing cluster configs are non-fatal (same as missing
@@ -404,8 +432,11 @@ func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, ef
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		// No cluster-policies document for this cluster is non-fatal.
-		return nil
+		// No cluster-policies document for this cluster is non-fatal; other errors are reported.
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read cluster configuration for %q: %w", clusterName, &clusterReadError{err: err})
 	}
 
 	var clusterConfig stewardconfig.StewardConfig
@@ -449,8 +480,10 @@ func (ir *InheritanceResolver) applyDeviceConfiguration(ctx context.Context, eff
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		// No device-specific configuration is OK
-		return nil
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read device configuration for %q: %w", stewardID, err)
 	}
 
 	// Parse the configuration

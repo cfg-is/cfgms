@@ -17,6 +17,7 @@ import (
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/audit"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	schedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
@@ -424,31 +425,32 @@ func (s *Server) rebootWindowConfigStore() cfgconfig.ConfigStore {
 }
 
 // rebootWindowTenantConfigKey resolves the ConfigKey for a tenant's policy-level config doc.
-// It mirrors the namespace/name selection in pkg/config/inheritance.go:applyConfigurationLevel:
+// The key comes from cfgms config.TenantLevelConfigKey, the same function the inheritance
+// resolver reads with, so the window is saved where resolution looks for it:
 //   - level 0 (MSP)    → msp-policies / global
-//   - level 1 (Client) → client-policies / {tenantID}
-//   - level ≥2 (Group) → group-policies / {tenantID}-groups
+//   - level 1 (Client) → client-policies / {tenant leaf name}
+//   - level ≥2 (Group) → group-policies / {tenant leaf name}-groups
 //
 // When s.tenantStore is nil (e.g. lightweight test setups without tenant hierarchy),
 // it defaults to the client-policies namespace, which is the most common tenant level.
 func (s *Server) rebootWindowTenantConfigKey(ctx context.Context, tenantID string) (*cfgconfig.ConfigKey, error) {
+	level := pkgconfig.LevelClient
 	if s.tenantStore != nil {
 		path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
 		if err != nil {
 			return nil, fmt.Errorf("get tenant path: %w", err)
 		}
-		level := len(path) - 1
-		switch level {
-		case 0:
-			return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "msp-policies", Name: "global"}, nil
-		case 1:
-			return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "client-policies", Name: tenantID}, nil
-		default:
-			return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "group-policies", Name: tenantID + "-groups"}, nil
+		if n := len(path) - 1; n >= int(pkgconfig.LevelGroup) {
+			level = pkgconfig.LevelGroup
+		} else {
+			level = pkgconfig.InheritanceLevel(n)
 		}
 	}
-	// Default: client-policies (most common tenant level).
-	return &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "client-policies", Name: tenantID}, nil
+	key, ok := pkgconfig.TenantLevelConfigKey(level, tenantID)
+	if !ok {
+		return nil, fmt.Errorf("no tenant config document for hierarchy level %d", level)
+	}
+	return key, nil
 }
 
 // resolveStewardTenant looks up the tenant for a steward via the in-memory controller service.
