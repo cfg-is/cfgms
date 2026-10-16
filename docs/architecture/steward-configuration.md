@@ -48,7 +48,7 @@ steward:
     additional_publishers:          # only consulted in strict mode
       - "vendor-a"
 
-# Required module declarations (top-level; resolved by controller on cfg push)
+# Required module declarations (top-level; exact versions; checked by the controller on cfg push, pulled by the steward on apply)
 required_modules:
   - name: "cfgms/firewall"
     version: "1.0.0"
@@ -179,6 +179,8 @@ required_modules:
 
 - `name`: Full module identifier in `publisher/name` format (e.g. `cfgms/firewall`).
 - `version`: Exact version (e.g. `1.0.0`). Constraints (`^1.0.0`), aliases (`latest`) and a `v` prefix are refused at cfg push before any source is contacted.
+
+The steward pulls each declared module itself: on config apply, a module not installed at exactly that publisher, name and version is fetched from the controller for the steward's own platform, verified under `module_trust.mode` and installed. Stdlib module names are provided by the installer and are never pulled. See the [module publishing guide](../operations/module-publishing.md).
 
 **Resolution behavior on cfg push:**
 

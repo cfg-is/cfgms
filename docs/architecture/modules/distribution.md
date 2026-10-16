@@ -140,10 +140,14 @@ The default implementation is `InMemoryTrustStore` — thread-safe, non-persiste
 pre-seeded at startup from:
 
 1. `CFGMSPublisherIdentity()` — the baked-in CFGMS publisher.
-2. Additional publishers declared in `steward.cfg` (steward) or controller tenant
-   configuration (controller).
+2. Additional publishers: on the controller, `module_trust.publishers` in `controller.cfg`
+   (name and base64 public key); on the steward, the names in `steward.cfg`
+   `module_trust.additional_publishers`, resolved against key material compiled into the
+   steward binary (`STEWARD_ADDITIONAL_PUBLISHER_KEYS`).
 
-The trust store is rebuilt at each startup.
+The trust store is rebuilt at each startup. The controller's set changes only by editing
+`controller.cfg` and restarting; no API, CLI command or `cfg push` field changes it. See the
+[operator guide](../../operations/module-publishing.md).
 
 ---
 
@@ -305,11 +309,17 @@ registry from `features/steward/discovery`, which loads `ModuleInfo` from `modul
 and searches `/opt/cfgms/modules` on Unix; that search path is unchanged and is not where
 either Unix installer stages.
 
-**One platform per root.** Each root's `Binaries` map holds exactly one entry,
-`<os>-<arch>`, for the platform the root ships to (for example
+**Stdlib roots are single-platform.** Each installer-payload root's `Binaries` map holds
+exactly one entry, `<os>-<arch>`, for the platform the installer ships to (for example
 `{"linux-amd64": "cfgms-module-file"}`). `ComputeInstalledContentHash` reads every entry
 in `Binaries` from disk and errors on a missing one, so a root listing all platforms would
-fail `VerifyInstalledContent` on every machine it is installed on.
+fail `VerifyInstalledContent` on a machine that holds only its own binary.
+
+A third-party root published to a git source (`cfg module bundle build`) is the opposite:
+it carries every platform's binary, and the content hash covers the digest of each. The
+controller serves, and the steward downloads and installs, only the steward's own
+platform's binary; the steward verifies it against the digest list, which is enough to
+recompute the signed content hash without the other platforms' binaries.
 
 **Build-time signing.** `scripts/sign-module-bundle assemble` builds a root: it copies the
 manifest, places the binary, computes `ContentHash` with `bundle.ComputeContentHash` over
@@ -362,11 +372,12 @@ After a bundle is fetched from a git source and placed in the cache, the control
 ```
                          ┌──────────────────────────────┐
   Trusted publisher      │  ApprovalWorkflow.Evaluate() │
-  + valid signature  ────►   AutoApprove                ├──► approved
-                         │                              │
-  Unknown publisher  ────►   QueueForReview             ├──► pending ──► approved
+  + valid signature  ────►   QueueForReview             ├──► pending ──► approved
                          │                              │       (admin Approve())
-  Sig verify fails   ────►   Reject                     ├──► rejected
+  Unknown publisher  ────►   QueueForReview             ├──► pending
+                         │                              │
+  No signature, or       │                              │
+  sig verify fails   ────►   Reject                     ├──► rejected
                          └──────────────────────────────┘
 ```
 
@@ -374,9 +385,16 @@ After a bundle is fetched from a git source and placed in the cache, the control
 
 | Condition | `ApprovalDecision` | Cache status |
 |-----------|--------------------|--------------|
-| Publisher in trust store AND `VerifyBundleSignature` passes | `AutoApprove` | `approved` |
-| Publisher NOT in trust store | `QueueForReview` | `pending` |
+| Bundle carries no signature | `Reject` | `rejected` |
 | Publisher in trust store, signature fails | `Reject` | `rejected` |
+| Publisher in trust store AND `VerifyBundleSignature` passes | `QueueForReview` | `pending` |
+| Publisher NOT in trust store | `QueueForReview` | `pending` |
+
+`Evaluate` never returns `AutoApprove`: a human approves every version, trusted publisher
+or not (`AutoApprove` is only reported for a bundle a human already approved). A rejected
+content address is immutable, so a trusted publisher's bad signature permanently rejects
+that publisher/name/version; the publisher must publish a new version. A bundle with no
+signature can never be approved.
 
 ### `cfg module approve` CLI Usage
 
@@ -411,9 +429,9 @@ cfg module list --status pending
 
 `GitSourceResolver` (`features/controller/modules/sources/git`) resolves a
 `publisher/name@version` reference to a `Bundle` by cloning the publisher's
-configured git repository and reading `module.yaml`, `binaries/` and
-`signatures/` out of the checkout. It is wired into the running controller as
-the `resolver` argument of `Server.SetModuleResolution` at startup
+configured git repository and reading the bundle installation root (`module.yaml`,
+`bundle.yaml` and the binaries it names) out of the checkout. It is wired into the
+running controller together with the approver and the trust store at startup
 (`features/controller/server/server.go`), constructed from controller
 configuration rather than from a hard-coded source list or path.
 
@@ -435,27 +453,52 @@ when the clone root cannot be created, startup logs a warning and continues
 with a nil resolver — the same nil-tolerant pattern already used for the
 module cache above, never a crash.
 
-**Version pinning.** `version` is resolved to an exact commit — via `git
-ls-remote` for a tag or branch name, or via a full fetch-and-checkout for a
-raw commit SHA — and that exact commit is checked out before `module.yaml` and
-the binaries are read. The local clone cache directory is keyed by the
-resolved commit, not only by the requested version string, so a first
-resolution that happened to land on the wrong commit can never poison a later
-lookup for the same version: a different resolved commit is always a different
-cache entry. Resolving `pub/name@v1.0.0` and `pub/name@v2.0.0` against a
-repository where those tags point at different commits fetches and returns
-their respective content, not whichever commit the repository's default
-branch currently happens to be on. An unresolvable ref fails the request with
-an error naming the ref — there is no fallback to the default branch.
+**Repository layout.** One repository per module at `<base>/<name>`. The repository root at
+the tag **is** the bundle installation root, exactly what `cfg module bundle build --out`
+produces; a multi-platform module carries every platform in that one root. The root is read
+strictly: files other than the bundle files (and `.git`) are refused.
 
-**What this does not do.** Supplying the resolver makes it reachable for the
-module cache's read/approve/reject REST surface and for
-`handleUpdateStewardConfig`'s required_modules resolution path, but
-`ResolveCfgRequiredModules` only runs when the cache lister, resolver,
-approver *and* trust store are all non-nil. The approver and trust store are
-not wired at startup, so a `cfg push` declaring `required_modules:` is still
-never blocked on cache/approval state — that enforcement remains a distinct,
-not-yet-scheduled change.
+**Version pinning.** `version` must be an exact semantic version with no `v` prefix, and
+the repository tag must be exactly that string. Only tags are listed and fetched;
+branches, `HEAD`, commit ids and `v`-prefixed versions are refused. The tag is fetched
+shallowly into a scratch directory that is removed before the call returns; the returned
+bundle holds the bytes. An unresolvable tag fails the request naming the tag — there is no
+fallback to a branch. Resolved bundles are rejected when the manifest's publisher, name or
+version differ from the request or when a signature names a different publisher than the
+manifest.
+
+**Transport.** A source base must be an absolute `https://` or `ssh://` URL with a host,
+no credentials, no query and no fragment (`ValidateBase`, also applied to `module_sources`
+at controller startup). Every git subprocess runs with an explicit environment: only the
+`https` and `ssh` protocols, no prompts, no system or user git config, hooks disabled, no
+submodules, certificate verification on, and ssh in batch mode with host-key checking.
+`GIT_SSL_CAINFO` and `GIT_SSH_COMMAND` in the controller's environment pass through.
+
+**Trust anchor.** The publisher signature, not the tag and not the transport, is the trust
+anchor. The content hash is recomputed from the fetched bytes, and every binary is
+verified against its digest, so a moved tag produces different bytes and a different hash.
+
+**Required modules gate.** `ResolveCfgRequiredModules` runs on every `cfg push` that
+declares `required_modules:`. Each version must be exact (`bundle.IsExactSemver`); anything
+else is refused with `ErrVersionNotExact` before any source is contacted. A cached,
+approved bundle passes; a cached pending or rejected bundle blocks the push; an uncached
+bundle is resolved, evaluated and stored, and blocks the push until a human approves it.
+
+### Steward Pull
+
+A steward whose applied configuration declares `required_modules:` compares each entry
+with its installed bundles. A module not installed at exactly that publisher, name and
+version is fetched with the `FetchModuleBundle` RPC over the steward's mTLS connection,
+for the steward's own platform only, verified under `module_trust.mode`, and installed by
+`features/steward/modules/install`. Stdlib names are never fetched. The controller serves
+the RPC only when the steward's own effective configuration requires that exact
+publisher/name/version and the bundle is approved; every refusal returns the same
+`NotFound` response and the reason is logged on the controller. Install verification
+order, the replace procedure and the sentinel errors are documented in the `install`
+package.
+
+Operators: see the [module publishing guide](../../operations/module-publishing.md) for
+the end-to-end procedure and troubleshooting.
 
 ### Implementation Reference
 
@@ -476,4 +519,12 @@ The steward enforces trust before loading a bundle:
    pass from a publisher in the steward's trust store.
 3. If no trusted signature is found → reject with `ErrPublisherNotTrusted`.
 
-Trust mode policy (permissive vs. strict) and per-publisher allowlists are S7 concerns.
+Trust mode (`steward.cfg` `module_trust.mode`):
+
+- `controller` (default) trusts the controller's approval.
+- `strict` verifies publisher signatures on the steward against the compiled-in CFGMS key
+  and the `additional_publishers` keys compiled in through `STEWARD_ADDITIONAL_PUBLISHER_KEYS`.
+  It is the control that holds if the controller or an admin account is compromised.
+- `bypass` disables enforcement and is for development only.
+
+The content hash is recomputed in every mode.
