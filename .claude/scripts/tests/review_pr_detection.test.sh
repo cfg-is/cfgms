@@ -363,7 +363,18 @@ case "$1" in
   *)  exit 0 ;;
 esac
 STUB
-chmod +x "$CONFLICT_STUB_DIR/gh"
+# Stub docker too. review-pr's same-host container probe (`docker ps -a ... |
+# head -1`) runs under `set -euo pipefail`, so on a host without docker the
+# CLI exits 127 with no output before reaching anything after the probe — the
+# adversarial gate below never ran there, and the not_refused cases above passed
+# only because empty output contains no "merge_conflicts". An empty `docker ps`
+# means "no existing review container", which is the state every case here
+# assumes; the result must not depend on the real host's docker or containers.
+cat > "$CONFLICT_STUB_DIR/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$CONFLICT_STUB_DIR/gh" "$CONFLICT_STUB_DIR/docker"
 
 assert_review_refusal() {
   local description="$1" merge_state="$2" expected="$3"
@@ -428,7 +439,16 @@ echo "--- review-pr: adversarial security-review gate (Issue #5025) ---"
 # gate, so a refusal here means no lease was taken and nothing was launched.
 ADV_ROOT=$(mktemp -d)
 trap 'rm -rf "$STALE_STUB_DIR" "$CONFLICT_STUB_DIR" "$ADV_ROOT"' EXIT
-mkdir -p "$ADV_ROOT/scripts" "$ADV_ROOT/home"
+mkdir -p "$ADV_ROOT/scripts" "$ADV_ROOT/home" "$ADV_ROOT/bin"
+# The container conflict gate runs `docker ps -a` before the adversarial gate.
+# Stub it to report no existing container so the test does not depend on a
+# host docker CLI (absent docker fails that pipeline under pipefail/errexit and
+# the dispatch exits before reaching the gate under test).
+cat > "$ADV_ROOT/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$ADV_ROOT/bin/docker"
 cat > "$ADV_ROOT/scripts/project-queue.sh" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -447,14 +467,23 @@ cat > "$ADV_ROOT/pipeline-helper.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "helper $*" >> "$ADV_CALLS"
 STUB
-chmod +x "$ADV_ROOT/scripts/project-queue.sh" "$ADV_ROOT/adversarial.sh" "$ADV_ROOT/pipeline-helper.sh"
+# review-pr's same-host container check (`docker ps -a ... | head -1`) runs
+# before the gate under `set -o pipefail`, so on a host without docker the CLI
+# exits 127 there and the gate is never reached. Stub docker as "no existing
+# container" so these cases do not depend on the host having docker installed.
+mkdir -p "$ADV_ROOT/bin"
+cat > "$ADV_ROOT/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$ADV_ROOT/scripts/project-queue.sh" "$ADV_ROOT/adversarial.sh" "$ADV_ROOT/pipeline-helper.sh" "$ADV_ROOT/bin/docker"
 printf '{"state":"OPEN","headRefName":"feature/story-4242-agent","body":"Fixes #4242","labels":[],"headRepositoryOwner":{"login":"cfg-is"},"author":{"login":"jrdnr"},"mergeStateStatus":"CLEAN"}' \
   > "$ADV_ROOT/meta.json"
 
 run_adv_review() {
   ADV_CALLS="$ADV_ROOT/calls-$1.log"; : > "$ADV_CALLS"
   ADV_VERDICT="$2" ADV_CALLS="$ADV_CALLS" GH_FIXTURE="$ADV_ROOT/meta.json" \
-    PATH="$CONFLICT_STUB_DIR:$PATH" HOME="$ADV_ROOT/home" \
+    PATH="$ADV_ROOT/bin:$CONFLICT_STUB_DIR:$PATH" HOME="$ADV_ROOT/home" \
     CFGMS_TEST_CREDS_STATUS="CREDS_OK:test" CFGMS_TEST_REPO_ROOT="$ADV_ROOT" \
     CFGMS_TEST_ADVERSARIAL_SCRIPT="$ADV_ROOT/adversarial.sh" \
     CFGMS_TEST_PIPELINE_HELPER="$ADV_ROOT/pipeline-helper.sh" \
