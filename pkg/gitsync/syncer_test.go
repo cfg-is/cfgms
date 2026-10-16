@@ -813,3 +813,62 @@ func TestConcurrentSyncsOfOneScopeAreSerialized(t *testing.T) {
 	got, _ := bindings.Get("root/test-tenant", "policies")
 	assert.Equal(t, runGit(t, workDir, "rev-parse", "HEAD"), got.LastSyncedSHA)
 }
+
+// TestSyncRefusesOversizedConfigFile verifies a file over the configured
+// maximum is refused while its sibling files still import.
+func TestSyncRefusesOversizedConfigFile(t *testing.T) {
+	const maxSize = 64
+	bareDir, _, _ := newTestRepo(t, map[string]string{
+		"small.yaml": "key: small\n",
+		"exact.yaml": "k: " + strings.Repeat("x", maxSize-3),
+		"big.yaml":   "k: " + strings.Repeat("x", maxSize-2),
+		"other.json": `{"a":1}`,
+	})
+
+	syncer, store, bindings := newTestSyncer(t, gitsync.WithMaxConfigFileSize(maxSize))
+	binding := gitsync.ScopeBinding{
+		TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main",
+	}
+	require.NoError(t, bindings.Add(binding))
+	require.NoError(t, syncer.TriggerSync(context.Background(), binding))
+
+	requireNoEntry(t, store, "big")
+	for _, name := range []string{"small", "exact", "other"} {
+		_, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+			TenantID: "root/test-tenant", Namespace: "policies", Name: name,
+		})
+		assert.NoError(t, err, "entry %q must import", name)
+	}
+}
+
+// TestSyncSkipsInvalidConfigNames verifies files whose derived names are
+// empty or invalid are skipped without aborting the sync.
+func TestSyncSkipsInvalidConfigNames(t *testing.T) {
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{
+		"good.yaml":  "key: good\n",
+		".yaml":      "key: empty\n",
+		"..yaml":     "key: dots\n",
+		"trail..yml": "key: trailing\n",
+	})
+
+	syncer, store, bindings := newTestSyncer(t)
+	binding := gitsync.ScopeBinding{
+		TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main",
+	}
+	require.NoError(t, bindings.Add(binding))
+	require.NoError(t, syncer.TriggerSync(context.Background(), binding))
+
+	_, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID: "root/test-tenant", Namespace: "policies", Name: "good",
+	})
+	require.NoError(t, err)
+	requireNoEntry(t, store, "")
+	requireNoEntry(t, store, ".")
+	requireNoEntry(t, store, ".yaml")
+	requireNoEntry(t, store, "trail.")
+
+	head := runGit(t, workDir, "rev-parse", "HEAD")
+	got, ok := bindings.Get("root/test-tenant", "policies")
+	require.True(t, ok)
+	assert.Equal(t, strings.TrimSpace(head), got.LastSyncedSHA)
+}

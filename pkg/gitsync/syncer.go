@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,7 @@ type Syncer struct {
 	newTickerFunc func(d time.Duration) (<-chan time.Time, func())
 	syncNotify    chan<- struct{} // optional; receives a value after each TriggerSync call
 	secretStore   secretsif.SecretStore
+	maxFileSize   int64 // largest config file importConfigs reads; larger files are skipped
 
 	// leaseJobFactory, when non-nil, builds the per-scope cluster-singleton
 	// lease claim (ADR-031 Decision 4) each scope's polling cycle runs behind.
@@ -133,6 +135,21 @@ func WithSyncNotify(ch chan<- struct{}) Option {
 func WithSecretStore(store secretsif.SecretStore) Option {
 	return func(s *Syncer) {
 		s.secretStore = store
+	}
+}
+
+// DefaultMaxConfigFileSize is the default largest config file the import will
+// read (1 MiB, the same cap the webhook handler applies to request bodies).
+const DefaultMaxConfigFileSize int64 = 1 << 20
+
+// WithMaxConfigFileSize sets the largest config file, in bytes, that an import
+// will read. Larger files are skipped with a warning. Values <= 0 or
+// MaxInt64 keep the default (DefaultMaxConfigFileSize).
+func WithMaxConfigFileSize(n int64) Option {
+	return func(s *Syncer) {
+		if n > 0 && n < math.MaxInt64 { // limit+1 must not overflow
+			s.maxFileSize = n
+		}
 	}
 }
 
@@ -185,6 +202,7 @@ func NewSyncer(
 		ctx:               ctx,
 		cancel:            cancel,
 		webhookLeaseRetry: defaultWebhookLeaseRetry,
+		maxFileSize:       DefaultMaxConfigFileSize,
 		newTickerFunc: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTicker(d)
 			return t.C, t.Stop
@@ -571,9 +589,14 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 			continue
 		}
 
-		data, readErr := readRegularFile(root, name)
+		if !validConfigName(configName) {
+			s.warnSkippedEntry(b, name)
+			continue
+		}
+
+		data, readErr := readRegularFile(root, name, s.maxFileSize)
 		if readErr != nil {
-			if errors.Is(readErr, errNotRegular) {
+			if errors.Is(readErr, errNotRegular) || errors.Is(readErr, errTooLarge) {
 				s.warnSkippedEntry(b, name)
 				continue
 			}
@@ -769,9 +792,26 @@ func classifyGitError(err error) error {
 // errNotRegular reports that an opened entry is not a regular file.
 var errNotRegular = errors.New("not a regular file")
 
+// errTooLarge reports that a config file exceeds the size limit.
+var errTooLarge = errors.New("config file exceeds size limit")
+
+// validConfigName reports whether a name derived from a file name is safe to
+// use as a config key: non-empty, no leading/trailing dot or whitespace, and
+// no path separators or NUL.
+func validConfigName(name string) bool {
+	if name == "" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return false
+	}
+	if strings.TrimSpace(name) != name {
+		return false
+	}
+	return !strings.ContainsAny(name, "/\\\x00")
+}
+
 // readRegularFile reads name through root and confirms, on the open handle,
-// that it is a regular file before using its bytes.
-func readRegularFile(root *os.Root, name string) ([]byte, error) {
+// that it is a regular file before using its bytes. It reads at most limit
+// bytes and returns errTooLarge if the file is longer.
+func readRegularFile(root *os.Root, name string, limit int64) ([]byte, error) {
 	f, err := root.Open(name)
 	if err != nil {
 		return nil, err
@@ -785,13 +825,20 @@ func readRegularFile(root *os.Root, name string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errNotRegular
 	}
-	return io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errTooLarge
+	}
+	return data, nil
 }
 
-// warnSkippedEntry logs a refused non-regular config entry. The link target is
-// deliberately not logged.
+// warnSkippedEntry logs a refused config entry (non-regular, oversized or
+// invalid name). The link target is deliberately not logged.
 func (s *Syncer) warnSkippedEntry(b ScopeBinding, name string) {
-	s.logger.Warn("gitsync: skipping non-regular config entry",
+	s.logger.Warn("gitsync: skipping refused config entry",
 		"tenant_path", logging.SanitizeLogValue(b.TenantPath),
 		"namespace", logging.SanitizeLogValue(b.Namespace),
 		"entry", logging.SanitizeLogValue(name))
