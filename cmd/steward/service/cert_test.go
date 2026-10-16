@@ -110,3 +110,32 @@ func TestWriteCACertCreatesParentDirs(t *testing.T) {
 	_, err := os.Stat(destPath)
 	require.NoError(t, err)
 }
+
+func TestVerifyCACertFingerprintRejectsExtraCertificate(t *testing.T) {
+	certPEM, fingerprint := generateTestCACert(t)
+	extraPEM, _ := generateTestCACert(t)
+	combined := certPEM + extraPEM
+
+	assert.Error(t, verifyCACertFingerprint(combined, fingerprint))
+
+	destPath := filepath.Join(t.TempDir(), "ca.pem")
+	assert.Error(t, writeCACert(combined, destPath))
+	_, err := os.Stat(destPath)
+	assert.True(t, os.IsNotExist(err), "nothing may be written for a multi-block input")
+}
+
+func TestVerifyCACertFingerprintRejectsTrailingData(t *testing.T) {
+	certPEM, fingerprint := generateTestCACert(t)
+	assert.Error(t, verifyCACertFingerprint(certPEM+"trailing garbage\n", fingerprint))
+	assert.Error(t, verifyCACertFingerprint("leading garbage\n"+certPEM, fingerprint))
+	assert.NoError(t, verifyCACertFingerprint(certPEM+"\n  \n", fingerprint))
+}
+
+func TestWriteCACertWritesReencodedCertificate(t *testing.T) {
+	certPEM, _ := generateTestCACert(t)
+	destPath := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, writeCACert(certPEM+"\n\n", destPath))
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, string(got))
+}

@@ -213,17 +213,10 @@ func trustSourceFromMode(mode string) TrustSource {
 }
 
 // computeCAPEMFingerprint returns the SHA-256 hex fingerprint of the DER bytes
-// of the first certificate block in caPEM.
+// of caPEM, which must hold exactly one CERTIFICATE block and no other data.
 func computeCAPEMFingerprint(caPEM string) (string, error) {
-	block, _ := pem.Decode([]byte(caPEM))
-	if block == nil {
-		return "", fmt.Errorf("no PEM block found in CA PEM")
-	}
-	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-		return "", fmt.Errorf("invalid CA certificate: %w", err)
-	}
-	sum := sha256.Sum256(block.Bytes)
-	return hex.EncodeToString(sum[:]), nil
+	_, fp, err := service.CanonicalCAPEM(caPEM)
+	return fp, err
 }
 
 // resolveTrustSource determines the effective trust level and controller URL.
@@ -271,17 +264,126 @@ func checkTrustDowngrade(current TrustSource, currentCAPEM string, id *StewardId
 	return nil
 }
 
+// verifyPersistedCA re-validates a persisted CA PEM on load: it must hold exactly
+// one CERTIFICATE block and, when pin is non-empty, re-derive to the pinned
+// fingerprint. It returns the canonical single-certificate PEM. A persisted CA
+// that fails either check is refused, never trusted.
+func verifyPersistedCA(caPEM, pin string) (string, error) {
+	canonical, fp, err := service.CanonicalCAPEM(caPEM)
+	if err != nil {
+		return "", fmt.Errorf("persisted CA rejected: %w", err)
+	}
+	if pin != "" && !strings.EqualFold(fp, pin) {
+		return "", fmt.Errorf("persisted CA rejected: fingerprint does not match pin; re-pin requires wipe + re-enroll")
+	}
+	return canonical, nil
+}
+
+// repairPersistedCA returns the canonical single-certificate PEM for raw. When
+// raw holds more than the pinned certificate (old persisted state) and the pinned
+// certificate is one of its blocks, only that certificate is kept; otherwise the
+// persisted CA is refused.
+func repairPersistedCA(raw, pin string) (string, error) {
+	if canonical, err := verifyPersistedCA(raw, pin); err == nil {
+		return canonical, nil
+	}
+	if pin == "" {
+		return "", fmt.Errorf("persisted CA rejected: not a single certificate and no pin to repair against")
+	}
+	rest := []byte(raw)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(cert.Raw)
+		if strings.EqualFold(hex.EncodeToString(sum[:]), pin) {
+			return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})), nil
+		}
+	}
+	return "", fmt.Errorf("persisted CA rejected: pinned certificate not present; re-pin requires wipe + re-enroll")
+}
+
+// repairPersistedCAFile validates the CA file at path against pin and rewrites it
+// in place to the canonical single certificate when it holds extra material. A
+// missing file is not an error. It returns the canonical PEM.
+func repairPersistedCAFile(path, pin string) (string, error) {
+	// #nosec G304 -- path is the installer CA path or an administrator override.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read persisted CA: %w", err)
+	}
+	canonical, err := repairPersistedCA(string(data), pin)
+	if err != nil {
+		return "", err
+	}
+	if canonical == string(data) {
+		return canonical, nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".ca-repair-*")
+	if err != nil {
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.WriteString(canonical); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
+	// #nosec G302 -- a CA certificate is public verification material; 0444 matches the installer.
+	if err := os.Chmod(tmp.Name(), 0444); err != nil {
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
+	// Windows refuses to rename over a read-only file; the 0444 target must be
+	// removed first. The directory is service-owned, so this is not a trust change.
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return "", fmt.Errorf("repair persisted CA: %w", err)
+	}
+	return canonical, nil
+}
+
 // pinTOFUCA pins the controller CA on first TOFU enrollment. On first call it
 // records the fingerprint in id and writes the CA to caPath at 0444 (public,
 // immutable). On subsequent calls it verifies the CA matches the pinned value.
 func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
-	fp, err := computeCAPEMFingerprint(caPEM)
+	canonicalPEM, fp, err := service.CanonicalCAPEM(caPEM)
 	if err != nil {
 		return fmt.Errorf("compute TOFU CA fingerprint: %w", err)
 	}
 	if id.CAPinFingerprint != "" {
 		if fp != id.CAPinFingerprint {
 			return fmt.Errorf("already enrolled; re-pin requires wipe + re-enroll")
+		}
+		// The incoming CA matches the pin. Bring older persisted state (a file or
+		// identity holding more than the pinned certificate) back to the canonical
+		// single certificate, or refuse it.
+		if caPath != "" {
+			if _, err := repairPersistedCAFile(caPath, id.CAPinFingerprint); err != nil {
+				return err
+			}
+		}
+		if id.CACertPEM != "" {
+			repaired, err := repairPersistedCA(id.CACertPEM, id.CAPinFingerprint)
+			if err != nil {
+				return err
+			}
+			id.CACertPEM = repaired
 		}
 		return nil
 	}
@@ -294,7 +396,7 @@ func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
 		}
 		// #nosec G306 -- a CA certificate is public verification material; 0444
 		// makes the TOFU pin service-readable and immutable by the service user.
-		if err := os.WriteFile(caPath, []byte(caPEM), 0444); err != nil {
+		if err := os.WriteFile(caPath, []byte(canonicalPEM), 0444); err != nil {
 			return fmt.Errorf("write TOFU CA cert: %w", err)
 		}
 	}
@@ -488,8 +590,16 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		if installCACertPath != "" {
 			// #nosec G304 -- path is returned by resolveRegistrationCACertPath
 			// from the explicit installer CA option or fixed service CA path.
-			if caData, caErr := os.ReadFile(installCACertPath); caErr == nil {
-				installCAPEM = string(caData)
+			if _, caErr := os.Stat(installCACertPath); caErr == nil {
+				var pin string
+				if storedID, idErr := loadIdentity(defaultCertStoreDir()); idErr == nil && storedID != nil {
+					pin = storedID.CAPinFingerprint
+				}
+				canonical, vErr := repairPersistedCAFile(installCACertPath, pin)
+				if vErr != nil {
+					return vErr
+				}
+				installCAPEM = canonical
 			}
 		}
 		trustSrc, resolvedURL, trustErr := resolveTrustSource(ControllerURL, controllerURL, installCAPEM)
@@ -1612,6 +1722,13 @@ func connectWithApprovedRegistration(
 			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, &persistedID); err != nil {
 				return nil, fmt.Errorf("TOFU CA pin failed: %w", err)
 			}
+			// Persist and trust only the verified single-certificate re-encoding.
+			canonicalPEM, _, cerr := service.CanonicalCAPEM(reg.CACert)
+			if cerr != nil {
+				return nil, fmt.Errorf("TOFU CA pin failed: %w", cerr)
+			}
+			reg.CACert = canonicalPEM
+			persistedID.CACertPEM = canonicalPEM
 		}
 	case trustSourceInstallPinned:
 		if installCAPEM != "" {
@@ -1897,6 +2014,16 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	// lacks both as unusable and fall back to HTTP re-registration.
 	if id.ServerCertPEM == "" && id.SigningCertPEM == "" && len(id.SigningCertPEMs) == 0 {
 		return nil, fmt.Errorf("stored identity missing controller server/signing certificate; cannot verify signed commands")
+	}
+
+	// Re-validate the persisted CA on load: exactly one certificate, matching the
+	// pin recorded at enrollment. A mismatch is refused, never trusted.
+	if id.CACertPEM != "" {
+		canonical, caErr := verifyPersistedCA(id.CACertPEM, id.CAPinFingerprint)
+		if caErr != nil {
+			return nil, caErr
+		}
+		id.CACertPEM = canonical
 	}
 
 	// Load the cert manager from the existing cert store.

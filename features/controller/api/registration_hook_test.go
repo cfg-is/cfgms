@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,7 +40,8 @@ import (
 type testIPTrustStore struct {
 	mu      sync.RWMutex
 	trusted map[string]bool // key: tenantID+"\x00"+ip
-	err     error           // when non-nil, IsTrusted returns this error
+	err     error           // when non-nil, IsTrusted and ListTrustedRanges return this error
+	entries []*business.IPTrustEntry
 }
 
 func newTestIPTrustStore() *testIPTrustStore {
@@ -48,7 +50,7 @@ func newTestIPTrustStore() *testIPTrustStore {
 
 func (s *testIPTrustStore) key(tenantID, ip string) string { return tenantID + "\x00" + ip }
 
-func (s *testIPTrustStore) AddTrustedRange(_ context.Context, tenantID, cidr string, _ bool) error {
+func (s *testIPTrustStore) AddTrustedRange(_ context.Context, tenantID, cidr string, preSeeded bool) error {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return err
@@ -56,6 +58,7 @@ func (s *testIPTrustStore) AddTrustedRange(_ context.Context, tenantID, cidr str
 	// For testing simplicity, record the network address as "trusted".
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.entries = append(s.entries, &business.IPTrustEntry{TenantID: tenantID, CIDR: ipNet.String(), PreSeeded: preSeeded})
 	s.trusted[s.key(tenantID, ipNet.IP.String())] = true
 	return nil
 }
@@ -69,8 +72,19 @@ func (s *testIPTrustStore) IsTrusted(_ context.Context, tenantID, ip string) (bo
 	return s.trusted[s.key(tenantID, ip)], nil
 }
 
-func (s *testIPTrustStore) ListTrustedRanges(_ context.Context, _ string) ([]*business.IPTrustEntry, error) {
-	return nil, nil
+func (s *testIPTrustStore) ListTrustedRanges(_ context.Context, tenantID string) ([]*business.IPTrustEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []*business.IPTrustEntry
+	for _, e := range s.entries {
+		if e.TenantID == tenantID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 func (s *testIPTrustStore) RevokeTrustedRange(_ context.Context, _, _ string) error { return nil }
 func (s *testIPTrustStore) RecordHealthySteward(_ context.Context, _, _ string, _ time.Time) error {
@@ -85,6 +99,11 @@ func (s *testIPTrustStore) setTrusted(tenantID, ip string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.trusted[s.key(tenantID, ip)] = true
+	if addr, err := netip.ParseAddr(ip); err == nil {
+		s.entries = append(s.entries, &business.IPTrustEntry{
+			TenantID: tenantID, CIDR: netip.PrefixFrom(addr, addr.BitLen()).String(), PreSeeded: true,
+		})
+	}
 }
 
 // setError makes IsTrusted return the given error.
@@ -789,4 +808,24 @@ func TestManualReviewApprovalHookStoreRequirements_DecliningProviderFailsStartup
 		"startup error must name the registration subsystem so operators can diagnose the gap")
 	assert.Contains(t, err.Error(), string(interfaces.StoreNamePendingRegistration),
 		"startup error must name the missing store")
+}
+
+// TestIPTrustApprovalHook_LegacyPromotedIPv6Slash32_NotTrusted verifies a
+// promoted <ipv6>/32 entry written by the pre-fix evaluator does not grant trust
+// to other addresses in that block, while a promoted /128 still trusts its host.
+func TestIPTrustApprovalHook_LegacyPromotedIPv6Slash32_NotTrusted(t *testing.T) {
+	store := newTestIPTrustStore()
+	require.NoError(t, store.AddTrustedRange(context.Background(), "test-tenant", "2001:db8:1:2::5/32", false))
+	hook := NewIPTrustApprovalHook(store, logging.NewNoopLogger())
+
+	in := sampleInput()
+	in.SourceIP = "2001:db8:ffff::9"
+	decision, _, err := hook.Evaluate(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionQuarantine, decision, "legacy promoted IPv6 /32 must not trust the wider block")
+
+	require.NoError(t, store.AddTrustedRange(context.Background(), "test-tenant", "2001:db8:ffff::9/128", false))
+	decision, _, err = hook.Evaluate(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionApprove, decision, "promoted /128 host entry must still trust its host")
 }

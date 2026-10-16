@@ -1032,11 +1032,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			" (ed25519: raw 32-byte key; ecdsa-p256: PKIX DER on P-256)", http.StatusBadRequest)
 		return
 	}
-	// The DeviceID is SHA-256 of the key bytes. It is enforced here for ecdsa-p256
-	// (ADR-011 Amendment 3); the ed25519 path has historically only checked its
-	// format and keeps doing exactly that.
-	if keyAlg == KeyAlgorithmECDSAP256 && req.DeviceID != deviceIDForKey(identityKeyBytes) {
-		http.Error(w, "device_id must be the lowercase hex SHA-256 of the PKIX DER identity_key_pub", http.StatusBadRequest)
+	// The DeviceID is SHA-256 of the key bytes for both algorithms (ADR-010 §1,
+	// ADR-011 Amendment 3).
+	if req.DeviceID != deviceIDForKey(identityKeyBytes) {
+		http.Error(w, "device_id must be the lowercase hex SHA-256 of the identity_key_pub bytes", http.StatusBadRequest)
 		return
 	}
 	claimID := registrationClaimID(req.DeviceID, identityKeyBytes)

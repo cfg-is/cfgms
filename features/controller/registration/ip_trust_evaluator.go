@@ -5,6 +5,7 @@ package registration
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -58,12 +59,22 @@ func NewIPTrustEvaluator(cfg IPTrustEvaluatorConfig) *IPTrustEvaluator {
 	}
 }
 
+// normalizeIP returns the canonical form of ip (IPv4-mapped IPv6 unmapped), or
+// ip unchanged when it does not parse.
+func normalizeIP(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	return addr.Unmap().WithZone("").String()
+}
+
 // HasTimer returns true if a liveness timer is active for the given
 // (tenantID, ip) pair. Used by tests to inspect internal state.
 func (e *IPTrustEvaluator) HasTimer(tenantID, ip string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, ok := e.timers[tenantID+"\x00"+ip]
+	_, ok := e.timers[tenantID+"\x00"+normalizeIP(ip)]
 	return ok
 }
 
@@ -72,7 +83,7 @@ func (e *IPTrustEvaluator) HasTimer(tenantID, ip string) bool {
 func (e *IPTrustEvaluator) ForceTimerExpiry(tenantID, ip string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	key := tenantID + "\x00" + ip
+	key := tenantID + "\x00" + normalizeIP(ip)
 	if _, ok := e.timers[key]; ok {
 		e.timers[key] = time.Now().Add(-e.threshold)
 	}
@@ -90,6 +101,12 @@ func (e *IPTrustEvaluator) RecordLiveness(ctx context.Context, tenantID, steward
 		return nil
 	}
 
+	addr, perr := netip.ParseAddr(ip)
+	if perr != nil {
+		return nil
+	}
+	addr = addr.Unmap().WithZone("")
+	ip = addr.String()
 	key := tenantID + "\x00" + ip
 
 	e.mu.Lock()
@@ -131,7 +148,7 @@ func (e *IPTrustEvaluator) RecordLiveness(ctx context.Context, tenantID, steward
 	// undo that decision — revocation must only be reversed by an explicit
 	// re-trust action, never by the same kind of signal it was meant to stop
 	// trusting.
-	cidr := ip + "/32"
+	cidr := netip.PrefixFrom(addr, addr.BitLen()).String()
 	revoked, err := e.isRevoked(ctx, tenantID, cidr)
 	if err != nil {
 		e.logger.Error("Failed to check IP trust revocation state before promotion",
@@ -169,20 +186,53 @@ func (e *IPTrustEvaluator) RecordLiveness(ctx context.Context, tenantID, steward
 	return nil
 }
 
-// isRevoked reports whether tenantID already has a revoked trust entry for the
-// exact CIDR. ListTrustedRanges is used rather than IsTrusted because IsTrusted
-// only answers "is this IP currently trusted" — it cannot distinguish "no entry
-// ever existed" from "an entry exists but was revoked", and that distinction is
-// exactly what a re-promotion decision needs.
+// isRevoked reports whether tenantID has a revoked trust entry that covers
+// cidr. Containment is evaluated on normalized prefixes (IPv4-mapped IPv6
+// unmapped, zones dropped), so a revoked wider range blocks promotion of any
+// host inside it. ListTrustedRanges is used rather than IsTrusted because
+// IsTrusted only answers "is this IP currently trusted" — it cannot distinguish
+// "no entry ever existed" from "an entry exists but was revoked", and that
+// distinction is exactly what a re-promotion decision needs.
 func (e *IPTrustEvaluator) isRevoked(ctx context.Context, tenantID, cidr string) (bool, error) {
 	entries, err := e.store.ListTrustedRanges(ctx, tenantID)
 	if err != nil {
 		return false, err
 	}
+	target, perr := netip.ParsePrefix(cidr)
+	if perr != nil {
+		return false, nil
+	}
+	target = normalizePrefix(target)
 	for _, entry := range entries {
-		if entry.CIDR == cidr && entry.Revoked {
+		if !entry.Revoked {
+			continue
+		}
+		if entry.CIDR == cidr {
+			return true, nil
+		}
+		p, err := netip.ParsePrefix(entry.CIDR)
+		if err != nil {
+			continue
+		}
+		p = normalizePrefix(p)
+		if p.Bits() <= target.Bits() && p.Contains(target.Addr()) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// normalizePrefix unmaps an IPv4-mapped IPv6 prefix to IPv4, drops any zone and
+// masks host bits.
+func normalizePrefix(p netip.Prefix) netip.Prefix {
+	addr := p.Addr().WithZone("")
+	bits := p.Bits()
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+		bits -= 96
+		if bits < 0 {
+			bits = 0
+		}
+	}
+	return netip.PrefixFrom(addr, bits).Masked()
 }

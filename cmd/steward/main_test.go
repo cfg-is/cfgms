@@ -1587,3 +1587,128 @@ func TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs(t *testing.T) {
 	assert.NotEmpty(t, attrs, "CollectAttributes must return host attrs even without a module source")
 	assert.Contains(t, attrs, "hostname", "host-fact attributes must be present in hardware-facts-only mode")
 }
+
+// TestMultiBlockCAPEMRejected verifies that a CA PEM whose first block matches
+// the pin but which carries extra certificates is rejected on first TOFU pin,
+// on re-enroll, and on the refresh-complete downgrade check, and that nothing
+// is written.
+func TestMultiBlockCAPEMRejected(t *testing.T) {
+	certPEM, fingerprint := generateMainTestCACert(t)
+	extraPEM, _ := generateMainTestCACert(t)
+	multi := certPEM + extraPEM
+
+	t.Run("first pin", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		id := &StewardIdentity{}
+		require.Error(t, pinTOFUCA(caPath, multi, id))
+		assert.Empty(t, id.CAPinFingerprint)
+		_, statErr := os.Stat(caPath)
+		assert.True(t, os.IsNotExist(statErr), "nothing may be written for a multi-block CA")
+	})
+
+	t.Run("re-enroll", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		id := &StewardIdentity{CAPinFingerprint: fingerprint}
+		require.Error(t, pinTOFUCA(caPath, multi, id))
+		_, statErr := os.Stat(caPath)
+		assert.True(t, os.IsNotExist(statErr))
+	})
+
+	t.Run("refresh-complete", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "install-pinned", CAPinFingerprint: fingerprint}
+		require.Error(t, checkTrustDowngrade(trustSourceInstallPinned, multi, id))
+	})
+
+	t.Run("first pin writes re-encoded DER", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		require.NoError(t, pinTOFUCA(caPath, "\n"+certPEM+"\n", &StewardIdentity{}))
+		got, err := os.ReadFile(caPath)
+		require.NoError(t, err)
+		assert.Equal(t, certPEM, string(got))
+	})
+}
+
+// TestPersistedCAValidatedOnRead covers the read-side CA rules: a multi-block CA
+// on disk is repaired to the pinned certificate or refused, and a stored identity
+// whose CA does not match its pin (or holds more than one certificate) is refused
+// on reconnect.
+func TestPersistedCAValidatedOnRead(t *testing.T) {
+	certPEM, fingerprint := generateMainTestCACert(t)
+	otherPEM, _ := generateMainTestCACert(t)
+
+	t.Run("file with extra certificate is repaired to the pinned one", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		require.NoError(t, os.WriteFile(caPath, []byte(certPEM+otherPEM), 0444))
+		got, err := repairPersistedCAFile(caPath, fingerprint)
+		require.NoError(t, err)
+		onDisk, readErr := os.ReadFile(caPath)
+		require.NoError(t, readErr)
+		assert.Equal(t, got, string(onDisk))
+		_, fp, cerr := service.CanonicalCAPEM(string(onDisk))
+		require.NoError(t, cerr)
+		assert.Equal(t, fingerprint, fp)
+	})
+
+	t.Run("file without the pinned certificate is refused and untouched", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		multi := otherPEM + otherPEM
+		require.NoError(t, os.WriteFile(caPath, []byte(multi), 0444))
+		_, err := repairPersistedCAFile(caPath, fingerprint)
+		require.Error(t, err)
+		onDisk, _ := os.ReadFile(caPath)
+		assert.Equal(t, multi, string(onDisk))
+	})
+
+	t.Run("multi-block file with no pin is refused", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		require.NoError(t, os.WriteFile(caPath, []byte(certPEM+otherPEM), 0444))
+		_, err := repairPersistedCAFile(caPath, "")
+		require.Error(t, err)
+	})
+
+	t.Run("pinTOFUCA re-enroll repairs persisted file and identity", func(t *testing.T) {
+		caPath := filepath.Join(t.TempDir(), "ca.crt")
+		require.NoError(t, os.WriteFile(caPath, []byte(certPEM+otherPEM), 0444))
+		id := &StewardIdentity{CAPinFingerprint: fingerprint, CACertPEM: otherPEM + certPEM}
+		require.NoError(t, pinTOFUCA(caPath, certPEM, id))
+		onDisk, _ := os.ReadFile(caPath)
+		_, fp, err := service.CanonicalCAPEM(string(onDisk))
+		require.NoError(t, err)
+		assert.Equal(t, fingerprint, fp)
+		_, fp, err = service.CanonicalCAPEM(id.CACertPEM)
+		require.NoError(t, err)
+		assert.Equal(t, fingerprint, fp)
+	})
+
+	t.Run("pinTOFUCA re-enroll refuses unrepairable identity CA", func(t *testing.T) {
+		id := &StewardIdentity{CAPinFingerprint: fingerprint, CACertPEM: otherPEM + otherPEM}
+		require.Error(t, pinTOFUCA("", certPEM, id))
+	})
+
+	reconnect := func(t *testing.T, caPEM, pin string) error {
+		dir := t.TempDir()
+		require.NoError(t, saveIdentity(dir, StewardIdentity{
+			StewardID:        "steward-ca",
+			TenantID:         "tenant-1",
+			TransportAddress: "controller:4433",
+			ServerCertPEM:    certPEM,
+			CACertPEM:        caPEM,
+			CAPinFingerprint: pin,
+		}))
+		tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+		assert.Nil(t, tc)
+		return err
+	}
+
+	t.Run("reconnect refuses stored CA that does not match pin", func(t *testing.T) {
+		err := reconnect(t, otherPEM, fingerprint)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "persisted CA rejected")
+	})
+
+	t.Run("reconnect refuses stored multi-block CA", func(t *testing.T) {
+		err := reconnect(t, certPEM+otherPEM, fingerprint)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "persisted CA rejected")
+	})
+}
