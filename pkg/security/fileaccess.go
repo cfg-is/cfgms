@@ -182,10 +182,10 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	if resolveErr == nil {
 		absUserPath = resolved
 	} else if errors.Is(resolveErr, os.ErrNotExist) {
-		// Non-existent target: walk up to the deepest existing ancestor,
-		// eval-symlink it, then re-join the non-existing tail components.
-		// This handles paths like "newdir/newfile.txt" where the parent dirs
-		// don't yet exist, and also catches ancestors that are malicious symlinks.
+		// Non-existent target: resolve the deepest existing ancestor, then re-join the
+		// non-existing tail components. This handles paths like "newdir/newfile.txt"
+		// where the parent dirs don't yet exist, and also catches ancestors that are
+		// malicious or dangling symlinks.
 		//
 		// Preliminary check uses rawAbsBasePath (not the already-resolved absBasePath)
 		// so both sides are in the same pre-resolution form. On macOS, absBasePath is
@@ -196,35 +196,11 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		if rawRelErr != nil || strings.HasPrefix(rawRel, "..") || filepath.IsAbs(rawRel) {
 			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
 		}
-		parent := absUserPath
-		var tail []string
-		for {
-			info, lstatErr := os.Lstat(parent)
-			if lstatErr == nil {
-				if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-					// A link (or Windows reparse point) is never re-joined unresolved:
-					// it must resolve, otherwise a later create would follow it.
-					if _, statErr := os.Stat(parent); statErr != nil {
-						return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
-					}
-				}
-				break
-			}
-			if !errors.Is(lstatErr, os.ErrNotExist) {
-				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
-			}
-			tail = append([]string{filepath.Base(parent)}, tail...)
-			next := filepath.Dir(parent)
-			if next == parent {
-				return "", fmt.Errorf("failed to resolve any ancestor of %s", userPath)
-			}
-			parent = next
+		resolvedPath, tailErr := resolveMissingTail(absBasePath, rawRel, userPath)
+		if tailErr != nil {
+			return "", tailErr
 		}
-		resolvedParent, resolveParentErr := filepath.EvalSymlinks(parent)
-		if resolveParentErr != nil {
-			return "", fmt.Errorf("failed to resolve parent: %w", resolveParentErr)
-		}
-		absUserPath = filepath.Join(append([]string{resolvedParent}, tail...)...)
+		absUserPath = resolvedPath
 	} else {
 		return "", fmt.Errorf("failed to evaluate symlinks: %w", resolveErr)
 	}
@@ -236,6 +212,58 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	}
 
 	return absUserPath, nil
+}
+
+// resolveMissingTail resolves rel (relative to the canonical base absBasePath) when the full
+// path does not exist. It walks the components top-down, resolving each existing prefix with
+// filepath.EvalSymlinks so the walk always stands in a fully resolved directory inside the
+// base. The first component that does not resolve is probed with a no-follow Lstat through an
+// os.Root anchored at the base, so the probe can never touch a file outside it. A missing
+// component starts the non-existent tail. A symlink or Windows reparse point that does not
+// resolve is rejected, because re-joining it unresolved would let a later create follow it.
+// A prefix that resolves outside the base is rejected as traversal.
+func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
+	baseRoot, err := os.OpenRoot(absBasePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open base path: %w", err)
+	}
+	defer func() { _ = baseRoot.Close() }()
+
+	resolvedDir := absBasePath
+	var components []string
+	if rel != "." {
+		components = strings.Split(rel, string(filepath.Separator))
+	}
+	for i, component := range components {
+		if resolved, evalErr := filepath.EvalSymlinks(filepath.Join(resolvedDir, component)); evalErr == nil {
+			if err := containmentCheck(absBasePath, resolved, userPath); err != nil {
+				return "", err
+			}
+			resolvedDir = resolved
+			continue
+		}
+		// resolvedDir is canonical and inside the base, so this base-relative path has no
+		// link in any intermediate component: the Root never has to follow one (os.Root
+		// refuses absolute link targets even when they point inside the base).
+		dirRel, relErr := filepath.Rel(absBasePath, resolvedDir)
+		if relErr != nil {
+			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+		}
+		info, lstatErr := baseRoot.Lstat(filepath.Join(dirRel, component))
+		if lstatErr != nil {
+			if os.IsPermission(lstatErr) {
+				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
+			}
+			// Any other failure means the component does not exist (ErrNotExist, or Windows
+			// ERROR_INVALID_NAME for "a:b"): it and everything after it are the new tail.
+			return filepath.Join(append([]string{resolvedDir}, components[i:]...)...), nil
+		}
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
+		}
+		return "", fmt.Errorf("failed to resolve path component of %s", userPath)
+	}
+	return resolvedDir, nil
 }
 
 // containmentCheck verifies that absUserPath is within absBasePath using filepath.Rel.

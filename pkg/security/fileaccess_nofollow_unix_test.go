@@ -48,6 +48,52 @@ func TestDanglingSymlinkIntermediateDirRejected(t *testing.T) {
 	}
 }
 
+// A dangling link beneath an ancestor that is an absolute in-base symlink must still be
+// rejected: the walk resolves the ancestor before probing the next component.
+func TestDanglingSymlinkBehindAbsoluteInBaseLinkRejected(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(base, "abs")); err != nil {
+		t.Fatalf("create absolute symlink: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "newdir")
+	if err := os.Symlink(outside, filepath.Join(realDir, "dangling")); err != nil {
+		t.Fatalf("create dangling symlink: %v", err)
+	}
+
+	if _, err := ValidateAndCleanPath(base, "abs/dangling/new.txt"); err == nil {
+		t.Fatal("ValidateAndCleanPath must reject a dangling link behind an absolute in-base link")
+	}
+}
+
+// An absolute symlink that points inside the base is legitimate; a non-existent tail beneath
+// it resolves to the link's target directory.
+func TestAbsoluteInBaseLinkWithMissingTailAccepted(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(base, "abs")); err != nil {
+		t.Fatalf("create absolute symlink: %v", err)
+	}
+
+	got, err := ValidateAndCleanPath(base, "abs/newdir/new.txt")
+	if err != nil {
+		t.Fatalf("ValidateAndCleanPath rejected an in-base absolute link: %v", err)
+	}
+	resolvedReal, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(resolvedReal, "newdir", "new.txt"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestOpenNoFollowRejectsSwappedLeaf(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(t.TempDir(), "victim.txt")
