@@ -30,6 +30,7 @@
 package api
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"sync"
@@ -282,24 +283,27 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist the advanced sign count. The credential is matched by ID.
-	updatedAcct := *acct
-	updatedAcct.Credentials = make([]WebAuthnCredential, len(acct.Credentials))
-	copy(updatedAcct.Credentials, acct.Credentials)
-	for i, c := range updatedAcct.Credentials {
-		if string(c.ID) == string(credential.ID) {
-			updatedAcct.Credentials[i].SignCount = newSignCount
-			break
+	// Issue #5066: reload the account and record the sign count with compare-and-swap so
+	// a revoke or disable that landed while the assertion was in flight is never undone.
+	if _, recordErr := s.recordAssertionSignCount(r.Context(), acct, credential.ID, newSignCount, principal.ID); recordErr != nil {
+		if errors.Is(recordErr, errAssertionRefused) {
+			s.logger.Warn("Step-up finish: account changed during assertion, refusing elevation",
+				"principal_id", logging.SanitizeLogValue(principal.ID),
+				"session_id", logging.SanitizeLogValue(sessID),
+				"error", logging.SanitizeLogValue(recordErr.Error()))
+			s.recordElevateFailure("session:" + sessID)
+			if ipKey != "" {
+				s.recordElevateFailure("ip:" + ipKey)
+			}
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Credential is no longer valid", "CREDENTIAL_REVOKED")
+			return
 		}
-	}
-	if persistErr := s.persistAccount(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
+		// Store failure while writing: the reload confirmed the credential is still valid
+		// and verification already succeeded, so elevation proceeds.
 		s.logger.Error("Step-up finish: failed to persist updated sign count",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(persistErr.Error()))
-		// Non-fatal for session elevation: sign-count persistence failing does not
-		// compromise the cryptographic verification already performed. Log the error and proceed.
-	} else {
-		s.cacheAccount(&updatedAcct)
+			"error", logging.SanitizeLogValue(recordErr.Error()))
 	}
 
 	// Elevate the session: rotate the token and set AssuranceStrong.

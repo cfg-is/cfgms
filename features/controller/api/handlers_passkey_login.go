@@ -31,10 +31,13 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -323,23 +326,28 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Persist the advanced sign count.
-	updatedAcct := *acct
-	updatedAcct.Credentials = make([]WebAuthnCredential, len(acct.Credentials))
-	copy(updatedAcct.Credentials, acct.Credentials)
-	for i, c := range updatedAcct.Credentials {
-		if string(c.ID) == string(credential.ID) {
-			updatedAcct.Credentials[i].SignCount = newSignCount
-			break
-		}
-	}
-	if persistErr := s.persistAccount(r.Context(), &updatedAcct, acct.Username); persistErr != nil {
+	// Issue #5066: reload the account and record the sign count with compare-and-swap so
+	// a revoke or disable that landed while the assertion was in flight is never undone.
+	freshAcct, recordErr := s.recordAssertionSignCount(r.Context(), acct, credential.ID, newSignCount, acct.Username)
+	if recordErr != nil && !errors.Is(recordErr, errAssertionRefused) {
+		// Store failure while writing: cryptographic verification succeeded and the
+		// reload confirmed the credential is still valid, so proceed with login.
 		s.logger.Error("Passkey login finish: failed to persist sign count",
 			"username", logging.SanitizeLogValue(acct.Username),
-			"error", logging.SanitizeLogValue(persistErr.Error()))
-		// Non-fatal: cryptographic verification succeeded; proceed with login.
-	} else {
-		s.cacheAccount(&updatedAcct)
+			"error", logging.SanitizeLogValue(recordErr.Error()))
+	} else if recordErr != nil {
+		s.logger.Warn("Passkey login finish: account changed during assertion, refusing login",
+			"source_ip", logging.SanitizeLogValue(sourceIP),
+			"username", logging.SanitizeLogValue(acct.Username),
+			"error", logging.SanitizeLogValue(recordErr.Error()))
+		s.recordPasskeyLoginFailure("account:" + acct.Username)
+		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+		return
+	}
+	if freshAcct != nil {
+		acct = freshAcct
 	}
 
 	// Session-fixation defence: revoke any pre-existing session cookie before
@@ -456,4 +464,63 @@ func (s *Server) checkPasskeyLoginThrottle(key string) (blocked bool, retryAfter
 // RateCounterStore (Issue #4527).
 func (s *Server) recordPasskeyLoginFailure(key string) {
 	s.recordThrottleFailure(&s.passkeyLoginThrottle, passkeyLoginThrottleKeyPrefix, key)
+}
+
+// errAssertionRefused marks a verified assertion that must not be honoured because the
+// account or credential changed (or a write could not be settled) while it was in flight.
+var errAssertionRefused = errors.New("assertion refused: account changed during verification")
+
+// recordAssertionSignCount applies a verified assertion's sign count to the account
+// (Issue #5066). It reloads the account from the store, refuses when the account is gone,
+// disabled, or no longer holds the credential that signed, applies the count to that fresh
+// copy, and writes it with persistAccountCAS. A lost swap reloads and retries once; a second
+// loss refuses. Nothing is written on any refusal, so a removed credential or the disabled
+// flag can never be undone. On success the cache is updated with the new version.
+//
+// Refusals wrap errAssertionRefused. Any other error is a store failure; the returned
+// account is then the freshly validated copy (without the new count) when one was loaded.
+func (s *Server) recordAssertionSignCount(ctx context.Context, acct *account, credID []byte, newSignCount uint32, createdBy string) (*account, error) {
+	const maxAttempts = 2
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		fresh, err := s.loadAccountFromStore(ctx, acct.Username, accountStorageTenant(acct.TenantID))
+		if err != nil {
+			return nil, fmt.Errorf("%w: reload failed: %v", errAssertionRefused, err)
+		}
+		if fresh == nil || fresh.ID != acct.ID {
+			return nil, fmt.Errorf("%w: account no longer exists", errAssertionRefused)
+		}
+		if fresh.Disabled {
+			return nil, fmt.Errorf("%w: account disabled", errAssertionRefused)
+		}
+		idx := -1
+		for i, c := range fresh.Credentials {
+			if bytes.Equal(c.ID, credID) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, fmt.Errorf("%w: credential no longer registered", errAssertionRefused)
+		}
+		stored := fresh.Credentials[idx].SignCount
+		if (stored > 0 || newSignCount > 0) && newSignCount <= stored {
+			return nil, fmt.Errorf("%w: sign count already advanced", errAssertionRefused)
+		}
+
+		updated := *fresh
+		updated.Credentials = make([]WebAuthnCredential, len(fresh.Credentials))
+		copy(updated.Credentials, fresh.Credentials)
+		updated.Credentials[idx].SignCount = newSignCount
+
+		newVersion, ok, err := s.persistAccountCAS(ctx, &updated, createdBy)
+		if err != nil {
+			return fresh, err
+		}
+		if ok {
+			updated.Version = newVersion
+			s.cacheAccount(&updated)
+			return &updated, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: concurrent writes kept winning", errAssertionRefused)
 }
