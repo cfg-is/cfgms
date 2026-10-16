@@ -2,10 +2,7 @@
 // Copyright 2026 Jordan Ritz
 package script
 
-import (
-	"os"
-	"strings"
-)
+import "os"
 
 // windowsPowerShellPath resolves powershell.exe via an absolute path under %SystemRoot%
 // (then %windir%, then C:\Windows) rather than %PATH%, so a planted powershell.exe earlier
@@ -21,8 +18,8 @@ func windowsPowerShellPath(getenv func(string) string) string {
 	}
 	p := root + `\System32\WindowsPowerShell\v1.0\powershell.exe`
 	driveAbs := len(root) >= 3 && root[1] == ':' && (root[2] == '\\' || root[2] == '/')
-	if !driveAbs && !strings.HasPrefix(root, `\\`) {
-		// Not an absolute Windows path (checked textually so this works on any GOOS).
+	if !driveAbs {
+		// Not a drive-letter path (UNC roots are refused too) (checked textually so this works on any GOOS).
 		return ""
 	}
 	return p
