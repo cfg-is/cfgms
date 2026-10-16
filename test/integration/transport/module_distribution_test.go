@@ -857,7 +857,7 @@ func TestModuleDistribution(t *testing.T) {
 		// An attacker with write access replaces the installed binary before the module starts.
 		ran := filepath.Join(t.TempDir(), "ran")
 		binPath := filepath.Join(f.root, distModule, exeName("cfgms-module-"+distModule))
-		require.NoError(t, os.Chmod(binPath, 0o700)) // #nosec G302 -- test-owned file, made writable to simulate tampering
+		require.NoError(t, os.Chmod(binPath, 0o700)) // #nosec G302 -- test-owned file, made writable to model tampering
 		require.NoError(t, os.WriteFile(binPath, []byte("#!/bin/sh\ntouch '"+ran+"'\n"), 0o700))
 
 		// A restarted steward that cannot reach the controller finds the module installed
