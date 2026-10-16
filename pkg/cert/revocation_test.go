@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,8 +218,12 @@ func TestRevocationStore_TwoStoresDoNotLoseRevocations(t *testing.T) {
 
 	fresh, err := newRevocationStore(dir)
 	require.NoError(t, err)
-	assert.True(t, fresh.isRevoked("A"), "serial A written by the first store must survive")
-	assert.True(t, fresh.isRevoked("B"))
+	revoked, err := fresh.isRevoked("A")
+	require.NoError(t, err)
+	assert.True(t, revoked, "serial A written by the first store must survive")
+	revoked, err = fresh.isRevoked("B")
+	require.NoError(t, err)
+	assert.True(t, revoked)
 }
 
 // TestRevocationStore_ConcurrentIndependentStores verifies every serial persists
@@ -251,7 +256,9 @@ func TestRevocationStore_ConcurrentIndependentStores(t *testing.T) {
 	fresh, err := newRevocationStore(dir)
 	require.NoError(t, err)
 	for i := 0; i < n; i++ {
-		assert.True(t, fresh.isRevoked(fmt.Sprintf("serial-%d", i)), "serial-%d lost", i)
+		revoked, err := fresh.isRevoked(fmt.Sprintf("serial-%d", i))
+		require.NoError(t, err)
+		assert.True(t, revoked, "serial-%d lost", i)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(dir, "revocation.json.*"))
@@ -298,4 +305,24 @@ func TestRevocationStore_ExistingEntryKeepsTimestamp(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Equal(t, "original", entries[0].Reason)
 	assert.True(t, orig.RevokedAt.Equal(entries[0].RevokedAt))
+}
+
+// TestRevocationStore_IsRevokedFailsClosedOnReloadError verifies that when the
+// revocation file cannot be reloaded, IsRevoked returns an error instead of
+// answering from the stale in-memory map, so callers deny.
+func TestRevocationStore_IsRevokedFailsClosedOnReloadError(t *testing.T) {
+	dir := t.TempDir()
+	rs, err := newRevocationStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, rs.addAndPersist(RevocationEntry{Serial: "A"}))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, revocationFileName), []byte("{not json"), 0600))
+
+	revoked, err := rs.isRevoked("A")
+	require.Error(t, err, "reload failure must be reported, not hidden behind the cache")
+	assert.False(t, revoked)
+
+	revoked, err = rs.IsRevoked(context.Background(), "unrelated")
+	require.Error(t, err)
+	assert.False(t, revoked)
 }

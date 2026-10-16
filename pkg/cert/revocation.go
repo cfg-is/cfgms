@@ -167,13 +167,17 @@ func (rs *revocationStore) saveLocked() error {
 }
 
 // isRevoked reports whether serial is in the revocation list.
-// Re-reads from disk on every call to detect cross-process revocations.
-func (rs *revocationStore) isRevoked(serial string) bool {
+// Re-reads from disk on every call to detect cross-process revocations. If the
+// reload fails the status cannot be determined, so an error is returned and the
+// stale in-memory map is never consulted (fail closed).
+func (rs *revocationStore) isRevoked(serial string) (bool, error) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	_ = rs.loadLocked() // best-effort reload; stale cache preferred over crashing
+	if err := rs.loadLocked(); err != nil {
+		return false, fmt.Errorf("cannot determine revocation status: %w", err)
+	}
 	_, ok := rs.bySerial[serial]
-	return ok
+	return ok, nil
 }
 
 // allEntries returns a snapshot of all revocation entries.
@@ -196,7 +200,7 @@ func (rs *revocationStore) Revoke(_ context.Context, entry RevocationEntry) erro
 
 // IsRevoked implements certinterfaces.RevocationStore.IsRevoked.
 func (rs *revocationStore) IsRevoked(_ context.Context, serial string) (bool, error) {
-	return rs.isRevoked(serial), nil
+	return rs.isRevoked(serial)
 }
 
 // ListRevoked implements certinterfaces.RevocationStore.ListRevoked.
