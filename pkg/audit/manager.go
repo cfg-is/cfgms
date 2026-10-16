@@ -193,7 +193,7 @@ func scanValue(v interface{}) interface{} {
 		}
 		return out
 	case string:
-		return redactErrorMessage(val)
+		return logging.SanitizeLogValue(redactErrorMessage(val))
 	default:
 		return v
 	}
@@ -1086,13 +1086,13 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 	entry.Action = b.action
 	entry.UserID = b.userID
 	entry.UserType = b.userType
-	entry.SessionID = b.sessionID
+	entry.SessionID = logging.SanitizeLogValue(b.sessionID)
 	entry.ResourceType = b.resourceType
 	entry.ResourceID = b.resourceID
 	entry.ResourceName = logging.SanitizeLogValue(b.resourceName)
 	entry.Result = b.result
-	entry.ErrorCode = b.errorCode
-	entry.RequestID = b.requestID
+	entry.ErrorCode = logging.SanitizeLogValue(b.errorCode)
+	entry.RequestID = logging.SanitizeLogValue(b.requestID)
 	entry.IPAddress = logging.SanitizeLogValue(b.ipAddress)
 	entry.UserAgent = logging.SanitizeLogValue(b.userAgent)
 	entry.Method = logging.SanitizeLogValue(b.method)
@@ -1105,8 +1105,13 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 			Fields: b.changes.Fields,
 		}
 	}
-	entry.ErrorMessage = redactErrorMessage(b.errorMessage)
-	entry.Tags = b.tags
+	entry.ErrorMessage = logging.SanitizeLogValue(redactErrorMessage(b.errorMessage))
+	if b.tags != nil {
+		entry.Tags = make([]string, len(b.tags))
+		for i, t := range b.tags {
+			entry.Tags[i] = logging.SanitizeLogValue(t)
+		}
+	}
 	entry.Severity = b.severity
 }
 

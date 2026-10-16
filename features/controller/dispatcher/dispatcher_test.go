@@ -2209,3 +2209,60 @@ func TestDispatcher_StewardAction_CompletionIsAuditedWithOperatorAndBoundedCode(
 	assert.Equal(t, "failed", got[0].ResultCode, "a steward cannot write arbitrary text into the audit log")
 	assert.Empty(t, h.audit.recorded(), "a reported result is not an expiry")
 }
+
+// verbatimLogger records each Error call as one record with message and
+// key/value pairs written verbatim (no quoting), so a raw control character in
+// a value splits the record across lines. Unrelated levels are discarded.
+type verbatimLogger struct {
+	logging.Logger
+	mu      sync.Mutex
+	records []string
+}
+
+func (l *verbatimLogger) Error(msg string, kv ...interface{}) {
+	var sb strings.Builder
+	sb.WriteString("msg=" + msg)
+	for i := 0; i+1 < len(kv); i += 2 {
+		fmt.Fprintf(&sb, " %v=%v", kv[i], kv[i+1])
+	}
+	l.mu.Lock()
+	l.records = append(l.records, sb.String())
+	l.mu.Unlock()
+}
+
+func (l *verbatimLogger) find(prefix string) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, r := range l.records {
+		if strings.HasPrefix(r, "msg="+prefix) {
+			return r, true
+		}
+	}
+	return "", false
+}
+
+// TestDispatcher_AckFailureLogNeutralizesControlCharacters verifies that a
+// steward-supplied execution_id containing a newline cannot split the
+// "Failed to acknowledge completion" log record (Issue #5079).
+func TestDispatcher_AckFailureLogNeutralizesControlCharacters(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	vl := &verbatimLogger{Logger: logging.NewNoopLogger()}
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		PollInterval: 24 * time.Hour,
+		Logger:       vl,
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec\nforged=1", 0))
+
+	rec, ok := vl.find("Failed to acknowledge completion")
+	require.True(t, ok, "ack failure must be logged")
+	assert.NotContains(t, rec, "\n")
+	assert.NotContains(t, rec, "\r")
+	assert.Len(t, strings.Split(rec, "\n"), 1)
+}

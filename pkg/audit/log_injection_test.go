@@ -138,3 +138,78 @@ func TestManager_LogsSanitizeInjectedErrorContent(t *testing.T) {
 			"line %d does not start with \"msg=\" — an unsanitized \"\\n\" split a record's value into a forged extra log line: %q", i, line)
 	}
 }
+
+// TestManager_AuditEntryFieldsNeutralizeControlCharacters proves that
+// caller-controlled strings in SessionID, ErrorCode, RequestID, ErrorMessage,
+// Tags and nested Details/Changes values are stored without raw CR/LF, and
+// that the chain checksum still verifies (Issue #5079).
+func TestManager_AuditEntryFieldsNeutralizeControlCharacters(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager, err := audit.NewManager(storageManager.GetAuditStore(), "entry-injection-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	const inj = "x\r\nforged=1"
+	ctx := context.Background()
+	require.NoError(t, manager.RecordEvent(ctx, audit.NewEventBuilder().
+		Tenant("entry-injection-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("injection_action").
+		User("user1", business.AuditUserTypeHuman).
+		Session(inj).
+		Resource("resource", "res-1", "").
+		Error(inj, inj).
+		Request(inj, "GET", "/p", "127.0.0.1", "ua").
+		Tags([]string{"ok", inj}).
+		Details(map[string]interface{}{
+			"nested": map[string]interface{}{"s": inj, "n": 5},
+			"list":   []interface{}{inj, 7},
+		}).
+		Changes(map[string]interface{}{"a": inj}, map[string]interface{}{"b": inj}, nil).
+		Severity(business.AuditSeverityMedium)))
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Flush(flushCtx))
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: "entry-injection-tenant", Order: "asc"})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	e := entries[0]
+
+	var values []string
+	values = append(values, e.SessionID, e.ErrorCode, e.RequestID, e.ErrorMessage)
+	values = append(values, e.Tags...)
+	nested, ok := e.Details["nested"].(map[string]interface{})
+	require.True(t, ok)
+	values = append(values, nested["s"].(string))
+	list, ok := e.Details["list"].([]interface{})
+	require.True(t, ok)
+	values = append(values, list[0].(string))
+	require.NotNil(t, e.Changes)
+	values = append(values, e.Changes.Before["a"].(string), e.Changes.After["b"].(string))
+	for _, v := range values {
+		assert.NotContains(t, v, "\r")
+		assert.NotContains(t, v, "\n")
+	}
+	assert.Equal(t, float64(5), toFloat(nested["n"]), "non-string values must be unchanged")
+	assert.Empty(t, manager.VerifyChain(entries))
+}
+
+func toFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case float64:
+		return n
+	}
+	return -1
+}
