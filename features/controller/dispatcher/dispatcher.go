@@ -738,7 +738,7 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 	d.logger.Info("Sent execute_script command",
 		"device_id", logging.SanitizeLogValue(deviceID),
 		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
-		"shell", exec.Shell)
+		"shell", logging.SanitizeLogValue(string(exec.Shell)))
 
 	return nil
 }

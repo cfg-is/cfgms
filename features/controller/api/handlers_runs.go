@@ -340,6 +340,13 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Shell != "" && !allowedShells[req.Shell] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("unsupported shell %q; allowed: bash, sh, powershell, pwsh, cmd", logging.SanitizeLogValue(req.Shell)),
+			"UNSUPPORTED_SHELL")
+		return
+	}
+
 	filter, err := parseRunTarget(req.Target)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid target selector: "+err.Error(), "INVALID_TARGET")

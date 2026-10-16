@@ -5,6 +5,7 @@ package audit_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -165,13 +166,18 @@ func TestManager_AuditEntryFieldsNeutralizeControlCharacters(t *testing.T) {
 		Action("injection_action").
 		User("user1", business.AuditUserTypeHuman).
 		Session(inj).
-		Resource("resource", "res-1", "").
+		Resource("resource", inj, "").
 		Error(inj, inj).
 		Request(inj, "GET", "/p", "127.0.0.1", "ua").
 		Tags([]string{"ok", inj}).
 		Details(map[string]interface{}{
 			"nested": map[string]interface{}{"s": inj, "n": 5},
 			"list":   []interface{}{inj, 7},
+			"strs":   []string{inj},
+			"smap":   map[string]string{"k": inj},
+			"err":    errors.New(inj),
+			"strct":  struct{ S string }{inj},
+			"strg":   stringerVal(inj),
 		}).
 		Changes(map[string]interface{}{"a": inj}, map[string]interface{}{"b": inj}, nil).
 		Severity(business.AuditSeverityMedium)))
@@ -186,7 +192,7 @@ func TestManager_AuditEntryFieldsNeutralizeControlCharacters(t *testing.T) {
 	e := entries[0]
 
 	var values []string
-	values = append(values, e.SessionID, e.ErrorCode, e.RequestID, e.ErrorMessage)
+	values = append(values, e.ResourceID, e.SessionID, e.ErrorCode, e.RequestID, e.ErrorMessage)
 	values = append(values, e.Tags...)
 	nested, ok := e.Details["nested"].(map[string]interface{})
 	require.True(t, ok)
@@ -194,6 +200,31 @@ func TestManager_AuditEntryFieldsNeutralizeControlCharacters(t *testing.T) {
 	list, ok := e.Details["list"].([]interface{})
 	require.True(t, ok)
 	values = append(values, list[0].(string))
+	for _, k := range []string{"strs", "smap", "err", "strct", "strg"} {
+		raw, err := json.Marshal(e.Details[k])
+		require.NoError(t, err)
+		decoded := string(raw)
+		// JSON-escaped control chars would hide a raw one, so inspect decoded strings.
+		var walk func(interface{})
+		walk = func(x interface{}) {
+			switch t := x.(type) {
+			case string:
+				values = append(values, t)
+			case []interface{}:
+				for _, i := range t {
+					walk(i)
+				}
+			case map[string]interface{}:
+				for _, i := range t {
+					walk(i)
+				}
+			}
+		}
+		var any interface{}
+		require.NoError(t, json.Unmarshal([]byte(decoded), &any), k)
+		walk(any)
+		require.NotEmpty(t, values, k)
+	}
 	require.NotNil(t, e.Changes)
 	values = append(values, e.Changes.Before["a"].(string), e.Changes.After["b"].(string))
 	for _, v := range values {
@@ -203,6 +234,10 @@ func TestManager_AuditEntryFieldsNeutralizeControlCharacters(t *testing.T) {
 	assert.Equal(t, float64(5), toFloat(nested["n"]), "non-string values must be unchanged")
 	assert.Empty(t, manager.VerifyChain(entries))
 }
+
+type stringerVal string
+
+func (s stringerVal) String() string { return string(s) }
 
 func toFloat(v interface{}) float64 {
 	switch n := v.(type) {
