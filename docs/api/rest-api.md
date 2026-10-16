@@ -859,6 +859,23 @@ Permission `steward:rotate-credentials`, **AssuranceStrong**. Revokes every clie
 
 Permission `steward:move-identity`, **AssuranceStrong**. Request body `{"pending_id": "..."}`. The pending registration must be in the steward's tenant, have `clone_of` equal to `{id}`, and be `pending`; otherwise `404` (a pending ID from another tenant or without `clone_of` is indistinguishable from an unknown one) or `409` (not pending). The steward record is rebound to the queued machine's device identity (`409` `DEVICE_ID_CONFLICT` if another live steward in the tenant holds it; nothing changes), its provenance baseline is cleared, the queued entry is pointed at the original steward ID and approved, and every serial previously issued for that ID is revoked. The queued machine claims under the original steward ID. Audit event `steward_identity_moved` (high). No other endpoint changes a steward's device identity.
 
+### Script Runs
+
+#### POST /api/v1/runs/script
+
+Runs a library script on the stewards the `target` selector matches.
+
+**Required permission:** `steward:execute-scripts` (strong assurance)
+
+Body fields: `target` (fleet selector), `script_id` (required), `script_version` (optional; empty means latest), `shell` (optional shell override) and `params` (script parameters).
+
+`shell`, when present, must be one of `bash`, `sh`, `powershell`, `pwsh` or `cmd`. Any other value is rejected with `400` and error code `UNSUPPORTED_SHELL` before a run is created. The message lists the allowed shells and never echoes control characters from the submitted value.
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `MISSING_SCRIPT_ID` | `script_id` is empty |
+| 400 | `UNSUPPORTED_SHELL` | `shell` is outside the allowlist |
+
 ### Steward Service and Process Actions
 
 An operator can start, stop or restart a service, or end, suspend or resume a process, on

@@ -613,6 +613,51 @@ paths:
         '429':
           description: Per-principal action budget exceeded (ACTION_BUDGET_EXCEEDED)
 
+  /runs/script:
+    post:
+      summary: Run a library script on matched stewards
+      description: >-
+        Creates a run and queues one execution per steward the target selector
+        matches. Requires steward:execute-scripts at strong assurance. The
+        optional shell must be one of bash, sh, powershell, pwsh or cmd; any other
+        value is rejected with 400 UNSUPPORTED_SHELL. The error message lists the
+        allowed shells and never echoes control characters from the submitted
+        value. A missing script_id is 400 MISSING_SCRIPT_ID.
+      operationId: postRunScript
+      tags:
+        - Steward Actions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script_id]
+              properties:
+                target:
+                  type: string
+                  description: Fleet selector
+                script_id:
+                  type: string
+                script_version:
+                  type: string
+                  description: Empty means latest
+                shell:
+                  type: string
+                  enum: [bash, sh, powershell, pwsh, cmd]
+                  description: Optional shell override; other values return 400 UNSUPPORTED_SHELL
+                params:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        '200':
+          description: Run created; data.run_id identifies it
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /runs/{runId}:
     get:
       summary: Get a run
