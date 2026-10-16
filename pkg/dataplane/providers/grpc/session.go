@@ -86,6 +86,10 @@ func (s *Session) clientReceiveConfig(ctx context.Context) (*types.ConfigTransfe
 		StewardId: s.provider.stewardID,
 	}
 
+	// Cancelling on return tears the RPC down when a bound trips mid-stream.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	stream, err := s.client.SyncConfig(ctx, req)
 	if err != nil {
 		s.provider.stats.transferErrors.Add(1)
@@ -93,6 +97,7 @@ func (s *Session) clientReceiveConfig(ctx context.Context) (*types.ConfigTransfe
 	}
 
 	var chunks []*transportpb.ConfigChunk
+	var budget configRecvBudget
 	for {
 		chunk, err := stream.Recv()
 		if isEOF(err) {
@@ -101,6 +106,10 @@ func (s *Session) clientReceiveConfig(ctx context.Context) (*types.ConfigTransfe
 		if err != nil {
 			s.provider.stats.transferErrors.Add(1)
 			return nil, fmt.Errorf("failed to receive config chunk: %w", err)
+		}
+		if err := budget.admit(chunk); err != nil {
+			s.provider.stats.transferErrors.Add(1)
+			return nil, fmt.Errorf("config stream rejected: %w", err)
 		}
 		chunks = append(chunks, chunk)
 		s.provider.stats.bytesReceived.Add(int64(len(chunk.Data)))
@@ -206,6 +215,10 @@ func (s *Session) SendBulk(ctx context.Context, bulk *types.BulkTransfer) error 
 }
 
 func (s *Session) clientSendBulk(ctx context.Context, bulk *types.BulkTransfer) error {
+	// Cancelling on return tears the RPC down when a bound trips mid-stream.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	stream, err := s.client.BulkTransfer(ctx)
 	if err != nil {
 		s.provider.stats.transferErrors.Add(1)
@@ -253,6 +266,10 @@ func (s *Session) ReceiveBulk(ctx context.Context) (*types.BulkTransfer, error) 
 }
 
 func (s *Session) clientReceiveBulk(ctx context.Context) (*types.BulkTransfer, error) {
+	// Cancelling on return tears the RPC down when a bound trips mid-stream.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	stream, err := s.client.BulkTransfer(ctx)
 	if err != nil {
 		s.provider.stats.transferErrors.Add(1)
@@ -260,6 +277,7 @@ func (s *Session) clientReceiveBulk(ctx context.Context) (*types.BulkTransfer, e
 	}
 
 	var chunks []*transportpb.BulkChunk
+	var budget bulkRecvBudget
 	for {
 		chunk, err := stream.Recv()
 		if isEOF(err) {
@@ -268,6 +286,10 @@ func (s *Session) clientReceiveBulk(ctx context.Context) (*types.BulkTransfer, e
 		if err != nil {
 			s.provider.stats.transferErrors.Add(1)
 			return nil, fmt.Errorf("failed to receive bulk chunk: %w", err)
+		}
+		if err := budget.admit(chunk); err != nil {
+			s.provider.stats.transferErrors.Add(1)
+			return nil, fmt.Errorf("bulk stream rejected: %w", err)
 		}
 		chunks = append(chunks, chunk)
 		s.provider.stats.bytesReceived.Add(int64(len(chunk.Data)))

@@ -13,6 +13,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"google.golang.org/protobuf/proto"
 )
 
 // isEOF reports whether err signals end-of-stream from a gRPC Recv call.
@@ -343,4 +344,95 @@ func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer,
 		Checksum: checksum,
 		Metadata: chunks[0].Metadata,
 	}, nil
+}
+
+// maxRecvChunks caps how many chunks one inbound config or bulk transfer may
+// span. At the 64 KB send-side chunk size an 8 MB payload is 128 chunks, so 256
+// leaves 2x headroom. A byte cap alone does not bound the chunk slice itself.
+const maxRecvChunks = 256
+
+// configRecvBudget admits ConfigChunks one at a time on the steward receive
+// side, before each is appended, so a hostile controller cannot make the
+// steward buffer an unbounded stream. Charges proto.Size (wire size, so
+// metadata fields count) against maxRecvMsgSize.
+type configRecvBudget struct {
+	count       int
+	bytes       int
+	totalChunks int32
+	configID    string
+}
+
+func (b *configRecvBudget) admit(c *transportpb.ConfigChunk) error {
+	if b.count >= maxRecvChunks {
+		return fmt.Errorf("more than %d chunks: %w", maxRecvChunks, ErrPayloadTooLarge)
+	}
+	if b.count == 0 {
+		if c.TotalChunks < 1 || c.TotalChunks > maxRecvChunks {
+			return fmt.Errorf("TotalChunks=%d outside 1..%d: %w", c.TotalChunks, maxRecvChunks, ErrPayloadTooLarge)
+		}
+		b.totalChunks = c.TotalChunks
+		b.configID = c.ConfigId
+	} else {
+		if c.TotalChunks != b.totalChunks {
+			return fmt.Errorf("TotalChunks changed from %d to %d: %w", b.totalChunks, c.TotalChunks, ErrChunkCountMismatch)
+		}
+		if c.ConfigId != b.configID {
+			return fmt.Errorf("config ID changed mid-stream: %w", ErrChunkSequenceGap)
+		}
+	}
+	if b.count >= int(b.totalChunks) {
+		return fmt.Errorf("more chunks than TotalChunks=%d: %w", b.totalChunks, ErrChunkCountMismatch)
+	}
+	if c.ChunkIndex < 0 || c.ChunkIndex >= b.totalChunks {
+		return fmt.Errorf("chunk index %d outside 0..%d: %w", c.ChunkIndex, b.totalChunks-1, ErrChunkSequenceGap)
+	}
+	size := proto.Size(c)
+	if size > maxRecvMsgSize-b.bytes {
+		return fmt.Errorf("exceeds %d bytes: %w", maxRecvMsgSize, ErrPayloadTooLarge)
+	}
+	b.bytes += size
+	b.count++
+	return nil
+}
+
+// bulkRecvBudget is the BulkChunk counterpart of configRecvBudget. It also pins
+// TotalSize and TransferId to the first chunk and bounds the running data
+// length by TotalSize.
+type bulkRecvBudget struct {
+	count      int
+	bytes      int
+	dataBytes  int64
+	totalSize  int64
+	transferID string
+}
+
+func (b *bulkRecvBudget) admit(c *transportpb.BulkChunk) error {
+	if b.count >= maxRecvChunks {
+		return fmt.Errorf("more than %d chunks: %w", maxRecvChunks, ErrPayloadTooLarge)
+	}
+	if b.count == 0 {
+		if c.TotalSize < 0 || c.TotalSize > maxRecvMsgSize {
+			return fmt.Errorf("TotalSize=%d outside 0..%d: %w", c.TotalSize, maxRecvMsgSize, ErrPayloadTooLarge)
+		}
+		b.totalSize = c.TotalSize
+		b.transferID = c.TransferId
+	} else {
+		if c.TotalSize != b.totalSize {
+			return fmt.Errorf("TotalSize changed from %d to %d: %w", b.totalSize, c.TotalSize, ErrTotalSizeMismatch)
+		}
+		if c.TransferId != b.transferID {
+			return fmt.Errorf("transfer ID changed mid-stream: %w", ErrChunkSequenceGap)
+		}
+	}
+	size := proto.Size(c)
+	if size > maxRecvMsgSize-b.bytes {
+		return fmt.Errorf("exceeds %d bytes: %w", maxRecvMsgSize, ErrPayloadTooLarge)
+	}
+	if int64(len(c.Data)) > b.totalSize-b.dataBytes {
+		return fmt.Errorf("data exceeds TotalSize=%d: %w", b.totalSize, ErrTotalSizeMismatch)
+	}
+	b.bytes += size
+	b.dataBytes += int64(len(c.Data))
+	b.count++
+	return nil
 }
