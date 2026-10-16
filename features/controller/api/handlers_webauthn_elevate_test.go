@@ -477,3 +477,85 @@ func TestElevateBackoff(t *testing.T) {
 		}
 	}
 }
+
+// stepUpRaceFixture prepares a step-up finish whose assertion verifies, with a racing
+// secret store installed (Issue #5066).
+func stepUpRaceFixture(t *testing.T) (*Server, string, *racingSecretStore, *Principal, string, *bytes.Reader) {
+	t.Helper()
+	server, username := setupWebAuthnServer(t, svAuthRPID, []string{svAuthOrigin})
+
+	credIDBytes, err := hex.DecodeString(svAuthCredentialIDHex)
+	require.NoError(t, err)
+	pubKeyBytes, err := hex.DecodeString(svAuthPublicKeyHex)
+	require.NoError(t, err)
+	challengeBytes, err := hex.DecodeString(svAuthChallengeHex)
+	require.NoError(t, err)
+	authDataBytes, err := hex.DecodeString(svAuthAuthDataHex)
+	require.NoError(t, err)
+	clientDataJSONBytes, err := hex.DecodeString(svAuthClientDataJSONHex)
+	require.NoError(t, err)
+	sigBytes, err := hex.DecodeString(svAuthSignatureHex)
+	require.NoError(t, err)
+
+	injectCredentialWithPublicKey(t, server, username, credIDBytes, pubKeyBytes, 0)
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+
+	sd := webauthn.SessionData{
+		Challenge:            base64.RawURLEncoding.EncodeToString(challengeBytes),
+		RelyingPartyID:       svAuthRPID,
+		UserID:               []byte(acct.ID),
+		UserVerification:     protocol.VerificationPreferred,
+		AllowedCredentialIDs: [][]byte{credIDBytes},
+		Expires:              time.Now().Add(10 * time.Minute),
+	}
+	const sessID = "race-sess"
+	injectElevateSession(server, sessID, sd, time.Minute, username)
+
+	rs := installRacingStore(t, server)
+	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
+	return server, username, rs, &Principal{ID: username}, sessID, body
+}
+
+func TestStepUpFinish_CredentialRemovedDuringAssertion_Refused(t *testing.T) {
+	server, username, rs, principal, sessID, body := stepUpRaceFixture(t)
+	rs.fireOnList = 1 // the handler's own account read
+	rs.hook = func() {
+		mutateStoredAccount(t, server, username, func(a *account) { a.Credentials = nil })
+	}
+
+	rec := doStepUpFinish(t, server, principal, sessID, body)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Empty(t, storedAccount(t, server, username).Credentials, "revoked credential must stay removed")
+}
+
+func TestStepUpFinish_AccountDisabledDuringAssertion_Refused(t *testing.T) {
+	server, username, rs, principal, sessID, body := stepUpRaceFixture(t)
+	rs.fireOnList = 1
+	rs.hook = func() {
+		mutateStoredAccount(t, server, username, func(a *account) { a.Disabled = true })
+	}
+
+	rec := doStepUpFinish(t, server, principal, sessID, body)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.True(t, storedAccount(t, server, username).Disabled, "account must stay disabled")
+}
+
+func TestStepUpFinish_SwapKeepsLosing_RefusedAfterOneRetry(t *testing.T) {
+	server, username, rs, principal, sessID, body := stepUpRaceFixture(t)
+	rs.casAlwaysLoss = true
+
+	rec := doStepUpFinish(t, server, principal, sessID, body)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	rs.mu.Lock()
+	calls := rs.casCalls
+	rs.mu.Unlock()
+	assert.Equal(t, 2, calls)
+	creds := storedAccount(t, server, username).Credentials
+	require.Len(t, creds, 1)
+	assert.Zero(t, creds[0].SignCount)
+}
