@@ -149,6 +149,7 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	var body struct {
 		Data struct {
 			Status   string            `json:"status"`
+			Version  *string           `json:"version"`
 			Services map[string]string `json:"services"`
 		} `json:"data"`
 	}
@@ -157,12 +158,10 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	assert.Equal(s.T(), "healthy", body.Data.Status,
 		"Controller should report healthy once storage is initialised, got: %s", output)
 
-	// These two services are constructed from the storage manager, so their
-	// state is the closest the health payload comes to reporting on storage.
-	assert.Equal(s.T(), "healthy", body.Data.Services["controller"],
-		"Controller service should be healthy")
-	assert.Equal(s.T(), "healthy", body.Data.Services["configuration"],
-		"Configuration service should be healthy")
+	// The unauthenticated probe discloses status only; version and the
+	// per-service map are served by the authenticated /health/detailed.
+	assert.Nil(s.T(), body.Data.Version, "Public health must not disclose version")
+	assert.Empty(s.T(), body.Data.Services, "Public health must not disclose per-service status")
 
 	s.T().Log("Controller storage initialized (controller is serving requests)")
 }
