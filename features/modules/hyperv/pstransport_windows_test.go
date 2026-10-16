@@ -8,7 +8,9 @@ package hyperv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func TestRunFresh_DeadlineKillProducesDistinguishableError(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	out, err := tr.runFresh(ctx, "Start-Sleep -Seconds 30")
+	out, err := tr.runFresh(ctx, "Sleep", "Start-Sleep -Seconds 30", nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -76,7 +78,7 @@ func TestRunFresh_NonZeroExitUsesGenericError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err := tr.runFresh(ctx, "Write-Output 'boom'; exit 1")
+	_, err := tr.runFresh(ctx, "Boom", "Write-Output 'boom'; exit 1", nil)
 	if err == nil {
 		t.Fatal("expected an error from a non-zero-exit seed op, got nil")
 	}
@@ -98,8 +100,7 @@ func TestRunFresh_NonZeroExitUsesGenericError(t *testing.T) {
 // names no verb, so a log reader cannot tell WHICH seed op failed or why there
 // is no detail. The empty case must say so in words and name the verb.
 func TestFreshSeedOpError_EmptyOutputSaysSo(t *testing.T) {
-	err := freshSeedOpError(errors.New("exit status 1"), "",
-		`Cfgms-AttachSeedDisk -Name "stw-01" -SeedPath "C:\seeds\s.vhdx"`, 1500*time.Millisecond)
+	err := freshSeedOpError(errors.New("exit status 1"), "", "AttachSeedDisk", 1500*time.Millisecond)
 
 	require.Error(t, err)
 	msg := err.Error()
@@ -116,26 +117,12 @@ func TestFreshSeedOpError_EmptyOutputSaysSo(t *testing.T) {
 // than replaced by the generic empty-output wording.
 func TestFreshSeedOpError_RealOutputIsSurfacedVerbatim(t *testing.T) {
 	psText := "Add-VMHardDiskDrive : Failed to add device 'Virtual Hard Disk'. (0x80070020)"
-	err := freshSeedOpError(errors.New("exit status 1"), "\n  "+psText+"  \n",
-		"Cfgms-AttachSeedDisk -Name \"stw-01\"", time.Second)
+	err := freshSeedOpError(errors.New("exit status 1"), "\n  "+psText+"  \n", "AttachSeedDisk", time.Second)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), psText, "real PowerShell output must be surfaced verbatim")
 	assert.NotContains(t, err.Error(), "NO output",
 		"the empty-output wording must not appear when there IS output")
-}
-
-// TestPSVerbOf_DoesNotLeakArguments: the verb is safe to embed in an error, but
-// the argument tail carries host paths and other caller-supplied values that
-// must not be pasted into an error string.
-func TestPSVerbOf_DoesNotLeakArguments(t *testing.T) {
-	got := psVerbOf(`Cfgms-CopyToSeedVHD -SeedPath "C:\seeds\secret-host-path.vhdx" -Content "user-data"`)
-	assert.Equal(t, "Cfgms-CopyToSeedVHD", got)
-
-	for _, in := range []string{"", "   ", "Write-Output 'hi'", "$x = 1"} {
-		assert.Equal(t, "unknown", psVerbOf(in),
-			"a non-Cfgms expression must not be echoed back into an error message: %q", in)
-	}
 }
 
 // ── #3168 follow-up: deadline kill must not leak a host-attached seed VHD ────
@@ -150,71 +137,28 @@ func TestPSVerbOf_DoesNotLeakArguments(t *testing.T) {
 // Only the two verbs that actually Mount-VHD may leak. Dismounting for the others
 // would be wrong: Cfgms-AttachSeedDisk attaches the disk to the VM, and force-
 // dismounting there could yank a disk the VM legitimately holds.
+//
+// [REQUIRED TEST] The path is taken from the call's structured args (Path for
+// MountSeedVHD, SeedPath for CopyToSeedVHD), never parsed out of script text.
 func TestMountedSeedPathForCleanup_OnlyMountingVerbs(t *testing.T) {
-	cases := []struct {
-		name string
-		expr string
-		want string
-	}{
-		{
-			"MountSeedVHD leaks -Path",
-			`Cfgms-MountSeedVHD -Path 'C:\cfgms-seeds\cfgms-seed-web-01.vhdx' -Label 'CIDATA'`,
-			`C:\cfgms-seeds\cfgms-seed-web-01.vhdx`,
-		},
-		{
-			"CopyToSeedVHD leaks -SeedPath",
-			`Cfgms-CopyToSeedVHD -SeedPath 'C:\seeds\s.vhdx' -FileName 'user-data' -Content 'x'`,
-			`C:\seeds\s.vhdx`,
-		},
-		{
-			"NewSeedVHD only creates a file — nothing mounted",
-			`Cfgms-NewSeedVHD -Path 'C:\seeds\s.vhdx' -SizeBytes 268435456`,
-			"",
-		},
-		{
-			"AttachSeedDisk attaches to the VM, not the host — must NOT be dismounted",
-			`Cfgms-AttachSeedDisk -Name 'web-01' -SeedPath 'C:\seeds\s.vhdx'`,
-			"",
-		},
-		{
-			"unrelated verb",
-			`Cfgms-GetVM -Name 'web-01'`,
-			"",
-		},
-		{
-			"embedded quote is unescaped from the doubled PS form",
-			`Cfgms-MountSeedVHD -Path 'C:\se''ed\s.vhdx'`,
-			`C:\se'ed\s.vhdx`,
-		},
-		{
-			"unterminated literal refuses to guess",
-			`Cfgms-MountSeedVHD -Path 'C:\seeds\s.vhdx`,
-			"",
-		},
-		{"empty", "", ""},
+	args := map[string]string{
+		"Path":     `C:\cfgms-seeds\se'ed \u2019web-01.vhdx`,
+		"SeedPath": `C:\seeds\s.vhdx`,
+		"Name":     "web-01",
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, mountedSeedPathForCleanup(tc.expr))
-		})
-	}
-}
+	assert.Equal(t, args["Path"], mountedSeedPathForCleanup("MountSeedVHD", args),
+		"MountSeedVHD leaks its Path, byte for byte")
+	assert.Equal(t, args["SeedPath"], mountedSeedPathForCleanup("CopyToSeedVHD", args),
+		"CopyToSeedVHD leaks its SeedPath")
+	assert.Empty(t, mountedSeedPathForCleanup("MountSeedVHD", map[string]string{}))
 
-// TestMountedSeedPathForCleanup_RoundTripsDispatcherQuoting proves the extractor
-// understands exactly what the dispatcher emits, rather than a hand-written
-// approximation of it: the path is rendered with quoteForPS and must come back
-// byte-identical. Without this, a path containing a quote would silently yield a
-// wrong path and the cleanup would dismount nothing (or the wrong disk).
-func TestMountedSeedPathForCleanup_RoundTripsDispatcherQuoting(t *testing.T) {
-	for _, path := range []string{
-		`C:\cfgms-seeds\cfgms-seed-web-01.vhdx`,
-		`C:\ClusterStorage\CSV01\seeds\seed.vhdx`,
-		`C:\od''d\se'ed name.vhdx`,
-		`C:\with space\seed.vhdx`,
-	} {
-		expr := "Cfgms-MountSeedVHD -Path " + quoteForPS(path) + " -Label 'CIDATA'"
-		assert.Equal(t, path, mountedSeedPathForCleanup(expr),
-			"extractor must round-trip whatever quoteForPS produced")
+	// Every other verb returns "": NewSeedVHD only creates a file, and
+	// AttachSeedDisk attaches to the VM, not the host — it must NOT be dismounted.
+	for _, spec := range psDispatchTable {
+		if spec.Verb == "MountSeedVHD" || spec.Verb == "CopyToSeedVHD" {
+			continue
+		}
+		assert.Empty(t, mountedSeedPathForCleanup(spec.Verb, args), "Cfgms-%s cannot leak a mount", spec.Verb)
 	}
 }
 
@@ -260,4 +204,139 @@ func funcSourceTextPS(t *testing.T, name string) string {
 		return s[start:]
 	}
 	return s[start : start+1+end]
+}
+
+// ── #5111: values travel as data, never as script text ───────────────────
+
+// newTestPSHost starts the real persistent PowerShell host with the
+// production preamble. The runner has no Hyper-V cmdlets, so tests use verbs
+// that fail before, or never reach, a Hyper-V cmdlet.
+func newTestPSHost(t *testing.T) *psHostTransport {
+	t.Helper()
+	tr, err := newPSHostTransport(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tr.Close() })
+	return tr
+}
+
+// TestPSHost_IntegerSubexpressionIsNotEvaluated is the [REQUIRED TEST] for
+// the demonstrated hole. Before #5111, intArg spliced the trimmed MemoryMB
+// string into the command text unquoted, so a subexpression ran at parameter
+// binding as LocalSystem — before Set-VM was ever reached. Now the value must
+// fail integer parsing and run nothing.
+func TestPSHost_IntegerSubexpressionIsNotEvaluated(t *testing.T) {
+	tr := newTestPSHost(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	marker := filepath.Join(dir, "int-marker.txt")
+	_, err := tr.ExecutePS(ctx, psSetVMMemory, map[string]string{
+		"Name":     "web-01",
+		"MemoryMB": "$(New-Item -ItemType File -Path '" + marker + "')",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not an integer")
+	assert.NoFileExists(t, marker, "an integer parameter must never be evaluated as code")
+
+	// A string path carrying a statement separator and a marker-creating
+	// command is a literal path to Remove-Item -LiteralPath, nothing more.
+	marker2 := filepath.Join(dir, "str-marker.txt")
+	_, err = tr.ExecutePS(ctx, psDeleteSeedMedia, map[string]string{
+		"Path": "x'; New-Item -ItemType File -Path '" + marker2 + "'; '",
+	})
+	require.NoError(t, err)
+	assert.NoFileExists(t, marker2, "a string value must never be evaluated as code")
+}
+
+// TestPSHost_UnicodeQuotePathIsData: a file whose name holds U+2018 and
+// U+2019, passed as the Path of the seed-media delete verb, is deleted — the
+// value arrived byte for byte as data. Regression test; not claimed to fail
+// on the old quoting.
+func TestPSHost_UnicodeQuotePathIsData(t *testing.T) {
+	tr := newTestPSHost(t)
+	target := filepath.Join(t.TempDir(), "seed \u2018web\u2019 01.vhdx")
+	require.NoError(t, os.WriteFile(target, []byte("seed"), 0o600))
+
+	_, err := tr.ExecutePS(context.Background(), psDeleteSeedMedia, map[string]string{"Path": target})
+	require.NoError(t, err)
+	assert.NoFileExists(t, target)
+}
+
+// TestPSHost_CfgmsInvokeStringRoundTrip is the [REQUIRED TEST] for verbatim
+// strings. Windows PowerShell 5.1's ConvertFrom-Json turns the escaped
+// "\/Date(...)\/" form into [DateTime]; Go's encoder never emits that escape,
+// so a /Date(0)/ value must arrive as the same string. Quotes must survive too.
+// A test-only echo verb, defined in the live host, reports the bound value's
+// type and its UTF-8 bytes in hex, so console encoding cannot blur the check.
+func TestPSHost_CfgmsInvokeStringRoundTrip(t *testing.T) {
+	tr := newTestPSHost(t)
+	ctx := context.Background()
+	_, err := tr.run(ctx, "function Cfgms-EchoTest { param($Value) "+
+		"if ($Value -is [string]) { 'string:' + [BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($Value)) } "+
+		"else { 'type:' + $Value.GetType().FullName } }")
+	require.NoError(t, err)
+
+	tmp := t.TempDir()
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
+	for _, v := range []string{
+		"/Date(0)/",
+		`\/Date(0)\/`,
+		"2026-10-16T00:00:00Z",
+		"O'Brien \u2018a\u2019 \u201ab\u201b \"c\"",
+		"line1\r\nline2 $(x) `n",
+	} {
+		out, err := tr.runCall(ctx, psCall{Verb: "EchoTest", Mode: psModeHost, Args: []psArg{{"Value", v}}})
+		require.NoError(t, err)
+		want := "string:" + strings.ToUpper(strings.Join(hexBytes([]byte(v)), "-"))
+		assert.Equal(t, want, strings.TrimSpace(out), "value %q must arrive unchanged", v)
+	}
+	left, err := os.ReadDir(tmp)
+	require.NoError(t, err)
+	assert.Empty(t, left, "every args file must be removed after its call")
+}
+
+// TestPSHost_CfgmsInvokeRefusesNonScalar: a JSON property that is not a
+// string, number or boolean is refused before the verb runs.
+func TestPSHost_CfgmsInvokeRefusesNonScalar(t *testing.T) {
+	tr := newTestPSHost(t)
+	ctx := context.Background()
+	for name, body := range map[string]string{
+		"object": `{"Name":{"a":1}}`,
+		"array":  `{"Name":[1,2]}`,
+		"null":   `{"Name":null}`,
+		"date":   `{"Name":"\/Date(0)\/"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, err := os.CreateTemp(t.TempDir(), "cfgms-args-*.json")
+			require.NoError(t, err)
+			_, err = f.WriteString(body)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+			expr, err := invokeExpression("GetVM", f.Name())
+			require.NoError(t, err)
+			_, err = tr.run(ctx, expr)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "is not a string, number or boolean")
+		})
+	}
+
+	t.Run("unknown verb", func(t *testing.T) {
+		f, err := os.CreateTemp(t.TempDir(), "cfgms-args-*.json")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		expr, err := invokeExpression("NoSuchVerb", f.Name())
+		require.NoError(t, err)
+		_, err = tr.run(ctx, expr)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown verb")
+	})
+}
+
+func hexBytes(b []byte) []string {
+	out := make([]string, len(b))
+	for i, c := range b {
+		out[i] = fmt.Sprintf("%02x", c)
+	}
+	return out
 }

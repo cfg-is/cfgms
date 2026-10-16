@@ -41,7 +41,12 @@ import (
 //
 // Each call is a single line on stdin of the form:
 //
-//	Cfgms-VerbName -Param1 'value1' -Param2 'value2'; Write-Output '<<<END:nonce>>>'
+//	Cfgms-Invoke -Verb 'VerbName' -ArgsFile '<temp path>'; Write-Output '<<<END:nonce>>>'
+//
+// The parameter values are never in that line: they are in the per-call JSON
+// args file (pstransport_args_windows.go), which Cfgms-Invoke parses and binds
+// to the named parameters of Cfgms-VerbName. PowerShell never parses a value
+// as code.
 //
 // The transport reads stdout line-by-line until it sees the matching nonce
 // sentinel, then returns the captured lines (joined with newlines) as the
@@ -233,17 +238,21 @@ func (t *psHostTransport) loadPreamble() error {
 // process runs the disk cmdlets directly with no deadlock (proven on cfg-lab).
 //
 // The temp script is the full preamble (Cfgms-* defs + safe defaults) followed
-// by the expression, so the verb resolves exactly as in the persistent host.
-// The script is removed after the run. Unlike run(), this does not serialise on
-// t.mu (it spawns an independent process) and is unaffected by t.closed.
-func (t *psHostTransport) runFresh(ctx context.Context, expression string) (string, error) {
+// by the expression (freshScriptBody), so the verb resolves exactly as in the
+// persistent host. The script is removed after the run. Unlike run(), this does
+// not serialise on t.mu (it spawns an independent process) and is unaffected by
+// t.closed.
+//
+// verb names the Cfgms-* verb for the failure message. onKill, when non-nil,
+// runs after a deadline kill, before the error returns.
+func (t *psHostTransport) runFresh(ctx context.Context, verb, expression string, onKill func()) (string, error) {
 	f, err := os.CreateTemp("", "cfgms-seedop-*.ps1")
 	if err != nil {
 		return "", fmt.Errorf("hyperv-ps-host: create temp seed script: %w", err)
 	}
 	tmpPath := f.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
-	if _, werr := io.WriteString(f, psHostPreamble+"\n"+expression+"\n"); werr != nil {
+	if _, werr := io.WriteString(f, freshScriptBody(expression)); werr != nil {
 		_ = f.Close()
 		return "", fmt.Errorf("hyperv-ps-host: write temp seed script: %w", werr)
 	}
@@ -267,8 +276,8 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 		// one timeout silently breaks seed provisioning for every later VM on the host.
 		// Observed live on cfg-lab: a seed left Attached=True after a 30s module.Set
 		// deadline kill, on a steward already carrying the #3766 fix.
-		if ctx.Err() != nil {
-			t.dismountAfterKill(expression)
+		if ctx.Err() != nil && onKill != nil {
+			onKill()
 		}
 		// Distinguish a module-call deadline kill from a genuine non-zero exit.
 		// When the module-call context is cancelled/expired, CommandContext kills
@@ -284,7 +293,7 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 			return string(out), fmt.Errorf(
 				"hyperv-ps-host: seed op killed by deadline after %s (ctx: %w)", elapsed, ctxErr)
 		}
-		return string(out), freshSeedOpError(runErr, string(out), expression, elapsed)
+		return string(out), freshSeedOpError(runErr, string(out), verb, elapsed)
 	}
 	return string(out), nil
 }
@@ -295,53 +304,31 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 // ~6s worst case, so this leaves ample headroom.
 const seedCleanupDismountTimeout = 30 * time.Second
 
-// mountedSeedPathForCleanup returns the seed VHD path a killed expression may
-// have left ATTACHED to the host, or "" when the expression cannot leak a mount.
+// freshScriptBody is the temp .ps1 body for a fresh-process call: the
+// preamble, then the expression.
+func freshScriptBody(expression string) string {
+	return psHostPreamble + "\n" + expression + "\n"
+}
+
+// mountedSeedPathForCleanup returns the seed VHD path a killed call may have
+// left ATTACHED to the host, or "" when the call cannot leak a mount.
 //
-// Only the two verbs that call Mount-VHD can leak: Cfgms-MountSeedVHD (-Path)
-// and Cfgms-CopyToSeedVHD (-SeedPath). Cfgms-NewSeedVHD only creates a file, and
+// Only the two verbs that call Mount-VHD can leak: Cfgms-MountSeedVHD (Path)
+// and Cfgms-CopyToSeedVHD (SeedPath). Cfgms-NewSeedVHD only creates a file, and
 // Cfgms-AttachSeedDisk attaches to the VM rather than mounting host-side, so
 // neither needs cleanup — dismounting for them would be a no-op at best and, if
 // the VM legitimately holds the disk, misleading noise in the audit trail.
 //
-// The value is parsed back out of the dispatched expression because that is the
-// only place the transport can see it; the dispatcher inlines arguments as
-// single-quoted PS literals (quoteForPS), doubling embedded quotes.
-func mountedSeedPathForCleanup(expression string) string {
-	trimmed := strings.TrimSpace(expression)
-	var flag string
-	switch {
-	case strings.HasPrefix(trimmed, "Cfgms-MountSeedVHD"):
-		flag = "-Path "
-	case strings.HasPrefix(trimmed, "Cfgms-CopyToSeedVHD"):
-		flag = "-SeedPath "
-	default:
-		return ""
+// The path is read from the call's structured args, never parsed back out of
+// script text.
+func mountedSeedPathForCleanup(verb string, psArgs map[string]string) string {
+	switch verb {
+	case "MountSeedVHD":
+		return psArgs["Path"]
+	case "CopyToSeedVHD":
+		return psArgs["SeedPath"]
 	}
-	idx := strings.Index(trimmed, flag)
-	if idx < 0 {
-		return ""
-	}
-	rest := trimmed[idx+len(flag):]
-	if !strings.HasPrefix(rest, "'") {
-		return ""
-	}
-	rest = rest[1:]
-	// Scan to the closing quote, treating '' as an escaped literal quote.
-	var b strings.Builder
-	for i := 0; i < len(rest); i++ {
-		if rest[i] != '\'' {
-			b.WriteByte(rest[i])
-			continue
-		}
-		if i+1 < len(rest) && rest[i+1] == '\'' {
-			b.WriteByte('\'')
-			i++
-			continue
-		}
-		return b.String()
-	}
-	return "" // unterminated literal — refuse to guess
+	return ""
 }
 
 // dismountAfterKill best-effort dismounts a seed VHD left attached by a killed
@@ -356,8 +343,8 @@ func mountedSeedPathForCleanup(expression string) string {
 // has no logger, so a failed cleanup is not reported here — it surfaces as the
 // next seed attach failing on 0x80070020, which is the pre-fix behaviour and no
 // worse than not having tried.
-func (t *psHostTransport) dismountAfterKill(expression string) {
-	seedPath := mountedSeedPathForCleanup(expression)
+func (t *psHostTransport) dismountAfterKill(verb string, psArgs map[string]string) {
+	seedPath := mountedSeedPathForCleanup(verb, psArgs)
 	if seedPath == "" {
 		return
 	}
@@ -365,19 +352,33 @@ func (t *psHostTransport) dismountAfterKill(expression string) {
 	defer cancel()
 	// Cfgms-DismountAndVerify throws when the VHD is still attached after its
 	// retry loop, so a non-nil error here genuinely means the leak survived.
-	_, _ = t.runFreshNoCleanup(ctx, "Cfgms-DismountAndVerify -Path "+quoteForPS(seedPath))
+	_, _ = t.runFreshNoCleanup(ctx, psCall{
+		Verb: "DismountAndVerify",
+		Mode: psModeFresh,
+		Args: []psArg{{Param: "Path", Value: seedPath}},
+	})
 }
 
 // runFreshNoCleanup is runFresh without the post-kill dismount, used by
-// dismountAfterKill itself so a failing cleanup cannot recurse.
-func (t *psHostTransport) runFreshNoCleanup(ctx context.Context, expression string) (string, error) {
+// dismountAfterKill itself so a failing cleanup cannot recurse. The path
+// travels through the same args-file channel as every other call.
+func (t *psHostTransport) runFreshNoCleanup(ctx context.Context, call psCall) (string, error) {
+	argsPath, remove, err := writeArgsFile(call)
+	if err != nil {
+		return "", err
+	}
+	defer remove()
+	expression, err := invokeExpression(call.Verb, argsPath)
+	if err != nil {
+		return "", err
+	}
 	f, err := os.CreateTemp("", "cfgms-seedcleanup-*.ps1")
 	if err != nil {
 		return "", fmt.Errorf("hyperv-ps-host: create temp cleanup script: %w", err)
 	}
 	tmpPath := f.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
-	if _, werr := io.WriteString(f, psHostPreamble+"\n"+expression+"\n"); werr != nil {
+	if _, werr := io.WriteString(f, freshScriptBody(expression)); werr != nil {
 		_ = f.Close()
 		return "", fmt.Errorf("hyperv-ps-host: write temp cleanup script: %w", werr)
 	}
@@ -407,29 +408,14 @@ func (t *psHostTransport) runFreshNoCleanup(ctx context.Context, expression stri
 //
 // combined is the merged stdout+stderr (exec.CombinedOutput), so an empty value
 // genuinely means the process produced NO output on either stream.
-func freshSeedOpError(runErr error, combined, expression string, elapsed time.Duration) error {
+func freshSeedOpError(runErr error, combined, verb string, elapsed time.Duration) error {
 	trimmed := strings.TrimSpace(combined)
 	if trimmed != "" {
 		return fmt.Errorf("hyperv-ps-host: fresh seed op failed: %w: %s", runErr, trimmed)
 	}
 	return fmt.Errorf(
-		"hyperv-ps-host: fresh seed op failed: %w: powershell exited non-zero after %s and produced NO output on stdout or stderr (verb: %s)",
-		runErr, elapsed, psVerbOf(expression))
-}
-
-// psVerbOf returns the leading Cfgms-* verb of a dispatched expression, for use
-// in an error message. Only the verb is taken: the argument tail can carry host
-// paths and other caller-supplied values that should not be pasted into an
-// error string. Returns "unknown" for an empty or unrecognised expression.
-func psVerbOf(expression string) string {
-	fields := strings.Fields(strings.TrimSpace(expression))
-	if len(fields) == 0 {
-		return "unknown"
-	}
-	if !strings.HasPrefix(fields[0], "Cfgms-") {
-		return "unknown"
-	}
-	return fields[0]
+		"hyperv-ps-host: fresh seed op failed: %w: powershell exited non-zero after %s and produced NO output on stdout or stderr (verb: Cfgms-%s)",
+		runErr, elapsed, verb)
 }
 
 // runDetached launches a single Cfgms-* expression in a DETACHED fresh
@@ -450,13 +436,17 @@ func psVerbOf(expression string) string {
 // (e.g. a parse-stage failure). No ctx: cancelling the dispatching call must
 // not kill an already-started migration — Windows children outlive their
 // parent, which is also what lets the move survive a steward restart.
-func (t *psHostTransport) runDetached(expression string) (string, error) {
+//
+// onExit, when non-nil, runs in that goroutine after the process exits; the
+// caller uses it to remove the call's args file. It does not run when the
+// process fails to start.
+func (t *psHostTransport) runDetached(expression string, onExit func()) (string, error) {
 	f, err := os.CreateTemp("", "cfgms-moveop-*.ps1")
 	if err != nil {
 		return "", fmt.Errorf("hyperv-ps-host: create temp move script: %w", err)
 	}
 	tmpPath := f.Name()
-	body := psHostPreamble + "\n" + expression + "\n" +
+	body := freshScriptBody(expression) +
 		"Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
 	if _, werr := io.WriteString(f, body); werr != nil {
 		_ = f.Close()
@@ -478,6 +468,9 @@ func (t *psHostTransport) runDetached(expression string) (string, error) {
 	go func() {
 		_ = cmd.Wait()
 		_ = os.Remove(tmpPath) // no-op when the script already self-deleted
+		if onExit != nil {
+			onExit()
+		}
 	}()
 	return "", nil
 }
@@ -564,18 +557,6 @@ func generatePSNonce() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf[:]), nil
-}
-
-// quoteForPS wraps a string in single quotes and doubles any embedded single
-// quotes (the canonical PowerShell single-quoted string escape). PowerShell
-// does NOT interpret backslashes or variable references inside single-
-// quoted strings, so single quotes are the safest container for arbitrary
-// argument values. Defense-in-depth: the calling code in vm.go / vswitch.go
-// already validates these values against a strict allowlist,
-// but quoting here means a value that ever slipped past would at worst be
-// passed as a literal string to the cmdlet, never executed as code.
-func quoteForPS(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // threadSafeBuffer is a minimal append-only string buffer the stderr drain
