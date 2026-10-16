@@ -1443,3 +1443,91 @@ func TestResolveConfiguration_RequiredModulesMerge(t *testing.T) {
 		{Name: "acme-corp/extra", Version: "3.0.0"},
 	}, effective.Config.RequiredModules)
 }
+
+// failingConfigStore wraps a real ConfigStore and injects an error for reads of
+// one tenant's keys.
+type failingConfigStore struct {
+	cfgconfig.ConfigStore
+	failTenant string
+	err        error
+}
+
+func (f *failingConfigStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	if key.TenantID == f.failTenant {
+		return nil, f.err
+	}
+	return f.ConfigStore.GetConfig(ctx, key)
+}
+
+func newFailingResolver(t *testing.T, failTenant string, injected error) (*InheritanceResolver, context.Context) {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "client", Namespace: "stewards", Name: "steward-1"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{Steward: stewardconfig.StewardSettings{ID: "dev"}}),
+	}))
+	store := &failingConfigStore{ConfigStore: cs, failTenant: failTenant, err: injected}
+	return NewInheritanceResolver(&cfgStoreAsRouter{ConfigStore: store}, sm.GetTenantStore()), ctx
+}
+
+func TestResolveConfiguration_ClientLevelReadError_Fails(t *testing.T) {
+	storageErr := errors.New("transient storage fault")
+	ir, ctx := newFailingResolver(t, "msp", storageErr)
+	eff, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, storageErr)
+	assert.Nil(t, eff)
+}
+
+func TestResolveConfiguration_NotFoundAtLevel_Succeeds(t *testing.T) {
+	ir, ctx := newFailingResolver(t, "msp", cfgconfig.ErrConfigNotFound)
+	eff, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+	assert.Equal(t, stewardconfig.ModuleTrustModeStrict, eff.Config.Steward.ModuleTrust.Mode)
+}
+
+func TestResolveConfiguration_DeviceLevelReadError_Fails(t *testing.T) {
+	storageErr := errors.New("transient storage fault")
+	// Device config is keyed by the device's own tenant ("client"); its other
+	// levels are read from the same tenant, so the fault hits the group level
+	// first. Assert on the device namespace via a namespace-scoped failure.
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+	store := &nsFailingStore{ConfigStore: sm.GetConfigStore(), namespace: "stewards", err: storageErr}
+	ir := NewInheritanceResolver(&cfgStoreAsRouter{ConfigStore: store}, sm.GetTenantStore())
+	_, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, storageErr)
+}
+
+type nsFailingStore struct {
+	cfgconfig.ConfigStore
+	namespace string
+	err       error
+}
+
+func (f *nsFailingStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	if key.Namespace == f.namespace {
+		return nil, f.err
+	}
+	return f.ConfigStore.GetConfig(ctx, key)
+}
+
+func TestResolveConfiguration_FailingStrictAncestor_NeverYieldsConfigWithoutStrict(t *testing.T) {
+	ir, ctx := newFailingResolver(t, "root", errors.New("transient storage fault"))
+	eff, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.Error(t, err, "a failing read at the strict ancestor must not produce a partial configuration")
+	assert.Nil(t, eff)
+}

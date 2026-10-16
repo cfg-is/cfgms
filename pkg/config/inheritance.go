@@ -5,6 +5,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -365,8 +366,12 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		// No configuration at this level is OK - continue with inheritance
-		return nil
+		// Only a genuinely absent document means "no config at this level";
+		// any other error must not let the level silently drop out.
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read configuration at level %d for tenant %q: %w", level, tenantID, err)
 	}
 
 	// Parse the configuration
@@ -404,8 +409,11 @@ func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, ef
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		// No cluster-policies document for this cluster is non-fatal.
-		return nil
+		// No cluster-policies document for this cluster is non-fatal; other errors are reported.
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read cluster configuration for %q: %w", clusterName, err)
 	}
 
 	var clusterConfig stewardconfig.StewardConfig
@@ -449,8 +457,10 @@ func (ir *InheritanceResolver) applyDeviceConfiguration(ctx context.Context, eff
 
 	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
 	if err != nil {
-		// No device-specific configuration is OK
-		return nil
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read device configuration for %q: %w", stewardID, err)
 	}
 
 	// Parse the configuration
