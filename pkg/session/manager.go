@@ -163,7 +163,7 @@ func (m *manager) loadFromStore(ctx context.Context, hash string) *managedSessio
 // The caller must hold ms.mu.
 func (m *manager) verifyInStore(ctx context.Context, hash string, ms *managedSession) error {
 	_, err := m.store.Get(ctx, hash)
-	if err == nil || !(errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionRevoked)) {
+	if err == nil || (!errors.Is(err, ErrSessionNotFound) && !errors.Is(err, ErrSessionRevoked)) {
 		return nil
 	}
 	if hash == ms.prevHash {
