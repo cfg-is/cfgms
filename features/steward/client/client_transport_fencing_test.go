@@ -286,3 +286,111 @@ func TestReceiveCommand_UnauthenticatedHighTerm_DoesNotAdvanceFence(t *testing.T
 	// A correctly signed command at the old term is still accepted.
 	require.NoError(t, tc.receiveCommand(context.Background(), sign("legit", 5), h.HandleCommand))
 }
+
+// TestReceiveCommand_LowerTermDuringHigherDispatch_Refused: the compare and the
+// commit are separate steps, so a lower-term command arriving while a higher-term
+// command is still dispatching must be refused against the in-flight term.
+func TestReceiveCommand_LowerTermDuringHigherDispatch_Refused(t *testing.T) {
+	tc := &TransportClient{
+		logger:       newTestLogger(t),
+		fenceRatchet: stewardconfig.NewFenceRatchet(t.TempDir()),
+	}
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("seed", 5)))
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- tc.receiveCommand(context.Background(), fencedCommand("high", 11),
+			func(context.Context, *cpTypes.SignedCommand) error {
+				close(entered)
+				<-release
+				return nil
+			})
+	}()
+	<-entered
+
+	dispatched := false
+	err := tc.receiveCommand(context.Background(), fencedCommand("low", 9),
+		func(context.Context, *cpTypes.SignedCommand) error { dispatched = true; return nil })
+	require.ErrorIs(t, err, ErrCommandTermFenced)
+	assert.False(t, dispatched)
+
+	close(release)
+	require.NoError(t, <-done)
+}
+
+// TestReceiveCommand_FailedDispatchReleasesReservation: a higher-term command
+// that fails authentication must not leave a reservation that fences later
+// commands.
+func TestReceiveCommand_FailedDispatchReleasesReservation(t *testing.T) {
+	tc := &TransportClient{
+		logger:       newTestLogger(t),
+		fenceRatchet: stewardconfig.NewFenceRatchet(t.TempDir()),
+	}
+	require.NoError(t, admitCommandTerm(tc, fencedCommand("seed", 5)))
+	err := tc.receiveCommand(context.Background(), fencedCommand("forged", 1<<60),
+		func(context.Context, *cpTypes.SignedCommand) error { return commands.ErrUnauthenticatedCommand })
+	require.Error(t, err)
+	require.NoError(t, tc.receiveCommand(context.Background(), fencedCommand("legit", 5),
+		func(context.Context, *cpTypes.SignedCommand) error { return nil }))
+}
+
+// TestReceiveCommand_UnusableSigningCert_FailsClosed: signing material that is
+// present but cannot become a verifier must refuse commands and leave the fence
+// untouched, not skip signature verification.
+func TestReceiveCommand_UnusableSigningCert_FailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	tc := &TransportClient{
+		logger:          newTestLogger(t),
+		fenceRatchet:    stewardconfig.NewFenceRatchet(dir),
+		signingCertPEMs: []string{"not a certificate"},
+	}
+	verifier := tc.buildVerifierOnDemand()
+	require.NotNil(t, verifier, "unusable signing material must yield a rejecting verifier, not nil")
+
+	h, err := commands.New(&commands.Config{
+		StewardID: "steward-fence-test",
+		OnStatus:  func(context.Context, *cpTypes.Event) {},
+		Logger:    newTestLogger(t),
+		Verifier:  verifier,
+	})
+	require.NoError(t, err)
+	t.Cleanup(h.Wait)
+	tc.commandHandler = h
+
+	forged := fencedCommand("forged", 1<<60)
+	forged.Signature = &signature.ConfigSignature{}
+	err = tc.receiveCommand(context.Background(), forged, h.HandleCommand)
+	require.ErrorIs(t, err, commands.ErrUnauthenticatedCommand)
+
+	tc.mu.RLock()
+	set, highest := tc.termRatchetSet, tc.highestTermSeen
+	tc.mu.RUnlock()
+	assert.False(t, set)
+	assert.Zero(t, highest)
+	persistedSet, _, err := stewardconfig.NewFenceRatchet(dir).Load()
+	require.NoError(t, err)
+	assert.False(t, persistedSet)
+}
+
+// TestReceiveCommand_NoVerifier_DoesNotAdvanceFence: a handler without a
+// verifier dispatches unauthenticated commands; those must not move the fence.
+func TestReceiveCommand_NoVerifier_DoesNotAdvanceFence(t *testing.T) {
+	tc := &TransportClient{logger: newTestLogger(t), fenceRatchet: stewardconfig.NewFenceRatchet(t.TempDir())}
+	h, err := commands.New(&commands.Config{
+		StewardID: "steward-fence-test",
+		OnStatus:  func(context.Context, *cpTypes.Event) {},
+		Logger:    newTestLogger(t),
+	})
+	require.NoError(t, err)
+	t.Cleanup(h.Wait)
+	tc.commandHandler = h
+
+	_ = tc.receiveCommand(context.Background(), fencedCommand("unverified", 1<<60),
+		func(context.Context, *cpTypes.SignedCommand) error { return nil })
+	tc.mu.RLock()
+	set := tc.termRatchetSet
+	tc.mu.RUnlock()
+	assert.False(t, set)
+}
