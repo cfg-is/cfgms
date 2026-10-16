@@ -331,6 +331,9 @@ func CreateAuditRecord(stewardID string, resourceID string, config *ScriptConfig
 
 	if result != nil {
 		record.Status = StatusCompleted
+		if result.ExitCode != 0 {
+			record.Status = StatusFailed
+		}
 		record.ExitCode = result.ExitCode
 		record.Stdout = result.Stdout
 		record.Stderr = result.Stderr

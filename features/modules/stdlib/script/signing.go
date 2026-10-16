@@ -6,10 +6,12 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"crypto/sha1" // #nosec G505 -- certificate thumbprints are SHA-1 by convention; not used for integrity
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"strings"
@@ -115,7 +117,9 @@ func hasDetachedSignature(sig *ScriptSignature) bool {
 // sig.Signature must be the raw signature bytes encoded as standard or URL-safe base64.
 // sig.Algorithm must be one of: rsa-sha256, rsa-sha512, ecdsa-sha256, ecdsa-sha384.
 //
-// After cryptographic verification, the trust mode policy is enforced using sig.Thumbprint.
+// After cryptographic verification, the trust mode policy is enforced using thumbprints
+// derived from the presented key or certificate material. The caller-supplied
+// sig.Thumbprint is never trusted: it is an unauthenticated string in the same block.
 func verifyDetachedSignature(content []byte, sig *ScriptSignature, cfg ModuleSigningConfig) error {
 	if sig == nil {
 		return fmt.Errorf("%w: signature is nil", modules.ErrInvalidInput)
@@ -145,7 +149,20 @@ func verifyDetachedSignature(content []byte, sig *ScriptSignature, cfg ModuleSig
 	}
 
 	// Enforce trust mode policy using the signature's certificate thumbprint.
-	return applyTrustMode(sig.Thumbprint, cfg)
+	return applyTrustMode(cfg, derivedThumbprints(sig.PublicKey)...)
+}
+
+// derivedThumbprints computes the hex SHA-256 and SHA-1 thumbprints of the DER bytes of
+// the presented PEM (certificate or PKIX public key). It returns nil if the PEM cannot be
+// decoded, which makes every allowlist comparison fail closed.
+func derivedThumbprints(pemStr string) []string {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil
+	}
+	s256 := sha256.Sum256(block.Bytes)
+	s1 := sha1.Sum(block.Bytes) // #nosec G401 -- thumbprint identifier, not an integrity primitive
+	return []string{hex.EncodeToString(s256[:]), hex.EncodeToString(s1[:])}
 }
 
 // parsePublicKey decodes a PEM-encoded PKIX public key or X.509 certificate.
@@ -224,22 +241,26 @@ func verifyCryptoSignature(content, sigBytes []byte, algorithm string, pub crypt
 }
 
 // applyTrustMode enforces the trust mode policy after a signature has been cryptographically
-// verified. thumbprint is the certificate thumbprint embedded in the script signature (may
-// be empty for signatures that carry only a raw public key).
-func applyTrustMode(thumbprint string, cfg ModuleSigningConfig) error {
+// verified. thumbprints are values derived from the verified key or certificate (never read
+// from the signature block); the key is trusted if any of them is allowlisted.
+func applyTrustMode(cfg ModuleSigningConfig, thumbprints ...string) error {
+	thumbprint := ""
+	if len(thumbprints) > 0 {
+		thumbprint = thumbprints[0]
+	}
 	switch cfg.TrustMode {
 	case TrustModeAnyValid, "":
 		// Any cryptographically valid signature is accepted; no key allowlist checked.
 		return nil
 
 	case TrustModeTrustedKeys:
-		if isTrustedThumbprint(thumbprint, cfg.TrustedKeys) {
+		if anyTrustedThumbprint(thumbprints, cfg.TrustedKeys) {
 			return nil
 		}
 		return fmt.Errorf("%w: signing key thumbprint %q is not in the trusted keys allowlist", modules.ErrInvalidInput, thumbprint)
 
 	case TrustModeTrustedKeysAndPublic:
-		if isTrustedThumbprint(thumbprint, cfg.TrustedKeys) {
+		if anyTrustedThumbprint(thumbprints, cfg.TrustedKeys) {
 			return nil
 		}
 		if cfg.AllowPublicCA {
@@ -252,6 +273,16 @@ func applyTrustMode(thumbprint string, cfg ModuleSigningConfig) error {
 	default:
 		return fmt.Errorf("%w: unknown trust mode: %q", modules.ErrInvalidInput, cfg.TrustMode)
 	}
+}
+
+// anyTrustedThumbprint reports whether any of thumbprints matches the allowlist.
+func anyTrustedThumbprint(thumbprints []string, trustedKeys []TrustedKeyEntry) bool {
+	for _, tp := range thumbprints {
+		if isTrustedThumbprint(tp, trustedKeys) {
+			return true
+		}
+	}
+	return false
 }
 
 // isTrustedThumbprint reports whether thumbprint matches any entry in trustedKeys.

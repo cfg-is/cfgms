@@ -79,5 +79,5 @@ func verifyAuthenticodeSignature(content []byte, sig *ScriptSignature, cfg Modul
 		certThumbprint = strings.TrimSpace(parts[1])
 	}
 
-	return applyTrustMode(certThumbprint, cfg)
+	return applyTrustMode(cfg, certThumbprint)
 }

@@ -489,3 +489,21 @@ func TestAuditLogger_Pagination(t *testing.T) {
 		t.Errorf("Expected 3 results with offset and limit, got %d", len(results))
 	}
 }
+
+func TestCreateAuditRecord_NonZeroExitIsFailed(t *testing.T) {
+	config := &ScriptConfig{Content: "exit 1", Shell: ShellBash}
+	result := &ExecutionResult{ExitCode: 1, Stderr: "boom"}
+
+	record := CreateAuditRecord("steward-1", "res-1", config, result, nil, false)
+	if record.Status != StatusFailed {
+		t.Errorf("non-zero exit must be audited as failed, got %q", record.Status)
+	}
+	if record.ExitCode != 1 {
+		t.Errorf("exit code = %d, want 1", record.ExitCode)
+	}
+
+	ok := CreateAuditRecord("steward-1", "res-1", config, &ExecutionResult{ExitCode: 0}, nil, false)
+	if ok.Status != StatusCompleted {
+		t.Errorf("zero exit must be completed, got %q", ok.Status)
+	}
+}
