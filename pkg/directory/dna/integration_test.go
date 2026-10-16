@@ -545,18 +545,32 @@ func TestScalabilityScenario(t *testing.T) {
 	})
 }
 
-// scanningBackend reads back every record stored so far before each write: a
-// real O(n) scan on the real SQLite backend, the shape of a dedup-by-scan
-// regression in the write path.
+// scanningBackend reads back every record stored so far, scanPasses times,
+// before each write: a real O(n) scan on the real SQLite backend, the shape of
+// a dedup-by-scan regression in the write path.
 type scanningBackend struct {
 	fleetstorage.Backend
 	stored []fleetstorage.DNARecord
 }
 
+// scanPasses sets how heavy each record's share of the injected scan is. The
+// growth the check sees is n times the cost of reading one record relative to
+// writing one, and that cost ratio depends on the machine. With one pass over
+// 400 records, a native Windows CI runner measured a late ratio of 5.69, under
+// the bound of 8, where a local Windows host measured 11.6-43.7. The injected
+// work grows with passes times records, but test time grows with records times
+// that, so more passes over fewer records lift the ratio past the bound at less
+// cost than more records. Six passes over 200 records measured a late ratio of
+// 108-110 locally under -race; the CI runner's per-read cost in that failure
+// gives an estimate near 19 there.
+const scanPasses = 6
+
 func (b *scanningBackend) scan(ctx context.Context) error {
-	for _, r := range b.stored {
-		if _, err := b.GetRecord(ctx, r.ContentHash, r.ShardID); err != nil {
-			return err
+	for pass := 0; pass < scanPasses; pass++ {
+		for _, r := range b.stored {
+			if _, err := b.GetRecord(ctx, r.ContentHash, r.ShardID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -599,7 +613,7 @@ func organizationDNA(t *testing.T, n int) []*DirectoryDNA {
 func TestWriteGrowthCheck_DetectsPerWriteScan(t *testing.T) {
 	st := newDirectoryStorage(t)
 	store := NewDirectoryDNAStorageAdapter(&scanningBackend{Backend: st.backend}, st.compressor, st.indexer, st.logger)
-	g := measureWriteGrowth(t, store, func() *DirectoryDNAStorageAdapter { return newDirectoryStorageAdapter(t) }, organizationDNA(t, 400))
+	g := measureWriteGrowth(t, store, func() *DirectoryDNAStorageAdapter { return newDirectoryStorageAdapter(t) }, organizationDNA(t, 200))
 	g.log(t, "O(n) scan per write")
 	assert.Error(t, g.check(), "a write path that scans every stored record must fail the growth check")
 }
