@@ -43,6 +43,19 @@ func SecureReadFile(basePath, userPath string) ([]byte, error) {
 	return os.ReadFile(validatedPath)
 }
 
+// writeFileNoFollow writes data like os.WriteFile but never follows a link at the leaf.
+func writeFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	f, err := openNoFollow(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
 // SecureWriteFile safely writes a file with path validation and secure permissions.
 //
 // Files are written with 0600 permissions (owner read/write only) by default.
@@ -59,7 +72,7 @@ func SecureWriteFile(basePath, userPath string, data []byte) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return os.WriteFile(validatedPath, data, 0600)
+	return writeFileNoFollow(validatedPath, data, 0600)
 }
 
 // SecureWriteFileWithPerms writes a file with custom permissions after path validation.
@@ -77,7 +90,7 @@ func SecureWriteFileWithPerms(basePath, userPath string, data []byte, perm os.Fi
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return os.WriteFile(validatedPath, data, perm)
+	return writeFileNoFollow(validatedPath, data, perm)
 }
 
 // SecureOpenFile safely opens a file with path validation.
@@ -91,7 +104,7 @@ func SecureOpenFile(basePath, userPath string, flag int, perm os.FileMode) (*os.
 
 	// #nosec G304 - Secure file access wrapper with comprehensive path validation
 	// This function specifically prevents directory traversal attacks
-	return os.OpenFile(validatedPath, flag, perm)
+	return openNoFollow(validatedPath, flag, perm)
 }
 
 // ValidateAndCleanPath validates a user-provided path against a base directory.
@@ -186,8 +199,19 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		parent := absUserPath
 		var tail []string
 		for {
-			if _, statErr := os.Stat(parent); statErr == nil {
+			info, lstatErr := os.Lstat(parent)
+			if lstatErr == nil {
+				if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+					// A link (or Windows reparse point) is never re-joined unresolved:
+					// it must resolve, otherwise a later create would follow it.
+					if _, statErr := os.Stat(parent); statErr != nil {
+						return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
+					}
+				}
 				break
+			}
+			if !errors.Is(lstatErr, os.ErrNotExist) {
+				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
 			}
 			tail = append([]string{filepath.Base(parent)}, tail...)
 			next := filepath.Dir(parent)

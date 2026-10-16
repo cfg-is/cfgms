@@ -1,0 +1,73 @@
+//go:build !windows
+
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+package file
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+func TestFileModule_Set_DanglingSymlinkRejected(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "created.txt")
+	link := filepath.Join(base, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	err := New().Set(context.Background(), link, createConfigFromYAML(testFileConfigYAML("x", "", "", base)))
+	if err == nil {
+		t.Fatal("Set() through a dangling symlink must fail")
+	}
+	if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("link target must not be created, stat err = %v", statErr)
+	}
+}
+
+func TestNoFollowMetadataHelpers_RejectSymlinkLeaf(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	outFile := filepath.Join(outside, "f.txt")
+	if err := os.WriteFile(outFile, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(outside, "d")
+	if err := os.Mkdir(outDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		target string
+		isDir  bool
+	}{"file": {outFile, false}, "dir": {outDir, true}} {
+		t.Run(name, func(t *testing.T) {
+			link := filepath.Join(base, name+"-link")
+			if err := os.Symlink(tc.target, link); err != nil {
+				t.Skipf("cannot create symlink: %v", err)
+			}
+			before, _ := os.Stat(tc.target)
+
+			if err := chmodNoFollow(link, 0777, tc.isDir); err == nil {
+				t.Error("chmodNoFollow must fail on a symlink leaf")
+			}
+			if err := chownNoFollow(link, os.Getuid(), os.Getgid(), tc.isDir); err == nil {
+				t.Error("chownNoFollow must fail on a symlink leaf")
+			}
+			if err := setOwnership(context.Background(), link, "root", "", logging.NewNoopLogger(), "r"); err == nil {
+				t.Error("setOwnership must fail on a symlink leaf")
+			}
+			after, _ := os.Stat(tc.target)
+			if before.Mode() != after.Mode() {
+				t.Errorf("target mode changed: %v -> %v", before.Mode(), after.Mode())
+			}
+		})
+	}
+}
