@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -748,4 +750,66 @@ func TestSyncDeleteErrorKeepsLastSyncedSHA(t *testing.T) {
 	// Retry with a working store converges.
 	require.NoError(t, good.TriggerSync(ctx, binding))
 	assert.Error(t, getEntry(real, "policies", "b"))
+}
+
+// overlapStore wraps a real ConfigStore and records the highest number of
+// ListConfigs calls (made by the prune step) in flight at once.
+type overlapStore struct {
+	cfgconfig.ConfigStore
+	inFlight, maxInFlight atomic.Int32
+}
+
+func (o *overlapStore) ListConfigs(ctx context.Context, f *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	n := o.inFlight.Add(1)
+	defer o.inFlight.Add(-1)
+	for {
+		m := o.maxInFlight.Load()
+		if n <= m || o.maxInFlight.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	return o.ConfigStore.ListConfigs(ctx, f)
+}
+
+func TestConcurrentSyncsOfOneScopeAreSerialized(t *testing.T) {
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{
+		"a.yaml": "a: 1\n",
+		"b.yaml": "b: 1\n",
+	})
+	root := t.TempDir()
+	real := pkgtesting.SetupTestStorage(t).GetConfigStore()
+	store := &overlapStore{ConfigStore: real}
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+	syncer, err := gitsync.NewSyncer(store, bindings, filepath.Join(root, "repos"), logging.ForComponent("gitsync-test"))
+	require.NoError(t, err)
+
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+	store.maxInFlight.Store(0)
+
+	commitRemoval(t, workDir, map[string]string{"b.yaml": ""}, nil)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = syncer.TriggerSync(ctx, binding)
+		}()
+	}
+	wg.Wait()
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
+
+	assert.EqualValues(t, 1, store.maxInFlight.Load(), "syncs of one scope must not overlap")
+	assert.NoError(t, getEntry(real, "policies", "a"))
+	assert.Error(t, getEntry(real, "policies", "b"))
+	got, _ := bindings.Get("root/test-tenant", "policies")
+	assert.Equal(t, runGit(t, workDir, "rev-parse", "HEAD"), got.LastSyncedSHA)
 }

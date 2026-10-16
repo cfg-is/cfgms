@@ -66,6 +66,7 @@ type Syncer struct {
 	logger        logging.Logger
 	statusMap     map[string]*ScopeStatus
 	cancelFuncs   map[string]context.CancelFunc
+	scopeLocks    sync.Map // scope key -> *sync.Mutex; serializes syncScope per scope
 	ctx           context.Context
 	cancel        context.CancelFunc
 	newTickerFunc func(d time.Duration) (<-chan time.Time, func())
@@ -288,7 +289,16 @@ func (s *Syncer) TriggerSync(ctx context.Context, b ScopeBinding) error {
 
 // syncScope performs the actual git clone/pull and config import for one
 // binding.
+//
+// Syncs of one scope are serialized: webhook goroutines and the polling loop
+// may call in concurrently, and an interleaved import/prune/SHA update could
+// delete entries the other sync just wrote.
 func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
+	lk, _ := s.scopeLocks.LoadOrStore(b.key(), &sync.Mutex{})
+	mu := lk.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// sanitizeKey already replaces "/" (TenantPath and Namespace are attacker-
 	// influenceable via the binding API), but a ".."-only segment or a stray
 	// backslash on Windows could otherwise still walk outside workDir — bound
