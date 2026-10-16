@@ -4,6 +4,8 @@
 package quic
 
 import (
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -97,4 +99,62 @@ func TestConn_Deadlines(t *testing.T) {
 	require.NoError(t, clientConn.SetDeadline(time.Time{}))
 	require.NoError(t, clientConn.SetReadDeadline(time.Time{}))
 	require.NoError(t, clientConn.SetWriteDeadline(time.Time{}))
+}
+
+// TestConn_CloseDeliversWrittenData verifies that bytes written immediately
+// before Close reach the peer. gRPC writes the final status trailers and then
+// closes the connection; losing them surfaces to the client as a transport
+// error instead of the status (Issue #5039).
+func TestConn_CloseDeliversWrittenData(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	for i := 0; i < 20; i++ {
+		serverConn, clientConn := dialPair(t, tlsPair)
+		_, err := serverConn.Write([]byte("trailers"))
+		require.NoError(t, err)
+		require.NoError(t, serverConn.Close())
+
+		require.NoError(t, clientConn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		got, err := io.ReadAll(clientConn)
+		require.NoError(t, err, "iteration %d", i)
+		assert.Equal(t, "trailers", string(got), "iteration %d", i)
+	}
+}
+
+// TestConn_CloseHoldsSlotUntilConnectionClosed proves the listener's connection
+// slot is not released while the QUIC connection is still alive in its close
+// grace period, so MaxConnections keeps bounding live connections.
+func TestConn_CloseHoldsSlotUntilConnectionClosed(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	lis, err := Listen("127.0.0.1:0", tlsPair.server, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+
+	acceptCh := make(chan net.Conn, 1)
+	go func() {
+		nc, aerr := lis.Accept()
+		if aerr == nil {
+			acceptCh <- nc
+		}
+	}()
+
+	cc, err := Dial(t.Context(), lis.Addr().String(), tlsPair.client, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cc.Close() })
+	_, err = cc.Write([]byte{0x00})
+	require.NoError(t, err)
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-acceptCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not accept the connection")
+	}
+	require.Equal(t, 1, lis.ActiveConnections())
+
+	require.NoError(t, serverConn.Close())
+	// The client keeps its side open, so the connection lives until closeGrace.
+	assert.Equal(t, 1, lis.ActiveConnections(), "slot released while the QUIC connection is still open")
+
+	require.Eventually(t, func() bool { return lis.ActiveConnections() == 0 },
+		closeGrace+3*time.Second, 10*time.Millisecond)
 }

@@ -6,6 +6,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -60,7 +61,11 @@ func openStreamFrom(t *testing.T, srcIP, serverAddr string, tlsCfg *tls.Config, 
 	}
 	stream, err := transportpb.NewStewardTransportClient(cc).ControlChannel(ctx)
 	require.NoError(t, err)
-	require.NoError(t, stream.Send(&transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{Heartbeat: &transportpb.Heartbeat{}}}))
+	// The controller refuses without reading, so a refusal can land before this
+	// Send: gRPC then reports io.EOF and delivers the real status on Recv.
+	if err := stream.Send(&transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{Heartbeat: &transportpb.Heartbeat{}}}); err != nil {
+		require.ErrorIs(t, err, io.EOF)
+	}
 	return stream
 }
 
@@ -131,6 +136,23 @@ func TestControlChannel_CopyRefusedWithIdentityInUseReason(t *testing.T) {
 	assert.ErrorIs(t, cerr, interfaces.ErrIdentityInUse)
 	assert.ErrorIs(t, cerr, interfaces.ErrIdentityRejected)
 	assert.NotContains(t, cerr.Error(), "127.0.0.1")
+}
+
+// TestControlChannel_RefusalSurvivesClientSendAfterTeardown covers a client that
+// keeps sending after the controller has refused it: Send reports io.EOF once the
+// stream has ended, and the refusal status must still be what Recv returns
+// (Issue #5039), never a bare EOF.
+func TestControlChannel_RefusalSurvivesClientSendAfterTeardown(t *testing.T) {
+	t.Parallel()
+	env := newProvEnv(t, "steward-late", baselineJSON)
+	server, _ := env.startServer(t, WithProvenanceChecker(env.spy))
+	tlsCfg, _ := env.clientTLS(t, "steward-late")
+
+	stream := openStreamFrom(t, "127.0.0.1", server.ListenAddr(), tlsCfg, copyAttrs)
+	hb := &transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{Heartbeat: &transportpb.Heartbeat{}}}
+	require.Eventually(t, func() bool { return stream.Send(hb) != nil },
+		5*time.Second, time.Millisecond, "controller never ended the refused stream")
+	requireIdentityInUse(t, recvStatus(t, stream))
 }
 
 func TestControlChannel_PlainPermissionDeniedIsNotIdentityInUse(t *testing.T) {

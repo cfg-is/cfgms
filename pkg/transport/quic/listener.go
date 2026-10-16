@@ -143,6 +143,7 @@ type Listener struct {
 	slots             chan struct{} // one token per accepted QUIC connection
 	streamOpenTimeout time.Duration
 	wg                sync.WaitGroup // tracks acceptLoop and acceptStream goroutines
+	grace             *graceTracker  // accepted conns awaiting a deferred close
 }
 
 // Compile-time check that Listener implements net.Listener.
@@ -220,6 +221,7 @@ func ListenWithLimits(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Con
 		conns:             make(chan net.Conn, limits.ReadyQueueSize),
 		slots:             make(chan struct{}, limits.MaxConnections),
 		streamOpenTimeout: limits.StreamOpenTimeout,
+		grace:             newGraceTracker(),
 	}
 	l.wg.Add(1)
 	go func() {
@@ -271,6 +273,7 @@ func (l *Listener) acceptStream(quicConn *quicgo.Conn) {
 	local := newAddr(quicConn.LocalAddr().String())
 	remote := newAddr(quicConn.RemoteAddr().String())
 	conn := newConnWithCloseHook(quicConn, stream, local, remote, func() { <-l.slots })
+	conn.grace = l.grace
 	queueTimer := time.NewTimer(l.streamOpenTimeout)
 	defer queueTimer.Stop()
 	select {
@@ -306,6 +309,9 @@ func (l *Listener) Close() error {
 	// quic-go transport goroutines (runSendQueue, listen) can proceed to
 	// their own exit without competing I/O from our side.
 	l.wg.Wait()
+	// Connections still inside their close grace period end now, while the
+	// transport can still send their CONNECTION_CLOSE.
+	l.grace.closeAll()
 	err := l.ql.Close()
 	if l.tr != nil {
 		_ = l.tr.Close()
