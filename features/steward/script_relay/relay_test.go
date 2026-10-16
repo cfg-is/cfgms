@@ -92,6 +92,8 @@ func TestRelay_SocketCreation(t *testing.T) {
 	require.NotEmpty(t, sockPath)
 
 	sockDir := filepath.Dir(sockPath)
+	assert.True(t, strings.HasPrefix(filepath.Base(sockDir), "cfgms-"+execID+"-"),
+		"socket directory %q must be labelled with the execution ID", sockDir)
 
 	// Directory must exist with mode 0700.
 	dirInfo, err := os.Stat(sockDir)
@@ -162,11 +164,11 @@ func TestNewRelay_InvalidUIDChownFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "chown")
 
 	// The failed socket directory must not be left behind.
-	matches, globErr := filepath.Glob(filepath.Join(os.TempDir(), "cfgms-*", "api.sock"))
+	// The directory name embeds the execution ID ("cfgms-<execID>-<random>"),
+	// so any leftover directory for this execution matches this glob.
+	matches, globErr := filepath.Glob(filepath.Join(os.TempDir(), "cfgms-"+execID+"-*"))
 	require.NoError(t, globErr)
-	for _, m := range matches {
-		assert.NotContains(t, m, execID)
-	}
+	assert.Empty(t, matches, "socket directory must be removed after a failed chown")
 }
 
 // TestRelay_RequestResponseCycle tests the full steward-side relay lifecycle:
@@ -383,4 +385,19 @@ func TestCheckSocketDir(t *testing.T) {
 		require.NoError(t, os.Chown(other, 12345, -1))
 		assert.Error(t, checkSocketDir(other), "foreign-owned directory must be refused")
 	}
+}
+
+// TestDirExecID verifies the execution-ID label embedded in the socket
+// directory name cannot introduce path separators or traversal elements and is
+// bounded in length.
+func TestDirExecID(t *testing.T) {
+	assert.Equal(t, "exec-1_a.b", dirExecID("exec-1_a.b"))
+	assert.Equal(t, ".._.._etc", dirExecID("../../etc"))
+	assert.NotContains(t, dirExecID("a/b\\c\x00d"), "/")
+	assert.Len(t, dirExecID(strings.Repeat("x", 200)), maxDirExecIDLen)
+
+	// A traversal-shaped execution ID still yields a directory directly under
+	// the temp root.
+	r, _ := newTestRelay(t, "../"+uniqueExecID("trav"))
+	assert.Equal(t, filepath.Clean(os.TempDir()), filepath.Dir(filepath.Dir(r.SocketPath())))
 }

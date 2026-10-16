@@ -9,8 +9,33 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
+
+// maxDirExecIDLen bounds how much of the execution ID is embedded in the socket
+// directory name, keeping the socket path under the unix sun_path limit.
+const maxDirExecIDLen = 48
+
+// dirExecID returns the execution ID reduced to characters that are safe in a
+// single path element, truncated to maxDirExecIDLen. It only labels the
+// directory; uniqueness and unpredictability come from os.MkdirTemp's random
+// suffix, so the label never makes the path predictable.
+func dirExecID(executionID string) string {
+	var b strings.Builder
+	for _, c := range executionID {
+		if b.Len() >= maxDirExecIDLen {
+			break
+		}
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+			b.WriteRune(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
 
 // checkSocketDir refuses a socket directory that another local user could have
 // prepared: a symlink, a non-directory, a directory owned by someone other than
@@ -42,12 +67,12 @@ func checkSocketDir(dir string) error {
 
 // initSocket creates the per-execution directory (mode 0700) and opens a
 // unix socket inside it (mode 0600). The directory is created fresh and
-// exclusively with an unpredictable name (os.MkdirTemp), so a path planted in
-// the world-writable temp tree is never reused. It is verified before binding,
+// exclusively with an unpredictable name (os.MkdirTemp: "cfgms-<execID>-<random>"),
+// so a path planted in the world-writable temp tree is never reused. It is verified before binding,
 // and is created first so no window exists between bind and chmod where the
 // socket is world-accessible.
 func initSocket(r *Relay) error {
-	sockDir, err := os.MkdirTemp("", "cfgms-")
+	sockDir, err := os.MkdirTemp("", "cfgms-"+dirExecID(r.executionID)+"-")
 	if err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
