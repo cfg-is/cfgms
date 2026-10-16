@@ -3,22 +3,22 @@
 # read the compiler export data written by the active Go toolchain.
 #
 # Both tools load packages through x/tools' gcimporter. gosec v2.29.0 vendors
-# x/tools v0.49.0 and staticcheck 2026.2.1 vendors a v0.44.1 pseudo-version;
-# neither can decode the export data Go 1.27.2 writes ("export data version 5 is
+# x/tools v0.49.0 (staticcheck 2026.2.2 requires v0.51.0), and the Go 1.27.2
+# toolchain writes export data older x/tools cannot decode ("export data version 5 is
 # greater than maximum supported version 4"). `go install pkg@version` ignores
 # any override, so this builds both from a throwaway module that raises x/tools.
 #
 # Pins (keep in sync with the install hints in the Makefile and docs):
 #   gosec       v2.29.0   (2026-08-25)
-#   staticcheck 2026.2.1  (honnef.co/go/tools v0.8.1, 2026-08-21)
-#   x/tools     v0.50.0   (2026-09-08)
+#   staticcheck 2026.2.2  (honnef.co/go/tools v0.8.2, 2026-10-12)
+#   x/tools     v0.51.0   (2026-10-02)
 #
 # Usage: scripts/install-go-analyzers.sh   (installs to $GOBIN or $(go env GOPATH)/bin)
 set -euo pipefail
 
 GOSEC_VERSION="v2.29.0"
-STATICCHECK_VERSION="2026.2.1"
-XTOOLS_VERSION="v0.50.0"
+STATICCHECK_VERSION="2026.2.2"
+XTOOLS_VERSION="v0.51.0"
 
 work="$(mktemp -d)"
 trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT

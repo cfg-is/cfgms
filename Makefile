@@ -1830,7 +1830,7 @@ security-staticcheck:
 		echo "❌ Error: staticcheck is not installed"; \
 		echo ""; \
 		echo "Install staticcheck using Go:"; \
-		echo "  GOTOOLCHAIN=\$$(go env GOVERSION) go install honnef.co/go/tools/cmd/staticcheck@2026.2.1"; \
+		echo "  GOTOOLCHAIN=\$$(go env GOVERSION) go install honnef.co/go/tools/cmd/staticcheck@2026.2.2"; \
 		echo ""; \
 		echo "For more info: https://staticcheck.io/"; \
 		exit 1; \
