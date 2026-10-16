@@ -32,6 +32,11 @@ import (
 // "steward". The steward runtime hosts only steward-kind modules.
 var ErrWrongModuleKind = errors.New("wrong module kind: steward runtime hosts only steward-kind modules")
 
+// ErrNoInstallRoot is returned by Start when the bundle carries no InstallRoot.
+// The runtime resolves and re-verifies the binary relative to the installation
+// root; a bundle that was not read from one has nothing to verify and is refused.
+var ErrNoInstallRoot = errors.New("bundle has no installation root: refusing to execute an unverifiable binary")
+
 // handleSeq generates unique monotonic IDs for socket path generation.
 var handleSeq atomic.Int64
 
@@ -81,13 +86,29 @@ func (r *ModuleRuntime) SetLogger(l logging.Logger) {
 // is strict — the only mode that consults it — matching where
 // StewardTrustEnforcer.VerifyForLoad itself consults the list.
 //
+// Verification order (each step must pass before the next runs, and nothing is
+// executed until all have):
+//  1. kind gate — only steward-kind modules
+//  2. trust verification (strict mode: additional_publishers resolution, then
+//     publisher signatures; controller and bypass: no signature check)
+//  3. declared env names
+//  4. install root and binary lookup — the bundle must carry an InstallRoot and
+//     a binary for the running os-arch, resolved under that root
+//  5. bundle.VerifyInstalledPinned, immediately before exec and in every trust
+//     mode: the root holds no extra entries, and the binary's streamed SHA-256
+//     matches the digest recorded for the running platform, with the recomputed
+//     content hash equal to the one trust verification covered
+//  6. fork/exec, socket, handshake
+//
 // Error precedence:
 //  1. ErrWrongModuleKind — bundle.Manifest.Kind != "steward"
 //  2. stewardtrust.ErrAdditionalPublisherUnresolvable — an additional_publishers
 //     entry has no known key material (strict mode only)
 //  3. pkgtrust.ErrPublisherNotTrusted — trust verification failed (strict mode)
-//  4. binary not found in bundle.Binaries for current os-arch
-//  5. fork/exec, socket, or gRPC errors
+//  4. ErrNoInstallRoot, or binary not found in bundle.Binaries for current os-arch
+//  5. bundle.ErrContentHashMismatch / bundle.ErrUnexpectedEntry — the installed
+//     tree changed since it was loaded
+//  6. fork/exec, socket, or gRPC errors
 func (r *ModuleRuntime) Start(
 	b *bundle.Bundle,
 	mode stewardtypes.ModuleTrustMode,
@@ -125,11 +146,23 @@ func (r *ModuleRuntime) Start(
 	}
 
 	// 3. Locate the binary for the current platform.
+	if b.InstallRoot == "" {
+		return nil, ErrNoInstallRoot
+	}
 	osArch := goruntime.GOOS + "-" + goruntime.GOARCH
-	binPath, ok := b.Binaries[osArch]
+	relPath, ok := b.Binaries[osArch]
 	if !ok {
 		return nil, fmt.Errorf("no binary for %q in bundle %q (available: %v)",
 			osArch, b.Manifest.Name, binaryKeys(b.Binaries))
+	}
+	binPath, err := bundle.InstalledBinaryPath(b.InstallRoot, relPath)
+	if err != nil {
+		return nil, fmt.Errorf("module %q: %w", b.Manifest.Name, err)
+	}
+	// Re-verify the installed tree immediately before exec, in every trust mode:
+	// a binary or sidecar changed since the bundle was loaded must not run.
+	if err := bundle.VerifyInstalledPinned(b.InstallRoot, osArch, b.ContentHash, relPath); err != nil {
+		return nil, fmt.Errorf("module %q: installed bundle failed pre-exec verification: %w", b.Manifest.Name, err)
 	}
 
 	// 4. Construct a unique socket path for this module instance. makeSocketPath

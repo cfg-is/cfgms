@@ -28,6 +28,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules/adapter"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/features/steward/modules/install"
 	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
 	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -96,6 +97,7 @@ func osArch() string { return goruntime.GOOS + "-" + goruntime.GOARCH }
 func installEchoBundle(t *testing.T, installRoot, name, publisher string, privKey ed25519.PrivateKey) string {
 	t.Helper()
 
+	require.NoError(t, install.EnsureProtectedDir(installRoot))
 	moduleRoot := filepath.Join(installRoot, name)
 	require.NoError(t, os.MkdirAll(moduleRoot, 0o755))
 
@@ -180,37 +182,6 @@ func TestDefaultInstalledModulesRoot_UsesPlatformDefaultWhenUnset(t *testing.T) 
 	} else {
 		assert.Equal(t, installedModulesUnixRoot, got)
 	}
-}
-
-// --- AC: binary path resolved to an absolute path under the installation root ---
-
-func TestResolveBundleBinaryPaths_ProducesAbsolutePathUnderRoot(t *testing.T) {
-	root := t.TempDir()
-	b := &bundle.Bundle{
-		Manifest:    &featuremodules.ModuleMetadata{Name: "widget", Version: "0.1.0", Publisher: "cfgms", Kind: "steward"},
-		Binaries:    map[string]string{osArch(): "binaries/module"},
-		ContentHash: "irrelevant-for-this-test",
-	}
-
-	resolved, err := resolveBundleBinaryPaths(b, root)
-	require.NoError(t, err)
-
-	gotPath := resolved.Binaries[osArch()]
-	assert.True(t, filepath.IsAbs(gotPath), "resolved binary path must be absolute, got %q", gotPath)
-
-	absRoot, err := filepath.Abs(root)
-	require.NoError(t, err)
-	rel, err := filepath.Rel(absRoot, gotPath)
-	require.NoError(t, err)
-	assert.False(t, rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)),
-		"resolved path %q must stay under root %q", gotPath, root)
-
-	// ComputeContentHash hashes binary content and manifest bytes, never the
-	// path string, so resolving paths must not change ContentHash.
-	assert.Equal(t, b.ContentHash, resolved.ContentHash)
-
-	// b itself must be untouched: resolution operates on a copy.
-	assert.Equal(t, "binaries/module", b.Binaries[osArch()])
 }
 
 // --- AC: bundle branch loads an installed bundle when no built-in matches ---
@@ -300,6 +271,7 @@ func TestLoadModule_PublisherTrustEnforced_NoProcessSpawned(t *testing.T) {
 	require.NoError(t, err)
 
 	installRoot := t.TempDir()
+	require.NoError(t, install.EnsureProtectedDir(installRoot))
 	moduleRoot := filepath.Join(installRoot, "widget")
 	require.NoError(t, os.MkdirAll(moduleRoot, 0o755))
 
@@ -580,4 +552,59 @@ func assertEnclosingFunctionSetsModuleRuntime(t *testing.T, path string, lineNo 
 	assert.Contains(t, body, ".SetModuleRuntime(",
 		"%s:%d: this ModuleFactory construction site's enclosing function must call SetModuleRuntime "+
 			"so this path can load installed bundle modules (Issue #4410)", path, lineNo)
+}
+
+// --- AC: extra files and unprotected trees are refused at load ---
+
+func loadWidget(t *testing.T, installRoot string) error {
+	t.Helper()
+	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
+	f := newTestFactory()
+	f.SetModuleRuntime(moduleruntime.NewModuleRuntime(shortRuntimeDir(t)), config.ModuleTrustModeBypass, nil)
+	t.Cleanup(func() { f.UnloadAllModules() })
+	_, err := f.LoadModule("widget")
+	return err
+}
+
+func TestLoadModule_RefusesExtraFileNextToBinary(t *testing.T) {
+	installRoot := t.TempDir()
+	moduleRoot := installEchoBundle(t, installRoot, "widget", "cfgms", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(moduleRoot, "helper.dll"), []byte("x"), 0o644))
+
+	require.Error(t, loadWidget(t, installRoot))
+}
+
+func TestLoadModule_RefusesTreeWritableByOthers(t *testing.T) {
+	for _, target := range []string{"root", "module"} {
+		t.Run(target, func(t *testing.T) {
+			installRoot := t.TempDir()
+			moduleRoot := installEchoBundle(t, installRoot, "widget", "cfgms", nil)
+			dir := installRoot
+			if target == "module" {
+				dir = moduleRoot
+			}
+			if goruntime.GOOS == "windows" {
+				// Grant Users (S-1-5-32-545) write on the directory.
+				out, err := exec.Command("icacls", dir, "/grant", "*S-1-5-32-545:(OI)(CI)W").CombinedOutput()
+				require.NoError(t, err, string(out))
+			} else {
+				// #nosec G302 -- deliberately unsafe mode under test.
+				require.NoError(t, os.Chmod(dir, 0o777))
+			}
+
+			// LoadModule folds every errBundleModuleNotAvailable refusal into its
+			// ordinary "not found" error.
+			require.Error(t, loadWidget(t, installRoot))
+		})
+	}
+}
+
+// A root owned by another non-root uid cannot be created without privileges;
+// that sub-case is therefore covered by the install package's ownership rule
+// tests (ownerAcceptable) rather than here.
+
+func TestLoadModule_LoadsCorrectlyInstalledTree(t *testing.T) {
+	installRoot := t.TempDir()
+	installEchoBundle(t, installRoot, "widget", "cfgms", nil)
+	require.NoError(t, loadWidget(t, installRoot))
 }

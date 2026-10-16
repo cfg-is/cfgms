@@ -545,3 +545,69 @@ func TestReadInstalledMetadata_ReadsNoBinaryBytes(t *testing.T) {
 	_, err = bundle.ReadInstalledMetadata(root, bundle.ReadOptions{})
 	assert.Error(t, err)
 }
+
+func TestReadInstalled_SetsInstallRoot(t *testing.T) {
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{})
+	root := filepath.Join(t.TempDir(), "mod")
+	sb.WriteRoot(t, root, bundle.WriteOptions{})
+
+	b, err := bundle.ReadInstalled(root)
+	require.NoError(t, err)
+	assert.Equal(t, root, b.InstallRoot)
+
+	found, err := bundle.DiscoverInstalled(filepath.Dir(root))
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	for _, ib := range found {
+		assert.Equal(t, root, ib.Bundle.InstallRoot)
+	}
+}
+
+func TestVerifyInstalled_DetectsChangesAndPins(t *testing.T) {
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{})
+	root := filepath.Join(t.TempDir(), "mod")
+	sb.WriteRoot(t, root, bundle.WriteOptions{})
+
+	require.NoError(t, bundle.VerifyInstalled(root, platform))
+	require.NoError(t, bundle.VerifyInstalledPinned(root, platform, sb.ContentHash, sb.Binaries[platform]))
+	assert.ErrorIs(t, bundle.VerifyInstalledPinned(root, platform, "", "elsewhere"), bundle.ErrContentHashMismatch)
+
+	err := bundle.VerifyInstalledPinned(root, platform, "some-other-hash", "")
+	assert.ErrorIs(t, err, bundle.ErrContentHashMismatch)
+	assert.Error(t, bundle.VerifyInstalled(root, ""))
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "pad"), []byte("x"), 0o644))
+	assert.ErrorIs(t, bundle.VerifyInstalled(root, platform), bundle.ErrUnexpectedEntry)
+	require.NoError(t, os.Remove(filepath.Join(root, "pad")))
+
+	bin := filepath.Join(root, testutil.BinaryFileName("testmod", platform))
+	require.NoError(t, os.WriteFile(bin, []byte("changed"), 0o755))
+	assert.ErrorIs(t, bundle.VerifyInstalled(root, platform), bundle.ErrContentHashMismatch)
+}
+
+// TestVerifyInstalled_StreamsLargeBinary hashes a binary far larger than the
+// bundle package's in-memory metadata bound and checks the verification
+// allocates a small, size-independent amount rather than buffering the file.
+func TestVerifyInstalled_StreamsLargeBinary(t *testing.T) {
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	const size = 48 << 20 // well above the 1 MiB in-memory limit used for metadata files
+	big := make([]byte, size)
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	sb := testutil.NewSignedBundle(t, testutil.BundleOptions{BinaryContent: map[string][]byte{platform: big}})
+	root := filepath.Join(t.TempDir(), "mod")
+	sb.WriteRoot(t, root, bundle.WriteOptions{})
+
+	// TotalAlloc is cumulative, so the before/after delta counts only the
+	// bytes allocated by VerifyInstalled regardless of what is still live.
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	require.NoError(t, bundle.VerifyInstalled(root, platform))
+	runtime.ReadMemStats(&after)
+
+	allocated := after.TotalAlloc - before.TotalAlloc
+	assert.Less(t, allocated, uint64(size/4),
+		"verifying a %d byte binary allocated %d bytes: the binary must be streamed, not read into memory", size, allocated)
+}

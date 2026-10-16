@@ -58,6 +58,7 @@ import (
 	user_module "github.com/cfgis/cfgms/features/modules/stdlib/user"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/features/steward/modules/install"
 	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintinterfaces "github.com/cfgis/cfgms/pkg/maintenance/interfaces"
@@ -364,12 +365,11 @@ func (f *ModuleFactory) SetModuleRuntime(rt *moduleruntime.ModuleRuntime, mode c
 // through f.moduleRuntime, and wraps the returned handle's gRPC client in
 // adapter.Client so it satisfies modules.Module.
 //
-// Binary paths recorded in an installed bundle are root-relative (see
-// bundle.ReadInstalled); ModuleRuntime.Start execs b.Binaries[osArch] directly
-// with no root, so this resolves the current-platform entry to an absolute
-// path via bundle.InstalledBinaryPath before calling Start, on a copy of the
-// bundle so the original (and its ContentHash, which hashes binary content and
-// the manifest — never the path string) is unaffected.
+// Binary paths recorded in an installed bundle stay root-relative; the bundle
+// carries its InstallRoot (set by bundle.DiscoverInstalled) and
+// ModuleRuntime.Start resolves and re-verifies the binary against it right
+// before exec. Before starting, the module's directory and its parent root must
+// pass install.CheckProtectedTree.
 //
 // Callers must hold f.mu (it reads f.moduleRuntime / f.moduleTrustMode /
 // f.additionalPublishers and writes f.bundleHandles).
@@ -392,9 +392,16 @@ func (f *ModuleFactory) loadBundleModule(moduleName string) (modules.Module, err
 		return nil, errBundleModuleNotAvailable
 	}
 
-	resolved, err := resolveBundleBinaryPaths(ib.Bundle, ib.Root)
-	if err != nil {
-		return nil, fmt.Errorf("resolve bundle binary path for module %q: %w", moduleName, err)
+	// The installed tree must be writable by administrators only, or a binary
+	// could be swapped between the pre-exec re-hash and exec. The module's own
+	// directory and the root it sits in are both checked; a violation is a
+	// refusal, with the reason (never a path from the tree) logged.
+	for _, dir := range []string{ib.Root, root} {
+		if err := install.CheckProtectedTree(dir); err != nil {
+			f.logger.Warn("refusing to load module bundle: installation tree is not protected",
+				"module", logging.SanitizeLogValue(moduleName), "error", logging.SanitizeLogValue(err.Error()))
+			return nil, fmt.Errorf("%w: installation tree for module %q: %v", errBundleModuleNotAvailable, moduleName, err)
+		}
 	}
 
 	// module_trust.mode: bypass disables all publisher-signature verification
@@ -407,7 +414,7 @@ func (f *ModuleFactory) loadBundleModule(moduleName string) (modules.Module, err
 			"module", moduleName, "mode", string(f.moduleTrustMode))
 	}
 
-	handle, err := f.moduleRuntime.Start(resolved, f.moduleTrustMode, f.additionalPublishers)
+	handle, err := f.moduleRuntime.Start(ib.Bundle, f.moduleTrustMode, f.additionalPublishers)
 	if err != nil {
 		return nil, fmt.Errorf("start bundle module %q: %w", moduleName, err)
 	}
@@ -415,37 +422,6 @@ func (f *ModuleFactory) loadBundleModule(moduleName string) (modules.Module, err
 	f.bundleHandles[moduleName] = handle
 
 	return adapter.NewClient(handle.Client, moduleName), nil
-}
-
-// resolveBundleBinaryPaths returns a copy of b with the current-platform
-// binary entry (if present) rewritten from a bundle-relative path to an
-// absolute path under root, via bundle.InstalledBinaryPath. Other os-arch
-// entries are left root-relative, matching the Bundle.Binaries contract —
-// ModuleRuntime.Start only ever execs the current-platform entry.
-//
-// b itself is never mutated: ComputeContentHash hashes binary content and the
-// manifest bytes, never the path string, so the copy's ContentHash remains
-// valid and still verifies — but it is still a copy of a structure the caller
-// may hold onto (e.g. the DiscoverInstalled result), and mutating it in place
-// would be a surprising side effect on an unrelated caller's data.
-func resolveBundleBinaryPaths(b *bundle.Bundle, root string) (*bundle.Bundle, error) {
-	resolved := *b
-	resolvedBinaries := make(map[string]string, len(b.Binaries))
-	for key, relPath := range b.Binaries {
-		resolvedBinaries[key] = relPath
-	}
-
-	osArch := runtime.GOOS + "-" + runtime.GOARCH
-	if relPath, ok := resolvedBinaries[osArch]; ok {
-		absPath, err := bundle.InstalledBinaryPath(root, relPath)
-		if err != nil {
-			return nil, err
-		}
-		resolvedBinaries[osArch] = absPath
-	}
-	resolved.Binaries = resolvedBinaries
-
-	return &resolved, nil
 }
 
 // newPatchModule constructs the patch module and injects the production
