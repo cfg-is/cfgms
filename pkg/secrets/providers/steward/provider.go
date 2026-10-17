@@ -10,6 +10,7 @@ import (
 	"runtime"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // StewardProvider implements interfaces.SecretProvider for steward endpoints.
@@ -67,14 +68,14 @@ func (p *StewardProvider) CreateSecretStore(config map[string]interface{}) (inte
 	}
 
 	// Ensure the secrets directory exists with restrictive permissions
-	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+	if err := ensureSecretDir(secretsDir); err != nil {
 		return nil, fmt.Errorf("failed to create secrets directory %s: %w", secretsDir, err)
 	}
 
 	// Create blobs subdirectory
 	blobsDir := filepath.Join(secretsDir, "blobs")
-	if err := os.MkdirAll(blobsDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create blobs directory: %w", err)
+	if err := ensureSecretDir(blobsDir); err != nil {
+		return nil, fmt.Errorf("failed to create blobs directory %s: %w", blobsDir, err)
 	}
 
 	// Create platform-specific encryptor
@@ -94,6 +95,15 @@ func (p *StewardProvider) CreateSecretStore(config map[string]interface{}) (inte
 	}
 
 	return store, nil
+}
+
+// ensureSecretDir creates dir. On Windows, where mode bits do not restrict
+// access, it also limits the directory to SYSTEM and Administrators.
+func ensureSecretDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return security.EnsureAdminOnlyDir(dir)
+	}
+	return os.MkdirAll(dir, 0700)
 }
 
 // defaultSecretsDir returns the platform-specific default secrets directory.

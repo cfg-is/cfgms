@@ -5,6 +5,7 @@ package entra_user
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -94,7 +95,7 @@ func ctxForTenant(cfgmsTenantID string) context.Context {
 func newTestModule(t *testing.T) (*entraUserModule, auth.CredentialStore, *fakeGraphClient) {
 	t.Helper()
 	sp := &stewardprovider.StewardProvider{}
-	store, err := sp.CreateSecretStore(map[string]interface{}{"secrets_dir": t.TempDir()})
+	store, err := sp.CreateSecretStore(map[string]interface{}{"secrets_dir": filepath.Join(t.TempDir(), "secrets")})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 

@@ -5,6 +5,7 @@ package script
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ func newTestSecretStore(t *testing.T) interfaces.SecretStore {
 	}
 	provider := &steward.StewardProvider{}
 	store, err := provider.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err, "failed to create test secret store")
 	return store

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -621,7 +622,7 @@ func newTestFlowStateStore(tb testing.TB, dir string) secretsif.SecretStore {
 // controller restart. Instance 1 writes state; a new instance backed by the same store
 // dir reads it back successfully.
 func TestFlowStateDurableStorage(t *testing.T) {
-	secretsDir := t.TempDir()
+	secretsDir := filepath.Join(t.TempDir(), "secrets")
 
 	config := &OAuth2Config{
 		ClientID:    "test-durable-client",
@@ -667,7 +668,7 @@ func TestFlowStateDurableStorage(t *testing.T) {
 // TestFlowStateExpiredReturnsDistinctError verifies that reading a flow state whose
 // ExpiresAt is in the past returns ErrFlowStateExpired — not stale or zero state.
 func TestFlowStateExpiredReturnsDistinctError(t *testing.T) {
-	store := newTestFlowStateStore(t, t.TempDir())
+	store := newTestFlowStateStore(t, filepath.Join(t.TempDir(), "secrets"))
 
 	config := &OAuth2Config{
 		ClientID: "test-expiry-client",
@@ -712,7 +713,7 @@ func TestFlowStateExpiredReturnsDistinctError(t *testing.T) {
 // TestFlowStateMissingReturnsError verifies that reading a non-existent flow state
 // returns an error and not nil/zero state.
 func TestFlowStateMissingReturnsError(t *testing.T) {
-	store := newTestFlowStateStore(t, t.TempDir())
+	store := newTestFlowStateStore(t, filepath.Join(t.TempDir(), "secrets"))
 
 	config := &OAuth2Config{
 		ClientID: "test-missing-client",

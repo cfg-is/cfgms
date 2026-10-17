@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
@@ -66,6 +67,21 @@ func platformCACertPath() string {
 		return filepath.Join(prefix, dest[len(vol):])
 	}
 	return dest
+}
+
+// prepareDataDir ensures the steward data directory (the parent of the pinned
+// CA cert, %ProgramData%\cfgms, respecting CFGMS_INSTALL_PREFIX) exists and is
+// restricted to SYSTEM and Administrators. Entries owned by a member of
+// Administrators, such as the installing administrator's own account, are
+// handed to Administrators (security.AdoptAdminOnlyDir), the same takeover the
+// SYSTEM steward performs at start. It refuses a directory owned by any other
+// principal, so the CA cert is never written into a tree a local user controls.
+func prepareDataDir() error {
+	dir := filepath.Dir(platformCACertPath())
+	if _, err := security.AdoptAdminOnlyDir(dir); err != nil {
+		return fmt.Errorf("cannot secure steward data directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // platformLogDir returns the platform-conventional steward log directory
@@ -298,12 +314,24 @@ func (m *windowsManager) stageInstall(launcherSrc, caCertPEM string) error {
 
 	// Write CA cert before registering the service so the service finds it on first start.
 	if caCertPEM != "" {
-		fmt.Printf("Writing CA cert to %s...\n", platformCACertPath())
-		if err := writeCACert(caCertPEM, platformCACertPath()); err != nil {
-			return fmt.Errorf("failed to write CA cert: %w", err)
-		}
+		return stageDataDir(caCertPEM)
 	}
 	return nil
+}
+
+// stageDataDir secures the steward data directory, writes the pinned CA cert
+// into it, then secures it again: the cert file is created owned by the
+// installing administrator's own account, which the SYSTEM steward's start-up
+// check would refuse.
+func stageDataDir(caCertPEM string) error {
+	if err := prepareDataDir(); err != nil {
+		return err
+	}
+	fmt.Printf("Writing CA cert to %s...\n", platformCACertPath())
+	if err := writeCACert(caCertPEM, platformCACertPath()); err != nil {
+		return fmt.Errorf("failed to write CA cert: %w", err)
+	}
+	return prepareDataDir()
 }
 
 // registerAndStartService creates the launcher-backed service, sets its

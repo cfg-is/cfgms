@@ -24,7 +24,7 @@ func newTestStore(t *testing.T) *StewardSecretStore {
 		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
 	}
 
-	tmpDir := t.TempDir()
+	tmpDir := filepath.Join(t.TempDir(), "secrets")
 
 	provider := &StewardProvider{}
 	store, err := provider.CreateSecretStore(map[string]interface{}{
@@ -375,7 +375,7 @@ func TestStore_PersistenceAcrossReload(t *testing.T) {
 		t.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
 	}
 
-	tmpDir := t.TempDir()
+	tmpDir := filepath.Join(t.TempDir(), "secrets")
 	ctx := context.Background()
 
 	// Store a secret

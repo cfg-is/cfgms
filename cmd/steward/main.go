@@ -49,6 +49,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/version"
 
 	// Import logging providers to register them
@@ -547,6 +548,13 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		(&logging.TelemetryBridge{}).Initialize()
 		logging.InitializeGlobalLoggerFactory("steward", "main")
 		logger = logging.ForComponent("steward")
+	}
+
+	// ── Data directory lockdown ───────────────────────────────────────────────
+	// Windows only: restrict %ProgramData%\cfgms to SYSTEM and Administrators
+	// before the pinned CA, cert store or device key are read from it.
+	if err := secureStewardDataDir(logger); err != nil {
+		return err
 	}
 
 	// ── gRPC transport registration flow ─────────────────────────────────────
@@ -2680,6 +2688,47 @@ func buildClientCertManagerAtPath(certStorePath, clientCertPEM, clientKeyPEM, is
 // uses. Tests point it at a temporary directory; production uses
 // defaultCertStoreDir.
 var certStoreDirResolver = defaultCertStoreDir
+
+// stewardDataDirResolver returns the Windows steward data directory
+// (%ProgramData%\cfgms). Tests replace it with a t.TempDir()-based path so they
+// never depend on the real machine directory.
+var stewardDataDirResolver = func() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms")
+}
+
+// secureStewardDataDir restricts the Windows steward data directory
+// (%ProgramData%\cfgms) to SYSTEM and Administrators. Entries owned by a member
+// of Administrators (for example files an administrator or an older installer
+// wrote) are taken over and each takeover is logged. If any entry is owned by
+// another principal the reason is logged and an error is returned so no trust
+// or identity material is loaded from it. No-op on other platforms.
+func secureStewardDataDir(logger logging.Logger) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	dir := stewardDataDirResolver()
+	adopted, err := security.AdoptAdminOnlyDir(dir)
+	for _, p := range adopted {
+		logger.Info("Took over steward data entry owned by a member of Administrators",
+			"path", logging.SanitizeLogValue(p))
+	}
+	if len(adopted) > 0 {
+		logger.Info("Assigned steward data entries to BUILTIN\\Administrators",
+			"count", len(adopted),
+			"path", logging.SanitizeLogValue(dir))
+	}
+	if err != nil {
+		logger.Error("Refusing to load trust and identity material from steward data directory",
+			"path", logging.SanitizeLogValue(dir),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return fmt.Errorf("steward data directory %s is not secure: %w", dir, err)
+	}
+	return nil
+}
 
 // defaultCertStoreDir returns the platform-specific stable directory for the
 // steward's on-demand client certificate store. Uses the same path convention

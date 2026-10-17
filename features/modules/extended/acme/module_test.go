@@ -492,7 +492,7 @@ func requireMachineID(t *testing.T) {
 func newTestSecretStore(t *testing.T) secretsinterfaces.SecretStore {
 	t.Helper()
 	requireMachineID(t)
-	tmpDir := t.TempDir()
+	tmpDir := filepath.Join(t.TempDir(), "secrets")
 
 	provider, err := secretsinterfaces.GetSecretProvider("steward")
 	require.NoError(t, err, "steward secret provider must be registered")
@@ -865,7 +865,7 @@ func TestACMECertStore_AccountKey_NoSecretStore_Error(t *testing.T) {
 
 func TestACMECertStore_AccountKey_EncryptedAtRest(t *testing.T) {
 	requireMachineID(t)
-	secretsDir := t.TempDir()
+	secretsDir := filepath.Join(t.TempDir(), "secrets")
 
 	provider, err := secretsinterfaces.GetSecretProvider("steward")
 	require.NoError(t, err)

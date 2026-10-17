@@ -5,6 +5,7 @@ package auth
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func newTestCredentialStore(tb testing.TB) *SecretStoreCredentialStore {
 	}
 	provider := &stewardprovider.StewardProvider{}
 	store, err := provider.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": tb.TempDir(),
+		"secrets_dir": filepath.Join(tb.TempDir(), "secrets"),
 	})
 	if err != nil {
 		tb.Fatalf("create steward store: %v", err)

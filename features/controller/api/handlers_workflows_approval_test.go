@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func newApprovalFixture(t *testing.T) *approvalFixture {
 	sm := pkgtesting.SetupTestStorage(t)
 	store := sm.GetApprovalStore()
 	require.NotNil(t, store)
-	secrets, err := (&steward.StewardProvider{}).CreateSecretStore(map[string]interface{}{"secrets_dir": t.TempDir()})
+	secrets, err := (&steward.StewardProvider{}).CreateSecretStore(map[string]interface{}{"secrets_dir": filepath.Join(t.TempDir(), "secrets")})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = secrets.Close() })
 

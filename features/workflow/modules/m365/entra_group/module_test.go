@@ -5,6 +5,7 @@ package entra_group
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -1284,7 +1285,7 @@ type groupTenantIsolationFixture struct {
 func newTenantIsolationTestModule(t *testing.T) *groupTenantIsolationFixture {
 	t.Helper()
 	sp := &stewardprovider.StewardProvider{}
-	store, err := sp.CreateSecretStore(map[string]interface{}{"secrets_dir": t.TempDir()})
+	store, err := sp.CreateSecretStore(map[string]interface{}{"secrets_dir": filepath.Join(t.TempDir(), "secrets")})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
