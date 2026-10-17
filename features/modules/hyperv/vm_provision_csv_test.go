@@ -59,9 +59,9 @@ func TestStoreFor_RoutesHARoleCSVToInjectedStore(t *testing.T) {
 // injected. The transport answers the 4 reads on the create path up to (but not
 // including) any New-VM: getVM(absent) + membership probe(empty) + CNO owner +
 // role owners. Any New-VM beyond that is a gate violation.
-func haCSVSourceModule(t *testing.T, csvStore ProvisionStore) (*hypervModule, *testWinRMTransport, *recordingAuditStore) {
+func haCSVSourceModule(t *testing.T, csvStore ProvisionStore) (*hypervModule, *testPSTransport, *recordingAuditStore) {
 	t.Helper()
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: locally absent
 		`{"owners":{}}`,     // getVM membership probe: role absent cluster-wide
 		`{"owner":"NODE1"}`, // #2421 ownership helper: this node owns the CNO

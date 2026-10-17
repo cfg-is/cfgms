@@ -34,7 +34,7 @@ func TestGetVM_ReportsChainRootVHDPathAndCheckpointCount(t *testing.T) {
 	// The JSON Cfgms-GetVM emits for a running VM with 3 checkpoints: Path is the
 	// resolved chain root (the base .vhdx), NOT the active .avhdx.
 	js := `{"found":true,"Name":"cp-vm","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\cp-vm.vhdx","ConfigurationLocation":"C:\\VMs","CheckpointCount":3,"SwitchName":"","SwitchNames":[],"State":"Running"}`
-	transport := &testWinRMTransport{perCallOutputs: []string{js}}
+	transport := &testPSTransport{perCallOutputs: []string{js}}
 	m := vmModuleWithTransport(transport, "t-cp")
 
 	cfg, err := m.getVM(context.Background(), vmName)
@@ -54,7 +54,7 @@ func TestGetVM_WrongChainRoot_PreservesDrift(t *testing.T) {
 	const declaredPath = `C:\VMs\vm.vhdx`
 	// The chain root resolved by PS is a DIFFERENT disk — real drift.
 	js := `{"found":true,"Name":"wrong-root-vm","MemoryStartupBytes":2147483648,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\other.vhdx","ConfigurationLocation":"C:\\VMs","CheckpointCount":0,"SwitchName":"","SwitchNames":[],"State":"Running"}`
-	transport := &testWinRMTransport{perCallOutputs: []string{js}}
+	transport := &testPSTransport{perCallOutputs: []string{js}}
 	m := vmModuleWithTransport(transport, "t-wrong")
 
 	cfg, err := m.getVM(context.Background(), vmName)
@@ -77,7 +77,7 @@ func TestGetVM_GetVHDFailure_FallsBackToRawPath(t *testing.T) {
 	// CheckpointCount=1 so the operator can see there is a checkpoint even in
 	// the degraded case.
 	js := `{"found":true,"Name":"snap-vm","MemoryStartupBytes":2147483648,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\cp-vm-snap.avhdx","ConfigurationLocation":"C:\\VMs","CheckpointCount":1,"SwitchName":"","SwitchNames":[],"State":"Running"}`
-	transport := &testWinRMTransport{perCallOutputs: []string{js}}
+	transport := &testPSTransport{perCallOutputs: []string{js}}
 	m := vmModuleWithTransport(transport, "t-fallback")
 
 	cfg, err := m.getVM(context.Background(), vmName)
@@ -122,7 +122,7 @@ func snapshotListJSON(t *testing.T, snaps ...vmSnapshot) string {
 // mergedSnapshotNames returns the checkpoint names passed to Remove-VMSnapshot
 // (the merge primitive), in call order. psArgs are recorded in sorted-key order,
 // so for {Name, SnapshotName} the snapshot name is args[1].
-func mergedSnapshotNames(calls []winRMCall) []string {
+func mergedSnapshotNames(calls []recordedPSCall) []string {
 	var names []string
 	for _, c := range calls {
 		if c.scriptBlock == psRemoveVMSnapshot && len(c.args) == 2 {
@@ -144,7 +144,7 @@ func TestCheckpointReconcile_PolicyNone_MergesAllOldestFirst(t *testing.T) {
 		{Name: "cp-mid", CreationTime: base.Add(24 * time.Hour)},
 		{Name: "cp-new", CreationTime: base.Add(48 * time.Hour)},
 	}
-	transport := &testWinRMTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
+	transport := &testPSTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
 	m := vmModuleWithTransport(transport, "t-cp-none")
 
 	require.NoError(t, m.reconcileCheckpoints(context.Background(), "cp-vm", &CheckpointPolicy{Policy: "none"}))
@@ -164,7 +164,7 @@ func TestCheckpointReconcile_MaxZero_MergesAll(t *testing.T) {
 		{Name: "a", CreationTime: base},
 		{Name: "b", CreationTime: base.Add(time.Hour)},
 	}
-	transport := &testWinRMTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
+	transport := &testPSTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
 	m := vmModuleWithTransport(transport, "t-cp-max0")
 
 	zero := 0
@@ -184,7 +184,7 @@ func TestCheckpointReconcile_MaxN_RetainsNewestMergesRest(t *testing.T) {
 		{Name: "cp4", CreationTime: base.Add(3 * time.Hour)},
 		{Name: "cp5", CreationTime: base.Add(4 * time.Hour)},
 	}
-	transport := &testWinRMTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
+	transport := &testPSTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
 	m := vmModuleWithTransport(transport, "t-cp-max")
 
 	three := 3
@@ -219,7 +219,7 @@ func TestCheckpointsToMerge_MaxAge_RetainsYoungerMergesOlder(t *testing.T) {
 // empty checkpoints block issues NO PowerShell at all — no Get-VMSnapshot, no
 // Remove-VMSnapshot. This is the #2626 observe-only default.
 func TestCheckpointReconcile_NoPolicy_ObserveOnly(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vmModuleWithTransport(transport, "t-cp-observe")
 
 	require.NoError(t, m.reconcileCheckpoints(context.Background(), "cp-vm", nil))
@@ -266,7 +266,7 @@ func TestCheckpointReconcile_NeverRestores(t *testing.T) {
 		{Name: "cp1", CreationTime: base},
 		{Name: "cp2", CreationTime: base.Add(time.Hour)},
 	}
-	transport := &testWinRMTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
+	transport := &testPSTransport{perCallOutputs: []string{snapshotListJSON(t, snaps...)}}
 	m := vmModuleWithTransport(transport, "t-cp-restore")
 
 	require.NoError(t, m.reconcileCheckpoints(context.Background(), "cp-vm", &CheckpointPolicy{Policy: "none"}))
@@ -293,7 +293,7 @@ func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
 	desired := map[string]interface{}{"policy": "none"}
 
 	// Compliant: 0 checkpoints under policy none → echo the block → no drift.
-	mc := vmModuleWithTransport(&testWinRMTransport{
+	mc := vmModuleWithTransport(&testPSTransport{
 		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 0)}}, "t-echo-clean")
 	mc.checkpointDesired["cp-vm"] = desired
 	cc, err := mc.getVM(context.Background(), "cp-vm")
@@ -302,7 +302,7 @@ func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
 		"a compliant VM must echo the desired checkpoints block so it compares equal (no false drift)")
 
 	// Non-compliant: 2 checkpoints under policy none → omit the block → drift.
-	md := vmModuleWithTransport(&testWinRMTransport{
+	md := vmModuleWithTransport(&testPSTransport{
 		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 2)}}, "t-echo-dirty")
 	md.checkpointDesired["cp-vm"] = desired
 	cd, err := md.getVM(context.Background(), "cp-vm")
@@ -312,7 +312,7 @@ func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
 		"a VM with stray checkpoints must omit the block so it drifts vs desired and triggers reconcile")
 
 	// Observe-only (no stashed policy): getVM never emits a checkpoints key.
-	mo := vmModuleWithTransport(&testWinRMTransport{
+	mo := vmModuleWithTransport(&testPSTransport{
 		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 5)}}, "t-echo-observe")
 	co, err := mo.getVM(context.Background(), "cp-vm")
 	require.NoError(t, err)
@@ -328,7 +328,7 @@ func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
 func TestGetVM_CheckpointEcho_MaxAgeFetchesSnapshotList(t *testing.T) {
 	desired := map[string]interface{}{"policy": "retain", "max_age": "100000h"}
 	snapJSON := snapshotListJSON(t, vmSnapshot{Name: "cp1", CreationTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)})
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSONWithCheckpoints("cp-vm", 1), // 1st: psGetVM
 		snapJSON,                              // 2nd: psGetVMSnapshots (max_age needs times)
 	}}
@@ -352,7 +352,7 @@ func TestCheckpointDesired_KeyedPerVM_NoCrossLeak(t *testing.T) {
 	blockB := map[string]interface{}{"policy": "retain", "max": 5}
 
 	// One shared module/transport instance serving both VMs (call 0 = A, 1 = B).
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSONWithCheckpoints("vm-a", 0),
 		hostVMJSONWithCheckpoints("vm-b", 3),
 	}}
@@ -375,7 +375,7 @@ func TestCheckpointDesired_KeyedPerVM_NoCrossLeak(t *testing.T) {
 // Exercises concurrent writes (setVM-style) and reads (getVM) for distinct VMs;
 // run under `go test -race` this fails if the map access is unguarded.
 func TestCheckpointDesired_ConcurrentAccess_NoRace(t *testing.T) {
-	m := vmModuleWithTransport(&testWinRMTransport{output: hostVMJSONWithCheckpoints("x", 0)}, "t-cp-race")
+	m := vmModuleWithTransport(&testPSTransport{output: hostVMJSONWithCheckpoints("x", 0)}, "t-cp-race")
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		vm := fmt.Sprintf("vm-%d", i)

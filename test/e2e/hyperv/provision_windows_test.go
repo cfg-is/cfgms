@@ -28,14 +28,12 @@ import (
 
 // Required environment variables (the test skips when any is unset):
 //
-//	CFGMS_E2E_HYPERV_HOST          hostname/IP of the Hyper-V host (winrm transport)
 //	CFGMS_E2E_WIN_ISO             host path to the Windows Server install ISO
 //	CFGMS_E2E_WIN_PPKG_PATH       host path to the staged .ppkg enrollment package
 //	CFGMS_E2E_REGTOKEN_SECRET_KEY secrets-provider key holding the enrollment regtoken
 //
 // Optional:
 //
-//	CFGMS_E2E_HYPERV_USER / _PASS WinRM credentials (when the host needs them)
 //	CFGMS_E2E_STEWARD_STORE       path to the controller's flatfile steward
 //	                              registry; when set the test waits for the real
 //	                              registered steward to appear and drives the
@@ -48,12 +46,9 @@ import (
 //	CFGMS_E2E_SWITCH              virtual switch to connect (default HVSwitch_1G).
 
 const (
-	envHost       = "CFGMS_E2E_HYPERV_HOST"
 	envISO        = "CFGMS_E2E_WIN_ISO"
 	envPpkg       = "CFGMS_E2E_WIN_PPKG_PATH"
 	envRegToken   = "CFGMS_E2E_REGTOKEN_SECRET_KEY"
-	envUser       = "CFGMS_E2E_HYPERV_USER"
-	envPass       = "CFGMS_E2E_HYPERV_PASS"
 	envStewardDir = "CFGMS_E2E_STEWARD_STORE"
 	envVHDDir     = "CFGMS_E2E_VHD_DIR"
 	envSwitch     = "CFGMS_E2E_SWITCH"
@@ -94,19 +89,17 @@ func getenvDefault(key, def string) string {
 //
 // Run live:
 //
-//	CFGMS_E2E_HYPERV_HOST=cfg-70-02 \
 //	CFGMS_E2E_WIN_ISO='C:\ClusterStorage\CSV01\iso\windows-server-2025.iso' \
 //	CFGMS_E2E_WIN_PPKG_PATH='C:\cfgms\packages\cfgms-enroll.ppkg' \
 //	CFGMS_E2E_REGTOKEN_SECRET_KEY=hyperv/enroll/regtoken \
 //	go test -tags e2e -run TestE2E_ProvisionWindows -timeout 120m ./test/e2e/hyperv/...
 func TestE2E_ProvisionWindows_ToStewardRegistered(t *testing.T) {
-	host := os.Getenv(envHost)
 	iso := os.Getenv(envISO)
 	ppkg := os.Getenv(envPpkg)
 	regTokenKey := os.Getenv(envRegToken)
-	if host == "" || iso == "" || ppkg == "" || regTokenKey == "" {
-		t.Skipf("host-gated E2E: set %s, %s, %s, and %s to run against a real Hyper-V host",
-			envHost, envISO, envPpkg, envRegToken)
+	if iso == "" || ppkg == "" || regTokenKey == "" {
+		t.Skipf("host-gated E2E: set %s, %s, and %s to run on a real Hyper-V host",
+			envISO, envPpkg, envRegToken)
 	}
 
 	ctx := context.Background()
@@ -134,15 +127,7 @@ func TestE2E_ProvisionWindows_ToStewardRegistered(t *testing.T) {
 	require.True(t, ok, "hyperv module must be Configurable")
 
 	cfgMap := map[string]interface{}{
-		"transport":         "ps-host",
-		"winrm_host":        host, // used only if the ps-host transport is unavailable
-		"winrm_user_secret": "winrm-user",
-		"winrm_pass_secret": "winrm-pass",
-	}
-	// Seed WinRM creds when supplied (winrm fallback path).
-	if u := os.Getenv(envUser); u != "" {
-		secretStore.secrets["winrm-user"] = u
-		secretStore.secrets["winrm-pass"] = os.Getenv(envPass)
+		"transport": "ps-host",
 	}
 	require.NoError(t, configurable.Configure(e2eConfig{m: cfgMap}))
 

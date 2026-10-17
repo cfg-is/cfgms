@@ -13,7 +13,7 @@ import (
 
 // vswitchModuleWithTransport creates a hypervModule wired with the given transport
 // and tenantID for vSwitch operation tests.
-func vswitchModuleWithTransport(transport winrmTransport, tenantID string) *hypervModule {
+func vswitchModuleWithTransport(transport psTransport, tenantID string) *hypervModule {
 	return &hypervModule{
 		executor:  &stubHypervExecutor{},
 		transport: transport,
@@ -31,7 +31,7 @@ func vswitchModuleWithTransport(transport winrmTransport, tenantID string) *hype
 // of tenant_id. This is the founder directive: the actual switch name on the host
 // must equal what is in the cfg.
 func TestVSwitchHostName_IsExactConfigName(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vswitchModuleWithTransport(transport, "root/msp-a")
 
 	cfg := &VSwitchConfig{Name: "myswitch", State: "absent"}
@@ -180,13 +180,13 @@ func TestVSwitchConfig_YAML(t *testing.T) {
 // ─── Injection defense tests ───────────────────────────────────────────────────
 
 // TestVSwitchInjectionDefense verifies that the (exact) switch name is transmitted
-// as a WinRM ArgumentList parameter during create/delete, never interpolated into the
+// as a PowerShell parameter during create/delete, never interpolated into the
 // PowerShell script block text. This satisfies the AC test name alias.
 func TestVSwitchInjectionDefense(t *testing.T) {
 	const tenantID = "ops"
 	const switchName = "corp-net"
 
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vswitchModuleWithTransport(transport, tenantID)
 
 	cfg := &VSwitchConfig{Name: switchName, SwitchType: "internal", State: "absent"}
@@ -216,7 +216,7 @@ func TestVSwitchInjectionDefense(t *testing.T) {
 // and file modules and lets the unified executor detect drift against a
 // desired state:"present" configuration.
 func TestGet_VSwitch_ReturnsAbsentWhenMissing(t *testing.T) {
-	transport := &testWinRMTransport{output: `{"found":false}`}
+	transport := &testPSTransport{output: `{"found":false}`}
 	m := vswitchModuleWithTransport(transport, "t")
 
 	state, err := m.Get(context.Background(), "vswitch:nonexistent")
@@ -232,14 +232,14 @@ func TestGet_VSwitch_ReturnsAbsentWhenMissing(t *testing.T) {
 // root cause of F14 — every failed Get aborted the Set even though the host
 // was simply offline.
 func TestGet_VSwitch_WrapsTransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
+	transport := &testPSTransport{execErr: errors.New("ps host: connection refused")}
 	m := vswitchModuleWithTransport(transport, "t")
 
 	_, err := m.Get(context.Background(), "vswitch:unreachable")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrVSwitchNotFound,
 		"transport errors must NOT be reported as ErrVSwitchNotFound")
-	assert.Contains(t, err.Error(), "winrm: connection refused",
+	assert.Contains(t, err.Error(), "ps host: connection refused",
 		"underlying transport error message must be preserved in the chain")
 }
 
@@ -262,7 +262,7 @@ func TestGet_VSwitch_ReturnsConfig(t *testing.T) {
 	const tenantID = "prod"
 	const switchName = "corp-external"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: `{"found":true,"Name":"` + switchName + `","SwitchType":"External"}`,
 	}
 	m := vswitchModuleWithTransport(transport, tenantID)
@@ -283,7 +283,7 @@ func TestGet_VSwitch_ReturnsConfig(t *testing.T) {
 // TestSet_VSwitch_CreateInternal verifies that Set creates an internal switch and
 // passes the prefixed switch name via args (not embedded in scriptBlock).
 func TestSet_VSwitch_CreateInternal(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vswitchModuleWithTransport(transport, "dev")
 
 	cfg := &VSwitchConfig{
@@ -317,7 +317,7 @@ func TestSet_VSwitch_CreateInternal(t *testing.T) {
 // TestSet_VSwitch_CreateExternal verifies that Set creates an external switch and
 // passes both switch name and adapter name via args.
 func TestSet_VSwitch_CreateExternal(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vswitchModuleWithTransport(transport, "ops")
 
 	cfg := &VSwitchConfig{
@@ -355,9 +355,9 @@ func TestSet_VSwitch_CreateExternal(t *testing.T) {
 }
 
 // TestSet_VSwitch_DeleteAbsent verifies that Set with state "absent" calls Remove-VMSwitch
-// and passes the prefixed switch name as a WinRM argument (not interpolated into script).
+// and passes the prefixed switch name as a PowerShell parameter (not interpolated into script).
 func TestSet_VSwitch_DeleteAbsent(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vswitchModuleWithTransport(transport, "ops")
 
 	cfg := &VSwitchConfig{Name: "old-switch", State: "absent"}
@@ -383,9 +383,9 @@ func TestSet_VSwitch_DeleteAbsent(t *testing.T) {
 }
 
 // TestSet_VSwitch_ValidationRejectsNAT verifies that setVSwitch rejects nat type
-// before any WinRM call is made.
+// before any host call is made.
 func TestSet_VSwitch_ValidationRejectsNAT(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vswitchModuleWithTransport(transport, "t")
 
 	cfg := &VSwitchConfig{Name: "natswitch", SwitchType: "nat"}
@@ -402,7 +402,7 @@ func TestSet_VSwitch_ValidationRejectsNAT(t *testing.T) {
 // TestSet_VSwitch_CreateTransportError verifies that transport failures in createVSwitch
 // surface as wrapped errors, not silently swallowed.
 func TestSet_VSwitch_CreateTransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: access denied")}
+	transport := &testPSTransport{execErr: errors.New("ps host: access denied")}
 	m := vswitchModuleWithTransport(transport, "t")
 
 	cfg := &VSwitchConfig{Name: "sw", SwitchType: "internal", State: "present"}
@@ -414,7 +414,7 @@ func TestSet_VSwitch_CreateTransportError(t *testing.T) {
 // TestSet_VSwitch_DeleteTransportError verifies that transport failures in removeVSwitch
 // surface as wrapped errors, not silently swallowed.
 func TestSet_VSwitch_DeleteTransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
+	transport := &testPSTransport{execErr: errors.New("ps host: connection refused")}
 	m := vswitchModuleWithTransport(transport, "t")
 
 	cfg := &VSwitchConfig{Name: "sw", State: "absent"}
@@ -429,8 +429,8 @@ func TestSet_VSwitch_DeleteTransportError(t *testing.T) {
 // is the exact config name regardless of tenant_id — CFGMS never namespaces.
 // (Operators sharing a host across tenants must choose non-colliding names.)
 func TestVSwitchExactName_RegardlessOfTenant(t *testing.T) {
-	transportA := &testWinRMTransport{}
-	transportB := &testWinRMTransport{}
+	transportA := &testPSTransport{}
+	transportB := &testPSTransport{}
 
 	moduleA := vswitchModuleWithTransport(transportA, "a")
 	moduleB := vswitchModuleWithTransport(transportB, "b")

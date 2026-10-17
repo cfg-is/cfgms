@@ -47,7 +47,7 @@ func recordHypervOp(ctx context.Context, mgr *audit.Manager, tenantID, stewardID
 	if opErr == nil {
 		builder = builder.Result(business.AuditResultSuccess)
 	} else {
-		// opErr carries text from the Hyper-V host (PowerShell/WinRM output), so
+		// opErr carries text from the Hyper-V host (PowerShell output), so
 		// it is sanitized before it is persisted as the record's ErrorMessage.
 		builder = builder.Result(business.AuditResultFailure).Error("", logging.SanitizeLogValue(opErr.Error()))
 	}

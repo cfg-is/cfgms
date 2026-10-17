@@ -53,7 +53,7 @@ func TestRenameProvisionRecord_SetProvisionFailure_LogsSanitizedError(t *testing
 	const newName = "lab-lin-01"
 	ctx := context.Background()
 
-	m := vmModuleWithTransport(&testWinRMTransport{}, "t-logsan-rename")
+	m := vmModuleWithTransport(&testPSTransport{}, "t-logsan-rename")
 	capLog := logging.NewCapturingLogger()
 	require.NoError(t, m.SetLogger(capLog))
 
@@ -79,7 +79,7 @@ func TestRenameProvisionRecord_SetProvisionFailure_LogsSanitizedError(t *testing
 // error via cErr.Error() instead of logging.SanitizeLogValue(cErr.Error()).
 func TestGetVM_CheckpointProbeFailure_LogsSanitizedError(t *testing.T) {
 	desired := map[string]interface{}{"policy": "retain", "max_age": "100000h"}
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 1), ``},
 		perCallErrors:  []error{nil, errors.New(injectedLogError)},
 	}
@@ -106,7 +106,7 @@ func TestGetVM_CheckpointProbeFailure_LogsSanitizedError(t *testing.T) {
 // error via roErr.Error() instead of logging.SanitizeLogValue(roErr.Error()).
 func TestGetVM_ClusterRoleProbeFailure_LogsSanitizedError(t *testing.T) {
 	const vmName = "degraded-vm"
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON(vmName, "running", 2, 4096), ``},
 		perCallErrors:  []error{nil, errors.New(injectedLogError)},
 	}
@@ -136,7 +136,7 @@ func TestApplyVMState_OwnerProbeFailure_LogsSanitizedError(t *testing.T) {
 	const vmName = "ha-probe-flaky-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{``},
 		perCallErrors:  []error{errors.New(injectedLogError)},
 	}

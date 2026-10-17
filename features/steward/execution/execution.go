@@ -145,7 +145,7 @@ func (g *genericConfigState) GetManagedFields() []string {
 	//   - identifier fields (path, name) — used to select the resource, not
 	//     compared as state.
 	//   - module-operational keys (transport, tenant_id, steward_id,
-	//     audit_manager, and winrm_* credential pointers) — consumed by the
+	//     and audit_manager) — consumed by the
 	//     module's Configure to wire its transport/identity; never reported
 	//     by a module's Get response, so leaving them in the comparison
 	//     produces false-positive drift on every convergence cycle (the
@@ -162,9 +162,6 @@ func (g *genericConfigState) GetManagedFields() []string {
 		"tenant_id":                true, // module operational: namespace prefix
 		"steward_id":               true, // module operational: audit subject
 		"audit_manager":            true, // module operational: pointer, never serialised
-		"winrm_host":               true, // module operational: WinRM endpoint
-		"winrm_user_secret":        true, // module operational: SecretStore key
-		"winrm_pass_secret":        true, // module operational: SecretStore key
 		"source":                   true, // create-time provisioning directive (existence-gated, ADR-009); never reported by getVM (source: nil), so comparing it drifts every cycle on a provisioned VM
 		"old_name":                 true, // #2776 in-place rename directive: consumed by setVM to locate the source VM, never reported by getVM (which returns the VM under its NEW name), so comparing it drifts every cycle after a completed rename. The rename still triggers — the VM under the new name is absent, so its other fields drift.
 		"enroll_token":             true, // module operational: hyperv create-from-source join token (ADR-010)

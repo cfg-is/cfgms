@@ -829,7 +829,7 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 // result is safe to emit.
 //
 // Every name reaching here is host-supplied: switch and cluster names arrive in
-// the JSON Get-VM / Get-Cluster return over WinRM, cluster member nodes come
+// the JSON Get-VM / Get-Cluster return from the host, cluster member nodes come
 // from Get-ClusterNode, and the managed-by owner from Get-ClusterGroup. The
 // CFGMS threat model states stewards run on hosts that may be compromised, so
 // none of these are trusted strings.
@@ -917,8 +917,8 @@ const psEnumerateVMs = `ConvertTo-Json @{vms=@(Get-VM -ErrorAction SilentlyConti
 //
 // Notes:
 //   - New-VM does NOT accept -ProcessorCount (real PS pitfall surfaced by
-//     the #1887 live-validation B1 bucket — previously masked because
-//     WinRM was broken and this command never actually ran). CPU count
+//     the #1887 live-validation B1 bucket — previously masked
+//     because the earlier remote transport never ran this command). CPU count
 //     is set with a separate Set-VMProcessor call after the VM exists.
 //     A newly created Generation-2 VM defaults to 1 vCPU which we only
 //     resize if the desired count differs.
@@ -1016,7 +1016,7 @@ func isHealthyVMState(state string) bool {
 // the CNO guarantees it exists (Layer 2, a separate story) — so re-detecting the
 // locally-absent body as drift every cycle is wrong. This needs only the owner's
 // NAME (a bulk cluster read that already works cluster-wide), never the owner's
-// VM body (which would require cross-node WinRM that isn't available).
+// VM body (which would require a cross-node call that isn't available).
 //
 // The write paths (setVM, the state:"absent" delete path) deliberately use
 // getVMLocal, NOT getVM: their create/lifecycle owner-gates key on LOCAL presence
@@ -2018,12 +2018,12 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 			"VhdPath":     cfg.VHDPath,
 			"ResizeBytes": fmt.Sprintf("%d", resizeBytes),
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", cfgResourceID, nil, nil, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Convert-VHD", cfgResourceID, nil, nil, psErr)
 			return fmt.Errorf("hyperv: prepare cloud boot disk for VM %q: %w", vmName, psErr)
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", cfgResourceID, nil, nil, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Convert-VHD", cfgResourceID, nil, nil, nil)
 		_, psErr := m.transport.ExecutePS(ctx, psCreateVMFromDisk, psArgs)
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", cfgResourceID, nil, after, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "New-VM", cfgResourceID, nil, after, psErr)
 		if psErr != nil {
 			return fmt.Errorf("hyperv: create VM %q from cloud image: %w", vmName, psErr)
 		}
@@ -2036,7 +2036,7 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", cfgResourceID, nil, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "New-VM", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
 	}
@@ -2330,7 +2330,7 @@ func (m *hypervModule) connectVMToSwitch(ctx context.Context, cfgResourceID, vmN
 		"SwitchName": switchName,
 	})
 	after := map[string]interface{}{"switch": "vswitch:" + switchName}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", cfgResourceID, nil, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Add-VMNetworkAdapter", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: connect VM %q to switch %q: %w", vmName, switchName, psErr)
 	}
@@ -2347,7 +2347,7 @@ func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, cfgResourceID
 		"SwitchName": switchName,
 	})
 	before := map[string]interface{}{"switch": "vswitch:" + switchName}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", cfgResourceID, before, nil, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Remove-VMNetworkAdapter", cfgResourceID, before, nil, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: disconnect VM %q from switch %q: %w", vmName, switchName, psErr)
 	}
@@ -2356,7 +2356,7 @@ func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, cfgResourceID
 
 func (m *hypervModule) execStartVM(ctx context.Context, cfgResourceID, hostName string, before, after map[string]interface{}) error {
 	_, psErr := m.transport.ExecutePS(ctx, psStartVM, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Start-VM", cfgResourceID, before, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Start-VM", cfgResourceID, before, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: Start-VM %q: %w", hostName, psErr)
 	}
@@ -2365,7 +2365,7 @@ func (m *hypervModule) execStartVM(ctx context.Context, cfgResourceID, hostName 
 
 func (m *hypervModule) execStopVM(ctx context.Context, cfgResourceID, hostName string, before, after map[string]interface{}) error {
 	_, psErr := m.transport.ExecutePS(ctx, psStopVM, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Stop-VM", cfgResourceID, before, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Stop-VM", cfgResourceID, before, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: Stop-VM %q: %w", hostName, psErr)
 	}
@@ -2377,7 +2377,7 @@ func (m *hypervModule) execSetVMProcessor(ctx context.Context, cfgResourceID, ho
 		"Name": hostName,
 		"CPU":  fmt.Sprintf("%d", cpuCount),
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMProcessor", cfgResourceID, before, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Set-VMProcessor", cfgResourceID, before, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: Set-VMProcessor %q: %w", hostName, psErr)
 	}
@@ -2389,7 +2389,7 @@ func (m *hypervModule) execSetVMMemory(ctx context.Context, cfgResourceID, hostN
 		"Name":     hostName,
 		"MemoryMB": fmt.Sprintf("%d", memoryMB),
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMMemory", cfgResourceID, before, after, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Set-VMMemory", cfgResourceID, before, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: Set-VMMemory %q: %w", hostName, psErr)
 	}
@@ -2406,7 +2406,7 @@ func (m *hypervModule) removeVM(ctx context.Context, vmName string, before map[s
 	cfgResourceID := "vm:" + vmName
 
 	_, psErr := m.transport.ExecutePS(ctx, psRemoveVM, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VM", cfgResourceID, before, nil, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Remove-VM", cfgResourceID, before, nil, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: remove VM %q: %w", vmName, psErr)
 	}

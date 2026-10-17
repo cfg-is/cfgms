@@ -20,7 +20,7 @@ import (
 // the cluster tests exercise the real getCluster / clusterOwnershipHelper paths
 // without any mocks of CFGMS components (the recording transport + fakeDetector
 // are the established test seams).
-func clusterTestModule(t *testing.T, transport *testWinRMTransport) (*hypervModule, *recordingAuditStore) {
+func clusterTestModule(t *testing.T, transport *testPSTransport) (*hypervModule, *recordingAuditStore) {
 	t.Helper()
 	mgr, store := newRecordingAuditManager(t)
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
@@ -59,7 +59,7 @@ func TestClusterConfig_Validate(t *testing.T) {
 // ErrClusterNotDeclared WITHOUT invoking any PowerShell cmdlet (zero transport
 // calls).
 func TestClusterScopeCap_UndeclaredCluster(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m, _ := clusterTestModule(t, transport) // m.clusterName == "lab-hv"
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
@@ -78,7 +78,7 @@ func TestClusterScopeCap_UndeclaredCluster(t *testing.T) {
 // CNO group has no current owner (transient failover), the helper returns
 // (false, nil, nil) — no error, no panic — and queries no role owners.
 func TestClusterOwnershipHelper_CNOAbsent(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		// First (and only) call: the CNO owner query returns no owner.
 		perCallOutputs: []string{`{"owner":""}`},
 	}
@@ -109,7 +109,7 @@ func TestClusterOwnershipHelper_CNOAbsent(t *testing.T) {
 // Timestamp is within 5s of time.Now() (Go receipt-time) and whose node
 // identity is non-empty.
 func TestClusterOwnershipHelper_NonOwner(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE2"}`,                             // CNO owner is NODE2, not this node (NODE1)
 			`{"owners":{"web-01":"NODE2","db-01":"NODE1"}}`, // role owners
@@ -153,7 +153,7 @@ func TestClusterOwnershipHelper_NonOwner(t *testing.T) {
 // (found:false) yields a ClusterStatus{Found:false} with err==nil and issues no
 // further ownership queries.
 func TestGetCluster_NotFound(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m, _ := clusterTestModule(t, transport)
@@ -179,7 +179,7 @@ func TestGetCluster_NotFound(t *testing.T) {
 // returns a *ClusterStatus whose AsMap exposes member_nodes, cno_owner_node,
 // resource_owner, and csv_paths populated from live cluster state.
 func TestGetCluster_FoundPopulatesDNA(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// Get-Cluster
 			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2","NODE3"],"CsvPaths":["C:\\ClusterStorage\\CSV01"]}`,
@@ -220,7 +220,7 @@ func TestGetCluster_FoundPopulatesDNA(t *testing.T) {
 // clusterOwnershipHelper (S5), not just getCluster — an out-of-scope name
 // returns the sentinel without any transport call.
 func TestClusterScopeCap_OwnershipHelper(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m, _ := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
@@ -237,8 +237,8 @@ func TestClusterScopeCap_OwnershipHelper(t *testing.T) {
 // Get-Cluster query propagates as a wrapped non-nil error (no silent
 // swallowing).
 func TestGetCluster_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{
-		perCallErrors: []error{errors.New("winrm: connection refused")},
+	transport := &testPSTransport{
+		perCallErrors: []error{errors.New("ps host: connection refused")},
 	}
 	m, _ := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
@@ -246,7 +246,7 @@ func TestGetCluster_TransportError(t *testing.T) {
 	state, err := m.getCluster(context.Background(), "lab-hv")
 	require.Error(t, err, "a transport failure must surface as an error")
 	assert.Nil(t, state, "no status is returned on a transport failure")
-	assert.Contains(t, err.Error(), "winrm: connection refused",
+	assert.Contains(t, err.Error(), "ps host: connection refused",
 		"the underlying transport error must be wrapped, not swallowed")
 }
 
@@ -254,7 +254,7 @@ func TestGetCluster_TransportError(t *testing.T) {
 // getCluster (cluster.go ~190): non-JSON Get-Cluster output yields a wrapped
 // parse error.
 func TestGetCluster_MalformedJSON(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		// PowerShell error text instead of JSON.
 		perCallOutputs: []string{"Get-Cluster : Cluster service is not running."},
 	}
@@ -273,7 +273,7 @@ func TestGetCluster_MalformedJSON(t *testing.T) {
 // a wrapped parse error. Driven through getCluster so the third PS call returns
 // garbage while the prior calls succeed.
 func TestReadResourceOwners_MalformedJSON(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`, // CNO owner read (this node)
@@ -298,7 +298,7 @@ func TestReadResourceOwners_MalformedJSON(t *testing.T) {
 // succeeds with an empty cno_owner_node and no role owners.
 func TestReadCNOOwner_MalformedJSON(t *testing.T) {
 	// Direct unit assertion on readCNOOwner: malformed JSON → "".
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{"Get-ClusterGroup : The cluster group could not be found."},
 	}
 	m, _ := clusterTestModule(t, transport)
@@ -314,7 +314,7 @@ func TestReadCNOOwner_MalformedJSON(t *testing.T) {
 // cno_owner_node with the live owner. Asserts the resulting CNOOwnerNode is the
 // other node and the exact transport call count.
 func TestGetCluster_FoundNonCNOOwner(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			// 0: Get-Cluster
 			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2"],"CsvPaths":["C:\\ClusterStorage\\CSV01"]}`,
@@ -353,7 +353,7 @@ func TestGetCluster_FoundNonCNOOwner(t *testing.T) {
 // the node's computer account holds cluster access, getCluster reports
 // ClusterAccessOK=true, no remediation, and surfaces cluster_access_ok on the DNA.
 func TestGetCluster_ClusterAccessOK(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2"],"CsvPaths":["C:\\ClusterStorage\\CSV01"]}`,
 			`{"owner":"NODE1"}`, // CNO owner (this node)
@@ -376,7 +376,7 @@ func TestGetCluster_ClusterAccessOK(t *testing.T) {
 // when the node lacks cluster access, getCluster reports ClusterAccessOK=false and
 // an actionable remediation naming the Grant-ClusterAccess command.
 func TestGetCluster_ClusterAccessMissing(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1"],"CsvPaths":[]}`,
 			`{"owner":"NODE1"}`,
@@ -399,7 +399,7 @@ func TestGetCluster_ClusterAccessMissing(t *testing.T) {
 // onboarding): a standalone (non-cluster) host never raises a cluster-access
 // alert and skips the probe entirely.
 func TestGetCluster_Standalone_NoAccessAlert(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m, _ := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
@@ -433,7 +433,7 @@ func TestComputeClusterAccessReconcile(t *testing.T) {
 // TestReconcileClusterAccess drives the reconcile through the transport: it reads
 // the ACL, grants the missing member and revokes the drift node, exactly once each.
 func TestReconcileClusterAccess(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"nodes":["NODE1","NODE3"]}`, // current ACL: NODE1, NODE3
 			``,                            // grant NODE2
@@ -471,7 +471,7 @@ func auditEntriesByActionCT(entries []*business.AuditEntry, action string) []*bu
 // returns the distinct ErrTransportNotConfigured sentinel (a misconfiguration),
 // NOT the ErrClusterNotDeclared scope-cap sentinel.
 func TestGetCluster_NilTransport(t *testing.T) {
-	m, _ := clusterTestModule(t, &testWinRMTransport{})
+	m, _ := clusterTestModule(t, &testPSTransport{})
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 	m.transport = nil
 
@@ -486,7 +486,7 @@ func TestGetCluster_NilTransport(t *testing.T) {
 // TestClusterOwnershipHelper_NilTransport verifies #7 for the ownership helper:
 // a nil transport returns ErrTransportNotConfigured, not ErrClusterNotDeclared.
 func TestClusterOwnershipHelper_NilTransport(t *testing.T) {
-	m, _ := clusterTestModule(t, &testWinRMTransport{})
+	m, _ := clusterTestModule(t, &testPSTransport{})
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 	m.transport = nil
 
@@ -504,7 +504,7 @@ func TestClusterOwnershipHelper_NilTransport(t *testing.T) {
 // every transport call, in call order. The cluster tests assert on this to
 // prove which PS verb was (or was NOT) invoked — the user-supplied role/cluster
 // names only ever travel via psArgs, never the scriptBlock text (S3).
-func scriptBlocks(tr *testWinRMTransport) []string {
+func scriptBlocks(tr *testPSTransport) []string {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	out := make([]string, len(tr.calls))
@@ -515,7 +515,7 @@ func scriptBlocks(tr *testWinRMTransport) []string {
 }
 
 // countCmd returns how many recorded calls used the given psCommand const.
-func countCmd(tr *testWinRMTransport, psCommand string) int {
+func countCmd(tr *testPSTransport, psCommand string) int {
 	n := 0
 	for _, sb := range scriptBlocks(tr) {
 		if sb == psCommand {
@@ -526,12 +526,12 @@ func countCmd(tr *testWinRMTransport, psCommand string) int {
 }
 
 // psArgsForCmd reconstructs the psArgs key→value map for the first recorded
-// call to psCommand. winRMCall stores args as []interface{} in SORTED key order
-// (see testWinRMTransport.ExecutePS), so the caller-known sorted key list for
+// call to psCommand. recordedPSCall stores args as []interface{} in SORTED key order
+// (see testPSTransport.ExecutePS), so the caller-known sorted key list for
 // each cluster verb is zipped back against the recorded values. Returns nil if
 // the command was never invoked. Used by W2 to positively assert that the
 // user-supplied names travelled via ArgumentList.
-func psArgsForCmd(tr *testWinRMTransport, psCommand string) map[string]string {
+func psArgsForCmd(tr *testPSTransport, psCommand string) map[string]string {
 	// Sorted key order per cluster write verb (matches the dispatch psArgs maps
 	// in setCluster).
 	var keys []string
@@ -580,7 +580,7 @@ func boolPtr(v bool) *bool { return &v }
 // cfg.Roles entries dispatches ZERO property-set PS consts — properties are left
 // at cluster defaults when the operator declares none.
 func TestSetCluster_EmptyRoles_Noop(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // CNO owner → this node
 			`{"owners":{"web-01":"NODE1"}}`, // resource owners → role present
@@ -607,7 +607,7 @@ func TestSetCluster_EmptyRoles_Noop(t *testing.T) {
 // PS consts, with the operator values travelling via ArgumentList (never in the
 // scriptBlock text).
 func TestSetCluster_OwnerReconcileDispatches(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // CNO owner → this node
 			`{"owners":{"web-01":"NODE1"}}`, // resource owners → role present (no Add)
@@ -662,7 +662,7 @@ func TestSetCluster_OwnerReconcileDispatches(t *testing.T) {
 // records the ownership-gated skip and dispatches NO property sets (the gate is
 // upstream of the property reconcile).
 func TestSetCluster_NonOwnerSkipsProperties(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE2"}`,             // CNO owner → NODE2 (this node is NODE1 → non-owner)
 			`{"owners":{"web-01":"NODE2"}}`, // resource owners
@@ -705,7 +705,7 @@ func TestSetCluster_NonOwnerSkipsProperties(t *testing.T) {
 // once when the named role is absent, and records a create audit event with the
 // owner node identity and a Go receipt-time Timestamp (S8).
 func TestRoleMembership_CNOOwner_Create(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,                      // helper: CNO owner read → this node (NODE1) owns it
 			`{"owners":{}}`,                          // helper: resource owners → role absent
@@ -762,7 +762,7 @@ func TestRoleMembership_CNOOwner_Create(t *testing.T) {
 // mutation (no Add/Remove cmdlet) and records an ownership-gated-skip audit
 // event. Set returns nil — coordination, not authorization.
 func TestClusterSet_NonOwner_Skip(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE2"}`,             // helper: CNO owner is NODE2, not this node (NODE1)
 			`{"owners":{"web-01":"NODE2"}}`, // helper: resource owners
@@ -802,7 +802,7 @@ func TestClusterSet_NonOwner_Skip(t *testing.T) {
 func TestRoleMembership_Idempotent(t *testing.T) {
 	// (a) Existence-check short-circuit: role already present in the owners map.
 	t.Run("existence-check short-circuit", func(t *testing.T) {
-		transport := &testWinRMTransport{
+		transport := &testPSTransport{
 			perCallOutputs: []string{
 				`{"owner":"NODE1"}`,                      // helper CNO owner (this node)
 				`{"owners":{"web-01":"NODE1"}}`,          // role already exists
@@ -820,7 +820,7 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 
 	// (b) Add error normalised: existence read empty, but Add reports already-registered.
 	t.Run("already-registered error normalised", func(t *testing.T) {
-		transport := &testWinRMTransport{
+		transport := &testPSTransport{
 			perCallOutputs: []string{
 				`{"owner":"NODE1"}`,                      // helper CNO owner (this node)
 				`{"owners":{}}`,                          // existence read: role absent
@@ -844,7 +844,7 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 
 	// (c) A genuine non-idempotent error is NOT swallowed.
 	t.Run("non-idempotent error surfaces", func(t *testing.T) {
-		transport := &testWinRMTransport{
+		transport := &testPSTransport{
 			perCallOutputs: []string{
 				`{"owner":"NODE1"}`,
 				`{"owners":{}}`,
@@ -871,7 +871,7 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 // demote passes true (role-only removal); the gate still protects any future
 // internal caller that does not.
 func TestRoleMembership_DestructiveGate(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,                      // helper CNO owner (this node owns it)
 			`{"owners":{"web-01":"NODE1"}}`,          // role present
@@ -898,7 +898,7 @@ func TestRoleMembership_DestructiveGate(t *testing.T) {
 // mutated. Here role A ("web-01") is absent (gets created) while role B
 // ("db-99") is present but unnamed and must be left untouched.
 func TestRoleMembership_DriftNotAdopted(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,                      // helper CNO owner (this node)
 			`{"owners":{"db-99":"NODE1"}}`,           // undeclared role db-99 present; declared web-01 absent
@@ -938,7 +938,7 @@ func TestRoleMembership_DriftNotAdopted(t *testing.T) {
 // what demoteClusteredRole passes), triggers Remove-ClusterResource exactly
 // once and records a cluster-set-remove audit event with removed: true.
 func TestRoleMembership_Remove_Success(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,                      // helper CNO owner → this node (NODE1) owns it
 			`{"owners":{"web-01":"NODE1"}}`,          // helper resource owners → role present
@@ -992,7 +992,7 @@ func TestRoleMembership_Remove_Success(t *testing.T) {
 // error (it does NOT swallow it) — isAlreadyRegistered must NOT be applied to
 // the remove path, so even an "already"-bearing error surfaces.
 func TestRoleMembership_Remove_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,                      // helper CNO owner (this node owns it)
 			`{"owners":{"web-01":"NODE1"}}`,          // role present
@@ -1036,7 +1036,7 @@ func TestRoleMembership_Remove_TransportError(t *testing.T) {
 // true, is an idempotent no-op — zero Remove-ClusterResource calls, a
 // cluster-set-remove-noop audit event, and no error.
 func TestRoleMembership_Remove_AlreadyGone(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,                      // helper CNO owner (this node owns it)
 			`{"owners":{}}`,                          // resource owners → role already gone
@@ -1075,7 +1075,7 @@ func TestRoleMembership_Remove_AlreadyGone(t *testing.T) {
 // makes ZERO transport calls — the scope cap rejects BEFORE the transport, even
 // for the write path.
 func TestClusterSet_ScopeCap_Undeclared(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m, _ := clusterTestModule(t, transport) // m.clusterName == "lab-hv"
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
@@ -1095,7 +1095,7 @@ func TestClusterSet_ScopeCap_Undeclared(t *testing.T) {
 // returns the distinct ErrTransportNotConfigured sentinel (a misconfiguration),
 // NOT the ErrClusterNotDeclared scope-cap sentinel.
 func TestClusterSet_NilTransport(t *testing.T) {
-	m, _ := clusterTestModule(t, &testWinRMTransport{})
+	m, _ := clusterTestModule(t, &testPSTransport{})
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 	m.transport = nil
 

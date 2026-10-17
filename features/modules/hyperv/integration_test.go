@@ -14,27 +14,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// integrationModule configures a hypervModule using env-var credentials.
-// Returns nil and skips the test if CFGMS_HYPERV_HOST is not set.
+// integrationModule configures a hypervModule on the local Hyper-V host through
+// the in-host PowerShell host. Skips the test if CFGMS_HYPERV_LIVE_PS is not 1.
 func integrationModule(t *testing.T) *hypervModule {
 	t.Helper()
 
-	host := os.Getenv("CFGMS_HYPERV_HOST")
-	if host == "" {
-		t.Skip("CFGMS_HYPERV_HOST not set — Hyper-V host required for integration tests")
+	if os.Getenv("CFGMS_HYPERV_LIVE_PS") != "1" {
+		t.Skip("CFGMS_HYPERV_LIVE_PS=1 not set — Hyper-V host required for integration tests")
 	}
 
-	user := os.Getenv("CFGMS_HYPERV_USER")
-	pass := os.Getenv("CFGMS_HYPERV_PASS")
-
-	store := newInlineStore("user-key", user, "pass-key", pass)
-	m := newModuleWithDetector(store, &fakeDetector{result: true})
-
-	require.NoError(t, m.Configure(mapConfigState{
-		"winrm_host":        host,
-		"winrm_user_secret": "user-key",
-		"winrm_pass_secret": "pass-key",
-	}))
+	m := newModuleWithDetector(newInlineStore(), &fakeDetector{result: true})
+	require.NoError(t, m.Configure(mapConfigState{}))
 
 	return m
 }

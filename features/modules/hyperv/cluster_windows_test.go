@@ -27,7 +27,7 @@ import (
 // last element repeats once the sequence is exhausted). This lets a test vary
 // only the resource-owner response across polls — simulating an ownership change
 // — without mutating shared state mid-flight. It implements the same
-// winrmTransport seam as testWinRMTransport.
+// psTransport seam as testPSTransport.
 type seqClusterTransport struct {
 	mu   sync.Mutex
 	seqs map[string][]string
@@ -71,7 +71,7 @@ func resourceOwnerJSON(owner string) string {
 // clusterMonitorModule builds a hypervModule wired for cluster monitoring with
 // the given transport, registered interest in cluster:lab-hv, and an open
 // changes channel.
-func clusterMonitorModule(transport winrmTransport) *hypervModule {
+func clusterMonitorModule(transport psTransport) *hypervModule {
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
 	m.transport = transport
 	m.clusterName = "lab-hv"

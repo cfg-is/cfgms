@@ -32,7 +32,7 @@ func TestApplyVMState_NonOwner_GoesQuiet(t *testing.T) {
 
 	// One transport call only: the ownership probe. Anything beyond it (storage
 	// move, NIC reconcile, promote/demote, stop/resize/start) violates the gate.
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"owners":{"ha-failover-vm":"NODE2"}}`, // role owned by the OTHER node
 	}}
 	m := vmModuleWithTransport(transport, "t-2422")
@@ -84,7 +84,7 @@ func TestApplyVMState_Owner_ConvergesNormally(t *testing.T) {
 		const vmName = "ha-promote-existing-vm"
 		// call0: gate probe — role absent cluster-wide (no entry ⇒ do NOT skip).
 		// calls 1-4: registerClusteredRole on the CNO owner (this node).
-		transport := &testWinRMTransport{perCallOutputs: []string{
+		transport := &testPSTransport{perCallOutputs: []string{
 			`{"owners":{}}`,                        // gate: role not yet registered → local possession decides
 			`{"owner":"NODE1"}`,                    // reconcileRoleMembership: CNO owner
 			`{"owners":{}}`,                        // reconcileRoleMembership: role owners
@@ -111,7 +111,7 @@ func TestApplyVMState_Owner_ConvergesNormally(t *testing.T) {
 	t.Run("steady_owner_applies_resize", func(t *testing.T) {
 		const vmName = "ha-owned-vm"
 		// call0: gate probe — this node owns the role → do NOT skip; convergence runs.
-		transport := &testWinRMTransport{perCallOutputs: []string{
+		transport := &testPSTransport{perCallOutputs: []string{
 			`{"owners":{"ha-owned-vm":"NODE1"}}`, // gate: this node IS the owner
 		}}
 		m := vmModuleWithTransport(transport, "t-2422")
@@ -149,7 +149,7 @@ func TestApplyVMState_Owner_ConvergesNormally(t *testing.T) {
 func TestApplyVMState_StandaloneVM_NoOwnerQuery(t *testing.T) {
 	const vmName = "standalone-vm"
 
-	transport := &testWinRMTransport{} // no cluster outputs needed — none must be requested
+	transport := &testPSTransport{} // no cluster outputs needed — none must be requested
 	m := vmModuleWithTransport(transport, "t-2422")
 	m.nodeHostname = "NODE1"
 	m.clusterName = "lab-hv" // even on a cluster-scoped module, a non-HA VM must not query
@@ -176,7 +176,7 @@ func TestApplyVMState_OwnerQueryError_SkipsQuietly(t *testing.T) {
 	const vmName = "ha-probe-flaky-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{``},
 		perCallErrors:  []error{errors.New("cluster service down")},
 	}
@@ -215,7 +215,7 @@ func TestApplyVMState_UnresolvedOwner_GoesQuiet(t *testing.T) {
 	const vmName = "ha-unsettled-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"owners":{"ha-unsettled-vm":""}}`, // registered role, no current owner (settling)
 	}}
 	m := vmModuleWithTransport(transport, "t-2422")
@@ -250,7 +250,7 @@ func TestApplyVMState_UnresolvedOwner_GoesQuiet(t *testing.T) {
 func TestApplyVMState_OutOfScopeCluster_ErrorsWithoutTransport(t *testing.T) {
 	const vmName = "ha-rogue-lifecycle-vm"
 
-	transport := &testWinRMTransport{} // any transport call is a violation
+	transport := &testPSTransport{} // any transport call is a violation
 	m := vmModuleWithTransport(transport, "t-2422")
 	m.nodeHostname = "NODE1"
 	m.clusterName = "lab-hv" // scope cap

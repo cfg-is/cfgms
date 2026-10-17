@@ -30,8 +30,8 @@ import (
 
 // scriptIndex returns the indices of recorded calls whose scriptBlock contains
 // the given substring, in call order.
-func callsContaining(calls []winRMCall, substr string) []winRMCall {
-	var out []winRMCall
+func callsContaining(calls []recordedPSCall, substr string) []recordedPSCall {
+	var out []recordedPSCall
 	for _, c := range calls {
 		if strings.Contains(c.scriptBlock, substr) {
 			out = append(out, c)
@@ -40,7 +40,7 @@ func callsContaining(calls []winRMCall, substr string) []winRMCall {
 	return out
 }
 
-func argsContain(call winRMCall, want string) bool {
+func argsContain(call recordedPSCall, want string) bool {
 	for _, a := range call.args {
 		if s, ok := a.(string); ok && s == want {
 			return true
@@ -54,7 +54,7 @@ func argsContain(call winRMCall, want string) bool {
 // the exact name and connects each additional desired switch by its exact name.
 func TestReconcile_CreateWhenHostMissing_ConnectsEachSwitchByExactName(t *testing.T) {
 	// Call 0: getVM → not found. Subsequent calls succeed.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -96,7 +96,7 @@ func TestReconcile_CreateWhenHostMissing_ConnectsEachSwitchByExactName(t *testin
 // -MemoryStartupBytes 0 and failed inside PowerShell on every monitor-driven
 // retry instead of being rejected up front, in-process, before any dispatch.
 func TestReconcile_CreateWithMissingMemoryMB_RejectedBeforeDispatch(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -124,7 +124,7 @@ func TestReconcile_CreateWithMissingMemoryMB_RejectedBeforeDispatch(t *testing.T
 // non-zero-but-still-invalid case: a memory_mb explicitly set but still below
 // Hyper-V's own floor.
 func TestReconcile_CreateWithBelowMinimumMemoryMB_RejectedBeforeDispatch(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -154,7 +154,7 @@ func TestReconcile_CreateWithBelowMinimumMemoryMB_RejectedBeforeDispatch(t *test
 // adapters (Part 2), not a cache that might say otherwise.
 func TestReconcile_MultiNICSet_AddsAdapterFromHostTruth(t *testing.T) {
 	// Call 0: getVM reports the host on [sw-a].
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a"],"State":"Off"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -193,7 +193,7 @@ func TestReconcile_MultiNICSet_AddsAdapterFromHostTruth(t *testing.T) {
 // → one Remove-VMNetworkAdapter for sw-b.
 func TestReconcile_MultiNICUnSet_RemovesAdapterFromHostTruth(t *testing.T) {
 	// Call 0: getVM reports the host on [sw-a, sw-b].
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a","sw-b"],"State":"Off"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -221,7 +221,7 @@ func TestReconcile_MultiNICUnSet_RemovesAdapterFromHostTruth(t *testing.T) {
 // TestReconcile_Idempotent_NoHostMutationWhenConverged drives a fully-converged
 // apply: host == desired → only the getVM read runs, zero mutations.
 func TestReconcile_Idempotent_NoHostMutationWhenConverged(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a","sw-b"],"State":"Off"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -254,7 +254,7 @@ func TestReconcile_Idempotent_NoHostMutationWhenConverged(t *testing.T) {
 // on an existing VM → Remove-VM with the exact name. This is the delete path that
 // the cache short-circuit previously let skip when the cache disagreed with host.
 func TestReconcile_Delete_RemovesVMByExactName(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vmModuleWithTransport(transport, "ops")
 
 	cfg := rawConfigState{m: map[string]interface{}{
@@ -282,7 +282,7 @@ func TestReconcile_Delete_RemovesVMByExactName(t *testing.T) {
 // against a host already running (via getVM) → no Start-VM. Proves the power
 // decision is made off host truth (Part 2).
 func TestReconcile_PowerIdempotent_NoStartWhenAlreadyRunning(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a"],"State":"Running"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -332,7 +332,7 @@ func existingSourceVMJSON(name, hvState string) string {
 // or recreated. This is the core ADR-009 §2 safety invariant.
 func TestExistenceGating_ExistingVMNotRecreatedByDefault(t *testing.T) {
 	// getVM (call 0) reports the VM already present and running.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Running"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -350,9 +350,9 @@ func TestExistenceGating_ExistingVMNotRecreatedByDefault(t *testing.T) {
 	assert.Empty(t, callsContaining(calls, "Remove-VM"),
 		"existing VM must NEVER be destroyed when on_existing is never")
 	// Source orchestration must not have run any of its create-path verbs either.
-	assert.Empty(t, callsContaining(calls, "New-VHD"),
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD),
 		"no seed VHDX may be built for an existing VM under the default")
-	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"),
+	assert.Empty(t, callsContaining(calls, psAttachDVD),
 		"no install ISO may be attached to an existing VM under the default")
 }
 
@@ -360,7 +360,7 @@ func TestExistenceGating_ExistingVMNotRecreatedByDefault(t *testing.T) {
 // holds for an existing STOPPED VM too — existence, not power state, gates source.
 // A stopped VM with desired state running is started, but never recreated.
 func TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Off"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -385,7 +385,7 @@ func TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault(t *testing.T) {
 // default on_existing must be surfaced as a degraded provisioning record with
 // LastError describing the observed state — and NEVER torn down.
 func TestExistenceGating_BrokenVMSurfacesAsDegraded(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Critical"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -415,7 +415,7 @@ func TestExistenceGating_BrokenVMSurfacesAsDegraded(t *testing.T) {
 // when on_existing is recreate and the VM exists, the module issues Remove-VM
 // THEN New-VM (in that order) — the explicit opt-in reprovision.
 func TestExistenceGating_RecreateOnlyWhenExplicit(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Running"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -458,7 +458,7 @@ func TestExistenceGating_RecreateOnlyWhenExplicit(t *testing.T) {
 // cycle issues Cfgms-DeleteSeedMedia for BOTH the seed VHDX and the answer ISO,
 // ordered after the teardown (Remove-VM) and before the seed is rebuilt (New-VHD).
 func TestApplySourceGated_RecreateCleansUpSeedMedia(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Running"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -489,7 +489,7 @@ func TestApplySourceGated_RecreateCleansUpSeedMedia(t *testing.T) {
 		if strings.Contains(c.scriptBlock, "Remove-VM") && !strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
 			removeVMIdx = i
 		}
-		if strings.Contains(c.scriptBlock, "New-VHD") && newVHDIdx == -1 {
+		if strings.Contains(c.scriptBlock, psNewSeedVHD) && newVHDIdx == -1 {
 			newVHDIdx = i
 		}
 	}
@@ -514,7 +514,7 @@ func TestApplySourceGated_RecreateCleansUpSeedMedia_VHDPathChanged(t *testing.T)
 	oldVMJSON := `{"found":true,"Name":"stw-01","MemoryStartupBytes":4294967296,` +
 		`"ProcessorCount":2,"Generation":2,"Path":"C:\\OldStorage\\stw-01.vhdx",` +
 		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"Running"}`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{oldVMJSON},
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -555,7 +555,7 @@ func TestApplySourceGated_RecreateCleansUpSeedMedia_VHDPathChanged(t *testing.T)
 // does NOT cover.
 func TestSet_VMAbsent_CleansUpSeedMedia(t *testing.T) {
 	// getVM (call 0) reports the VM present with a VHD at C:\ClusterStorage\CSV01\stw-01.vhdx.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Running"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -587,8 +587,8 @@ func TestSet_VMAbsent_CleansUpSeedMedia(t *testing.T) {
 
 // deleteSeedMediaCallIndex returns the index of the first psDeleteSeedMedia call
 // whose Path argument equals wantPath, or -1 if none. The path travels via psArgs
-// (recorded in winRMCall.args), never the scriptBlock text (S3).
-func deleteSeedMediaCallIndex(calls []winRMCall, wantPath string) int {
+// (recorded in recordedPSCall.args), never the scriptBlock text (S3).
+func deleteSeedMediaCallIndex(calls []recordedPSCall, wantPath string) int {
 	for i, c := range calls {
 		if c.scriptBlock != psDeleteSeedMedia {
 			continue
@@ -607,7 +607,7 @@ func deleteSeedMediaCallIndex(calls []winRMCall, wantPath string) int {
 // absent from the host (mid-install / transiently not yet visible), the module
 // must NOT re-issue New-VM — auto-retry is off by default (ADR-009 §2).
 func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: `{"found":false}`, // host reports the VM absent
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -627,7 +627,7 @@ func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
 
 	assert.Empty(t, callsContaining(calls, "New-VM"),
 		"an own in-progress provisioning attempt must surface-and-wait, not auto-retry New-VM")
-	assert.Empty(t, callsContaining(calls, "New-VHD"),
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD),
 		"no seed rebuild for an in-progress own attempt")
 
 	// The record must remain at installing — surface-and-wait leaves it untouched.
@@ -653,7 +653,7 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 	// (sourceVMConfigMap sets state: running), so absent the gate the VM would be
 	// started. Off is a healthy state (isHealthyVMState), so only the new gate —
 	// not the degraded branch — can keep it off.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Off"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -694,7 +694,7 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 		"surface-and-wait must not create or recreate the VM")
 	assert.Empty(t, callsContaining(calls, "Remove-VM"),
 		"surface-and-wait must never destroy the existing VM")
-	assert.Empty(t, callsContaining(calls, "New-VHD"),
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD),
 		"a retry-exhausted record must NOT trigger another seed-build attempt")
 
 	// Surface-and-wait does not mutate the record — it is left at failed for an
@@ -716,7 +716,7 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 // install-ISO attach, Start-VM) and that RetryCount increments, proving a
 // genuine re-invocation rather than a no-op return.
 func TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Off"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -739,9 +739,9 @@ func TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.NotEmpty(t, callsContaining(calls, "New-VHD"),
+	assert.NotEmpty(t, callsContaining(calls, psNewSeedVHD),
 		"a retry within budget must rebuild the seed VHDX — a real re-invocation of provisionVM, not a no-op")
-	assert.NotEmpty(t, callsContaining(calls, "Add-VMHardDiskDrive"),
+	assert.NotEmpty(t, callsContaining(calls, psAttachSeedDisk),
 		"a retry within budget must re-attach the rebuilt seed disk")
 	assert.NotEmpty(t, callsContaining(calls, "Start-VM"),
 		"a successful repair completes the create/seed phase and powers the VM on, same as a fresh attempt")
@@ -765,7 +765,7 @@ func TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget(t *testing.T) {
 // auto-retry added by this story; ADR-009 §2's degraded-class invariant
 // (observed, never remediated) is untouched.
 func TestApplySourceGated_DegradedVMNeverAutoRetried(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Critical"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -789,7 +789,7 @@ func TestApplySourceGated_DegradedVMNeverAutoRetried(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, callsContaining(calls, "New-VHD"),
+	assert.Empty(t, callsContaining(calls, psNewSeedVHD),
 		"a degraded (broken, non-seed-phase) VM must never trigger the seed-build auto-retry path")
 	assert.Empty(t, callsContaining(calls, "Start-VM"),
 		"a degraded VM must never be auto-started via the retry path")
@@ -811,7 +811,7 @@ func TestApplySourceGated_DegradedVMNeverAutoRetried(t *testing.T) {
 // hit the new gate. The existing, healthy-but-off VM keeps converging to its
 // desired running state exactly as before (#2467 AC2 — no regression).
 func TestApplySourceGated_FailedAfterInstallingStillConverges(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: existingSourceVMJSON("stw-01", "Off"),
 	}
 	m := provisionModuleWithTransport(t, transport)
@@ -850,7 +850,7 @@ func TestApplySourceGated_FailedAfterInstallingStillConverges(t *testing.T) {
 // try/finally fix removes the cause of the stuck mount; this test pins the
 // deletion that stops the files accumulating in the first place.
 func TestReconcile_DeleteRemovesSeedMedia(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{existingSourceVMJSON("stw-01", "Off")},
 	}
 	m := provisionModuleWithTransport(t, transport)
