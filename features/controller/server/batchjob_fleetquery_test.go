@@ -98,57 +98,32 @@ func TestServerFleetStewardProvider_GetAllStewards(t *testing.T) {
 	assert.Equal(t, "offline", nildna.Status)
 }
 
-// TestServerBatchjobFleetQuery_Search_TenantScoped verifies that Search parses the
-// selector, scopes results to the given tenant, and returns batchjob.StewardMeta
-// entries carrying the flattened DNA attributes.
-func TestServerBatchjobFleetQuery_Search_TenantScoped(t *testing.T) {
+// TestServerBatchjobFleetQuery_Lookup_ExactIDs verifies the adapter returns
+// metadata for exactly the requested IDs: no other steward, in any tenant, is
+// returned, and unknown IDs are omitted.
+func TestServerBatchjobFleetQuery_Lookup_ExactIDs(t *testing.T) {
 	svc := newFleetQueryTestService(t)
 	adapter := &serverBatchjobFleetQuery{svc: svc}
 
-	// os:linux exists in both tenant-a and tenant-b, but tenant scoping must
-	// exclude tenant-b's steward.
-	metas, err := adapter.Search(context.Background(), "os:linux", "tenant-a")
-	require.NoError(t, err)
-	require.Len(t, metas, 1)
-	assert.Equal(t, "s-linux", metas[0].ID)
-	assert.Equal(t, "linux", metas[0].DNAAttributes["os"])
-
-	// The same selector under tenant-b returns only tenant-b's steward.
-	metasB, err := adapter.Search(context.Background(), "os:linux", "tenant-b")
-	require.NoError(t, err)
-	require.Len(t, metasB, 1)
-	assert.Equal(t, "s-other", metasB[0].ID)
-}
-
-// TestServerBatchjobFleetQuery_Search_All verifies the "all" selector returns every
-// steward in the requested tenant.
-func TestServerBatchjobFleetQuery_Search_All(t *testing.T) {
-	svc := newFleetQueryTestService(t)
-	adapter := &serverBatchjobFleetQuery{svc: svc}
-
-	metas, err := adapter.Search(context.Background(), "all", "tenant-a")
+	metas, err := adapter.Lookup(context.Background(), []string{"s-linux", "s-other", "s-unknown"})
 	require.NoError(t, err)
 	require.Len(t, metas, 2)
 
-	ids := map[string]bool{}
+	byID := map[string]string{}
 	for _, m := range metas {
-		ids[m.ID] = true
+		byID[m.ID] = m.DNAAttributes["os"]
 	}
-	assert.True(t, ids["s-linux"])
-	assert.True(t, ids["s-windows"])
-	assert.False(t, ids["s-other"], "tenant-b steward must not appear under tenant-a scope")
+	assert.Equal(t, map[string]string{"s-linux": "linux", "s-other": "linux"}, byID)
 }
 
-// TestServerBatchjobFleetQuery_Search_InvalidSelector verifies that an empty
-// selector fails closed with a wrapped parse error rather than fanning out.
-func TestServerBatchjobFleetQuery_Search_InvalidSelector(t *testing.T) {
-	svc := newFleetQueryTestService(t)
-	adapter := &serverBatchjobFleetQuery{svc: svc}
+// TestServerBatchjobFleetQuery_Lookup_Empty verifies an empty ID list yields no
+// metadata rather than the whole fleet.
+func TestServerBatchjobFleetQuery_Lookup_Empty(t *testing.T) {
+	adapter := &serverBatchjobFleetQuery{svc: newFleetQueryTestService(t)}
 
-	metas, err := adapter.Search(context.Background(), "", "tenant-a")
-	require.Error(t, err)
-	assert.Nil(t, metas)
-	assert.Contains(t, err.Error(), "invalid selector")
+	metas, err := adapter.Lookup(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, metas)
 }
 
 // newTestTagStore opens a temporary SQLite-backed tag store suitable for use in unit tests.
@@ -194,10 +169,16 @@ func TestServerFleetStewardProvider_TagSelector(t *testing.T) {
 
 	// Drive the full tag: selector path through MemoryQuery to confirm end-to-end resolution.
 	adapter := &serverBatchjobFleetQuery{svc: svc}
-	metas, err := adapter.Search(context.Background(), "tag:github-runner", "tenant-a")
+	metas, err := adapter.Lookup(context.Background(), []string{"s-linux", "s-windows"})
 	require.NoError(t, err)
-	require.Len(t, metas, 1, "only s-linux is tagged; s-windows must not match")
-	assert.Equal(t, "s-linux", metas[0].ID)
+	require.Len(t, metas, 2)
+	for _, m := range metas {
+		if m.ID == "s-linux" {
+			assert.Equal(t, "github-runner", m.DNAAttributes["tags"])
+		} else {
+			assert.NotContains(t, m.DNAAttributes, "tags")
+		}
+	}
 }
 
 // TestServerFleetStewardProvider_TagsSurviveDNARefresh verifies that controller-stored
@@ -228,7 +209,7 @@ func TestServerFleetStewardProvider_TagsSurviveDNARefresh(t *testing.T) {
 	}))
 
 	adapter := &serverBatchjobFleetQuery{svc: svc}
-	metas, err := adapter.Search(context.Background(), "tag:github-runner", "tenant-a")
+	metas, err := adapter.Lookup(context.Background(), []string{"s-refresh"})
 	require.NoError(t, err)
 	require.Len(t, metas, 1, "tag must survive DNA refresh")
 	assert.Equal(t, "s-refresh", metas[0].ID)

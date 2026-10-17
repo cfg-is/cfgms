@@ -105,13 +105,15 @@ type BatchJob struct {
 	TenantID string
 
 	// Selector is the fleet.Filter expression used to resolve Targets.
-	// Stored verbatim for audit — re-evaluating later could yield different results.
+	// Stored verbatim for audit only; it is never re-evaluated.
 	Selector string
 
 	// Config holds the static parameters for this job.
 	Config BatchJobConfig
 
-	// Targets is the resolved set of steward IDs captured at job creation time.
+	// Targets is the authorized set of steward IDs captured at job creation time.
+	// The executor dispatches to exactly these IDs and never re-resolves
+	// Selector or TenantID to choose recipients.
 	Targets []string
 
 	// Status is the current lifecycle state of the job.

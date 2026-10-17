@@ -88,7 +88,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/correlator"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/tenantsync"
-	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/lease"
@@ -4957,23 +4956,18 @@ type serverBatchjobFleetQuery struct {
 	svc *service.ControllerService
 }
 
-func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tenantID string) ([]batchjob.StewardMeta, error) {
-	filter, _, err := fleetSelector.Parse(selectorStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
+// Lookup returns metadata for exactly the requested steward IDs, filtering the
+// fleet source by ID. Unknown IDs are omitted.
+func (a *serverBatchjobFleetQuery) Lookup(_ context.Context, ids []string) ([]batchjob.StewardMeta, error) {
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
 	}
-	filter.TenantID = tenantID
-	q := controllerFleet.NewMemoryQuery(&serverFleetStewardProvider{svc: a.svc})
-	results, err := q.Search(ctx, filter)
-	if err != nil {
-		return nil, err
-	}
-	metas := make([]batchjob.StewardMeta, 0, len(results))
-	for _, r := range results {
-		metas = append(metas, batchjob.StewardMeta{
-			ID:            r.ID,
-			DNAAttributes: r.DNAAttributes,
-		})
+	metas := make([]batchjob.StewardMeta, 0, len(ids))
+	for _, sd := range (&serverFleetStewardProvider{svc: a.svc}).GetAllStewards() {
+		if _, ok := want[sd.ID]; ok {
+			metas = append(metas, batchjob.StewardMeta{ID: sd.ID, DNAAttributes: sd.DNAAttributes})
+		}
 	}
 	return metas, nil
 }
