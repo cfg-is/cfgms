@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -289,4 +291,27 @@ func TestRunInstallSequenceRestartFailureReturnsBoth(t *testing.T) {
 	msg := err.Error()
 	assert.Less(t, strings.Index(msg, "stage failed"), strings.Index(msg, "start refused"))
 	assert.Equal(t, []string{"stop", "stage", "restart-existing"}, calls)
+}
+
+func TestPrepareDataDir_ProducesProtectedAdminOnlyDACL(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	require.NoError(t, prepareDataDir())
+
+	dir := filepath.Dir(platformCACertPath())
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	require.NoError(t, err)
+	ctrl, _, err := sd.Control()
+	require.NoError(t, err)
+	assert.NotZero(t, ctrl&windows.SE_DACL_PROTECTED, "DACL must be protected")
+
+	acl, _, err := sd.DACL()
+	require.NoError(t, err)
+	require.NotNil(t, acl)
+	var sids []string
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		require.NoError(t, windows.GetAce(acl, i, &ace))
+		sids = append(sids, (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String())
+	}
+	assert.ElementsMatch(t, []string{"S-1-5-18", "S-1-5-32-544"}, sids)
 }

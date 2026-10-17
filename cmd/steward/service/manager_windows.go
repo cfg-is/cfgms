@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
@@ -66,6 +67,19 @@ func platformCACertPath() string {
 		return filepath.Join(prefix, dest[len(vol):])
 	}
 	return dest
+}
+
+// prepareDataDir ensures the steward data directory (the parent of the pinned
+// CA cert, %ProgramData%\cfgms, respecting CFGMS_INSTALL_PREFIX) exists and is
+// restricted to SYSTEM and Administrators. It refuses a directory owned by a
+// non-admin principal, so the CA cert is never written into a tree a local user
+// controls. stageInstall runs it before writeCACert.
+func prepareDataDir() error {
+	dir := filepath.Dir(platformCACertPath())
+	if err := security.EnsureAdminOnlyDir(dir); err != nil {
+		return fmt.Errorf("cannot secure steward data directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // platformLogDir returns the platform-conventional steward log directory
@@ -298,6 +312,9 @@ func (m *windowsManager) stageInstall(launcherSrc, caCertPEM string) error {
 
 	// Write CA cert before registering the service so the service finds it on first start.
 	if caCertPEM != "" {
+		if err := prepareDataDir(); err != nil {
+			return err
+		}
 		fmt.Printf("Writing CA cert to %s...\n", platformCACertPath())
 		if err := writeCACert(caCertPEM, platformCACertPath()); err != nil {
 			return fmt.Errorf("failed to write CA cert: %w", err)

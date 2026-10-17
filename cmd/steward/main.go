@@ -49,6 +49,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/version"
 
 	// Import logging providers to register them
@@ -547,6 +548,13 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		(&logging.TelemetryBridge{}).Initialize()
 		logging.InitializeGlobalLoggerFactory("steward", "main")
 		logger = logging.ForComponent("steward")
+	}
+
+	// ── Data directory lockdown ───────────────────────────────────────────────
+	// Windows only: restrict %ProgramData%\cfgms to SYSTEM and Administrators
+	// before the pinned CA, cert store or device key are read from it.
+	if err := secureStewardDataDir(logger); err != nil {
+		return err
 	}
 
 	// ── gRPC transport registration flow ─────────────────────────────────────
@@ -2680,6 +2688,28 @@ func buildClientCertManagerAtPath(certStorePath, clientCertPEM, clientKeyPEM, is
 // uses. Tests point it at a temporary directory; production uses
 // defaultCertStoreDir.
 var certStoreDirResolver = defaultCertStoreDir
+
+// secureStewardDataDir restricts the Windows steward data directory
+// (%ProgramData%\cfgms) to SYSTEM and Administrators. If the directory is owned
+// by a non-admin principal the reason is logged and an error is returned so no
+// trust or identity material is loaded from it. No-op on other platforms.
+func secureStewardDataDir(logger logging.Logger) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	dir := filepath.Join(programData, "cfgms")
+	if err := security.EnsureAdminOnlyDir(dir); err != nil {
+		logger.Error("Refusing to load trust and identity material from steward data directory",
+			"path", logging.SanitizeLogValue(dir),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return fmt.Errorf("steward data directory %s is not secure: %w", dir, err)
+	}
+	return nil
+}
 
 // defaultCertStoreDir returns the platform-specific stable directory for the
 // steward's on-demand client certificate store. Uses the same path convention

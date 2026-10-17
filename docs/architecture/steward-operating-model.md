@@ -68,6 +68,17 @@ supervise loop continues rather than crashing (the steward child is unaffected
 by a missing SCM entry until the next reboot). This behavior is Windows-only —
 the launcher's supervise loop no-ops the check on Linux/macOS.
 
+#### Windows data directory ACL (#5119)
+
+On Windows the steward keeps its pinned controller CA, client certificate, device identity key, secret store and provision state under `%ProgramData%\cfgms`. The default `%ProgramData%` ACL lets standard users read the tree and create directories directly under `%ProgramData%`, and machine-scope DPAPI blobs can be decrypted by any local user who can read them, so the tree must be admin-only:
+
+- **Owner:** SYSTEM or BUILTIN\Administrators.
+- **DACL:** protected (no inherited ACEs), full control for SYSTEM and BUILTIN\Administrators only, inheritable to all child files and directories. The ACL is propagated to existing children.
+
+`pkg/security.EnsureAdminOnlyDir` applies this with in-process Win32 security APIs (no `icacls`/`takeown`). The installer applies it before writing the CA cert; the steward applies it at start-up before reading the pinned CA, cert store or device key; `StewardProvider.CreateSecretStore` applies it to the secrets directory (default or configured `secrets_dir`) and its `blobs` subdirectory. An existing install whose directory is admin-owned but has an inherited DACL is corrected in place.
+
+**The steward refuses a tree owned by a non-admin principal.** If the directory already exists and its owner is neither SYSTEM nor BUILTIN\Administrators, the helper changes nothing and returns an error: the installer fails naming the directory and writes no CA cert, and the steward logs the reason and loads no trust or identity material from it. It never takes ownership of a directory a non-admin created; an administrator must inspect and remove it. On other platforms the helper is a no-op.
+
 **SCM delete-pending window:** `DeleteService` only *marks* a registration
 for deletion; the SCM does not purge it until every reference to it — including
 the running service instance itself — is gone. Confirmed live: a registration
