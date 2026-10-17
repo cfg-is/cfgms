@@ -1205,3 +1205,31 @@ func TestServeWebSocket_AuditsUnforgeableClientIP(t *testing.T) {
 	}
 	assert.True(t, checked, "audit event for the test user must be present")
 }
+
+// TestServeWebSocket_SelectsOnlyTerminalSubprotocol: a browser offers the one-time
+// ticket as a subprotocol (cfgms.ticket.<ticket>) alongside the marker; the server
+// selects only the marker and never echoes the ticket.
+func TestServeWebSocket_SelectsOnlyTerminalSubprotocol(t *testing.T) {
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/terminal/{steward_id}", func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), ctxkeys.UserIDKey, "admin-browser")
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
+		h.ServeWebSocket(w, r.WithContext(ctx))
+	})
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+
+	dialer := websocket.Dialer{Subprotocols: []string{"cfgms.terminal.v1", "cfgms.ticket.x"}}
+	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/terminal/steward-subproto",
+		http.Header{"Origin": []string{srv.URL}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	assert.Equal(t, "cfgms.terminal.v1", resp.Header.Get("Sec-WebSocket-Protocol"))
+	assert.Equal(t, "cfgms.terminal.v1", conn.Subprotocol())
+}

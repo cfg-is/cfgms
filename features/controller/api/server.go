@@ -180,6 +180,7 @@ type Server struct {
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions (non-ClusterMode only; ClusterMode uses NonceStore, Issue #4527); key=username, value=*webAuthnPendingSession
 	webAuthnPresenceSessions        sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
 	presenceTokens                  sync.Map                                 // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
+	terminalTickets                 sync.Map                                 // Issue #5121: one-time terminal tickets; key=ticketHash, value=*terminalTicketRecord
 	webAuthnElevateSessions         sync.Map                                 // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
 	webAuthnElevateThrottle         sync.Map                                 // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	operatorPayloadSignSessions     sync.Map                                 // Issue #3695: pending operator-payload sign ceremonies; key=sessionID, value=*operatorPayloadSignSession

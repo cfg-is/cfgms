@@ -125,6 +125,9 @@ func NewTerminalHandler(
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 4096,
+		// Only the protocol marker is selectable; a browser's cfgms.ticket.<ticket>
+		// offer is never echoed back.
+		Subprotocols: []string{"cfgms.terminal.v1"},
 		CheckOrigin: func(r *http.Request) bool {
 			return terminalOriginAllowed(r, allowedOrigins)
 		},

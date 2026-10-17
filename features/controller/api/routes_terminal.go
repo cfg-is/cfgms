@@ -36,6 +36,17 @@ func registerTerminalRoutes(s *Server, api *mux.Router) {
 			h.ServeHTTP(w, r)
 		}))),
 	).Methods("GET")
+
+	// Browsers cannot attach an operator proof to a WebSocket upgrade, so the Shell tab
+	// prepares the signed content here and trades the proof for a one-time ticket.
+	api.Handle(
+		"/terminal/prepare/{steward_id}",
+		s.requirePermission("terminal", "create")(s.tenantScopedTerminalWrapper(http.HandlerFunc(s.handleTerminalPrepare))),
+	).Methods("POST")
+	api.Handle(
+		"/terminal/tickets/{steward_id}",
+		s.requirePermission("terminal", "create")(s.tenantScopedTerminalWrapper(http.HandlerFunc(s.handleTerminalTicket))),
+	).Methods("POST")
 }
 
 // tenantScopedTerminalWrapper enforces cross-tenant isolation on the terminal
