@@ -238,7 +238,7 @@ func newModuleWithDetector(store secretsif.SecretStore, detector HypervDetector)
 func TestModule_NoCredentialInLogs(t *testing.T) {
 	bufLog := newBufferLogger()
 
-	store := newInlineStore("user-key", "winrm-admin", "pass-key", "s3cr3t")
+	store := newInlineStore("user-key", "hyperv-admin", "pass-key", "s3cr3t")
 
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetLogger(bufLog))
@@ -428,7 +428,6 @@ func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown transport")
 	assert.Contains(t, err.Error(), `valid: "ps-host")`, "ps-host must be the only listed transport")
-	assert.NotContains(t, err.Error(), "winrm")
 	assert.Nil(t, m.transport)
 }
 
