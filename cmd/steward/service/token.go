@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -43,15 +44,30 @@ func commandLineHasRegToken(definition string) bool {
 	return !strings.HasPrefix(fields[0], "-") && !strings.HasPrefix(fields[0], `"`)
 }
 
-// definitionHasRegToken reports whether the service definition file at path
-// carries a --regtoken argument. A missing file reports false, not an error.
-func definitionHasRegToken(path string) (bool, error) {
-	data, err := os.ReadFile(path) //#nosec G304 -- fixed platform service-definition path
+// tokenFileName is the name of the root-only registration token file. It lives
+// beside the installed CA certificate.
+const tokenFileName = "registration-token"
+
+// platformTokenFilePath returns the registration token file path, a sibling of
+// platformCACertPath so CFGMS_INSTALL_PREFIX isolates tests.
+func platformTokenFilePath() string {
+	return filepath.Join(filepath.Dir(platformCACertPath()), tokenFileName)
+}
+
+// TokenFilePath returns the path of the registration token file.
+func TokenFilePath() string {
+	return platformTokenFilePath()
+}
+
+// tokenFileConfigured reports whether path is a non-empty regular file. A
+// missing path reports false, not an error. It never returns the content.
+func tokenFileConfigured(path string) (bool, error) {
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read service definition %s: %w", path, err)
+		return false, fmt.Errorf("inspect registration token file %s: %w", path, err)
 	}
-	return commandLineHasRegToken(string(data)), nil
+	return info.Mode().IsRegular() && info.Size() > 0, nil
 }

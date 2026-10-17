@@ -22,7 +22,7 @@ import (
 const prepareImageTestToken = "tok_prepare_image_secret_123"
 
 // serviceStandIn is a service-manager stand-in for the image under preparation.
-// Its "service definition" is a real file on disk; Stop records the call and
+// Its registration token file is a real file on disk; Stop records the call and
 // the image is considered stopped from then on.
 type serviceStandIn struct {
 	definitionPath string
@@ -39,14 +39,14 @@ func (s *serviceStandIn) Stop() error {
 }
 
 func (s *serviceStandIn) RegistrationTokenConfigured() (bool, error) {
-	data, err := os.ReadFile(s.definitionPath)
+	info, err := os.Stat(s.definitionPath)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(string(data), "--regtoken "+prepareImageTestToken), nil
+	return info.Mode().IsRegular() && info.Size() > 0, nil
 }
 
 // enrolledImage is an image built from a machine that already enrolled: a real
@@ -79,12 +79,12 @@ func newEnrolledImage(t *testing.T) *enrolledImage {
 	img := &enrolledImage{
 		certStoreDir: dir,
 		caFile:       filepath.Join(machine, "controller-ca.crt"),
-		serviceDef:   filepath.Join(machine, "cfgms-steward.service"),
+		serviceDef:   filepath.Join(machine, "registration-token"),
 		deviceID:     ks.DeviceID(),
 	}
 	require.NoError(t, os.WriteFile(img.caFile, []byte(fx.caPEM), 0644))
 	require.NoError(t, os.WriteFile(img.serviceDef,
-		[]byte(`ExecStart=launcher run --child-args "--regtoken `+prepareImageTestToken+`"`), 0600))
+		[]byte(prepareImageTestToken+"\n"), 0600))
 	img.svc = &serviceStandIn{definitionPath: img.serviceDef, elevated: true}
 	if runtime.GOOS == "windows" && !service.New("").IsElevated() {
 		// The machine key store refuses an unelevated process (NTE_PERM), and
@@ -151,7 +151,7 @@ func TestPrepareImage_RemovesIdentityKeepsTrustAnchorAndToken(t *testing.T) {
 	assert.Equal(t, caBefore, caAfter, "trust anchor must be untouched")
 	defAfter, err := os.ReadFile(img.serviceDef)
 	require.NoError(t, err)
-	assert.Equal(t, defBefore, defAfter, "service definition with token must be untouched")
+	assert.Equal(t, defBefore, defAfter, "token file must be untouched")
 
 	assert.Equal(t, 1, img.svc.stopped, "service must be stopped before removal")
 	assert.NotContains(t, out, prepareImageTestToken, "output must never print the registration token")
@@ -307,7 +307,7 @@ func TestPrepareImage_DoesNotFollowSymlinkedEntries(t *testing.T) {
 
 func TestPrepareImage_RefusesWithoutToken(t *testing.T) {
 	img := newEnrolledImage(t)
-	require.NoError(t, os.WriteFile(img.serviceDef, []byte(`ExecStart=launcher run`), 0600))
+	require.NoError(t, os.Remove(img.serviceDef))
 	before := listFiles(t, img.certStoreDir)
 
 	_, err := img.run(t, prepareImageOptions{Yes: true})

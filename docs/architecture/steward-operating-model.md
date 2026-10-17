@@ -660,16 +660,17 @@ From the `cfg` CLI, `cfg steward service` and `cfg steward process` sign with th
 
 ## Entry Paths
 
-The steward binary supports four entry paths:
+The steward binary supports these entry paths:
 
 | Invocation | Mode | Description |
 |------------|------|-------------|
 | `cfgms-steward --regtoken TOKEN` | Controller-connected (foreground) | Registers with the controller via HTTP REST API, receives mTLS certificates, then establishes a gRPC-over-QUIC transport connection. Registration is called on every invocation — there is no stored-certificate resume path. |
+| `cfgms-steward --regtoken-file PATH` | Controller-connected (foreground) | Same as `--regtoken`, but the token is read at start from the file at `PATH`. On Linux and macOS the file must be a regular file owned by the running user with no group or other permission bits (mode 0600); a missing, unreadable or empty file is a start-up error that never prints the token. The token is held in memory only. Not available on Windows yet. |
 | `cfgms-steward --config path.cfg` | Standalone (foreground) | Loads cfg from the specified local file. No controller connection is established. All convergence, DNA, health, and local logging operate as normal. |
 | `cfgms-steward install --regtoken TOKEN` | Controller-connected (service) | Installs the steward as a native OS service (systemd on Linux, SCM on Windows, launchd on macOS) and starts it. |
 | `cfgms-steward` (no arguments) | Interactive | Prompts for a registration token, then presents a menu: [1] Install as service, [2] Run once in foreground, [3] Exit. |
 
-When both `--regtoken` and `--config` are supplied, the `--regtoken` path takes precedence and `--config` is ignored.
+When both `--regtoken` and `--config` are supplied, the `--regtoken` path takes precedence and `--config` is ignored. Supplying both `--regtoken` and `--regtoken-file` is an error.
 
 ## Logging
 

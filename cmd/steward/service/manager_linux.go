@@ -285,9 +285,9 @@ func stopSystemdUnit(unitPath string) error {
 	return nil
 }
 
-// RegistrationTokenConfigured reports whether the systemd unit carries --regtoken.
+// RegistrationTokenConfigured reports whether the systemd unit holds a non-empty registration token file.
 func (m *linuxManager) RegistrationTokenConfigured() (bool, error) {
-	return definitionHasRegToken(linuxSystemdUnit)
+	return tokenFileConfigured(platformTokenFilePath())
 }
 
 // Status returns the current state of the systemd service without requiring
