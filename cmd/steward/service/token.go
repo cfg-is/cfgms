@@ -4,9 +4,7 @@
 package service
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -57,17 +55,4 @@ func platformTokenFilePath() string {
 // TokenFilePath returns the path of the registration token file.
 func TokenFilePath() string {
 	return platformTokenFilePath()
-}
-
-// tokenFileConfigured reports whether path is a non-empty regular file. A
-// missing path reports false, not an error. It never returns the content.
-func tokenFileConfigured(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect registration token file %s: %w", path, err)
-	}
-	return info.Mode().IsRegular() && info.Size() > 0, nil
 }
