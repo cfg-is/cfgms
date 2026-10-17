@@ -23,7 +23,10 @@ enum CommandType {
   COMMAND_TYPE_PUSH_STEWARD_BINARY = 10; // Issue #1943: controller pushes a new steward binary for self-upgrade
   COMMAND_TYPE_RELAY_RESPONSE = 11;      // Issue #1994: controller sends relay response back to steward relay goroutine
   // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY.
-  // Command.params keys: session_id (string), shell (string), cols (int32), rows (int32).
+  // Command.params keys: session_id (string), shell (string), cols (int32), rows (int32),
+  // plus the operator envelope keys: targets, nonce, expires_at and the X.509 or
+  // WebAuthn signature fields (with webauthn_manifest), forwarded unchanged from the
+  // verified one-time ticket.
   COMMAND_TYPE_OPEN_TERMINAL = 12;
   // Issue #3104 (ADR-024 Amendment 1): controller pushes the resolved observe-module
   // set back to the steward after receiving EventObserveSweepRequest.

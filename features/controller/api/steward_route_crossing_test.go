@@ -135,7 +135,7 @@ var stewardCrossingTable = map[string]stewardCrossingRoute{
 		path:       func(id string) string { return "/api/v1/terminal/ws/" + id },
 		body:       noBody,
 
-		pastGateStatus: http.StatusServiceUnavailable, pastGateBody: "terminal service not available",
+		pastGateStatus: http.StatusForbidden, pastGateBody: "TERMINAL_TICKET_REQUIRED",
 	},
 }
 

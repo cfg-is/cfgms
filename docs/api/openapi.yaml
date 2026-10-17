@@ -586,6 +586,33 @@ paths:
         '409':
           description: Steward platform is unknown (STEWARD_PLATFORM_UNKNOWN); pass terminal_shell
 
+  /terminal/ws/{steward_id}:
+    get:
+      summary: Open the terminal WebSocket
+      description: >-
+        Requires a one-time ticket from POST /terminal/tickets/{steward_id}, offered as the
+        WebSocket subprotocol cfgms.ticket.<ticket> alongside cfgms.terminal.v1 in
+        Sec-WebSocket-Protocol (never in the URL). The server selects only
+        cfgms.terminal.v1. The ticket is redeemed after the permission and tenant checks;
+        a missing, unknown, used or expired ticket, or one issued to another principal,
+        tenant, web session or steward, is 403 TERMINAL_TICKET_REQUIRED before upgrade.
+      operationId: openTerminalWebSocket
+      tags:
+        - Terminal
+      parameters:
+        - name: steward_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '101':
+          description: Switching Protocols
+        '403':
+          description: Ticket missing, invalid, used, expired or not issued to this caller (TERMINAL_TICKET_REQUIRED)
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /terminal/tickets/{steward_id}:
     post:
       summary: Exchange an operator proof for a one-time terminal ticket

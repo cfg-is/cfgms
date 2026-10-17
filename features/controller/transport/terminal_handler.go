@@ -23,7 +23,6 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/terminal"
-	termshell "github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -314,14 +313,20 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	userID, _ := ctx.Value(ctxkeys.UserIDKey).(string)
 	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
-	q := r.URL.Query()
-	shell := q.Get("shell")
-	if shell == "" {
-		// Platform-appropriate default (e.g. "powershell" on a Windows controller,
-		// "bash" elsewhere) — a bare "bash" default fails shell.Factory validation
-		// on Windows.
-		shell = termshell.GetDefaultShell()
+	// Fail closed: a terminal opens only for a verified operator proof redeemed by the
+	// REST layer, bound to this steward and tenant.
+	proof, ok := TerminalProofFromContext(ctx)
+	if !ok || proof.StewardID != stewardID || proof.TenantID != tenantID {
+		if h.logger != nil {
+			h.logger.Warn("terminal: refused without a matching verified operator proof",
+				"steward_id", logging.SanitizeLogValue(stewardID))
+		}
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
+
+	q := r.URL.Query()
+	shell := proof.TerminalShell
 	if !terminal.ValidateShell(shell) {
 		http.Error(w, "unsupported shell", http.StatusBadRequest)
 		return
@@ -386,12 +391,15 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		// cols/rows are uint16, so int32(cols)/int32(rows) are widening conversions
 		// that are provably in range [0, 65535] — no bounds guard is required and
 		// CodeQL's go/incorrect-integer-conversion does not flag a uint16→int32 cast.
-		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, map[string]interface{}{
-			"session_id": sess.ID,
-			"shell":      shell,
-			"cols":       int32(cols),
-			"rows":       int32(rows),
-		})
+		params := make(map[string]interface{}, len(proof.Params)+4)
+		for k, v := range proof.Params {
+			params[k] = v
+		}
+		params["session_id"] = sess.ID
+		params["shell"] = shell
+		params["cols"] = int32(cols)
+		params["rows"] = int32(rows)
+		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, params)
 		if cmdErr != nil {
 			if h.logger != nil {
 				h.logger.Warn("terminal: dispatch open-terminal command failed",

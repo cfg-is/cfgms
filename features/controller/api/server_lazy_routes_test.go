@@ -3,9 +3,11 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -217,7 +219,21 @@ func TestServer_SetTerminalHandler_RegistersRBACGatedRoute(t *testing.T) {
 	// (1) Pre-wiring: terminalHandler is nil. The authorized admin clears
 	// requirePermission and the tenant-scoping wrapper, reaches the closure, and
 	// must receive 503 — proving the nil-handler guard is live, not 403/404.
-	req := requestWithTLSCert(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, adminCert)
+	// The route redeems a one-time ticket bound to the caller before the handler runs.
+	ticketReq := func() *http.Request {
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, adminCert)
+		principal := server.extractAdminPrincipal(req)
+		require.NotNil(t, principal)
+		ticket, hash, err := newTerminalTicket()
+		require.NoError(t, err)
+		require.Equal(t, ceremonyOK, server.putTerminalTicket(context.Background(), hash, &terminalTicketRecord{
+			principalID: principal.ID, tenantID: "test-tenant", stewardID: stewardID,
+			terminalShell: "bash", expires: time.Now().Add(time.Minute),
+		}))
+		req.Header.Set("Sec-WebSocket-Protocol", "cfgms.terminal.v1, cfgms.ticket."+ticket)
+		return req
+	}
+	req := ticketReq()
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
@@ -231,7 +247,7 @@ func TestServer_SetTerminalHandler_RegistersRBACGatedRoute(t *testing.T) {
 		w.WriteHeader(http.StatusSwitchingProtocols)
 	}))
 
-	req = requestWithTLSCert(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, adminCert)
+	req = ticketReq()
 	rec = httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.True(t, reached,

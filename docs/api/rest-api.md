@@ -985,6 +985,17 @@ controller node. Only its SHA-256 is stored. It is presented as the WebSocket su
 | 404 | `STEWARD_NOT_FOUND` | Steward unknown or outside the caller's tenant |
 | 503 | `WEBAUTHN_CEREMONY_STORE_UNAVAILABLE` | Cluster mode with no usable shared store; no ticket is minted |
 
+#### GET /api/v1/terminal/ws/{steward_id}
+
+Opens the terminal WebSocket. The request must offer the subprotocols `cfgms.terminal.v1` and
+`cfgms.ticket.<ticket>` in `Sec-WebSocket-Protocol`; the ticket is never read from the URL, and the
+response selects only `cfgms.terminal.v1`. The ticket is redeemed after the permission and tenant
+checks, so a caller outside the steward's tenant (404) does not consume it. A missing, unknown,
+used or expired ticket, or one minted for a different principal, tenant, web session or steward,
+is `403 TERMINAL_TICKET_REQUIRED` before the upgrade (a mismatched ticket is already consumed).
+The shell and operator proof come from the ticket, not the query string, and are forwarded to the
+steward unchanged.
+
 ### Certificate Management
 
 #### GET /api/v1/certificates

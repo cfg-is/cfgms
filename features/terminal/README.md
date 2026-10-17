@@ -29,7 +29,7 @@ The Terminal module provides secure remote terminal access to managed Stewards t
 The controller-side relay is wired as of Issue #2761:
 
 - `GET /api/v1/terminal/ws/{steward_id}` is registered by `features/controller/api/routes_terminal.go` behind `requirePermission("terminal", "create")` with `Min: AssuranceStrong` (ADR-021).
-- The browser leg authenticates via the ADR-018 session cookie and the assurance gate, **not client certificates**. `CreateBrowserSession` in `auth_integration.go` is the browser entry point and does not perform any mTLS or cert checks.
+- The browser leg authenticates via the ADR-018 session cookie, the assurance gate and the one-time operator-proof ticket, **not client certificates**. `CreateBrowserSession` in `auth_integration.go` is the browser entry point and does not perform any mTLS or cert checks.
 - The steward leg (`HandleGRPC` in `features/controller/transport/terminal_handler.go`) extracts the mTLS peer CN and verifies it matches the relay's `steward_id`. The `AuthenticatedTerminalManager` mTLS settings (`RequireMTLS`, `ClientCertRequired`, `IPBindingEnabled`, `TLSFingerprintCheck`) are unchanged.
 - Session recording and audit events (start + end) are produced for every browser terminal session. The relay records **both** legs: steward output via `Session.HandleOutput`, and operator keystrokes and resizes via `Session.RecordInput` / `Session.RecordResize` before they are queued for the steward. Both are fail-closed — a frame that cannot be recorded tears the relay down, which ends the steward stream and therefore the endpoint's PTY.
 - Sessions are correlated by `session_id`, generated at WS-session creation and carried in the `COMMAND_TYPE_OPEN_TERMINAL` params to the steward.
@@ -37,7 +37,7 @@ The controller-side relay is wired as of Issue #2761:
 ## Security Model
 
 ### Authentication & Authorization
-- **Browser WebSocket** (`GET /terminal/ws/{steward_id}`): ADR-018 session cookie + ADR-021 AssuranceStrong gate. No client certificate required.
+- **Browser WebSocket** (`GET /terminal/ws/{steward_id}`): ADR-018 session cookie + ADR-021 AssuranceStrong gate, plus a one-time ticket (`cfgms.ticket.<ticket>` in `Sec-WebSocket-Protocol`) minted for a verified operator proof. The route redeems the ticket after the tenant gate and binds it to the caller, tenant, web session and steward; `ServeWebSocket` refuses (403) without the verified proof and forwards it to the steward in `COMMAND_TYPE_OPEN_TERMINAL`. No client certificate required.
 - **Steward gRPC** (`Terminal` bidi RPC): mTLS peer CN verified against relay's steward_id. RequireMTLS enforced.
 - **RBAC Integration**: `terminal.session.create` permission (resourceType `terminal`, action `create`)
 - **Session Isolation**: Per-user/per-steward session boundaries

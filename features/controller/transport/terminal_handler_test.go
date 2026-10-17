@@ -623,11 +623,108 @@ func TestTerminalHandler_ServeWebSocket_AllowlistOriginAccepted(t *testing.T) {
 	req = mux.SetURLVars(req, map[string]string{"steward_id": "steward-1"})
 	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-allowlist")
 	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-allowlist")
+	ctx = withTestProof(ctx, "steward-1", "tenant-allowlist")
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	h.ServeWebSocket(rec, req)
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"allowlisted origin must not be rejected with 403")
+}
+
+// withTestProof is the one shared helper that gives ServeWebSocket the verified operator
+// proof the REST layer attaches after redeeming a ticket.
+func withTestProof(ctx context.Context, stewardID, tenantID string) context.Context {
+	return WithTerminalProof(ctx, &TerminalProof{
+		StewardID:     stewardID,
+		UserID:        "proof-user",
+		TenantID:      tenantID,
+		TerminalShell: termshell.GetDefaultShell(),
+		Params: map[string]interface{}{
+			"targets":              []string{stewardID},
+			"nonce":                "nonce-1",
+			"expires_at":           "2030-01-01T00:00:00Z",
+			"signature_algorithm":  "ed25519",
+			"signature_value":      "sig-value",
+			"signature_public_key": "pub-key",
+		},
+	})
+}
+
+// serveWithProofCtx serves ServeWebSocket with the given context values and returns the
+// recorder plus every command the real publisher delivered.
+func serveWithProofCtx(t *testing.T, stewardID string, mutate func(context.Context) context.Context) (*httptest.ResponseRecorder, *terminal.SessionManager, <-chan *controlplaneTypes.SignedCommand) {
+	t.Helper()
+	pub, received := newRealTerminalCommandPublisher(t, stewardID)
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), pub, mgr, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID, nil)
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://localhost")
+	req = mux.SetURLVars(req, map[string]string{"steward_id": stewardID})
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-p")
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-p")
+	rec := httptest.NewRecorder()
+	h.ServeWebSocket(rec, req.WithContext(mutate(ctx)))
+	return rec, &mgr, received
+}
+
+func assertNoCommand(t *testing.T, received <-chan *controlplaneTypes.SignedCommand) {
+	t.Helper()
+	select {
+	case sc := <-received:
+		t.Fatalf("no command may be published, got %+v", sc.Command)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// [REQUIRED] ServeWebSocket without a verified proof, or with one for another steward
+// or tenant, is 403 with no session and no published command.
+func TestTerminalHandler_ServeWebSocket_RequiresVerifiedProof(t *testing.T) {
+	cases := map[string]func(context.Context) context.Context{
+		"no proof":        func(c context.Context) context.Context { return c },
+		"other steward":   func(c context.Context) context.Context { return withTestProof(c, "someone-else", "tenant-p") },
+		"other tenant":    func(c context.Context) context.Context { return withTestProof(c, "proof-steward", "tenant-other") },
+		"nil proof value": func(c context.Context) context.Context { return WithTerminalProof(c, nil) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, mgr, received := serveWithProofCtx(t, "proof-steward", mutate)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Empty(t, (*mgr).GetActiveSessions())
+			assertNoCommand(t, received)
+		})
+	}
+}
+
+// [REQUIRED] A valid proof publishes one command carrying the proof fields unchanged and
+// the shell from the proof, ignoring ?shell= in the query string.
+func TestTerminalHandler_ServeWebSocket_ForwardsProofUnchanged(t *testing.T) {
+	const stewardID = "proof-steward"
+	pub, received := newRealTerminalCommandPublisher(t, stewardID)
+	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID+"?shell=zsh-not-signed", nil)
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://localhost")
+	req = mux.SetURLVars(req, map[string]string{"steward_id": stewardID})
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-p")
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-p")
+	h.ServeWebSocket(httptest.NewRecorder(), req.WithContext(withTestProof(ctx, stewardID, "tenant-p")))
+
+	var sc *controlplaneTypes.SignedCommand
+	select {
+	case sc = <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("command not delivered")
+	}
+	require.NotNil(t, sc.RawParams)
+	assert.Equal(t, termshell.GetDefaultShell(), sc.RawParams["shell"])
+	assert.Equal(t, "nonce-1", sc.RawParams["nonce"])
+	assert.Equal(t, "2030-01-01T00:00:00Z", sc.RawParams["expires_at"])
+	assert.Equal(t, "ed25519", sc.RawParams["signature_algorithm"])
+	assert.Equal(t, "sig-value", sc.RawParams["signature_value"])
+	assert.Equal(t, "pub-key", sc.RawParams["signature_public_key"])
+	assert.NotEmpty(t, sc.RawParams["targets"])
+	assertNoCommand(t, received)
 }
 
 // [REQUIRED] TestTerminalHandler_ServeWebSocket_OfflineSteward verifies that
@@ -648,6 +745,7 @@ func TestTerminalHandler_ServeWebSocket_OfflineSteward(t *testing.T) {
 	// Set tenant and user so session creation succeeds before command dispatch.
 	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-offline")
 	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-offline")
+	ctx = withTestProof(ctx, "offline-steward", "tenant-offline")
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -678,6 +776,7 @@ func TestTerminalHandler_ServeWebSocket_DispatchesOpenTerminalCommand(t *testing
 	// Set tenant and user so session creation succeeds before command dispatch.
 	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-dispatch")
 	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-dispatch")
+	ctx = withTestProof(ctx, stewardID, "tenant-dispatch")
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -899,6 +998,7 @@ func startBrowserTerminal(t *testing.T, h *TerminalHandler, mgr terminal.Session
 		defer close(served)
 		ctx := context.WithValue(r.Context(), ctxkeys.UserIDKey, "admin-browser")
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
+		ctx = withTestProof(ctx, mux.Vars(r)["steward_id"], "tenant-1")
 		h.ServeWebSocket(w, r.WithContext(ctx))
 	})
 	srv := httptest.NewServer(router)
@@ -1179,6 +1279,7 @@ func TestServeWebSocket_AuditsUnforgeableClientIP(t *testing.T) {
 	req = mux.SetURLVars(req, map[string]string{"steward_id": "steward-abc"})
 	ctx := context.WithValue(req.Context(), ctxkeys.UserIDKey, "admin-browser")
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
+	ctx = withTestProof(ctx, "steward-abc", "tenant-1")
 	req = req.WithContext(ctx)
 
 	// No WebSocket upgrade headers: the upgrade fails after session creation and
@@ -1217,6 +1318,7 @@ func TestServeWebSocket_SelectsOnlyTerminalSubprotocol(t *testing.T) {
 	router.HandleFunc("/terminal/{steward_id}", func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), ctxkeys.UserIDKey, "admin-browser")
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
+		ctx = withTestProof(ctx, mux.Vars(r)["steward_id"], "tenant-1")
 		h.ServeWebSocket(w, r.WithContext(ctx))
 	})
 	srv := httptest.NewServer(router)
