@@ -109,7 +109,7 @@ modules:
 
 If the field is absent or not an absolute path, the module returns `ErrAllowedBasePathRequired` and performs no filesystem operations.
 
-`allowed_base_path` uses `filepath.Clean` + `filepath.Abs` internally. Symlink escapes outside the base path are **not** blocked.
+`allowed_base_path` uses `filepath.Clean` + `filepath.Abs` internally. A symlink or Windows reparse point that resolves outside the base path, a dangling link, and a link at the final path component are all refused. Writes open the final component without following links (`O_NOFOLLOW` on Unix; an `Lstat` check on Windows), and post-write ownership, mode and ACL changes refuse a link leaf.
 
 ### Initialization via `Configure()`
 

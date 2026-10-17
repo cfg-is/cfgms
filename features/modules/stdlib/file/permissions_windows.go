@@ -103,6 +103,9 @@ func setFileACL(path string, acl *modules.WindowsACL) error {
 	if acl == nil {
 		return nil
 	}
+	if err := rejectLinkLeaf(path); err != nil {
+		return err
+	}
 
 	// Build EXPLICIT_ACCESS entries; keep *SID pointers alive until the API call returns.
 	sids := make([]*windows.SID, 0, len(acl.Entries))
