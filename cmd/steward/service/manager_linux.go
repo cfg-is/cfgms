@@ -187,8 +187,13 @@ func (m *linuxManager) Install(token, controllerURL, caCertPEM, expectedFingerpr
 		}
 	}
 
+	tokenPath, err := installRegistrationToken(token)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("Writing systemd unit...")
-	unit := generateSystemdUnit(token, controllerURL)
+	unit := generateSystemdUnit(tokenPath, controllerURL)
 	if err := writeSystemdUnit(linuxSystemdUnit, []byte(unit)); err != nil {
 		return fmt.Errorf("failed to write systemd unit %s: %w", linuxSystemdUnit, err)
 	}
@@ -285,7 +290,7 @@ func stopSystemdUnit(unitPath string) error {
 	return nil
 }
 
-// RegistrationTokenConfigured reports whether the systemd unit holds a non-empty registration token file.
+// RegistrationTokenConfigured reports whether the systemd unit has a non-empty registration token file.
 func (m *linuxManager) RegistrationTokenConfigured() (bool, error) {
 	return tokenFileConfigured(platformTokenFilePath())
 }
@@ -313,26 +318,39 @@ func (m *linuxManager) Status() (*ServiceStatus, error) {
 }
 
 // writeSystemdUnit writes a systemd unit file to path.
-// 0600: owner rw (root only); systemd reads unit files as root, group read is unnecessary
-// and would expose the registration token to group members.
+// 0600: owner rw (root only); systemd reads unit files as root, group read is unnecessary.
 func writeSystemdUnit(path string, content []byte) error {
 	return os.WriteFile(path, content, 0600)
 }
 
-// generateSystemdUnit returns a systemd unit that runs cfgms-steward with the
-// given registration token. When controllerURL is non-empty, --controller-url is
-// appended to ExecStart so the steward connects to the specified controller.
-// Restart=always and RestartSec=10 ensure the steward recovers from transient failures.
+// installRegistrationToken writes the registration token to the root-only token
+// file (mode 0600), overwriting any token from a previous install, and returns
+// the file path. Install calls it before the unit is written and the service is
+// started.
+func installRegistrationToken(token string) (string, error) {
+	path := platformTokenFilePath()
+	fmt.Printf("Writing registration token to %s...\n", path)
+	if err := writeTokenFile(path, token); err != nil {
+		return "", fmt.Errorf("failed to write registration token file: %w", err)
+	}
+	return path, nil
+}
+
+// generateSystemdUnit returns a systemd unit that runs cfgms-steward with
+// --regtoken-file pointing at tokenPath. When controllerURL is non-empty,
+// --controller-url is appended to ExecStart so the steward connects to the
+// specified controller. Restart=always and RestartSec=10 ensure the steward
+// recovers from transient failures.
 //
-// Security note: the token appears in the unit file (readable by root). This
-// mirrors the behaviour of --regtoken in ps output. The token is a one-time
-// registration credential — after registration the steward uses mTLS certs.
-func generateSystemdUnit(token, controllerURL string) string {
+// Security note: the registration token is reusable until it expires or is
+// revoked, so it must not appear in the unit or in process arguments. It is
+// kept in a root-only file (see installRegistrationToken) and only the file
+// path is passed on the command line.
+func generateSystemdUnit(tokenPath, controllerURL string) string {
 	// The launcher supervises the steward and forwards --child-args to it. Args
-	// are space-separated (the launcher splits on whitespace); the registration
-	// token is validated to be free of spaces/quotes, so no per-arg quoting is
-	// needed inside the child-args string.
-	childArgs := fmt.Sprintf(`--regtoken %s`, token)
+	// are space-separated (the launcher splits on whitespace), so the token file
+	// path must not contain whitespace or quotes.
+	childArgs := fmt.Sprintf(`--regtoken-file %s`, tokenPath)
 	if controllerURL != "" {
 		childArgs += fmt.Sprintf(` --controller-url %s`, controllerURL)
 	}
