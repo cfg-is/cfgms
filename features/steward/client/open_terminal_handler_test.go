@@ -11,6 +11,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -39,11 +40,8 @@ func TestSetupCommandHandler_RegistersOpenTerminal(t *testing.T) {
 	handler, err := c.setupCommandHandler(context.Background(), "steward-open-term")
 	require.NoError(t, err)
 
-	// Omitting the shell param makes handleOpenTerminal fall back to the platform
-	// default shell, which is always in the platform allowlist, so shell validation
-	// passes and the handler returns nil (EventCommandCompleted). The actual PTY
-	// bridge runs in a background goroutine and is not part of this assertion — the
-	// bridge is exercised end-to-end in terminal_bridge_test.go.
+	// No operator proof is attached: the command must reach the registered handler and
+	// be refused with ErrUnauthenticatedCommand, not "no handler for command type".
 	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
 		ID:        "cmd-open-term-1",
 		Type:      cpTypes.CommandOpenTerminal,
@@ -52,6 +50,7 @@ func TestSetupCommandHandler_RegistersOpenTerminal(t *testing.T) {
 		Timestamp: time.Now(),
 		Params: map[string]interface{}{
 			"session_id": "sess-2760-test",
+			"shell":      "bash",
 			"cols":       float64(80),
 			"rows":       float64(24),
 		},
@@ -62,14 +61,15 @@ func TestSetupCommandHandler_RegistersOpenTerminal(t *testing.T) {
 	events := drainEvents(capture.events)
 	require.NotEmpty(t, events, "open_terminal dispatch must publish a status event")
 
-	var completed *cpTypes.Event
+	var failed *cpTypes.Event
 	for _, evt := range events {
-		require.NotEqualf(t, cpTypes.EventCommandFailed, evt.Type,
-			"open_terminal must be registered in setupCommandHandler — got EventCommandFailed: %v", evt.Details)
-		if evt.Type == cpTypes.EventCommandCompleted {
-			completed = evt
+		require.NotEqualf(t, cpTypes.EventCommandCompleted, evt.Type, "an unproven open_terminal must not complete")
+		if evt.Type == cpTypes.EventCommandFailed {
+			failed = evt
 		}
 	}
-	require.NotNil(t, completed, "open_terminal dispatch must publish EventCommandCompleted")
-	require.Equal(t, "cmd-open-term-1", completed.CommandID)
+	require.NotNil(t, failed, "open_terminal dispatch must publish EventCommandFailed")
+	require.Equal(t, "cmd-open-term-1", failed.CommandID)
+	require.Contains(t, fmt.Sprint(failed.Details), "unauthenticated")
+	require.NotContains(t, fmt.Sprint(failed.Details), "no handler for command type")
 }

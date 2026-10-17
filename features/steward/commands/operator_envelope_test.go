@@ -209,3 +209,28 @@ func TestVerifyOperatorEnvelope_CrossUseRefused(t *testing.T) {
 		require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 	})
 }
+
+// A captured, valid terminal-open envelope re-sent as EXECUTE_SCRIPT is refused before
+// any verification or execution.
+func TestExecuteScript_TerminalEnvelopeReplayedAsScriptRefused(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	h := newHandlerWithSigning(t, nil, true, caPool)
+
+	content, err := operatorpayload.TerminalContent("steward-test", platformShell())
+	require.NoError(t, err)
+	params := terminalParams(t, signer, content, operatorpayload.TerminalShell, []string{"steward-test"}, time.Now().Add(time.Minute))
+	params["script_content"] = base64.StdEncoding.EncodeToString(content)
+	params["shell"] = operatorpayload.TerminalShell
+	params["execution_id"] = "replay-term-001"
+
+	err = h.preflightScriptSignature(envelopeCmd(params))
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	assert.Contains(t, err.Error(), "reserved for terminal sessions")
+
+	// Refused before verification: the nonce was never consumed.
+	assert.True(t, h.envelopeNonceCache.Add(params["nonce"].(string)))
+
+	sc := testSignedCommandWithParams("replay-term-001", cpTypes.CommandExecuteScript, params)
+	require.ErrorIs(t, h.HandleCommand(context.Background(), sc), ErrUnauthenticatedCommand)
+}

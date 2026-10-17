@@ -5,10 +5,12 @@ package commands
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
 
 // TerminalDialer opens a bidirectional Terminal RPC stream to the controller
@@ -50,9 +52,27 @@ func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, 
 		rows = 24
 	}
 
-	// Fall back to platform default when caller omits the shell param.
+	// Authenticate first, before the allowlist, any logging of session details or the
+	// dialer. An omitted shell fails closed: the controller always sends an explicit
+	// shell and the operator signs that exact string.
 	if shellStr == "" {
-		shellStr = shell.GetDefaultShell()
+		return fmt.Errorf("%w: open_terminal requires an explicit shell", ErrUnauthenticatedCommand)
+	}
+	content, err := operatorpayload.TerminalContent(h.stewardID, shellStr)
+	if err != nil {
+		return fmt.Errorf("%w: malformed open_terminal: %v", ErrUnauthenticatedCommand, err)
+	}
+	// The shared verifier checks expiry but not a ceiling. Checked first so a refused
+	// envelope does not consume its nonce.
+	if expiresAt, perr := time.Parse(time.RFC3339, fmt.Sprint(cmd.Params["expires_at"])); perr == nil &&
+		expiresAt.After(time.Now().Add(operatorpayload.TerminalEnvelopeMaxTTL)) {
+		return fmt.Errorf("%w: terminal envelope validity exceeds the maximum", ErrUnauthenticatedCommand)
+	}
+	if err := h.verifyOperatorEnvelope(cmd, content, operatorpayload.TerminalShell); err != nil {
+		h.logger.Warn("open_terminal: operator envelope rejected",
+			"command_id", cmd.ID,
+			"error", logging.SanitizeLogValue(err.Error()))
+		return err
 	}
 
 	// Validate against the platform allowlist BEFORE touching shell.Factory.

@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
 
 // ---------------------------------------------------------------------------
@@ -93,15 +95,40 @@ var _ TerminalDialer = (*recordingDialer)(nil)
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newOpenTerminalHandler(t *testing.T) *Handler {
+// newOpenTerminalHandler builds a handler (StewardID "steward-test") that trusts the
+// returned operator signing certificate for terminal-open envelopes.
+func newOpenTerminalHandler(t *testing.T) (*Handler, *cert.Certificate) {
 	t.Helper()
-	h, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  noopStatus,
-		Logger:    newTestLogger(t),
-	})
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	return newHandlerWithSigning(t, nil, true, caPool), signer
+}
+
+// terminalParams returns open_terminal params carrying an X.509-signed envelope over
+// content with envelope shell envShell, targeted at targets.
+func terminalParams(t *testing.T, signer *cert.Certificate, content []byte, envShell string, targets []string, expiresAt time.Time) map[string]interface{} {
+	t.Helper()
+	params := signedActionParams(t, signer, content, targets, sigTestNonce(t), expiresAt)
+	// signedActionParams signs with ActionShell; re-sign with the requested shell.
+	env := operatorpayload.Envelope{Content: content, Shell: envShell, Targets: targets,
+		Nonce: params["nonce"].(string), ExpiresAt: expiresAt}
+	canonical, err := operatorpayload.CanonicalBytes(env)
 	require.NoError(t, err)
-	return h
+	params["signature_value"] = sigTestSignWithCert(t, signer.PrivateKeyPEM, canonical)
+	return params
+}
+
+// validTerminalParams signs a terminal-open envelope for steward-test and shell sh.
+func validTerminalParams(t *testing.T, signer *cert.Certificate, sh, sessionID string) map[string]interface{} {
+	t.Helper()
+	content, err := operatorpayload.TerminalContent("steward-test", sh)
+	require.NoError(t, err)
+	params := terminalParams(t, signer, content, operatorpayload.TerminalShell, []string{"steward-test"}, time.Now().Add(time.Minute))
+	params["session_id"] = sessionID
+	params["shell"] = sh
+	params["cols"] = float64(120)
+	params["rows"] = float64(40)
+	return params
 }
 
 // allowedShell returns a shell name that is valid on the current platform.
@@ -116,87 +143,149 @@ func allowedShell() string {
 // Tests
 // ---------------------------------------------------------------------------
 
-// TestOpenTerminal_InvalidShell_Rejected verifies that an unsupported shell in
-// Command.params is rejected synchronously without ever calling TerminalDialer.Dial.
+// TestOpenTerminal_NoProof_Rejected: a command with no operator proof never dials.
+func TestOpenTerminal_NoProof_Rejected(t *testing.T) {
+	dialer := newRecordingDialer()
+	h, _ := newOpenTerminalHandler(t)
+
+	cmd := &cpTypes.Command{ID: "ot-noproof", StewardID: "steward-test", Params: map[string]interface{}{
+		"session_id": "sess-001", "shell": allowedShell(), "cols": float64(80), "rows": float64(24),
+	}}
+	err := h.handleOpenTerminal(context.Background(), cmd, dialer)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	assert.Empty(t, dialer.dialCalls())
+}
+
+// TestOpenTerminal_InvalidShell_Rejected: a correctly signed but non-allowlisted shell
+// is still refused by the allowlist, without dialing.
 func TestOpenTerminal_InvalidShell_Rejected(t *testing.T) {
 	dialer := newRecordingDialer()
-	h := newOpenTerminalHandler(t)
-	h.RegisterOpenTerminalHandler(dialer)
+	h, signer := newOpenTerminalHandler(t)
 
-	sc := testSignedCommandWithParams("ot-bad-shell-001", cpTypes.CommandOpenTerminal, map[string]interface{}{
-		"session_id": "sess-001",
-		"shell":      "/bin/evil-shell",
-		"cols":       float64(80),
-		"rows":       float64(24),
-	})
-
-	require.NoError(t, h.HandleCommand(context.Background(), sc))
-	h.Wait()
-
-	// The command must have failed (EventCommandFailed) because the handler returned an error.
-	// The dialer must never have been called.
+	params := validTerminalParams(t, signer, "/bin/evil-shell", "sess-001")
+	err := h.handleOpenTerminal(context.Background(), &cpTypes.Command{ID: "ot-bad-shell", StewardID: "steward-test", Params: params}, dialer)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported shell")
 	assert.Empty(t, dialer.dialCalls(), "Dial must not be called for a non-allowlisted shell")
 }
 
-// TestOpenTerminal_ValidShell_DialerCalled verifies that a valid shell param causes
-// TerminalDialer.Dial to be invoked with the correct session_id, shell, cols, and rows.
-func TestOpenTerminal_ValidShell_DialerCalled(t *testing.T) {
+// TestOpenTerminal_ValidEnvelope_DialerCalledOnce: a valid X.509 terminal envelope dials
+// once with the expected values; replaying the same values is rejected (nonce reuse).
+func TestOpenTerminal_ValidEnvelope_DialerCalledOnce(t *testing.T) {
 	dialer := newBlockingDialer()
-	h := newOpenTerminalHandler(t)
+	h, signer := newOpenTerminalHandler(t)
 	h.RegisterOpenTerminalHandler(dialer)
 
-	sc := testSignedCommandWithParams("ot-valid-001", cpTypes.CommandOpenTerminal, map[string]interface{}{
-		"session_id": "sess-abc",
-		"shell":      allowedShell(),
-		"cols":       float64(120),
-		"rows":       float64(40),
-	})
+	params := validTerminalParams(t, signer, allowedShell(), "sess-abc")
+	require.NoError(t, h.HandleCommand(context.Background(), testSignedCommandWithParams("ot-valid-001", cpTypes.CommandOpenTerminal, params)))
+	h.Wait()
 
-	require.NoError(t, h.HandleCommand(context.Background(), sc))
-	h.Wait() // waits for the executeCommand goroutine; bridge goroutine still blocking
-
-	// Wait for Dial to be called (bridge goroutine runs concurrently).
 	select {
 	case call := <-dialer.callCh:
-		assert.Equal(t, "sess-abc", call.SessionID)
-		assert.Equal(t, allowedShell(), call.Shell)
-		assert.Equal(t, 120, call.Cols)
-		assert.Equal(t, 40, call.Rows)
+		assert.Equal(t, dialCall{SessionID: "sess-abc", Shell: allowedShell(), Cols: 120, Rows: 40}, call)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for TerminalDialer.Dial to be called")
 	}
 
-	// Unblock the bridge goroutine so the test exits cleanly.
+	// Replay of the same signed values is a reused nonce.
+	err := h.handleOpenTerminal(context.Background(), &cpTypes.Command{ID: "ot-replay", StewardID: "steward-test", Params: params}, dialer)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	assert.Contains(t, err.Error(), "nonce already used")
+
+	dialer.allowReturn(nil)
+	assert.Len(t, dialer.dialCalls(), 1)
+}
+
+// TestOpenTerminal_WebAuthnEnvelope_DialerCalled: a real WebAuthn assertion over the
+// terminal content is accepted.
+func TestOpenTerminal_WebAuthnEnvelope_DialerCalled(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signingCert := sigTestSigningCert(t, ca)
+	priv, pubKey := sigTestWebAuthnKeypair(t)
+	credID := []byte("webauthn-cred-terminal-001")
+	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{sigTestAuthorizedEntry(credID, pubKey)})
+	h := newHandlerWithSigning(t, nil, true, caPool)
+	dialer := newBlockingDialer()
+
+	content, err := operatorpayload.TerminalContent("steward-test", allowedShell())
+	require.NoError(t, err)
+	params := sigTestWebAuthnAssertionParams(t, priv, credID, manifestJSON, content, operatorpayload.TerminalShell,
+		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(time.Minute))
+	delete(params, "script_content")
+	params["shell"] = allowedShell()
+	params["session_id"] = "sess-wa"
+	params["cols"] = float64(100)
+	params["rows"] = float64(30)
+
+	require.NoError(t, h.handleOpenTerminal(context.Background(), &cpTypes.Command{ID: "ot-wa", StewardID: "steward-test", Params: params}, dialer))
+	select {
+	case call := <-dialer.callCh:
+		assert.Equal(t, dialCall{SessionID: "sess-wa", Shell: allowedShell(), Cols: 100, Rows: 30}, call)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for TerminalDialer.Dial")
+	}
 	dialer.allowReturn(nil)
 }
 
-// TestOpenTerminal_DefaultShell_UsedWhenOmitted verifies that when no shell is
-// provided in params the platform default shell is used and is allowlist-valid.
-func TestOpenTerminal_DefaultShell_UsedWhenOmitted(t *testing.T) {
-	dialer := newBlockingDialer()
-	h := newOpenTerminalHandler(t)
-	h.RegisterOpenTerminalHandler(dialer)
-
-	sc := testSignedCommandWithParams("ot-default-shell-001", cpTypes.CommandOpenTerminal, map[string]interface{}{
-		"session_id": "sess-def",
-		// shell omitted intentionally
-	})
-
-	require.NoError(t, h.HandleCommand(context.Background(), sc))
-	h.Wait()
-
-	select {
-	case call := <-dialer.callCh:
-		assert.NotEmpty(t, call.Shell, "shell must not be empty when default is used")
-		assert.Equal(t, allowedShell(), call.Shell,
-			"default shell must match platform default")
-		assert.Equal(t, 80, call.Cols, "default cols must be 80 when omitted")
-		assert.Equal(t, 24, call.Rows, "default rows must be 24 when omitted")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for TerminalDialer.Dial with default shell")
+// TestOpenTerminal_BadEnvelopes_Rejected: every defective envelope is refused with
+// ErrUnauthenticatedCommand and never dials.
+func TestOpenTerminal_BadEnvelopes_Rejected(t *testing.T) {
+	sh := allowedShell()
+	otherShell := "powershell"
+	if sh == otherShell {
+		otherShell = "bash"
 	}
-
-	dialer.allowReturn(nil)
+	termContent := func(id, s string) []byte {
+		c, err := operatorpayload.TerminalContent(id, s)
+		require.NoError(t, err)
+		return c
+	}
+	steward := []string{"steward-test"}
+	cases := map[string]func(t *testing.T, signer *cert.Certificate) map[string]interface{}{
+		"expired": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			return terminalParams(t, s, termContent("steward-test", sh), operatorpayload.TerminalShell, steward, time.Now().Add(-time.Minute))
+		},
+		"ttl too long": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			return terminalParams(t, s, termContent("steward-test", sh), operatorpayload.TerminalShell, steward,
+				time.Now().Add(operatorpayload.TerminalEnvelopeMaxTTL+time.Hour))
+		},
+		"targets omit steward": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			return terminalParams(t, s, termContent("steward-test", sh), operatorpayload.TerminalShell, []string{"other"}, time.Now().Add(time.Minute))
+		},
+		"signed for other shell": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			return terminalParams(t, s, termContent("steward-test", otherShell), operatorpayload.TerminalShell, steward, time.Now().Add(time.Minute))
+		},
+		"signed for other steward": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			return terminalParams(t, s, termContent("steward-other", sh), operatorpayload.TerminalShell, steward, time.Now().Add(time.Minute))
+		},
+		"action shell": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			return terminalParams(t, s, termContent("steward-test", sh), operatorpayload.ActionShell, steward, time.Now().Add(time.Minute))
+		},
+		"empty shell": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			p := validTerminalParams(t, s, sh, "sess")
+			p["shell"] = ""
+			return p
+		},
+		"omitted shell": func(t *testing.T, s *cert.Certificate) map[string]interface{} {
+			p := validTerminalParams(t, s, sh, "sess")
+			delete(p, "shell")
+			return p
+		},
+	}
+	for name, build := range cases {
+		t.Run(name, func(t *testing.T) {
+			dialer := newRecordingDialer()
+			h, signer := newOpenTerminalHandler(t)
+			params := build(t, signer)
+			params["session_id"] = "sess"
+			if _, ok := params["shell"]; !ok && name != "omitted shell" {
+				params["shell"] = sh
+			}
+			err := h.handleOpenTerminal(context.Background(), &cpTypes.Command{ID: "ot-bad", StewardID: "steward-test", Params: params}, dialer)
+			require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+			assert.Empty(t, dialer.dialCalls())
+		})
+	}
 }
 
 // TestOpenTerminal_CommandCompletesBeforeBridgeDone verifies that handleOpenTerminal
@@ -204,8 +293,6 @@ func TestOpenTerminal_DefaultShell_UsedWhenOmitted(t *testing.T) {
 // is still running. This decouples the command handler timeout from the PTY session.
 func TestOpenTerminal_CommandCompletesBeforeBridgeDone(t *testing.T) {
 	dialer := newBlockingDialer()
-	h := newOpenTerminalHandler(t)
-	h.RegisterOpenTerminalHandler(dialer)
 
 	var commandCompletedAt atomic.Int64
 
@@ -215,20 +302,20 @@ func TestOpenTerminal_CommandCompletesBeforeBridgeDone(t *testing.T) {
 			commandCompletedAt.Store(time.Now().UnixNano())
 		}
 	}
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
 	h2, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  cb,
-		Logger:    newTestLogger(t),
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
 	})
 	require.NoError(t, err)
 	h2.RegisterOpenTerminalHandler(dialer)
 
-	sc := testSignedCommandWithParams("ot-timing-001", cpTypes.CommandOpenTerminal, map[string]interface{}{
-		"session_id": "sess-timing",
-		"shell":      allowedShell(),
-		"cols":       float64(80),
-		"rows":       float64(24),
-	})
+	sc := testSignedCommandWithParams("ot-timing-001", cpTypes.CommandOpenTerminal,
+		validTerminalParams(t, signer, allowedShell(), "sess-timing"))
 
 	require.NoError(t, h2.HandleCommand(context.Background(), sc))
 	h2.Wait() // returns once executeCommand goroutine completes (bridge still blocked)
