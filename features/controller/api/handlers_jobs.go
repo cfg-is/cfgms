@@ -158,6 +158,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		"target_count", len(targetIDs),
 		"batch_size", strings.ReplaceAll(strconv.Itoa(batchSize), "\n", ""))
 
+	// Build the response from the job as persisted, before the executor goroutine
+	// takes ownership of job. Execute mutates job (e.g. job.Status) concurrently,
+	// so the handler must not read job after the goroutine starts.
+	resp := createJobResponse{
+		JobID:       job.ID,
+		Status:      string(job.Status),
+		TargetCount: len(targetIDs),
+	}
+
 	// Start the executor asynchronously — the HTTP response returns immediately.
 	if s.batchJobExecutor != nil {
 		executor := s.batchJobExecutor
@@ -177,11 +186,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	s.writeResponse(w, http.StatusAccepted, createJobResponse{
-		JobID:       job.ID,
-		Status:      string(job.Status),
-		TargetCount: len(targetIDs),
-	})
+	s.writeResponse(w, http.StatusAccepted, resp)
 }
 
 // handleListJobs handles GET /api/v1/jobs.

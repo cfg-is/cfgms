@@ -9,12 +9,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/tenant"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -314,6 +316,87 @@ func TestHandleCreateJob_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{inScope}, job.Targets,
 		"explicit prefix must scope targets to client-1, excluding sibling client-2")
+}
+
+// recordingJobPublisher is a real batchjob.CommandPublisher that records the
+// stewards it is asked to dispatch to and reports each command as completed.
+type recordingJobPublisher struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (p *recordingJobPublisher) PublishCommandWithCallback(
+	_ context.Context, stewardID string, _ controlplaneTypes.CommandType,
+	_ map[string]interface{}, _ time.Duration,
+	onComplete func(event *controlplaneTypes.Event), _ func(),
+) (string, error) {
+	p.mu.Lock()
+	p.sent = append(p.sent, stewardID)
+	p.mu.Unlock()
+	onComplete(&controlplaneTypes.Event{Type: controlplaneTypes.EventCommandCompleted, StewardID: stewardID})
+	return "cmd-" + stewardID, nil
+}
+
+func (p *recordingJobPublisher) stewards() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := append([]string(nil), p.sent...)
+	sort.Strings(out)
+	return out
+}
+
+// wholeFleetQuery is a batchjob.FleetQuery that ignores the requested IDs and
+// returns every steward in the fleet, to prove the executor does not widen the
+// authorized set from what a fleet query hands back.
+type wholeFleetQuery struct{ ids []string }
+
+func (q *wholeFleetQuery) Lookup(_ context.Context, _ []string) ([]batchjob.StewardMeta, error) {
+	out := make([]batchjob.StewardMeta, len(q.ids))
+	for i, id := range q.ids {
+		out[i] = batchjob.StewardMeta{ID: id}
+	}
+	return out, nil
+}
+
+// TestHandleCreateJob_RealExecutor_DispatchesOnlyAuthorizedTargets runs the real
+// RollingBatchExecutor behind the handler. A root-scoped job whose selector names
+// one tenant prefix must dispatch to that tenant's stewards only, even though the
+// fleet also holds stewards in tenants outside the selector.
+func TestHandleCreateJob_RealExecutor_DispatchesOnlyAuthorizedTargets(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+	seedTenantTree(t, server)
+
+	authorized := registerActiveSteward(t, server.controllerService, "job-auth-c1", "client-1")
+	outsideB := registerActiveSteward(t, server.controllerService, "job-auth-b", "msp-b")
+	outsideAB := registerActiveSteward(t, server.controllerService, "job-auth-ab", "msp-ab")
+
+	pub := &recordingJobPublisher{}
+	fleetIDs := []string{authorized, outsideB, outsideAB}
+	exec := batchjob.NewRollingBatchExecutor(store, &wholeFleetQuery{ids: fleetIDs}, pub, nil, logging.NewNoopLogger())
+	server.batchJobExecutor = exec
+
+	rec := postCreateJobAs(server, adminPrincipal(), `{"selector":"client-1/all","batch_size":10}`)
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	var apiResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
+	dataMap, ok := apiResp.Data.(map[string]interface{})
+	require.True(t, ok)
+	jobID, ok := dataMap["job_id"].(string)
+	require.True(t, ok)
+
+	require.Eventually(t, func() bool {
+		job, err := store.GetBatchJob(context.Background(), jobID)
+		return err == nil && job.Status == batchjob.BatchJobStatusCompleted
+	}, 5*time.Second, 10*time.Millisecond, "job must complete")
+
+	assert.Equal(t, []string{authorized}, pub.stewards(),
+		"only the steward the handler authorized may receive a command")
+	job, err := store.GetBatchJob(context.Background(), jobID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{authorized}, job.Targets)
 }
 
 // ── handleGetJob: auth guard ──────────────────────────────────────────────────

@@ -4,6 +4,8 @@ package batchjob_test
 
 import (
 	"context"
+	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -13,10 +15,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/controller/commands"
-	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
-	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -143,53 +143,41 @@ func (p *executorTestCP) sentWithParam(key, value string) []*controlplaneTypes.S
 // prevent the cycle: batchjob → fleet → business → batchjob.
 // ----------------------------------------------------------------------------
 
-type fleetQueryAdapter struct {
-	q fleet.FleetQuery
+// recordingFleetQuery is a real FleetQuery that serves metadata from a fixed
+// fleet and records every Lookup call. It deliberately holds more stewards
+// than any job targets, so a lookup that is wider than requested is visible.
+type recordingFleetQuery struct {
+	mu     sync.Mutex
+	fleet  []batchjob.StewardMeta
+	lookup [][]string
+	// err, when set, is returned by every Lookup call (fleet source unavailable).
+	err error
 }
 
-func (a *fleetQueryAdapter) Search(ctx context.Context, selector, tenantID string) ([]batchjob.StewardMeta, error) {
-	filter, _, err := fleetSelector.Parse(selector)
-	if err != nil {
-		return nil, err
+func (q *recordingFleetQuery) Lookup(_ context.Context, ids []string) ([]batchjob.StewardMeta, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.lookup = append(q.lookup, append([]string(nil), ids...))
+	if q.err != nil {
+		return nil, q.err
 	}
-	filter.TenantID = tenantID
-	results, err := a.q.Search(ctx, filter)
-	if err != nil {
-		return nil, err
-	}
-	metas := make([]batchjob.StewardMeta, len(results))
-	for i, r := range results {
-		metas[i] = batchjob.StewardMeta{
-			ID:            r.ID,
-			DNAAttributes: r.DNAAttributes,
-		}
-	}
-	return metas, nil
+	// Intentionally returns the whole fleet: the executor must not trust it
+	// to choose recipients.
+	return append([]batchjob.StewardMeta(nil), q.fleet...), nil
 }
 
-type staticFleetProvider struct {
-	stewards []fleet.StewardData
+func (q *recordingFleetQuery) calls() [][]string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([][]string(nil), q.lookup...)
 }
 
-func (p *staticFleetProvider) GetAllStewards() []fleet.StewardData { return p.stewards }
-
-func makeStewards(ids ...string) []fleet.StewardData {
-	out := make([]fleet.StewardData, len(ids))
-	for i, id := range ids {
-		out[i] = fleet.StewardData{
-			ID:            id,
-			TenantID:      "tenant-1",
-			Status:        "online",
-			LastHeartbeat: time.Now(),
-		}
+func newTestFleetQuery(ids ...string) *recordingFleetQuery {
+	q := &recordingFleetQuery{}
+	for _, id := range ids {
+		q.fleet = append(q.fleet, batchjob.StewardMeta{ID: id})
 	}
-	return out
-}
-
-func newTestFleetQuery(ids ...string) batchjob.FleetQuery {
-	return &fleetQueryAdapter{
-		q: fleet.NewMemoryQuery(&staticFleetProvider{stewards: makeStewards(ids...)}),
-	}
+	return q
 }
 
 // ----------------------------------------------------------------------------
@@ -271,6 +259,7 @@ type executorFixture struct {
 	store     batchjob.BatchJobStore
 	publisher *commands.Publisher
 	executor  *batchjob.RollingBatchExecutor
+	ids       []string
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
@@ -305,6 +294,7 @@ func newExecutorFixture(t *testing.T, stewardIDs ...string) *executorFixture {
 		store:     store,
 		publisher: pub,
 		executor:  exec,
+		ids:       stewardIDs,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -364,6 +354,7 @@ func TestRollingBatchExecutor_SequentialBatches(t *testing.T) {
 	defer f.cleanup()
 
 	job := newPendingJob("job-seq", 2)
+	job.Targets = f.ids
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
 	d := f.driveAllSucceed(t)
@@ -399,6 +390,7 @@ func TestRollingBatchExecutor_FailurePausesBatchZero(t *testing.T) {
 	defer f.cleanup()
 
 	job := newPendingJob("job-fail", 2)
+	job.Targets = f.ids
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
 	d := f.driveFirstFails(t)
@@ -430,6 +422,7 @@ func TestRollingBatchExecutor_AllCompleted(t *testing.T) {
 	defer f.cleanup()
 
 	job := newPendingJob("job-all", 10) // batch size > steward count → single batch
+	job.Targets = f.ids
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
 	d := f.driveAllSucceed(t)
@@ -445,23 +438,158 @@ func TestRollingBatchExecutor_AllCompleted(t *testing.T) {
 	assert.Len(t, got.Steps[0].StewardIDs, 3)
 }
 
-// TestRollingBatchExecutor_TargetsPersisted verifies that Execute resolves and
-// persists the fleet selector's resolved steward IDs in job.Targets.
-func TestRollingBatchExecutor_TargetsPersisted(t *testing.T) {
+// sentStewards returns the sorted steward IDs that received a command.
+func (p *executorTestCP) sentStewards() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var ids []string
+	for _, cmd := range p.sent {
+		ids = append(ids, cmd.Command.StewardID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// recordingQuorumChecker is a QuorumChecker that records the stewards it was handed
+// and returns them as one batch.
+type recordingQuorumChecker struct {
+	got []batchjob.StewardMeta
+}
+
+func (c *recordingQuorumChecker) Partition(stewards []batchjob.StewardMeta, _ int) [][]string {
+	c.got = stewards
+	ids := make([]string, len(stewards))
+	for i, s := range stewards {
+		ids[i] = s.ID
+	}
+	return [][]string{ids}
+}
+
+// TestRollingBatchExecutor_TargetsAreAuthorizedSet verifies that Execute
+// dispatches only to job.Targets and persists them unchanged, even when the
+// fleet query knows about many more stewards and the job's TenantID is empty.
+func TestRollingBatchExecutor_TargetsAreAuthorizedSet(t *testing.T) {
+	for _, tenantID := range []string{"tenant-1", ""} {
+		t.Run("tenant="+tenantID, func(t *testing.T) {
+			f := newExecutorFixture(t, "s-a", "s-b", "s-c", "s-d", "s-e")
+			defer f.cleanup()
+
+			job := newPendingJob("job-targets", 10)
+			job.TenantID = tenantID
+			job.Targets = []string{"s-a", "s-c"}
+			require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+			require.NoError(t, f.store.UpdateBatchTargets(f.ctx, job.ID, job.Targets))
+
+			d := f.driveAllSucceed(t)
+			defer d.stop()
+
+			require.NoError(t, f.executor.Execute(f.ctx, job))
+
+			assert.Equal(t, []string{"s-a", "s-c"}, f.cp.sentStewards())
+			assert.Equal(t, []string{"s-a", "s-c"}, job.Targets)
+			got, err := f.store.GetBatchJob(f.ctx, job.ID)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"s-a", "s-c"}, got.Targets)
+			assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+		})
+	}
+}
+
+// TestRollingBatchExecutor_QuorumCheckerOnlyTargets verifies the quorum checker
+// is handed metadata for the targets only, and an unknown target is still
+// partitioned (with no metadata) and dispatched.
+func TestRollingBatchExecutor_QuorumCheckerOnlyTargets(t *testing.T) {
 	f := newExecutorFixture(t, "s-a", "s-b", "s-c")
 	defer f.cleanup()
+	qc := &recordingQuorumChecker{}
+	fq := newTestFleetQuery("s-a", "s-b", "s-c")
+	exec := batchjob.NewRollingBatchExecutor(f.store, fq, f.publisher, qc, logging.NewNoopLogger())
 
-	job := newPendingJob("job-targets", 10)
+	job := newPendingJob("job-quorum", 10)
+	job.Targets = []string{"s-b", "s-ghost"}
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
 	d := f.driveAllSucceed(t)
 	defer d.stop()
 
+	require.NoError(t, exec.Execute(f.ctx, job))
+
+	var partitioned []string
+	for _, m := range qc.got {
+		partitioned = append(partitioned, m.ID)
+	}
+	assert.Equal(t, []string{"s-b", "s-ghost"}, partitioned)
+	assert.Equal(t, []string{"s-b", "s-ghost"}, f.cp.sentStewards())
+}
+
+// TestRollingBatchExecutor_FleetQueryGetsTargetIDsOnly verifies the fleet query
+// is called with the target IDs (deduplicated) and never with the selector.
+func TestRollingBatchExecutor_FleetQueryGetsTargetIDsOnly(t *testing.T) {
+	f := newExecutorFixture(t, "s-a", "s-b")
+	defer f.cleanup()
+	fq := newTestFleetQuery("s-a", "s-b")
+	exec := batchjob.NewRollingBatchExecutor(f.store, fq, f.publisher, &recordingQuorumChecker{}, logging.NewNoopLogger())
+
+	job := newPendingJob("job-lookup", 10)
+	job.Selector = "tag:never-resolved"
+	job.Targets = []string{"s-a", "s-a", "s-b"}
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	d := f.driveAllSucceed(t)
+	defer d.stop()
+
+	require.NoError(t, exec.Execute(f.ctx, job))
+
+	assert.Equal(t, [][]string{{"s-a", "s-b"}}, fq.calls())
+	assert.Equal(t, []string{"s-a", "s-b"}, f.cp.sentStewards(), "duplicates dispatched once")
+}
+
+// TestRollingBatchExecutor_FleetLookupErrorDispatchesNothing verifies that when
+// the quorum-aware path cannot look up target metadata, Execute returns the
+// lookup error, dispatches no commands, and leaves the job pending.
+func TestRollingBatchExecutor_FleetLookupErrorDispatchesNothing(t *testing.T) {
+	f := newExecutorFixture(t, "s-a", "s-b")
+	defer f.cleanup()
+	lookupErr := errors.New("fleet source unavailable")
+	fq := newTestFleetQuery("s-a", "s-b")
+	fq.err = lookupErr
+	qc := &recordingQuorumChecker{}
+	exec := batchjob.NewRollingBatchExecutor(f.store, fq, f.publisher, qc, logging.NewNoopLogger())
+
+	job := newPendingJob("job-lookup-err", 10)
+	job.Targets = []string{"s-a", "s-b"}
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	err := exec.Execute(f.ctx, job)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, lookupErr)
+	assert.Contains(t, err.Error(), "fleet lookup")
+
+	assert.Equal(t, [][]string{{"s-a", "s-b"}}, fq.calls(), "lookup attempted with the targets")
+	assert.Empty(t, qc.got, "quorum checker must not partition after a failed lookup")
+	assert.Zero(t, f.cp.sentCount(), "no commands dispatched after a failed lookup")
+
+	got, getErr := f.store.GetBatchJob(f.ctx, job.ID)
+	require.NoError(t, getErr)
+	assert.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+	assert.Empty(t, got.Steps)
+}
+
+// TestRollingBatchExecutor_EmptyTargetsCompletes verifies a job with no targets
+// completes without dispatching to anyone in the fleet.
+func TestRollingBatchExecutor_EmptyTargetsCompletes(t *testing.T) {
+	f := newExecutorFixture(t, "s-a", "s-b")
+	defer f.cleanup()
+
+	job := newPendingJob("job-empty", 10)
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
 	require.NoError(t, f.executor.Execute(f.ctx, job))
 
-	got, err := f.store.GetBatchJob(f.ctx, "job-targets")
+	assert.Zero(t, f.cp.sentCount())
+	got, err := f.store.GetBatchJob(f.ctx, job.ID)
 	require.NoError(t, err)
-	assert.Len(t, got.Targets, 3, "resolved targets must be persisted")
+	assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
 }
 
 // TestRollingBatchExecutor_RollbackOnBatchFailure is the REQUIRED test:
@@ -473,6 +601,7 @@ func TestRollingBatchExecutor_RollbackOnBatchFailure(t *testing.T) {
 	defer f.cleanup()
 
 	job := newPendingJob("job-rollback", 2)
+	job.Targets = f.ids
 	job.Config.PreviousConfigRef = "v1"
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
@@ -525,6 +654,7 @@ func TestRollingBatchExecutor_NoRollbackWhenNoPreviousConfigRef(t *testing.T) {
 	defer f.cleanup()
 
 	job := newPendingJob("job-no-rollback", 2)
+	job.Targets = f.ids
 	// PreviousConfigRef intentionally left empty.
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
@@ -561,6 +691,7 @@ func TestRollingBatchExecutor_RollbackBatchZeroFailurePauses(t *testing.T) {
 	defer f.cleanup()
 
 	job := newPendingJob("job-rollback-batch0", 2)
+	job.Targets = f.ids
 	job.Config.PreviousConfigRef = "v1" // baseline set → routes through rollbackAppliedSteps
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
@@ -600,6 +731,7 @@ func TestRollingBatchExecutor_RollbackDispatchFailureTransitionsJobFailed(t *tes
 	defer f.cleanup()
 
 	job := newPendingJob("job-rollback-fail", 2)
+	job.Targets = f.ids
 	job.Config.PreviousConfigRef = "v1"
 	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
 
@@ -676,6 +808,7 @@ func TestRollingBatchExecutor_DispatchBatch_StampsRaftTerm(t *testing.T) {
 	)
 
 	job := newPendingJob("job-term", 10)
+	job.Targets = []string{"s-0", "s-1", "s-2"}
 	require.NoError(t, store.CreateBatchJob(ctx, job))
 
 	d := newCompletionDriver(t, cp, pub, func(_ string) bool { return false })
@@ -723,6 +856,7 @@ func TestRollingBatchExecutor_ContextCancellation(t *testing.T) {
 	)
 
 	job := newPendingJob("job-cancel", 10)
+	job.Targets = []string{"s-0"}
 	require.NoError(t, store.CreateBatchJob(ctx, job))
 
 	// Run Execute in a goroutine (no driver — commands never complete).

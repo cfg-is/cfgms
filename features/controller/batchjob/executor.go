@@ -13,16 +13,17 @@ import (
 
 const batchStepTimeout = 10 * time.Minute
 
-// FleetQuery is the selector resolution interface the executor depends on.
+// FleetQuery is the steward metadata lookup interface the executor depends on.
 // Defined here (not in the fleet package) to avoid the import cycle:
 //
 //	batchjob → fleet → business → batchjob
 //
 // The real wiring uses a thin adapter around fleet.FleetQuery; tests use a
-// staticFleetQuery that returns a fixed list of StewardMeta.
+// static fleet query that returns a fixed list of StewardMeta.
 type FleetQuery interface {
-	// Search resolves selector scoped to tenantID and returns matching steward metadata.
-	Search(ctx context.Context, selector, tenantID string) ([]StewardMeta, error)
+	// Lookup returns metadata for the given steward IDs. IDs the fleet source
+	// does not know are omitted; the result is never wider than ids.
+	Lookup(ctx context.Context, ids []string) ([]StewardMeta, error)
 }
 
 // QuorumChecker partitions a steward list so no batch violates cluster-quorum rules.
@@ -80,34 +81,33 @@ func NewRollingBatchExecutor(
 // Execute runs the rolling batch job to completion (or stops on failure).
 //
 // Algorithm:
-//  1. Resolve job.Selector via fleetQuery scoped to job.TenantID; persist Targets.
-//  2. Partition steward IDs into batches (quorum-aware or naive round-robin).
+//  1. Take job.Targets (deduplicated) as the authorized recipient set. It is never
+//     re-resolved from job.Selector or job.TenantID.
+//  2. Look up metadata for those IDs and partition them into batches (quorum-aware
+//     or naive round-robin). IDs without metadata are still dispatched.
 //  3. For each batch: dispatch CommandSyncConfig with callback; wait for all results.
 //     All succeeded → advance. Any failed → rollback applied steps if PreviousConfigRef
 //     is set (job → rolled_back or failed), else set job status paused; return nil.
 //  4. All batches done → set job status completed.
+//
+// job.Targets is the set the create handler authorized. Execute sends commands to
+// those stewards only and never replaces the persisted targets.
 func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error {
-	// 1. Resolve fleet selector scoped to the job's tenant.
-	stewards, err := e.fleetQuery.Search(ctx, job.Selector, job.TenantID)
-	if err != nil {
-		return fmt.Errorf("executor: fleet search: %w", err)
-	}
-	ids := make([]string, len(stewards))
-	for i, s := range stewards {
-		ids[i] = s.ID
-	}
-	job.Targets = ids
-
-	if err := e.store.UpdateBatchTargets(ctx, job.ID, ids); err != nil {
-		return fmt.Errorf("executor: persist targets: %w", err)
-	}
+	// 1. The authorized set, without duplicates.
+	ids := dedupeIDs(job.Targets)
 
 	// 2. Partition into batches.
 	var batches [][]string
-	if e.quorumCheck != nil {
-		batches = e.quorumCheck.Partition(stewards, job.Config.BatchSize)
-	} else {
-		batches = naivePartition(ids, job.Config.BatchSize)
+	if len(ids) > 0 {
+		if e.quorumCheck != nil {
+			found, err := e.fleetQuery.Lookup(ctx, ids)
+			if err != nil {
+				return fmt.Errorf("executor: fleet lookup: %w", err)
+			}
+			batches = e.quorumCheck.Partition(orderedMeta(ids, found), job.Config.BatchSize)
+		} else {
+			batches = naivePartition(ids, job.Config.BatchSize)
+		}
 	}
 
 	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusRunning); err != nil {
@@ -260,4 +260,40 @@ func naivePartition(ids []string, batchSize int) [][]string {
 		ids = ids[size:]
 	}
 	return batches
+}
+
+// dedupeIDs returns ids without duplicates or empty entries, preserving order.
+func dedupeIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// orderedMeta returns one StewardMeta per id, in ids order. Metadata the lookup
+// did not return (or returned for an ID outside ids) is ignored; a missing ID
+// gets a bare StewardMeta so it is still partitioned and dispatched.
+func orderedMeta(ids []string, found []StewardMeta) []StewardMeta {
+	byID := make(map[string]StewardMeta, len(found))
+	for _, m := range found {
+		byID[m.ID] = m
+	}
+	out := make([]StewardMeta, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			out = append(out, m)
+		} else {
+			out = append(out, StewardMeta{ID: id})
+		}
+	}
+	return out
 }
