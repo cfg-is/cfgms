@@ -71,14 +71,14 @@ func platformCACertPath() string {
 
 // prepareDataDir ensures the steward data directory (the parent of the pinned
 // CA cert, %ProgramData%\cfgms, respecting CFGMS_INSTALL_PREFIX) exists and is
-// restricted to SYSTEM and Administrators. Entries owned by the installing
-// administrator's own account are handed to Administrators, so the SYSTEM
-// steward's start-up check (security.EnsureAdminOnlyDir) accepts them. It
-// refuses a directory owned by any other principal, so the CA cert is never
-// written into a tree a local user controls.
+// restricted to SYSTEM and Administrators. Entries owned by a member of
+// Administrators, such as the installing administrator's own account, are
+// handed to Administrators (security.AdoptAdminOnlyDir), the same takeover the
+// SYSTEM steward performs at start. It refuses a directory owned by any other
+// principal, so the CA cert is never written into a tree a local user controls.
 func prepareDataDir() error {
 	dir := filepath.Dir(platformCACertPath())
-	if err := security.AdoptAdminOnlyDir(dir); err != nil {
+	if _, err := security.AdoptAdminOnlyDir(dir); err != nil {
 		return fmt.Errorf("cannot secure steward data directory %s: %w", dir, err)
 	}
 	return nil

@@ -266,7 +266,8 @@ func TestAdoptAdminOnlyDir_AdoptsCallerOwnedTree(t *testing.T) {
 	file := filepath.Join(child, "ca.crt")
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0600))
 
-	require.NoError(t, AdoptAdminOnlyDir(dir))
+	_, err := AdoptAdminOnlyDir(dir)
+	require.NoError(t, err)
 
 	for _, p := range []string{dir, child, file} {
 		assert.Equal(t, sidAdministrators, ownerSID(t, p), "%s must be handed to Administrators", p)
@@ -282,7 +283,8 @@ func TestAdoptAdminOnlyDir_RefusesEntryOwnedByAnotherPrincipal(t *testing.T) {
 	require.NoError(t, os.WriteFile(planted, []byte("x"), 0600))
 	setOwnerWithRestorePrivilege(t, planted, sidUsers)
 
-	assert.ErrorIs(t, AdoptAdminOnlyDir(dir), ErrUntrustedDirOwner)
+	_, err := AdoptAdminOnlyDir(dir)
+	assert.ErrorIs(t, err, ErrUntrustedDirOwner)
 	assert.Equal(t, sidUsers, ownerSID(t, planted), "an entry another principal owns must never be adopted")
 }
 
@@ -291,6 +293,112 @@ func TestAdoptAdminOnlyDir_RefusesRootOwnedByAnotherPrincipal(t *testing.T) {
 	require.NoError(t, os.Mkdir(dir, 0755))
 	setOwnerWithRestorePrivilege(t, dir, sidUsers)
 
-	assert.ErrorIs(t, AdoptAdminOnlyDir(dir), ErrUntrustedDirOwner)
+	_, err := AdoptAdminOnlyDir(dir)
+	assert.ErrorIs(t, err, ErrUntrustedDirOwner)
 	assert.Equal(t, sidUsers, ownerSID(t, dir))
+}
+
+// localAccountSID returns the SID of the well-known local account sidType (the
+// built-in Administrator or Guest) in this machine's account domain.
+func localAccountSID(t *testing.T, sidType windows.WELL_KNOWN_SID_TYPE) *windows.SID {
+	t.Helper()
+	name, err := windows.ComputerName()
+	require.NoError(t, err)
+	domain, _, accType, err := windows.LookupSID("", name)
+	require.NoError(t, err)
+	require.Equal(t, uint32(windows.SidTypeDomain), accType, "%s must name the local account domain", name)
+	sid, err := windows.CreateWellKnownDomainSid(sidType, domain)
+	require.NoError(t, err)
+	return sid
+}
+
+// otherAdministratorsMember returns the built-in local Administrator account,
+// which Windows keeps in BUILTIN\Administrators (it cannot be removed), as a
+// member of Administrators that is not the test's own account.
+func otherAdministratorsMember(t *testing.T) string {
+	t.Helper()
+	sid := localAccountSID(t, windows.WinAccountAdministratorSid)
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	require.NoError(t, err)
+	if user.User.Sid.Equals(sid) {
+		t.Skip("the test runs as the built-in Administrator, so it has no other Administrators member to own the tree")
+	}
+	return sid.String()
+}
+
+// standardUser returns the built-in local Guest account, a real user account
+// that is not a member of Administrators.
+func standardUser(t *testing.T) string {
+	t.Helper()
+	return localAccountSID(t, windows.WinAccountGuestSid).String()
+}
+
+func TestIsAdministratorsMember(t *testing.T) {
+	admin := localAccountSID(t, windows.WinAccountAdministratorSid)
+	member, err := isAdministratorsMember(admin)
+	require.NoError(t, err)
+	assert.True(t, member, "the built-in Administrator is always a member of Administrators")
+
+	member, err = isAdministratorsMember(localAccountSID(t, windows.WinAccountGuestSid))
+	require.NoError(t, err)
+	assert.False(t, member, "Guest is not a member of Administrators")
+
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	require.NoError(t, err)
+	member, _ = isAdministratorsMember(users)
+	assert.False(t, member, "a group is not an account whose membership can be granted")
+}
+
+func TestAdoptAdminOnlyDir_AdoptsTreeOwnedByAnotherAdministratorsMember(t *testing.T) {
+	// An upgraded host: files an administrator (not the account running the
+	// steward) wrote under the data directory.
+	adminMember := otherAdministratorsMember(t)
+	dir := filepath.Join(t.TempDir(), "cfgms")
+	require.NoError(t, os.Mkdir(dir, 0755))
+	child := filepath.Join(dir, "certs")
+	require.NoError(t, os.Mkdir(child, 0755))
+	file := filepath.Join(child, "ca.crt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0600))
+	setOwnerAdministrators(t, dir)
+	for _, p := range []string{child, file} {
+		setOwnerWithRestorePrivilege(t, p, adminMember)
+	}
+
+	adopted, err := AdoptAdminOnlyDir(dir)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{child, file}, adopted, "every taken-over entry must be reported")
+	for _, p := range []string{child, file} {
+		assert.Equal(t, sidAdministrators, ownerSID(t, p), "%s must be handed to Administrators", p)
+		sids, protected := daclSIDs(t, p)
+		assert.True(t, protected, "%s must get a protected DACL", p)
+		assert.ElementsMatch(t, []string{sidSystem, sidAdministrators}, sids, p)
+	}
+	require.NoError(t, EnsureAdminOnlyDir(dir), "the taken-over tree must pass the strict check")
+}
+
+func TestAdoptAdminOnlyDir_RefusesEntryOwnedByStandardUser(t *testing.T) {
+	user := standardUser(t)
+	dir := filepath.Join(t.TempDir(), "cfgms")
+	require.NoError(t, os.Mkdir(dir, 0755))
+	setOwnerAdministrators(t, dir)
+	planted := filepath.Join(dir, "planted.crt")
+	require.NoError(t, os.WriteFile(planted, []byte("x"), 0600))
+	setOwnerWithRestorePrivilege(t, planted, user)
+
+	adopted, err := AdoptAdminOnlyDir(dir)
+	assert.ErrorIs(t, err, ErrUntrustedDirOwner)
+	assert.Empty(t, adopted)
+	assert.Equal(t, user, ownerSID(t, planted), "an entry a standard user owns must never be adopted")
+}
+
+func TestAdoptAdminOnlyDir_RefusesRootOwnedByStandardUser(t *testing.T) {
+	user := standardUser(t)
+	dir := filepath.Join(t.TempDir(), "cfgms")
+	require.NoError(t, os.Mkdir(dir, 0755))
+	setOwnerWithRestorePrivilege(t, dir, user)
+
+	_, err := AdoptAdminOnlyDir(dir)
+	assert.ErrorIs(t, err, ErrUntrustedDirOwner)
+	assert.Equal(t, user, ownerSID(t, dir))
 }

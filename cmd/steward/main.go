@@ -2701,15 +2701,27 @@ var stewardDataDirResolver = func() string {
 }
 
 // secureStewardDataDir restricts the Windows steward data directory
-// (%ProgramData%\cfgms) to SYSTEM and Administrators. If the directory is owned
-// by a non-admin principal the reason is logged and an error is returned so no
-// trust or identity material is loaded from it. No-op on other platforms.
+// (%ProgramData%\cfgms) to SYSTEM and Administrators. Entries owned by a member
+// of Administrators (for example files an administrator or an older installer
+// wrote) are taken over and each takeover is logged. If any entry is owned by
+// another principal the reason is logged and an error is returned so no trust
+// or identity material is loaded from it. No-op on other platforms.
 func secureStewardDataDir(logger logging.Logger) error {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
 	dir := stewardDataDirResolver()
-	if err := security.EnsureAdminOnlyDir(dir); err != nil {
+	adopted, err := security.AdoptAdminOnlyDir(dir)
+	for _, p := range adopted {
+		logger.Info("Took over steward data entry owned by a member of Administrators",
+			"path", logging.SanitizeLogValue(p))
+	}
+	if len(adopted) > 0 {
+		logger.Info("Assigned steward data entries to BUILTIN\\Administrators",
+			"count", len(adopted),
+			"path", logging.SanitizeLogValue(dir))
+	}
+	if err != nil {
 		logger.Error("Refusing to load trust and identity material from steward data directory",
 			"path", logging.SanitizeLogValue(dir),
 			"error", logging.SanitizeLogValue(err.Error()))

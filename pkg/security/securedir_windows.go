@@ -57,33 +57,48 @@ const shareAll = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FI
 // Administrators is refused (ErrUntrustedDirOwner / ErrUntrustedDirEntry).
 // Uses in-process Win32 security APIs only.
 func EnsureAdminOnlyDir(path string) error {
-	return ensureAdminOnlyDir(path, false)
+	_, err := ensureAdminOnlyDir(path, false)
+	return err
 }
 
-// AdoptAdminOnlyDir is EnsureAdminOnlyDir for the elevated installer. Before the
-// checks, every existing entry (path itself and everything below it, never
-// following reparse points) that is owned by the calling elevated user's own
-// account is reassigned to BUILTIN\Administrators. Windows makes an elevated
-// administrator's own account the owner of what it creates ("Object creator"),
-// so without this the SYSTEM steward's EnsureAdminOnlyDir would refuse the
-// files the install just wrote. Entries owned by any other principal are left
-// untouched and refused as EnsureAdminOnlyDir refuses them; a non-elevated
-// caller adopts nothing.
-func AdoptAdminOnlyDir(path string) error {
+// AdoptAdminOnlyDir is EnsureAdminOnlyDir for the steward's own data directory,
+// run by the installer and at every steward start. Before the checks, every
+// existing entry (path itself and everything below it, never following reparse
+// points) whose owner is a member of the local BUILTIN\Administrators group,
+// directly or through nested groups, is taken over: its owner becomes
+// BUILTIN\Administrators and it gets the protected admin-only DACL. Windows makes
+// an administrator's own account the owner of what it creates ("Object
+// creator"), so files an installer or an administrator wrote would otherwise be
+// refused by the SYSTEM steward. An Administrators member can already take
+// ownership of anything on the host, so adopting its entries hands control to
+// no one new. An entry owned by any other principal (a standard user, a
+// non-admin group, an account whose groups cannot be computed) is refused with
+// ErrUntrustedDirOwner, as EnsureAdminOnlyDir refuses it.
+//
+// It returns the paths it took over, for the caller to log.
+func AdoptAdminOnlyDir(path string) (adopted []string, err error) {
 	return ensureAdminOnlyDir(path, true)
 }
 
-func ensureAdminOnlyDir(path string, adopt bool) error {
+func ensureAdminOnlyDir(path string, adopt bool) ([]string, error) {
 	path = filepath.Clean(path)
 	created, err := createAdminOnlyDir(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var adopted []string
 	if adopt && !created {
-		if err := adoptCallerOwned(path); err != nil {
-			return err
+		a := &adopter{members: map[string]bool{}}
+		err := a.adoptTree(path)
+		if err != nil {
+			return a.adopted, err
 		}
+		adopted = a.adopted
 	}
+	return adopted, secureExistingOrCreated(path, created)
+}
+
+func secureExistingOrCreated(path string, created bool) error {
 
 	access := uint32(windows.READ_CONTROL | windows.WRITE_DAC)
 	if created {
@@ -256,11 +271,24 @@ func rootOwnerIsUntrusted(path string) bool {
 	return err == nil && !trusted
 }
 
-// adoptCallerOwned walks path and everything below it without following
-// reparse points and makes BUILTIN\Administrators the owner of each entry the
-// elevated caller's own account owns. A reparse point is refused.
-func adoptCallerOwned(path string) error {
-	isDir, err := adoptEntry(path)
+// adminOnlyFileDACLSDDL is adminOnlyDACLSDDL for a file, which has no children
+// to pass ACEs on to.
+const adminOnlyFileDACLSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// adopter takes over the Administrators-owned entries of one tree. members
+// caches the Administrators-membership answer per owner SID, since a tree is
+// usually owned by one or two accounts.
+type adopter struct {
+	members map[string]bool
+	adopted []string
+}
+
+// adoptTree walks path and everything below it without following reparse
+// points and takes over each entry whose owner is an Administrators member. A
+// reparse point, or an entry owned by anyone else who is not SYSTEM or
+// BUILTIN\Administrators, is refused.
+func (a *adopter) adoptTree(path string) error {
+	isDir, err := a.adoptEntry(path)
 	if err != nil || !isDir {
 		return err
 	}
@@ -269,22 +297,24 @@ func adoptCallerOwned(path string) error {
 		return fmt.Errorf("list directory %s: %w", path, err)
 	}
 	for _, e := range entries {
-		if err := adoptCallerOwned(filepath.Join(path, e.Name())); err != nil {
+		if err := a.adoptTree(filepath.Join(path, e.Name())); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// adoptEntry reassigns one entry to BUILTIN\Administrators if the elevated
-// caller's own account owns it, reading and writing the owner on one handle
-// that does not follow reparse points. It reports whether the entry is a plain
-// directory to descend into.
-func adoptEntry(path string) (isDir bool, err error) {
-	h, err := openHandleNoFollow(path, windows.READ_CONTROL|windows.WRITE_OWNER)
+// adoptEntry inspects one entry, and if an Administrators member owns it sets
+// its owner to BUILTIN\Administrators and its DACL to the protected admin-only
+// DACL, reading and writing on one handle that does not follow reparse points.
+// It reports whether the entry is a plain directory to descend into.
+func (a *adopter) adoptEntry(path string) (isDir bool, err error) {
+	writable := true
+	h, err := openHandleNoFollow(path, windows.READ_CONTROL|windows.WRITE_OWNER|windows.WRITE_DAC)
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		// Not ours to reassign; the checks that follow decide whether it is
-		// acceptable as it is.
+		// Not ours to reassign. If the owner is already trusted the checks
+		// that follow decide whether the entry is acceptable as it is.
+		writable = false
 		h, err = openHandleNoFollow(path, windows.READ_CONTROL)
 	}
 	if err != nil {
@@ -309,18 +339,57 @@ func adoptEntry(path string) (isDir bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("read owner of %s: %w", path, err)
 	}
-	if owner == nil || owner.IsWellKnown(windows.WinLocalSystemSid) ||
-		owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || !ownerIsElevatedCaller(owner) {
+	if owner != nil && (owner.IsWellKnown(windows.WinLocalSystemSid) ||
+		owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)) {
 		return isDir, nil
 	}
+	if owner == nil || !a.isMember(owner) {
+		return false, fmt.Errorf("%s is owned by a principal that is not SYSTEM or a member of Administrators: %w", path, ErrUntrustedDirOwner)
+	}
+	if !writable {
+		return false, fmt.Errorf("%s is owned by a member of Administrators but cannot be reassigned: %w", path, ErrUntrustedDirOwner)
+	}
+
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return false, fmt.Errorf("build Administrators SID: %w", err)
 	}
-	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+	daclSDDL := adminOnlyFileDACLSDDL
+	if isDir {
+		daclSDDL = adminOnlyDACLSDDL
+	}
+	dsd, err := windows.SecurityDescriptorFromString(daclSDDL)
+	if err != nil {
+		return false, fmt.Errorf("build admin-only security descriptor: %w", err)
+	}
+	dacl, _, err := dsd.DACL()
+	if err != nil {
+		return false, fmt.Errorf("read admin-only DACL: %w", err)
+	}
+	secInfo := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION |
+		windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, secInfo, admins, nil, dacl, nil); err != nil {
 		return false, fmt.Errorf("assign %s to Administrators: %w", path, err)
 	}
+	a.adopted = append(a.adopted, path)
 	return isDir, nil
+}
+
+// isMember reports whether owner is the elevated caller or a member of the
+// local Administrators group. A membership that cannot be computed counts as
+// not a member, so the entry is refused.
+func (a *adopter) isMember(owner *windows.SID) bool {
+	if ownerIsElevatedCaller(owner) {
+		return true
+	}
+	key := owner.String()
+	if m, ok := a.members[key]; ok {
+		return m
+	}
+	m, err := isAdministratorsMember(owner)
+	m = m && err == nil
+	a.members[key] = m
+	return m
 }
 
 // checkTree verifies every entry below root without following reparse points.

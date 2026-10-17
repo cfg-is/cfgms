@@ -12,7 +12,8 @@ func EnsureAdminOnlyDir(path string) error {
 	return nil
 }
 
-// AdoptAdminOnlyDir is a no-op outside Windows, like EnsureAdminOnlyDir.
-func AdoptAdminOnlyDir(path string) error {
-	return nil
+// AdoptAdminOnlyDir is a no-op outside Windows, like EnsureAdminOnlyDir. It
+// never adopts anything.
+func AdoptAdminOnlyDir(path string) (adopted []string, err error) {
+	return nil, nil
 }
