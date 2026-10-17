@@ -123,7 +123,8 @@ func TestDarwinManagerStatusNotInstalled(t *testing.T) {
 
 func TestGenerateLaunchdPlist(t *testing.T) {
 	token := "tok_plist_test_abc123"
-	plist := generateLaunchdPlist(token, "")
+	tokenPath := "/etc/cfgms/registration-token"
+	plist := generateLaunchdPlist(tokenPath, "")
 
 	assert.Contains(t, plist, "<?xml")
 	assert.Contains(t, plist, darwinServiceName)
@@ -136,36 +137,32 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 	assert.Contains(t, plist, darwinLauncherRoot)
 	assert.Contains(t, plist, "--child-args")
 	assert.NotContains(t, plist, darwinInstallPath+" --regtoken", "ProgramArguments must run the launcher, not the bare steward")
-	assert.Contains(t, plist, "--regtoken")
-	assert.Contains(t, plist, token)
+	assert.Contains(t, plist, "--regtoken-file "+tokenPath)
+	assert.NotContains(t, plist, "--regtoken ")
+	assert.NotContains(t, plist, token)
 	assert.Contains(t, plist, "<key>KeepAlive</key>")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>")
 	assert.Contains(t, plist, "<true/>")
 	// Without URL: --controller-url must not appear.
 	assert.NotContains(t, plist, "--controller-url")
-
-	// Token appears exactly once (no duplication).
-	count := strings.Count(plist, token)
-	assert.Equal(t, 1, count, "token should appear exactly once in plist")
+	assert.Equal(t, 1, strings.Count(plist, tokenPath), "token file path should appear exactly once")
 }
 
 func TestGenerateLaunchdPlistKeepAliveRequired(t *testing.T) {
-	plist := generateLaunchdPlist("tok_test", "")
+	plist := generateLaunchdPlist("/etc/cfgms/registration-token", "")
 	assert.Contains(t, plist, "<key>KeepAlive</key>", "KeepAlive required by acceptance criteria")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>", "RunAtLoad required by acceptance criteria")
 }
 
 func TestGenerateLaunchdPlistWithControllerURL(t *testing.T) {
-	token := "tok_url_test"
+	tokenPath := "/etc/cfgms/registration-token"
 	controllerURL := "https://ctrl.example.com"
-	plist := generateLaunchdPlist(token, controllerURL)
+	plist := generateLaunchdPlist(tokenPath, controllerURL)
 
 	assert.Contains(t, plist, "--controller-url")
 	assert.Contains(t, plist, controllerURL)
-	assert.Contains(t, plist, "--regtoken")
-	assert.Contains(t, plist, token)
-	// Token and URL each appear exactly once.
-	assert.Equal(t, 1, strings.Count(plist, token), "token should appear exactly once")
+	assert.Contains(t, plist, "--regtoken-file")
+	assert.Equal(t, 1, strings.Count(plist, tokenPath), "token file path should appear exactly once")
 	assert.Equal(t, 1, strings.Count(plist, controllerURL), "controller URL should appear exactly once")
 }
 
@@ -179,7 +176,7 @@ func TestDarwinManagerNew(t *testing.T) {
 // TestGenerateLaunchdPlistSetsLogDir: the installer-managed steward must log to
 // the platform-conventional path (#2378) — never the /tmp/cfgms fallback.
 func TestGenerateLaunchdPlistSetsLogDir(t *testing.T) {
-	plist := generateLaunchdPlist("tok_test", "")
+	plist := generateLaunchdPlist("/etc/cfgms/registration-token", "")
 	assert.Contains(t, plist, "<key>EnvironmentVariables</key>")
 	assert.Contains(t, plist, "<key>CFGMS_LOG_DIR</key>")
 	assert.Contains(t, plist, "<string>/usr/local/var/log/cfgms</string>",
@@ -214,4 +211,46 @@ func TestDarwinLauncherBinaryPermissions(t *testing.T) {
 	// 0750: owner rwx (service binary), group rx (service group), no world access
 	assert.Equal(t, os.FileMode(0750), info.Mode().Perm(),
 		"launcher binary must be installed with 0750 to prevent standard-user replacement")
+}
+
+// TestDarwinInstallFilesKeepTokenOutOfPlist is the REQUIRED TEST for the token
+// file contract: the token lives only in a 0600 file, and the plist (also 0600)
+// references that file instead of embedding the token.
+func TestDarwinInstallFilesKeepTokenOutOfPlist(t *testing.T) {
+	prefix := t.TempDir()
+	t.Setenv("CFGMS_INSTALL_PREFIX", prefix)
+	token := "tok_install_files_secret"
+	plistPath := filepath.Join(t.TempDir(), "com.cfgms.steward.plist")
+
+	// A pre-existing world-readable plist must be tightened, not inherited.
+	require.NoError(t, os.WriteFile(plistPath, []byte("old"), 0644))
+
+	require.NoError(t, writeDaemonFiles(token, "https://ctrl.example.com", plistPath))
+
+	tokenPath := filepath.Join(prefix, "etc", "cfgms", tokenFileName)
+	assert.Equal(t, tokenPath, platformTokenFilePath())
+
+	tokenInfo, err := os.Stat(tokenPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), tokenInfo.Mode().Perm())
+	got, err := ReadTokenFile(tokenPath)
+	require.NoError(t, err)
+	assert.Equal(t, token, got)
+
+	plistInfo, err := os.Stat(plistPath)
+	require.NoError(t, err)
+	assert.Zero(t, plistInfo.Mode().Perm()&0077, "plist must have no group or other permission bit")
+
+	plist, err := os.ReadFile(plistPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(plist), token)
+	assert.Contains(t, string(plist), "--regtoken-file "+tokenPath)
+}
+
+func TestDarwinInstallFilesRejectsInvalidToken(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	plistPath := filepath.Join(t.TempDir(), "p.plist")
+	require.Error(t, writeDaemonFiles("bad token", "", plistPath))
+	_, err := os.Stat(plistPath)
+	assert.True(t, os.IsNotExist(err), "plist must not be written when the token is invalid")
 }

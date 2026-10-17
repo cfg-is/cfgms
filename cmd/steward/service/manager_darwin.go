@@ -125,10 +125,9 @@ func (m *darwinManager) Install(token, controllerURL, caCertPEM, expectedFingerp
 		}
 	}
 
-	fmt.Println("Writing launchd plist...")
-	plist := generateLaunchdPlist(token, controllerURL)
-	if err := os.WriteFile(darwinPlistPath, []byte(plist), 0644); err != nil {
-		return fmt.Errorf("failed to write plist %s: %w", darwinPlistPath, err)
+	fmt.Println("Writing registration token and launchd plist...")
+	if err := writeDaemonFiles(token, controllerURL, darwinPlistPath); err != nil {
+		return err
 	}
 
 	fmt.Println("Loading launchd daemon...")
@@ -140,6 +139,25 @@ func (m *darwinManager) Install(token, controllerURL, caCertPEM, expectedFingerp
 	fmt.Printf("  Service name: %s\n", darwinServiceName)
 	fmt.Printf("  Status:  cfgms-steward status\n")
 	fmt.Printf("  Remove:  cfgms-steward uninstall\n")
+	return nil
+}
+
+// writeDaemonFiles writes the root-only registration token file and then the
+// launchd plist (mode 0600) that references it. The token is written first so
+// the plist never points at a missing file, and never appears in the plist.
+func writeDaemonFiles(token, controllerURL, plistPath string) error {
+	tokenPath := platformTokenFilePath()
+	if err := writeTokenFile(tokenPath, token); err != nil {
+		return fmt.Errorf("failed to write registration token file %s: %w", tokenPath, err)
+	}
+	plist := generateLaunchdPlist(tokenPath, controllerURL)
+	if err := os.WriteFile(plistPath, []byte(plist), 0600); err != nil {
+		return fmt.Errorf("failed to write plist %s: %w", plistPath, err)
+	}
+	// os.WriteFile keeps the mode of a pre-existing file, so enforce it.
+	if err := os.Chmod(plistPath, 0600); err != nil {
+		return fmt.Errorf("failed to restrict plist %s: %w", plistPath, err)
+	}
 	return nil
 }
 
@@ -210,7 +228,7 @@ func (m *darwinManager) Stop() error {
 	return nil
 }
 
-// RegistrationTokenConfigured reports whether the launchd plist holds a non-empty registration token file.
+// RegistrationTokenConfigured reports whether the registration token file exists and is non-empty.
 func (m *darwinManager) RegistrationTokenConfigured() (bool, error) {
 	return tokenFileConfigured(platformTokenFilePath())
 }
@@ -242,15 +260,18 @@ func (m *darwinManager) Status() (*ServiceStatus, error) {
 // The launcher supervises the steward and forwards --child-args to it.
 // KeepAlive ensures the daemon restarts on exit; RunAtLoad starts it immediately.
 //
-// Security note: the token appears in the plist (readable by root only for
-// LaunchDaemons). The token is a one-time registration credential — after
-// first registration the steward authenticates via mTLS certificates.
-func generateLaunchdPlist(token, controllerURL string) string {
+// Security note: the plist never contains the registration token. It passes
+// --regtoken-file with the path of a root-only (0600) token file instead, and
+// the plist itself is written 0600. The token is a registration credential
+// that stays valid until it expires or is revoked, so it must not be readable
+// by other local users. After first registration the steward authenticates via
+// mTLS certificates.
+func generateLaunchdPlist(tokenFilePath, controllerURL string) string {
 	// The launcher supervises the steward and forwards --child-args to it. Args
-	// are space-separated (the launcher splits on whitespace); the registration
-	// token is validated to be free of spaces/quotes, so no per-arg quoting is
+	// are space-separated (the launcher splits on whitespace); the token file
+	// path is a fixed platform path without whitespace, so no per-arg quoting is
 	// needed inside the child-args string.
-	childArgs := fmt.Sprintf(`--regtoken %s`, token)
+	childArgs := fmt.Sprintf(`--regtoken-file %s`, tokenFilePath)
 	if controllerURL != "" {
 		childArgs += fmt.Sprintf(` --controller-url %s`, controllerURL)
 	}
