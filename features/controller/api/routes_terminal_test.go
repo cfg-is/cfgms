@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -273,4 +274,152 @@ func TestTerminalScope_RootScoped_WithCrossing_Allowed(t *testing.T) {
 	rec, reached := serveTerminalScopeAsRootScoped(server, principal, "steward-msp-b")
 	assert.True(t, *reached, "root-scoped caller with active crossing must reach the handler")
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// ---------------------------------------------------------------------------
+// One-time ticket redemption on GET /terminal/ws/{steward_id}
+// ---------------------------------------------------------------------------
+
+// wsNode is a ticketNode whose terminal handler records the proof it receives.
+type wsNode struct {
+	*ticketNode
+	reached int
+	proof   *transport.TerminalProof
+}
+
+func newWSNode(t *testing.T) *wsNode {
+	t.Helper()
+	n := &wsNode{ticketNode: newTicketX509Node(t)}
+	n.server.SetTerminalHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.reached++
+		n.proof, _ = transport.TerminalProofFromContext(r.Context())
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+	return n
+}
+
+// seed stores a ticket bound to the given principal ID, steward and web session, in the
+// tenant of the steward, and returns the plaintext ticket.
+func (n *wsNode) seed(principalID, stewardID, webSession string) string {
+	n.t.Helper()
+	ticket, hash, err := newTerminalTicket()
+	require.NoError(n.t, err)
+	rec := &terminalTicketRecord{
+		principalID: principalID, tenantID: saTenant, webSessionID: webSession, stewardID: stewardID,
+		terminalShell: "bash", expires: time.Now().Add(time.Minute),
+		targets: []string{stewardID}, nonce: "n-1", expiresAt: time.Now().Add(time.Minute).UTC().Truncate(time.Second),
+		x509: &OperatorX509Proof{Algorithm: "ed25519", Value: "v", PublicKey: "k"},
+	}
+	require.Equal(n.t, ceremonyOK, n.server.putTerminalTicket(context.Background(), hash, rec))
+	return ticket
+}
+
+func (n *wsNode) connect(p *Principal, stewardID, webSession, protocols string, query string) *httptest.ResponseRecorder {
+	n.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID+query, nil)
+	if protocols != "" {
+		req.Header.Set("Sec-WebSocket-Protocol", protocols)
+	}
+	req = withPrincipal(req, p)
+	if webSession != "" {
+		req = req.WithContext(context.WithValue(req.Context(), webSessionIDContextKey, webSession))
+	}
+	rec := httptest.NewRecorder()
+	n.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func ticketProtocols(ticket string) string { return "cfgms.terminal.v1, cfgms.ticket." + ticket }
+
+// [REQUIRED] Redemption refusals are 403 and never reach the handler.
+func TestTerminalWS_TicketRefusals(t *testing.T) {
+	n := newWSNode(t)
+	require.NoError(t, n.server.controllerService.RegisterSteward("steward-2", saTenant, "addr", "active"))
+	user := actionPrincipal("op-1")
+
+	t.Run("no ticket", func(t *testing.T) {
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "", "cfgms.terminal.v1", "").Code)
+	})
+	t.Run("unknown ticket", func(t *testing.T) {
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "", ticketProtocols("nope"), "").Code)
+	})
+	t.Run("ticket in query string is ignored", func(t *testing.T) {
+		tk := n.seed("op-1", ttSteward, "")
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "", "cfgms.terminal.v1", "?ticket="+tk).Code)
+	})
+	t.Run("replay", func(t *testing.T) {
+		tk := n.seed("op-1", ttSteward, "")
+		assert.Equal(t, http.StatusSwitchingProtocols, n.connect(user, ttSteward, "", ticketProtocols(tk), "").Code)
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "", ticketProtocols(tk), "").Code)
+	})
+	t.Run("expired", func(t *testing.T) {
+		tk, hash, err := newTerminalTicket()
+		require.NoError(t, err)
+		n.server.putTerminalTicket(context.Background(), hash, &terminalTicketRecord{
+			principalID: "op-1", tenantID: saTenant, stewardID: ttSteward, terminalShell: "bash", expires: time.Now().Add(-time.Second)})
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "", ticketProtocols(tk), "").Code)
+	})
+	t.Run("cross user", func(t *testing.T) {
+		tk := n.seed("op-1", ttSteward, "")
+		assert.Equal(t, http.StatusForbidden, n.connect(actionPrincipal("op-2"), ttSteward, "", ticketProtocols(tk), "").Code)
+	})
+	t.Run("other web session of the same user", func(t *testing.T) {
+		tk := n.seed("op-1", ttSteward, "sess-a")
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "sess-b", ticketProtocols(tk), "").Code)
+	})
+	t.Run("ticket for steward A on steward B", func(t *testing.T) {
+		tk := n.seed("op-1", ttSteward, "")
+		assert.Equal(t, http.StatusForbidden, n.connect(user, "steward-2", "", ticketProtocols(tk), "").Code)
+	})
+	t.Run("two tickets presented", func(t *testing.T) {
+		tk := n.seed("op-1", ttSteward, "")
+		assert.Equal(t, http.StatusForbidden, n.connect(user, ttSteward, "", ticketProtocols(tk)+", cfgms.ticket.other", "").Code)
+	})
+	assert.Equal(t, 1, n.reached, "only the replay's first use may reach the handler")
+}
+
+// [REQUIRED] Principal IDs that SanitizeLogValue maps to one string are still distinct.
+func TestTerminalWS_SanitisedIDCollisionRefused(t *testing.T) {
+	n := newWSNode(t)
+	minted, caller := "op\n1", "op_1"
+	require.Equal(t, logging.SanitizeLogValue(minted), logging.SanitizeLogValue(caller), "test needs a real collision")
+	tk := n.seed(minted, ttSteward, "")
+	assert.Equal(t, http.StatusForbidden, n.connect(actionPrincipal(caller), ttSteward, "", ticketProtocols(tk), "").Code)
+	assert.Zero(t, n.reached)
+}
+
+// [REQUIRED] A principal whose ID sanitisation would change redeems its own ticket.
+func TestTerminalWS_RawIDRedeemsOwnTicket(t *testing.T) {
+	n := newWSNode(t)
+	id := "op\n1"
+	require.NotEqual(t, id, logging.SanitizeLogValue(id))
+	tk := n.seed(id, ttSteward, "")
+	assert.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal(id), ttSteward, "", ticketProtocols(tk), "").Code)
+	assert.Equal(t, 1, n.reached)
+}
+
+// A valid ticket reaches the handler with the verified proof in context.
+func TestTerminalWS_ValidTicketForwardsProof(t *testing.T) {
+	n := newWSNode(t)
+	tk := n.seed("op-1", ttSteward, "sess-a")
+	rec := n.connect(actionPrincipal("op-1"), ttSteward, "sess-a", ticketProtocols(tk), "")
+	require.Equal(t, http.StatusSwitchingProtocols, rec.Code)
+	require.NotNil(t, n.proof)
+	assert.Equal(t, ttSteward, n.proof.StewardID)
+	assert.Equal(t, "bash", n.proof.TerminalShell)
+	assert.Equal(t, "op-1", n.proof.UserID)
+	assert.Equal(t, "ed25519", n.proof.Params["signature_algorithm"])
+	assert.Equal(t, "n-1", n.proof.Params["nonce"])
+	assert.NotContains(t, rec.Header().Get("Sec-WebSocket-Protocol"), tk)
+}
+
+// An out-of-tenant request is stopped before redemption and does not consume the ticket.
+func TestTerminalWS_OutOfTenantDoesNotConsumeTicket(t *testing.T) {
+	n := newWSNode(t)
+	tk := n.seed("op-1", ttSteward, "")
+	outsider := actionPrincipal("op-1")
+	outsider.TenantID = "msp-b"
+	assert.Equal(t, http.StatusNotFound, n.connect(outsider, ttSteward, "", ticketProtocols(tk), "").Code)
+	assert.Equal(t, 1, ticketCount(n.server), "ticket must survive an out-of-tenant attempt")
+	assert.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
 }

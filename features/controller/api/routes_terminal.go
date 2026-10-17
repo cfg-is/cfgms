@@ -3,12 +3,20 @@
 package api
 
 import (
+	"encoding/base64"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/transport"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// terminalTicketSubprotocolPrefix prefixes the WebSocket subprotocol carrying the ticket.
+const terminalTicketSubprotocolPrefix = "cfgms.ticket."
 
 func init() { RegisterRoutes(registerTerminalRoutes) }
 
@@ -25,7 +33,7 @@ func init() { RegisterRoutes(registerTerminalRoutes) }
 func registerTerminalRoutes(s *Server, api *mux.Router) {
 	api.Handle(
 		"/terminal/ws/{steward_id}",
-		s.requirePermission("terminal", "create")(s.tenantScopedTerminalWrapper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.requirePermission("terminal", "create")(s.tenantScopedTerminalWrapper(s.terminalTicketWrapper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			s.mu.RLock()
 			h := s.terminalHandler
 			s.mu.RUnlock()
@@ -34,7 +42,7 @@ func registerTerminalRoutes(s *Server, api *mux.Router) {
 				return
 			}
 			h.ServeHTTP(w, r)
-		}))),
+		})))),
 	).Methods("GET")
 
 	// Browsers cannot attach an operator proof to a WebSocket upgrade, so the Shell tab
@@ -142,4 +150,110 @@ func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		}
 	})
+}
+
+// terminalTicketFromRequest extracts the single cfgms.ticket.<ticket> subprotocol from
+// the Sec-WebSocket-Protocol header. The ticket is never read from the URL.
+func terminalTicketFromRequest(r *http.Request) (string, bool) {
+	ticket := ""
+	for _, v := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, tok := range strings.Split(v, ",") {
+			tok = strings.TrimSpace(tok)
+			if !strings.HasPrefix(tok, terminalTicketSubprotocolPrefix) {
+				continue
+			}
+			if ticket != "" {
+				return "", false
+			}
+			ticket = strings.TrimPrefix(tok, terminalTicketSubprotocolPrefix)
+		}
+	}
+	return ticket, ticket != ""
+}
+
+// terminalTicketWrapper redeems the one-time terminal ticket and hands the verified
+// operator proof to the handler through the request context. It runs after the tenant
+// gate, so an unauthenticated or out-of-tenant caller can neither burn another user's
+// ticket nor probe for one. The ticket must belong to the calling principal (raw ID
+// compared, never the sanitised form), tenant, web session and the steward in the path;
+// any mismatch is 403 and the ticket is already consumed.
+func (s *Server) terminalTicketWrapper(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stewardID := mux.Vars(r)["steward_id"]
+		refuse := func(reason string) {
+			s.logger.Warn("Terminal ticket refused",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"reason", reason)
+			s.writeErrorResponse(w, http.StatusForbidden, "valid terminal ticket required", "TERMINAL_TICKET_REQUIRED")
+		}
+
+		ticket, ok := terminalTicketFromRequest(r)
+		if !ok {
+			refuse("no ticket presented")
+			return
+		}
+		principal, _ := r.Context().Value(principalContextKey).(*Principal)
+		if principal == nil {
+			refuse("no authenticated principal")
+			return
+		}
+		rec, outcome := s.takeTerminalTicket(r.Context(), hashTerminalTicket(ticket))
+		if outcome == ceremonyUnavailable {
+			s.writeCeremonyUnavailable(w)
+			return
+		}
+		if outcome != ceremonyOK || rec == nil || !time.Now().Before(rec.expires) {
+			refuse("ticket unknown, used or expired")
+			return
+		}
+
+		// The ticket records the steward's tenant at mint time; the caller was already
+		// authorised for that steward (possibly as an ancestor tenant) by the tenant gate.
+		info, known := s.controllerService.GetStewardInfo(stewardID)
+		if !known || info == nil || rec.tenantID != info.TenantID {
+			refuse("ticket tenant mismatch")
+			return
+		}
+		if rec.principalID != principal.ID || rec.stewardID != stewardID ||
+			rec.webSessionID != webSessionIDFromContext(r) {
+			refuse("ticket not issued to this caller or steward")
+			return
+		}
+
+		callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+		proof := &transport.TerminalProof{
+			StewardID:     rec.stewardID,
+			UserID:        rec.principalID,
+			TenantID:      callerTenant,
+			TerminalShell: rec.terminalShell,
+			Params:        terminalProofParams(rec),
+		}
+		next.ServeHTTP(w, r.WithContext(transport.WithTerminalProof(r.Context(), proof)))
+	})
+}
+
+// terminalProofParams renders the ticket's operator envelope as the command params
+// steward_action carries, so the steward verifies it unchanged.
+func terminalProofParams(rec *terminalTicketRecord) map[string]interface{} {
+	params := map[string]interface{}{
+		"targets":    rec.targets,
+		"nonce":      rec.nonce,
+		"expires_at": rec.expiresAt.UTC().Format(time.RFC3339),
+	}
+	if rec.x509 != nil {
+		params["signature_algorithm"] = rec.x509.Algorithm
+		params["signature_value"] = rec.x509.Value
+		params["signature_public_key"] = rec.x509.PublicKey
+	}
+	if rec.webAuthn != nil {
+		b64 := base64.StdEncoding.EncodeToString
+		params["webauthn_authenticator_data"] = b64(rec.webAuthn.AuthenticatorData)
+		params["webauthn_client_data_json"] = b64(rec.webAuthn.ClientDataJSON)
+		params["webauthn_signature"] = b64(rec.webAuthn.Signature)
+		params["webauthn_credential_id"] = b64(rec.webAuthn.CredentialID)
+		if rec.manifest != "" {
+			params["webauthn_manifest"] = rec.manifest
+		}
+	}
+	return params
 }
