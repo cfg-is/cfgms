@@ -65,9 +65,10 @@ const (
 // in-memory types carry unexported fields so each gets an exported-field twin.
 
 type webAuthnPendingWire struct {
-	Data    webauthn.SessionData `json:"data"`
-	Expires time.Time            `json:"expires"`
-	Binding string               `json:"binding"`
+	Data    webauthn.SessionData   `json:"data"`
+	Expires time.Time              `json:"expires"`
+	Binding string                 `json:"binding"`
+	Action  *presenceActionBinding `json:"action,omitempty"`
 }
 
 type passkeyLoginWire struct {
@@ -102,11 +103,11 @@ type operatorPayloadSignWire struct {
 }
 
 func (p *webAuthnPendingSession) toWire() webAuthnPendingWire {
-	return webAuthnPendingWire{Data: p.data, Expires: p.expires, Binding: p.binding}
+	return webAuthnPendingWire{Data: p.data, Expires: p.expires, Binding: p.binding, Action: p.action}
 }
 
 func (w webAuthnPendingWire) toSession() *webAuthnPendingSession {
-	return &webAuthnPendingSession{data: w.Data, expires: w.Expires, binding: w.Binding}
+	return &webAuthnPendingSession{data: w.Data, expires: w.Expires, binding: w.Binding, action: w.Action}
 }
 
 func (p *passkeyLoginSession) toWire() passkeyLoginWire {

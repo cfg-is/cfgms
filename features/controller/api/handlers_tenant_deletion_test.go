@@ -586,7 +586,7 @@ func TestHandleApproveTenantDeletion_RouterRequiresPresenceToken(t *testing.T) {
 
 	// With a fresh presence token bound to the same principal the approval proceeds.
 	withPresence := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/del-presence-root/delete/approve", nil)
-	withPresence.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, mtlsAdminPrincipalID))
+	withPresence.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, mtlsAdminPrincipalID, withPresence, "tenant:approve-delete"))
 	wYes := httptest.NewRecorder()
 	server.router.ServeHTTP(wYes, withPresence)
 	require.Equal(t, http.StatusOK, wYes.Code, wYes.Body.String())

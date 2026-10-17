@@ -7,10 +7,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -1997,6 +1999,16 @@ func mintPresenceToken(t *testing.T, s *Server, principalID string) string {
 	return token
 }
 
+// mintPresenceTokenFor mints a presence token bound to req's method, path and body
+// and the given permission — the shape handlePresenceFinish mints for every token
+// (Issue #5142). Hashing the body restores it, so req stays usable.
+func mintPresenceTokenFor(t *testing.T, s *Server, principalID string, req *http.Request, permissionID string) string {
+	t.Helper()
+	bodyHash, err := hashRequestBodyForPresenceBinding(req)
+	require.NoError(t, err)
+	return mintBoundPresenceToken(t, s, principalID, req.Method, req.URL.Path, bodyHash, permissionID)
+}
+
 // storePresenceTokenForTest stores rec the way the server under test keeps presence
 // tokens: in the node-local map, or — on a ClusterMode node (Issue #4527) — in the
 // cluster-shared NonceStore, wiring a real one first when the test did not.
@@ -2082,10 +2094,9 @@ func TestRequirePermission_UserPresence_ValidTokenAdmitted(t *testing.T) {
 	handler := wrapWithAuth(server, "test", "presence-required",
 		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
-	token := mintPresenceToken(t, server, "test-admin")
-
 	// First use: must be admitted.
 	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	token := mintPresenceTokenFor(t, server, "test-admin", req, "test:presence-required")
 	req.Header.Set(presenceTokenHeader, token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2119,9 +2130,8 @@ func TestRequirePermission_UserPresence_PrincipalMismatchRejected(t *testing.T) 
 		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// Token minted for a DIFFERENT principal ("other-admin") than the acting cert principal.
-	token := mintPresenceToken(t, server, "other-admin")
-
 	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	token := mintPresenceTokenFor(t, server, "other-admin", req, "test:presence-required")
 	req.Header.Set(presenceTokenHeader, token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2341,10 +2351,10 @@ func TestRequirePermission_UserPresence_ActionBinding_PermissionMismatchRejected
 	assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
 }
 
-// TestRequirePermission_UserPresence_UnboundTokenStillAdmitted verifies that a token
-// with no binding (today's ordinary browser step-up flow shape) is unaffected by the
-// new binding check — it is admitted purely on the existing principal-match contract.
-func TestRequirePermission_UserPresence_UnboundTokenStillAdmitted(t *testing.T) {
+// TestRequirePermission_UserPresence_UnboundTokenRefused (Issue #5142, ADR-021
+// Amendment 7): a presence token with an empty binding satisfies no
+// RequireUserPresence permission.
+func TestRequirePermission_UserPresence_UnboundTokenRefused(t *testing.T) {
 	withPresencePermission(t)
 	server := setupTestServer(t)
 	adminCert := makeSelfSignedAdminCert(t)
@@ -2359,7 +2369,59 @@ func TestRequirePermission_UserPresence_UnboundTokenStillAdmitted(t *testing.T) 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code, "an unbound token must be admitted unchanged")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "an unbound token must be refused")
+	assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
+}
+
+// TestRequirePermission_UserPresence_BoundTokenRefusedForOtherAction: a token bound to
+// one action is refused for a different method, path, body or permission.
+func TestRequirePermission_UserPresence_BoundTokenRefusedForOtherAction(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	const path = "/api/v1/test/presence-action"
+	bodySum := sha256.Sum256([]byte(`{"a":1}`))
+	bodyHash := hex.EncodeToString(bodySum[:])
+
+	cases := []struct {
+		name         string
+		method, path string
+		body         string
+		permission   string
+		wantOK       bool
+	}{
+		{"exact match", http.MethodPost, path, `{"a":1}`, "test:presence-required", true},
+		{"other method", http.MethodPut, path, `{"a":1}`, "test:presence-required", false},
+		{"other path", http.MethodPost, path + "-other", `{"a":1}`, "test:presence-required", false},
+		{"other body", http.MethodPost, path, `{"a":2}`, "test:presence-required", false},
+		{"other permission", http.MethodPost, path, `{"a":1}`, "test:other", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := mintBoundPresenceToken(t, server, "test-admin", tc.method, tc.path, bodyHash, tc.permission)
+			req := requestWithTLSCert(http.MethodPost, path, adminCert)
+			// The request is always POST path with this body; the token is bound to
+			// tc's action, so every row but the exact match differs in one field.
+			reqBody := `{"a":1}`
+			if tc.name == "other body" {
+				reqBody = `{"a":2}`
+			}
+			req.Body = io.NopCloser(strings.NewReader(reqBody))
+			req.Header.Set(presenceTokenHeader, token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if tc.wantOK {
+				assert.Equal(t, http.StatusOK, rec.Code)
+				return
+			}
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
+		})
+	}
 }
 
 // TestWebSessionCookie_AssurancePropagatedToPrincipal verifies that the cookie auth path

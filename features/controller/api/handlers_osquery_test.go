@@ -87,7 +87,7 @@ func makeOsqueryRequest(t *testing.T, s *Server, body interface{}, principal *Pr
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(withCallerTenant(req.Context(), principal.TenantID), principalContextKey, principal))
 	// Inject presence token: osquery:execute carries RequireUserPresence: true.
-	token := mintPresenceToken(t, s, principal.ID)
+	token := mintPresenceTokenFor(t, s, principal.ID, req, "osquery:execute")
 	req.Header.Set(presenceTokenHeader, token)
 	return req
 }

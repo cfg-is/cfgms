@@ -123,6 +123,37 @@ function toAssertionJSON(cred: PublicKeyCredential): AssertionJSON {
   }
 }
 
+// ── Presence action binding (Issue #5142, ADR-021 Amendment 7) ──────────────
+//
+// The presence token must authorize the one request the operator is retrying, so
+// presence/begin names its method, path, SHA-256 body hash and permission. The
+// server compares all four against the guarded request when the token is used.
+
+async function sha256Hex(data: BufferSource): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** Hex SHA-256 of the retried request's body ('' hashes as the empty string). */
+async function hashRetryBody(body: RequestInit['body']): Promise<string> {
+  if (body === undefined || body === null) return sha256Hex(new Uint8Array(0))
+  if (typeof body === 'string') return sha256Hex(new TextEncoder().encode(body))
+  if (body instanceof URLSearchParams) return sha256Hex(new TextEncoder().encode(body.toString()))
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+    return sha256Hex(body as BufferSource)
+  }
+  throw new Error('unsupported request body for presence binding')
+}
+
+async function presenceBinding(request: StepUpRequest) {
+  return {
+    method: (request.init.method ?? 'GET').toUpperCase(),
+    path: request.path.split('?')[0]!,
+    body_hash: await hashRetryBody(request.init.body),
+    permission_id: request.permission,
+  }
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export interface StepUpModalProps {
@@ -207,10 +238,19 @@ export default function StepUpModal({
         const headers = new Headers()
         if (csrf !== null) headers.set('X-CSRF-Token', csrf)
 
+        // Only the presence ceremony is bound to an action; elevation mints no token.
+        let body: string | undefined
+        if (request.presenceRequired) {
+          headers.set('Content-Type', 'application/json')
+          body = JSON.stringify(await presenceBinding(request))
+          if (aborted) return
+        }
+
         const resp = await fetch(beginUrl, {
           method: 'POST',
           headers,
           credentials: 'same-origin',
+          body,
         })
         if (aborted) return
 
@@ -238,7 +278,7 @@ export default function StepUpModal({
     return () => {
       aborted = true
     }
-  }, [beginKey, request.presenceRequired])
+  }, [beginKey, request])
 
   const handleVerify = useCallback(async () => {
     const opts = optsRef.current
