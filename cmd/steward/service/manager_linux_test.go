@@ -101,14 +101,16 @@ func TestLinuxManagerStatusNotInstalled(t *testing.T) {
 
 func TestGenerateSystemdUnit(t *testing.T) {
 	token := "tok_unit_test_abc123"
-	unit := generateSystemdUnit(token, "")
+	tokenPath := "/etc/cfgms/registration-token"
+	unit := generateSystemdUnit(tokenPath, "")
 
 	assert.Contains(t, unit, "[Unit]")
 	assert.Contains(t, unit, "[Service]")
 	assert.Contains(t, unit, "[Install]")
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=10")
-	assert.Contains(t, unit, "--regtoken "+token)
+	assert.Contains(t, unit, "--regtoken-file "+tokenPath)
+	assert.NotContains(t, unit, token)
 	// Launcher-managed: ExecStart runs the launcher, which supervises the steward
 	// and forwards the token via --child-args. This is what makes the steward
 	// push-upgradeable.
@@ -116,10 +118,35 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	assert.Contains(t, unit, "--child-args")
 	assert.NotContains(t, unit, linuxInstallPath+" --regtoken", "ExecStart must run the launcher, not the bare steward")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
+}
 
-	// Verify token appears exactly once (no duplication).
-	count := strings.Count(unit, token)
-	assert.Equal(t, 1, count, "token should appear exactly once in unit file")
+// TestInstallRegistrationTokenFile: the token lives in a root-only file under
+// the install prefix, never in the unit, and a re-install overwrites it.
+func TestInstallRegistrationTokenFile(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	token := "tok_secret_value_123"
+
+	path, err := installRegistrationToken(token)
+	require.NoError(t, err)
+	assert.Equal(t, platformTokenFilePath(), path)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+
+	unit := generateSystemdUnit(path, "https://ctrl.example.com")
+	assert.NotContains(t, unit, token)
+	assert.Contains(t, unit, "--regtoken-file "+path)
+	assert.NotContains(t, unit, "EnvironmentFile=")
+
+	_, err = installRegistrationToken("tok_replacement_456")
+	require.NoError(t, err)
+	got, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_replacement_456", got)
+
+	_, err = installRegistrationToken("bad token")
+	assert.Error(t, err)
 }
 
 func TestGenerateSystemdUnitContainsRestartPolicy(t *testing.T) {
@@ -133,18 +160,18 @@ func TestGenerateSystemdUnitContainsRestartPolicy(t *testing.T) {
 func TestGenerateSystemdUnitWithControllerURL(t *testing.T) {
 	token := "tok_test_url"
 	controllerURL := "https://ctrl.example.com"
-	unit := generateSystemdUnit(token, controllerURL)
+	unit := generateSystemdUnit("/etc/cfgms/registration-token", controllerURL)
 
 	assert.Contains(t, unit, "--controller-url "+controllerURL)
-	assert.Contains(t, unit, "--regtoken "+token)
+	assert.Contains(t, unit, "--regtoken-file /etc/cfgms/registration-token")
+	assert.NotContains(t, unit, token)
 	assert.Contains(t, unit, linuxLauncherPath)
 
 	// Verify token and URL each appear exactly once.
-	assert.Equal(t, 1, strings.Count(unit, token), "token should appear exactly once")
 	assert.Equal(t, 1, strings.Count(unit, controllerURL), "controller URL should appear exactly once")
 
 	// Without URL: --controller-url must not appear.
-	unitNoURL := generateSystemdUnit(token, "")
+	unitNoURL := generateSystemdUnit("/etc/cfgms/registration-token", "")
 	assert.NotContains(t, unitNoURL, "--controller-url")
 }
 
