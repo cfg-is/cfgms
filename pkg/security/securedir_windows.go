@@ -67,7 +67,7 @@ func EnsureAdminOnlyDir(path string) error {
 	if created {
 		access |= windows.WRITE_OWNER
 	}
-	h, err := openNoFollow(path, access)
+	h, err := openHandleNoFollow(path, access)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) && !created {
 			// The handle we could not open is never written through; this
@@ -182,8 +182,8 @@ func adminOnlyDACL() (*windows.ACL, error) {
 	return dacl, nil
 }
 
-// openNoFollow opens path itself (never a reparse target) for access.
-func openNoFollow(path string, access uint32) (windows.Handle, error) {
+// openHandleNoFollow opens path itself (never a reparse target) for access.
+func openHandleNoFollow(path string, access uint32) (windows.Handle, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return windows.InvalidHandle, err
@@ -221,7 +221,7 @@ func requirePlainDir(h windows.Handle, path string) error {
 // when the owner cannot be determined; the caller then reports its own open
 // error instead.
 func rootOwnerIsUntrusted(path string) bool {
-	h, err := openNoFollow(path, windows.READ_CONTROL)
+	h, err := openHandleNoFollow(path, windows.READ_CONTROL)
 	if err != nil {
 		return false
 	}
@@ -261,7 +261,7 @@ func checkTree(root string, checkDACL bool) error {
 // checkEntry inspects one entry on a handle that does not follow reparse
 // points and reports whether it is a (plain) directory to descend into.
 func checkEntry(path string, checkDACL bool) (isDir bool, err error) {
-	h, err := openNoFollow(path, windows.READ_CONTROL)
+	h, err := openHandleNoFollow(path, windows.READ_CONTROL)
 	if err != nil {
 		return false, fmt.Errorf("open %s: %w", path, err)
 	}
