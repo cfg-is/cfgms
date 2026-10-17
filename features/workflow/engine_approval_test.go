@@ -39,7 +39,7 @@ func newApprovalHarness(t *testing.T) *approvalHarness {
 	storeRoot := t.TempDir()
 	store := openFlatfileApprovalStore(t, storeRoot)
 	secrets, err := (&steward.StewardProvider{}).CreateSecretStore(map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = secrets.Close() })

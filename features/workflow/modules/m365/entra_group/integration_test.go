@@ -587,7 +587,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 	}
 	sp := &stewardprovider.StewardProvider{}
 	secretStore, err := sp.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err, "Failed to create secret store")
 	t.Cleanup(func() { _ = secretStore.Close() })

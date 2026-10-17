@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func newTestSecretStore(t *testing.T) secretsif.SecretStore {
 	}
 	provider := &steward.StewardProvider{}
 	store, err := provider.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })

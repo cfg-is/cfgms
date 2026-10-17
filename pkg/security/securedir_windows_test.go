@@ -45,6 +45,16 @@ func daclSIDs(t *testing.T, path string) (sids []string, protected bool) {
 	return sids, protected
 }
 
+// setOwnerAdministrators makes BUILTIN\Administrators the owner of path.
+func setOwnerAdministrators(t *testing.T, path string) {
+	t.Helper()
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil))
+	require.Equal(t, sidAdministrators, ownerSID(t, path))
+}
+
 func TestEnsureAdminOnlyDir_FreshDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cfgms")
 	require.NoError(t, EnsureAdminOnlyDir(dir))
@@ -64,11 +74,17 @@ func TestEnsureAdminOnlyDir_FreshDirectory(t *testing.T) {
 }
 
 func TestEnsureAdminOnlyDir_CorrectsExistingTreeInPlace(t *testing.T) {
-	dir := t.TempDir() // admin-owned in CI; inherits a permissive DACL
+	// A t.TempDir() tree inherits a permissive DACL but is owned by the test
+	// user, which EnsureAdminOnlyDir refuses; hand it to Administrators (an
+	// elevated member may assign that group as owner) so only the DACL differs.
+	dir := t.TempDir()
 	child := filepath.Join(dir, "child")
 	require.NoError(t, os.Mkdir(child, 0755))
 	file := filepath.Join(child, "old.bin")
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0600))
+	for _, p := range []string{dir, child, file} {
+		setOwnerAdministrators(t, p)
+	}
 
 	require.NoError(t, EnsureAdminOnlyDir(dir))
 

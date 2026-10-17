@@ -161,7 +161,7 @@ func currentProcessHandleCount(t *testing.T) uint32 {
 func newE2ESecretStore(t *testing.T) secretsif.SecretStore {
 	t.Helper()
 	store, err := secretsif.CreateSecretStoreFromConfig("steward", map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err, "create steward secret store for hyperv module")
 	return store

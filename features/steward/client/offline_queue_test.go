@@ -536,7 +536,7 @@ func newTestSecretStore(t *testing.T) secretsif.SecretStore {
 	}
 	provider := &stewardprovider.StewardProvider{}
 	store, err := provider.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err, "failed to create test secret store")
 	return store

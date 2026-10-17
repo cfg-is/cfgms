@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -241,7 +242,7 @@ func newTestStore(t *testing.T) interfaces.SecretStore {
 	}
 	provider := &steward.StewardProvider{}
 	store, err := provider.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": t.TempDir(),
+		"secrets_dir": filepath.Join(t.TempDir(), "secrets"),
 	})
 	require.NoError(t, err)
 	return store
