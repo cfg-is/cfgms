@@ -16,8 +16,9 @@
  * Lifecycle: WebSocket opens on mount, closes on unmount (no background
  * shells after the operator navigates away — ADR-018).
  *
- * Auth: same-origin cookie auth per ADR-018 — session cookie sent
- * automatically by the browser on the WS upgrade; no token in JS.
+ * Auth: same-origin cookie auth per ADR-018 plus a one-time ticket: before
+ * the socket exists the tab runs terminal prepare, the passkey ceremony and
+ * the ticket request, then offers the ticket as a subprotocol (never in the URL).
  *
  * 403 detection: when the WS upgrade returns HTTP 403 the browser fires
  * onerror then onclose before onopen ever fires.  We treat "close without
@@ -33,12 +34,72 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import './ShellTab.css'
+import {
+  ControlHttpError,
+  NoPasskeyError,
+  SignCancelledError,
+  postJson,
+  signPrepared,
+} from './signAction.ts'
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type ConnState = 'connecting' | 'connected' | 'disconnected' | 'denied'
+
+const TERMINAL_SUBPROTOCOL = 'cfgms.terminal.v1'
+const TICKET_SUBPROTOCOL_PREFIX = 'cfgms.ticket.'
+
+interface PrepareResponse {
+  content: string
+  shell: string
+  terminal_shell: string
+}
+
+/** Confirms prepare's content opens a terminal on this steward with the resolved shell. */
+function contentNamesTerminal(content: string, stewardId: string, shell: string): boolean {
+  try {
+    const parsed = JSON.parse(atob(content)) as {
+      verb?: string
+      target_kind?: string
+      target_name?: string
+      parameters?: Record<string, string>
+    }
+    return (
+      parsed.verb === 'terminal.open' &&
+      parsed.target_kind === 'steward' &&
+      parsed.target_name === stewardId &&
+      shell !== '' &&
+      parsed.parameters?.shell === shell
+    )
+  } catch {
+    return false
+  }
+}
+
+/** Prepare, passkey ceremony and ticket request; returns the one-time ticket. */
+async function obtainTicket(stewardId: string, isCancelled: () => boolean): Promise<string> {
+  const stop = () => { if (isCancelled()) throw new SignCancelledError() }
+  const id = encodeURIComponent(stewardId)
+  const prepared = await postJson<PrepareResponse>(`/api/v1/terminal/prepare/${id}`, {
+    terminal_shell: '',
+  })
+  stop()
+  if (!contentNamesTerminal(prepared.content, stewardId, prepared.terminal_shell)) {
+    throw new Error('prepared content does not match this terminal')
+  }
+  const proof = await signPrepared(stewardId, prepared.content, prepared.shell)
+  stop()
+  const res = await postJson<{ ticket: string }>(`/api/v1/terminal/tickets/${id}`, {
+    terminal_shell: prepared.terminal_shell,
+    nonce: proof.nonce,
+    expires_at: proof.expires_at,
+    targets: proof.targets,
+    webauthn: proof.webauthn,
+  })
+  return res.ticket
+}
 
 interface TerminalWireMsg {
   type: string
@@ -123,12 +184,14 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
   const wsRef = useRef<WebSocket | null>(null)
   const [connState, setConnState] = useState<ConnState>('connecting')
   const [reconnectKey, setReconnectKey] = useState(0)
+  const [errorMsg, setErrorMsg] = useState('')
 
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     let cancelled = false
     setConnState('connecting')
+    setErrorMsg('')
 
     const terminal = new Terminal({
       fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace',
@@ -144,14 +207,6 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
     terminal.open(container)
     try { fitAddon.fit() } catch { /* jsdom: no layout engine */ }
 
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // Identity is server-derived: the controller reads the operator from the
-    // authenticated session context (terminal_handler.go ServeWebSocket), so
-    // the client must never assert steward_id/user_id in the query string.
-    const url = `${proto}//${location.host}/api/v1/terminal/ws/${encodeURIComponent(stewardId)}`
-    const ws = new WebSocket(url)
-    wsRef.current = ws
-
     // Re-theme when the app toggles data-theme or the OS scheme flips (auto mode).
     const applyTheme = () => { terminal.options.theme = readTerminalTheme() }
     const themeObserver = new MutationObserver(applyTheme)
@@ -162,46 +217,79 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
     const scheme = window.matchMedia?.('(prefers-color-scheme: dark)')
     scheme?.addEventListener?.('change', applyTheme)
 
-    let wasConnected = false
+    const connect = (ticket: string) => {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      // Identity is server-derived: the controller reads the operator from the
+      // authenticated session context (terminal_handler.go ServeWebSocket), so
+      // the client must never assert steward_id/user_id in the query string.
+      const url = `${proto}//${location.host}/api/v1/terminal/ws/${encodeURIComponent(stewardId)}`
+    
+  const ws = new WebSocket(url, [TERMINAL_SUBPROTOCOL, TICKET_SUBPROTOCOL_PREFIX + ticket])
+  wsRef.current = ws
 
-    ws.onopen = () => {
-      if (cancelled) return
-      wasConnected = true
-      setConnState('connected')
-      try { fitAddon.fit() } catch { /* jsdom: no layout engine */ }
-      if (ws.readyState === WebSocket.OPEN) {
-        sendResize(ws, terminal.cols, terminal.rows)
+      let wasConnected = false
+
+      ws.onopen = () => {
+        if (cancelled) return
+        wasConnected = true
+        setConnState('connected')
+        try { fitAddon.fit() } catch { /* jsdom: no layout engine */ }
+        if (ws.readyState === WebSocket.OPEN) {
+          sendResize(ws, terminal.cols, terminal.rows)
+        }
       }
+
+      ws.onmessage = (ev) => {
+        if (cancelled) return
+        let msg: TerminalWireMsg
+        try {
+          msg = JSON.parse(ev.data as string) as TerminalWireMsg
+        } catch {
+          return  /* unparseable frame — ignore */
+        }
+        if (msg.type === 'data' && msg.data) {
+          try { terminal.write(decodeBase64(msg.data)) } catch { /* malformed base64 */ }
+        } else if (msg.type === 'error') {
+          setConnState('disconnected')
+        }
+      }
+
+      ws.onclose = (ev) => {
+        if (cancelled) return
+        // code 4403: explicit RBAC denial.
+        // code 0 / no onopen: HTTP-level rejection before upgrade (likely 403).
+        if (ev.code === 4403 || !wasConnected) {
+          setConnState('denied')
+        } else {
+          setConnState('disconnected')
+        }
+      }
+
+
     }
 
-    ws.onmessage = (ev) => {
-      if (cancelled) return
-      let msg: TerminalWireMsg
-      try {
-        msg = JSON.parse(ev.data as string) as TerminalWireMsg
-      } catch {
-        return  /* unparseable frame — ignore */
-      }
-      if (msg.type === 'data' && msg.data) {
-        try { terminal.write(decodeBase64(msg.data)) } catch { /* malformed base64 */ }
-      } else if (msg.type === 'error') {
-        setConnState('disconnected')
-      }
-    }
-
-    ws.onclose = (ev) => {
-      if (cancelled) return
-      // code 4403: explicit RBAC denial.
-      // code 0 / no onopen: HTTP-level rejection before upgrade (likely 403).
-      if (ev.code === 4403 || !wasConnected) {
-        setConnState('denied')
-      } else {
-        setConnState('disconnected')
-      }
-    }
+    obtainTicket(stewardId, () => cancelled).then(
+      (ticket) => { if (!cancelled) connect(ticket) },
+      (e: unknown) => {
+        if (cancelled) return
+        if (e instanceof SignCancelledError) {
+          setErrorMsg('The passkey prompt was cancelled, so no shell was opened.')
+          setConnState('disconnected')
+        } else if (e instanceof NoPasskeyError) {
+          setErrorMsg('No passkey is registered for your account. Enrol a passkey to open a remote shell.')
+          setConnState('disconnected')
+        } else if (e instanceof ControlHttpError && e.status === 403) {
+          setConnState('denied')
+        } else {
+          setErrorMsg('Could not obtain permission to open the shell. Try again.')
+          setConnState('disconnected')
+        }
+      },
+    )
 
     const dataListener = terminal.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN) {
         try {
           ws.send(JSON.stringify({ type: 'data', data: encodeBase64(data) }))
         } catch { /* WS may have closed between the readyState check and send */ }
@@ -209,7 +297,8 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
     })
 
     const resizeListener = terminal.onResize(({ cols, rows }) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN) {
         sendResize(ws, cols, rows)
       }
     })
@@ -221,6 +310,7 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
 
     return () => {
       cancelled = true
+      const ws = wsRef.current
       wsRef.current = null
       terminalRef.current = null
       ro.disconnect()
@@ -228,7 +318,7 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
       scheme?.removeEventListener?.('change', applyTheme)
       dataListener.dispose()
       resizeListener.dispose()
-      ws.close()
+      ws?.close()
       terminal.dispose()
     }
   }, [stewardId, reconnectKey])
@@ -316,10 +406,10 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
                 <path d="M6.6 6.6a8 8 0 1 0 10.8 0" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
               </svg>
             </div>
-            <h3>Steward unreachable</h3>
+            <h3>{errorMsg ? 'Remote shell not opened' : 'Steward unreachable'}</h3>
             <p>
-              The remote shell session ended. The steward may be offline or the connection was
-              interrupted.
+              {errorMsg ||
+                'The remote shell session ended. The steward may be offline or the connection was interrupted.'}
             </p>
             <button
               type="button"
@@ -345,7 +435,7 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
               Live Activity, or ask an operator with remote-shell rights.
             </p>
             <span className="mono2">
-              {`GET /api/v1/terminal/ws/${stewardId} — 403 Forbidden`}
+              {`/api/v1/terminal/ws/${stewardId} — 403 Forbidden`}
             </span>
           </div>
         )}

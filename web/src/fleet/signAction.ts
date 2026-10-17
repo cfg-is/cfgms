@@ -108,7 +108,7 @@ interface FinishResponse {
   credential_id: string
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+export async function postJson<T>(path: string, body: unknown): Promise<T> {
   const resp = await apiFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -162,13 +162,25 @@ export async function signAction(stewardId: string, spec: ActionSpec): Promise<S
     },
   )
   assertContentMatches(prepared.content, spec)
+  return signPrepared(stewardId, prepared.content, prepared.shell)
+}
 
+/**
+ * Runs the passkey ceremony (sign/begin, credentials.get, sign/finish) over content
+ * that prepare already returned and the caller has verified. Throws
+ * SignCancelledError, NoPasskeyError or ControlHttpError like signAction.
+ */
+export async function signPrepared(
+  stewardId: string,
+  content: string,
+  shell: string,
+): Promise<SignedProof> {
   let begin: BeginResponse
   try {
     begin = await postJson<BeginResponse>('/api/v1/operator-payload/sign/begin', {
       selector: `id:${stewardId}`,
-      content: prepared.content,
-      shell: prepared.shell,
+      content,
+      shell,
     })
   } catch (e) {
     if (e instanceof ControlHttpError && e.code === 'NO_CREDENTIALS') throw new NoPasskeyError()
