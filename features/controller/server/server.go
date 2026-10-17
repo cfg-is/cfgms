@@ -1181,6 +1181,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				// the DNA and bulk handlers use, whose bucket key comes off the wire
 				// (see ingest_admission.go).
 				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
+				// Issue #5120: steward events get their own queue so slow handlers
+				// cannot use up connect or heartbeat slots.
+				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
@@ -1196,6 +1199,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				// the DNA and bulk handlers use, whose bucket key comes off the wire
 				// (see ingest_admission.go).
 				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
+				// Issue #5120: steward events get their own queue so slow handlers
+				// cannot use up connect or heartbeat slots.
+				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),

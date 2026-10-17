@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"github.com/stretchr/testify/assert"
@@ -398,6 +400,11 @@ type admissionEnv struct {
 	clientA *Provider
 	clientB *Provider
 	queue   *controllerTransport.TenantQueue
+	// eventQueue is the events-only gate, a different instance from queue.
+	eventQueue *controllerTransport.TenantQueue
+	logger     *verbatimLogger
+	reg        *registry.InMemoryRegistry
+	tc         *testCA
 }
 
 const (
@@ -414,10 +421,14 @@ func newAdmissionEnv(t *testing.T) *admissionEnv {
 	resolver := tenantResolverFor(map[string]string{
 		"steward-adm-a": admissionTenantA,
 		"steward-adm-b": admissionTenantB,
+		"steward-adm-c": admissionTenantA,
 	})
+	eventQueue := controllerTransport.NewTenantQueue()
+	vl := &verbatimLogger{Logger: logging.NewNoopLogger()}
 
-	server := New(ModeServer, WithTenantAdmission(queue), WithStewardTenantResolver(resolver))
+	server := New(ModeServer, WithTenantAdmission(queue), WithEventAdmission(eventQueue), WithStewardTenantResolver(resolver))
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"logger":     vl,
 		"mode":       "server",
 		"addr":       "127.0.0.1:0",
 		"tls_config": tc.serverTLSConfig(t),
@@ -452,7 +463,7 @@ func newAdmissionEnv(t *testing.T) *admissionEnv {
 		return reg.Count() == 2
 	}, 5*time.Second, 10*time.Millisecond, "both stewards should register")
 
-	return &admissionEnv{server: server, clientA: clientA, clientB: clientB, queue: queue}
+	return &admissionEnv{server: server, clientA: clientA, clientB: clientB, queue: queue, eventQueue: eventQueue, logger: vl, reg: reg, tc: tc}
 }
 
 // TestControlChannel_Heartbeat_TenantAdmissionQueueFull_DroppedWithoutStarvingOtherTenants
@@ -573,31 +584,344 @@ func TestControlChannel_Heartbeat_AdmissionKeyedOnResolvedTenantNotPayload(t *te
 		"a forged tenant_id must not buy capacity outside the caller's own saturated bucket")
 }
 
-// TestControlChannel_Heartbeat_TenantAdmissionSlotReleasedAfterDispatch verifies
-// that a heartbeat's admission slot is released immediately after dispatch, not
-// held for the stream's lifetime — otherwise a steward's normal heartbeat cadence
-// would eventually exhaust its own tenant's queue.
-func TestControlChannel_Heartbeat_TenantAdmissionSlotReleasedAfterDispatch(t *testing.T) {
+// startExtraSteward connects another steward (steward-adm-c, tenant A in the
+// resolver) over real QUIC+mTLS and waits for it to register.
+func (e *admissionEnv) startExtraSteward(t *testing.T) *Provider {
+	t.Helper()
+	before := e.reg.Count()
+	c := New(ModeClient)
+	require.NoError(t, c.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       e.server.ListenAddr(),
+		"tls_config": e.tc.clientTLSConfig(t, "steward-adm-c"),
+		"steward_id": "steward-adm-c",
+	}))
+	require.NoError(t, c.Start(context.Background()))
+	t.Cleanup(func() { _ = c.Stop(context.Background()) })
+	require.Eventually(t, func() bool { return e.reg.Count() == before+1 },
+		5*time.Second, 10*time.Millisecond, "extra steward should register")
+	return c
+}
+
+func testHeartbeat(id, tenant string) *types.Heartbeat {
+	return &types.Heartbeat{StewardID: id, TenantID: tenant, Status: types.StatusHealthy, Timestamp: time.Now().Truncate(time.Microsecond)}
+}
+
+// concurrencyProbe is a handler body that records how many invocations run at
+// once and blocks each until released.
+type concurrencyProbe struct {
+	cur, max atomic.Int32
+	started  atomic.Int32
+	release  chan struct{}
+}
+
+func newConcurrencyProbe() *concurrencyProbe {
+	return &concurrencyProbe{release: make(chan struct{})}
+}
+
+func (c *concurrencyProbe) enter() {
+	n := c.cur.Add(1)
+	for {
+		m := c.max.Load()
+		if n <= m || c.max.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	c.started.Add(1)
+	<-c.release
+	c.cur.Add(-1)
+}
+
+// tenantSlotsFree reports whether every admission slot for tenant is free,
+// leaving the queue as it found it.
+func tenantSlotsFree(q *controllerTransport.TenantQueue, tenant string) bool {
+	var got int
+	for q.Acquire(tenant) == nil {
+		got++
+	}
+	for i := 0; i < got; i++ {
+		q.Release(tenant)
+	}
+	return got == controllerTransport.MaxConcurrentPerTenant
+}
+
+// requireTenantSlotsFree waits until no handler holds a slot of tenant in q.
+// Handlers free their stream slot before their tenant slot, so this also
+// proves the stream's in-flight slots have been returned.
+func requireTenantSlotsFree(t *testing.T, q *controllerTransport.TenantQueue, tenant string, msgAndArgs ...interface{}) {
+	t.Helper()
+	require.Eventually(t, func() bool { return tenantSlotsFree(q, tenant) }, 5*time.Second, 10*time.Millisecond, msgAndArgs...)
+}
+
+func (e *admissionEnv) stats(t *testing.T) *types.ControlPlaneStats {
+	t.Helper()
+	st, err := e.server.GetStats(context.Background())
+	require.NoError(t, err)
+	return st
+}
+
+func publishEvents(t *testing.T, c *Provider, stewardID string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		require.NoError(t, c.PublishEvent(context.Background(), &types.Event{
+			ID: fmt.Sprintf("evt-%d", i), StewardID: stewardID, TenantID: admissionTenantA,
+			Type: "test.event", Timestamp: time.Now().Truncate(time.Microsecond),
+		}))
+	}
+}
+
+// TestControlChannel_Event_PerStreamInFlightCap: one stream sending more events
+// than the stream limit while the handler blocks never has more than
+// maxInFlightEventsPerStream handlers running; the rest are dropped.
+func TestControlChannel_Event_PerStreamInFlightCap(t *testing.T) {
 	t.Parallel()
 	env := newAdmissionEnv(t)
-
-	received := make(chan *types.Heartbeat, controllerTransport.MaxConcurrentPerTenant*3)
-	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
-		received <- hb
+	probe := newConcurrencyProbe()
+	require.NoError(t, env.server.SubscribeEvents(context.Background(), nil, func(context.Context, *types.Event) error {
+		probe.enter()
 		return nil
 	}))
 
-	const beats = controllerTransport.MaxConcurrentPerTenant * 3
-	for i := 0; i < beats; i++ {
-		require.NoError(t, env.clientA.SendHeartbeat(context.Background(), &types.Heartbeat{
-			StewardID: "steward-adm-a",
-			TenantID:  admissionTenantA,
-			Status:    types.StatusHealthy,
-			Timestamp: time.Now().Truncate(time.Microsecond),
-		}))
+	const extra = 12
+	publishEvents(t, env.clientA, "steward-adm-a", maxInFlightEventsPerStream+extra)
+
+	require.Eventually(t, func() bool { return env.stats(t).EventsDropped >= extra },
+		5*time.Second, 10*time.Millisecond, "events past the stream cap must be dropped")
+	assert.EqualValues(t, maxInFlightEventsPerStream, probe.started.Load())
+	assert.EqualValues(t, maxInFlightEventsPerStream, probe.max.Load())
+
+	close(probe.release)
+	require.Eventually(t, func() bool { return probe.cur.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.EqualValues(t, maxInFlightEventsPerStream, probe.max.Load(), "concurrency must never exceed the stream cap")
+	assert.EqualValues(t, extra, env.stats(t).EventsDropped)
+
+	// Slots come back once handlers return.
+	require.Eventually(t, func() bool { return env.stats(t).EventsReceived >= maxInFlightEventsPerStream }, 5*time.Second, 10*time.Millisecond)
+	publishEvents(t, env.clientA, "steward-adm-a", 1)
+	require.Eventually(t, func() bool { return env.stats(t).EventsReceived == maxInFlightEventsPerStream+1 },
+		5*time.Second, 10*time.Millisecond, "an event after the handlers returned must be accepted")
+}
+
+// TestControlChannel_Event_FloodDoesNotStarveConnectOrHeartbeat: a tenant's
+// blocked event handlers use only the events queue, so another steward of the
+// same tenant can still Register and have its heartbeat dispatched.
+func TestControlChannel_Event_FloodDoesNotStarveConnectOrHeartbeat(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	probe := newConcurrencyProbe()
+	t.Cleanup(func() { close(probe.release) })
+	require.NoError(t, env.server.SubscribeEvents(context.Background(), nil, func(context.Context, *types.Event) error {
+		probe.enter()
+		return nil
+	}))
+	beats := make(chan *types.Heartbeat, 4)
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
+		beats <- hb
+		return nil
+	}))
+
+	publishEvents(t, env.clientA, "steward-adm-a", maxInFlightEventsPerStream)
+	require.Eventually(t, func() bool { return probe.cur.Load() == maxInFlightEventsPerStream },
+		5*time.Second, 10*time.Millisecond)
+
+	// Fill the rest of the tenant's event slots from other streams' point of
+	// view: the events queue is exhausted for tenant A.
+	for i := 0; i < controllerTransport.MaxConcurrentPerTenant-maxInFlightEventsPerStream; i++ {
+		require.NoError(t, env.eventQueue.Acquire(admissionTenantA))
+	}
+	require.Error(t, env.eventQueue.Acquire(admissionTenantA), "tenant A's event slots are exhausted")
+
+	c := env.startExtraSteward(t)
+	require.NoError(t, c.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-c", admissionTenantA)))
+	select {
+	case got := <-beats:
+		assert.Equal(t, "steward-adm-c", got.StewardID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeat of a same-tenant steward must still be dispatched while events are saturated")
+	}
+}
+
+// TestControlChannel_Heartbeat_PerStreamAndPerTenantConcurrency: with a blocking
+// heartbeat handler a stream has at most one heartbeat in flight, and a tenant
+// never exceeds the admission limit.
+func TestControlChannel_Heartbeat_PerStreamAndPerTenantConcurrency(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	probe := newConcurrencyProbe()
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(context.Context, *types.Heartbeat) error {
+		probe.enter()
+		return nil
+	}))
+
+	const extra = 10
+	for i := 0; i < 1+extra; i++ {
+		require.NoError(t, env.clientA.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-a", admissionTenantA)))
+	}
+	require.Eventually(t, func() bool { return env.stats(t).HeartbeatsDropped >= extra },
+		5*time.Second, 10*time.Millisecond, "heartbeats past one in flight must be dropped")
+	assert.EqualValues(t, 1, probe.started.Load())
+
+	// Per tenant: leave exactly the slot the in-flight heartbeat holds plus none
+	// free, then a second steward of the tenant is gated by the tenant limit.
+	for {
+		if err := env.queue.Acquire(admissionTenantA); err != nil {
+			break
+		}
+	}
+	c := env.startExtraSteward(t)
+	dropsBefore := env.stats(t).HeartbeatsDropped
+	require.NoError(t, c.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-c", admissionTenantA)))
+	require.Eventually(t, func() bool { return env.stats(t).HeartbeatsDropped > dropsBefore },
+		5*time.Second, 10*time.Millisecond, "tenant gate must drop the second steward's heartbeat")
+
+	close(probe.release)
+	require.Eventually(t, func() bool { return probe.cur.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
+	assert.EqualValues(t, 1, probe.max.Load(), "per-stream heartbeat concurrency must never exceed one")
+	assert.EqualValues(t, 1, probe.started.Load(), "the tenant-gated heartbeat must not reach the handler")
+}
+
+// TestControlChannel_Heartbeat_TenantAdmissionSlotHeldUntilHandlerReturns: the
+// tenant slot is taken for the whole handler run and free only after it returns.
+func TestControlChannel_Heartbeat_TenantAdmissionSlotHeldUntilHandlerReturns(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	probe := newConcurrencyProbe()
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(context.Context, *types.Heartbeat) error {
+		probe.enter()
+		return nil
+	}))
+
+	require.NoError(t, env.clientA.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-a", admissionTenantA)))
+	require.Eventually(t, func() bool { return probe.cur.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	// While the handler runs the tenant has one fewer free slot.
+	var held int
+	for env.queue.Acquire(admissionTenantA) == nil {
+		held++
+	}
+	assert.Equal(t, controllerTransport.MaxConcurrentPerTenant-1, held, "slot must be held while the handler runs")
+	for i := 0; i < held; i++ {
+		env.queue.Release(admissionTenantA)
 	}
 
+	close(probe.release)
 	require.Eventually(t, func() bool {
-		return len(received) == beats
-	}, 5*time.Second, 20*time.Millisecond, "every heartbeat should be dispatched — slots must be released between beats")
+		var got int
+		for env.queue.Acquire(admissionTenantA) == nil {
+			got++
+		}
+		for i := 0; i < got; i++ {
+			env.queue.Release(admissionTenantA)
+		}
+		return got == controllerTransport.MaxConcurrentPerTenant
+	}, 5*time.Second, 20*time.Millisecond, "slot must be free after the handler returns")
+}
+
+// TestControlChannel_HandlerPanic_FreesSlotsAndKeepsProcessAlive: a panicking
+// handler is recovered and still releases both the stream and tenant slots.
+func TestControlChannel_HandlerPanic_FreesSlotsAndKeepsProcessAlive(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	var calls atomic.Int32
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(context.Context, *types.Heartbeat) error {
+		calls.Add(1)
+		panic("handler boom\nforged=1")
+	}))
+	require.NoError(t, env.server.SubscribeEvents(context.Background(), nil, func(context.Context, *types.Event) error {
+		panic("event boom")
+	}))
+
+	// Well beyond both the one-heartbeat stream cap and the event cap: every
+	// message is accepted only if each previous panic released its slots. The
+	// release callback frees the stream slot before the tenant slot, so waiting
+	// for every tenant slot to be free proves the stream slot is free too.
+	for i := 0; i < 5; i++ {
+		before := calls.Load()
+		require.NoError(t, env.clientA.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-a", admissionTenantA)))
+		require.Eventually(t, func() bool { return calls.Load() == before+1 }, 5*time.Second, 10*time.Millisecond)
+		requireTenantSlotsFree(t, env.queue, admissionTenantA, "heartbeat %d: panicking handler must release its slots", i)
+	}
+	for round := int64(1); round <= 3; round++ {
+		publishEvents(t, env.clientA, "steward-adm-a", maxInFlightEventsPerStream)
+		require.Eventually(t, func() bool { return env.stats(t).EventsReceived == round*maxInFlightEventsPerStream },
+			5*time.Second, 10*time.Millisecond, "round %d: events must be accepted once earlier panics released their slots", round)
+		requireTenantSlotsFree(t, env.eventQueue, admissionTenantA, "round %d: panicking event handlers must release their slots", round)
+	}
+	assert.Zero(t, env.stats(t).EventsDropped, "no event may be dropped for a leaked slot")
+	requireTenantSlotsFree(t, env.queue, admissionTenantA, "heartbeat tenant slots must be free after panicking handlers")
+
+	panics := 0
+	for _, rec := range env.logger.snapshot() {
+		if strings.Contains(rec, "handler panicked") {
+			panics++
+			assert.NotContains(t, rec, "\n")
+		}
+	}
+	assert.Positive(t, panics, "recovered panics must be logged")
+}
+
+// TestControlChannel_DropsAreCountedAndLogRateLimited: tenant-gate and
+// stream-limit drops increment the counters, and a burst writes one log line.
+func TestControlChannel_DropsAreCountedAndLogRateLimited(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	probe := newConcurrencyProbe()
+	t.Cleanup(func() { close(probe.release) })
+	require.NoError(t, env.server.SubscribeEvents(context.Background(), nil, func(context.Context, *types.Event) error {
+		probe.enter()
+		return nil
+	}))
+
+	// Tenant gate: saturate tenant B's event queue; clientB's events drop.
+	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+		require.NoError(t, env.eventQueue.Acquire(admissionTenantB))
+	}
+	publishEvents(t, env.clientB, "steward-adm-b", 3)
+	require.Eventually(t, func() bool { return env.stats(t).EventsDropped == 3 }, 5*time.Second, 10*time.Millisecond)
+	assert.Zero(t, probe.started.Load())
+
+	// Tenant gate on heartbeats.
+	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+		require.NoError(t, env.queue.Acquire(admissionTenantB))
+	}
+	require.NoError(t, env.clientB.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-b", admissionTenantB)))
+	require.Eventually(t, func() bool { return env.stats(t).HeartbeatsDropped == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	// Stream limit: a burst from stream A past the cap.
+	const extra = 20
+	publishEvents(t, env.clientA, "steward-adm-a", maxInFlightEventsPerStream+extra)
+	require.Eventually(t, func() bool { return env.stats(t).EventsDropped == 3+extra }, 5*time.Second, 10*time.Millisecond)
+
+	// One line for stream B's 3 tenant-gate drops and one for stream A's burst of
+	// 20 — never one per drop.
+	lines := 0
+	for _, rec := range env.logger.snapshot() {
+		if strings.Contains(rec, "controlchannel event dropped") {
+			lines++
+		}
+	}
+	assert.Equal(t, 2, lines, "each stream logs its first drop once; the rest of the burst is suppressed")
+}
+
+func TestDropLogLimiter_FirstThenOncePerInterval(t *testing.T) {
+	t.Parallel()
+	var d dropLogLimiter
+	now := time.Now()
+	ok, n := d.record(now)
+	assert.True(t, ok)
+	assert.EqualValues(t, 1, n)
+	for i := 0; i < 5; i++ {
+		ok, _ = d.record(now.Add(time.Second))
+		assert.False(t, ok)
+	}
+	ok, n = d.record(now.Add(dropLogInterval))
+	assert.True(t, ok)
+	assert.EqualValues(t, 6, n, "the line carries the drops since the last one")
+}
+
+func TestWithEventAdmission_OptionSetsField(t *testing.T) {
+	t.Parallel()
+	q := controllerTransport.NewTenantQueue()
+	p := New(ModeServer, WithEventAdmission(q))
+	assert.Same(t, q, p.eventAdmission)
 }

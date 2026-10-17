@@ -10,8 +10,8 @@ import (
 // ingestAdmissionQueues holds the per-tenant admission gates for the steward
 // ingest paths (Issue #3759, ADR-031 Decision 6).
 //
-// There are deliberately TWO TenantQueue instances, split by how much the
-// controller trusts the bucket key each path uses:
+// There are deliberately THREE TenantQueue instances. Two are split by how much
+// the controller trusts the bucket key each path uses, the third by workload:
 //
 //   - connectHeartbeat gates Register (connect) and the ControlChannel heartbeat
 //     message. Its bucket key is produced by
@@ -23,6 +23,12 @@ import (
 //     key is additionally length- and charset-bounded, which is what preserves
 //     TenantQueue's "bounded by number of active tenants" invariant (entries are
 //     created lazily and never evicted).
+//
+//   - events gates steward events on the ControlChannel. Its key is the same
+//     server-verified bucket as connectHeartbeat, but events run arbitrary
+//     handlers that can be slow, so they get their own queue: a flood of slow
+//     event handlers from one tenant must never use up that tenant's connect or
+//     heartbeat slots (Issue #5120).
 //
 //   - dnaBulk gates SyncDNA and BulkTransfer. The DNA handler keys its bucket on
 //     the first chunk's tenant_id — unverified wire data (BulkHandler keys on
@@ -42,6 +48,7 @@ import (
 // connectHeartbeat only once its bucket key is derived server-side the same way.
 type ingestAdmissionQueues struct {
 	connectHeartbeat *controllerTransport.TenantQueue
+	events           *controllerTransport.TenantQueue
 	dnaBulk          *controllerTransport.TenantQueue
 }
 
@@ -51,6 +58,7 @@ type ingestAdmissionQueues struct {
 func newIngestAdmissionQueues() *ingestAdmissionQueues {
 	return &ingestAdmissionQueues{
 		connectHeartbeat: controllerTransport.NewTenantQueue(),
+		events:           controllerTransport.NewTenantQueue(),
 		dnaBulk:          controllerTransport.NewTenantQueue(),
 	}
 }
@@ -71,4 +79,13 @@ func (q *ingestAdmissionQueues) dnaBulkQueue() *controllerTransport.TenantQueue 
 		return controllerTransport.NewTenantQueue()
 	}
 	return q.dnaBulk
+}
+
+// eventsQueue returns the gate for steward events, tolerating a Server
+// assembled without New (queues absent).
+func (q *ingestAdmissionQueues) eventsQueue() *controllerTransport.TenantQueue {
+	if q == nil {
+		return controllerTransport.NewTenantQueue()
+	}
+	return q.events
 }

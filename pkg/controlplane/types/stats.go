@@ -48,6 +48,14 @@ type ControlPlaneStats struct {
 	// disagreed with the mTLS-authenticated CN and were rejected without dispatch.
 	IdentityMismatches int64 `json:"identity_mismatches"`
 
+	// EventsDropped counts steward events shed by the tenant event gate or the
+	// per-stream in-flight limit.
+	EventsDropped int64 `json:"events_dropped"`
+
+	// HeartbeatsDropped counts steward heartbeats shed by the tenant gate or the
+	// per-stream in-flight limit.
+	HeartbeatsDropped int64 `json:"heartbeats_dropped"`
+
 	// Average message latency (if measurable)
 	AvgLatency time.Duration `json:"avg_latency,omitempty"`
 

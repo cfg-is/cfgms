@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -53,12 +56,107 @@ func WithTenantAdmission(admission TenantAdmission) option {
 	}
 }
 
+// WithEventAdmission injects the per-tenant admission gate for steward events on
+// the ControlChannel. It must be a different instance from the one passed to
+// WithTenantAdmission so a flood of slow event handlers from one tenant cannot
+// use up that tenant's connect or heartbeat slots (Issue #5120). Optional — nil
+// disables the tenant gate; the per-stream in-flight limit still applies.
+func WithEventAdmission(admission TenantAdmission) option {
+	return func(p *Provider) {
+		p.eventAdmission = admission
+	}
+}
+
+// maxInFlightEventsPerStream bounds event handlers in flight at the same time
+// for one ControlChannel stream: a quarter of the per-tenant limit (32), so one
+// steward cannot fill its tenant's event slots. It bounds concurrency, not the
+// event rate. Events past the cap are dropped and counted, never queued.
+const maxInFlightEventsPerStream = 8
+
+// maxInFlightHeartbeatsPerStream is the number of heartbeats a stream may have
+// being handled at once.
+const maxInFlightHeartbeatsPerStream = 1
+
+// dropLogInterval is the minimum time between drop warnings on one stream.
+const dropLogInterval = 30 * time.Second
+
+// dropLogLimiter rate-limits a stream's drop warnings: the first drop is
+// logged, then at most one line per interval carrying the drops since the last.
+type dropLogLimiter struct {
+	mu      sync.Mutex
+	last    time.Time
+	pending int64
+}
+
+// record notes one drop and reports whether to log now, with the number of
+// drops since the last logged line.
+func (d *dropLogLimiter) record(now time.Time) (bool, int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending++
+	if !d.last.IsZero() && now.Sub(d.last) < dropLogInterval {
+		return false, 0
+	}
+	n := d.pending
+	d.pending = 0
+	d.last = now
+	return true, n
+}
+
+// streamIngest is the per-ControlChannel-stream in-flight state. One is created
+// per stream, so no counter is shared across streams.
+type streamIngest struct {
+	events         atomic.Int32
+	heartbeats     atomic.Int32
+	eventDrops     *dropLogLimiter
+	heartbeatDrops *dropLogLimiter
+}
+
+func newStreamIngest() *streamIngest {
+	return &streamIngest{eventDrops: &dropLogLimiter{}, heartbeatDrops: &dropLogLimiter{}}
+}
+
+func tryAcquireCounter(c *atomic.Int32, limit int32) bool {
+	if c.Add(1) > limit {
+		c.Add(-1)
+		return false
+	}
+	return true
+}
+
+func (s *streamIngest) tryEvent() bool {
+	return tryAcquireCounter(&s.events, maxInFlightEventsPerStream)
+}
+func (s *streamIngest) releaseEvent() { s.events.Add(-1) }
+func (s *streamIngest) tryHeartbeat() bool {
+	return tryAcquireCounter(&s.heartbeats, maxInFlightHeartbeatsPerStream)
+}
+func (s *streamIngest) releaseHeartbeat() { s.heartbeats.Add(-1) }
+
+// dropMessage counts a shed steward message and logs it, rate-limited per
+// stream.
+func (p *Provider) dropMessage(limiter *dropLogLimiter, counter *atomic.Int64, kind, reason, stewardID, bucket string) {
+	counter.Add(1)
+	if ok, n := limiter.record(time.Now()); ok {
+		p.logger.Warn("controlchannel "+kind+" dropped — "+reason,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"admission_bucket", logging.SanitizeLogValue(bucket),
+			"dropped_since_last_log", n)
+	}
+}
+
 // TenantAdmission returns the per-tenant admission gate wired into this
 // provider, or nil when admission control is disabled. It exists so wiring can
 // be asserted from outside the package — notably that the connect/heartbeat gate
 // is a different instance from the one the wire-keyed DNA and bulk paths use.
 func (p *Provider) TenantAdmission() TenantAdmission {
 	return p.tenantAdmission
+}
+
+// EventAdmission returns the steward-event admission gate wired into this
+// provider, or nil when the tenant event gate is disabled.
+func (p *Provider) EventAdmission() TenantAdmission {
+	return p.eventAdmission
 }
 
 // StewardTenantResolver maps an mTLS-verified steward identity to the tenant

@@ -31,6 +31,10 @@ func TestIngestAdmissionQueues_WireKeyedFloodCannotStarveConnectOrHeartbeat(t *t
 	queues := newIngestAdmissionQueues()
 	require.NotSame(t, queues.connectHeartbeatQueue(), queues.dnaBulkQueue(),
 		"connect/heartbeat and DNA/bulk must not share a TenantQueue instance")
+	require.NotSame(t, queues.eventsQueue(), queues.connectHeartbeatQueue(),
+		"events and connect/heartbeat must not share a TenantQueue instance")
+	require.NotSame(t, queues.eventsQueue(), queues.dnaBulkQueue(),
+		"events and DNA/bulk must not share a TenantQueue instance")
 
 	const victimTenant = "root/msp-a/victim"
 
@@ -75,6 +79,7 @@ func TestIngestAdmissionQueues_NilReceiverYieldsUsableQueues(t *testing.T) {
 	var queues *ingestAdmissionQueues
 	require.NotNil(t, queues.connectHeartbeatQueue())
 	require.NotNil(t, queues.dnaBulkQueue())
+	require.NotNil(t, queues.eventsQueue())
 	assert.NoError(t, queues.connectHeartbeatQueue().Acquire("tenant-a"))
 	assert.NoError(t, queues.dnaBulkQueue().Acquire("tenant-a"))
 }
@@ -133,4 +138,30 @@ func TestServer_New_ConnectAdmissionGateIsNotTheWireKeyedQueue(t *testing.T) {
 		"the CP provider must hold the server-verified-key gate")
 	assert.NotSame(t, srv.admissionQueues.dnaBulkQueue(), cpProvider.TenantAdmission(),
 		"the CP provider must never hold the queue the wire-keyed DNA path uses")
+
+	require.NotNil(t, cpProvider.EventAdmission(), "steward events must be gated by an admission queue")
+	assert.Same(t, srv.admissionQueues.eventsQueue(), cpProvider.EventAdmission(),
+		"the CP provider must hold the events gate")
+	assert.NotSame(t, srv.admissionQueues.connectHeartbeatQueue(), cpProvider.EventAdmission(),
+		"events must not share the connect/heartbeat gate")
+	assert.NotSame(t, srv.admissionQueues.dnaBulkQueue(), cpProvider.EventAdmission(),
+		"events must not share the DNA/bulk gate")
+}
+
+// TestIngestAdmissionQueues_EventsQueueIsolatedFromConnectHeartbeat: a flood of
+// slow event handlers holding every events slot of a tenant leaves that
+// tenant's connect/heartbeat and DNA/bulk slots untouched.
+func TestIngestAdmissionQueues_EventsQueueIsolatedFromConnectHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	queues := newIngestAdmissionQueues()
+	const tenant = "root/msp-a/client-1"
+
+	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+		require.NoError(t, queues.eventsQueue().Acquire(tenant))
+	}
+	require.ErrorIs(t, queues.eventsQueue().Acquire(tenant), controllerTransport.ErrTenantQueueFull)
+
+	assert.NoError(t, queues.connectHeartbeatQueue().Acquire(tenant), "events must not use connect/heartbeat slots")
+	assert.NoError(t, queues.dnaBulkQueue().Acquire(tenant), "events must not use DNA/bulk slots")
 }
