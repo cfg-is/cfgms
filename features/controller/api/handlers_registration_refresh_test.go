@@ -123,6 +123,7 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 	server.SetPendingRefreshStore(pending)
 	server.SetRefreshPolicyStore(policies)
 	server.SetNonceStore(nonces)
+	server.SetAuditStore(storageManager.GetAuditStore())
 
 	return &refreshFixture{
 		server:   server,

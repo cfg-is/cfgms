@@ -72,7 +72,8 @@ type testAuditCountResponse struct {
 // handleTestAuditCount handles GET /api/v1/test/audit/count.
 // Query params: action=<action>&device_id=<device_id>
 // Returns {"count": N} — the number of audit entries matching both filters.
-// device_id is matched via the audit entry's user_id field (set by emitRefreshAudit).
+// device_id is matched via the audit entry's resource_id (the steward/device), so events
+// whose user is an operator principal (refresh_admin_approved/rejected) are found too.
 // Flushes the audit manager before querying so in-flight entries are drained.
 // Requires CFGMS_ENABLE_TEST_ENDPOINTS=true (enforced by authenticationMiddleware).
 func (s *Server) handleTestAuditCount(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +103,7 @@ func (s *Server) handleTestAuditCount(w http.ResponseWriter, r *http.Request) {
 		Actions: []string{action},
 	}
 	if deviceID != "" {
-		filter.UserIDs = []string{deviceID}
+		filter.ResourceIDs = []string{deviceID}
 	}
 
 	entries, err := s.auditStore.ListAuditEntries(r.Context(), filter)
