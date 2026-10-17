@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -285,6 +286,8 @@ type wsNode struct {
 	*ticketNode
 	reached int
 	proof   *transport.TerminalProof
+	recheck transport.SessionRecheck
+	authRef *authSessionRef // when set, connect marks the request as session-authenticated
 }
 
 func newWSNode(t *testing.T) *wsNode {
@@ -293,6 +296,7 @@ func newWSNode(t *testing.T) *wsNode {
 	n.server.SetTerminalHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.reached++
 		n.proof, _ = transport.TerminalProofFromContext(r.Context())
+		n.recheck = transport.SessionRecheckFromContext(r.Context())
 		w.WriteHeader(http.StatusSwitchingProtocols)
 	}))
 	return n
@@ -323,6 +327,9 @@ func (n *wsNode) connect(p *Principal, stewardID, webSession, protocols string, 
 	req = withPrincipal(req, p)
 	if webSession != "" {
 		req = req.WithContext(context.WithValue(req.Context(), webSessionIDContextKey, webSession))
+	}
+	if n.authRef != nil {
+		req = req.WithContext(context.WithValue(req.Context(), authSessionContextKey, *n.authRef))
 	}
 	rec := httptest.NewRecorder()
 	n.router.ServeHTTP(rec, req)
@@ -422,4 +429,28 @@ func TestTerminalWS_OutOfTenantDoesNotConsumeTicket(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, n.connect(outsider, ttSteward, "", ticketProtocols(tk), "").Code)
 	assert.Equal(t, 1, ticketCount(n.server), "ticket must survive an out-of-tenant attempt")
 	assert.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
+}
+
+// A session-authenticated upgrade hands the handler a re-check that follows the shared
+// store; a principal with no session gets none.
+func TestTerminalWS_SessionRecheckFollowsSessionStore(t *testing.T) {
+	n := newWSNode(t)
+	cfg := session.Config{IdleTimeout: time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: time.Second}
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	sm := session.NewManager(cfg, store, time.Now)
+	sess, _, err := sm.Issue(context.Background(), "op-1", "web", saTenant)
+	require.NoError(t, err)
+
+	tk := n.seed("op-1", ttSteward, "")
+	require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
+	assert.Nil(t, n.recheck, "a principal with no session must not be re-checked")
+
+	n.authRef = &authSessionRef{manager: sm, id: sess.ID}
+	tk = n.seed("op-1", ttSteward, "")
+	require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
+	require.NotNil(t, n.recheck)
+	assert.True(t, n.recheck(context.Background()))
+	require.NoError(t, sm.Revoke(context.Background(), sess.ID))
+	assert.False(t, n.recheck(context.Background()), "a revoked session must fail the re-check")
 }

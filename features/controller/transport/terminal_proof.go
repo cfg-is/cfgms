@@ -33,3 +33,23 @@ func TerminalProofFromContext(ctx context.Context) (*TerminalProof, bool) {
 	p, ok := ctx.Value(terminalProofKey{}).(*TerminalProof)
 	return p, ok && p != nil
 }
+
+type sessionRecheckKey struct{}
+
+// SessionRecheck reports whether the admin session that authenticated a terminal
+// upgrade is still live according to the shared session store. It is set by the
+// route layer (transport must not import the api package) and consulted by the
+// relay at least once per ping interval.
+type SessionRecheck func(ctx context.Context) bool
+
+// WithSessionRecheck returns ctx carrying the session re-check for the request.
+func WithSessionRecheck(ctx context.Context, fn SessionRecheck) context.Context {
+	return context.WithValue(ctx, sessionRecheckKey{}, fn)
+}
+
+// SessionRecheckFromContext returns the re-check in ctx, or nil for a principal
+// that has no session (mTLS admin certificate, API key).
+func SessionRecheckFromContext(ctx context.Context) SessionRecheck {
+	fn, _ := ctx.Value(sessionRecheckKey{}).(SessionRecheck)
+	return fn
+}

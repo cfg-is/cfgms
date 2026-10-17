@@ -228,7 +228,13 @@ func (s *Server) terminalTicketWrapper(next http.Handler) http.Handler {
 			TerminalShell: rec.terminalShell,
 			Params:        terminalProofParams(rec),
 		}
-		next.ServeHTTP(w, r.WithContext(transport.WithTerminalProof(r.Context(), proof)))
+		ctx := transport.WithTerminalProof(r.Context(), proof)
+		// A cookie or Bearer session is re-checked against the shared store for as
+		// long as the shell runs; mTLS and API-key principals carry no session.
+		if ref, ok := r.Context().Value(authSessionContextKey).(authSessionRef); ok {
+			ctx = transport.WithSessionRecheck(ctx, ref.stillLive)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
