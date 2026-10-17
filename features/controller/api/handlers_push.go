@@ -22,6 +22,7 @@ import (
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -181,7 +182,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.emitConfigPushAudit(r, cfg.TenantID, cfg.ConfigID, pushID)
+	s.emitConfigPushAudit(r, principal, cfg.TenantID, cfg.ConfigID, pushID)
 
 	// Build the push record (the "config write") up front. It is persisted
 	// below in the same transaction as the per-steward delivery rows it
@@ -197,14 +198,15 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("Failed to marshal push payload for persistence", "error", logging.SanitizeLogValue(marshalErr.Error()), "push_id", pushID)
 		} else {
 			pushRecord = &business.PushRecord{
-				ID:        pushID,
-				ConfigID:  cfg.ConfigID,
-				TenantID:  cfg.TenantID,
-				Version:   cfg.Version,
-				Status:    business.PushStatusInProgress,
-				Data:      pushData,
-				CreatedAt: queuedAt,
-				UpdatedAt: queuedAt,
+				ID:          pushID,
+				InitiatedBy: principal.ID,
+				ConfigID:    cfg.ConfigID,
+				TenantID:    cfg.TenantID,
+				Version:     cfg.Version,
+				Status:      business.PushStatusInProgress,
+				Data:        pushData,
+				CreatedAt:   queuedAt,
+				UpdatedAt:   queuedAt,
 			}
 		}
 	}
@@ -404,7 +406,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 
 // emitConfigPushAudit records an audit event for a config push initiation.
 // It is a no-op when auditManager is nil and never blocks or fails the caller.
-func (s *Server) emitConfigPushAudit(r *http.Request, tenantID, configID, pushID string) {
+func (s *Server) emitConfigPushAudit(r *http.Request, principal *Principal, tenantID, configID, pushID string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -412,13 +414,55 @@ func (s *Server) emitConfigPushAudit(r *http.Request, tenantID, configID, pushID
 		Tenant(tenantID).
 		Type(business.AuditEventConfiguration).
 		Action("config.push.initiated").
-		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		User(principal.ID, principalAuditUserType(principal)).
 		Resource("config", logging.SanitizeLogValue(configID), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityMedium).
 		Detail("push_id", pushID).
 		Detail("config_id", logging.SanitizeLogValue(configID))
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
-		s.logger.Warn("Failed to emit config push audit event", "error", err, "push_id", pushID)
+		s.logger.Warn("Failed to emit config push audit event", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
+	}
+}
+
+// principalAuditUserType maps an authenticated principal to the audit actor type:
+// API-key (machine) principals are recorded as API clients, everything else as humans.
+func principalAuditUserType(p *Principal) business.AuditUserType {
+	if p != nil && p.Assurance == session.AssuranceMachine {
+		return business.AuditUserTypeAPI
+	}
+	return business.AuditUserTypeHuman
+}
+
+// emitOperatorAudit records an audit event for an action an authenticated operator
+// took, naming the principal as the actor. It is a no-op when auditManager is nil
+// and never blocks or fails the caller.
+func (s *Server) emitOperatorAudit(
+	r *http.Request,
+	principal *Principal,
+	tenantID string,
+	eventType business.AuditEventType,
+	action, resourceType, resourceID string,
+	result business.AuditResult,
+	severity business.AuditSeverity,
+	details map[string]interface{},
+) {
+	if s.auditManager == nil || principal == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(eventType).
+		Action(action).
+		User(principal.ID, principalAuditUserType(principal)).
+		Resource(resourceType, resourceID, "").
+		Result(result).
+		Severity(severity)
+	for k, v := range details {
+		b = b.Detail(k, v)
+	}
+	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+		s.logger.Warn("Failed to emit operator audit event",
+			"error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }

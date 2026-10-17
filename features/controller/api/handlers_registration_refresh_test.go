@@ -33,7 +33,9 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -121,6 +123,7 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 	server.SetPendingRefreshStore(pending)
 	server.SetRefreshPolicyStore(policies)
 	server.SetNonceStore(nonces)
+	server.SetAuditStore(storageManager.GetAuditStore())
 
 	return &refreshFixture{
 		server:   server,
@@ -819,6 +822,11 @@ func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
 	assert.NotEmpty(t, entry.Details["device_id"], "device_id in audit")
 	assert.NotEmpty(t, entry.Details["tenant_id"], "tenant_id in audit")
 	assert.Equal(t, "approved", entry.Details["decision"])
+	// The audit entry names the approving operator, not the device.
+	assert.Equal(t, req.TLS.PeerCertificates[0].Subject.CommonName, entry.UserID,
+		"refresh_admin_approved must record the authenticated principal")
+	assert.NotEqual(t, testDeviceID, entry.UserID)
+	assert.Equal(t, testDeviceID, entry.Details["device_id"])
 }
 
 // TestHandleRefreshApprove_RevokedDeviceRejected verifies the security gate added
@@ -917,6 +925,11 @@ func TestHandleRefreshReject_RejectsEntry(t *testing.T) {
 	entry := f.findAuditAction(t, "refresh_admin_rejected")
 	require.NotNil(t, entry, "refresh_admin_rejected audit event expected")
 	assert.Equal(t, "rejected", entry.Details["decision"])
+	// The audit entry names the rejecting operator, not the device.
+	assert.NotEmpty(t, entry.UserID)
+	assert.NotEqual(t, testDeviceID, entry.UserID,
+		"refresh_admin_rejected must record the authenticated principal")
+	assert.Equal(t, testDeviceID, entry.Details["device_id"])
 }
 
 func TestHandleListPendingRefreshes_ReturnsList(t *testing.T) {
@@ -1954,4 +1967,40 @@ func TestHandleRefreshClaim_RebaselineNormalisesAndSkipsUnusable(t *testing.T) {
 			assert.JSONEq(t, tc.want, rec.LastProvenanceJSON)
 		})
 	}
+}
+
+// TestHandleSetRefreshPolicy_AuditsPolicyChange verifies that changing a tenant's
+// refresh policy records one audit entry naming the calling principal, the tenant,
+// and both the old and new mode.
+func TestHandleSetRefreshPolicy_AuditsPolicyChange(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	ctx := context.Background()
+	const tenantID = "audit-policy-tenant"
+	oldDays := 30
+	require.NoError(t, f.policies.SetPolicy(ctx, &business.RefreshPolicy{
+		TenantID: tenantID, Mode: "require_approval", MaxDormancyDays: &oldDays,
+	}))
+
+	body := bytes.NewBufferString(`{"mode":"auto_accept","max_dormancy_days":60}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+tenantID+"/refresh-policy", body)
+	req = mux.SetURLVars(req, map[string]string{"tenant_path": tenantID})
+	p := &Principal{ID: "admin-alice", Name: "alice", Assurance: session.AssuranceBasic, GlobalScope: true}
+	rctx := context.WithValue(req.Context(), principalContextKey, p)
+	rctx = context.WithValue(rctx, ctxkeys.TenantID, "")
+	rctx = context.WithValue(rctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	req = req.WithContext(rctx)
+	rec := httptest.NewRecorder()
+
+	f.server.handleSetRefreshPolicy(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	require.NoError(t, f.audit.Flush(ctx))
+	entries, err := f.audit.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"refresh_policy.changed"}})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "admin-alice", entries[0].UserID)
+	assert.Equal(t, tenantID, entries[0].TenantID)
+	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
+	assert.Equal(t, "require_approval", entries[0].Details["old_mode"])
+	assert.Equal(t, "auto_accept", entries[0].Details["new_mode"])
 }

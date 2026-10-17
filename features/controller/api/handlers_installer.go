@@ -6,7 +6,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // validPlatforms is the allow-list of supported installer platforms (Issue #1702).
@@ -89,14 +92,20 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		Name:      platform + "-" + arch,
 	}
 
-	if err := s.blobStore.PutBlob(r.Context(), key, r.Body, blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil {
+	hasher := sha256.New()
+	body := io.TeeReader(r.Body, hasher)
+	if err := s.blobStore.PutBlob(r.Context(), key, body, blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil {
 		s.logger.Error("Failed to store installer artifact",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
+		s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, "", business.AuditResultFailure)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
 		return
 	}
+	// Audit immediately: a stored artifact must always have an audit record,
+	// independent of the metadata re-read below.
+	s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, hex.EncodeToString(hasher.Sum(nil)), business.AuditResultSuccess)
 	if tenantID == s.rootTenantID(r.Context()) {
 		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
 	}
@@ -262,6 +271,7 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
+		s.emitInstallerAudit(r, tenantID, "installer.artifact.deleted", platform, arch, "", business.AuditResultFailure)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete artifact", "DELETE_ERROR")
 		return
 	}
@@ -269,7 +279,26 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
 	}
 
+	s.emitInstallerAudit(r, tenantID, "installer.artifact.deleted", platform, arch, "", business.AuditResultSuccess)
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// emitInstallerAudit records an installer artifact change naming the authenticated
+// principal. checksum is the stored SHA-256 for uploads and empty for deletes.
+func (s *Server) emitInstallerAudit(r *http.Request, tenantID, action, platform, arch, checksum string, result business.AuditResult) {
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	details := map[string]interface{}{
+		"tenant_id": tenantID,
+		"platform":  platform,
+		"arch":      arch,
+	}
+	if checksum != "" {
+		details["checksum"] = checksum
+	}
+	s.emitOperatorAudit(r, principal, tenantID, business.AuditEventConfiguration,
+		action, "installer_artifact", platform+"-"+arch,
+		result, business.AuditSeverityHigh, details)
 }
 
 // parseInstallerName splits a blob name like "windows-amd64" into ("windows", "amd64", true).
