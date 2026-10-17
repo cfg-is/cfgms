@@ -204,9 +204,9 @@ describe('Shell tab (Story #4591)', () => {
     fireEvent.click(tab)
     const shell = screen.getByTestId('shell-tab')
     expect(shell).toHaveTextContent('stw-42')
-    expect(
-      StubWebSocket.urls.some((u) => u.endsWith('/api/v1/terminal/ws/stw-42')),
-    ).toBe(true)
+    // The socket opens only after prepare, the passkey ceremony and the ticket request.
+    expect(fetchMock.mock.calls.some(([p]) => String(p) === '/api/v1/terminal/prepare/stw-42')).toBe(true)
+    expect(StubWebSocket.urls.some((u) => u.includes('/api/v1/terminal/ws/'))).toBe(false)
     expect(screen.queryByText(/not yet available/i)).toBeNull()
   })
 })
