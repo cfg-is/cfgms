@@ -172,6 +172,12 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	}
 	m.configuredBasePath = fileConfig.AllowedBasePath
 
+	// Local steward settings live in the boot config; a delivered resource
+	// must never create, modify, delete or chmod them (Issue #5146).
+	if security.IsProtectedBootConfigPath(cleanPath) {
+		return ErrProtectedBootConfig
+	}
+
 	switch fileConfig.resolvedType() {
 	case "symlink":
 		return ErrSymlinkNotSupported

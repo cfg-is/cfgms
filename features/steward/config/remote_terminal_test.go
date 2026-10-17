@@ -3,6 +3,9 @@
 package config
 
 import (
+	"runtime"
+
+	"github.com/cfgis/cfgms/pkg/security"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,4 +45,34 @@ func TestRemoteTerminalSetting_FromProtoNeverSets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, cfg.Steward.RemoteTerminal.Enabled)
 	assert.True(t, cfg.Steward.RemoteTerminal.IsEnabled())
+}
+
+// The documented location (steward.cfg in a standard config dir) must really
+// be read by the loader, and the setting must take effect (Issue #5146).
+func TestLoadConfiguration_ReadsDocumentedStewardCfg(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	dir := filepath.Join(home, ".config", "cfgms")
+	if runtime.GOOS != "linux" {
+		dir = filepath.Join(home, ".cfgms")
+	}
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, security.BootConfigFileName),
+		[]byte("steward:\n  id: h1\n  remote_terminal:\n    enabled: false\nresources: []\n"), 0o600))
+
+	cfg, err := LoadConfiguration("")
+	require.NoError(t, err)
+	assert.False(t, cfg.Steward.RemoteTerminal.IsEnabled())
+}
+
+func TestWarnShadowedConfigs_ExistingUnreadFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "steward.cfg")
+	require.NoError(t, os.WriteFile(p, []byte("steward: {}\n"), 0o600))
+	// Must not panic and must tolerate loaded == other path.
+	warnShadowedConfigs([]string{p, filepath.Join(dir, "missing.cfg")}, filepath.Join(dir, "other.cfg"))
 }

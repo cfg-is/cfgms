@@ -7,7 +7,7 @@ Choose the deployment that matches your scenario.
 Two fully-commented config files to copy and customize:
 
 - [`controller.cfg`](controller.cfg) — canonical controller boot config. Copy to `/etc/cfgms/controller.cfg`.
-- [`steward.cfg`](steward.cfg) — canonical steward boot config. Copy to `/etc/cfgms/steward.cfg` on each endpoint.
+- [`steward.cfg`](steward.cfg) — canonical steward boot config. Copy to `/etc/cfgms/steward.cfg` (Linux; macOS and Windows locations are listed in the file header) on each endpoint.
 
 The canonical public-beta controller and service/container definitions select
 `security_profile: public-beta` and require signed ad-hoc execution. Do not

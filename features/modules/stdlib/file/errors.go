@@ -9,6 +9,10 @@ var (
 	// See docs/modules/file.md for configuration guidance.
 	ErrAllowedBasePathRequired = errors.New("AllowedBasePath is required and must be an absolute path; see docs/modules/file.md")
 
+	// ErrProtectedBootConfig is returned when a resource targets a steward boot-config
+	// file or its directory. Local steward settings must not be changeable by delivered config.
+	ErrProtectedBootConfig = errors.New("refusing to modify steward boot configuration: it is managed locally only")
+
 	// ErrNotADirectory is returned when the path exists but is not a directory (type: directory).
 	ErrNotADirectory = errors.New("path exists but is not a directory")
 

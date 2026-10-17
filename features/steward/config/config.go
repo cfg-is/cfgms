@@ -54,7 +54,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -62,6 +61,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // Type aliases — re-export from stewardtypes so existing callers compile unchanged.
@@ -187,6 +188,7 @@ func LoadConfiguration(configPath string) (StewardConfig, error) {
 
 	for _, path := range searchPaths {
 		if _, err := os.Stat(path); err == nil {
+			warnShadowedConfigs(searchPaths, path)
 			return loadFromPath(path)
 		}
 	}
@@ -242,61 +244,35 @@ func loadFromPath(configPath string) (StewardConfig, error) {
 	return config, nil
 }
 
-// getConfigSearchPaths returns the prioritized list of configuration search paths
+// getConfigSearchPaths returns the prioritized list of configuration search
+// paths: for each directory in security.BootConfigDirs, "<hostname>.cfg" then
+// the canonical steward.cfg. The same directory list backs the file-module
+// write guard.
 func getConfigSearchPaths() []string {
 	var paths []string
-
-	// Get hostname for the config file name
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "localhost"
-	}
-	configFileName := hostname + ".cfg"
-
-	// Current working directory (highest priority)
-	if cwd, err := os.Getwd(); err == nil {
-		paths = append(paths, filepath.Join(cwd, configFileName))
-	}
-
-	// Platform-specific paths
-	switch runtime.GOOS {
-	case "windows":
-		// Windows: ProgramData and user profile
-		if programData := os.Getenv("PROGRAMDATA"); programData != "" {
-			paths = append(paths, filepath.Join(programData, "cfgms", configFileName))
-		}
-		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
-			paths = append(paths, filepath.Join(userProfile, ".cfgms", configFileName))
-		}
-
-	case "darwin":
-		// macOS: system and user Library
-		paths = append(paths,
-			filepath.Join("/Library", "Application Support", "cfgms", configFileName),
-			filepath.Join("/usr", "local", "etc", "cfgms", configFileName),
-		)
-		if homeDir := os.Getenv("HOME"); homeDir != "" {
-			paths = append(paths,
-				filepath.Join(homeDir, "Library", "Application Support", "cfgms", configFileName),
-				filepath.Join(homeDir, ".cfgms", configFileName),
-			)
-		}
-
-	case "linux":
-		// Linux: standard system and user paths
-		paths = append(paths,
-			filepath.Join("/etc", "cfgms", configFileName),
-			filepath.Join("/usr", "local", "etc", "cfgms", configFileName),
-		)
-		if homeDir := os.Getenv("HOME"); homeDir != "" {
-			paths = append(paths,
-				filepath.Join(homeDir, ".config", "cfgms", configFileName),
-				filepath.Join(homeDir, ".cfgms", configFileName),
-			)
+	for _, dir := range security.BootConfigDirs() {
+		for _, name := range security.BootConfigFileNames() {
+			paths = append(paths, filepath.Join(dir, name))
 		}
 	}
-
 	return paths
+}
+
+// warnShadowedConfigs logs at Warn for every existing candidate configuration
+// file that was not loaded. A shadowed steward.cfg (for example a local
+// remote_terminal.enabled: false) is otherwise silently ignored.
+func warnShadowedConfigs(searchPaths []string, loaded string) {
+	logger := logging.ForModule("steward-config")
+	for _, p := range searchPaths {
+		if p == loaded {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			logger.Warn("steward configuration file exists but was not loaded; settings in it have no effect",
+				"unread_path", logging.SanitizeLogValue(p),
+				"loaded_path", logging.SanitizeLogValue(loaded))
+		}
+	}
 }
 
 // applyDefaults sets default values for configuration fields
