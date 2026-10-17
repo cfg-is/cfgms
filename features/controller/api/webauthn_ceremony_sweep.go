@@ -221,6 +221,13 @@ func (s *Server) sweepExpiredWebAuthnCeremonies(now time.Time) {
 		}
 		return rec.expires, true
 	}, nil)
+	sweepExpired(&s.terminalTickets, now, func(v any) (time.Time, bool) {
+		rec, ok := v.(*terminalTicketRecord)
+		if !ok {
+			return time.Time{}, false
+		}
+		return rec.expires, true
+	}, nil)
 	sweepExpired(&s.webAuthnElevateSessions, now, func(v any) (time.Time, bool) {
 		sess, ok := v.(*webAuthnElevateSession)
 		if !ok {

@@ -529,6 +529,132 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /terminal/prepare/{steward_id}:
+    post:
+      summary: Prepare a terminal-open request for signing
+      description: >-
+        Returns the canonical terminal-open content (base64) and the envelope shell
+        (terminal-open) to feed to POST /operator-payload/sign/begin. An empty
+        terminal_shell resolves to the target steward's platform default
+        (powershell for windows, bash otherwise); 409 when the platform is unknown.
+        Requires terminal:create at strong assurance.
+      operationId: prepareTerminal
+      tags:
+        - Terminal
+      parameters:
+        - name: steward_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                terminal_shell:
+                  type: string
+                  example: bash
+      responses:
+        '200':
+          description: Canonical content to sign
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      content:
+                        type: string
+                        description: base64 of the canonical terminal content
+                      shell:
+                        type: string
+                        example: terminal-open
+                      terminal_shell:
+                        type: string
+                        example: bash
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Steward platform is unknown (STEWARD_PLATFORM_UNKNOWN); pass terminal_shell
+
+  /terminal/tickets/{steward_id}:
+    post:
+      summary: Exchange an operator proof for a one-time terminal ticket
+      description: >-
+        Verifies the operator proof over the terminal-open envelope and returns a
+        ticket valid for 30 seconds. The ticket is single use (the first redemption
+        consumes it, on any controller node) and is presented as the WebSocket
+        subprotocol cfgms.ticket.<ticket> alongside cfgms.terminal.v1. Every
+        proof-related failure is 403 INVALID_SIGNATURE. Requires terminal:create at
+        strong assurance.
+      operationId: createTerminalTicket
+      tags:
+        - Terminal
+      parameters:
+        - name: steward_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [terminal_shell, nonce, expires_at, targets]
+              properties:
+                terminal_shell:
+                  type: string
+                nonce:
+                  type: string
+                expires_at:
+                  type: string
+                  format: date-time
+                targets:
+                  type: array
+                  items:
+                    type: string
+                signature:
+                  type: object
+                  description: X.509 proof (algorithm, value, public_key); exactly one of signature or webauthn
+                webauthn:
+                  type: object
+                  description: WebAuthn proof (authenticator_data, client_data_json, signature, credential_id)
+      responses:
+        '200':
+          description: Ticket minted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ticket:
+                        type: string
+                        description: base64url, 30 second single-use ticket
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: INVALID_SIGNATURE
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Cluster mode with no usable shared ceremony store
+
   /stewards/{stewardId}/services/{name}/actions:
     post:
       summary: Start, stop or restart a service on one steward

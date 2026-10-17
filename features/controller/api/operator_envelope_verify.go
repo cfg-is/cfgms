@@ -65,6 +65,18 @@ type OperatorProof struct {
 // Callers report a failure to the client as "invalid operator signature" without
 // detail, and log the returned error through logging.SanitizeLogValue.
 func (s *Server) verifyOperatorActionEnvelope(ctx context.Context, stewardID string, action operatorpayload.Action, targets []string, nonce string, expiresAt time.Time, proof OperatorProof) (string, error) {
+	content, err := operatorpayload.ActionContent(action)
+	if err != nil {
+		return "", fmt.Errorf("invalid operator action: %w", err)
+	}
+	return s.verifyOperatorEnvelope(ctx, stewardID, content, operatorpayload.ActionShell, operatorpayload.ActionEnvelopeMaxTTL, targets, nonce, expiresAt, proof)
+}
+
+// verifyOperatorEnvelope is the content-agnostic core of the operator envelope check:
+// the caller supplies the canonical content, the envelope shell and the longest validity
+// window (maxTTL) its envelope kind may carry. The admission window, targets rule and
+// credential handling are those documented on verifyOperatorActionEnvelope.
+func (s *Server) verifyOperatorEnvelope(ctx context.Context, stewardID string, content []byte, shell string, maxTTL time.Duration, targets []string, nonce string, expiresAt time.Time, proof OperatorProof) (string, error) {
 	if (proof.X509 == nil) == (proof.WebAuthn == nil) {
 		return "", fmt.Errorf("operator proof must carry exactly one credential type")
 	}
@@ -72,20 +84,16 @@ func (s *Server) verifyOperatorActionEnvelope(ctx context.Context, stewardID str
 	if !expiresAt.After(now) {
 		return "", fmt.Errorf("operator envelope has expired")
 	}
-	if expiresAt.After(now.Add(operatorpayload.ActionEnvelopeMaxTTL)) {
-		return "", fmt.Errorf("operator envelope expiry exceeds the %s maximum", operatorpayload.ActionEnvelopeMaxTTL)
+	if expiresAt.After(now.Add(maxTTL)) {
+		return "", fmt.Errorf("operator envelope expiry exceeds the %s maximum", maxTTL)
 	}
 	if stewardID == "" || len(targets) != 1 || targets[0] != stewardID {
 		return "", fmt.Errorf("operator envelope targets must be exactly the addressed steward")
 	}
 
-	content, err := operatorpayload.ActionContent(action)
-	if err != nil {
-		return "", fmt.Errorf("invalid operator action: %w", err)
-	}
 	envelope := operatorpayload.Envelope{
 		Content:   content,
-		Shell:     operatorpayload.ActionShell,
+		Shell:     shell,
 		Targets:   targets,
 		Nonce:     nonce,
 		ExpiresAt: expiresAt,

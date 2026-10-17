@@ -947,6 +947,44 @@ target, justification and signing credential id (`signer_id`); the steward's res
 controller closing the action as expired, writes `steward_action_completed` or
 `steward_action_expired`. Audit resource ids are the steward id.
 
+### Terminal Tickets
+
+A browser cannot attach an operator proof to a WebSocket upgrade. The Shell tab signs with its
+passkey, posts the proof here, and receives a short-lived one-time ticket to present on the
+WebSocket. Both endpoints require `terminal:create` (strong assurance); a steward outside the
+caller's tenant is a `404`.
+
+#### POST /api/v1/terminal/prepare/{steward_id}
+
+Returns the canonical terminal-open content and the envelope shell, to feed to
+`POST /api/v1/operator-payload/sign/begin`. Body: `{"terminal_shell": "bash"}`. An empty
+`terminal_shell` resolves to the default for the target steward's platform (`powershell` for
+`windows`, `bash` otherwise), never the controller's. A non-empty value must be a supported
+shell (`400 INVALID_TERMINAL_SHELL` otherwise). A steward with no known platform returns
+`409 STEWARD_PLATFORM_UNKNOWN`; pass an explicit `terminal_shell`.
+
+Response: `{"data": {"content": "<base64 canonical content>", "shell": "terminal-open", "terminal_shell": "bash"}}`
+
+#### POST /api/v1/terminal/tickets/{steward_id}
+
+Verifies the operator proof over the terminal-open envelope and mints a ticket. Body:
+`terminal_shell` (required, supported shell), `nonce`, `expires_at` and `targets` copied from the
+`sign/begin` envelope, and exactly one of `signature` or `webauthn` (the `sign/finish` fields).
+`targets` must be exactly the steward in the path, and `expires_at` at most 5 minutes ahead.
+
+Response: `{"data": {"ticket": "<base64url>"}}`
+
+The ticket is valid for 30 seconds and is single use: the first redemption consumes it, on any
+controller node. Only its SHA-256 is stored. It is presented as the WebSocket subprotocol
+`cfgms.ticket.<ticket>` alongside `cfgms.terminal.v1`; the server selects only `cfgms.terminal.v1`.
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `INVALID_REQUEST`, `INVALID_TERMINAL_SHELL` | Malformed JSON, or missing or unsupported `terminal_shell` |
+| 403 | `INVALID_SIGNATURE` | No proof, both proofs, an invalid proof, wrong envelope shell or steward, expired, validity above the maximum, or `targets` not exactly the steward |
+| 404 | `STEWARD_NOT_FOUND` | Steward unknown or outside the caller's tenant |
+| 503 | `WEBAUTHN_CEREMONY_STORE_UNAVAILABLE` | Cluster mode with no usable shared store; no ticket is minted |
+
 ### Certificate Management
 
 #### GET /api/v1/certificates
