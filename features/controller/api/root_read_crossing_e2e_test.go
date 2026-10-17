@@ -79,12 +79,14 @@ func newE2ERootRead(t *testing.T) *e2eRootRead {
 }
 
 func (e *e2eRootRead) do(token, method, url string, body interface{}) *httptest.ResponseRecorder {
-	return e.doWithPresence(token, "", method, url, body)
+	return e.doWithPresence(nil, token, "", method, url, body)
 }
 
 // doWithPresence is do with an X-Presence-Token, for the routes that demand a fresh
-// WebAuthn proof of presence.
-func (e *e2eRootRead) doWithPresence(token, presence, method, url string, body interface{}) *httptest.ResponseRecorder {
+// WebAuthn proof of presence. presenceFor is the principal ID the token is minted
+// for; the token is bound to this request's method, path, body and the
+// break-glass approval permission (Issue #5142).
+func (e *e2eRootRead) doWithPresence(t *testing.T, token, presenceFor, method, url string, body interface{}) *httptest.ResponseRecorder {
 	var raw []byte
 	if body != nil {
 		raw, _ = json.Marshal(body)
@@ -92,8 +94,8 @@ func (e *e2eRootRead) doWithPresence(token, presence, method, url string, body i
 	req := httptest.NewRequest(method, url, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	if presence != "" {
-		req.Header.Set(presenceTokenHeader, presence)
+	if presenceFor != "" {
+		req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, e.server, presenceFor, req, "tenant:crossing-approve-break-glass"))
 	}
 	rec := httptest.NewRecorder()
 	e.server.router.ServeHTTP(rec, req)
@@ -395,12 +397,12 @@ func TestRootReadPolicy_EndToEnd(t *testing.T) {
 			approvePath := "/api/v1/tenants/" + sweepMSP + "/break-glass/" + pending.ID + "/approve"
 			// The presence proof is minted for the acting principal, so each approval
 			// attempt reaches the handler and is decided on its merits.
-			self := e.doWithPresence(invoker, mintPresenceToken(t, e.server, "e2e-root-invoker"), http.MethodPost, approvePath, nil)
+			self := e.doWithPresence(t, invoker, "e2e-root-invoker", http.MethodPost, approvePath, nil)
 			assert.Equal(t, http.StatusForbidden, self.Code, self.Body.String())
 			assert.Equal(t, "SAME_APPROVER", crossingErrorCode(t, self))
 			e.assertAllChallenged(t, invoker)
 
-			rec = e.doWithPresence(approver, mintPresenceToken(t, e.server, "e2e-root-approver"), http.MethodPost, approvePath, nil)
+			rec = e.doWithPresence(t, approver, "e2e-root-approver", http.MethodPost, approvePath, nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			assert.Equal(t, "active", decodeCrossing(t, rec).Status)
 			e.assertAllAdmitted(t, invoker)

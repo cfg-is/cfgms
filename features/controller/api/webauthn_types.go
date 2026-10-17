@@ -106,16 +106,12 @@ const presenceTokenTTL = 30 * time.Second
 // even if they were not loaded (client may never send the request).
 //
 // boundMethod/boundPath/boundBodyHash/boundPermissionID bind the token to one action
-// (Issue #4287, Desired State 2, ADR-021 Amendment 7): a token minted through the CLI
-// presence relay (handlePresenceFinish's cli_presence_request_id path) carries the
-// exact HTTP method, path, request-body hash and permission ID it was lodged for, and
-// requirePermission rejects the token outright for any other request — closing the gap
-// where malware on the admin's machine swaps a different approval into the same
-// gesture. A token minted through the ordinary browser step-up flow (StepUpModal.tsx)
-// does not yet supply a binding, so these fields are empty for it; requirePermission
-// treats an empty binding as "unbound" (today's principal-only behavior) rather than
-// rejecting it. See the ADR-021 amendment for why extending the binding to that flow
-// too is the recorded default, not yet implemented.
+// (Issues #4287 and #5142, ADR-021 Amendment 7): the exact HTTP method, path,
+// request-body hash and permission ID of the guarded request. Both mint paths set
+// them — the CLI presence relay (handlePresenceFinish's cli_presence_request_id path)
+// from the lodged request, and the browser step-up flow (StepUpModal.tsx) from the
+// binding named at presence/begin. requirePermission refuses a token with an empty
+// binding, and any token presented for a different request.
 type presenceTokenRecord struct {
 	principalID string
 	expires     time.Time

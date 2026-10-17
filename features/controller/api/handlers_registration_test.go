@@ -1474,7 +1474,7 @@ func TestApproveRegistration_CannotReopenClaimedEntry(t *testing.T) {
 		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 			strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+		req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "test-admin", req, "registration:approve-by-cidr"))
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
 
@@ -1837,7 +1837,7 @@ func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
 		strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
 	req.Header.Set("Content-Type", "application/json")
 	// registration:approve-by-cidr requires RequireUserPresence (Issue #2969).
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "test-admin", req, "registration:approve-by-cidr"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1906,7 +1906,7 @@ func TestHandleApproveByCIDR_InvalidCIDR(t *testing.T) {
 		strings.NewReader(`{"cidr":"not-a-cidr"}`))
 	req.Header.Set("Content-Type", "application/json")
 	// Presence token required even for error paths — gate is enforced before handler logic.
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "test-admin", req, "registration:approve-by-cidr"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1923,7 +1923,7 @@ func TestHandleApproveByCIDR_NoPendingStore(t *testing.T) {
 		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
 	req.Header.Set("Content-Type", "application/json")
 	// Presence token required — gate fires before handler's pendingStore nil check.
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "test-admin", req, "registration:approve-by-cidr"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 

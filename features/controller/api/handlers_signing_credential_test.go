@@ -69,7 +69,7 @@ func TestHandleRequestSigningCredential_Success(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
 	// The bootstrap-fallback principal ID is the cert's CommonName (extractAdminPrincipal).
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -134,7 +134,7 @@ func TestHandleRequestSigningCredential_ResponseNeverCarriesPrivateKeyMaterial(t
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-2"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-2", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -198,7 +198,7 @@ func TestHandleRequestSigningCredential_TenantScope_MismatchRejected(t *testing.
 	ctx := context.WithValue(req.Context(), principalContextKey, principal)
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a"))
 	req = req.WithContext(ctx)
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "mismatched-admin"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "mismatched-admin", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.handleRequestSigningCredential(rec, req)
 
@@ -224,7 +224,7 @@ func TestHandleRequestSigningCredential_UnsetScope_Returns403(t *testing.T) {
 	}
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "unset-scope-admin"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "unset-scope-admin", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.handleRequestSigningCredential(rec, req)
 
@@ -285,7 +285,7 @@ func TestHandleRequestSigningCredential_MissingPublicKey_Returns400(t *testing.T
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-4"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-4", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -301,7 +301,7 @@ func TestHandleRequestSigningCredential_InvalidJSON_Returns400(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", strings.NewReader("{not json"))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-5"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-5", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -326,7 +326,7 @@ func TestHandleRequestSigningCredential_RSAKeyRejected(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-6"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-6", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -351,7 +351,7 @@ func TestHandleRequestSigningCredential_WrongCurveRejected(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-7"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-7", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -445,7 +445,7 @@ func TestRequestSigningCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-any-node"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-any-node", req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 

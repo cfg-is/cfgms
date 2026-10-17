@@ -349,7 +349,7 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 			// (RequireUserPresence: true in permissionAssurance). Without a token these routes
 			// return 401; with one they pass through to the handler.
 			if permReq, found := permissionAssurance[entry.permission]; found && permReq.RequireUserPresence {
-				token := mintPresenceToken(t, server, strongPrincipal.ID)
+				token := mintPresenceTokenFor(t, server, strongPrincipal.ID, req, entry.permission)
 				req.Header.Set(presenceTokenHeader, token)
 			}
 

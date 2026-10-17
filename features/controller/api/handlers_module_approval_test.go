@@ -167,7 +167,7 @@ func makeApproveRequest(t *testing.T, s *Server, addressParam string, principal 
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(principal.TenantID))
 	req = req.WithContext(ctx)
 	// Inject a presence token so requirePermission's RequireUserPresence check passes.
-	token := mintPresenceToken(t, s, principal.ID)
+	token := mintPresenceTokenFor(t, s, principal.ID, req, "module:approve")
 	req.Header.Set(presenceTokenHeader, token)
 	return req
 }
@@ -184,7 +184,7 @@ func makeRejectRequest(t *testing.T, s *Server, addressParam string, principal *
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(principal.TenantID))
 	req = req.WithContext(ctx)
 	// Inject a presence token so requirePermission's RequireUserPresence check passes.
-	token := mintPresenceToken(t, s, principal.ID)
+	token := mintPresenceTokenFor(t, s, principal.ID, req, "module:reject")
 	req.Header.Set(presenceTokenHeader, token)
 	return req
 }
@@ -387,7 +387,7 @@ func TestHandleApproveModuleBundle_InvalidAddressFormat(t *testing.T) {
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(strongPrincipal.TenantID))
 	req = req.WithContext(ctx)
 	// Inject presence token so the RequireUserPresence gate passes (Issue #2784).
-	presToken := mintPresenceToken(t, server, moduleTestStrongPrincipal().ID)
+	presToken := mintPresenceTokenFor(t, server, moduleTestStrongPrincipal().ID, req, "module:approve")
 	req.Header.Set(presenceTokenHeader, presToken)
 	rec := httptest.NewRecorder()
 

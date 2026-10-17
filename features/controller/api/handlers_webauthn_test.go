@@ -850,6 +850,19 @@ func doPresenceBegin(t *testing.T, server *Server, principal *Principal) *httpte
 	return rec
 }
 
+// doPresenceBeginWithAction calls handlePresenceBegin with the action binding the
+// browser step-up flow names (Issue #5142).
+func doPresenceBeginWithAction(t *testing.T, server *Server, principal *Principal, action presenceActionBinding) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(action)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/begin", bytes.NewReader(body))
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handlePresenceBegin(rec, req)
+	return rec
+}
+
 // doPresenceFinish calls handlePresenceFinish directly with an empty body.
 // Pass nil principal to omit the principal from the request context.
 func doPresenceFinish(t *testing.T, server *Server, principal *Principal) *httptest.ResponseRecorder {
@@ -1119,6 +1132,92 @@ func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
 	assert.Equal(t, cliPresenceRequestStatusApproved, stored.Status)
 	assert.Equal(t, out.PresenceToken, stored.PresenceToken)
 	assert.Equal(t, principal.ID, stored.ApprovedBy)
+}
+
+// runBrowserPresenceCeremony runs begin (with action, if non-nil) and a real signed
+// finish with no cli_presence_request_id, returning the finish recorder.
+func runBrowserPresenceCeremony(t *testing.T, server *Server, username string, action *presenceActionBinding) (*httptest.ResponseRecorder, *Principal) {
+	t.Helper()
+	priv, pubKey := generateSyntheticCredential(t)
+	credID := []byte("browser-presence-cred-1")
+	injectSignCredential(t, server, username, credID, pubKey, 0)
+	principal := principalForAccount(t, server, username)
+	principal.Assurance = session.AssuranceStrong
+
+	var beginRec *httptest.ResponseRecorder
+	if action != nil {
+		beginRec = doPresenceBeginWithAction(t, server, principal, *action)
+	} else {
+		beginRec = doPresenceBegin(t, server, principal)
+	}
+	require.Equal(t, http.StatusOK, beginRec.Code, "body: %s", beginRec.Body.String())
+	var beginResp APIResponse
+	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &beginResp))
+	optsMap, ok := beginResp.Data.(map[string]interface{})
+	require.True(t, ok)
+	pk, ok := optsMap["publicKey"].(map[string]interface{})
+	require.True(t, ok)
+	challengeB64, _ := pk["challenge"].(string)
+	require.NotEmpty(t, challengeB64)
+
+	assertionBody := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin, challengeB64, 1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/finish", assertionBody)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handlePresenceFinish(rec, req)
+	return rec, principal
+}
+
+// [REQUIRED TEST] Issue #5142: the browser presence finish path (no
+// cli_presence_request_id) mints a token carrying the action named at begin.
+func TestWebAuthnPresenceFinish_Browser_BindsActionFromBegin(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	action := presenceActionBinding{
+		Method:       http.MethodPost,
+		Path:         "/api/v1/modules/approvals/test-address/approve",
+		BodyHash:     emptyBodyHashHex,
+		PermissionID: "module:approve",
+	}
+	rec, _ := runBrowserPresenceCeremony(t, server, username, &action)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var finishResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &finishResp))
+	data, err := json.Marshal(finishResp.Data)
+	require.NoError(t, err)
+	var out WebAuthnPresenceFinishResponse
+	require.NoError(t, json.Unmarshal(data, &out))
+	require.NotEmpty(t, out.PresenceToken)
+
+	raw, found := server.presenceTokens.Load(hashPresenceToken(out.PresenceToken))
+	require.True(t, found)
+	record, ok := raw.(*presenceTokenRecord)
+	require.True(t, ok)
+	assert.Equal(t, action.Method, record.boundMethod)
+	assert.Equal(t, action.Path, record.boundPath)
+	assert.Equal(t, action.BodyHash, record.boundBodyHash)
+	assert.Equal(t, action.PermissionID, record.boundPermissionID)
+}
+
+// A ceremony begun without a binding mints no token at all.
+func TestWebAuthnPresenceFinish_Browser_NoBindingMintsNothing(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	rec, _ := runBrowserPresenceCeremony(t, server, username, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "PRESENCE_BINDING_REQUIRED", errCode(t, rec.Body.Bytes()))
+	count := 0
+	server.presenceTokens.Range(func(_, _ any) bool { count++; return true })
+	assert.Zero(t, count, "no presence token may be minted without a binding")
+}
+
+// A begin body naming a partial binding is rejected up front.
+func TestWebAuthnPresenceBegin_PartialBindingRejected(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, []byte("partial-cred"), pubKey, 0)
+	principal := principalForAccount(t, server, username)
+	rec := doPresenceBeginWithAction(t, server, principal, presenceActionBinding{Method: http.MethodPost, Path: "/x"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- Issue #2966: first-passkey enrollment via magic link ---
