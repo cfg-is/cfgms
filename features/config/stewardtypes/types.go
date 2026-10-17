@@ -41,6 +41,11 @@ type StewardSettings struct {
 	// ModuleTrust configures module trust policy and additional trusted publishers.
 	ModuleTrust ModuleTrustConfig `yaml:"module_trust,omitempty" json:"module_trust,omitempty"`
 
+	// RemoteTerminal is a steward-local switch for remote terminal. It is read
+	// only from the local steward.cfg at start-up and is never populated from a
+	// controller-delivered config. (Issue #5146)
+	RemoteTerminal RemoteTerminalConfig `yaml:"remote_terminal,omitempty" json:"remote_terminal,omitempty"`
+
 	// SignedCommandReplayWindow is the maximum age of an accepted command timestamp.
 	SignedCommandReplayWindow time.Duration `yaml:"signed_command_replay_window,omitempty" json:"signed_command_replay_window,omitempty"`
 
@@ -194,6 +199,18 @@ const (
 	// ModuleTrustModeBypass disables all trust enforcement. Development use only.
 	ModuleTrustModeBypass ModuleTrustMode = "bypass"
 )
+
+// RemoteTerminalConfig configures whether this endpoint offers remote terminal.
+type RemoteTerminalConfig struct {
+	// Enabled turns remote terminal on or off. Nil (absent) means enabled, so
+	// existing deployments do not change. Only `enabled: false` has an effect.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// IsEnabled reports whether remote terminal is allowed; an absent value is enabled.
+func (c RemoteTerminalConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
 
 // ModuleTrustConfig configures module trust policy for the steward.
 // Placed alongside ScriptSigning as steward security posture configuration.

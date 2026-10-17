@@ -66,22 +66,23 @@ import (
 
 // Type aliases — re-export from stewardtypes so existing callers compile unchanged.
 type (
-	StewardConfig       = stewardtypes.StewardConfig
-	StewardSettings     = stewardtypes.StewardSettings
-	ResourceConfig      = stewardtypes.ResourceConfig
-	ErrorHandlingConfig = stewardtypes.ErrorHandlingConfig
-	DriftMode           = stewardtypes.DriftMode
-	LoggingConfig       = stewardtypes.LoggingConfig
-	SecretsConfig       = stewardtypes.SecretsConfig
-	ScriptSigningConfig = stewardtypes.ScriptSigningConfig
-	ScriptSigningPolicy = stewardtypes.ScriptSigningPolicy
-	ScriptTrustMode     = stewardtypes.ScriptTrustMode
-	TrustedKeyRef       = stewardtypes.TrustedKeyRef
-	ErrorAction         = stewardtypes.ErrorAction
-	ModuleTrustConfig   = stewardtypes.ModuleTrustConfig
-	ModuleTrustMode     = stewardtypes.ModuleTrustMode
-	RequiredModule      = stewardtypes.RequiredModule
-	UpgradeConfig       = stewardtypes.UpgradeConfig
+	StewardConfig        = stewardtypes.StewardConfig
+	StewardSettings      = stewardtypes.StewardSettings
+	ResourceConfig       = stewardtypes.ResourceConfig
+	ErrorHandlingConfig  = stewardtypes.ErrorHandlingConfig
+	DriftMode            = stewardtypes.DriftMode
+	LoggingConfig        = stewardtypes.LoggingConfig
+	SecretsConfig        = stewardtypes.SecretsConfig
+	ScriptSigningConfig  = stewardtypes.ScriptSigningConfig
+	ScriptSigningPolicy  = stewardtypes.ScriptSigningPolicy
+	ScriptTrustMode      = stewardtypes.ScriptTrustMode
+	TrustedKeyRef        = stewardtypes.TrustedKeyRef
+	ErrorAction          = stewardtypes.ErrorAction
+	ModuleTrustConfig    = stewardtypes.ModuleTrustConfig
+	ModuleTrustMode      = stewardtypes.ModuleTrustMode
+	RemoteTerminalConfig = stewardtypes.RemoteTerminalConfig
+	RequiredModule       = stewardtypes.RequiredModule
+	UpgradeConfig        = stewardtypes.UpgradeConfig
 )
 
 // Constant re-exports from stewardtypes.
