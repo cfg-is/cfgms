@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1757,4 +1758,64 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// runRootWithSeam runs the root command with rootRunSteward replaced by a
+// recorder and returns the token the steward was started with.
+func runRootWithSeam(t *testing.T, args ...string) (gotToken string, started bool, err error) {
+	t.Helper()
+	orig := rootRunSteward
+	rootRunSteward = func(ctx context.Context, regToken, controllerURL, configPath string) error {
+		gotToken, started = regToken, true
+		return nil
+	}
+	defer func() { rootRunSteward = orig }()
+
+	root := buildRootCommand()
+	root.SetArgs(args)
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err = root.Execute()
+	return gotToken, started, err
+}
+
+func TestRegTokenFileStartsStewardWithToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("--regtoken-file is not available on Windows yet")
+	}
+	path := filepath.Join(t.TempDir(), "registration-token")
+	require.NoError(t, os.WriteFile(path, []byte("tok_from_file_123\n"), 0o600))
+
+	token, started, err := runRootWithSeam(t, "--regtoken-file", path)
+	require.NoError(t, err)
+	assert.True(t, started, "--regtoken-file alone must not enter interactive mode")
+	assert.Equal(t, "tok_from_file_123", token)
+}
+
+func TestRegTokenAndRegTokenFileTogetherIsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registration-token")
+	require.NoError(t, os.WriteFile(path, []byte("tok_from_file_123\n"), 0o600))
+
+	_, started, err := runRootWithSeam(t, "--regtoken", "tok_flag_456", "--regtoken-file", path)
+	require.Error(t, err)
+	assert.False(t, started)
+	assert.NotContains(t, err.Error(), "tok_flag_456")
+	assert.NotContains(t, err.Error(), "tok_from_file_123")
+}
+
+func TestRegTokenFileUnreadableIsErrorWithoutToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission semantics differ on Windows; the flag is rejected there")
+	}
+	dir := t.TempDir()
+	wide := filepath.Join(dir, "wide")
+	require.NoError(t, os.WriteFile(wide, []byte("tok_secret_789\n"), 0o600))
+	require.NoError(t, os.Chmod(wide, 0o644))
+
+	for _, path := range []string{wide, filepath.Join(dir, "missing")} {
+		_, started, err := runRootWithSeam(t, "--regtoken-file", path)
+		require.Error(t, err)
+		assert.False(t, started)
+		assert.NotContains(t, err.Error(), "tok_secret_789")
+	}
 }

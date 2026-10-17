@@ -7,8 +7,20 @@ package service
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 )
+
+// platformCACertPath returns the CA certificate path, respecting
+// CFGMS_INSTALL_PREFIX for test isolation.
+func platformCACertPath() string {
+	const p = "/etc/cfgms/controller-ca.crt"
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		return filepath.Join(prefix, p)
+	}
+	return p
+}
 
 func newManager(binaryPath string) Manager {
 	return &stubManager{}
@@ -35,5 +47,5 @@ func (m *stubManager) Stop() error {
 }
 
 func (m *stubManager) RegistrationTokenConfigured() (bool, error) {
-	return false, fmt.Errorf("service inspection is not supported on %s", runtime.GOOS)
+	return tokenFileConfigured(platformTokenFilePath())
 }

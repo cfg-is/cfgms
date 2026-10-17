@@ -422,6 +422,7 @@ func buildRootCommand() *cobra.Command {
 	var (
 		configPath    string
 		regToken      string
+		regTokenFile  string
 		controllerURL string
 	)
 
@@ -435,19 +436,21 @@ Manages the local endpoint configuration on behalf of a CFGMS controller.
 
 Entry paths:
   cfgms-steward --regtoken TOKEN     Run in foreground (controller-connected)
+  cfgms-steward --regtoken-file PATH Run in foreground, token read from a root-only file
   cfgms-steward --config path.cfg    Run in standalone mode
   cfgms-steward install --regtoken TOKEN  Install as OS service
   cfgms-steward                      Interactive mode (prompts for token)`, version.Short()),
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, controllerURL, configPath)
+			return runRootCommand(cmd, regToken, regTokenFile, controllerURL, configPath)
 		},
 	}
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
 	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
+	root.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token (mutually exclusive with --regtoken)")
 	root.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (overrides compile-time URL; set at install time via service definition)")
 
 	// Subcommands.
@@ -464,11 +467,24 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, controllerURL, configPath string) error {
+func runRootCommand(cmd *cobra.Command, regToken, regTokenFile, controllerURL, configPath string) error {
+	if regToken != "" && regTokenFile != "" {
+		return fmt.Errorf("--regtoken and --regtoken-file cannot be used together")
+	}
+
 	// Interactive mode: no flags set and no subcommand selected.
-	noFlags := regToken == "" && configPath == ""
+	noFlags := regToken == "" && regTokenFile == "" && configPath == ""
 	if noFlags {
 		return runInteractive()
+	}
+
+	// The token is read into memory only; it is never placed in process arguments.
+	if regTokenFile != "" {
+		token, err := service.ReadTokenFile(regTokenFile)
+		if err != nil {
+			return err
+		}
+		regToken = token
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -481,8 +497,12 @@ func runRootCommand(cmd *cobra.Command, regToken, controllerURL, configPath stri
 		cancel()
 	}()
 
-	return runSteward(ctx, regToken, controllerURL, configPath)
+	return rootRunSteward(ctx, regToken, controllerURL, configPath)
 }
+
+// rootRunSteward is the steward entry the root command calls; tests substitute
+// it to observe the resolved token without connecting to a controller.
+var rootRunSteward = runSteward
 
 // runSteward starts the steward with the given configuration and blocks until
 // ctx is cancelled. It is called from both the root cobra command and the

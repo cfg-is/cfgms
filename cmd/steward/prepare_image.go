@@ -84,7 +84,8 @@ Removed, from the certificate store directory (--cert-store-dir):
 
 Kept:
   the installed binary
-  the service definition and its registration token (--regtoken)
+  the service definition and the registration token file (registration-token,
+    beside the installed CA certificate)
   the trust anchor: the install-pinned CA file (controller-ca.crt); a
     compile-baked trust anchor needs nothing
   machine-generic state: the key-derivation salt and machine-id files, the
@@ -98,7 +99,7 @@ Removing it means each clone re-pins the CA at first boot, which is a weaker
 trust path than an install-pinned CA.
 
 The service is stopped and left enabled; prepare-image does not start it.
-It refuses to run if the service definition carries no registration token,
+It refuses to run if the registration token file is missing or empty,
 and removes nothing in that case. Running it again on a prepared machine
 reports "nothing to remove".
 
@@ -141,10 +142,10 @@ func prepareImage(opts prepareImageOptions, svc imageService, in io.Reader, out 
 
 	hasToken, err := svc.RegistrationTokenConfigured()
 	if err != nil {
-		return fmt.Errorf("failed to inspect the service definition: %w", err)
+		return fmt.Errorf("failed to inspect the registration token file: %w", err)
 	}
 	if !hasToken {
-		return fmt.Errorf("the service definition carries no registration token; nothing was removed\n" +
+		return fmt.Errorf("the registration token file is missing or empty; nothing was removed\n" +
 			"  a clone could not enroll without one: run 'cfgms-steward install --regtoken TOKEN' first")
 	}
 
