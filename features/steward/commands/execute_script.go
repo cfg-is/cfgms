@@ -372,6 +372,11 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 		return fmt.Errorf("%w: shell %q is reserved for steward actions", ErrUnauthenticatedCommand, shellStr)
 	}
 
+	// Likewise a terminal-open envelope (Shell = TerminalShell) is never a script.
+	if shellStr == operatorpayload.TerminalShell {
+		return fmt.Errorf("%w: shell %q is reserved for terminal sessions", ErrUnauthenticatedCommand, shellStr)
+	}
+
 	isLibraryScript := scriptID != ""
 
 	// Decode base64 content. Fail closed for library scripts and for inline commands
