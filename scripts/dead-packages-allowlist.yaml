@@ -109,6 +109,15 @@ packages:
       (the module, not this tests package) is registered in the steward
       factory by this same story and is no longer unreachable.
 
+  - path: pkg/testutil/winacct
+    reason: >
+      Issue #5119: Windows-only test support (local account SIDs, a
+      temporary local administrator, owner assignment) imported only by
+      `//go:build windows` _test.go files in pkg/security and cmd/steward.
+      The gate runs on Linux, where those test files are excluded, so it
+      cannot see them as test-support importers. It must never be reachable
+      from a main package: it creates local accounts.
+
   # --- Out of scope for Issue #4345: module-kind work with its own wiring ---
   # --- story (M365 / Active Directory), excluded per #4345's Out of Scope ---
   # --- section to avoid double-covering the same packages. Reasons below ----
