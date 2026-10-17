@@ -1744,3 +1744,17 @@ func TestLoadConnectedRuntimeConfig_RejectedLocalConfigNeverUsed(t *testing.T) {
 		}
 	}
 }
+
+func TestMain(m *testing.M) {
+	// Tests must not depend on the real %ProgramData%\cfgms (its owner is
+	// machine-specific); point the Windows data-directory lockdown at a temp dir.
+	dir, err := os.MkdirTemp("", "cfgms-steward-data-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	stewardDataDirResolver = func() string { return filepath.Join(dir, "cfgms") }
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}

@@ -11,3 +11,10 @@ import "errors"
 // a non-admin principal that created it keeps full control, so nothing placed
 // in it can be trusted.
 var ErrUntrustedDirOwner = errors.New("directory is owned by a principal other than SYSTEM or BUILTIN\\Administrators")
+
+// ErrUntrustedDirEntry is returned by EnsureAdminOnlyDir when an entry below
+// the directory is a link or reparse point, or still grants access to a
+// principal other than SYSTEM or BUILTIN\Administrators after the lockdown.
+// Such an entry could let a local user regain access to, or redirect, material
+// the steward trusts.
+var ErrUntrustedDirEntry = errors.New("directory contains an entry that is a reparse point or grants access to a non-administrator principal")

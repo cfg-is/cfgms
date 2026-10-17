@@ -2689,6 +2689,17 @@ func buildClientCertManagerAtPath(certStorePath, clientCertPEM, clientKeyPEM, is
 // defaultCertStoreDir.
 var certStoreDirResolver = defaultCertStoreDir
 
+// stewardDataDirResolver returns the Windows steward data directory
+// (%ProgramData%\cfgms). Tests replace it with a t.TempDir()-based path so they
+// never depend on the real machine directory.
+var stewardDataDirResolver = func() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms")
+}
+
 // secureStewardDataDir restricts the Windows steward data directory
 // (%ProgramData%\cfgms) to SYSTEM and Administrators. If the directory is owned
 // by a non-admin principal the reason is logged and an error is returned so no
@@ -2697,11 +2708,7 @@ func secureStewardDataDir(logger logging.Logger) error {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
-	programData := os.Getenv("ProgramData")
-	if programData == "" {
-		programData = `C:\ProgramData`
-	}
-	dir := filepath.Join(programData, "cfgms")
+	dir := stewardDataDirResolver()
 	if err := security.EnsureAdminOnlyDir(dir); err != nil {
 		logger.Error("Refusing to load trust and identity material from steward data directory",
 			"path", logging.SanitizeLogValue(dir),
