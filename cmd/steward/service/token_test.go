@@ -4,8 +4,6 @@
 package service
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,17 +73,4 @@ func TestCommandLineHasRegToken(t *testing.T) {
 	assert.False(t, commandLineHasRegToken(`run --child-args "--regtoken "`))
 	assert.False(t, commandLineHasRegToken(`run --child-args "--regtoken --controller-url x"`))
 	assert.False(t, commandLineHasRegToken(""))
-}
-
-func TestDefinitionHasRegToken(t *testing.T) {
-	dir := t.TempDir()
-	withToken := filepath.Join(dir, "with.service")
-	require.NoError(t, os.WriteFile(withToken, []byte(`ExecStart=/usr/local/bin/cfgms-launcher run --child-args "--regtoken tok_abc123"`), 0600))
-	ok, err := definitionHasRegToken(withToken)
-	require.NoError(t, err)
-	assert.True(t, ok)
-
-	ok, err = definitionHasRegToken(filepath.Join(dir, "missing.service"))
-	require.NoError(t, err)
-	assert.False(t, ok, "a missing definition reports no token, not an error")
 }

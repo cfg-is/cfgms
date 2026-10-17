@@ -30,10 +30,11 @@ On Windows, run the same commands from an elevated (Administrator) prompt.
 | `--yes` | Skip the confirmation prompt. |
 | `--cert-store-dir` | Certificate store directory. Defaults to the platform path used by the steward; set it only for non-default installs. |
 
-The command requires elevation. It checks that the service definition carries a
-registration token, stops the steward service (the supervisor does not restart a
+The command requires elevation. It checks that the registration token file
+(`registration-token`, beside the installed CA certificate, readable only by root) exists and is
+non-empty, stops the steward service (the supervisor does not restart a
 service stopped through the service manager), then removes the identity. If the
-token is missing it fails and removes nothing. It never prints the token or key
+token file is missing or empty it fails and removes nothing. It never prints the token or key
 material.
 
 ## What it removes
@@ -61,7 +62,7 @@ directory that is itself a symlink.
 
 ## What it keeps
 
-- The installed binary and the service definition, including its `--regtoken` argument.
+- The installed binary and the service definition and the registration token file.
 - The trust anchor: the install-pinned CA file (`/etc/cfgms/controller-ca.crt`, or
   `%ProgramData%\cfgms\controller-ca.crt` on Windows). A compile-baked trust anchor
   needs nothing.

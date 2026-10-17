@@ -210,9 +210,9 @@ func (m *darwinManager) Stop() error {
 	return nil
 }
 
-// RegistrationTokenConfigured reports whether the launchd plist carries --regtoken.
+// RegistrationTokenConfigured reports whether the launchd plist holds a non-empty registration token file.
 func (m *darwinManager) RegistrationTokenConfigured() (bool, error) {
-	return definitionHasRegToken(darwinPlistPath)
+	return tokenFileConfigured(platformTokenFilePath())
 }
 
 // Status returns the current state of the launchd daemon without requiring
