@@ -32,6 +32,7 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
@@ -989,6 +990,13 @@ type browserTerminalFixture struct {
 // ServeWebSocket created, leaving the relay running in both directions.
 func startBrowserTerminal(t *testing.T, h *TerminalHandler, mgr terminal.SessionManager, stewardID string) *browserTerminalFixture {
 	t.Helper()
+	return startBrowserTerminalWithRecheck(t, h, mgr, stewardID, nil)
+}
+
+// startBrowserTerminalWithRecheck is startBrowserTerminal for a request that carries an
+// admin-session re-check (nil models a principal with no session).
+func startBrowserTerminalWithRecheck(t *testing.T, h *TerminalHandler, mgr terminal.SessionManager, stewardID string, recheck SessionRecheck) *browserTerminalFixture {
+	t.Helper()
 
 	ca := newTestCA(t)
 
@@ -999,6 +1007,9 @@ func startBrowserTerminal(t *testing.T, h *TerminalHandler, mgr terminal.Session
 		ctx := context.WithValue(r.Context(), ctxkeys.UserIDKey, "admin-browser")
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
 		ctx = withTestProof(ctx, mux.Vars(r)["steward_id"], "tenant-1")
+		if recheck != nil {
+			ctx = WithSessionRecheck(ctx, recheck)
+		}
 		h.ServeWebSocket(w, r.WithContext(ctx))
 	})
 	srv := httptest.NewServer(router)
@@ -1334,4 +1345,196 @@ func TestServeWebSocket_SelectsOnlyTerminalSubprotocol(t *testing.T) {
 	}
 	assert.Equal(t, "cfgms.terminal.v1", resp.Header.Get("Sec-WebSocket-Protocol"))
 	assert.Equal(t, "cfgms.terminal.v1", conn.Subprotocol())
+}
+
+// ---------------------------------------------------------------------------
+// [SECURITY] A relay ends when the admin session that opened it is gone
+// ---------------------------------------------------------------------------
+
+type adminSessionClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *adminSessionClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *adminSessionClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// newAdminSession issues a real session through a real session manager and returns the
+// manager, the session and the same re-check the route layer installs.
+func newAdminSession(t *testing.T, clock *adminSessionClock) (session.Manager, *session.Session, SessionRecheck) {
+	t.Helper()
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	store := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(store.Close)
+	sm := session.NewManager(cfg, store, clock.Now)
+	sess, _, err := sm.Issue(context.Background(), "admin-browser", "web", "tenant-1")
+	require.NoError(t, err)
+	recheck := func(ctx context.Context) bool {
+		_, getErr := sm.GetByID(ctx, sess.ID)
+		return getErr == nil
+	}
+	return sm, sess, recheck
+}
+
+// assertRelayEndedBySessionLoss waits for the browser to receive the error frame and the
+// close, then for both server-side halves to finish, and asserts no input was forwarded.
+func assertRelayEndedBySessionLoss(t *testing.T, fx *browserTerminalFixture) {
+	t.Helper()
+	require.NoError(t, fx.conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	var sawError bool
+	for {
+		var msg terminal.TerminalMessage
+		if err := fx.conn.ReadJSON(&msg); err != nil {
+			assert.True(t, websocket.IsCloseError(err, websocket.ClosePolicyViolation),
+				"browser must see a policy-violation close, got %v", err)
+			break
+		}
+		if msg.Type == terminal.MessageTypeError {
+			sawError = true
+			assert.Contains(t, msg.Error, "revoked or expired")
+		}
+	}
+	assert.True(t, sawError, "browser must receive an error frame before the close")
+	require.NoError(t, fx.waitGRPC(), "steward stream must see end-of-stream")
+	waitServed(t, fx)
+	assert.Empty(t, fx.stream.getSent(), "no input may reach the steward after the revocation")
+}
+
+func TestServeWebSocket_RelayEndsWhenAdminSessionRevoked(t *testing.T) {
+	const stewardID = "steward-revoked"
+	sm, sess, recheck := newAdminSession(t, &adminSessionClock{t: time.Now()})
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+	h.pingInterval = 20 * time.Millisecond
+
+	// The recheck gate holds the relay open until the test has revoked the session.
+	revoked := make(chan struct{})
+	gated := func(ctx context.Context) bool {
+		select {
+		case <-revoked:
+			return recheck(ctx)
+		default:
+			return true
+		}
+	}
+	fx := startBrowserTerminalWithRecheck(t, h, mgr, stewardID, gated)
+
+	require.NoError(t, sm.Revoke(context.Background(), sess.ID))
+	close(revoked)
+
+	assertRelayEndedBySessionLoss(t, fx)
+}
+
+func TestServeWebSocket_RelayEndsWhenAdminSessionExpires(t *testing.T) {
+	const stewardID = "steward-expired"
+	clock := &adminSessionClock{t: time.Now()}
+	_, _, recheck := newAdminSession(t, clock)
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+	h.pingInterval = 20 * time.Millisecond
+
+	expired := make(chan struct{})
+	gated := func(ctx context.Context) bool {
+		select {
+		case <-expired:
+			return recheck(ctx)
+		default:
+			return true
+		}
+	}
+	fx := startBrowserTerminalWithRecheck(t, h, mgr, stewardID, gated)
+
+	clock.advance(2 * time.Hour) // past the absolute timeout
+	close(expired)
+
+	assertRelayEndedBySessionLoss(t, fx)
+}
+
+func TestServeWebSocket_RelayWithoutSessionIsNotEnded(t *testing.T) {
+	const stewardID = "steward-no-session"
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+	h.pingInterval = 10 * time.Millisecond
+
+	fx := startBrowserTerminal(t, h, mgr, stewardID)
+
+	// Several ping intervals elapse; observe them as pings reaching the browser.
+	pings := make(chan struct{}, 16)
+	fx.conn.SetPingHandler(func(string) error {
+		select {
+		case pings <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	go func() {
+		for {
+			var msg terminal.TerminalMessage
+			if err := fx.conn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}()
+	for i := 0; i < 5; i++ {
+		select {
+		case <-pings:
+		case <-time.After(5 * time.Second):
+			t.Fatal("relay stopped pinging")
+		}
+	}
+
+	select {
+	case <-fx.served:
+		t.Fatal("a relay with no session must not be ended by the re-check")
+	default:
+	}
+
+	// Input still flows.
+	require.NoError(t, fx.conn.WriteJSON(terminal.TerminalMessage{Type: terminal.MessageTypeData, Data: []byte("ls\n")}))
+	waitStewardFrame(t, fx.stream)
+
+	require.NoError(t, fx.conn.Close())
+	require.NoError(t, fx.waitGRPC())
+	waitServed(t, fx)
+}
+
+func TestServeWebSocket_SessionLossIsAuditedWithReason(t *testing.T) {
+	const stewardID = "steward-revoked-audit"
+	storageManager := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "terminal-test")
+	require.NoError(t, err)
+
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, auditMgr, nil, nil)
+	h.pingInterval = 20 * time.Millisecond
+
+	fx := startBrowserTerminalWithRecheck(t, h, mgr, stewardID, func(context.Context) bool { return false })
+	assertRelayEndedBySessionLoss(t, fx)
+
+	ctx := context.Background()
+	require.NoError(t, auditMgr.Flush(ctx))
+	start := time.Now().Add(-time.Minute)
+	events, err := storageManager.GetAuditStore().GetAuditsByAction(ctx, "terminal.session.end", &business.TimeRange{Start: &start})
+	require.NoError(t, err)
+	var found bool
+	for _, ev := range events {
+		if ev.SessionID == fx.sess.ID {
+			found = true
+			assert.Equal(t, "admin session revoked or expired", ev.Details["reason"])
+		}
+	}
+	assert.True(t, found, "terminal.session.end must be recorded for the ended relay")
 }

@@ -88,6 +88,10 @@ type TerminalHandler struct {
 	// trusted and the audited client IP is always the TCP peer.
 	trustedProxies []net.IPNet
 
+	// pingInterval paces the keepalive ping and the admin-session re-check. It is
+	// terminalPingInterval in production; tests shorten it.
+	pingInterval time.Duration
+
 	mu     sync.Mutex
 	relays map[string]*terminalRelay // session_id → relay
 
@@ -120,6 +124,7 @@ func NewTerminalHandler(
 		allowedOrigins: allowedOrigins,
 		trustedProxies: parseTrustedProxyCIDRs(trustedProxyCIDRs, logger),
 		relays:         make(map[string]*terminalRelay),
+		pingInterval:   terminalPingInterval,
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -337,6 +342,9 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	cols := parseTerminalInt(q.Get("cols"), 80)
 	rows := parseTerminalInt(q.Get("rows"), 24)
 	clientIP := terminalClientIP(r, h.trustedProxies)
+	// Nil for a principal with no session (mTLS certificate, API key): those keep
+	// running until the browser or steward ends the relay.
+	sessionRecheck := SessionRecheckFromContext(ctx)
 
 	// Create terminal session (includes recording + audit start event).
 	sess, err := terminal.CreateBrowserSession(ctx, h.sessionMgr, h.auditMgr, terminal.BrowserSessionOptions{
@@ -371,13 +379,14 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		done:      make(chan struct{}),
 	}
 
+	endReason := "websocket closed"
 	h.registerRelay(sess.ID, relay)
 	defer func() {
 		h.unregisterRelay(sess.ID)
 		relay.close()
 		terminal.EndBrowserSession(
 			context.Background(), h.auditMgr,
-			tenantID, userID, sess.ID, stewardID, "websocket closed",
+			tenantID, userID, sess.ID, stewardID, endReason,
 			h.logger,
 		)
 		// Close session to flush the recorder.
@@ -438,16 +447,27 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Bidirectional relay between browser WS and steward gRPC stream.
-	h.runWSRelay(ctx, conn, relay, sess)
+	if h.runWSRelay(ctx, conn, relay, sess, sessionRecheck) == relayEndSessionInvalid {
+		endReason = "admin session revoked or expired"
+	}
 }
 
-// runWSRelay manages the WS ↔ gRPC relay for one session.
-func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, relay *terminalRelay, sess *terminal.Session) {
+// relayEnd says why runWSRelay returned.
+type relayEnd int
+
+const (
+	relayEndClosed         relayEnd = iota // browser, steward or request context ended it
+	relayEndSessionInvalid                 // the admin session that opened it is gone
+)
+
+// runWSRelay manages the WS ↔ gRPC relay for one session. recheck, when non-nil,
+// is consulted every ping interval and ends the relay once it reports false.
+func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, relay *terminalRelay, sess *terminal.Session, recheck SessionRecheck) relayEnd {
 	conn.SetReadLimit(65536)
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(terminalPingInterval + 10*time.Second))
+		return conn.SetReadDeadline(time.Now().Add(h.pingInterval + 10*time.Second))
 	})
-	_ = conn.SetReadDeadline(time.Now().Add(terminalPingInterval + 10*time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(h.pingInterval + 10*time.Second))
 
 	// WS reader goroutine: browser input → inputCh.
 	wsGone := make(chan struct{})
@@ -517,30 +537,46 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 	}()
 
 	// WS writer loop: steward output → browser.
-	pingTicker := time.NewTicker(terminalPingInterval)
+	pingTicker := time.NewTicker(h.pingInterval)
 	defer pingTicker.Stop()
 
 	for {
 		select {
 		case <-wsGone:
-			return
+			return relayEndClosed
 		case <-relay.done:
 			terminalSendWSError(conn, "steward disconnected")
-			return
+			return relayEndClosed
 		case <-ctx.Done():
-			return
+			return relayEndClosed
 		case data := <-sess.OutputChan():
 			_ = conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 			if err := conn.WriteJSON(terminal.TerminalMessage{
 				Type: terminal.MessageTypeData,
 				Data: data,
 			}); err != nil {
-				return
+				return relayEndClosed
 			}
 		case <-pingTicker.C:
+			if recheck != nil && !recheck(ctx) {
+				// The session that opened this shell was revoked, expired or is
+				// no longer in the shared store. Close the relay first so the
+				// steward's stream ends (and its PTY with it) and no queued input
+				// is forwarded, then tell the browser.
+				relay.close()
+				terminalSendWSError(conn, "admin session revoked or expired")
+				_ = conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
+				_ = conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "session revoked"))
+				if h.logger != nil {
+					h.logger.Warn("terminal: ending relay, admin session revoked or expired",
+						"session_id", logging.RedactedID(relay.sessionID))
+				}
+				return relayEndSessionInvalid
+			}
 			_ = conn.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return relayEndClosed
 			}
 		}
 	}
