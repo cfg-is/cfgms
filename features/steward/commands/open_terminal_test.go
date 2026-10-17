@@ -4,6 +4,7 @@ package commands
 
 import (
 	"context"
+	"crypto/x509"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -326,4 +327,30 @@ func TestOpenTerminal_CommandCompletesBeforeBridgeDone(t *testing.T) {
 
 	// Unblock the bridge goroutine.
 	dialer.allowReturn(nil)
+}
+
+// TestOpenTerminal_NoControllerCARoots_FailsClosed: with nil or empty controller CA
+// roots, an envelope carrying a valid signature from a freshly generated key (no
+// operator credential chain) is refused and nothing is dialed.
+func TestOpenTerminal_NoControllerCARoots_FailsClosed(t *testing.T) {
+	// Signer from an unrelated CA: the signature is valid, the chain is not trusted.
+	otherCA, _ := sigTestCA(t)
+	rogue := sigTestOperatorCert(t, otherCA, cert.SetPayloadSigningMarker)
+
+	roots := map[string]*x509.CertPool{"nil": nil, "empty": x509.NewCertPool()}
+	for name, pool := range roots {
+		t.Run(name, func(t *testing.T) {
+			dialer := newRecordingDialer()
+			h := newHandlerWithSigning(t, nil, true, pool)
+			h.RegisterOpenTerminalHandler(dialer)
+
+			params := validTerminalParams(t, rogue, allowedShell(), "sess-rogue")
+			err := h.handleOpenTerminal(context.Background(),
+				&cpTypes.Command{ID: "ot-noroots-" + name, StewardID: "steward-test", Params: params}, dialer)
+			require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+			assert.Contains(t, err.Error(), "controller CA")
+			h.Wait()
+			assert.Empty(t, dialer.dialCalls(), "Dial must not be called without controller CA roots")
+		})
+	}
 }

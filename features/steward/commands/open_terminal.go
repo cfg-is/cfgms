@@ -4,6 +4,7 @@ package commands
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"time"
 
@@ -57,6 +58,11 @@ func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, 
 	// shell and the operator signs that exact string.
 	if shellStr == "" {
 		return fmt.Errorf("%w: open_terminal requires an explicit shell", ErrUnauthenticatedCommand)
+	}
+	// Fail closed without controller CA roots: the envelope signature alone proves
+	// nothing about who signed it, so a terminal is never opened on it.
+	if h.controllerCARoots == nil || h.controllerCARoots.Equal(x509.NewCertPool()) {
+		return fmt.Errorf("%w: open_terminal requires a configured controller CA to verify the operator credential", ErrUnauthenticatedCommand)
 	}
 	content, err := operatorpayload.TerminalContent(h.stewardID, shellStr)
 	if err != nil {
