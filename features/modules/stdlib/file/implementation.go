@@ -393,7 +393,7 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 	}
 
 	if platformSupportsPermissions() {
-		if err := os.Chmod(cleanPath, fileMode); err != nil {
+		if err := chmodNoFollow(cleanPath, fileMode, true); err != nil {
 			return fmt.Errorf("failed to set permissions: %w", err)
 		}
 	}
@@ -457,7 +457,7 @@ func setOwnership(ctx context.Context, cleanPath, owner, group string, logger lo
 			gid = parsedGID
 		}
 		// #nosec G304 -- cleanPath validated by security.ValidateAndCleanPath before this call
-		if err := os.Chown(cleanPath, uid, gid); err != nil {
+		if err := chownNoFollow(cleanPath, uid, gid, false); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set ownership",
 				"resource_id", logging.SanitizeLogValue(resourceID),
 				"error_code", "OWNERSHIP_FAILED",

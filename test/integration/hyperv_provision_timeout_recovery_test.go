@@ -35,8 +35,8 @@
 // The only stand-in is the Hyper-V HOST itself, injected at the module's own
 // exported host-execution boundary (hyperv.HostCommandTransport, applied with
 // hyperv.WithHostCommandTransport). Driving a live host instead would require
-// Hyper-V admin rights on Windows or a reachable WinRM host on any platform,
-// neither of which exists on a Linux CI runner — and the real-host coverage is
+// Hyper-V admin rights on Windows, which a Linux CI runner does not have — and
+// the real-host coverage is
 // exactly what the go:build windows sibling provides.
 //
 // The retry BUDGET is not mirrored either: both fixtures declare source.retry_max
@@ -220,7 +220,7 @@ func buildSeedPhaseFailedFixture(t *testing.T, vmName string, attemptCount int) 
 	require.Positive(t, attemptCount, "fixture requires at least one real failed attempt")
 
 	store := hyperv.NewMemProvisionStore()
-	host := &scriptedHypervHost{vmState: "Off", failCmd: "New-VHD", failRemaining: attemptCount}
+	host := &scriptedHypervHost{vmState: "Off", failCmd: "Cfgms-NewSeedVHD", failRemaining: attemptCount}
 	exec := newSeedRepairExecutor(t, newRealHypervModule(t, store, host), 90)
 
 	// A retry budget comfortably larger than attemptCount so these
@@ -400,7 +400,7 @@ func TestHypervVMSeedRepair_SlowRetry_SucceedsPastOld30sCeiling(t *testing.T) {
 	store, host := buildSeedPhaseFailedFixture(t, seedRepairVMName, 1)
 	// New-VHD appears only in the seed-build command (psNewSeedVHD); the VM
 	// itself already exists, so nothing else creates a disk on this pass.
-	host.slowCmd = "New-VHD"
+	host.slowCmd = "Cfgms-NewSeedVHD"
 	host.slowFor = seedBuildDuration
 
 	exec := newSeedRepairExecutor(t, newRealHypervModule(t, store, host), 90)
@@ -411,7 +411,7 @@ func TestHypervVMSeedRepair_SlowRetry_SucceedsPastOld30sCeiling(t *testing.T) {
 	require.GreaterOrEqual(t, elapsed, seedBuildDuration,
 		"the repair must actually wait out the full seed build, not be cut short by the old 30s ceiling")
 	assert.Equal(t, 1, host.slowSeen, "the slow seed build must have been attempted exactly once")
-	assert.Positive(t, host.countCalls("Add-VMHardDiskDrive"),
+	assert.Positive(t, host.countCalls("Cfgms-AttachSeedDisk"),
 		"a repair must re-attach the rebuilt seed disk — work that only happens AFTER the slow seed build returns")
 	assert.Positive(t, host.countCalls("Start-VM"),
 		"a completed repair powers the VM on, the last step of the seed/create phase")
@@ -470,7 +470,7 @@ func TestHypervVMSeedRepair_RetryExhausted_ReachesConfigStatusReport(t *testing.
 
 	// Surface-and-wait: the exhausted branch performs no host work at all and
 	// leaves the record untouched for an operator.
-	assert.Zero(t, host.countCalls("New-VHD"),
+	assert.Zero(t, host.countCalls("Cfgms-NewSeedVHD"),
 		"an exhausted budget must not trigger another seed build")
 	assert.Zero(t, host.countCalls("Start-VM"),
 		"a VM with no working seed must never be powered on")

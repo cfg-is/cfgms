@@ -136,6 +136,8 @@ type verbatimLogger struct {
 	records []string
 }
 
+func (l *verbatimLogger) Warn(msg string, kv ...interface{}) { l.Error(msg, kv...) }
+
 func (l *verbatimLogger) Error(msg string, kv ...interface{}) {
 	var sb strings.Builder
 	sb.WriteString("msg=" + msg)
@@ -172,7 +174,7 @@ func TestDispatchEvent_HandlerErrorLogNeutralizesControlCharacters(t *testing.T)
 			return errors.New("handler failed\nforged=1")
 		}))
 
-	p.dispatchEvent(&types.Event{ID: "evt\nforged=1"})
+	p.dispatchEvent(&types.Event{ID: "evt\nforged=1"}, nil)
 
 	require.Eventually(t, func() bool {
 		for _, r := range vl.snapshot() {

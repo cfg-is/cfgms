@@ -51,6 +51,8 @@ func TestSweepExpiredWebAuthnCeremonies_RemovesExpiredKeepsUnexpired(t *testing.
 			&webAuthnPendingSession{expires: past}, &webAuthnPendingSession{expires: future}},
 		{"presenceTokens", &server.presenceTokens,
 			&presenceTokenRecord{expires: past}, &presenceTokenRecord{expires: future}},
+		{"terminalTickets", &server.terminalTickets,
+			&terminalTicketRecord{expires: past}, &terminalTicketRecord{expires: future}},
 		{"webAuthnElevateSessions", &server.webAuthnElevateSessions,
 			&webAuthnElevateSession{expires: past}, &webAuthnElevateSession{expires: future}},
 		{"operatorPayloadSignSessions", &server.operatorPayloadSignSessions,

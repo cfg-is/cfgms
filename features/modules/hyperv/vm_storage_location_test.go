@@ -45,7 +45,7 @@ func jsonEscapeBackslashes(s string) string {
 
 // callsByScript returns the indexes of recorded transport calls whose
 // scriptBlock equals the given psXxx const.
-func callsByScript(calls []winRMCall, script string) []int {
+func callsByScript(calls []recordedPSCall, script string) []int {
 	var out []int
 	for i, c := range calls {
 		if c.scriptBlock == script {
@@ -155,7 +155,7 @@ func TestMoveStore_Durable_SurvivesReopen(t *testing.T) {
 // a VM-name subfolder to -Path, so an explicit config-only Move-VMStorage to
 // the declared home follows — verified live on cfg-lab 2026-07-07).
 func TestCreateVM_PlacesConfigAtVHDHome(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`, // getVM: absent → create path
 			"",                // New-VM
@@ -194,7 +194,7 @@ func TestCreateVM_PlacesConfigAtVHDHome(t *testing.T) {
 // surface expose the VM's configuration-file location.
 func TestGetVM_ReportsConfigurationLocation(t *testing.T) {
 	const cfgLoc = `C:\VMs\vm7`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: homeVMJSON("vm7", "running", `C:\VMs\vm7\vm7.vhdx`, cfgLoc),
 	}
 	m := vmModuleWithTransport(transport, "t")
@@ -214,7 +214,7 @@ func TestGetVM_ReportsConfigurationLocation(t *testing.T) {
 // MoveRecord — and never stops, deletes, or recreates the VM.
 func TestLocationDrift_DispatchesExactlyOneMove(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv1`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv1", "running", `C:\VMs\mv1.vhdx`, `C:\VMs\mv1`), // getVM: local home
 			`{"required_bytes":1073741824,"free_bytes":269386489856}`,     // preflight: plenty free
@@ -266,7 +266,7 @@ func TestLocationDrift_DispatchesExactlyOneMove(t *testing.T) {
 // second move — the cycle is a cheap no-op (getVM + error probe only).
 func TestLocationDrift_InFlightMoveIsNoOp(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv2`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv2", "running", `C:\VMs\mv2.vhdx`, `C:\VMs\mv2`), // still at old location
 			`{"error":""}`, // no failure surfaced by the detached move
@@ -307,7 +307,7 @@ func TestLocationDrift_InFlightMoveIsNoOp(t *testing.T) {
 // normal lifecycle proceeds.
 func TestLocationDrift_CompletionClearsRecord(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv3`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv3", "running", home+`\mv3.vhdx`, home), // converged
 		},
@@ -343,7 +343,7 @@ func TestLocationDrift_CompletionClearsRecord(t *testing.T) {
 // the record.
 func TestMovePreflight_InsufficientSpace(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv4`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv4", "running", `C:\VMs\mv4.vhdx`, `C:\VMs\mv4`),
 			`{"required_bytes":1073741824,"free_bytes":1024}`, // destination nearly full
@@ -378,7 +378,7 @@ func TestMovePreflight_InsufficientSpace(t *testing.T) {
 // flips the record to failed with the error, and Set returns the error.
 func TestMoveFailure_SurfacesOnRecord(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv5`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv5", "running", `C:\VMs\mv5.vhdx`, `C:\VMs\mv5`), // still at source
 			`{"error":"Move-VMStorage : migration failed"}`,               // error marker
@@ -413,7 +413,7 @@ func TestMoveFailure_SurfacesOnRecord(t *testing.T) {
 // one new dispatch on the next converge cycle (bounded retry).
 func TestMoveFailure_NextConvergeRetriesOnce(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv6`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv6", "running", `C:\VMs\mv6.vhdx`, `C:\VMs\mv6`),
 			`{"required_bytes":1073741824,"free_bytes":269386489856}`,
@@ -456,7 +456,7 @@ func TestMoveFailure_NextConvergeRetriesOnce(t *testing.T) {
 // move interrupted by a host reboot, where the detached process left no error).
 func TestMoveStalled_FailsRecord(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv7`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv7", "running", `C:\VMs\mv7.vhdx`, `C:\VMs\mv7`),
 			`{"error":""}`, // no error marker — the move just never completed
@@ -488,7 +488,7 @@ func TestMoveStalled_FailsRecord(t *testing.T) {
 // TestSetVM_Absent_DeletesMoveRecord: deleting a VM clears any move record so
 // a later same-named VM starts clean (mirrors the provision-record cleanup).
 func TestSetVM_Absent_DeletesMoveRecord(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv8", "running", `C:\VMs\mv8.vhdx`, `C:\VMs\mv8`), // before-snapshot
 			"", // Remove-VM
@@ -517,7 +517,7 @@ func TestSetVM_Absent_DeletesMoveRecord(t *testing.T) {
 // calls (no probe, no preflight, no dispatch).
 func TestNoLocationDrift_NoMoveMachinery(t *testing.T) {
 	const home = `C:\ClusterStorage\CSV01\mv9`
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			homeVMJSON("mv9", "running", home+`\mv9.vhdx`, home),
 		},

@@ -63,7 +63,7 @@ func requireEdgesKey(t *testing.T, m map[string]interface{}) []interface{} {
 
 // vmModuleWithTransport creates a hypervModule wired with the given transport
 // and tenantID for VM operation tests. vms cache is initialised empty.
-func vmModuleWithTransport(transport winrmTransport, tenantID string) *hypervModule {
+func vmModuleWithTransport(transport psTransport, tenantID string) *hypervModule {
 	return &hypervModule{
 		executor:          &stubHypervExecutor{},
 		transport:         transport,
@@ -101,7 +101,7 @@ func TestVMHostName_IsExactConfigName(t *testing.T) {
 	const tenantID = "root/msp-a"
 	const vmName = "web-01"
 
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vmModuleWithTransport(transport, tenantID)
 
 	// state:absent → getVM (call 0) then Remove-VM (call 1).
@@ -168,14 +168,14 @@ func TestVMConfig_Validate_RejectsInjectionChars(t *testing.T) {
 // ─── Injection defense tests ───────────────────────────────────────────────────
 
 // TestVMInjectionDefense verifies that the (exact) VM name is transmitted as a
-// WinRM ArgumentList parameter, never interpolated into the PowerShell script text.
+// PowerShell parameter, never interpolated into the PowerShell script text.
 // Uses Get("vm:foo") since Get passes only the Name argument, making args[0] the
 // exact VM name.
 func TestVMInjectionDefense(t *testing.T) {
 	const tenantID = "acme"
 	const vmName = "webserver"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\webserver.vhdx","SwitchName":"External","State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
@@ -202,9 +202,9 @@ func TestVMInjectionDefense(t *testing.T) {
 // ─── Set absent tests ──────────────────────────────────────────────────────────
 
 // TestSet_VMAbsent_CallsRemoveVM verifies that Set with state "absent" calls Remove-VM
-// and passes the exact VM name as a WinRM argument (not interpolated into the script).
+// and passes the exact VM name as a PowerShell parameter (not interpolated into the script).
 func TestSet_VMAbsent_CallsRemoveVM(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vmModuleWithTransport(transport, "ops")
 
 	cfg := mapConfigState{
@@ -244,7 +244,7 @@ func TestSet_VMAbsent_CallsRemoveVM(t *testing.T) {
 // configuration.
 func TestGet_VM_ReturnsAbsentWhenMissing(t *testing.T) {
 	// Transport returns not-found JSON (VM absent on host)
-	transport := &testWinRMTransport{output: `{"found":false}`}
+	transport := &testPSTransport{output: `{"found":false}`}
 	m := vmModuleWithTransport(transport, "t")
 
 	state, err := m.Get(context.Background(), "vm:nonexistent")
@@ -255,19 +255,19 @@ func TestGet_VM_ReturnsAbsentWhenMissing(t *testing.T) {
 }
 
 // TestGet_VM_WrapsTransportError verifies that transport-layer failures (e.g.
-// WinRM connection refused) are returned as wrapped errors, NOT as
+// host connection refused) are returned as wrapped errors, NOT as
 // ErrVMNotFound. Conflating "absent" with "transport broken" was the root
 // cause of F14: every failed Get aborted the Set even when the host was
 // simply offline.
 func TestGet_VM_WrapsTransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
+	transport := &testPSTransport{execErr: errors.New("ps host: connection refused")}
 	m := vmModuleWithTransport(transport, "t")
 
 	_, err := m.Get(context.Background(), "vm:unreachable")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrVMNotFound,
 		"transport errors must NOT be reported as ErrVMNotFound")
-	assert.Contains(t, err.Error(), "winrm: connection refused",
+	assert.Contains(t, err.Error(), "ps host: connection refused",
 		"underlying transport error message must be preserved in the chain")
 }
 
@@ -278,8 +278,8 @@ func TestGet_VM_WrapsTransportError(t *testing.T) {
 // for different tenants both target the exact name "foo" on the host. (Operators
 // sharing a host across tenants are responsible for choosing non-colliding names.)
 func TestExactName_RegardlessOfTenant(t *testing.T) {
-	transportA := &testWinRMTransport{}
-	transportB := &testWinRMTransport{}
+	transportA := &testPSTransport{}
+	transportB := &testPSTransport{}
 
 	moduleA := vmModuleWithTransport(transportA, "a")
 	moduleB := vmModuleWithTransport(transportB, "b")
@@ -369,7 +369,7 @@ func TestVMConfig_AsMap_EmptyAdapters(t *testing.T) {
 // preserving MAC-address order (#2891). Without this parsing the DNA surface
 // would silently omit the VM identity and NIC inventory.
 func TestReadVMState_ParsesGUIDAndAdapters(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,` +
 				`"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx",` +
@@ -396,7 +396,7 @@ func TestReadVMState_ParsesGUIDAndAdapters(t *testing.T) {
 // omits the Id and Adapters fields yields an empty VMGUID and no adapters, with
 // no error (older host scripts / VMs with no NICs).
 func TestReadVMState_NoGUIDOrAdapters(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("db-01", "stopped", 4, 8192)},
 	}
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
@@ -575,7 +575,7 @@ func TestGet_VM_ReadsMultipleAdapters(t *testing.T) {
 	const tenantID = "prod"
 	const vmName = "app-server"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
@@ -596,7 +596,7 @@ func TestGet_VM_SingleAdapterScalarSwitchNames(t *testing.T) {
 	const tenantID = "prod"
 	const vmName = "app-server"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":"External","State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
@@ -613,7 +613,7 @@ func TestGet_VM_SingleAdapterScalarSwitchNames(t *testing.T) {
 // switches issues New-VM (first switch) plus one Add-VMNetworkAdapter for the
 // second switch.
 func TestSetVM_MultiSwitchCreate(t *testing.T) {
-	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := vmModuleWithTransport(transport, "dev")
 
 	cfg := &VMConfig{
@@ -655,7 +655,7 @@ func TestSetVM_MultiSwitchCreate(t *testing.T) {
 func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
 	// getVM (call 0) reports the live host: VM exists, stopped, on [External, Mgmt].
 	// Part 2: the reconcile decision is made off this host truth, not the cache.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"foo","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\foo.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Off"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -691,7 +691,7 @@ func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
 func TestSetVM_MultiSwitch_IdempotentWhenEqual(t *testing.T) {
 	// getVM (call 0) reports the host already on [External, Mgmt], stopped, with
 	// the desired CPU/memory — fully converged.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"foo","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\foo.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Off"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -737,7 +737,7 @@ func (r rawConfigState) GetManagedFields() []string    { return nil }
 // so the list was silently dropped (desired set empty -> reconcile no-op).
 func TestSetVM_ConfigMap_SwitchNameList_Connects(t *testing.T) {
 	// getVM (call 0) reports the host on [hv-int]; desired adds hv-priv.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":true,"Name":"foo","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\foo.vhdx","SwitchName":"hv-int","SwitchNames":["hv-int"],"State":"Off"}`},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1185,7 +1185,7 @@ func TestGet_VM_ReturnsConfig(t *testing.T) {
 	const tenantID = "prod"
 	const vmName = "app-server"
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
@@ -1210,7 +1210,7 @@ func TestGet_VM_ReturnsConfig(t *testing.T) {
 // falls through to New-VM as call[1] and the config-home move (#2411) as
 // call[2].
 func TestSet_VMCreate(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := vmModuleWithTransport(transport, "dev")
@@ -1262,7 +1262,7 @@ func TestSet_VMCreate(t *testing.T) {
 // existing VM issues Start-VM and does not issue New-VM.
 func TestSetVM_RunningState_CallsStartVM(t *testing.T) {
 	// getVM (call 0) reports the live host: VM exists, stopped, matching CPU/mem.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1292,7 +1292,7 @@ func TestSetVM_RunningState_CallsStartVM(t *testing.T) {
 // existing VM issues Stop-VM and does not issue New-VM.
 func TestSetVM_StoppedState_CallsStopVM(t *testing.T) {
 	// getVM (call 0) reports the live host: VM exists, running, matching CPU/mem.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1324,7 +1324,7 @@ func TestSetVM_StoppedState_CallsStopVM(t *testing.T) {
 // is issued (power-state gating): the only calls are the two resize cmdlets.
 func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 	// getVM (call 0) reports the live host: VM stopped, 2 CPUs / 4096 MB.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1376,7 +1376,7 @@ func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 // (the resize-while-running path) without issuing New-VM.
 func TestSetVM_RunningState_WithResize(t *testing.T) {
 	// getVM (call 0) reports the live host: VM running, 2 CPUs / 4096 MB.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1417,7 +1417,7 @@ func TestSetVM_RunningState_WithResize(t *testing.T) {
 // the running state".
 func TestSetVM_RunningState_AlreadyRunning_NoStartVM(t *testing.T) {
 	// getVM (call 0) reports the host already running with the desired CPU/memory.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1442,7 +1442,7 @@ func TestSetVM_RunningState_AlreadyRunning_NoStartVM(t *testing.T) {
 // desired-stopped config to a VM that is ALREADY stopped issues NO Stop-VM.
 func TestSetVM_StoppedState_AlreadyStopped_NoStopVM(t *testing.T) {
 	// getVM (call 0) reports the host already stopped with the desired CPU/memory.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1468,7 +1468,7 @@ func TestSetVM_StoppedState_AlreadyStopped_NoStopVM(t *testing.T) {
 // genuinely needs.
 func TestSetVM_RunningResize_StopResizeStart(t *testing.T) {
 	// getVM (call 0) reports the host running, 2 CPUs / 4096 MB.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
 	}
 	m := vmModuleWithTransport(transport, "ops")
@@ -1495,9 +1495,9 @@ func TestSetVM_RunningResize_StopResizeStart(t *testing.T) {
 // surfaces an error containing "Start-VM".
 func TestSetVM_StartVM_TransportError(t *testing.T) {
 	// getVM (call 0) succeeds; Start-VM (call 1) fails.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
-		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+		perCallErrors:  []error{nil, errors.New("ps host: timeout")},
 	}
 	m := vmModuleWithTransport(transport, "ops")
 
@@ -1511,9 +1511,9 @@ func TestSetVM_StartVM_TransportError(t *testing.T) {
 // surfaces an error containing "Stop-VM".
 func TestSetVM_StopVM_TransportError(t *testing.T) {
 	// getVM (call 0) succeeds; Stop-VM (call 1) fails.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
-		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+		perCallErrors:  []error{nil, errors.New("ps host: timeout")},
 	}
 	m := vmModuleWithTransport(transport, "ops")
 
@@ -1530,9 +1530,9 @@ func TestSetVM_StopVM_TransportError(t *testing.T) {
 func TestSetVM_SetVMProcessor_TransportError(t *testing.T) {
 	// getVM (call 0) succeeds; Set-VMProcessor (call 1) fails. VM already stopped,
 	// so power-state gating skips Stop-VM and Set-VMProcessor is the first mutation.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
-		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+		perCallErrors:  []error{nil, errors.New("ps host: timeout")},
 	}
 	m := vmModuleWithTransport(transport, "ops")
 
@@ -1549,9 +1549,9 @@ func TestSetVM_SetVMProcessor_TransportError(t *testing.T) {
 func TestSetVM_SetVMMemory_TransportError(t *testing.T) {
 	// getVM (call 0) succeeds; Set-VMMemory (call 1) fails. VM already stopped and
 	// only memory changes, so Set-VMMemory is the first (and failing) mutation.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
-		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+		perCallErrors:  []error{nil, errors.New("ps host: timeout")},
 	}
 	m := vmModuleWithTransport(transport, "ops")
 
@@ -1689,7 +1689,7 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 
 	// First converge: role absent → exactly one Add-ClusterVirtualMachineRole.
 	t.Run("first_converge_registers_once", func(t *testing.T) {
-		transport := &testWinRMTransport{perCallOutputs: []string{
+		transport := &testPSTransport{perCallOutputs: []string{
 			`{"found":false}`,   // getVM: VM absent
 			`{"owners":{}}`,     // getVM probe (#2420): role absent cluster-wide
 			`{"owner":"NODE1"}`, // #2421 owner gate: CNO owner read (this node owns)
@@ -1728,7 +1728,7 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 	// only the role registration was idempotently skipped — the exact
 	// duplicate-VM window the gate closes).
 	t.Run("role_present_is_noop", func(t *testing.T) {
-		transport := &testWinRMTransport{perCallOutputs: []string{
+		transport := &testPSTransport{perCallOutputs: []string{
 			`{"found":false}`,              // getVM: VM absent on this node
 			`{"owners":{"ha-vm":"NODE1"}}`, // getVM probe (#2420): role ALREADY present
 		}}
@@ -1799,7 +1799,7 @@ func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
 		},
 	}}
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: VM absent
 		`{"owners":{}}`,     // getVM probe (#2420): role absent cluster-wide
 		`{"owner":"NODE1"}`, // #2421 owner gate: CNO owner read (this node owns)
@@ -1855,7 +1855,7 @@ func TestSetVM_AbsentDeletesProvisionRecord(t *testing.T) {
 		UpdatedAt:     now,
 	}))
 
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vmModuleWithTransport(transport, "ops")
 	m.provisionStore = store
 
@@ -1877,7 +1877,7 @@ func TestSetVM_AbsentDeletesProvisionRecord(t *testing.T) {
 // succeeds and does not error on missing record.
 func TestSetVM_AbsentNoProvisionRecord(t *testing.T) {
 	ctx := context.Background()
-	transport := &testWinRMTransport{}
+	transport := &testPSTransport{}
 	m := vmModuleWithTransport(transport, "ops")
 	m.provisionStore = NewMemProvisionStore() // empty store
 

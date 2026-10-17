@@ -76,7 +76,7 @@ func TestCheckDetection_NilDetector_ReturnsErrHostNotHyperV(t *testing.T) {
 // TestCheckDetection_PropagatesDetectorError verifies that a detector error is
 // surfaced directly from Get and Set without wrapping or swallowing.
 func TestCheckDetection_PropagatesDetectorError(t *testing.T) {
-	detErr := errors.New("detector: winrm timeout")
+	detErr := errors.New("detector: host timeout")
 	fake := &fakeDetector{err: detErr}
 
 	m := newModuleWithDetector(nil, fake)

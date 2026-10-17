@@ -3862,3 +3862,47 @@ func TestRegister_CloneOf_QueuedWritesAuditEvent(t *testing.T) {
 	assert.Equal(t, business.AuditSeverityMedium, entries[0].Severity)
 	assert.Equal(t, "steward-original", entries[0].Details["clone_of"])
 }
+
+// TestHandleRegistrationStatus_ClaimRecordsAuditEvent verifies that a successful
+// claim of an approved registration records a registration_claimed audit entry for
+// the steward, carrying the issued certificate serial.
+func TestHandleRegistrationStatus_ClaimRecordsAuditEvent(t *testing.T) {
+	const regToken = "cfgms_reg_claim_audit_tok"
+	const tenantID = "test-tenant"
+	const pendingID = "pending-claim-audit-1"
+	const stewardID = "steward-claim-audit-1"
+
+	tokenStore := newTestRegistrationStore(t)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ctx := context.Background()
+	require.NoError(t, tokenStore.SaveToken(ctx, &registration.Token{
+		Token: regToken, TenantID: tenantID, ControllerURL: "grpc://controller:7443", Group: "prod",
+	}))
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(ctx, &business.PendingRegistrationEntry{
+		PendingID: pendingID, StewardID: stewardID, TenantID: tenantID, TokenStr: regToken,
+		SourceIP: "10.0.0.1", RegisteredAt: now, ExpiresAt: now.Add(24 * time.Hour),
+		Status: business.PendingRegistrationStatusPending, CSRPEM: testValidCSRPEM,
+	}))
+	require.NoError(t, pendingStore.UpdateStatus(ctx, pendingID, business.PendingRegistrationStatusApproved))
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/registration/status/"+pendingID, nil)
+	r.Header.Set("Authorization", "Bearer "+regToken)
+	r = mux.SetURLVars(r, map[string]string{"pending_id": pendingID})
+	rec := httptest.NewRecorder()
+	server.handleRegistrationStatus(rec, r)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	require.NoError(t, auditMgr.Flush(ctx))
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"registration_claimed"}})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, stewardID, entries[0].UserID)
+	assert.Equal(t, tenantID, entries[0].TenantID)
+	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
+	assert.NotEmpty(t, entries[0].Details["cert_serial"])
+}

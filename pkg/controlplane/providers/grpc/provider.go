@@ -156,6 +156,12 @@ type Provider struct {
 	// (default). Injected via WithTenantAdmission (Issue #3759, ADR-031 Decision 6).
 	tenantAdmission TenantAdmission
 
+	// eventAdmission gates steward events on the ControlChannel with its own
+	// per-tenant queue, separate from tenantAdmission. Nil disables the tenant
+	// gate; the per-stream limit applies regardless. Injected via
+	// WithEventAdmission (Issue #5120).
+	eventAdmission TenantAdmission
+
 	// stewardTenantResolver maps an mTLS-verified steward identity to its tenant
 	// using server-side fleet records, so admission buckets are never keyed on a
 	// caller-supplied tenant field. Nil falls back to per-steward buckets.
@@ -208,6 +214,11 @@ type Provider struct {
 	deliveryFailures   atomic.Int64
 	reconnectAttempts  atomic.Int64
 	identityMismatches atomic.Int64
+
+	// eventsDropped / heartbeatsDropped count steward messages shed by the tenant
+	// gate or the per-stream in-flight limit (Issue #5120).
+	eventsDropped     atomic.Int64
+	heartbeatsDropped atomic.Int64
 
 	// Connection timestamps (protected by mu)
 	lastConnectedAt    time.Time
@@ -1273,30 +1284,66 @@ func (p *Provider) SendResponse(ctx context.Context, response *types.Response) e
 	return nil
 }
 
-// dispatchEvent routes an incoming event to matching event handlers.
-func (p *Provider) dispatchEvent(event *types.Event) {
+// runHandlers starts one goroutine per handler and calls release exactly once,
+// after every goroutine has returned (including ones that panicked or failed),
+// or at once when n is zero. A nil release is a no-op. A handler panic is
+// recovered and logged so it cannot end the controller process, and the wait
+// group and release callback still run.
+func (p *Provider) runHandlers(n int, kind string, run func(i int), release func()) {
+	if n == 0 {
+		if release != nil {
+			release()
+		}
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					p.logger.Error(kind+" handler panicked", "panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+				}
+			}()
+			run(i)
+		}(i)
+	}
+	go func() {
+		wg.Wait()
+		if release != nil {
+			release()
+		}
+	}()
+}
+
+// dispatchEvent routes an incoming event to matching event handlers. release
+// runs once after every started handler has returned, or immediately when no
+// handler matches.
+func (p *Provider) dispatchEvent(event *types.Event, release func()) {
 	p.eventsReceived.Add(1)
 
 	p.mu.RLock()
-	handlers := make([]eventSubscription, len(p.eventHandlers))
-	copy(handlers, p.eventHandlers)
-	p.mu.RUnlock()
-
-	for _, sub := range handlers {
+	handlers := make([]eventSubscription, 0, len(p.eventHandlers))
+	for _, sub := range p.eventHandlers {
 		if sub.filter != nil && !sub.filter.Match(event) {
 			continue
 		}
-		handler := sub.handler
-		go func() {
-			if err := handler(p.ctx, event); err != nil {
-				p.logger.Error("event handler error", "event_id", logging.SanitizeLogValue(event.ID), "error", logging.SanitizeLogValue(err.Error()))
-			}
-		}()
+		handlers = append(handlers, sub)
 	}
+	p.mu.RUnlock()
+
+	p.runHandlers(len(handlers), "event", func(i int) {
+		if err := handlers[i].handler(p.ctx, event); err != nil {
+			p.logger.Error("event handler error", "event_id", logging.SanitizeLogValue(event.ID), "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}, release)
 }
 
 // dispatchHeartbeat routes an incoming heartbeat to all heartbeat handlers.
-func (p *Provider) dispatchHeartbeat(hb *types.Heartbeat) {
+// release runs once after every started handler has returned, or immediately
+// when there are none.
+func (p *Provider) dispatchHeartbeat(hb *types.Heartbeat, release func()) {
 	p.heartbeatsReceived.Add(1)
 
 	p.mu.RLock()
@@ -1304,14 +1351,11 @@ func (p *Provider) dispatchHeartbeat(hb *types.Heartbeat) {
 	copy(handlers, p.heartbeatHandlers)
 	p.mu.RUnlock()
 
-	for _, handler := range handlers {
-		handler := handler
-		go func() {
-			if err := handler(p.ctx, hb); err != nil {
-				p.logger.Error("heartbeat handler error", "steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
-			}
-		}()
-	}
+	p.runHandlers(len(handlers), "heartbeat", func(i int) {
+		if err := handlers[i](p.ctx, hb); err != nil {
+			p.logger.Error("heartbeat handler error", "steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}, release)
 }
 
 // --- Status & Monitoring ---
@@ -1327,6 +1371,8 @@ func (p *Provider) GetStats(ctx context.Context) (*types.ControlPlaneStats, erro
 		ResponsesSent:      p.responsesSent.Load(),
 		ResponsesReceived:  p.responsesReceived.Load(),
 		DeliveryFailures:   p.deliveryFailures.Load(),
+		EventsDropped:      p.eventsDropped.Load(),
+		HeartbeatsDropped:  p.heartbeatsDropped.Load(),
 		IdentityMismatches: p.identityMismatches.Load(),
 		ProviderMetrics:    make(map[string]interface{}),
 	}
@@ -1585,7 +1631,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// steward use to silently drop an entire victim tenant's liveness traffic.
 	// Resolving once also keeps the per-heartbeat path free of store lookups.
 	var heartbeatBucket string
-	if s.provider.tenantAdmission != nil {
+	if s.provider.tenantAdmission != nil || s.provider.eventAdmission != nil {
 		heartbeatBucket = s.provider.admissionBucket(stream.Context(), stewardID, "")
 	}
 
@@ -1670,7 +1716,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		s.controlChannelRecvLoop(stream, stewardID, conn, heartbeatBucket)
+		s.controlChannelRecvLoop(stream, stewardID, conn, heartbeatBucket, newStreamIngest())
 	}()
 
 	// Close the stream if the peer serial is revoked while it is open. Returning
@@ -1708,7 +1754,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 }
 
 // controlChannelRecvLoop is the receive loop of an admitted ControlChannel.
-func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer[transportpb.ControlMessage, transportpb.ControlMessage], stewardID string, conn *registry.StewardConnection, heartbeatBucket string) {
+func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer[transportpb.ControlMessage, transportpb.ControlMessage], stewardID string, conn *registry.StewardConnection, heartbeatBucket string, ingest *streamIngest) {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -1730,7 +1776,29 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 				s.provider.identityMismatches.Add(1)
 				continue
 			}
-			s.provider.dispatchEvent(event)
+
+			// Events use their own tenant queue and a per-stream in-flight cap;
+			// both slots are held until every handler has returned. The receive
+			// loop never blocks (Issue #5120).
+			if !ingest.tryEvent() {
+				s.provider.dropMessage(ingest.eventDrops, &s.provider.eventsDropped, "event", "stream in-flight limit reached", stewardID, heartbeatBucket)
+				continue
+			}
+			release := ingest.releaseEvent
+			if ea := s.provider.eventAdmission; ea != nil {
+				if aErr := ea.Acquire(heartbeatBucket); aErr != nil {
+					ingest.releaseEvent()
+					s.provider.dropMessage(ingest.eventDrops, &s.provider.eventsDropped, "event", "tenant admission queue full", stewardID, heartbeatBucket)
+					continue
+				}
+				// The stream slot is freed before the tenant slot, so a free
+				// tenant slot implies its stream slot is free as well.
+				release = func() {
+					ingest.releaseEvent()
+					ea.Release(heartbeatBucket)
+				}
+			}
+			s.provider.dispatchEvent(event, release)
 
 		case *transportpb.ControlMessage_Heartbeat:
 			hb := heartbeatFromProto(payload.Heartbeat)
@@ -1744,27 +1812,30 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 				continue
 			}
 
-			// Per-tenant admission control (Issue #3759, ADR-031 Decision 6): the
-			// same queue instance as the connect gate above — and the same
-			// mechanism the DNA path runs on its own instance, since that path's
-			// key is wire data. Acquire/Release bracket only this one heartbeat's
-			// dispatch — never deferred to stream teardown — so a saturated
-			// tenant sheds its own excess heartbeats without blocking the
-			// receive loop or other tenants' concurrently-connected streams.
-			// The bucket is heartbeatBucket, resolved server-side at connect;
-			// hb.TenantID is payload data and never selects a bucket.
-			if s.provider.tenantAdmission != nil {
-				if aErr := s.provider.tenantAdmission.Acquire(heartbeatBucket); aErr != nil {
-					s.provider.logger.Warn("controlchannel heartbeat dropped — tenant admission queue full",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"admission_bucket", logging.SanitizeLogValue(heartbeatBucket))
-					continue
-				}
-				s.provider.dispatchHeartbeat(hb)
-				s.provider.tenantAdmission.Release(heartbeatBucket)
+			// Per-tenant admission control (Issue #3759, ADR-031 Decision 6) plus
+			// one heartbeat in flight per stream (Issue #5120). Slots are held
+			// until every heartbeat handler has returned, so they bound handlers
+			// running at once, not just how fast they start. The bucket is
+			// heartbeatBucket, resolved server-side at connect; hb.TenantID is
+			// payload data and never selects a bucket.
+			if !ingest.tryHeartbeat() {
+				s.provider.dropMessage(ingest.heartbeatDrops, &s.provider.heartbeatsDropped, "heartbeat", "stream in-flight limit reached", stewardID, heartbeatBucket)
 				continue
 			}
-			s.provider.dispatchHeartbeat(hb)
+			release := ingest.releaseHeartbeat
+			if ta := s.provider.tenantAdmission; ta != nil {
+				if aErr := ta.Acquire(heartbeatBucket); aErr != nil {
+					ingest.releaseHeartbeat()
+					s.provider.dropMessage(ingest.heartbeatDrops, &s.provider.heartbeatsDropped, "heartbeat", "tenant admission queue full", stewardID, heartbeatBucket)
+					continue
+				}
+				// Stream slot first, then tenant slot (see the event path).
+				release = func() {
+					ingest.releaseHeartbeat()
+					ta.Release(heartbeatBucket)
+				}
+			}
+			s.provider.dispatchHeartbeat(hb, release)
 
 		case *transportpb.ControlMessage_Response:
 			resp := responseFromProto(payload.Response)

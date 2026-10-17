@@ -43,6 +43,19 @@ func SecureReadFile(basePath, userPath string) ([]byte, error) {
 	return os.ReadFile(validatedPath)
 }
 
+// writeFileNoFollow writes data like os.WriteFile but never follows a link at the leaf.
+func writeFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	f, err := openNoFollow(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
 // SecureWriteFile safely writes a file with path validation and secure permissions.
 //
 // Files are written with 0600 permissions (owner read/write only) by default.
@@ -59,7 +72,7 @@ func SecureWriteFile(basePath, userPath string, data []byte) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return os.WriteFile(validatedPath, data, 0600)
+	return writeFileNoFollow(validatedPath, data, 0600)
 }
 
 // SecureWriteFileWithPerms writes a file with custom permissions after path validation.
@@ -77,7 +90,7 @@ func SecureWriteFileWithPerms(basePath, userPath string, data []byte, perm os.Fi
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return os.WriteFile(validatedPath, data, perm)
+	return writeFileNoFollow(validatedPath, data, perm)
 }
 
 // SecureOpenFile safely opens a file with path validation.
@@ -91,7 +104,7 @@ func SecureOpenFile(basePath, userPath string, flag int, perm os.FileMode) (*os.
 
 	// #nosec G304 - Secure file access wrapper with comprehensive path validation
 	// This function specifically prevents directory traversal attacks
-	return os.OpenFile(validatedPath, flag, perm)
+	return openNoFollow(validatedPath, flag, perm)
 }
 
 // ValidateAndCleanPath validates a user-provided path against a base directory.
@@ -167,12 +180,23 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	// This must happen before the final containment check so both paths are canonical.
 	resolved, resolveErr := filepath.EvalSymlinks(absUserPath)
 	if resolveErr == nil {
-		absUserPath = resolved
+		// EvalSymlinks leaves a Windows junction unresolved (Go 1.23+), so an existing path
+		// is walked component by component like a missing tail: every reparse point on it
+		// must lead back inside the base.
+		rel, relErr := filepath.Rel(absBasePath, resolved)
+		if relErr != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+		}
+		walked, walkErr := resolveMissingTail(absBasePath, rel, userPath)
+		if walkErr != nil {
+			return "", walkErr
+		}
+		absUserPath = walked
 	} else if errors.Is(resolveErr, os.ErrNotExist) {
-		// Non-existent target: walk up to the deepest existing ancestor,
-		// eval-symlink it, then re-join the non-existing tail components.
-		// This handles paths like "newdir/newfile.txt" where the parent dirs
-		// don't yet exist, and also catches ancestors that are malicious symlinks.
+		// Non-existent target: resolve the deepest existing ancestor, then re-join the
+		// non-existing tail components. This handles paths like "newdir/newfile.txt"
+		// where the parent dirs don't yet exist, and also catches ancestors that are
+		// malicious or dangling symlinks.
 		//
 		// Preliminary check uses rawAbsBasePath (not the already-resolved absBasePath)
 		// so both sides are in the same pre-resolution form. On macOS, absBasePath is
@@ -183,24 +207,11 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		if rawRelErr != nil || strings.HasPrefix(rawRel, "..") || filepath.IsAbs(rawRel) {
 			return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
 		}
-		parent := absUserPath
-		var tail []string
-		for {
-			if _, statErr := os.Stat(parent); statErr == nil {
-				break
-			}
-			tail = append([]string{filepath.Base(parent)}, tail...)
-			next := filepath.Dir(parent)
-			if next == parent {
-				return "", fmt.Errorf("failed to resolve any ancestor of %s", userPath)
-			}
-			parent = next
+		resolvedPath, tailErr := resolveMissingTail(absBasePath, rawRel, userPath)
+		if tailErr != nil {
+			return "", tailErr
 		}
-		resolvedParent, resolveParentErr := filepath.EvalSymlinks(parent)
-		if resolveParentErr != nil {
-			return "", fmt.Errorf("failed to resolve parent: %w", resolveParentErr)
-		}
-		absUserPath = filepath.Join(append([]string{resolvedParent}, tail...)...)
+		absUserPath = resolvedPath
 	} else {
 		return "", fmt.Errorf("failed to evaluate symlinks: %w", resolveErr)
 	}
@@ -212,6 +223,119 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	}
 
 	return absUserPath, nil
+}
+
+// resolveMissingTail resolves rel (relative to the canonical base absBasePath) when the full
+// path does not exist. It walks the components top-down, resolving each existing prefix with
+// filepath.EvalSymlinks so the walk always stands in a fully resolved directory inside the
+// base. The first component that does not resolve is probed with os.Lstat, which never follows
+// the leaf, on the canonical directory already checked to be inside the base. A missing
+// component starts the non-existent tail. A symlink or Windows reparse point that does not
+// resolve is rejected, because re-joining it unresolved would let a later create follow it.
+// An existing reparse point that EvalSymlinks returns unchanged (a live Windows junction) is
+// followed to its target by followReparsePoints. A prefix that resolves outside the base,
+// directly or through a junction, is rejected as traversal.
+func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
+	resolvedDir := absBasePath
+	var components []string
+	if rel != "." {
+		components = strings.Split(rel, string(filepath.Separator))
+	}
+	for i, component := range components {
+		if resolved, evalErr := filepath.EvalSymlinks(filepath.Join(resolvedDir, component)); evalErr == nil {
+			inBase, err := containedPath(absBasePath, resolved, userPath)
+			if err != nil {
+				return "", err
+			}
+			followed, err := followReparsePoints(absBasePath, inBase, userPath)
+			if err != nil {
+				return "", err
+			}
+			resolvedDir = followed
+			continue
+		}
+		// resolvedDir is canonical and inside the base, so joining one component onto it
+		// cannot traverse a link. os.Lstat never follows the leaf; on Windows it reports a
+		// dangling junction as a reparse point where a Root-relative Lstat did not.
+		candidate, err := containedPath(absBasePath, filepath.Join(resolvedDir, component), userPath)
+		if err != nil {
+			return "", err
+		}
+		info, lstatErr := os.Lstat(candidate)
+		if lstatErr != nil {
+			if os.IsPermission(lstatErr) {
+				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
+			}
+			// Any other failure means the component does not exist (ErrNotExist, or Windows
+			// ERROR_INVALID_NAME for "a:b"): it and everything after it are the new tail.
+			return filepath.Join(append([]string{resolvedDir}, components[i:]...)...), nil
+		}
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
+		}
+		return "", fmt.Errorf("failed to resolve path component of %s", userPath)
+	}
+	return resolvedDir, nil
+}
+
+// maxReparseHops bounds followReparsePoints so a junction cycle cannot loop forever.
+const maxReparseHops = 32
+
+// followReparsePoints returns the canonical in-base path that p, already checked to be inside
+// the base, leads to. On Windows, EvalSymlinks does not evaluate mount points (Go 1.23+): a
+// junction comes back unchanged with no error, and Lstat reports it as irregular. Each such
+// reparse point is read with os.Readlink, its target canonicalized, and that target checked
+// to be inside the base before it is followed. A dangling target, a target that cannot be
+// read, or a target outside the base is rejected, so a later create can never pass through it.
+func followReparsePoints(absBasePath, p, userPath string) (string, error) {
+	for hops := 0; ; hops++ {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, err)
+		}
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			return p, nil
+		}
+		if hops >= maxReparseHops {
+			return "", fmt.Errorf("too many links or reparse points in path %s: refusing to follow", userPath)
+		}
+		// Stat follows the reparse point; a dangling one fails here.
+		if _, statErr := os.Stat(p); statErr != nil {
+			return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
+		}
+		target, err := os.Readlink(p)
+		if err != nil {
+			return "", fmt.Errorf("unresolvable link or reparse point in path %s: refusing to follow", userPath)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(p), target)
+		}
+		canonical, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			return "", fmt.Errorf("unresolvable link or reparse point in path %s: refusing to follow", userPath)
+		}
+		if p, err = containedPath(absBasePath, canonical, userPath); err != nil {
+			return "", err
+		}
+	}
+}
+
+// containedPath returns absPath rebuilt as absBasePath joined with its relative path, after
+// the same containment rule as containmentCheck, then confirms the rebuilt path still starts
+// with the base. Probes in resolveMissingTail touch only this returned path, so every
+// filesystem call on a path under validation is guarded by the containment check itself.
+// filepath.IsLocal is not used: on Windows it rejects a component such as "a:b", which must
+// stay a not-yet-existing tail component.
+func containedPath(absBasePath, absPath, userPath string) (string, error) {
+	rel, err := filepath.Rel(absBasePath, absPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+	}
+	joined := filepath.Join(absBasePath, rel)
+	if !strings.HasPrefix(joined, absBasePath) {
+		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+	}
+	return joined, nil
 }
 
 // containmentCheck verifies that absUserPath is within absBasePath using filepath.Rel.

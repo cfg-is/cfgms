@@ -7,9 +7,10 @@ failover-cluster state on the Windows Server host the steward runs on. The
 module is a **steward** module: it runs in-process on the Hyper-V host's own
 steward and drives Hyper-V through a persistent in-host PowerShell host
 (`psHostTransport`) — a long-lived `powershell.exe` subprocess on the local
-host. It is **not** an outpost module and does **not** manage remote hosts. A
-legacy WinRM transport remains as a named fallback for the off-host case, but
-the default and supported deployment shape is the in-host PS host.
+host. It is **not** an outpost module and does **not** manage remote hosts. The
+in-host PS host is the only transport. A config that still asks for the removed
+remote transport (by `transport` value or by its leftover connection keys) fails
+in `Configure` with an error that names the removal; no other transport is tried.
 
 ## Purpose and scope
 
@@ -70,9 +71,7 @@ The module accepts the following configuration options via `Configure(cfg)`:
 
 | Option | Type | Required | Description |
 |--------|------|----------|-------------|
-| `winrm_host` | string | Yes | Hostname or IP of the Hyper-V host |
-| `winrm_user_secret` | string | Yes | SecretStore key for the WinRM username |
-| `winrm_pass_secret` | string | Yes | SecretStore key for the WinRM password |
+| `transport` | string | No | `ps-host` (the default and only value). Any other value fails in `Configure`. |
 | `tenant_id` | string | No | Tenant identifier recorded on audit events and DNA (not used to alter host-side resource names) |
 | `steward_id` | string | No | Steward identifier for audit records (defaults to `<tenantID>/hyperv`) |
 | `audit_manager` | `*audit.Manager` | No | Audit manager for recording Hyper-V operations |
@@ -643,8 +642,8 @@ store, large-object transfer, or ISO distribution path.
 1. **CPU/memory resize requires a stopped VM** — Hyper-V does not support hot-resize. The module handles this automatically: when `state: running` with a resize, it stops the VM, resizes, then starts it. A brief outage occurs during this sequence.
 2. **Generation is fixed at creation** — VM generation cannot be changed after the VM is created.
 3. **VHD path is immutable** — The virtual disk path is set at creation and cannot be changed via this module.
-4. **Basic auth is structurally disabled** — Only NTLM over HTTPS (port 5986) is supported. WinRM must be configured for HTTPS on the target host.
-5. **Integration tests require a live host** — Unit tests use a test implementation of the WinRM transport interface; full end-to-end validation requires `CFGMS_HYPERV_HOST` to be set.
+4. **Windows only** — The PowerShell host requires Windows. On other platforms `Configure` returns an unsupported-platform error naming the Hyper-V module.
+5. **Integration tests require a live host** — Unit tests use a test implementation of the host-command interface; full end-to-end validation requires `CFGMS_HYPERV_LIVE_PS=1` on a Hyper-V host.
 6. **Install media is a host path** — `source.iso` must already exist on the Hyper-V host (typically on a CSV). This module does not download, copy, or distribute ISOs; stage them with the `file` module or out of band. The ISO is attached as-is and is never repacked or re-signed.
 7. **No host ISO-builder dependency for the seed** — the unattended answer file is delivered on a host-native VHDX seed disk built with `New-VHD`/`Mount-VHD`/`Format-Volume` (present with the Hyper-V + Storage roles the host already runs), so it needs **no** `oscdimg.exe` (Windows ADK) or `mkisofs` on the host. If you choose to author a profile that ships its answer file via a secondary ISO instead of the VHDX seed, building that ISO on the host would require `oscdimg.exe` or `mkisofs` — neither is present on a stock Hyper-V host, which is why the VHDX seed is the supported mechanism.
 8. **Windows enrollment `.ppkg` must be pre-signed** — the Windows path applies a provisioning package (`.ppkg`) at first logon for steward enrollment. The package is referenced by host path (via a secret key) and must be signed ahead of time; this module does not sign `.ppkg` artifacts. An unsigned/self-signed package is acceptable only for lab/dogfood under `module_trust.mode: bypass`.
@@ -670,44 +669,11 @@ The module activates only on hosts where Hyper-V is actually present, and cleanl
 hyperv: declining resource — host is not a Hyper-V host  resource_id=vm:web-01
 ```
 
-The `resource_id` is sanitised via `logging.SanitizeLogValue()` to defend against log-injection payloads in attacker-controlled resource names. The module does not panic, does not call into the WinRM transport, and does not invoke any Hyper-V cmdlet — operators reading the steward log can immediately see which resource was declined and why.
+The `resource_id` is sanitised via `logging.SanitizeLogValue()` to defend against log-injection payloads in attacker-controlled resource names. The module does not panic, does not call into the host transport, and does not invoke any Hyper-V cmdlet — operators reading the steward log can immediately see which resource was declined and why.
 
 ## Service Account Requirements
 
-The WinRM service account must be a member of the **Hyper-V Administrators** local group on the target host. Domain Admin is not required and must not be granted — follow the principle of least privilege.
-
-```
-Computer Management → Local Users and Groups → Groups → Hyper-V Administrators → Add Member
-```
-
-## Credential Setup
-
-Credentials are stored in the CFGMS secret store and looked up by key on every WinRM call. No credential values are cached between calls.
-
-Store the WinRM username and password using the following key format:
-
-```
-hyperv/winrm/<tenantID>/<hostname>
-```
-
-Example for tenant `acme` and host `hv01.acme.local`:
-
-```sh
-cfg secret set --key "hyperv/winrm/acme/hv01.acme.local/user" \
-               --value '{"Username":"svc-hyperv","Password":""}'
-
-# Or set user and password as separate keys (recommended):
-cfg secret set --key "hyperv/winrm/acme/hv01.acme.local/user" --value "svc-hyperv"
-cfg secret set --key "hyperv/winrm/acme/hv01.acme.local/pass" --value "your-password-here"
-```
-
-Then reference those keys in the module configuration:
-
-```yaml
-winrm_host: hv01.acme.local
-winrm_user_secret: hyperv/winrm/acme/hv01.acme.local/user
-winrm_pass_secret: hyperv/winrm/acme/hv01.acme.local/pass
-```
+The steward service account on the Hyper-V host (LocalSystem for the standard install) needs Hyper-V administration rights, i.e. membership in the **Hyper-V Administrators** local group or equivalent. Domain Admin is not required and must not be granted — follow the principle of least privilege. The module takes no credentials and reads no SecretStore keys for host access.
 
 ## Constructor
 
@@ -1016,13 +982,6 @@ Resources are created on the host with the **exact** name specified in the confi
 
 Names are validated against an allowlist (`^[a-zA-Z0-9_\-]{1,64}$` for VMs, `^[a-zA-Z0-9_\- ]{1,64}$` for switches) purely as an injection-safety guard; the validated name is then used verbatim. Because names are not namespaced, operators sharing a single Hyper-V host across tenants must choose non-colliding names themselves.
 
-## WinRM Connection Details
-
-- **Port:** 5986 (HTTPS/TLS)
-- **Auth:** NTLM only — Basic auth is structurally disabled
-- **TLS:** Certificate verification is always enabled (`InsecureSkipVerify = false`)
-- **Credential lifetime:** Fetched from SecretStore on every PS execution — no in-memory caching
-
 ## Module Registration
 
 Register the module in the CFGMS module registry:
@@ -1041,9 +1000,7 @@ Integration tests require a real Hyper-V host and are excluded from `make test-c
 Set the following environment variables before running:
 
 ```sh
-export CFGMS_HYPERV_HOST=hv01.example.com
-export CFGMS_HYPERV_USER=svc-hyperv
-export CFGMS_HYPERV_PASS=your-password-here
+export CFGMS_HYPERV_LIVE_PS=1
 ```
 
 Run the integration tests:
@@ -1056,7 +1013,7 @@ The tests exercise:
 - **`TestHypervIntegration_VMLifecycle`** — create → start → stop → remove
 - **`TestHypervIntegration_VSwitch`** — create external switch → attach adapter → detach → remove
 
-Tests skip automatically if `CFGMS_HYPERV_HOST` is not set; `TestHypervIntegration_VSwitch` also skips if no UP physical network adapter is found on the host.
+Tests skip automatically if `CFGMS_HYPERV_LIVE_PS` is not `1`; `TestHypervIntegration_VSwitch` also skips if no UP physical network adapter is found on the host.
 
 ### Failover-cluster HA tests (`integration && windows`)
 
@@ -1141,11 +1098,10 @@ The before-snapshot for delete operations is captured best-effort immediately be
 
 ## Security considerations
 
-- **PowerShell injection prevention**: The `Invoke-Command` parameter injection pattern is used — user values are passed as WinRM `Arguments`, never embedded in the script block text
-- **Credential handling**: Credentials are fetched from the SecretStore on every WinRM call and never cached or logged
+- **PowerShell injection prevention**: user values travel as typed parameters, bound as data by the in-host PowerShell host, never embedded in script text
+- **No credentials**: the module reaches the host through a local subprocess and holds no credentials
 - **Log sanitization**: All log values that could contain user input are passed through `logging.SanitizeLogValue()`
-- **TLS always on**: WinRM connects on port 5986 (HTTPS); `InsecureSkipVerify` is explicitly `false`
-- **Least privilege**: The WinRM account needs only the `Hyper-V Administrators` local group — Domain Admin must not be granted
+- **Least privilege**: The steward account needs only Hyper-V administration rights — Domain Admin must not be granted
 
 ## Related Hypervisor Modules
 

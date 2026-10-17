@@ -12,7 +12,7 @@ import (
 )
 
 // windowsHypervExecutor implements hypervExecutor using Windows Hyper-V PowerShell APIs.
-// VM management is wired through the WinRM transport on the hypervModule; these
+// VM management is wired through the PowerShell host transport on the hypervModule; these
 // methods are reserved for future native Windows operations (Stories 3–4).
 type windowsHypervExecutor struct{}
 

@@ -14,7 +14,7 @@ import (
 // non-Windows platform. The hyperv module itself is only operationally
 // useful on Windows hosts (Hyper-V is Windows-only), but the package must
 // build cross-platform so tests and dependents compile.
-var errPSHostUnsupported = errors.New("hyperv: PS host transport requires Windows")
+var errPSHostUnsupported = errors.New("hyperv: the Hyper-V module is unsupported on this platform: the PowerShell host requires Windows")
 
 // psHostTransport on non-Windows is an unreachable type kept only so the
 // hypervModule struct's transport field can hold one across builds. ExecutePS
@@ -22,9 +22,8 @@ var errPSHostUnsupported = errors.New("hyperv: PS host transport requires Window
 type psHostTransport struct{}
 
 // newPSHostTransport on non-Windows returns nil + the unsupported sentinel.
-// hypervModule.Configure on Linux/macOS therefore falls through to the
-// winrmClient path (still buildable, even if the lab deployment shape it
-// targets — local steward on Hyper-V host — only exists on Windows).
+// hypervModule.Configure on Linux/macOS therefore returns an unsupported-
+// platform error naming the Hyper-V module; there is no other transport.
 //
 // can reference newPSHostTransport unconditionally.
 //
@@ -35,7 +34,7 @@ func newPSHostTransport(_ context.Context) (*psHostTransport, error) {
 
 // ExecutePS on non-Windows is unreachable in practice — Configure on non-
 // Windows never assigns a psHostTransport to m.transport — but is defined
-// so the type satisfies winrmTransport for cross-platform compilation.
+// so the type satisfies psTransport for cross-platform compilation.
 func (t *psHostTransport) ExecutePS(_ context.Context, _ string, _ map[string]string) (string, error) {
 	return "", errPSHostUnsupported
 }

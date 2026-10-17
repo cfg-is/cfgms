@@ -1,5 +1,5 @@
 name: hyperv
-description: Remote Hyper-V management via WinRM — manages VMs and virtual switches on Windows Server hosts
+description: Hyper-V management through the in-host PowerShell host — manages VMs and virtual switches on Windows Server hosts
 version: 0.1.0
 
 publisher: cfgms
@@ -22,8 +22,7 @@ interfaces:
 security:
   requires_root: false
   capabilities: []
-  ports:
-    - 5986  # WinRM HTTPS (fallback transport only; default is in-host PS host)
+  ports: []
   # module_trust is part of the signing manifest contract (ADR-006). The
   # read-only cluster surface (#2199 S1) requires strict independent verification
   # by the steward — the steward must not rely on the controller's word for a

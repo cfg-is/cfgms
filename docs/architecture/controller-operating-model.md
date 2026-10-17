@@ -727,17 +727,20 @@ These fields must remain distinct. `HeartbeatTimeout` is intentionally short for
 Steward ingest is admission-controlled per tenant by
 `features/controller/transport.TenantQueue` — a per-tenant concurrency
 semaphore, `MaxConcurrentPerTenant` (32) in-flight slots per tenant, non-blocking
-`Acquire`/`Release`. Four entry points are gated on a cell: **connect**
-(`Register`), **heartbeat** (`ControlChannel`'s Heartbeat message), **DNA sync**
-(`SyncDNA`), and **bulk transfer** (`BulkTransfer`).
+`Acquire`/`Release`. Five entry points are gated on a cell: **connect**
+(`Register`), **heartbeat** (`ControlChannel`'s Heartbeat message), **event**
+(`ControlChannel`'s Event message, with its own queue and a per-stream
+in-flight limit), **DNA sync** (`SyncDNA`), and **bulk transfer**
+(`BulkTransfer`).
 
-Two `TenantQueue` instances are constructed in
+Three `TenantQueue` instances are constructed in
 `features/controller/server.New` (`features/controller/server/ingest_admission.go`),
 split by how much the controller trusts the bucket key each path uses:
 
 | Instance | Paths | Bucket key |
 |----------|-------|------------|
 | `connectHeartbeat` | connect, heartbeat | server-verified (see below) |
+| `events` | steward events | server-verified, same key as `connectHeartbeat` |
 | `dnaBulk` | DNA sync, bulk transfer | DNA: first chunk's `tenant_id` (wire data). Bulk: mTLS peer CN |
 
 - **Connect** (`pkg/controlplane/providers/grpc.transportServer.Register`):
@@ -745,10 +748,24 @@ split by how much the controller trusts the bucket key each path uses:
   tenant-binding check to the return. A saturated tenant gets
   `codes.ResourceExhausted`; other tenants are unaffected.
 - **Heartbeat** (`transportServer.ControlChannel`, the `Heartbeat` case):
-  `Acquire`/`Release` bracket only that one heartbeat's dispatch — never
-  deferred to stream teardown. A saturated tenant has that heartbeat silently
-  dropped (logged, stream stays open); the slot is free again before the next
-  message on the loop.
+  the tenant slot is taken before dispatch and held until every heartbeat
+  handler for that message has returned (a handler panic is recovered and still
+  releases it). A stream also has at most one heartbeat in flight. A saturated
+  tenant or stream has that heartbeat dropped, counted in
+  `ControlPlaneStats.HeartbeatsDropped` and logged (stream stays open, receive
+  loop never blocks).
+- **Event** (`transportServer.ControlChannel`, the `Event` case,
+  `grpc.WithEventAdmission`): takes a slot from the separate `events` queue,
+  keyed on the same server-side bucket as heartbeats, so slow event handlers
+  from one tenant cannot use up its connect or heartbeat slots. Each stream may
+  also have at most `maxInFlightEventsPerStream` (8, a quarter of the tenant
+  limit) events in flight at once; that bounds concurrent handlers, not the
+  event rate. Both slots are held until every handler for the event has
+  returned. Events over either limit are dropped, not queued, and counted in
+  `ControlPlaneStats.EventsDropped`. The per-stream limit applies even when no
+  gate is configured. Drop warnings are rate-limited per stream: the first is
+  logged, then at most one line per 30 seconds with the number of drops since
+  the last line.
 - **DNA sync / bulk transfer** (`features/controller/transport.DNAHandler` /
   `BulkHandler`): unchanged by #3759 — `Acquire` on the first chunk, `Release`
   deferred for the RPC's duration. This is the pre-existing mechanism the connect

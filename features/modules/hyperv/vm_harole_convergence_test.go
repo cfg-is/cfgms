@@ -27,7 +27,7 @@ import (
 // and the VM appears in the cluster's VirtualMachine group owner map.
 func TestGetVM_ClusterRoleProbe_MemberReported(t *testing.T) {
 	const vmName = "ha-probe-vm"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "running", 2, 4096), // psGetVM
 		`{"owners":{"ha-probe-vm":"NODE1"}}`,   // membership probe
 	}}
@@ -44,7 +44,7 @@ func TestGetVM_ClusterRoleProbe_MemberReported(t *testing.T) {
 // map reports a nil HARole.
 func TestGetVM_ClusterRoleProbe_NonMemberNil(t *testing.T) {
 	const vmName = "plain-vm"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "running", 2, 4096),
 		`{"owners":{}}`,
 	}}
@@ -62,7 +62,7 @@ func TestGetVM_ClusterRoleProbe_NonMemberNil(t *testing.T) {
 // must not issue cluster queries.
 func TestGetVM_ClusterRoleProbe_SkippedWithoutScope(t *testing.T) {
 	const vmName = "standalone-vm"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "running", 2, 4096),
 	}}
 	m := vmModuleWithTransport(transport, "t-probe")
@@ -80,7 +80,7 @@ func TestGetVM_ClusterRoleProbe_SkippedWithoutScope(t *testing.T) {
 // a missed membership converges on a later cycle rather than breaking Get.
 func TestGetVM_ClusterRoleProbe_ErrorDegrades(t *testing.T) {
 	const vmName = "degraded-vm"
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{hostVMJSON(vmName, "running", 2, 4096), ``},
 		perCallErrors:  []error{nil, errors.New("cluster service down")},
 	}
@@ -105,7 +105,7 @@ func TestGetVM_ClusterRoleProbe_ErrorDegrades(t *testing.T) {
 // absent path too, so setVM can see "this role exists somewhere".
 func TestGetVM_AbsentButClusteredRole_ReportsHARole(t *testing.T) {
 	const vmName = "ghost-ha-vm"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`,                    // psGetVM: locally absent
 		`{"owners":{"ghost-ha-vm":"NODE2"}}`, // membership probe: registered cluster-wide
 	}}
@@ -124,11 +124,11 @@ func TestGetVM_AbsentButClusteredRole_ReportsHARole(t *testing.T) {
 // VM absent on THIS node but registered and owned by ANOTHER node is flagged
 // managed-elsewhere (naming the owner), so the executor treats it compliant-by-
 // delegation without a field comparison. No owner BODY is read (that would need
-// cross-node WinRM, which isn't available) — only the bulk owner map, which works
+// a cross-node call, which isn't available) — only the bulk owner map, which works
 // cluster-wide, is consulted.
 func TestGetVM_HostedElsewhere_ReportsManagedElsewhere(t *testing.T) {
 	const vmName = "ha-hosted-elsewhere"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`, // local Cfgms-GetVM: absent here
 		`{"owners":{"ha-hosted-elsewhere":"NODE2"}}`, // bulk owner read (probe + owner lookup share it via the cache)
 	}}
@@ -159,7 +159,7 @@ func TestGetVM_HostedElsewhere_ReportsManagedElsewhere(t *testing.T) {
 // from a VM we are supposed to host.
 func TestGetVM_HostedElsewhere_OwnerIsSelf_NotManagedElsewhere(t *testing.T) {
 	const vmName = "ha-owned-here"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`,                      // local: absent
 		`{"owners":{"ha-owned-here":"NODE1"}}`, // owner map: owned by THIS node
 	}}
@@ -180,7 +180,7 @@ func TestGetVM_HostedElsewhere_OwnerIsSelf_NotManagedElsewhere(t *testing.T) {
 // (owner-gated) create path runs next cycle. Degrade-safe: never a false compliant.
 func TestGetVM_HostedElsewhere_OwnerUnreadable_NotManagedElsewhere(t *testing.T) {
 	const vmName = "ha-owner-unreadable"
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{`{"found":false}`, ``},
 		perCallErrors:  []error{nil, errors.New("cluster service down")},
 	}
@@ -200,7 +200,7 @@ func TestGetVM_HostedElsewhere_OwnerUnreadable_NotManagedElsewhere(t *testing.T)
 // back-to-back getVM calls for different HA VMs issue ONE cluster read, not one
 // per VM (the per-VM probe was the N-reads-per-pass waste).
 func TestCachedResourceOwners_BatchesReadsWithinWindow(t *testing.T) {
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		// Local reads for two VMs both absent; a single bulk owner read serves both.
 		perCallOutputs: []string{
 			`{"found":false}`, // getVM("vm-a") local
@@ -237,7 +237,7 @@ func TestCachedResourceOwners_BatchesReadsWithinWindow(t *testing.T) {
 // exact pre-#2420 single-call behavior.
 func TestGetVM_AbsentWithoutScope_NoProbe(t *testing.T) {
 	const vmName = "ghost-plain-vm"
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`,
 	}}
 	m := vmModuleWithTransport(transport, "t-2420")
@@ -262,8 +262,8 @@ func TestSetVM_HARoleAlreadyClusterWide_SkipsCreate(t *testing.T) {
 
 	// Two transport calls total: getVM + membership probe. Anything beyond that
 	// (New-VM, provisioning, ownership reads) violates the gate.
-	newTransport := func() *testWinRMTransport {
-		return &testWinRMTransport{perCallOutputs: []string{
+	newTransport := func() *testPSTransport {
+		return &testPSTransport{perCallOutputs: []string{
 			`{"found":false}`,                        // getVM: locally absent
 			`{"owners":{"ha-elsewhere-vm":"NODE2"}}`, // probe: role hosted elsewhere
 		}}
@@ -340,7 +340,7 @@ func TestSetVM_HARoleAlreadyClusterWide_SkipsCreate(t *testing.T) {
 func TestSetVM_StandaloneVM_UnaffectedByGate(t *testing.T) {
 	const vmName = "plain-create-vm"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`, // getVM: locally absent
 		`{"owners":{}}`,   // probe: not a clustered role anywhere
 		``,                // New-VM: create succeeds
@@ -384,8 +384,8 @@ func TestSetVM_ClusterWideAbsentRole_NonOwnerSurfacesAndWaits(t *testing.T) {
 	// everywhere), then the ownership helper's CNO-owner read + role-owner map
 	// + the audit cnoOwner re-read. Anything beyond that (New-VM, provisioning)
 	// violates the gate.
-	newTransport := func() *testWinRMTransport {
-		return &testWinRMTransport{perCallOutputs: []string{
+	newTransport := func() *testPSTransport {
+		return &testPSTransport{perCallOutputs: []string{
 			`{"found":false}`,   // getVM: locally absent
 			`{"owners":{}}`,     // getVM probe: role absent cluster-wide
 			`{"owner":"NODE2"}`, // ownership helper: another node owns the CNO
@@ -466,7 +466,7 @@ func TestSetVM_ClusterWideAbsentRole_OwnerCreates(t *testing.T) {
 	const vmName = "ha-first-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: locally absent
 		`{"owners":{}}`,     // getVM probe: role absent cluster-wide
 		`{"owner":"NODE1"}`, // ownership helper (#2421 gate): this node owns the CNO
@@ -508,7 +508,7 @@ func TestSetVM_ClusterOwnershipHelperError_PropagatesAsSetError(t *testing.T) {
 
 	// readCNOOwner reports a valid owner, then the role-owner read fails —
 	// clusterOwnershipHelper returns that error.
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			`{"found":false}`,   // getVM: locally absent
 			`{"owners":{}}`,     // getVM probe: role absent cluster-wide
@@ -544,7 +544,7 @@ func TestSetVM_ClusterOwnershipHelperError_PropagatesAsSetError(t *testing.T) {
 func TestSetVM_ClusterWideAbsentRole_ScopeCapErrorPropagates(t *testing.T) {
 	const vmName = "ha-rogue-vm"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"found":false}`, // getVM: locally absent
 		`{"owners":{}}`,   // getVM probe (module scope): role absent cluster-wide
 	}}
@@ -574,7 +574,7 @@ func TestSetVM_HARole_PromoteExistingVM(t *testing.T) {
 	const vmName = "ha-promote-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096),          // getVM: VM exists
 		`{"owners":{}}`,                                 // getVM probe: not a member
 		`{"owners":{}}`,                                 // #2422 lifecycle owner gate: role not yet registered → proceed (first-time promote)
@@ -608,7 +608,7 @@ func TestSetVM_HARole_DemoteRemovesRoleOnly(t *testing.T) {
 	const vmName = "ha-demote-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096),         // getVM: VM exists
 		`{"owners":{"ha-demote-vm":"NODE1"}}`,          // getVM probe: member
 		`{"owner":"NODE1"}`,                            // ownership helper: CNO owner
@@ -641,7 +641,7 @@ func TestSetVM_HARole_PromoteIdempotent(t *testing.T) {
 	const vmName = "ha-steady-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
 		`{"owners":{"ha-steady-vm":"NODE1"}}`,  // getVM probe: already a member
 		`{"owners":{"ha-steady-vm":"NODE1"}}`,  // #2422 lifecycle owner gate: this node owns the role → proceed
@@ -673,7 +673,7 @@ func TestSetVM_HARole_PromoteIdempotent(t *testing.T) {
 func TestSetVM_HARole_DemoteIdempotent(t *testing.T) {
 	const vmName = "plain-steady-vm"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096),
 		`{"owners":{}}`,
 	}}
@@ -705,7 +705,7 @@ func TestSetVM_HARole_HostPromotesEvenIfNonCNOOwner(t *testing.T) {
 	const vmName = "ha-nonowner-vm"
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists locally (this node hosts it)
 		`{"owners":{}}`,                        // getVM probe: not a member
 		`{"owners":{}}`,                        // #2422 lifecycle owner gate: role not registered → proceed (first-time promote)
@@ -752,7 +752,7 @@ func TestFinalizeProvision_HARole_RegistersBeforeFinalizing(t *testing.T) {
 		UpdatedAt:     started,
 	}))
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "running", 2, 4096), // vmIsRunning → getVM
 		`{"owners":{}}`,                        // getVM probe (cluster scope set)
 		``,                                     // Dismount-VHD (detach seed)
@@ -808,7 +808,7 @@ func TestFinalizeProvision_HARole_RegistrationFailureRetries(t *testing.T) {
 		UpdatedAt:     started,
 	}))
 
-	transport := &testWinRMTransport{
+	transport := &testPSTransport{
 		perCallOutputs: []string{
 			hostVMJSON(vmName, "running", 2, 4096), // vmIsRunning → getVM
 			`{"owners":{}}`,                        // getVM probe
@@ -854,7 +854,7 @@ func TestFinalizeProvision_HARole_RegistrationFailureRetries(t *testing.T) {
 func TestSetCluster_RoleNamesNoLongerAddRoles(t *testing.T) {
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"owner":"NODE1"}`, // ownership helper: CNO owner
 		`{"owners":{}}`,     // ownership helper: role owners (role absent)
 		`{"owner":"NODE1"}`, // audit cnoOwner re-read
@@ -878,7 +878,7 @@ func TestSetCluster_RoleNamesNoLongerAddRoles(t *testing.T) {
 func TestSetCluster_AbsentMembershipSurfaceRemoved(t *testing.T) {
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"owner":"NODE1"}`,
 		`{"owners":{"some-vm":"NODE1"}}`,
 		`{"owner":"NODE1"}`,
@@ -904,7 +904,7 @@ func TestSetCluster_AbsentMembershipSurfaceRemoved(t *testing.T) {
 func TestSetCluster_PropertiesStillReconciledForExistingRole(t *testing.T) {
 	const cluster = "lab-hv"
 
-	transport := &testWinRMTransport{perCallOutputs: []string{
+	transport := &testPSTransport{perCallOutputs: []string{
 		`{"owner":"NODE1"}`,              // ownership helper: CNO owner
 		`{"owners":{"some-vm":"NODE1"}}`, // ownership helper: role exists
 		`{"owner":"NODE1"}`,              // audit cnoOwner re-read

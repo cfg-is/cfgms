@@ -686,6 +686,17 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 			"steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
+	// A successful claim mints an mTLS client credential; record it durably.
+	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored.
+	s.emitRegistrationAudit(ctx, tokenStr, entry.TenantID, entry.StewardID,
+		business.AuditEventAuthentication, "registration_claimed",
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"steward_id":  entry.StewardID,
+			"tenant_id":   entry.TenantID,
+			"cert_serial": clientCert.SerialNumber,
+		})
+
 	s.logger.Info("Generated client certificate for claimed registration",
 		"pending_id", logging.SanitizeLogValue(entry.PendingID),
 		"steward_id", logging.SanitizeLogValue(entry.StewardID),
