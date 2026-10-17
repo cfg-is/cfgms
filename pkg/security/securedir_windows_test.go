@@ -231,3 +231,66 @@ func TestDACLIsAdminOnly(t *testing.T) {
 		})
 	}
 }
+
+// setOwnerWithRestorePrivilege makes the principal sidString the owner of path.
+// Assigning an owner other than oneself needs SeRestorePrivilege, which an
+// elevated administrator holds but has disabled; it is enabled only for this
+// call.
+func setOwnerWithRestorePrivilege(t *testing.T, path, sidString string) {
+	t.Helper()
+	var luid windows.LUID
+	require.NoError(t, windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr("SeRestorePrivilege"), &luid))
+	var token windows.Token
+	require.NoError(t, windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token))
+	defer func() { _ = token.Close() }()
+	tp := windows.Tokenprivileges{PrivilegeCount: 1}
+	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
+	require.NoError(t, windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil))
+	defer func() {
+		tp.Privileges[0].Attributes = 0
+		_ = windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil)
+	}()
+	sid, err := windows.StringToSid(sidString)
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil))
+	require.Equal(t, sidString, ownerSID(t, path))
+}
+
+func TestAdoptAdminOnlyDir_AdoptsCallerOwnedTree(t *testing.T) {
+	// Everything under t.TempDir() is owned by the (elevated) test user, as an
+	// installer's files are; the SYSTEM steward's check would refuse them.
+	dir := t.TempDir()
+	child := filepath.Join(dir, "certs")
+	require.NoError(t, os.Mkdir(child, 0755))
+	file := filepath.Join(child, "ca.crt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0600))
+
+	require.NoError(t, AdoptAdminOnlyDir(dir))
+
+	for _, p := range []string{dir, child, file} {
+		assert.Equal(t, sidAdministrators, ownerSID(t, p), "%s must be handed to Administrators", p)
+	}
+	sids, protected := daclSIDs(t, dir)
+	assert.True(t, protected)
+	assert.ElementsMatch(t, []string{sidSystem, sidAdministrators}, sids)
+}
+
+func TestAdoptAdminOnlyDir_RefusesEntryOwnedByAnotherPrincipal(t *testing.T) {
+	dir := t.TempDir()
+	planted := filepath.Join(dir, "planted.crt")
+	require.NoError(t, os.WriteFile(planted, []byte("x"), 0600))
+	setOwnerWithRestorePrivilege(t, planted, sidUsers)
+
+	assert.ErrorIs(t, AdoptAdminOnlyDir(dir), ErrUntrustedDirOwner)
+	assert.Equal(t, sidUsers, ownerSID(t, planted), "an entry another principal owns must never be adopted")
+}
+
+func TestAdoptAdminOnlyDir_RefusesRootOwnedByAnotherPrincipal(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cfgms")
+	require.NoError(t, os.Mkdir(dir, 0755))
+	setOwnerWithRestorePrivilege(t, dir, sidUsers)
+
+	assert.ErrorIs(t, AdoptAdminOnlyDir(dir), ErrUntrustedDirOwner)
+	assert.Equal(t, sidUsers, ownerSID(t, dir))
+}

@@ -57,10 +57,32 @@ const shareAll = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FI
 // Administrators is refused (ErrUntrustedDirOwner / ErrUntrustedDirEntry).
 // Uses in-process Win32 security APIs only.
 func EnsureAdminOnlyDir(path string) error {
+	return ensureAdminOnlyDir(path, false)
+}
+
+// AdoptAdminOnlyDir is EnsureAdminOnlyDir for the elevated installer. Before the
+// checks, every existing entry (path itself and everything below it, never
+// following reparse points) that is owned by the calling elevated user's own
+// account is reassigned to BUILTIN\Administrators. Windows makes an elevated
+// administrator's own account the owner of what it creates ("Object creator"),
+// so without this the SYSTEM steward's EnsureAdminOnlyDir would refuse the
+// files the install just wrote. Entries owned by any other principal are left
+// untouched and refused as EnsureAdminOnlyDir refuses them; a non-elevated
+// caller adopts nothing.
+func AdoptAdminOnlyDir(path string) error {
+	return ensureAdminOnlyDir(path, true)
+}
+
+func ensureAdminOnlyDir(path string, adopt bool) error {
 	path = filepath.Clean(path)
 	created, err := createAdminOnlyDir(path)
 	if err != nil {
 		return err
+	}
+	if adopt && !created {
+		if err := adoptCallerOwned(path); err != nil {
+			return err
+		}
 	}
 
 	access := uint32(windows.READ_CONTROL | windows.WRITE_DAC)
@@ -232,6 +254,73 @@ func rootOwnerIsUntrusted(path string) bool {
 	}
 	trusted, err := ownerIsTrusted(sd)
 	return err == nil && !trusted
+}
+
+// adoptCallerOwned walks path and everything below it without following
+// reparse points and makes BUILTIN\Administrators the owner of each entry the
+// elevated caller's own account owns. A reparse point is refused.
+func adoptCallerOwned(path string) error {
+	isDir, err := adoptEntry(path)
+	if err != nil || !isDir {
+		return err
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return fmt.Errorf("list directory %s: %w", path, err)
+	}
+	for _, e := range entries {
+		if err := adoptCallerOwned(filepath.Join(path, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// adoptEntry reassigns one entry to BUILTIN\Administrators if the elevated
+// caller's own account owns it, reading and writing the owner on one handle
+// that does not follow reparse points. It reports whether the entry is a plain
+// directory to descend into.
+func adoptEntry(path string) (isDir bool, err error) {
+	h, err := openHandleNoFollow(path, windows.READ_CONTROL|windows.WRITE_OWNER)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		// Not ours to reassign; the checks that follow decide whether it is
+		// acceptable as it is.
+		h, err = openHandleNoFollow(path, windows.READ_CONTROL)
+	}
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+
+	attrs, err := attributesOf(h)
+	if err != nil {
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false, fmt.Errorf("%s is a link or reparse point: %w", path, ErrUntrustedDirEntry)
+	}
+	isDir = attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("read security descriptor of %s: %w", path, err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, fmt.Errorf("read owner of %s: %w", path, err)
+	}
+	if owner == nil || owner.IsWellKnown(windows.WinLocalSystemSid) ||
+		owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || !ownerIsElevatedCaller(owner) {
+		return isDir, nil
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false, fmt.Errorf("build Administrators SID: %w", err)
+	}
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+		return false, fmt.Errorf("assign %s to Administrators: %w", path, err)
+	}
+	return isDir, nil
 }
 
 // checkTree verifies every entry below root without following reparse points.

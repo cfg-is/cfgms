@@ -11,3 +11,8 @@ package security
 func EnsureAdminOnlyDir(path string) error {
 	return nil
 }
+
+// AdoptAdminOnlyDir is a no-op outside Windows, like EnsureAdminOnlyDir.
+func AdoptAdminOnlyDir(path string) error {
+	return nil
+}

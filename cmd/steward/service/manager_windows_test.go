@@ -18,6 +18,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 func TestWindowsManagerInstallPath(t *testing.T) {
@@ -314,4 +316,84 @@ func TestPrepareDataDir_ProducesProtectedAdminOnlyDACL(t *testing.T) {
 		sids = append(sids, (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String())
 	}
 	assert.ElementsMatch(t, []string{"S-1-5-18", "S-1-5-32-544"}, sids)
+}
+
+// treeOwners returns the owner SID of root and of every entry below it.
+func treeOwners(t *testing.T, root string) map[string]string {
+	t.Helper()
+	owners := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			return err
+		}
+		owner, _, err := sd.Owner()
+		if err != nil {
+			return err
+		}
+		owners[p] = owner.String()
+		return nil
+	}))
+	return owners
+}
+
+// TestStageDataDir_InstalledTreePassesStewardStartCheck runs the install's
+// data-directory staging as the current (elevated) user on a fresh tree, then
+// the steward's start-up check. The steward runs as SYSTEM, which accepts only
+// SYSTEM or Administrators as owner, so every entry must have one of those
+// owners, not the installing user's own account.
+func TestStageDataDir_InstalledTreePassesStewardStartCheck(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	certPEM, _ := generateTestCACert(t)
+
+	require.NoError(t, stageDataDir(certPEM))
+
+	dir := filepath.Dir(platformCACertPath())
+	owners := treeOwners(t, dir)
+	require.Contains(t, owners, platformCACertPath(), "the CA cert must be written")
+	for p, sid := range owners {
+		assert.Contains(t, []string{"S-1-5-18", "S-1-5-32-544"}, sid, "%s must be owned by SYSTEM or Administrators", p)
+	}
+	require.NoError(t, security.EnsureAdminOnlyDir(dir), "steward start-up check must accept the installed tree")
+}
+
+// TestStageDataDir_RefusesTreePrecreatedByNonAdmin plants the data directory
+// as a standard principal (BUILTIN\Users) before install. Staging must refuse
+// it and write no CA cert into it.
+func TestStageDataDir_RefusesTreePrecreatedByNonAdmin(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	dir := filepath.Dir(platformCACertPath())
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	setOwnerWithRestorePrivilege(t, dir, "S-1-5-32-545")
+	certPEM, _ := generateTestCACert(t)
+
+	assert.ErrorIs(t, stageDataDir(certPEM), security.ErrUntrustedDirOwner)
+	_, err := os.Stat(platformCACertPath())
+	assert.True(t, os.IsNotExist(err), "no CA cert may be written into a non-admin tree")
+	assert.ErrorIs(t, security.EnsureAdminOnlyDir(dir), security.ErrUntrustedDirOwner)
+}
+
+// setOwnerWithRestorePrivilege makes the principal sidString the owner of path,
+// enabling the elevated test process's SeRestorePrivilege only for this call.
+func setOwnerWithRestorePrivilege(t *testing.T, path, sidString string) {
+	t.Helper()
+	var luid windows.LUID
+	require.NoError(t, windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr("SeRestorePrivilege"), &luid))
+	var token windows.Token
+	require.NoError(t, windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token))
+	defer func() { _ = token.Close() }()
+	tp := windows.Tokenprivileges{PrivilegeCount: 1}
+	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
+	require.NoError(t, windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil))
+	defer func() {
+		tp.Privileges[0].Attributes = 0
+		_ = windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil)
+	}()
+	sid, err := windows.StringToSid(sidString)
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil))
 }
