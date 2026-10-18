@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,9 +42,10 @@ func TestHelperProcess(t *testing.T) {
 	}
 	dbPath := os.Getenv("SQLITE_HELPER_DB")
 	prefix := os.Getenv("SQLITE_HELPER_PREFIX")
+	openOnly := os.Getenv("SQLITE_HELPER_OPEN_ONLY") == "1"
 	countStr := os.Getenv("SQLITE_HELPER_COUNT")
 	count, _ := strconv.Atoi(countStr)
-	if dbPath == "" || prefix == "" || count <= 0 {
+	if dbPath == "" || prefix == "" || (count <= 0 && !openOnly) {
 		fmt.Fprintln(os.Stderr, "helper: missing required env (SQLITE_HELPER_DB / _PREFIX / _COUNT)")
 		os.Exit(2)
 	}
@@ -52,6 +54,10 @@ func TestHelperProcess(t *testing.T) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "helper %s: openAndInit: %v\n", prefix, err)
 		os.Exit(2)
+	}
+	if openOnly {
+		_ = db.Close()
+		os.Exit(0)
 	}
 	defer func() { _ = db.Close() }()
 
@@ -167,5 +173,59 @@ func TestSQLite_TwoProcesses_ConcurrentWrites_NoCorruption(t *testing.T) {
 		rec, err := store.GetSteward(context.Background(), id)
 		require.NoError(t, err, "GetSteward(%q)", id)
 		assert.Equal(t, business.StewardStatusRegistered, rec.Status)
+	}
+}
+
+// TestSQLite_TwoProcesses_OpenMigratedDB_NoBusy opens an already-initialised
+// database from two processes at once while a third connection holds the write
+// lock. Schema initialisation must not write on a migrated database, so both
+// opens succeed promptly instead of waiting on (and failing against) that lock.
+func TestSQLite_TwoProcesses_OpenMigratedDB_NoBusy(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "open_migrated.db")
+	db, err := openAndInit(dbPath)
+	require.NoError(t, err, "seed schema")
+	defer func() { _ = db.Close() }()
+
+	exe, err := os.Executable()
+	require.NoError(t, err, "os.Executable")
+
+	ctx := context.Background()
+	holder, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { _ = holder.Close() }()
+	_, err = holder.ExecContext(ctx, `BEGIN IMMEDIATE`)
+	require.NoError(t, err, "hold write lock")
+	defer func() { _, _ = holder.ExecContext(ctx, `ROLLBACK`) }()
+
+	const processes = 2
+	done := make(chan struct{})
+	errs := make([]error, processes)
+	outs := make([][]byte, processes)
+	var wg sync.WaitGroup
+	for j := 0; j < processes; j++ {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			cmd := exec.Command(exe, "-test.run=TestHelperProcess") //nolint:gosec // test infra
+			cmd.Env = append(os.Environ(),
+				"GO_WANT_HELPER_PROCESS=1",
+				"SQLITE_HELPER_DB="+dbPath,
+				"SQLITE_HELPER_PREFIX="+fmt.Sprintf("open-%d", j),
+				"SQLITE_HELPER_OPEN_ONLY=1",
+			)
+			outs[j], errs[j] = cmd.CombinedOutput()
+		}(j)
+	}
+	go func() { wg.Wait(); close(done) }()
+
+	// The opens never need the write lock, so they finish while it is still held.
+	// A write during init would block here for the busy timeout and then fail.
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("opening a migrated database blocked on the held write lock: schema init is writing")
+	}
+	for j := range errs {
+		require.NoError(t, errs[j], "process %d: %s", j, outs[j])
 	}
 }
