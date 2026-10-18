@@ -1085,9 +1085,11 @@ the **controller-side half** of the command fencing scheme defined in ADR-029:
   `Term` and an explicit `payload_version`. It is negotiated, never assumed:
   - *Advertise.* A steward lists the payload versions it can verify in
     `Heartbeat.signing_payload_versions`. The controller records the highest
-    supported version per steward (`types.SigningCapabilities`, in memory, rebuilt
-    from heartbeats). A steward that has not advertised v2 — including one whose
-    first heartbeat has not yet reached this node — receives v1.
+    supported version per steward (`types.SigningCapabilities`) in the shared steward
+    store (`signing_payload_version`), so every controller node signs the version
+    the steward advertised to any node. A steward that has not advertised v2
+    receives v1. A node that cannot read the capability (store failure) fails the
+    send with an error the caller sees; it never guesses a version.
   - *One signing path.* The publisher, the script dispatcher and the relay handler
     all sign through `types.SignCommand`, which picks the version from that
     registry. The version used is carried in `Command.signing_payload_version`
@@ -1102,10 +1104,11 @@ the **controller-side half** of the command fencing scheme defined in ADR-029:
     stamped (`Term > 0`) v1 command as unauthenticated. The term fence therefore
     advances only for terms covered by a verified signature, or for v1 commands
     received before the switch.
-  - *Cluster caveat.* The capability registry is per controller node. A command
-    signed by a node that has not seen the target steward's heartbeat is signed v1
-    and is refused by a steward that has already switched; the refusal is reported
-    as `unauthenticated` and is not retried.
+  - *Atomic switch.* The steward checks and sets `term_signed` in one critical
+    section at admission, after verification, so a stamped v1 command racing the
+    first v2 command is refused if the switch was set first.
+  - *Relay.* The relay handler takes the same registry at construction, so relay
+    responses use the negotiated version.
   - The v1 payload remains supported until no supported steward release lacks v2.
 - **Fence coverage is per-steward-determinable.** An operator can determine which
   stewards are capable of enforcing the fence without any new mechanism. The

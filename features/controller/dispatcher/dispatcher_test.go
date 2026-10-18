@@ -2283,8 +2283,8 @@ func (s bytesRecordingSigner) Sign(b []byte) (*configsignature.ConfigSignature, 
 // signed over it, and one that did not keeps the current payload.
 func TestDispatcher_SigningPayloadVersionFollowsStewardCapability(t *testing.T) {
 	caps := controlplaneTypes.NewSigningCapabilities()
-	caps.Record("steward-new", controlplaneTypes.SupportedSigningPayloadVersions())
-	caps.Record("steward-old", nil)
+	require.NoError(t, caps.Record("steward-new", controlplaneTypes.SupportedSigningPayloadVersions()))
+	require.NoError(t, caps.Record("steward-old", nil))
 
 	var signed [][]byte
 	controlPlane := &testControlPlane{}

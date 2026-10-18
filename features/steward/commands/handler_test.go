@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2042,4 +2043,86 @@ func TestHandleCommand_UnknownOrAbsentVersionNeverSelectsV2(t *testing.T) {
 	unknown.Command.SigningPayloadVersion = 77
 	err = h.HandleCommand(context.Background(), unknown)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+}
+
+// pausingVerifier wraps a real verifier and parks every Verify call for a command
+// whose signature it was told to hold, after the real verification succeeded. It
+// forces the interleaving where a v1 command passes verification before a v2
+// command sets the one-way switch.
+type pausingVerifier struct {
+	signature.Verifier
+	holdSig string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *pausingVerifier) Verify(data []byte, sig *signature.ConfigSignature) error {
+	if err := p.Verifier.Verify(data, sig); err != nil {
+		return err
+	}
+	if p.holdSig != "" && sig != nil && sig.Signature == p.holdSig {
+		close(p.entered)
+		<-p.release
+	}
+	return nil
+}
+
+// TestHandleCommand_V1StampedCommandRacingFirstV2IsRefused proves the term-signed
+// check and set are one step: a stamped v1 command that verified before the first v2
+// command set the switch is refused at admission, not accepted on a stale check.
+func TestHandleCommand_V1StampedCommandRacingFirstV2IsRefused(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	v1 := signTermCommand(t, signer, termTestCommand("v1-racing", 3), cpTypes.SigningPayloadV1)
+	pv := &pausingVerifier{
+		Verifier: verifier,
+		holdSig:  v1.Signature.Signature,
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	h := newTermSigningHandler(t, pv, t.TempDir())
+
+	v1Result := make(chan error, 1)
+	go func() { v1Result <- h.HandleCommand(context.Background(), v1) }()
+	<-pv.entered // the v1 command has verified and is parked before admission
+
+	require.NoError(t, h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v2-first", 4), cpTypes.SigningPayloadV2)))
+
+	close(pv.release)
+	require.ErrorIs(t, <-v1Result, ErrUnauthenticatedCommand,
+		"a v1 stamped command admitted after the switch was set must be refused")
+	h.Wait()
+}
+
+// TestHandleCommand_ConcurrentV1AndV2NeverAcceptsV1AfterSwitch hammers the switch
+// with concurrent stamped v1 and v2 commands. Once a v2 command has been accepted
+// and returned, no later v1 stamped command may be accepted.
+func TestHandleCommand_ConcurrentV1AndV2NeverAcceptsV1AfterSwitch(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	h := newTermSigningHandler(t, verifier, t.TempDir())
+
+	var v2Done atomic.Bool
+	var wg sync.WaitGroup
+	var violations atomic.Int32
+	for i := 0; i < 40; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			sc := signTermCommand(t, signer, termTestCommand(fmt.Sprintf("v2-%d", i), 10), cpTypes.SigningPayloadV2)
+			if h.HandleCommand(context.Background(), sc) == nil {
+				v2Done.Store(true)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			sc := signTermCommand(t, signer, termTestCommand(fmt.Sprintf("v1-%d", i), 10), cpTypes.SigningPayloadV1)
+			switchSetBefore := v2Done.Load()
+			if err := h.HandleCommand(context.Background(), sc); err == nil && switchSetBefore {
+				violations.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	h.Wait()
+	assert.Zero(t, violations.Load(), "a v1 stamped command was accepted after a v2 command had been accepted")
 }

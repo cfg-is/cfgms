@@ -424,7 +424,8 @@ type SignedCommand struct {
 //
 //   - A steward advertises the versions it can verify on its Heartbeat
 //     (SupportedSigningPayloadVersions); the controller records them per steward
-//     (SigningCapabilities) and signs with v2 only for stewards that listed it.
+//     (SigningCapabilities, shared cluster-wide through the steward store) and signs
+//     with v2 only for stewards that listed it.
 //     Every other steward keeps receiving v1.
 //   - Command.SigningPayloadVersion carries the version the signer used; the
 //     steward verifies against the version the command names. Absent means v1 and

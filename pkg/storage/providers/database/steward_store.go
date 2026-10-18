@@ -6,7 +6,9 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -328,6 +330,67 @@ func (s *DatabaseStewardStore) TransitionStewardStatus(ctx context.Context, stew
 		return false, fmt.Errorf("database: failed to commit steward status transition: %w", err)
 	}
 	return n > 0, nil
+}
+
+// SetStewardSigningPayloadVersion records the steward's advertised signing-payload version.
+func (s *DatabaseStewardStore) SetStewardSigningPayloadVersion(ctx context.Context, stewardID string, version uint32) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin set signing payload version tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records SET signing_payload_version = $2 WHERE id = $1`,
+		stewardID, int64(version))
+	if err != nil {
+		return fmt.Errorf("database: failed to set signing payload version for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return tx.Commit()
+}
+
+// GetStewardSigningPayloadVersion returns the steward's advertised signing-payload version.
+func (s *DatabaseStewardStore) GetStewardSigningPayloadVersion(ctx context.Context, stewardID string) (uint32, error) {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return 0, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("database: failed to begin get signing payload version tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return 0, fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	var v int64
+	err = tx.QueryRowContext(ctx, `SELECT signing_payload_version FROM steward_records WHERE id = $1`, stewardID).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, business.ErrStewardNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("database: failed to read signing payload version for steward %s: %w", stewardID, err)
+	}
+	if v < 0 || v > math.MaxUint32 {
+		return 0, fmt.Errorf("database: signing payload version %d for steward %s is out of range", v, stewardID)
+	}
+	return uint32(v), nil
 }
 
 // SetStewardHidden sets the operator-controlled visibility flag for the given steward.

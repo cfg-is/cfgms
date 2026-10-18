@@ -66,6 +66,8 @@ type Handler struct {
 	// termSigned is the one-way switch (Issue #5174): once set, a stamped command
 	// signed over the v1 payload (whose term is unsigned) is refused as
 	// unauthenticated. termState persists it; nil keeps it in memory only.
+	// termMu makes the check and the set of the switch one step (admitTermSigning).
+	termMu     sync.Mutex
 	termSigned atomic.Bool
 	termState  TermSigningState
 
@@ -436,20 +438,33 @@ func (h *Handler) unregisterRelay(executionID string) {
 	h.relays.Delete(executionID)
 }
 
-// markTermSigned sets the one-way term-signed switch and persists it. A
-// persistence failure is logged; the in-memory switch stays authoritative for the
-// life of the process.
-func (h *Handler) markTermSigned() {
-	if h.termSigned.Swap(true) {
-		return
+// admitTermSigning is the one atomic check-and-set of the one-way term-signed
+// switch (Issue #5174). A verified v2 command sets it (and persists it); a stamped
+// v1 command is refused once it is set. Check and set share one critical section, so
+// a v1 command and the first v2 command racing each other are ordered: no v1
+// stamped command is admitted after the switch is observed set. A persistence
+// failure is logged; the in-memory switch stays authoritative for the process.
+func (h *Handler) admitTermSigning(version uint32, term uint64) error {
+	h.termMu.Lock()
+	defer h.termMu.Unlock()
+
+	if version == cpTypes.SigningPayloadV2 {
+		if h.termSigned.Load() {
+			return nil
+		}
+		h.termSigned.Store(true)
+		if h.termState != nil {
+			if err := h.termState.MarkTermSigned(); err != nil {
+				h.logger.Warn("Failed to persist term-signed switch; in-memory state is still authoritative",
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+		return nil
 	}
-	if h.termState == nil {
-		return
+	if term > 0 && h.termSigned.Load() {
+		return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
 	}
-	if err := h.termState.MarkTermSigned(); err != nil {
-		h.logger.Warn("Failed to persist term-signed switch; in-memory state is still authoritative",
-			"error", logging.SanitizeLogValue(err.Error()))
-	}
+	return nil
 }
 
 // HandleCommand processes an incoming signed command from the controller.
@@ -469,8 +484,9 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 
 	cmd := &signed.Command
 
-	// termSignedCommand is true once a v2 signature (covering Term) has verified.
-	termSignedCommand := false
+	// verifiedVersion is the signing-payload version whose signature verified; 0 when
+	// no verifier is configured.
+	verifiedVersion := uint32(0)
 
 	// 1. Signature verification (only when a verifier is configured).
 	// Read verifier under the lock because UpdateVerifier may replace it concurrently
@@ -504,7 +520,7 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
-		termSignedCommand = version == cpTypes.SigningPayloadV2
+		verifiedVersion = version
 	}
 
 	// 2. StewardID match.
@@ -542,12 +558,15 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		}
 	}
 
-	// The command is fully authenticated: its term is covered by a verified
-	// signature, so from here on this steward refuses unsigned-term stamped
-	// commands. Set only now, so a stale, replayed or malformed command cannot
-	// flip the switch.
-	if termSignedCommand {
-		h.markTermSigned()
+	// The command is fully authenticated. Admit it against the one-way term-signed
+	// switch in one atomic step: a verified v2 command sets the switch, and a stamped
+	// v1 command that passed the early check above is refused if a v2 command set the
+	// switch while it was being verified. Done only now, so a stale, replayed or
+	// malformed command cannot flip the switch.
+	if verifiedVersion != 0 {
+		if err := h.admitTermSigning(verifiedVersion, cmd.Term); err != nil {
+			return err
+		}
 	}
 
 	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)

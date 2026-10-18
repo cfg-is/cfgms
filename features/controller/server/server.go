@@ -1381,7 +1381,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #5174: one registry of the signing-payload versions each steward
 		// advertised, shared by every command signer (publisher, dispatcher) so the
 		// version choice has a single source.
+		// With a steward store the capability is shared by every node using it, so a
+		// node that never saw the steward's heartbeat still signs the version the
+		// steward expects.
 		signingCaps := controlplaneTypes.NewSigningCapabilities()
+		if capStewardStore := storageManager.GetStewardStore(); capStewardStore != nil {
+			signingCaps = controlplaneTypes.NewSharedSigningCapabilities(commands.NewSigningCapabilityStore(capStewardStore))
+		}
 		var queueStore scriptmodule.QueueStore
 		var isLocallyConnected func(string) bool
 		if cfg.HA.IsClusterMode() {
@@ -1465,7 +1471,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// advertises on its heartbeat; signers use them to choose a version.
 		if subErr := controlPlane.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
 			if hb != nil {
-				signingCaps.Record(hb.StewardID, hb.SigningPayloadVersions)
+				if recErr := signingCaps.Record(hb.StewardID, hb.SigningPayloadVersions); recErr != nil {
+					logger.Warn("Failed to record steward signing capability",
+						"steward_id", logging.SanitizeLogValue(hb.StewardID),
+						"error", logging.SanitizeLogValue(recErr.Error()))
+				}
 			}
 			return nil
 		}); subErr != nil {

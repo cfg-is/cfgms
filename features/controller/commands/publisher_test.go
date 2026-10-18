@@ -4,6 +4,8 @@ package commands_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,10 +15,12 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/commands"
+	stewardcommands "github.com/cfgis/cfgms/features/steward/commands"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 )
@@ -429,8 +433,8 @@ func TestPublisher_Stop_CancelsPendingFenceRetries(t *testing.T) {
 func TestPublisher_SigningPayloadVersionFollowsStewardCapability(t *testing.T) {
 	signer, verifier := newTestSignerAndVerifier(t)
 	caps := types.NewSigningCapabilities()
-	caps.Record("steward-new", types.SupportedSigningPayloadVersions())
-	caps.Record("steward-old", nil)
+	require.NoError(t, caps.Record("steward-new", types.SupportedSigningPayloadVersions()))
+	require.NoError(t, caps.Record("steward-old", nil))
 
 	sent := make(chan *types.SignedCommand, 2)
 	pub, err := commands.New(&commands.Config{
@@ -467,4 +471,79 @@ func TestPublisher_SigningPayloadVersionFollowsStewardCapability(t *testing.T) {
 	v1Bytes, err := types.CommandSigningBytes(&oldCmd.Command, raw(oldCmd))
 	require.NoError(t, err)
 	assert.NoError(t, verifier.Verify(v1Bytes, oldCmd.Signature))
+}
+
+// newClusterNode returns a publisher for one controller node, with its own
+// SigningCapabilities registry over the shared steward store, and the channel its
+// commands are sent on.
+func newClusterNode(t *testing.T, signer signature.Signer, stewards business.StewardStore) (*commands.Publisher, *types.SigningCapabilities, chan *types.SignedCommand) {
+	t.Helper()
+	caps := types.NewSharedSigningCapabilities(commands.NewSigningCapabilityStore(stewards))
+	sent := make(chan *types.SignedCommand, 4)
+	pub, err := commands.New(&commands.Config{
+		ControlPlane:        &sendHookCP{onSend: func(sc *types.SignedCommand) error { sent <- sc; return nil }},
+		Signer:              signer,
+		TermSource:          &staticTermSource{term: 9},
+		SigningCapabilities: caps,
+		Logger:              logging.NewLogger("error"),
+	})
+	require.NoError(t, err)
+	return pub, caps, sent
+}
+
+// TestPublisher_CapabilityIsClusterWide proves that a command signed by a node that
+// never received the steward's heartbeat still uses the version the steward
+// advertised to another node: a steward that has switched to term-signed commands
+// accepts it. With a per-node registry that node would sign v1 and the steward
+// would refuse the command.
+func TestPublisher_CapabilityIsClusterWide(t *testing.T) {
+	signer, verifier := newTestSignerAndVerifier(t)
+	stewards, _ := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, stewards.RegisterSteward(ctx, &business.StewardRecord{ID: "steward-1", TenantID: "t1"}))
+
+	pubA, capsA, sentA := newClusterNode(t, signer, stewards)
+	pubB, _, sentB := newClusterNode(t, signer, stewards)
+
+	// Only node A receives the steward's heartbeat.
+	require.NoError(t, capsA.Record("steward-1", types.SupportedSigningPayloadVersions()))
+
+	steward, err := stewardcommands.New(&stewardcommands.Config{
+		StewardID: "steward-1",
+		OnStatus:  func(context.Context, *types.Event) {},
+		Logger:    logging.NewLogger("error"),
+		Verifier:  verifier,
+	})
+	require.NoError(t, err)
+	steward.RegisterHandler(types.CommandSyncConfig, func(context.Context, *types.Command) error { return nil })
+
+	// Node A's command switches the steward to term-signed commands.
+	_, err = pubA.PublishCommand(ctx, "steward-1", types.CommandSyncConfig, nil)
+	require.NoError(t, err)
+	require.NoError(t, steward.HandleCommand(ctx, <-sentA))
+	steward.Wait()
+
+	// Node B never saw a heartbeat; its command must still be term-signed.
+	_, err = pubB.PublishCommand(ctx, "steward-1", types.CommandSyncConfig, nil)
+	require.NoError(t, err)
+	fromB := <-sentB
+	assert.Equal(t, types.SigningPayloadV2, fromB.Command.SigningPayloadVersion)
+	require.NoError(t, steward.HandleCommand(ctx, fromB), "a switched steward must accept the non-heartbeat node's command")
+	steward.Wait()
+}
+
+// TestPublisher_UnknownCapabilityFailsLoudly proves a node that cannot determine a
+// steward's capability returns an error to the caller instead of sending a command
+// the steward may refuse silently.
+func TestPublisher_UnknownCapabilityFailsLoudly(t *testing.T) {
+	signer, _ := newTestSignerAndVerifier(t)
+	stewards, root := newTestStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, stewards.RegisterSteward(ctx, &business.StewardRecord{ID: "steward-1", TenantID: "t1"}))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "stewards", "steward-1.json"), []byte("{corrupt"), 0o600))
+
+	pub, _, sent := newClusterNode(t, signer, stewards)
+	_, err := pub.PublishCommand(ctx, "steward-1", types.CommandSyncConfig, nil)
+	require.Error(t, err)
+	assert.Empty(t, sent, "no command may be sent when the capability is unknown")
 }

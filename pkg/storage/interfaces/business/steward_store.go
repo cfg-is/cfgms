@@ -146,6 +146,13 @@ type StewardRecord struct {
 	// used by the gate handler (S3b) to score re-entry confidence. Updated at each
 	// successful refresh. Empty until the first refresh cycle completes.
 	LastProvenanceJSON string `json:"last_provenance_json"`
+
+	// SigningPayloadVersion is the highest command signing-payload version the steward
+	// advertised on its heartbeat (#5174); 0 means none advertised (v1 only). It is
+	// shared cluster-wide so every controller node signs the version the steward
+	// expects. Read it with GetStewardSigningPayloadVersion; GetSteward does not
+	// populate it on every provider.
+	SigningPayloadVersion uint32 `json:"signing_payload_version,omitempty"`
 }
 
 // StewardFilter defines criteria for filtering steward queries.
@@ -236,6 +243,17 @@ type StewardStore interface {
 	// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
 	// Returns ErrStewardNotFound if no record exists.
 	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
+
+	// SetStewardSigningPayloadVersion records the highest command signing-payload
+	// version the steward advertised (#5174). 0 resets the steward to v1. The value is
+	// visible to every controller node sharing the store. Returns ErrStewardNotFound
+	// if no record exists.
+	SetStewardSigningPayloadVersion(ctx context.Context, stewardID string, version uint32) error
+
+	// GetStewardSigningPayloadVersion returns the version recorded by
+	// SetStewardSigningPayloadVersion, 0 when none was recorded. Returns
+	// ErrStewardNotFound if no record exists.
+	GetStewardSigningPayloadVersion(ctx context.Context, stewardID string) (uint32, error)
 
 	// SetStewardProvenance replaces the steward's recorded provenance baseline
 	// (LastProvenanceJSON) with provenanceJSON (ADR-034 §2). It is written at

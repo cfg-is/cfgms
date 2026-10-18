@@ -29,33 +29,40 @@ func newTestSigner(t *testing.T) (signature.Signer, signature.Verifier) {
 	return signer, verifier
 }
 
+func mustVersion(t *testing.T, c *SigningCapabilities, id string) uint32 {
+	t.Helper()
+	v, err := c.VersionFor(id)
+	require.NoError(t, err)
+	return v
+}
+
 func TestSigningCapabilities_VersionFor(t *testing.T) {
 	var nilCaps *SigningCapabilities
-	assert.Equal(t, SigningPayloadV1, nilCaps.VersionFor("s1"))
-	nilCaps.Record("s1", []uint32{2}) // must not panic
+	assert.Equal(t, SigningPayloadV1, mustVersion(t, nilCaps, "s1"))
+	require.NoError(t, nilCaps.Record("s1", []uint32{2})) // must not panic
 
 	caps := NewSigningCapabilities()
-	assert.Equal(t, SigningPayloadV1, caps.VersionFor("s1"), "unknown steward gets v1")
+	assert.Equal(t, SigningPayloadV1, mustVersion(t, caps, "s1"), "unknown steward gets v1")
 
-	caps.Record("s1", []uint32{1, 2})
-	caps.Record("s2", []uint32{1})
-	caps.Record("s3", []uint32{99})
-	caps.Record("s4", nil)
-	assert.Equal(t, SigningPayloadV2, caps.VersionFor("s1"))
-	assert.Equal(t, SigningPayloadV1, caps.VersionFor("s2"))
-	assert.Equal(t, SigningPayloadV1, caps.VersionFor("s3"), "unsupported versions are ignored")
-	assert.Equal(t, SigningPayloadV1, caps.VersionFor("s4"))
+	require.NoError(t, caps.Record("s1", []uint32{1, 2}))
+	require.NoError(t, caps.Record("s2", []uint32{1}))
+	require.NoError(t, caps.Record("s3", []uint32{99}))
+	require.NoError(t, caps.Record("s4", nil))
+	assert.Equal(t, SigningPayloadV2, mustVersion(t, caps, "s1"))
+	assert.Equal(t, SigningPayloadV1, mustVersion(t, caps, "s2"))
+	assert.Equal(t, SigningPayloadV1, mustVersion(t, caps, "s3"), "unsupported versions are ignored")
+	assert.Equal(t, SigningPayloadV1, mustVersion(t, caps, "s4"))
 
 	// A later heartbeat without the capability (steward downgraded) revokes it.
-	caps.Record("s1", nil)
-	assert.Equal(t, SigningPayloadV1, caps.VersionFor("s1"))
+	require.NoError(t, caps.Record("s1", nil))
+	assert.Equal(t, SigningPayloadV1, mustVersion(t, caps, "s1"))
 }
 
 func TestSignCommand_PicksVersionPerSteward(t *testing.T) {
 	signer, verifier := newTestSigner(t)
 	caps := NewSigningCapabilities()
-	caps.Record("new", []uint32{1, 2})
-	caps.Record("old", nil)
+	require.NoError(t, caps.Record("new", []uint32{1, 2}))
+	require.NoError(t, caps.Record("old", nil))
 
 	for _, tc := range []struct {
 		steward string
@@ -82,7 +89,7 @@ func TestSignCommand_PicksVersionPerSteward(t *testing.T) {
 
 func TestSignCommand_NilSignerLeavesUnsigned(t *testing.T) {
 	caps := NewSigningCapabilities()
-	caps.Record("s", []uint32{2})
+	require.NoError(t, caps.Record("s", []uint32{2}))
 	sc, err := SignCommand(&Command{ID: "c", StewardID: "s"}, nil, caps)
 	require.NoError(t, err)
 	assert.Nil(t, sc.Signature)
