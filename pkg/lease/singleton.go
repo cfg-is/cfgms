@@ -4,6 +4,7 @@ package lease
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -123,12 +124,48 @@ func (j SingletonJob) RunIfLeader(ctx context.Context, fn func(ctx context.Conte
 		defer close(renewalStopped)
 		j.renewWhileRunning(runCtx, cancelRun, token)
 	}()
+	go j.cancelAtAuthorityDeadline(runCtx, cancelRun)
 
 	fn(runCtx)
 	cancelRun()
 	<-renewalStopped
 	return true
 }
+
+// cancelAtAuthorityDeadline cancels fn's context once this holder's local
+// authority (Manager.LocalAuthorityDeadline) lapses with no renewal having
+// extended it, or as soon as the authority is invalidated. It runs
+// independently of the renewal loop, so fn is cancelled before the store row
+// can expire even while a renewal call is still in flight and has not
+// returned (a store that is merely slow never reports a failure the renewal
+// loop could act on). The wait uses a real timer re-armed from the Clock's
+// view of the remaining time, so a renewal that lands in the meantime pushes
+// the deadline out.
+func (j SingletonJob) cancelAtAuthorityDeadline(ctx context.Context, onLost context.CancelFunc) {
+	for {
+		deadline, ok := j.Manager.LocalAuthorityDeadline(j.Name, j.HolderID)
+		if !ok {
+			onLost()
+			return
+		}
+		remaining := j.clock().Until(deadline)
+		if remaining <= 0 {
+			j.logWarn("lease: local authority lapsed with no completed renewal; cancelling remaining work to avoid a duplicate run",
+				errAuthorityLapsed)
+			onLost()
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+var errAuthorityLapsed = errors.New("lease: local authority deadline reached")
 
 // renewRetryBaseBackoff is the starting backoff for renewWithRetry, doubled
 // on each attempt within the budget — the same shape as the SQLite
@@ -186,7 +223,7 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 	backoff := renewRetryBaseBackoff
 
 	for {
-		newToken, err := j.Manager.Renew(ctx, j.Name, j.HolderID, token)
+		newToken, err := j.renewBounded(ctx, token)
 		if err == nil {
 			return newToken, nil
 		}
@@ -212,6 +249,18 @@ func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64,
 		}
 		backoff *= 2
 	}
+}
+
+// renewBounded runs one Manager.Renew call with a deadline of
+// Manager.MaxAllowedRenewalLatency; a call that exceeds it is treated as
+// failed (and retried by renewWithRetry while authority remains), as
+// SafetyMargin documents. The deadline is a context deadline, so a store that
+// ignores its context is not interrupted here; cancelAtAuthorityDeadline
+// still cancels fn at the authority deadline in that case.
+func (j SingletonJob) renewBounded(ctx context.Context, token uint64) (uint64, error) {
+	callCtx, cancel := context.WithTimeout(ctx, j.Manager.MaxAllowedRenewalLatency())
+	defer cancel()
+	return j.Manager.Renew(callCtx, j.Name, j.HolderID, token)
 }
 
 func (j SingletonJob) logWarn(msg string, err error) {
