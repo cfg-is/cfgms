@@ -12,6 +12,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -86,6 +87,11 @@ type account struct {
 	CreatedAt    time.Time
 	Credentials  []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
 	CertBindings []CertBinding        // Issue #3578: bound mTLS admin certificates, keyed by serial
+	// RevokedCredentialIDs lists passkey credential IDs removed from this account.
+	// A revoked ID is never accepted again, so re-registering the same authenticator
+	// cannot bring the web sessions its revocation ended back to life (Issue #5166).
+	// Survives reset_credentials.
+	RevokedCredentialIDs [][]byte
 	// Issue #2974: enrollment magic link (minted on create; #2966 redeems it).
 	// EnrollmentLinkHash stores the SHA-256 hex digest of the raw token — never the plaintext.
 	// EnrollmentLinkExpiresAt is zero when no outstanding link exists.
@@ -395,6 +401,12 @@ func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint 
 			acct.Credentials = creds
 		}
 	}
+	if revJSON, ok := m.Metadata["revoked_credentials"]; ok && revJSON != "" {
+		var revoked [][]byte
+		if err := json.Unmarshal([]byte(revJSON), &revoked); err == nil {
+			acct.RevokedCredentialIDs = revoked
+		}
+	}
 	// Issue #3578: deserialize bound mTLS certificate bindings (public metadata; non-secret).
 	if bindJSON, ok := m.Metadata["cert_bindings"]; ok && bindJSON != "" {
 		var bindings []CertBinding
@@ -455,6 +467,11 @@ func buildAccountSecretRequest(acct *account, createdBy string) *secretsif.Secre
 		credsJSON, err := json.Marshal(acct.Credentials)
 		if err == nil {
 			meta["credentials"] = string(credsJSON)
+		}
+	}
+	if len(acct.RevokedCredentialIDs) > 0 {
+		if revJSON, err := json.Marshal(acct.RevokedCredentialIDs); err == nil {
+			meta["revoked_credentials"] = string(revJSON)
 		}
 	}
 	// Issue #3578: persist bound mTLS certificate bindings (public metadata) in metadata.
@@ -793,6 +810,8 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		// account's scope moves the bindings with it, and the destination scope is already
 		// bounded by the caller's own subtree by the isWithinTenantScope checks below.
 		acct.CertBindings = existing.CertBindings
+		// Issue #5166: a revoked passkey stays revoked across a reset.
+		acct.RevokedCredentialIDs = existing.RevokedCredentialIDs
 		// Issue #2782: preserve registered WebAuthn credentials across account resets,
 		// unless the admin explicitly re-provisions to the zero-authenticator state
 		// (ADR-021 Amendment 1 Decision 4 — reset_credentials invalidates residual
@@ -1689,4 +1708,15 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		"username": username,
 		"deleted":  true,
 	})
+}
+
+// credentialIDRevoked reports whether id was removed from the account by a
+// passkey revocation (Issue #5166).
+func (a *account) credentialIDRevoked(id []byte) bool {
+	for _, r := range a.RevokedCredentialIDs {
+		if bytes.Equal(r, id) {
+			return true
+		}
+	}
+	return false
 }

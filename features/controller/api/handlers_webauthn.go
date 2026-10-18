@@ -460,6 +460,13 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if freshAcct.credentialIDRevoked(stored.ID) {
+		// Re-adding a revoked ID would revive the sessions its revocation ended (Issue #5166).
+		s.writeErrorResponse(w, http.StatusConflict,
+			"This authenticator was revoked and cannot be registered again", "CREDENTIAL_REVOKED")
+		return
+	}
+
 	updatedAcct := *freshAcct
 	updatedAcct.Credentials = append(append([]WebAuthnCredential(nil), freshAcct.Credentials...), stored)
 
@@ -1314,6 +1321,12 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if freshAcct.credentialIDRevoked(stored.ID) {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"This authenticator was revoked and cannot be registered again", "CREDENTIAL_REVOKED")
+		return
+	}
+
 	// Precondition satisfied. Build updated account: append credential, consume token.
 	updatedAcct := *freshAcct
 	updatedAcct.Credentials = []WebAuthnCredential{stored}
@@ -1462,6 +1475,8 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 
 	updatedAcct := *freshAcct
 	updatedAcct.Credentials = remaining
+	// Issue #5166: remember the revoked ID so it cannot be registered again.
+	updatedAcct.RevokedCredentialIDs = append(append([][]byte(nil), freshAcct.RevokedCredentialIDs...), credIDBytes)
 	newVersion, ok, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, actingPrincipalID)
 	if persistErr != nil {
 		s.logger.Error("Failed to persist credential revocation",

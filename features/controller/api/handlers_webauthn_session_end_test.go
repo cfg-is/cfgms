@@ -209,3 +209,45 @@ func TestSessionEnd_BearerSessionsAreNotRefused(t *testing.T) {
 	})).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+// Revocation is final: re-registering the same authenticator (same credential ID) must
+// not bring back the sessions its revocation ended (Issue #5166).
+func TestSessionEnd_RevocationIsFinal(t *testing.T) {
+	srv, username := setupWebAuthnServer(t, rfRPID, []string{rfOrigin})
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	store := session.NewMemStore(webCfg, time.Now)
+	t.Cleanup(store.Close)
+	srv.SetWebSessionManager(session.NewManager(webCfg, store, time.Now))
+	injectCredentialWith(t, srv, username, WebAuthnCredential{ID: sessEndCredX})
+
+	// Register passkey P through the real finish handler.
+	body, pID := rfPrepareFinish(t, srv, username)
+	rec := doFinish(t, srv, username, body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	acct, err := srv.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	cookie := sessEndLogin(t, srv.webSessionManager, acct, pID)
+	require.Equal(t, http.StatusOK, sessEndRequest(t, srv, cookie).Code, "precondition: session works")
+
+	sessEndRevoke(t, srv, username, pID)
+
+	// The same authenticator is registered again before the old cookie is used, so the
+	// session has not yet been revoked lazily by the middleware.
+	body, again := rfPrepareFinish(t, srv, username)
+	require.Equal(t, pID, again)
+	rec = doFinish(t, srv, username, body)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, "CREDENTIAL_REVOKED", errCode(t, rec.Body.Bytes()))
+
+	requireSessionRevoked(t, sessEndRequest(t, srv, cookie))
+	acct, err = srv.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	for _, c := range acct.Credentials {
+		assert.NotEqual(t, pID, c.ID, "a revoked credential must not be re-added")
+	}
+}
