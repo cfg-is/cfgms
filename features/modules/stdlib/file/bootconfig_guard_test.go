@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +23,15 @@ func TestFileModule_Set_RefusesBootConfig(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".config", "cfgms")
+	// Use the loader's own search dirs: they differ per OS (darwin has no ~/.config/cfgms).
+	var dir string
+	for _, d := range security.BootConfigDirs() {
+		if strings.HasPrefix(d, home) {
+			dir = d
+			break
+		}
+	}
+	require.NotEmpty(t, dir, "no boot-config dir under HOME")
 	require.NoError(t, os.MkdirAll(dir, 0o700))
 	cfgPath := filepath.Join(dir, "steward.cfg")
 	original := []byte("steward:\n  remote_terminal:\n    enabled: false\n")
