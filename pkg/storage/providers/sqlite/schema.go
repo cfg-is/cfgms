@@ -6,8 +6,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -126,9 +128,51 @@ func backfillTenantCrossings(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE tenant_crossings SET principal_id = '' WHERE kind = 'grant' AND principal_id <> ''`); err != nil {
+	// Probe first: an UPDATE needs the write lock even when it changes no rows, which
+	// made a second process opening an already-migrated database fail with SQLITE_BUSY.
+	var needsClear int
+	err = db.QueryRowContext(ctx, `SELECT 1 FROM tenant_crossings WHERE kind = 'grant' AND principal_id <> '' LIMIT 1`).Scan(&needsClear)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sqlite: tenant_crossings grant principal probe failed: %w", err)
+	}
+	if err := retryOnBusy(ctx, func() error {
+		return execImmediate(ctx, db, `UPDATE tenant_crossings SET principal_id = '' WHERE kind = 'grant' AND principal_id <> ''`)
+	}); err != nil {
 		return fmt.Errorf("sqlite: tenant_crossings grant principal clear failed: %w", err)
 	}
+	return nil
+}
+
+// execImmediate runs one statement inside a BEGIN IMMEDIATE transaction on a dedicated
+// connection, so the write lock is taken up front (modernc.org/sqlite does not always
+// honour busy_timeout for a lock upgrade inside a deferred transaction).
+func execImmediate(ctx context.Context, db *sql.DB, query string, args ...any) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_, _ = conn.ExecContext(rollbackCtx, `ROLLBACK`)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
