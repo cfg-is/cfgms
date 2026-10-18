@@ -434,20 +434,44 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		BackupState:    credential.Flags.BackupState,
 	}
 
-	// Re-persist the account with the appended credential. The account loaded above
-	// (resolveAccountForCredentials) already reflects any credentials registered
-	// before this call.
-	updatedAcct := *acct
-	updatedAcct.Credentials = append(append([]WebAuthnCredential(nil), acct.Credentials...), stored)
-
-	if err := s.persistAccount(r.Context(), &updatedAcct, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist WebAuthn credential",
+	// Reload from the durable store (not the cache) so a concurrent admin change
+	// made since the request began is not overwritten, then write with
+	// compare-and-swap keyed on the version just read (Issue #5158).
+	freshAcct, err := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
+	if err != nil {
+		s.logger.Error("Failed to reload account for credential registration",
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to reload account state", "STORE_ERROR")
+		return
+	}
+	if freshAcct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return
+	}
+	if freshAcct.Disabled {
+		s.writeErrorResponse(w, http.StatusForbidden, "Account is disabled", "ACCOUNT_DISABLED")
+		return
+	}
+
+	updatedAcct := *freshAcct
+	updatedAcct.Credentials = append(append([]WebAuthnCredential(nil), freshAcct.Credentials...), stored)
+
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, actingPrincipalID)
+	if persistErr != nil {
+		s.logger.Error("Failed to persist WebAuthn credential",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(persistErr.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
 			"Failed to persist credential", "STORE_ERROR")
 		return
 	}
+	if !swapped {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the registration", "ACCOUNT_MODIFIED")
+		return
+	}
+	updatedAcct.Version = newVersion
 	s.cacheAccount(&updatedAcct)
 
 	s.logger.Info("WebAuthn credential registered",
