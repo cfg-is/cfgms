@@ -5,10 +5,11 @@ package config
 import (
 	"runtime"
 
-	"github.com/cfgis/cfgms/pkg/security"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cfgis/cfgms/pkg/security"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/stretchr/testify/assert"
