@@ -1278,13 +1278,6 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
 				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
 				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
-				authCount := -1
-				globalScope := false
-				// Fail-closed defaults: account that cannot be resolved gets an empty grant set,
-				// never an unbounded one. ImplicitAdmin is only set for a resolved root-scope account
-				// (ADR-025 Amendment 3). permissions is always non-nil; the nil-sentinel is gone.
-				implicitAdminWeb := false
-				permissions := []string{}
 				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
 				// A web session lives only while the passkeys behind it exist (Issue
 				// #5166): the account is the proof, so every request resolves it. A
@@ -1316,6 +1309,12 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					endWebSession("unbound")
 					return
 				}
+				// Every path below runs only for a resolved account: an unresolvable
+				// one has already been answered with 503 or 401 above. ImplicitAdmin is
+				// only set for a root-scope account (ADR-025 Amendment 3), and
+				// permissions is always non-nil; the nil-sentinel is gone.
+				implicitAdminWeb := false
+				permissions := []string{}
 				{
 					acct := webAcct
 					// Issue #3126: an administratively disabled account loses access
@@ -1332,8 +1331,6 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						endWebSession("revoked-passkey")
 						return
 					}
-					authCount = len(acct.Credentials)
-					globalScope = acct.RootScope
 					if acct.RootScope {
 						// Root-scope accounts are platform administrators: they hold
 						// every permission, exactly as the mTLS-admin and CLI-session
@@ -1355,10 +1352,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						permissions = append(permissions, acct.Permissions...)
 					}
 				}
-				webTenant := webSess.TenantID
-				if webAcct != nil && webAcctErr == nil {
-					webTenant = s.accountPrincipalTenant(r.Context(), webAcct)
-				}
+				authCount := len(webAcct.Credentials)
+				globalScope := webAcct.RootScope
+				webTenant := s.accountPrincipalTenant(r.Context(), webAcct)
 				webPrincipal := &Principal{
 					ID:                 webSess.PrincipalID,
 					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
