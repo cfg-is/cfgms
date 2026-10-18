@@ -52,6 +52,7 @@ var tenantBoundaryRouteTable = []tenantBoundaryRoute{
 	{http.MethodPut, "/api/v1/tenants/{id}", "id", "tenant:update", false},
 	{http.MethodGet, "/api/v1/tenants/{id}/admin-contacts", "id", "tenant:read", false},
 	{http.MethodPut, "/api/v1/tenants/{id}/admin-contacts", "id", "tenant:update", false},
+	{http.MethodPut, "/api/v1/tenants/{id}/config-source/credential", "id", "tenant:manage", false},
 	{http.MethodPut, "/api/v1/tenants/{id}/m365-connection", "id", "tenant:manage", false},
 	{http.MethodGet, "/api/v1/tenants/{id}/m365-connection", "id", "tenant:read", false},
 	{http.MethodDelete, "/api/v1/tenants/{id}/m365-connection", "id", "tenant:manage", false},

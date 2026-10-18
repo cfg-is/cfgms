@@ -2186,6 +2186,37 @@ Test connectivity to a tenant's config source (e.g., validate git repository acc
 
 - `id` (path): Tenant ID
 
+#### PUT /api/v1/tenants/{id}/config-source/credential
+
+Store the access token of a tenant's git config source together with the repository URL it is bound to. The token and the binding are written in one operation; the bound URL cannot change without a new token, and there is no metadata-only update. A second call for the same tenant replaces the secret and its binding.
+
+**Authentication:** Required  
+**Required permission:** `tenant:manage` (`tenant:update` alone is refused with `403`)
+
+**Parameters:**
+
+- `id` (path): Tenant ID (the flat tenant ID, not a path)
+
+**Request body:** both fields are required; unknown fields are refused.
+
+```json
+{"url": "https://git.example.com/org/configs.git", "token": "<access token>"}
+```
+
+`url` is validated exactly as `config_source_url` is: HTTPS only, no embedded credentials, no private, loopback or link-local address literal. `token` must be non-empty.
+
+**Response (`200 OK`):**
+
+```json
+{"data": {"credential_ref": "client-1/config-source-git", "bound_repository_url": "https://git.example.com/org/configs"}}
+```
+
+`credential_ref` is the value to set as the tenant metadata `config_source_credential`. `bound_repository_url` is the normalized URL stored in the secret's `bound_repository_url` metadata: scheme and host lowercased, default port, trailing `/` and trailing `.git` removed. The token is never returned or logged.
+
+**Errors:** `400` (`INVALID_URL`, `INVALID_TOKEN`, `INVALID_REQUEST`; nothing is stored and an existing credential is unchanged), `404` for an unknown or out-of-scope tenant, the tenant-crossing challenge (`401`) for a root-scoped caller without an active crossing, `503` when no secret store is configured.
+
+**Audit:** `config_source.credential.set` names the tenant, the actor and the bound URL, never the token.
+
 #### GET /api/v1/billing/report
 
 Cross-MSP billing report. Lists every MSP (direct child of the root tenant) with its sizes and metrics, and sizes each of its clients under an opaque label. Both billing reports are projections of one aggregation, so their numbers cannot disagree.

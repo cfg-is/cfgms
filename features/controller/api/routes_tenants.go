@@ -26,6 +26,10 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleRestoreTenant))).Methods("POST")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+	// Git config-source credential and its repository binding, written together
+	// (Issue #5164). Names the tenant in {id}, so the ADR-025 root boundary applies.
+	tenants.Handle("/{id}/config-source/credential",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handlePutTenantConfigSourceCredential))).Methods("PUT")
 
 	// MSP-managed administrator contact addresses (Issue #4711). Both routes use the
 	// ordinary tenant:read / tenant:update gates, so a root-scoped caller meets the

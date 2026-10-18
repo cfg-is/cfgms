@@ -362,6 +362,7 @@ var goldenRouteTable = []string{
 	"PUT /api/v1/stewards/{id}/reboot-window",
 	"PUT /api/v1/tenants/{id}",
 	"PUT /api/v1/tenants/{id}/admin-contacts",
+	"PUT /api/v1/tenants/{id}/config-source/credential",
 	"PUT /api/v1/tenants/{id}/m365-connection",
 	"PUT /api/v1/tenants/{tenant_id}/reboot-window",
 	"PUT /api/v1/tenants/{tenant_path:.+}/assurance-policy",
