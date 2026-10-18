@@ -699,16 +699,18 @@ func TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderA
 	start := time.Now()
 	var cancelledAfter time.Duration
 	var acquiredAtCancel bool
+	var acquireErr error
 	ran := job1.RunIfLeader(context.Background(), func(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			cancelledAfter = time.Since(start)
-			_, acquiredAtCancel, _ = m2.TryAcquire(context.Background(), "stall", "node-2", ttl)
+			_, acquiredAtCancel, acquireErr = m2.TryAcquire(context.Background(), "stall", "node-2", ttl)
 		case <-time.After(ttl + ttl/2):
 		}
 	})
 	assert.True(t, ran)
 	require.NotZero(t, cancelledAfter, "fn's context was never cancelled while a renewal was stalled")
+	require.NoError(t, acquireErr, "the competing acquire must reach the store for its result to prove exclusion")
 	assert.Less(t, cancelledAfter, ttl, "fn must be cancelled before the store row can expire")
 	assert.False(t, acquiredAtCancel, "another holder must not be able to acquire when fn is cancelled")
 }
