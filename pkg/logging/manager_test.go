@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,6 +135,60 @@ func TestLoggingManager_FactoryProducesDistinctProviders(t *testing.T) {
 	assert.NoError(t, err, "mgr1 writes must succeed after mgr2 is independently closed")
 
 	require.NoError(t, mgr1.Close())
+}
+
+// TestLoggingManager_WriteEntryConcurrentWithClose verifies that WriteEntry
+// racing Close either succeeds or reports "not initialized", with no data race
+// and no use of a closed provider (Issue #5114).
+func TestLoggingManager_WriteEntryConcurrentWithClose(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		cfg := &LoggingConfig{
+			Provider: "file",
+			Config: map[string]interface{}{
+				"directory":        t.TempDir(),
+				"file_prefix":      "close-race",
+				"max_file_size":    1024 * 1024,
+				"retention_days":   1,
+				"compress_rotated": false,
+			},
+			Level:         "DEBUG",
+			ServiceName:   "close-race",
+			Component:     "test",
+			BatchSize:     2,
+			FlushInterval: time.Millisecond,
+			AsyncWrites:   async,
+			BufferSize:    16,
+		}
+		manager, err := NewLoggingManager(cfg)
+		require.NoError(t, err)
+
+		const writers = 8
+		var wg sync.WaitGroup
+		started := make(chan struct{})
+		errs := make(chan error, writers*1000)
+		for i := 0; i < writers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-started
+				for j := 0; j < 200; j++ {
+					errs <- manager.WriteEntry(context.Background(), interfaces.LogEntry{Level: "INFO", Message: "entry"})
+				}
+			}()
+		}
+		close(started)
+		time.Sleep(time.Millisecond)
+		require.NoError(t, manager.Close())
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			if err != nil {
+				assert.EqualError(t, err, "logging manager not initialized")
+			}
+		}
+		assert.Error(t, manager.WriteEntry(context.Background(), interfaces.LogEntry{Level: "INFO", Message: "after"}))
+	}
 }
 
 func TestLoggingManager_BasicFunctionality(t *testing.T) {
