@@ -8,13 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1349,7 +1345,7 @@ func TestAPIServerStartStop(t *testing.T) {
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
 
 	server := setupTestServer(t)
-	server.cfg.MetricsListenAddr = reservePrivateMetricsAddress(t)
+	server.SetMetricsListener(bindLoopbackListener(t))
 	server.cfg.Certificate.EnableCertManagement = true
 	server.certManager = newTLSTestCertManager(t)
 
@@ -1362,53 +1358,89 @@ func TestAPIServerStartStop(t *testing.T) {
 	assert.NoError(t, err, "api.Server.Stop() must return no error")
 }
 
-// reservePrivateMetricsAddress returns a loopback host:port that the caller can
-// hand to Server.Start. ValidatePrivateListenerAddress rejects port 0 ("a fixed
-// numeric port from 1 to 65535 is required"), so a test that needs a private
-// listener has to name a concrete port up front, which leaves the port unheld
-// between reservation and Start's bind.
-//
-// The candidate is drawn from BELOW the kernel's ephemeral range rather than
-// from inside it (net.Listen on ":0"). A port inside that range is also what the
-// kernel hands to every other listener and outbound connection on the host, so
-// with a package-parallel test run that window is routinely lost to an unrelated
-// connection — observed as "bind private Raft listener: listen tcp
-// 127.0.0.1:37571: bind: address already in use" with ip_local_port_range at
-// 32768-60999. Below the range, only something asking for that port by number
-// can take it, so the sole competitor is another caller of this helper — which
-// bind-probes first and holds a candidate for microseconds.
-func reservePrivateMetricsAddress(t *testing.T) string {
+// bindLoopbackListener binds a loopback listener on an OS-assigned port and
+// returns it still open. Handing it to Server.SetMetricsListener (or the Raft /
+// delivery equivalents) keeps the port held until Start, so no other process can
+// take it between reservation and use. Start owns the listener once it succeeds;
+// the cleanup only closes it if the test never reached that point.
+func bindLoopbackListener(t *testing.T) net.Listener {
 	t.Helper()
-	low, high := nonEphemeralPortWindow()
-	for attempt := 0; attempt < 100; attempt++ {
-		port := low + rand.IntN(high-low+1)
-		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		listener, err := net.Listen("tcp", address)
-		if err != nil {
-			continue // in use by another process — try another port
-		}
-		require.NoError(t, listener.Close())
-		return address
-	}
-	t.Fatalf("no free loopback port in %d-%d after 100 attempts", low, high)
-	return ""
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	return l
 }
 
-// nonEphemeralPortWindow returns the inclusive port range reservePrivateMetricsAddress
-// draws from: high enough to avoid privileged and well-known ports, and entirely
-// below the lowest port the kernel will allocate on its own. On Linux the
-// ephemeral floor is read from /proc; if that is unavailable the default floor of
-// 32768 applies, which is at or below the floor used by Linux, macOS and Windows.
-func nonEphemeralPortWindow() (low, high int) {
-	high = 32767
-	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
-		if fields := strings.Fields(string(data)); len(fields) == 2 {
-			if floor, convErr := strconv.Atoi(fields[0]); convErr == nil && floor > 20001 && floor-1 < high {
-				high = floor - 1
-			}
+// TestAPIServerStart_ConcurrentServersNeverCollide starts several servers at
+// once in one process, each handed pre-bound listeners. Because the ports are
+// held from bind until Start, no pair can collide. A reserve-then-release helper
+// fails the equivalent forced collision (see the pre-bind subtest).
+func TestAPIServerStart_ConcurrentServersNeverCollide(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	certMgr := newTLSTestCertManager(t)
+
+	t.Run("injected listeners start concurrently", func(t *testing.T) {
+		const n = 4
+		servers := make([]*Server, n)
+		addrs := make(map[string]bool)
+		for i := range servers {
+			srv := setupTestServer(t)
+			srv.cfg.Certificate.EnableCertManagement = true
+			srv.certManager = certMgr
+			l := bindLoopbackListener(t)
+			addrs[l.Addr().String()] = true
+			srv.SetMetricsListener(l)
+			servers[i] = srv
 		}
-	}
-	return 20000, high
+		require.Len(t, addrs, n, "each server must hold a distinct metrics port")
+
+		errs := make(chan error, n)
+		for _, srv := range servers {
+			go func(srv *Server) { errs <- srv.Start() }(srv)
+		}
+		for range servers {
+			require.NoError(t, <-errs)
+		}
+		for _, srv := range servers {
+			assert.NoError(t, srv.Stop())
+		}
+	})
+
+	t.Run("a released port can be taken before Start", func(t *testing.T) {
+		// Models the old reserve-then-release helper: the port is freed, another
+		// process binds it, and Start then fails. An injected listener cannot
+		// lose this race because the port is never released.
+		released, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := released.Addr().String()
+		require.NoError(t, released.Close())
+		thief, err := net.Listen("tcp", addr)
+		require.NoError(t, err)
+		defer func() { _ = thief.Close() }()
+
+		srv := setupTestServer(t)
+		srv.cfg.Certificate.EnableCertManagement = true
+		srv.certManager = certMgr
+		srv.cfg.MetricsListenAddr = addr
+		require.ErrorContains(t, srv.Start(), "bind private metrics listener")
+
+		held := bindLoopbackListener(t)
+		_, err = net.Listen("tcp", held.Addr().String())
+		require.Error(t, err, "a held listener's port cannot be taken by another binder")
+	})
+}
+
+func TestAPIServerStart_RejectsInjectedNonPrivateListener(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	l, err := net.Listen("tcp", "0.0.0.0:0")
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+
+	srv := setupTestServer(t)
+	srv.SetMetricsListener(l)
+
+	require.ErrorContains(t, srv.Start(), "invalid private metrics listener")
+	assert.Nil(t, srv.httpServer)
 }
 
 func TestAPIServerStart_FailsClosedWithoutPrivateMetricsListener(t *testing.T) {
