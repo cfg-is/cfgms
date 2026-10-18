@@ -31,4 +31,6 @@ type Neighborhood struct {
 	Root  EID
 	Nodes []*Entity
 	Edges []*Edge
+	// Truncated is true when the walk stopped at the node or edge cap.
+	Truncated bool
 }

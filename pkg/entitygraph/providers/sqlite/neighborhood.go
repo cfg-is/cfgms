@@ -5,7 +5,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -16,11 +15,15 @@ import (
 const (
 	neighborhoodMaxDepth     = 3
 	neighborhoodDefaultDepth = 2
+	// neighborhoodChunk caps the IN-list length of one query so a large frontier
+	// never reaches a driver variable limit.
+	neighborhoodChunk = 500
 )
 
 // GetNeighborhood returns a depth-bounded connected subgraph starting at eid.
-// The implicit tenant filter is the root entity's current owning_tenant: at every
-// hop, both edge endpoints must be in the root entity's tenant subtree (ADR-023 §4).
+// The tenant filter is the caller's authorized cut, not the root entity's tenant
+// (a placeholder root has none): at every hop, both edge endpoints must be inside
+// it (ADR-023 §4).
 //
 // depth ≤ 0 is treated as the contract default (2).
 // depth > 3 is rejected with an error per the access contract.
@@ -30,6 +33,7 @@ func (p *SQLiteEntityGraphProvider) GetNeighborhood(
 	edgeTypes []string,
 	direction types.TraversalDirection,
 	depth int,
+	cut interfaces.TenantCut,
 ) (*types.Neighborhood, error) {
 	if depth > neighborhoodMaxDepth {
 		return nil, fmt.Errorf("entitygraph/sqlite: depth %d exceeds maximum %d", depth, neighborhoodMaxDepth)
@@ -38,66 +42,122 @@ func (p *SQLiteEntityGraphProvider) GetNeighborhood(
 		depth = neighborhoodDefaultDepth
 	}
 
-	// Derive implicit tenant filter from the root entity's current owning_tenant.
-	// GetNeighborhood carries no resolved descendant set, so the cut is the root's
-	// own tenant only: an edge to a descendant tenant's entity is not followed
-	// (fail closed) rather than matched by a tenant-ID string prefix.
-	var tenantFilter string
-	_ = p.db.QueryRowContext(ctx,
-		`SELECT owning_tenant FROM eg_entity_index WHERE subject = ?`, eid.String(),
-	).Scan(&tenantFilter)
-
-	// BFS over the edge projection.
+	// BFS over the edge projection, bounded in nodes and in projection rows.
 	type edgeKey struct{ from, to, edgeType string }
 	edgeMap := make(map[edgeKey]*types.Edge)
+	var edgeOrder []*types.Edge
+	seenRows := make(map[[4]string]struct{})
+	rowCount := 0
+	truncated := false
 	visited := map[string]bool{eid.String(): true}
+	order := []string{eid.String()}
 	frontier := []string{eid.String()}
 
+walk:
 	for hop := 0; hop < depth && len(frontier) > 0; hop++ {
-		hopEdges, err := p.queryNeighborhoodEdges(ctx, frontier, edgeTypes, direction, interfaces.NewTenantCut(tenantFilter, nil))
-		if err != nil {
-			return nil, err
-		}
-
 		var nextFrontier []string
-		for _, e := range hopEdges {
-			k := edgeKey{from: e.From.String(), to: e.To.String(), edgeType: e.Type}
-			if existing, ok := edgeMap[k]; ok {
-				existing.Sources = append(existing.Sources, e.Sources...)
-			} else {
-				edgeMap[k] = e
+		for start := 0; start < len(frontier); start += neighborhoodChunk {
+			chunk := frontier[start:min(start+neighborhoodChunk, len(frontier))]
+			remaining := interfaces.MaxNeighborhoodEdges - rowCount
+			hopEdges, err := p.queryNeighborhoodEdges(ctx, chunk, edgeTypes, direction, cut, remaining+1)
+			if err != nil {
+				return nil, err
 			}
-
-			// Determine the peer node relative to what we traversed from.
-			peer := peerSubject(e, frontier, direction)
-			if peer != "" && !visited[peer] {
-				visited[peer] = true
-				nextFrontier = append(nextFrontier, peer)
+			for _, e := range hopEdges {
+				if rowCount >= interfaces.MaxNeighborhoodEdges {
+					truncated = true
+					break walk
+				}
+				// Determine the peer node relative to what we traversed from.
+				peer := peerSubject(e, chunk, direction)
+				if peer != "" && !visited[peer] {
+					if len(visited) >= interfaces.MaxNeighborhoodNodes {
+						truncated = true
+						continue
+					}
+					visited[peer] = true
+					order = append(order, peer)
+					nextFrontier = append(nextFrontier, peer)
+				}
+				// A projection row can come back from two chunks, or again on a
+				// later hop; it counts and merges once.
+				rk := [4]string{e.From.String(), e.To.String(), e.Type, e.Sources[0].Source}
+				if _, dup := seenRows[rk]; dup {
+					continue
+				}
+				seenRows[rk] = struct{}{}
+				rowCount++
+				k := edgeKey{from: e.From.String(), to: e.To.String(), edgeType: e.Type}
+				if existing, ok := edgeMap[k]; ok {
+					existing.Sources = append(existing.Sources, e.Sources...)
+				} else {
+					edgeMap[k] = e
+					edgeOrder = append(edgeOrder, e)
+				}
 			}
 		}
 		frontier = nextFrontier
 	}
 
-	// Collect unique edges.
-	edges := make([]*types.Edge, 0, len(edgeMap))
-	for _, e := range edgeMap {
-		edges = append(edges, e)
+	// Only edges with both endpoints in the returned node set survive: an edge to
+	// a peer dropped at the node cap, or visited via the other direction, is out.
+	edges := make([]*types.Edge, 0, len(edgeOrder))
+	for _, e := range edgeOrder {
+		if visited[e.From.String()] && visited[e.To.String()] {
+			edges = append(edges, e)
+		}
 	}
 
-	// Collect node entities for all visited subjects.
-	nodes := make([]*types.Entity, 0, len(visited))
-	for subject := range visited {
+	nodes, err := p.loadNeighborhoodNodes(ctx, order)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.Neighborhood{Root: eid, Nodes: nodes, Edges: edges, Truncated: truncated}, nil
+}
+
+// loadNeighborhoodNodes loads the kind and owning tenant of every subject in
+// batched IN queries of at most neighborhoodChunk subjects, in subjects order.
+func (p *SQLiteEntityGraphProvider) loadNeighborhoodNodes(ctx context.Context, subjects []string) ([]*types.Entity, error) {
+	type indexRow struct{ kind, tenant string }
+	index := make(map[string]indexRow, len(subjects))
+	for start := 0; start < len(subjects); start += neighborhoodChunk {
+		chunk := subjects[start:min(start+neighborhoodChunk, len(subjects))]
+		args := make([]interface{}, len(chunk))
+		for i, s := range chunk {
+			args[i] = s
+		}
+		// #nosec G202 -- the IN list is generated ? placeholders only; every
+		// subject is bound through args.
+		rows, err := p.db.QueryContext(ctx,
+			`SELECT subject, entity_kind, owning_tenant FROM eg_entity_index WHERE subject IN `+inPlaceholders(len(chunk)), args...)
+		if err != nil {
+			return nil, fmt.Errorf("entitygraph/sqlite: load nodes: %w", err)
+		}
+		for rows.Next() {
+			var subject string
+			var r indexRow
+			if err := rows.Scan(&subject, &r.kind, &r.tenant); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("entitygraph/sqlite: scan node: %w", err)
+			}
+			index[subject] = r
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("entitygraph/sqlite: iterate nodes: %w", err)
+		}
+		_ = rows.Close()
+	}
+
+	nodes := make([]*types.Entity, 0, len(subjects))
+	for _, subject := range subjects {
 		entityEID, err := types.ParseEID(subject)
 		if err != nil {
 			continue
 		}
-		var kind, tenant string
-		err = p.db.QueryRowContext(ctx,
-			`SELECT entity_kind, owning_tenant FROM eg_entity_index WHERE subject = ?`, subject,
-		).Scan(&kind, &tenant)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("entitygraph/sqlite: load node %s: %w", subject, err)
-		}
+		r := index[subject]
+		kind := r.kind
 		if kind == "" {
 			kind = entityEID.AuthorityType()
 		}
@@ -105,11 +165,10 @@ func (p *SQLiteEntityGraphProvider) GetNeighborhood(
 			EID:          entityEID,
 			Kind:         kind,
 			Attributes:   map[string]interface{}{},
-			OwningTenant: tenant,
+			OwningTenant: r.tenant,
 		})
 	}
-
-	return &types.Neighborhood{Root: eid, Nodes: nodes, Edges: edges}, nil
+	return nodes, nil
 }
 
 // queryNeighborhoodEdges returns all edges connected to any entity in the
@@ -122,6 +181,7 @@ func (p *SQLiteEntityGraphProvider) queryNeighborhoodEdges(
 	edgeTypes []string,
 	direction types.TraversalDirection,
 	cut interfaces.TenantCut,
+	limit int,
 ) ([]*types.Edge, error) {
 	if len(frontier) == 0 {
 		return nil, nil
@@ -172,7 +232,8 @@ func (p *SQLiteEntityGraphProvider) queryNeighborhoodEdges(
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject
 		  LEFT JOIN eg_entity_index ti ON ti.subject = ep.to_subject
-		  WHERE ` + strings.Join(conds, " AND ")
+		  WHERE ` + strings.Join(conds, " AND ") + " ORDER BY ep.edge_key LIMIT ?"
+	args = append(args, limit)
 
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {

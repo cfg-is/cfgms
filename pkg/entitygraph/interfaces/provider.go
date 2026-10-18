@@ -38,10 +38,29 @@ var ErrNotFound = errors.New("entitygraph: not found")
 // exactly this size succeeds; one more member is ErrCollapseGroupTooLarge.
 const MaxCollapseGroupMembers = 256
 
+// MaxNeighborhoodNodes bounds a GetNeighborhood result: the most nodes, root
+// included, a walk returns. Reaching it stops the walk and sets Truncated.
+const MaxNeighborhoodNodes = 1000
+
+// MaxNeighborhoodEdges bounds a GetNeighborhood result, counted in edge
+// projection rows (a merged Edge carries one Source per row). Reaching it stops
+// the walk and sets Truncated.
+const MaxNeighborhoodEdges = 5000
+
+// MaxTimelineEvents bounds a timeline read. A provider returns at most
+// MaxTimelineEvents+1 events, newest kept; the extra event signals truncation
+// and the caller trims it.
+const MaxTimelineEvents = 1000
+
+// CollapseAsOfWalkBudget is the wall-clock budget of the as-of same-as group
+// walk. Past it the walk fails with ErrCollapseGroupTooLarge.
+const CollapseAsOfWalkBudget = 3 * time.Second
+
 // ErrCollapseGroupTooLarge is returned by GetEntity with CollapseGroup set when
-// the same-as group reachable inside the caller's tenant cut has more than
-// MaxCollapseGroupMembers members. The result is an error, never a truncated
-// group: a partial merge would silently drop attributes and conflicts.
+// the same-as group reachable inside the caller's tenant cut is too large or too
+// expensive to collapse: it has more than MaxCollapseGroupMembers members, or the
+// as-of walk exceeded CollapseAsOfWalkBudget. The result is an error, never a
+// truncated group: a partial merge would silently drop attributes and conflicts.
 var ErrCollapseGroupTooLarge = errors.New("entitygraph: collapse group too large")
 
 // EIDRef is an alias for types.EID so callers can import only this package.
@@ -321,8 +340,12 @@ type EntityGraphProvider interface {
 	GetEdges(ctx context.Context, filter EdgeFilter) ([]*EdgeView, error)
 
 	// GetNeighborhood returns a depth-bounded connected subgraph starting at eid.
-	// depth must be ≤3 per the access contract.
-	GetNeighborhood(ctx context.Context, eid EIDRef, edgeTypes []string, direction types.TraversalDirection, depth int) (*types.Neighborhood, error)
+	// depth must be ≤3 per the access contract. cut is the caller's authorized
+	// tenant cut, never derived from the root entity (a placeholder root has no
+	// owning tenant): at every hop both edge endpoints must be inside it. An
+	// inactive cut is the caller's explicit unrestricted (root) scope; a caller
+	// with no resolvable scope must be refused before this call.
+	GetNeighborhood(ctx context.Context, eid EIDRef, edgeTypes []string, direction types.TraversalDirection, depth int, cut TenantCut) (*types.Neighborhood, error)
 
 	// GetHistory returns the versioned observation log for a subject over a time range.
 	GetHistory(ctx context.Context, eid EIDRef, r TimeRange) ([]*ObservationRecord, error)
@@ -330,7 +353,9 @@ type EntityGraphProvider interface {
 	// Diff returns the attribute delta between two points in time for a subject.
 	Diff(ctx context.Context, eid EIDRef, r TimeRange) (*StateDiff, error)
 
-	// GetTimeline returns a merged change-event stream for the given subjects.
+	// GetTimeline returns a merged change-event stream for the given subjects,
+	// oldest first. It returns at most MaxTimelineEvents+1 events (the newest);
+	// the extra event signals truncation.
 	GetTimeline(ctx context.Context, eids []EIDRef, r TimeRange) ([]*TimelineEvent, error)
 
 	// ListDrifted returns entities with active drift matching the filter.

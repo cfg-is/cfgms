@@ -74,6 +74,12 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("DesiredStateIsolation", func(t *testing.T) { testEGDesiredStateIsolation(t, factory) })         // AC 5 (isolation)
 	// Issue #3375: apply-outcome observations are log-only event records.
 	t.Run("ApplyOutcomeIsolation", func(t *testing.T) { testEGApplyOutcomeIsolation(t, factory) })
+	// Issue #5170: read-side walk caps
+	t.Run("NeighborhoodNodeCap", func(t *testing.T) { testEGNeighborhoodNodeCap(t, factory) })
+	t.Run("NeighborhoodEdgeCap", func(t *testing.T) { testEGNeighborhoodEdgeCap(t, factory) })
+	t.Run("NeighborhoodPlaceholderRootCut", func(t *testing.T) { testEGNeighborhoodPlaceholderRootCut(t, factory) })
+	t.Run("TimelineSameAsCaseExact", func(t *testing.T) { testEGTimelineSameAsCaseExact(t, factory) })
+	t.Run("TimelineEventCap", func(t *testing.T) { testEGTimelineEventCap(t, factory) })
 	// Story-6: temporal reads + same-as collapse-group (Issue #2876)
 	t.Run("HistoryDiffCorrectness", func(t *testing.T) { testEGHistoryDiffCorrectness(t, factory) })         // AC 1
 	t.Run("TimelineMultiSubject", func(t *testing.T) { testEGTimelineMultiSubject(t, factory) })             // AC 2
@@ -907,18 +913,18 @@ func testEGNeighborhoodDepthCap(t *testing.T, factory EntityGraphProviderFactory
 	})
 
 	// depth ≤ 0 → default depth 2: must not error.
-	n, err := p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 0)
+	n, err := p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 0, interfaces.TenantCut{})
 	require.NoError(t, err, "depth=0 (default) must not error")
 	require.NotNil(t, n)
 	assert.Equal(t, eid.String(), n.Root.String())
 
 	// depth=3 (maximum): must not error.
-	n, err = p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 3)
+	n, err = p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 3, interfaces.TenantCut{})
 	require.NoError(t, err, "depth=3 (contract max) must not error")
 	require.NotNil(t, n)
 
 	// depth=4 (exceeds maximum): must be rejected with an error.
-	_, err = p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 4)
+	_, err = p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 4, interfaces.TenantCut{})
 	require.Error(t, err, "depth=4 must be rejected")
 }
 
@@ -952,7 +958,7 @@ func testEGNeighborhoodTenantPerHop(t *testing.T, factory EntityGraphProviderFac
 	// Same-tenant edge: root → inEID.
 	egReportEdge(ctx, t, p, "observer:scan", rootEID.String(), inEID.String(), "contains")
 
-	n, err := p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1)
+	n, err := p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1, interfaces.NewTenantCut("root/nhop-tenant", nil))
 	require.NoError(t, err)
 	require.NotNil(t, n)
 
@@ -978,7 +984,7 @@ func testEGNeighborhoodTenantPerHop(t *testing.T, factory EntityGraphProviderFac
 	egReportEdge(ctx, t, p, "observer:scan", rootEID.String(), movedEID.String(), "contains")
 
 	// Before move: edge is visible (movedEID is in-subtree).
-	n, err = p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1)
+	n, err = p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1, interfaces.NewTenantCut("root/nhop-tenant", nil))
 	require.NoError(t, err)
 	var movedVisible bool
 	for _, e := range n.Edges {
@@ -994,7 +1000,7 @@ func testEGNeighborhoodTenantPerHop(t *testing.T, factory EntityGraphProviderFac
 	})
 
 	// After move: edge must be excluded via current-ownership check.
-	n, err = p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1)
+	n, err = p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1, interfaces.NewTenantCut("root/nhop-tenant", nil))
 	require.NoError(t, err)
 	for _, e := range n.Edges {
 		assert.NotEqual(t, movedEID.String(), e.To.String(),
@@ -2610,7 +2616,7 @@ func testEGTenantSubtreeIDs(t *testing.T, factory EntityGraphProviderFactory) {
 	// Neighborhood derives its cut from the root's own tenant and carries no
 	// resolved set, so only same-tenant neighbours are followed.
 	t.Run("NeighborhoodIsExactTenantOnly", func(t *testing.T) {
-		n, err := p.GetNeighborhood(ctx, own, nil, types.TraversalOutbound, 1)
+		n, err := p.GetNeighborhood(ctx, own, nil, types.TraversalOutbound, 1, interfaces.NewTenantCut("msp-a", nil))
 		require.NoError(t, err)
 		assert.Empty(t, n.Edges, "no neighbour shares the root's own tenant")
 	})
@@ -2759,7 +2765,7 @@ func (n *noopProvider) QueryEntities(_ context.Context, _ interfaces.EntityFilte
 func (n *noopProvider) GetEdges(_ context.Context, _ interfaces.EdgeFilter) ([]*interfaces.EdgeView, error) {
 	return nil, interfaces.ErrNotImplemented
 }
-func (n *noopProvider) GetNeighborhood(_ context.Context, _ interfaces.EIDRef, _ []string, _ types.TraversalDirection, _ int) (*types.Neighborhood, error) {
+func (n *noopProvider) GetNeighborhood(_ context.Context, _ interfaces.EIDRef, _ []string, _ types.TraversalDirection, _ int, _ interfaces.TenantCut) (*types.Neighborhood, error) {
 	return nil, interfaces.ErrNotImplemented
 }
 func (n *noopProvider) GetHistory(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
@@ -3067,4 +3073,206 @@ func testEGTimelineSameAsTenantCut(t *testing.T, factory EntityGraphProviderFact
 	require.Len(t, got, 1, "the cross-tenant same-as event must not appear in the other tenant's timeline")
 	assert.Contains(t, got[0], inCut.String())
 	assert.NotContains(t, got[0], outCut.String())
+}
+
+// egReportBatches ingests observations in batches of 500 so a large seed does
+// not depend on a provider batch limit.
+func egReportBatches(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, obs []types.Observation) {
+	t.Helper()
+	const size = 500
+	for start := 0; start < len(obs); start += size {
+		end := min(start+size, len(obs))
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source:       obs[start].Source,
+			Observations: obs[start:end],
+		}))
+	}
+}
+
+// egSeedNeighbors reports a root and n neighbors in one tenant, each linked to
+// the root by a "contains" edge, and returns the root.
+func egSeedNeighbors(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, authority string, n int) interfaces.EIDRef {
+	t.Helper()
+	root := egEID(t, fmt.Sprintf("host:%s/root", authority))
+	now := time.Now().UTC()
+	payload := func() map[string]interface{} {
+		return map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/" + authority}
+	}
+	obs := []types.Observation{egObservation(root.String(), "observer:scan", now, payload())}
+	for i := 0; i < n; i++ {
+		peer := fmt.Sprintf("host:%s/n%05d", authority, i)
+		obs = append(obs,
+			egObservation(peer, "observer:scan", now, payload()),
+			egObservation("contains|"+root.String()+"|"+peer, "observer:scan", now, map[string]interface{}{}),
+		)
+	}
+	egReportBatches(ctx, t, p, obs)
+	return root
+}
+
+func egNodeSet(n *types.Neighborhood) map[string]struct{} {
+	set := make(map[string]struct{}, len(n.Nodes))
+	for _, node := range n.Nodes {
+		set[node.EID.String()] = struct{}{}
+	}
+	return set
+}
+
+// testEGNeighborhoodNodeCap verifies the node cap: over the cap the walk stops at
+// MaxNeighborhoodNodes, flags Truncated and returns no dangling edge; just under
+// the cap everything comes back (Issue #5170).
+func testEGNeighborhoodNodeCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	p := factory(t)
+	root := egSeedNeighbors(ctx, t, p, "ncap-over", interfaces.MaxNeighborhoodNodes+50)
+	n, err := p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1, interfaces.TenantCut{})
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(n.Nodes), interfaces.MaxNeighborhoodNodes)
+	assert.True(t, n.Truncated, "a walk past the node cap must be flagged truncated")
+	nodes := egNodeSet(n)
+	assert.Contains(t, nodes, root.String(), "the root always counts")
+	for _, e := range n.Edges {
+		assert.Contains(t, nodes, e.From.String())
+		assert.Contains(t, nodes, e.To.String())
+	}
+
+	p = factory(t)
+	root = egSeedNeighbors(ctx, t, p, "ncap-under", interfaces.MaxNeighborhoodNodes-1-5)
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1, interfaces.TenantCut{})
+	require.NoError(t, err)
+	assert.Len(t, n.Nodes, interfaces.MaxNeighborhoodNodes-5)
+	assert.Len(t, n.Edges, interfaces.MaxNeighborhoodNodes-1-5)
+	assert.False(t, n.Truncated)
+}
+
+// testEGNeighborhoodEdgeCap verifies the edge cap counts projection rows: many
+// sources for one pair merge into one Edge, yet the Sources total stays capped.
+func testEGNeighborhoodEdgeCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	ctx := context.Background()
+	p := factory(t)
+
+	a := egEID(t, "host:ecap/a")
+	b := egEID(t, "host:ecap/b")
+	now := time.Now().UTC()
+	payload := map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/ecap"}
+	egReportBatches(ctx, t, p, []types.Observation{
+		egObservation(a.String(), "observer:scan", now, payload),
+		egObservation(b.String(), "observer:scan", now, payload),
+	})
+	edgeSubject := "contains|" + a.String() + "|" + b.String()
+	var edgeObs []types.Observation
+	for i := 0; i < interfaces.MaxNeighborhoodEdges+20; i++ {
+		edgeObs = append(edgeObs, egObservation(edgeSubject, fmt.Sprintf("observer:src%05d", i), now, map[string]interface{}{}))
+	}
+	egReportBatches(ctx, t, p, edgeObs)
+
+	n, err := p.GetNeighborhood(ctx, a, nil, types.TraversalOutbound, 1, interfaces.TenantCut{})
+	require.NoError(t, err)
+	assert.True(t, n.Truncated)
+	total := 0
+	for _, e := range n.Edges {
+		total += len(e.Sources)
+	}
+	assert.LessOrEqual(t, total, interfaces.MaxNeighborhoodEdges)
+	assert.Positive(t, total)
+}
+
+// testEGTimelineEventCap verifies a timeline over a few entities returns at most
+// MaxTimelineEvents+1 events, the newest.
+func testEGTimelineEventCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	ctx := context.Background()
+	p := factory(t)
+
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	eids := []interfaces.EIDRef{egEID(t, "host:tcap/h1"), egEID(t, "host:tcap/h2"), egEID(t, "host:tcap/h3")}
+	per := interfaces.MaxTimelineEvents/2 + 100
+	var obs []types.Observation
+	for i := 0; i < per; i++ {
+		for _, eid := range eids {
+			at := t0.Add(time.Duration(i) * time.Millisecond)
+			obs = append(obs, egObservation(eid.String(), "observer:scan", at, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": "root/tcap", "seq": i,
+			}))
+		}
+	}
+	egReportBatches(ctx, t, p, obs)
+
+	events, err := p.GetTimeline(ctx, eids, interfaces.TimeRange{From: t0.Add(-time.Minute), To: time.Now().UTC().Add(time.Minute)})
+	require.NoError(t, err)
+	assert.Len(t, events, interfaces.MaxTimelineEvents+1)
+	for i := 1; i < len(events); i++ {
+		assert.False(t, events[i].OccurredAt.Before(events[i-1].OccurredAt))
+	}
+	// The newest event survives the cut.
+	last := events[len(events)-1]
+	assert.Equal(t, t0.Add(time.Duration(per-1)*time.Millisecond).UnixMilli(), last.OccurredAt.UnixMilli())
+}
+
+// testEGNeighborhoodPlaceholderRootCut verifies the neighborhood cut comes from
+// the caller's scope, not the root entity: a placeholder root (no entity row, so
+// no owning tenant) in tenant A must not reach tenant B's entities.
+func testEGNeighborhoodPlaceholderRootCut(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	root := egEID(t, "host:phcut-auth/root")
+	inA := egEID(t, "host:phcut-auth/in-a")
+	inB := egEID(t, "host:phcut-auth/in-b")
+	egReport(ctx, t, p, "observer:scan", inA.String(), map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/phcut-a"})
+	egReport(ctx, t, p, "observer:scan", inB.String(), map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/phcut-b"})
+	egReportEdge(ctx, t, p, "observer:scan", root.String(), inA.String(), "contains")
+	egReportEdge(ctx, t, p, "observer:scan", root.String(), inB.String(), "contains")
+
+	n, err := p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1, interfaces.NewTenantCut("root/phcut-a", nil))
+	require.NoError(t, err)
+	for _, e := range n.Edges {
+		assert.NotEqual(t, inB.String(), e.To.String(), "tenant B's entity must not be reached from tenant A's scope")
+	}
+	for _, node := range n.Nodes {
+		assert.NotEqual(t, inB.String(), node.EID.String())
+	}
+}
+
+// testEGTimelineSameAsCaseExact verifies the same-as timeline match is exact and
+// case-sensitive: another tenant's eid that differs only in case contributes no
+// event to the caller's timeline.
+func testEGTimelineSameAsCaseExact(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	mine := egEID(t, "host:tlcase-auth/head")
+	other := egEID(t, "host:tlcase-auth/HEAD")
+	peerMine := egEID(t, "host:tlcase-auth/peer-mine")
+	peerOther := egEID(t, "host:tlcase-auth/peer-other")
+	for eid, tenant := range map[string]string{
+		mine.String(): "root/tlcase-a", peerMine.String(): "root/tlcase-a",
+		// The peer is inside the caller's cut: only the matched endpoint is foreign.
+		other.String(): "root/tlcase-b", peerOther.String(): "root/tlcase-a",
+	} {
+		egReport(ctx, t, p, "operator-assertion:admin", eid, map[string]interface{}{"entity_kind": "host", "owning_tenant": tenant})
+	}
+	egReportEdge(ctx, t, p, "operator-assertion:admin", mine.String(), peerMine.String(), "same-as")
+	egReportEdge(ctx, t, p, "operator-assertion:admin", other.String(), peerOther.String(), "same-as")
+	egReportEdge(ctx, t, p, "operator-assertion:admin", peerOther.String(), other.String(), "same-as")
+
+	tr := interfaces.TimeRange{
+		From: time.Now().UTC().Add(-time.Minute), To: time.Now().UTC().Add(time.Minute),
+		TenantFilter: "root/tlcase-a",
+	}
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{mine}, tr)
+	require.NoError(t, err)
+	var got []string
+	for _, e := range events {
+		if e.Kind == "same-as-change" {
+			got = append(got, e.Detail["edge_subject"].(string))
+		}
+	}
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], peerMine.String())
 }

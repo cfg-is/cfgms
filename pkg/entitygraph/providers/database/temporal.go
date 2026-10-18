@@ -127,8 +127,9 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			  AND l.kind IN ('state', 'absence', 'apply-outcome')
 			  AND l.observed_at >= $2
 			  AND l.observed_at <= $3
-			ORDER BY l.id ASC`,
-			subject, fromStr, toStr,
+			ORDER BY l.id DESC
+			LIMIT $4`,
+			subject, fromStr, toStr, interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: timeline scan for %s: %w", subject, err)
@@ -177,10 +178,11 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			WHERE (l.subject LIKE $1 ESCAPE '\' OR l.subject LIKE $2 ESCAPE '\')
 			  AND l.observed_at >= $3
 			  AND l.observed_at <= $4
-			ORDER BY l.id ASC`,
+			ORDER BY l.id DESC
+			LIMIT $5`,
 			"same-as|"+escapeLIKE(subject)+"|%",
 			"same-as|%|"+escapeLIKE(subject),
-			fromStr, toStr,
+			fromStr, toStr, interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: timeline same-as scan for %s: %w", subject, err)
@@ -197,6 +199,10 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			}
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
 			_, fromSubj, toSubj, _ := parseEdgeSubject(edgeSubject)
+			// Only an edge with the subject itself as an endpoint belongs here.
+			if fromSubj != subject && toSubj != subject {
+				continue
+			}
 			peer := fromSubj
 			if fromSubj == subject {
 				peer = toSubj
@@ -222,9 +228,17 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 		_ = saRows.Close()
 
 		// The correlator writes cross-tenant same-as edges by design; an event
-		// carries both ends, so it is dropped unless the peer is inside the cut. The
-		// check runs after the rows are closed so it never holds a second connection.
+		// carries both ends, so it is dropped unless the matched endpoint and the
+		// peer are both inside the cut. The checks run after the rows are closed so
+		// they never hold a second connection.
+		selfVisible, err := p.subjectVisible(ctx, cut, subject)
+		if err != nil {
+			return nil, err
+		}
 		for i, ev := range saEvents {
+			if !selfVisible {
+				break
+			}
 			visible, err := p.subjectVisible(ctx, cut, saPeers[i])
 			if err != nil {
 				return nil, err
@@ -233,19 +247,12 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 				events = append(events, ev)
 			}
 		}
+
+		// Keep only the newest events so memory stays bounded across subjects.
+		events = newestTimelineEvents(events)
 	}
 
-	// Merge all events into a single time-ordered stream.
-	sort.SliceStable(events, func(i, j int) bool {
-		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
-			vi, _ := events[i].Detail["version"].(int64)
-			vj, _ := events[j].Detail["version"].(int64)
-			return vi < vj
-		}
-		return events[i].OccurredAt.Before(events[j].OccurredAt)
-	})
-
-	return events, nil
+	return newestTimelineEvents(events), nil
 }
 
 // subjectVisible reports whether subject is owned inside cut. It is true for an
@@ -266,4 +273,22 @@ func (p *DatabaseEntityGraphProvider) subjectVisible(ctx context.Context, cut in
 		return false, fmt.Errorf("entitygraph/database: timeline tenant cut for %s: %w", subject, err)
 	}
 	return cut.Visible(owningTenant), nil
+}
+
+// newestTimelineEvents orders events oldest first and keeps the newest
+// MaxTimelineEvents+1 of them; the extra event tells the caller the stream was
+// cut.
+func newestTimelineEvents(events []*interfaces.TimelineEvent) []*interfaces.TimelineEvent {
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
+			vi, _ := events[i].Detail["version"].(int64)
+			vj, _ := events[j].Detail["version"].(int64)
+			return vi < vj
+		}
+		return events[i].OccurredAt.Before(events[j].OccurredAt)
+	})
+	if len(events) > interfaces.MaxTimelineEvents+1 {
+		events = events[len(events)-(interfaces.MaxTimelineEvents+1):]
+	}
+	return events
 }

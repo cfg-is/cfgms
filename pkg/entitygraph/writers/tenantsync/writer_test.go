@@ -170,7 +170,7 @@ func TestAC3_MultiLevelTraversal(t *testing.T) {
 	grandchildEID := tenantEID(t, "grandchild")
 
 	// Traverse from root with depth 3 to reach grandchild.
-	hood, err := eg.GetNeighborhood(ctx, rootEID, []string{"contains"}, types.TraversalOutbound, 3)
+	hood, err := eg.GetNeighborhood(ctx, rootEID, []string{"contains"}, types.TraversalOutbound, 3, interfaces.TenantCut{})
 	require.NoError(t, err)
 	require.NotNil(t, hood)
 
@@ -286,7 +286,7 @@ func TestAC5_HierarchicalTenantIDs(t *testing.T) {
 	require.Equal(t, clientEID.String(), mspEdges[0].Edge.To.String())
 
 	// The full path is traversable.
-	hood, err := eg.GetNeighborhood(ctx, rootEID, []string{"contains"}, types.TraversalOutbound, 3)
+	hood, err := eg.GetNeighborhood(ctx, rootEID, []string{"contains"}, types.TraversalOutbound, 3, interfaces.TenantCut{})
 	require.NoError(t, err)
 	reachable := make(map[string]bool)
 	for _, n := range hood.Nodes {

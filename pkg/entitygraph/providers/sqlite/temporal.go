@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 )
@@ -236,8 +237,9 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 			  AND l.kind IN ('state', 'absence', 'apply-outcome')
 			  AND l.observed_at >= ?
 			  AND l.observed_at <= ?
-			ORDER BY l.id ASC`,
-			subject, rfc3339(r.From), rfc3339(r.To),
+			ORDER BY l.id DESC
+			LIMIT ?`,
+			subject, rfc3339(r.From), rfc3339(r.To), interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/sqlite: timeline scan for %s: %w", subject, err)
@@ -278,16 +280,22 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 		_ = srows.Close()
 
 		// Same-as edge observations involving this subject (group-membership changes).
+		// The match is exact and case-sensitive (SQLite LIKE folds case, which would
+		// match another tenant's eid differing only in case), so it compares the
+		// subject's own text with substr.
+		sameAsPrefix := "same-as|" + subject + "|"
+		sameAsSuffix := "|" + subject
 		saRows, err := p.db.QueryContext(ctx, `
 			SELECT l.id, l.observed_at, l.kind, l.subject
 			FROM eg_observation_log l
-			WHERE (l.subject LIKE ? ESCAPE '\' OR l.subject LIKE ? ESCAPE '\')
+			WHERE ((substr(l.subject, 1, ?) = ?) OR (substr(l.subject, 1, 8) = 'same-as|' AND substr(l.subject, -?) = ?))
 			  AND l.observed_at >= ?
 			  AND l.observed_at <= ?
-			ORDER BY l.id ASC`,
-			"same-as|"+escapeLIKE(subject)+"|%",
-			"same-as|%|"+escapeLIKE(subject),
-			rfc3339(r.From), rfc3339(r.To),
+			ORDER BY l.id DESC
+			LIMIT ?`,
+			utf8.RuneCountInString(sameAsPrefix), sameAsPrefix,
+			utf8.RuneCountInString(sameAsSuffix), sameAsSuffix,
+			rfc3339(r.From), rfc3339(r.To), interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/sqlite: timeline same-as scan for %s: %w", subject, err)
@@ -304,6 +312,10 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 			}
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
 			_, fromSubj, toSubj, _ := parseEdgeSubject(edgeSubject)
+			// Only an edge with the subject itself as an endpoint belongs here.
+			if fromSubj != subject && toSubj != subject {
+				continue
+			}
 			peer := fromSubj
 			if fromSubj == subject {
 				peer = toSubj
@@ -329,9 +341,17 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 		_ = saRows.Close()
 
 		// The correlator writes cross-tenant same-as edges by design; an event
-		// carries both ends, so it is dropped unless the peer is inside the cut. The
-		// check runs after the rows are closed so it never holds a second connection.
+		// carries both ends, so it is dropped unless the matched endpoint and the
+		// peer are both inside the cut. The checks run after the rows are closed so
+		// they never hold a second connection.
+		selfVisible, err := p.subjectVisible(ctx, cut, subject)
+		if err != nil {
+			return nil, err
+		}
 		for i, ev := range saEvents {
+			if !selfVisible {
+				break
+			}
 			visible, err := p.subjectVisible(ctx, cut, saPeers[i])
 			if err != nil {
 				return nil, err
@@ -340,19 +360,12 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 				events = append(events, ev)
 			}
 		}
+
+		// Keep only the newest events so memory stays bounded across subjects.
+		events = newestTimelineEvents(events)
 	}
 
-	// Merge all events into a single time-ordered stream.
-	sort.SliceStable(events, func(i, j int) bool {
-		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
-			vi, _ := events[i].Detail["version"].(int64)
-			vj, _ := events[j].Detail["version"].(int64)
-			return vi < vj
-		}
-		return events[i].OccurredAt.Before(events[j].OccurredAt)
-	})
-
-	return events, nil
+	return newestTimelineEvents(events), nil
 }
 
 // subjectVisible reports whether subject is owned inside cut. It is true for an
@@ -373,4 +386,22 @@ func (p *SQLiteEntityGraphProvider) subjectVisible(ctx context.Context, cut inte
 		return false, fmt.Errorf("entitygraph/sqlite: timeline tenant cut for %s: %w", subject, err)
 	}
 	return cut.Visible(owningTenant), nil
+}
+
+// newestTimelineEvents orders events oldest first and keeps the newest
+// MaxTimelineEvents+1 of them; the extra event tells the caller the stream was
+// cut.
+func newestTimelineEvents(events []*interfaces.TimelineEvent) []*interfaces.TimelineEvent {
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
+			vi, _ := events[i].Detail["version"].(int64)
+			vj, _ := events[j].Detail["version"].(int64)
+			return vi < vj
+		}
+		return events[i].OccurredAt.Before(events[j].OccurredAt)
+	})
+	if len(events) > interfaces.MaxTimelineEvents+1 {
+		events = events[len(events)-(interfaces.MaxTimelineEvents+1):]
+	}
+	return events
 }
