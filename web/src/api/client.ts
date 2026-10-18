@@ -78,6 +78,8 @@ export interface StepUpRequest {
   init: RequestInit
   /** True when WWW-Authenticate: CFGMS-StepUp includes presence="required". */
   presenceRequired: boolean
+  /** Permission ID from the challenge's permission="..." parameter; '' when absent. */
+  permission: string
 }
 
 /**
@@ -252,6 +254,7 @@ export async function apiFetch(
             path,
             init,
             presenceRequired: wwwAuth.includes('presence="required"'),
+            permission: /permission="([^"]*)"/.exec(wwwAuth)?.[1] ?? '',
           })
           // Cap: return whatever the listener resolved (including a failed 401) —
           // never re-enter the step-up handler for this apiFetch call.

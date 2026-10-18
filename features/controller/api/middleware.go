@@ -1897,41 +1897,37 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					return
 				}
 
-				// Action binding (Issue #4287, ADR-021 Amendment 7): a token minted through
-				// the CLI presence relay (handlePresenceFinish's cli_presence_request_id
-				// path) carries the exact method/path/body-hash/permission it was lodged
-				// for. An empty boundPermissionID means the token was minted through the
-				// ordinary browser step-up flow (StepUpModal.tsx), which does not yet
-				// supply a binding — treated as "unbound", today's principal-only
-				// behavior, not rejected. See the ADR-021 amendment for why extending the
-				// binding to that flow too is the recorded default.
-				if record.boundPermissionID != "" {
-					bodyHash, hashErr := hashRequestBodyForPresenceBinding(r)
-					if hashErr != nil {
-						s.logger.Error("Failed to read request body for presence binding check",
-							"error", logging.SanitizeLogValue(hashErr.Error()))
-						s.writeErrorResponse(w, http.StatusInternalServerError,
-							"Failed to verify presence token", "PRESENCE_TOKEN_BINDING_ERROR")
-						return
-					}
-					if record.boundMethod != r.Method || record.boundPath != r.URL.Path ||
-						record.boundBodyHash != bodyHash || record.boundPermissionID != permissionID {
-						s.logger.Warn("Presence token action-binding mismatch",
-							"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),
-							"permission_id", permissionID,
-						)
-						w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
-						w.Header().Set("Content-Type", "application/json")
-						w.WriteHeader(http.StatusUnauthorized)
-						s.encodeJSONBody(w, struct {
-							Error            string `json:"error"`
-							PresenceRequired bool   `json:"presence_required"`
-						}{
-							Error:            "presence_token_action_mismatch",
-							PresenceRequired: true,
-						}, "presence_token_action_mismatch")
-						return
-					}
+				// Action binding (Issues #4287, #5142, ADR-021 Amendment 7): every presence
+				// token carries the exact method/path/body-hash/permission of the one
+				// request its gesture authorized, whether minted through the CLI presence
+				// relay or the browser step-up flow. A token with an empty binding is
+				// refused for every RequireUserPresence permission.
+				bodyHash, hashErr := hashRequestBodyForPresenceBinding(r)
+				if hashErr != nil {
+					s.logger.Error("Failed to read request body for presence binding check",
+						"error", logging.SanitizeLogValue(hashErr.Error()))
+					s.writeErrorResponse(w, http.StatusInternalServerError,
+						"Failed to verify presence token", "PRESENCE_TOKEN_BINDING_ERROR")
+					return
+				}
+				if record.boundPermissionID == "" || record.boundMethod != r.Method ||
+					record.boundPath != canonicalRequestTarget(r.URL.Path, r.URL.RawQuery) || record.boundBodyHash != bodyHash ||
+					record.boundPermissionID != permissionID {
+					s.logger.Warn("Presence token action-binding mismatch",
+						"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),
+						"permission_id", permissionID,
+					)
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_action_mismatch",
+						PresenceRequired: true,
+					}, "presence_token_action_mismatch")
+					return
 				}
 
 				s.logger.Debug("Presence token accepted",

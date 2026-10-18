@@ -59,6 +59,7 @@ const defaultRequest: StepUpRequest = {
   path: '/api/v1/modules/approvals/cfgms:test:1.0.0:AAAA/approve',
   init: { method: 'POST', body: JSON.stringify({ note: 'lgtm' }) },
   presenceRequired: true,
+  permission: 'module:approve',
 }
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -181,6 +182,54 @@ describe('StepUpModal — cancel', () => {
 })
 
 // ── Successful ceremony ───────────────────────────────────────────────────────
+
+describe('StepUpModal — presence action binding (Issue #5142)', () => {
+  it('sends the retried request method, path, body hash and permission to presence/begin', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
+    render(
+      <StepUpModal
+        request={{
+          ...defaultRequest,
+          path: '/api/v1/modules/approvals/x/approve?tenant=t1',
+          init: { method: 'post', body: 'hello' },
+        }}
+        principalUsername={null}
+        onSuccess={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+
+    const beginCall = fetchMock.mock.calls.find(([u]) => String(u).includes('presence/begin'))
+    expect(beginCall).toBeDefined()
+    const sent = JSON.parse(String(beginCall?.[1]?.body)) as Record<string, string>
+    expect(sent).toEqual({
+      method: 'POST',
+      path: '/api/v1/modules/approvals/x/approve?tenant=t1',
+      // SHA-256("hello")
+      body_hash: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+      permission_id: 'module:approve',
+    })
+  })
+
+  it('hashes a bodyless request as the empty string', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
+    render(
+      <StepUpModal
+        request={{ ...defaultRequest, init: { method: 'POST' } }}
+        principalUsername={null}
+        onSuccess={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    const beginCall = fetchMock.mock.calls.find(([u]) => String(u).includes('presence/begin'))
+    const sent = JSON.parse(String(beginCall?.[1]?.body)) as Record<string, string>
+    expect(sent.body_hash).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    )
+  })
+})
 
 describe('StepUpModal — successful assertion', () => {
   it('calls onSuccess with the retry response after full ceremony', async () => {
@@ -388,6 +437,7 @@ const elevationRequest: StepUpRequest = {
   path: '/api/v1/accounts/admin/delete',
   init: { method: 'DELETE' },
   presenceRequired: false,
+  permission: '',
 }
 
 describe('StepUpModal — elevation path (presenceRequired: false)', () => {

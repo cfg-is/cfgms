@@ -410,6 +410,8 @@ func TestWebAuthnCluster_PresenceTokenMintedOnAConsumedOnceOnB(t *testing.T) {
 	token := "cluster-presence-token"
 	require.Equal(t, ceremonyOK, a.putPresenceToken(context.Background(), hashPresenceToken(token), &presenceTokenRecord{
 		principalID: "test-admin", expires: time.Now().Add(presenceTokenTTL),
+		boundMethod: http.MethodPost, boundPath: "/api/v1/test/presence-action",
+		boundBodyHash: emptyBodyHashHex, boundPermissionID: "test:presence-required",
 	}))
 
 	handler := wrapWithAuth(b, "test", "presence-required",
@@ -447,6 +449,21 @@ func TestWebAuthnCluster_PresenceTokenKeepsActionBinding(t *testing.T) {
 	assert.Equal(t, "/x", rec.boundPath)
 	assert.Equal(t, "bh", rec.boundBodyHash)
 	assert.Equal(t, "perm:1", rec.boundPermissionID)
+}
+
+// Issue #5142: the action named at presence/begin on node A survives the shared
+// pending-session store and reaches finish on node B.
+func TestWebAuthnCluster_PresenceSessionKeepsActionBinding(t *testing.T) {
+	f := newClusterFixture(t)
+	a := f.join(setupTestServer(t))
+	b := f.join(setupTestServer(t))
+	action := &presenceActionBinding{Method: "POST", Path: "/x", BodyHash: "bh", PermissionID: "perm:1"}
+	require.Equal(t, ceremonyOK, a.putPendingSession(context.Background(), &a.webAuthnPresenceSessions,
+		ceremonyPrefixPresence, "p", &webAuthnPendingSession{expires: time.Now().Add(time.Minute), binding: "p", action: action},
+		time.Minute))
+	got, out := b.takePendingSession(context.Background(), &b.webAuthnPresenceSessions, ceremonyPrefixPresence, "p")
+	require.Equal(t, ceremonyOK, out)
+	assert.Equal(t, action, got.action)
 }
 
 // --- throttles ---

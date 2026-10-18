@@ -1192,16 +1192,19 @@ action anywhere in the flow. The CLI prints the same permission/method/path rend
 the terminal from its own local values, so the admin compares two independent renderings
 of one binding rather than trusting either side's prose.
 
-Today's tokens minted through the *ordinary* browser step-up flow
-(`StepUpModal.tsx`, Story #2786) stay principal-only — that flow doesn't yet supply a
-binding, so `requirePermission` treats an empty `boundPermissionID` as unbound rather
-than rejecting it, preserving that flow unchanged. **Whether that flow should gain the
-identical binding is a real question this amendment answers: yes, by default** — the
-same malware-swap gap applies to it equally, since it also authorizes a
-`RequireUserPresence` action with only a principal-bound token. Implementing it is
-future work (`StepUpModal.tsx` already knows the exact method/path/body of the
-mutation it's retrying, so the same mechanism applies directly); this amendment
-records the answer so a future change doesn't have to re-litigate it.
+The ordinary browser step-up flow (`StepUpModal.tsx`, Story #2786) carries the
+identical binding (Issue #5142). The malware-swap gap applies to it equally: an
+unbound token authorizes any `RequireUserPresence` action for the same principal
+within its TTL. `StepUpModal.tsx` knows the exact method, path, body and permission of
+the mutation it is about to retry, and names them in the `presence/begin` body
+(`method`, `path`, `body_hash`, `permission_id`). `handlePresenceBegin` stores them with
+the pending ceremony session (cluster-shared like the rest of that session), and
+`handlePresenceFinish` copies them onto the minted `presenceTokenRecord`. A ceremony
+begun without a binding, and not completing a CLI presence request, mints no token.
+`requirePermission` refuses a token with an empty binding for every
+`RequireUserPresence` permission — no code path mints or accepts an unbound presence
+token. Both flows are therefore bound; the only difference is where the binding comes
+from (the CLI's authenticated lodge call, or the browser's own begin request).
 
 **Decision 2 — automation stays out.** `handleLodgeCliPresenceRequest` rejects an
 `AssuranceMachine` (API-key) principal outright (`403 MACHINE_PRINCIPAL_CANNOT_LODGE`).

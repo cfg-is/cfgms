@@ -57,7 +57,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -85,6 +87,50 @@ type webAuthnPendingSession struct {
 	// presence, account ID for first-passkey enrolment). Finish refuses a different
 	// actor. Issue #4527. Empty only for sessions stored without a binding.
 	binding string
+
+	// action is the guarded request a presence ceremony authorizes (Issue #5142,
+	// ADR-021 Amendment 7). Set only by handlePresenceBegin; handlePresenceFinish
+	// copies it onto the minted presenceTokenRecord.
+	action *presenceActionBinding
+}
+
+// presenceActionBinding names the one guarded request a presence token may satisfy.
+type presenceActionBinding struct {
+	Method       string `json:"method"`
+	Path         string `json:"path"`
+	BodyHash     string `json:"body_hash"`
+	PermissionID string `json:"permission_id"`
+}
+
+// canonicalRequestTarget returns the path plus the query string with parameters
+// URL-decoded and sorted by key (values keep their order), so a presence token is
+// bound to the target tenant/resource chosen by query parameters as well as the path.
+func canonicalRequestTarget(path, rawQuery string) string {
+	if rawQuery == "" {
+		return path
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return path + "?" + rawQuery
+	}
+	if len(q) == 0 {
+		return path
+	}
+	return path + "?" + q.Encode()
+}
+
+// canonicalizeBindingTarget canonicalizes a client-supplied request target
+// ("/path?query") with the same form requirePermission computes at use.
+func canonicalizeBindingTarget(target string) string {
+	path, rawQuery, _ := strings.Cut(target, "?")
+	return canonicalRequestTarget(path, rawQuery)
+}
+
+// valid reports whether every field of the binding is populated. BodyHash is the
+// hex SHA-256 of the request body (of the empty string for a bodyless request), so
+// it is never legitimately empty.
+func (b *presenceActionBinding) valid() bool {
+	return b != nil && b.Method != "" && b.Path != "" && b.BodyHash != "" && b.PermissionID != ""
 }
 
 // webauthnUser adapts an account to the go-webauthn/webauthn User interface.
@@ -532,6 +578,30 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #5142: the browser step-up flow names the guarded request it is about to
+	// retry. An absent body is allowed here because the CLI presence relay begins
+	// without one (its binding comes from the lodged request at finish); finish
+	// refuses to mint a token when neither source supplied a binding.
+	var action *presenceActionBinding
+	if r.Body != nil {
+		var in presenceActionBinding
+		dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
+		if err := dec.Decode(&in); err != nil && err != io.EOF {
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"Invalid presence begin body", "INVALID_REQUEST")
+			return
+		} else if err == nil {
+			if !in.valid() {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Presence binding requires method, path, body_hash and permission_id", "INVALID_REQUEST")
+				return
+			}
+			in.Method = strings.ToUpper(in.Method)
+			in.Path = canonicalizeBindingTarget(in.Path)
+			action = &in
+		}
+	}
+
 	user := buildWebauthnUser(acct)
 
 	// BeginLogin with userVerification=required: the authenticator MUST verify the
@@ -552,6 +622,7 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 		data:    *sessionData,
 		expires: time.Now().Add(webAuthnSessionTTL),
 		binding: principal.ID,
+		action:  action,
 	}, webAuthnSessionTTL); out != ceremonyOK {
 		s.writeCeremonyUnavailable(w)
 		return
@@ -593,9 +664,9 @@ const cliPresenceRequestIDParam = "cli_presence_request_id"
 //   - Action binding (Issue #4287, ADR-021 Amendment 7): when the caller names a CLI
 //     presence-relay request via cliPresenceRequestIDParam, the minted token additionally
 //     carries that request's method/path/body-hash/permission, and requirePermission
-//     rejects it outright for any other request. A token minted without that query
-//     parameter (the ordinary browser step-up flow, StepUpModal.tsx) stays principal-bound
-//     only, matching today's behavior.
+//     rejects it outright for any other request. Without that query parameter (the
+//     browser step-up flow, StepUpModal.tsx) the token carries the action named in the
+//     begin body (Issue #5142); a ceremony begun without one is refused at finish.
 //
 // Cross-reference: #2728/#2732 implementers consume permissionAssurance["module:approve"]
 // and ["module:reject"] — the presence mechanism built here is what gates those routes.
@@ -690,6 +761,12 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if cliPresenceReq == nil && !pending.action.valid() {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Presence ceremony was begun without an action binding", "PRESENCE_BINDING_REQUIRED")
+		return
+	}
+
 	// Mint a 32-byte cryptographically random presence token.
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -715,6 +792,13 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		record.boundPath = cliPresenceReq.Path
 		record.boundBodyHash = cliPresenceReq.BodyHash
 		record.boundPermissionID = cliPresenceReq.PermissionID
+	} else {
+		// Issue #5142: the browser step-up flow binds the token to the action named at
+		// begin. No unbound token is ever minted.
+		record.boundMethod = pending.action.Method
+		record.boundPath = pending.action.Path
+		record.boundBodyHash = pending.action.BodyHash
+		record.boundPermissionID = pending.action.PermissionID
 	}
 	if out := s.putPresenceToken(r.Context(), tokenHash, record); out != ceremonyOK {
 		s.writeCeremonyUnavailable(w)

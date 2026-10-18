@@ -161,7 +161,7 @@ func serveBoundaryRoute(t *testing.T, server *Server, entry tenantBoundaryRoute,
 	// Permissions carrying RequireUserPresence would 401 at the presence gate before the
 	// boundary check runs, which would make these assertions pass for the wrong reason.
 	if permReq, found := permissionAssurance[entry.permission]; found && permReq.RequireUserPresence {
-		req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, principal.ID))
+		req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, principal.ID, req, entry.permission))
 	}
 
 	rec := httptest.NewRecorder()
