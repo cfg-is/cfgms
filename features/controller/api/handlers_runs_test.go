@@ -1717,6 +1717,37 @@ func adminRunPrincipal() *Principal {
 	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 }
 
+// failingListRunStore is a real RunStore test implementation (not a mock of a
+// CFGMS component) whose ListRuns always fails with a configured error. All
+// other RunStore methods come from the embedded real store.
+type failingListRunStore struct {
+	controllerrun.RunStore
+	err error
+}
+
+func (s *failingListRunStore) ListRuns(string, int, int) ([]*controllerrun.RunRecord, error) {
+	return nil, s.err
+}
+
+// TestHandleListRuns_StoreError_LogIsSanitized verifies that a run-store error whose
+// text carries a newline is logged without a raw newline (go/log-injection).
+func TestHandleListRuns_StoreError_LogIsSanitized(t *testing.T) {
+	logger := &errorCapturingLogger{}
+	server := setupTestServerWithLogger(t, logger)
+	server.SetRunManager(controllerrun.NewManager(&failingListRunStore{
+		err: errors.New("store failure\nINJECTED forged log line"),
+	}, nil), newTestRunQueue(t))
+
+	rec := listRunsAs(server, adminRunPrincipal(), "")
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	logged, ok := logger.kvValue("error").(string)
+	require.True(t, ok, "error log value must be a sanitized string, got %T", logger.kvValue("error"))
+	assert.NotContains(t, logged, "\n")
+	assert.NotContains(t, logged, "\r")
+	assert.Contains(t, logged, "INJECTED")
+}
+
 // TestHandleListRuns_NoPrincipal_Returns401 verifies the auth guard.
 func TestHandleListRuns_NoPrincipal_Returns401(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
