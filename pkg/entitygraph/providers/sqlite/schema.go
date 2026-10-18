@@ -171,14 +171,6 @@ var schemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS eg_observation_log_subject ON eg_observation_log(subject)`,
 	`CREATE INDEX IF NOT EXISTS eg_observation_log_subject_source ON eg_observation_log(subject, source)`,
-	// Issue #5170: the as-of same-as walk reads only same-as rows, ordered by
-	// (subject, observed_at, id). This partial index holds just those rows, so the
-	// to-direction scan no longer walks the whole log and the "latest row per
-	// subject" NOT EXISTS probe is an index seek. 'same-as}' is the first string
-	// after every 'same-as|...' subject ('}' follows '|'). IF NOT EXISTS makes the
-	// migration idempotent on existing databases.
-	`CREATE INDEX IF NOT EXISTS eg_observation_log_sameas_asof ON eg_observation_log(subject, observed_at, id)
-		WHERE subject >= 'same-as|' AND subject < 'same-as}'`,
 
 	// Current-state projection: highest-seq observation per (subject, source).
 	`CREATE TABLE IF NOT EXISTS eg_entity_current (

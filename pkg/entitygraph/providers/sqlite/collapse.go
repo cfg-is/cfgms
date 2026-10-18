@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -133,34 +132,6 @@ func (p *SQLiteEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.
 	return sortedGroupMembers(w.visited), nil
 }
 
-// asOfPeerBranch builds one branch of the as-of peer query: the latest same-as
-// observation row per edge subject at or before asOf that matches likePattern,
-// reduced to the peer subject by peerExpr, with retracted edges (judged on the
-// latest row, not any older one) and peers outside the cut removed in SQL.
-func asOfPeerBranch(likePattern, peerExpr string, peerArgs []interface{}, asOfStr string, cut interfaces.TenantCut, args *[]interface{}) string {
-	*args = append(*args, peerArgs...)
-	*args = append(*args, likePattern, asOfStr, asOfStr)
-	q := `SELECT b.peer FROM (
-				SELECT ` + peerExpr + ` AS peer, l.kind AS kind
-				FROM eg_observation_log l
-				WHERE l.subject LIKE ? ESCAPE '\'
-				  AND l.subject >= 'same-as|' AND l.subject < 'same-as}'
-				  AND l.observed_at <= ?
-				  AND NOT EXISTS (
-				      SELECT 1 FROM eg_observation_log m
-				      WHERE m.subject = l.subject AND m.observed_at <= ?
-				        AND (m.observed_at > l.observed_at
-				             OR (m.observed_at = l.observed_at AND m.id > l.id))
-				  )
-			) b
-			WHERE b.kind <> 'absence'`
-	if cut.Active() {
-		q += " AND b.peer IN (SELECT subject FROM eg_entity_index WHERE " +
-			tenantSubtreeCond("owning_tenant", cut, args) + ")"
-	}
-	return q
-}
-
 // resolveGroupMembersAsOf walks the same-as graph from eid using the observation
 // log, considering only edges that were active (not absent) at or before asOf.
 // Retracted edges and peers outside the cut are removed in SQL, so they never
@@ -176,58 +147,78 @@ func (p *SQLiteEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Context,
 	return members, err
 }
 
+// asOfRecursiveBranch builds one recursive step of the as-of walk: it joins the
+// walk so far (grp) to the live same-as edge subjects and reduces each match to
+// its peer with peerExpr. Peers outside the cut are removed here, so they never
+// count toward MaxCollapseGroupMembers. It appends the cut arguments to *args.
+func asOfRecursiveBranch(peerExpr, edgeCond string, cut interfaces.TenantCut, args *[]interface{}) string {
+	q := "SELECT " + peerExpr + " FROM grp g CROSS JOIN live v WHERE " + edgeCond
+	if cut.Active() {
+		q += " AND " + peerExpr + " IN (SELECT subject FROM eg_entity_index WHERE " +
+			tenantSubtreeCond("owning_tenant", cut, args) + ")"
+	}
+	return q
+}
+
 // walkGroupMembersAsOf is the as-of walk itself, run under the budgeted context.
+// The whole walk is one WITH RECURSIVE query: "live" holds the same-as edge
+// subjects whose latest observation at or before asOf is not a retraction, and
+// "grp" grows from eid across them in both directions. The CTE is capped at
+// MaxCollapseGroupMembers+1 rows, so a group past the limit stops the recursion
+// inside the query.
 func (p *SQLiteEntityGraphProvider) walkGroupMembersAsOf(ctx context.Context, eid interfaces.EIDRef, asOf time.Time, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
 	asOfStr := rfc3339(asOf)
-	w := newGroupWalk(eid.String())
+	args := []interface{}{asOfStr, asOfStr, eid.String()}
 
-	for len(w.queue) > 0 {
-		current := w.queue[0]
-		w.queue = w.queue[1:]
+	// Edge subjects are "same-as|<from>|<to>"; SQL substr/length count
+	// characters, which is what the offsets below assume.
+	fromBranch := asOfRecursiveBranch("substr(v.subject, length(g.eid) + 10)",
+		"v.subject >= 'same-as|' || g.eid || '|' AND v.subject < 'same-as|' || g.eid || '}'", cut, &args)
+	toBranch := asOfRecursiveBranch("substr(v.subject, 9, length(v.subject) - 9 - length(g.eid))",
+		"length(v.subject) > length(g.eid) + 9 AND substr(v.subject, -(length(g.eid) + 1)) = '|' || g.eid", cut, &args)
+	args = append(args, interfaces.MaxCollapseGroupMembers+1)
 
-		// Edge subjects are "same-as|<from>|<to>". Lengths are in characters
-		// because SQL substr/length count characters, not bytes.
-		fromPrefixLen := utf8.RuneCountInString("same-as|" + current + "|")
-		toLen := utf8.RuneCountInString(current)
+	// #nosec G202 -- the branches hold fixed SQL and ? placeholders; every
+	// value, including tenant IDs, is bound through args.
+	query := `WITH RECURSIVE live(subject) AS MATERIALIZED (
+			SELECT l.subject FROM eg_observation_log l
+			WHERE l.subject >= 'same-as|' AND l.subject < 'same-as}'
+			  AND l.observed_at <= ? AND l.kind <> 'absence'
+			  AND NOT EXISTS (
+			      SELECT 1 FROM eg_observation_log m
+			      WHERE m.subject = l.subject AND m.observed_at <= ?
+			        AND (m.observed_at > l.observed_at
+			             OR (m.observed_at = l.observed_at AND m.id > l.id))
+			  )
+		), grp(eid) AS (
+			SELECT ?
+			UNION ` + fromBranch + `
+			UNION ` + toBranch + `
+			LIMIT ?
+		)
+		SELECT eid FROM grp`
 
-		var args []interface{}
-		fromBranch := asOfPeerBranch("same-as|"+escapeLIKE(current)+"|%",
-			"substr(l.subject, ?)", []interface{}{fromPrefixLen + 1}, asOfStr, cut, &args)
-		toBranch := asOfPeerBranch("same-as|%|"+escapeLIKE(current),
-			"substr(l.subject, 9, length(l.subject) - 9 - ?)", []interface{}{toLen}, asOfStr, cut, &args)
-		args = append(args, interfaces.MaxCollapseGroupMembers+1)
-
-		// #nosec G202 -- the branches hold fixed SQL and ? placeholders; every
-		// value, including tenant IDs, is bound through args.
-		rows, err := p.db.QueryContext(ctx, fromBranch+" UNION "+toBranch+" LIMIT ?", args...)
-		if err != nil {
-			return nil, fmt.Errorf("entitygraph/sqlite: resolve group as-of for %s: %w", current, err)
-		}
-
-		n := 0
-		for rows.Next() {
-			var peer string
-			if err := rows.Scan(&peer); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("entitygraph/sqlite: scan group as-of edge: %w", err)
-			}
-			if n++; n > interfaces.MaxCollapseGroupMembers {
-				_ = rows.Close()
-				return nil, interfaces.ErrCollapseGroupTooLarge
-			}
-			if err := w.add(peer); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("entitygraph/sqlite: iterate group as-of edges: %w", err)
-		}
-		_ = rows.Close()
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("entitygraph/sqlite: resolve group as-of for %s: %w", eid.String(), err)
 	}
+	defer func() { _ = rows.Close() }()
 
-	return sortedGroupMembers(w.visited), nil
+	visited := map[string]struct{}{}
+	for rows.Next() {
+		var member string
+		if err := rows.Scan(&member); err != nil {
+			return nil, fmt.Errorf("entitygraph/sqlite: scan group as-of member: %w", err)
+		}
+		if len(visited) >= interfaces.MaxCollapseGroupMembers {
+			return nil, interfaces.ErrCollapseGroupTooLarge
+		}
+		visited[member] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("entitygraph/sqlite: iterate group as-of members: %w", err)
+	}
+	return sortedGroupMembers(visited), nil
 }
 
 // sortedGroupMembers converts a visited-set map to a sorted EID slice.
