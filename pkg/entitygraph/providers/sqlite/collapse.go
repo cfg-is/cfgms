@@ -148,40 +148,43 @@ func (p *SQLiteEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Context,
 }
 
 // asOfRecursiveBranch builds one recursive step of the as-of walk: it joins the
-// walk so far (grp) to the live same-as edge subjects and reduces each match to
-// its peer with peerExpr. Peers outside the cut are removed here, so they never
-// count toward MaxCollapseGroupMembers. It appends the cut arguments to *args.
-func asOfRecursiveBranch(peerExpr, edgeCond string, cut interfaces.TenantCut, args *[]interface{}) string {
-	q := "SELECT " + peerExpr + " FROM grp g CROSS JOIN live v WHERE " + edgeCond
+// walk so far (grp) to the live same-as edges on matchCol and yields the peer in
+// peerCol. Both columns are plain columns of the materialized "live" table, so
+// SQLite answers each step with an equality lookup on an automatic index rather
+// than a scan of every live edge. Peers outside the cut are removed here, so they
+// never count toward MaxCollapseGroupMembers. It appends the cut arguments to
+// *args.
+func asOfRecursiveBranch(matchCol, peerCol string, cut interfaces.TenantCut, args *[]interface{}) string {
+	q := "SELECT v." + peerCol + " FROM grp g JOIN live v ON v." + matchCol + " = g.eid"
 	if cut.Active() {
-		q += " AND " + peerExpr + " IN (SELECT subject FROM eg_entity_index WHERE " +
+		q += " WHERE v." + peerCol + " IN (SELECT subject FROM eg_entity_index WHERE " +
 			tenantSubtreeCond("owning_tenant", cut, args) + ")"
 	}
 	return q
 }
 
 // walkGroupMembersAsOf is the as-of walk itself, run under the budgeted context.
-// The whole walk is one WITH RECURSIVE query: "live" holds the same-as edge
-// subjects whose latest observation at or before asOf is not a retraction, and
-// "grp" grows from eid across them in both directions. The CTE is capped at
+// The whole walk is one WITH RECURSIVE query: "live" holds the endpoints of the
+// same-as edges whose latest observation at or before asOf is not a retraction,
+// and "grp" grows from eid across them in both directions. The CTE is capped at
 // MaxCollapseGroupMembers+1 rows, so a group past the limit stops the recursion
 // inside the query.
 func (p *SQLiteEntityGraphProvider) walkGroupMembersAsOf(ctx context.Context, eid interfaces.EIDRef, asOf time.Time, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
 	asOfStr := rfc3339(asOf)
 	args := []interface{}{asOfStr, asOfStr, eid.String()}
 
-	// Edge subjects are "same-as|<from>|<to>"; SQL substr/length count
-	// characters, which is what the offsets below assume.
-	fromBranch := asOfRecursiveBranch("substr(v.subject, length(g.eid) + 10)",
-		"v.subject >= 'same-as|' || g.eid || '|' AND v.subject < 'same-as|' || g.eid || '}'", cut, &args)
-	toBranch := asOfRecursiveBranch("substr(v.subject, 9, length(v.subject) - 9 - length(g.eid))",
-		"length(v.subject) > length(g.eid) + 9 AND substr(v.subject, -(length(g.eid) + 1)) = '|' || g.eid", cut, &args)
+	fromBranch := asOfRecursiveBranch("from_eid", "to_eid", cut, &args)
+	toBranch := asOfRecursiveBranch("to_eid", "from_eid", cut, &args)
 	args = append(args, interfaces.MaxCollapseGroupMembers+1)
 
+	// Edge subjects are "same-as|<from>|<to>", split the way parseEdgeSubject
+	// splits them: <from> runs to the first "|" after the prefix and <to> is the
+	// rest. "edge" is the subject with the 8-character "same-as|" prefix removed.
+	//
 	// #nosec G202 -- the branches hold fixed SQL and ? placeholders; every
 	// value, including tenant IDs, is bound through args.
-	query := `WITH RECURSIVE live(subject) AS MATERIALIZED (
-			SELECT l.subject FROM eg_observation_log l
+	query := `WITH RECURSIVE edge(rest) AS MATERIALIZED (
+			SELECT substr(l.subject, 9) FROM eg_observation_log l
 			WHERE l.subject >= 'same-as|' AND l.subject < 'same-as}'
 			  AND l.observed_at <= ? AND l.kind <> 'absence'
 			  AND NOT EXISTS (
@@ -190,6 +193,9 @@ func (p *SQLiteEntityGraphProvider) walkGroupMembersAsOf(ctx context.Context, ei
 			        AND (m.observed_at > l.observed_at
 			             OR (m.observed_at = l.observed_at AND m.id > l.id))
 			  )
+		), live(from_eid, to_eid) AS MATERIALIZED (
+			SELECT substr(rest, 1, instr(rest, '|') - 1), substr(rest, instr(rest, '|') + 1)
+			FROM edge WHERE instr(rest, '|') > 0
 		), grp(eid) AS (
 			SELECT ?
 			UNION ` + fromBranch + `
