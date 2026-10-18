@@ -272,15 +272,18 @@ func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 
 	<-node1Started
 
-	// Past the original expiry only the renewal keeps node-1 the holder.
-	clock.Advance(ttl - renewInterval)
+	// Renew inside node-1's local authority window (advancing straight past
+	// it would let the authority-deadline watchdog cancel fn before the
+	// renewal reaches the store), then move past the original expiry so only
+	// the renewal keeps node-1 the holder.
+	clock.Advance(renewInterval)
 	clock.Tick()
 	select {
 	case <-store.done:
 	case <-time.After(30 * time.Second): // failure bound only; the passing path waits on the event
 		t.Fatal("node-1's renewal never reached the store")
 	}
-	clock.Advance(ttl - renewInterval)
+	clock.Advance(ttl - renewInterval/2)
 
 	ran2 := job2.RunIfLeader(context.Background(), func(ctx context.Context) {
 		atomic.AddInt32(&node2Ran, 1)
