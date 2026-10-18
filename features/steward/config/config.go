@@ -260,19 +260,23 @@ func getConfigSearchPaths() []string {
 
 // warnShadowedConfigs logs at Warn for every existing candidate configuration
 // file that was not loaded. A shadowed steward.cfg (for example a local
-// remote_terminal.enabled: false) is otherwise silently ignored.
-func warnShadowedConfigs(searchPaths []string, loaded string) {
+// remote_terminal.enabled: false) is otherwise silently ignored. It returns the
+// shadowed paths it warned about, in search order.
+func warnShadowedConfigs(searchPaths []string, loaded string) []string {
 	logger := logging.ForModule("steward-config")
+	var shadowed []string
 	for _, p := range searchPaths {
 		if p == loaded {
 			continue
 		}
 		if _, err := os.Stat(p); err == nil {
+			shadowed = append(shadowed, p)
 			logger.Warn("steward configuration file exists but was not loaded; settings in it have no effect",
 				"unread_path", logging.SanitizeLogValue(p),
 				"loaded_path", logging.SanitizeLogValue(loaded))
 		}
 	}
+	return shadowed
 }
 
 // applyDefaults sets default values for configuration fields

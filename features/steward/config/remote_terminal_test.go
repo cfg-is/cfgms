@@ -72,8 +72,26 @@ func TestLoadConfiguration_ReadsDocumentedStewardCfg(t *testing.T) {
 
 func TestWarnShadowedConfigs_ExistingUnreadFile(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "steward.cfg")
-	require.NoError(t, os.WriteFile(p, []byte("steward: {}\n"), 0o600))
-	// Must not panic and must tolerate loaded == other path.
-	warnShadowedConfigs([]string{p, filepath.Join(dir, "missing.cfg")}, filepath.Join(dir, "other.cfg"))
+	existing := filepath.Join(dir, "steward.cfg")
+	require.NoError(t, os.WriteFile(existing, []byte("steward: {}\n"), 0o600))
+	hostCfg := filepath.Join(dir, "host1.cfg")
+	require.NoError(t, os.WriteFile(hostCfg, []byte("steward: {}\n"), 0o600))
+	missing := filepath.Join(dir, "missing.cfg")
+
+	t.Run("existing unread file warned, missing file not", func(t *testing.T) {
+		got := warnShadowedConfigs([]string{existing, missing}, filepath.Join(dir, "other.cfg"))
+		assert.Equal(t, []string{existing}, got)
+		assert.NotContains(t, got, missing)
+	})
+
+	t.Run("loaded path equal to a candidate is not warned", func(t *testing.T) {
+		got := warnShadowedConfigs([]string{hostCfg, existing, missing}, hostCfg)
+		assert.Equal(t, []string{existing}, got)
+		assert.NotContains(t, got, hostCfg)
+	})
+
+	t.Run("only loaded file exists yields no warning", func(t *testing.T) {
+		got := warnShadowedConfigs([]string{existing, missing}, existing)
+		assert.Empty(t, got)
+	})
 }
