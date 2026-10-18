@@ -1074,19 +1074,42 @@ the **controller-side half** of the command fencing scheme defined in ADR-029:
   listed under "Unstamped command paths" below. The steward-side enforcement —
   rejecting commands whose term is lower than the highest seen — is added in story
   #3436. Until that story ships, the field is informational only.
-- **The term is not covered by the command signature.** `CommandSigningBytes`
-  (`pkg/controlplane/types/messages.go`) deliberately omits `Term` from
-  `commandSigningPayload`, so a `SignedCommand` carries an authenticated body with a
-  transport-trusted (mTLS-authenticated, not signature-authenticated) term. Including
-  it would break signature verification on every steward predating #3436 the moment a
-  controller stamped a non-zero term. The consequence #3436/#3437 must design around:
-  anything able to modify a command between signer and steward — a future Outpost
-  proxy cache, an mTLS-terminating hop, a non-leader controller node — can rewrite
-  the term without invalidating the signature. It can raise the term to defeat the
-  fence, or set it to `MaxUint64` to poison the steward's high-water mark and wedge
-  its command channel — permanently, once #3437 persists that mark across restarts.
-  Making the term tamper-evident requires a negotiated signing-payload version, which
-  does not exist yet.
+- **The term is covered by the signature under signing-payload v2 (#5174).**
+  `CommandSigningBytes` (`pkg/controlplane/types/messages.go`) is the version-1
+  payload: `ID`, `Type`, `StewardID`, `TenantID`, `Timestamp` and `Params`, with
+  `Term` deliberately omitted so stewards predating the fence kept verifying
+  commands. A term under a v1 signature is transport-trusted only (mTLS, not the
+  signature): a party between signer and steward could raise it to defeat the fence
+  or set it to `MaxUint64` to wedge the steward's persisted high-water mark. Version 2
+  (`CommandSigningBytesVersion` with `SigningPayloadV2`) signs every v1 field plus
+  `Term` and an explicit `payload_version`. It is negotiated, never assumed:
+  - *Advertise.* A steward lists the payload versions it can verify in
+    `Heartbeat.signing_payload_versions`. The controller records the highest
+    supported version per steward (`types.SigningCapabilities`) in the shared steward
+    store (`signing_payload_version`), so every controller node signs the version
+    the steward advertised to any node. A steward that has not advertised v2
+    receives v1. A node that cannot read the capability (store failure) fails the
+    send with an error the caller sees; it never guesses a version.
+  - *One signing path.* The publisher, the script dispatcher and the relay handler
+    all sign through `types.SignCommand`, which picks the version from that
+    registry. The version used is carried in `Command.signing_payload_version`
+    (field 9); absent means v1. v1 commands are byte-identical to before.
+  - *Verify.* `commands.Handler.HandleCommand` verifies against the version the
+    command names. An absent version is v1 and never selects v2; an unknown version
+    is refused. A v2 command whose `Term` was altered after signing fails with
+    `ErrUnauthenticatedCommand`.
+  - *One-way switch.* After a correctly signed v2 command is accepted, the steward
+    sets `term_signed` in `fence_ratchet.json` (next to the ratchet, same atomic
+    write; only `ClearRatchet` at enrollment resets it) and refuses every later
+    stamped (`Term > 0`) v1 command as unauthenticated. The term fence therefore
+    advances only for terms covered by a verified signature, or for v1 commands
+    received before the switch.
+  - *Atomic switch.* The steward checks and sets `term_signed` in one critical
+    section at admission, after verification, so a stamped v1 command racing the
+    first v2 command is refused if the switch was set first.
+  - *Relay.* The relay handler takes the same registry at construction, so relay
+    responses use the negotiated version.
+  - The v1 payload remains supported until no supported steward release lacks v2.
 - **Fence coverage is per-steward-determinable.** An operator can determine which
   stewards are capable of enforcing the fence without any new mechanism. The
   existing `GET /api/v1/stewards` endpoint (`handleListStewards`,

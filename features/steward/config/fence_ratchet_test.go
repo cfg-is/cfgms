@@ -339,3 +339,55 @@ func TestFenceRatchet_LoadZeroFilledFileNamesPath(t *testing.T) {
 	assert.False(t, set)
 	assert.Zero(t, term)
 }
+
+// TestFenceRatchet_TermSignedSwitch covers the one-way term-signed switch (#5174):
+// it persists across restart, Save never drops it, MarkTermSigned never disturbs
+// the stored term, and only ClearRatchet resets it.
+func TestFenceRatchet_TermSignedSwitch(t *testing.T) {
+	dir := t.TempDir()
+	r := NewFenceRatchet(dir)
+
+	signed, err := r.TermSigned()
+	require.NoError(t, err)
+	assert.False(t, signed, "no file reads as unset")
+
+	require.NoError(t, r.Save(true, 7))
+	require.NoError(t, r.MarkTermSigned())
+	require.NoError(t, r.MarkTermSigned(), "idempotent")
+
+	set, term, err := r.Load()
+	require.NoError(t, err)
+	assert.True(t, set)
+	assert.Equal(t, uint64(7), term, "marking must not disturb the stored term")
+
+	// A later Save of a higher term keeps the switch.
+	require.NoError(t, r.Save(true, 9))
+
+	restarted := NewFenceRatchet(dir)
+	signed, err = restarted.TermSigned()
+	require.NoError(t, err)
+	assert.True(t, signed, "switch survives restart and later Saves")
+	_, term, err = restarted.Load()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(9), term)
+
+	// Marking from a fresh instance that never loaded must keep the stored term.
+	other := t.TempDir()
+	require.NoError(t, NewFenceRatchet(other).Save(true, 4))
+	require.NoError(t, NewFenceRatchet(other).MarkTermSigned())
+	_, term, err = NewFenceRatchet(other).Load()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4), term)
+
+	require.NoError(t, restarted.ClearRatchet())
+	signed, err = NewFenceRatchet(dir).TermSigned()
+	require.NoError(t, err)
+	assert.False(t, signed, "ClearRatchet resets the switch")
+
+	// In-memory (no dir) instance is a no-op and never errors.
+	mem := NewFenceRatchet("")
+	require.NoError(t, mem.MarkTermSigned())
+	signed, err = mem.TermSigned()
+	require.NoError(t, err)
+	assert.False(t, signed)
+}

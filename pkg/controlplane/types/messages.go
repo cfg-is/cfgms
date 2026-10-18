@@ -8,6 +8,7 @@ package types
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -104,9 +105,14 @@ type Command struct {
 	// operating model's "Outbound Command Contract" section for the exact list).
 	// Enforcement on the steward side is added in #3436.
 	//
-	// Not covered by the command signature — transport-trusted only. See
-	// commandSigningPayload for the trade-off and the tampering hazards it leaves open.
+	// Covered by the command signature only under SigningPayloadV2; a v1-signed
+	// command's term is transport-trusted. See commandSigningPayload.
 	Term uint64 `json:"term,omitempty"`
+
+	// SigningPayloadVersion names the signing-payload version the signer used
+	// (#5174). Zero means SigningPayloadV1. A verifier must never treat an absent
+	// value as a newer version.
+	SigningPayloadVersion uint32 `json:"signing_payload_version,omitempty"`
 }
 
 // EventType defines the type of event being reported.
@@ -269,6 +275,10 @@ type Heartbeat struct {
 	// ConnectionState is the steward's current connection state string.
 	// Values: "connected", "disconnected", "connecting", "reconnecting".
 	ConnectionState string `json:"connection_state,omitempty"`
+
+	// SigningPayloadVersions lists the command signing-payload versions the steward
+	// can verify (#5174). Empty means v1 only (a steward predating the field).
+	SigningPayloadVersions []uint32 `json:"signing_payload_versions,omitempty"`
 }
 
 // Response represents a command response/acknowledgment.
@@ -397,30 +407,32 @@ type SignedCommand struct {
 	RawParams map[string]string `json:"-"`
 }
 
-// commandSigningPayload is the stable canonical form used when signing/verifying commands.
-// Using map[string]string for Params avoids mutations from JSON-decoding proto string values,
-// and UTC normalisation avoids timezone-dependent JSON output.
+// commandSigningPayload is the version-1 canonical form used when signing/verifying
+// commands. Using map[string]string for Params avoids mutations from JSON-decoding
+// proto string values, and UTC normalisation avoids timezone-dependent JSON output.
 //
-// Command.Term is deliberately NOT a field here (#3390). The term is therefore
-// transport-trusted only — authenticated by the mTLS control channel, not by the
-// command signature. This is a recorded trade-off, not an oversight:
+// Version 1 deliberately does NOT cover Command.Term (#3390): it had to stay
+// byte-identical so stewards predating the term fence (#3436) kept verifying
+// commands from a term-stamping controller. A v1-signed command's term is therefore
+// transport-trusted only (authenticated by mTLS, not by the signature), so any party
+// between signer and steward — an Outpost cache, an mTLS-terminating hop, a
+// non-leader controller node — can rewrite it. Raising it defeats the fence and
+// setting it to MaxUint64 wedges the steward's persisted high-water mark.
 //
-//   - Including Term would change the signing bytes for every non-zero-term command,
-//     so every steward predating #3436 (which computes signing bytes without the field)
-//     would fail verification on every command the moment a controller started stamping
-//     terms — a fleet-wide outage during a rolling upgrade. #3390's constraint is an
-//     additive, wire-compatible field with no steward-visible behaviour change.
-//   - Consequence, which #3436/#3437 must design around: any party able to modify a
-//     command between the signer and the steward — a future Outpost proxy cache, an
-//     mTLS-terminating hop, a non-leader controller node — can rewrite Term without
-//     invalidating the signature. Two concrete hazards: raising Term defeats the fence,
-//     and setting Term to MaxUint64 poisons the steward's high-water mark, wedging its
-//     command channel permanently once #3437 persists that mark across restarts.
-//   - Closing this requires the term to be covered by the signature behind a negotiated
-//     signing-payload version, so that a steward advertises which payload version it can
-//     verify before the controller signs with it. That negotiation does not exist yet and
-//     is out of scope for #3390; it is a prerequisite for treating the term as
-//     tamper-evident rather than merely transport-trusted.
+// Version 2 (commandSigningPayloadV2, #5174) closes that: it covers every v1 field,
+// plus Term and an explicit payload-version field. It is negotiated, not assumed:
+//
+//   - A steward advertises the versions it can verify on its Heartbeat
+//     (SupportedSigningPayloadVersions); the controller records them per steward
+//     (SigningCapabilities, shared cluster-wide through the steward store) and signs
+//     with v2 only for stewards that listed it.
+//     Every other steward keeps receiving v1.
+//   - Command.SigningPayloadVersion carries the version the signer used; the
+//     steward verifies against the version the command names. Absent means v1 and
+//     never selects v2.
+//   - Once a steward has accepted a correctly signed v2 command it persists a
+//     one-way switch and refuses any later stamped v1 command as unauthenticated,
+//     so a downgrade to the unsigned-term form cannot be forced.
 //
 // See docs/architecture/controller-operating-model.md — "Outbound Command Contract".
 type commandSigningPayload struct {
@@ -430,6 +442,37 @@ type commandSigningPayload struct {
 	TenantID  string            `json:"tenant_id,omitempty"`
 	Timestamp time.Time         `json:"timestamp"`
 	Params    map[string]string `json:"params,omitempty"`
+}
+
+// commandSigningPayloadV2 is the version-2 canonical form: the v1 fields plus the
+// payload version and the fencing term (#5174).
+type commandSigningPayloadV2 struct {
+	PayloadVersion uint32            `json:"payload_version"`
+	ID             string            `json:"id"`
+	Type           CommandType       `json:"type"`
+	StewardID      string            `json:"steward_id,omitempty"`
+	TenantID       string            `json:"tenant_id,omitempty"`
+	Timestamp      time.Time         `json:"timestamp"`
+	Params         map[string]string `json:"params,omitempty"`
+	Term           uint64            `json:"term"`
+}
+
+// Command signing-payload versions (#5174).
+const (
+	// SigningPayloadV1 is the original payload; it does not cover Command.Term.
+	SigningPayloadV1 uint32 = 1
+	// SigningPayloadV2 covers Command.Term and carries its own version field.
+	SigningPayloadV2 uint32 = 2
+)
+
+// ErrUnknownSigningPayloadVersion is returned for a version this build cannot
+// compute signing bytes for.
+var ErrUnknownSigningPayloadVersion = errors.New("unknown command signing payload version")
+
+// SupportedSigningPayloadVersions lists the versions this build can verify. A
+// steward advertises it on every heartbeat.
+func SupportedSigningPayloadVersions() []uint32 {
+	return []uint32{SigningPayloadV1, SigningPayloadV2}
 }
 
 // InterfaceParamsToStringMap converts map[string]interface{} command params to the
@@ -456,27 +499,58 @@ func InterfaceParamsToStringMap(m map[string]interface{}) map[string]string {
 	return result
 }
 
-// CommandSigningBytes returns the canonical JSON bytes for signing or verifying a Command.
+// CommandSigningBytes returns the version-1 canonical JSON bytes for signing or
+// verifying a Command. It does not cover cmd.Term; use CommandSigningBytesVersion
+// with SigningPayloadV2 for a term-covering payload. Signers should go through
+// SignCommand, which picks the version per steward.
 //
 // rawParams must be the proto-wire string map of cmd.Params — either the map produced
 // by the gRPC transport on receive (RawParams field of SignedCommand), or the result of
 // InterfaceParamsToStringMap(cmd.Params) on the originating side. Using this canonical
 // form ensures that both the signer (controller) and verifier (steward) produce identical
 // bytes regardless of JSON-decode type coercions and timezone differences.
-//
-// The returned bytes do not cover cmd.Term — the fencing term is transport-trusted, not
-// signature-authenticated. See commandSigningPayload for the reasoning and the hazards
-// that #3436/#3437 must design around.
 func CommandSigningBytes(cmd *Command, rawParams map[string]string) ([]byte, error) {
-	payload := commandSigningPayload{
-		ID:        cmd.ID,
-		Type:      cmd.Type,
-		StewardID: cmd.StewardID,
-		TenantID:  cmd.TenantID,
-		Timestamp: cmd.Timestamp.UTC(),
-		Params:    rawParams,
+	return CommandSigningBytesVersion(cmd, rawParams, SigningPayloadV1)
+}
+
+// CommandSigningBytesVersion returns the canonical signing bytes for the named
+// payload version. Any version other than v1 or v2 yields
+// ErrUnknownSigningPayloadVersion; callers must resolve an absent version to v1
+// explicitly (see CommandPayloadVersion).
+func CommandSigningBytesVersion(cmd *Command, rawParams map[string]string, version uint32) ([]byte, error) {
+	switch version {
+	case SigningPayloadV1:
+		return json.Marshal(commandSigningPayload{
+			ID:        cmd.ID,
+			Type:      cmd.Type,
+			StewardID: cmd.StewardID,
+			TenantID:  cmd.TenantID,
+			Timestamp: cmd.Timestamp.UTC(),
+			Params:    rawParams,
+		})
+	case SigningPayloadV2:
+		return json.Marshal(commandSigningPayloadV2{
+			PayloadVersion: SigningPayloadV2,
+			ID:             cmd.ID,
+			Type:           cmd.Type,
+			StewardID:      cmd.StewardID,
+			TenantID:       cmd.TenantID,
+			Timestamp:      cmd.Timestamp.UTC(),
+			Params:         rawParams,
+			Term:           cmd.Term,
+		})
+	default:
+		return nil, fmt.Errorf("%w: %d", ErrUnknownSigningPayloadVersion, version)
 	}
-	return json.Marshal(payload)
+}
+
+// CommandPayloadVersion returns the signing-payload version a command names. An
+// absent (zero) value is v1; it never selects a newer version.
+func CommandPayloadVersion(cmd *Command) uint32 {
+	if cmd.SigningPayloadVersion == 0 {
+		return SigningPayloadV1
+	}
+	return cmd.SigningPayloadVersion
 }
 
 // FanOutResult reports per-steward delivery status from a FanOutCommand.

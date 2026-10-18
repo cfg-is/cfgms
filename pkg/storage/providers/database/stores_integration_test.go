@@ -995,3 +995,28 @@ func TestDatabaseStewardStore_RebindStewardIdentity(t *testing.T) {
 	err = store.RebindStewardIdentity(ctx, "ghost-rb", "dev-z", []byte("k"), "file", "")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
+
+// TestDatabaseStewardStore_SigningPayloadVersion covers the cluster-shared signing capability (#5174).
+func TestDatabaseStewardStore_SigningPayloadVersion(t *testing.T) {
+	store := newTestStewardStore(t)
+	require.NoError(t, store.RegisterSteward(context.Background(), makeSampleSteward("s-sig", "tenant-sig")))
+
+	ctx := context.Background()
+	v, err := store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	require.NoError(t, err)
+	assert.Zero(t, v, "no version recorded yet")
+
+	require.NoError(t, store.SetStewardSigningPayloadVersion(ctx, "s-sig", 2))
+	v, err = store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), v)
+
+	require.NoError(t, store.SetStewardSigningPayloadVersion(ctx, "s-sig", 0))
+	v, err = store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	require.NoError(t, err)
+	assert.Zero(t, v)
+
+	assert.ErrorIs(t, store.SetStewardSigningPayloadVersion(ctx, "ghost", 2), business.ErrStewardNotFound)
+	_, err = store.GetStewardSigningPayloadVersion(ctx, "ghost")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}

@@ -335,6 +335,31 @@ func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID str
 	return s.writeSteward(record)
 }
 
+// SetStewardSigningPayloadVersion records the steward's advertised signing-payload version.
+func (s *FlatFileStewardStore) SetStewardSigningPayloadVersion(_ context.Context, stewardID string, version uint32) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	record.SigningPayloadVersion = version
+	return s.writeSteward(record)
+}
+
+// GetStewardSigningPayloadVersion returns the steward's advertised signing-payload version.
+func (s *FlatFileStewardStore) GetStewardSigningPayloadVersion(_ context.Context, stewardID string) (uint32, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return 0, err
+	}
+	return record.SigningPayloadVersion, nil
+}
+
 // SetStewardProvenance replaces the steward's provenance baseline.
 func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID, provenanceJSON string) error {
 	s.mutex.Lock()

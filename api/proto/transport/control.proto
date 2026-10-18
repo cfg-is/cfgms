@@ -107,6 +107,10 @@ message Command {
   // Wire-compatible additive field: old stewards that do not understand it
   // silently ignore the unknown field number. Enforcement is added in #3436.
   uint64 term = 8;
+  // signing_payload_version names the signing-payload version the signer used
+  // (#5174). Zero or absent means version 1, which does not cover term; the
+  // verifier never treats an absent value as a newer version.
+  uint32 signing_payload_version = 9;
 }
 
 // Event is sent from steward to controller via ControlChannel.
@@ -132,6 +136,9 @@ message Heartbeat {
   string dna_hash = 7;      // for hash-based sync detection
   int32 active_sessions = 8;    // number of active control-channel streams (1 when connected, 0 otherwise)
   string connection_state = 9;  // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
+  // signing_payload_versions lists the command signing-payload versions this
+  // steward can verify (#5174). Empty means only version 1.
+  repeated uint32 signing_payload_versions = 10;
 }
 
 // Response is sent from steward to controller for command acknowledgment.
