@@ -1319,14 +1319,22 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	updatedAcct.Credentials = []WebAuthnCredential{stored}
 	updatedAcct.EnrollmentLinkRevoked = true
 
-	if err := s.persistAccount(r.Context(), &updatedAcct, ""); err != nil {
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, "")
+	if persistErr != nil {
 		s.logger.Error("Failed to persist enrollment credential",
 			"account_id", logging.SanitizeLogValue(acct.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
+			"error", logging.SanitizeLogValue(persistErr.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
 			"Failed to persist credential", "STORE_ERROR")
 		return
 	}
+	if !swapped {
+		// The ceremony is already consumed; the client restarts enrollment.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; restart enrollment", "ACCOUNT_MODIFIED")
+		return
+	}
+	updatedAcct.Version = newVersion
 	s.cacheAccount(&updatedAcct)
 
 	// Audit: record account, credential ID, and delivery channel.
