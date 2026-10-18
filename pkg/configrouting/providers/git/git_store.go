@@ -80,8 +80,9 @@ func NewGitConfigStore(
 	}
 	// Remove the directory this call created (or an empty/partial one) when construction
 	// fails, so a failed source leaves nothing behind.
+	constructed := false
 	defer func() {
-		if err != nil && !hadClone {
+		if !constructed && !hadClone {
 			if rmErr := RemoveCloneDir(workDir, repoDir); rmErr != nil && logger != nil {
 				logger.Warn("git-store: failed to remove clone directory after failed construction",
 					"tenant_id", logging.SanitizeLogValue(tenantID),
@@ -115,6 +116,7 @@ func NewGitConfigStore(
 		password = "" //nolint:ineffassign // zeroize after success
 	}
 
+	constructed = true
 	return s, nil
 }
 
