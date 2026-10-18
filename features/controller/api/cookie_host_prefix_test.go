@@ -59,7 +59,7 @@ func TestHostPrefixCookies_LoginFlow(t *testing.T) {
 // the pre-rename cookie name.
 func TestHostPrefixCookies_OldSessionNameNotAuthenticated(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
-	good := issueWebSession(t, mgr, "user-1", "test-tenant")
+	good := issueWebSession(t, srv, mgr, "user-1", "test-tenant")
 	require.Equal(t, "__Host-cfgms_session", good.Name)
 
 	call := func(c *http.Cookie) int {

@@ -1004,6 +1004,20 @@ func hasHeaderCredentials(r *http.Request) bool {
 	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
+// accountHoldsCredential reports whether id is a non-empty credential ID present
+// on the account.
+func accountHoldsCredential(acct *account, id []byte) bool {
+	if len(id) == 0 {
+		return false
+	}
+	for _, c := range acct.Credentials {
+		if bytes.Equal(c.ID, id) {
+			return true
+		}
+	}
+	return false
+}
+
 // authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
 // States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
 // (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
@@ -1264,38 +1278,59 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
 				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
 				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
-				authCount := -1
-				globalScope := false
-				// Fail-closed defaults: account that cannot be resolved gets an empty grant set,
-				// never an unbounded one. ImplicitAdmin is only set for a resolved root-scope account
-				// (ADR-025 Amendment 3). permissions is always non-nil; the nil-sentinel is gone.
+				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
+				// A web session lives only while the passkeys behind it exist (Issue
+				// #5166): the account is the proof, so every request resolves it. A
+				// lookup error fails closed with 503 and leaves the session intact
+				// (the error may be transient); a missing account proves no
+				// credential and ends the session.
+				if webAcctErr != nil {
+					s.logger.Error("Web session account lookup failed",
+						"session_id", logging.SanitizeLogValue(webSess.ID),
+						"error", logging.SanitizeLogValue(webAcctErr.Error()))
+					s.writeErrorResponse(w, http.StatusServiceUnavailable,
+						"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+					return
+				}
+				// endWebSession revokes the session server-side (best effort) so the
+				// rejection is durable, and answers with the same 401 for every reason:
+				// the response must not distinguish "disabled", "passkey revoked" and
+				// "revoked".
+				endWebSession := func(reason string) {
+					s.csrfTokens.Delete(webSess.ID)
+					if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
+						s.logger.Warn("Failed to revoke "+reason+" web session",
+							"session_id", logging.SanitizeLogValue(webSess.ID),
+							"error", logging.SanitizeLogValue(revokeErr.Error()))
+					}
+					s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+				}
+				if webAcct == nil {
+					endWebSession("unbound")
+					return
+				}
+				// Every path below runs only for a resolved account: an unresolvable
+				// one has already been answered with 503 or 401 above. ImplicitAdmin is
+				// only set for a root-scope account (ADR-025 Amendment 3), and
+				// permissions is always non-nil; the nil-sentinel is gone.
 				implicitAdminWeb := false
 				permissions := []string{}
-				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
-				if webAcctErr == nil && webAcct != nil {
+				{
 					acct := webAcct
 					// Issue #3126: an administratively disabled account loses access
-					// immediately, not at session expiry. The login gate in
-					// handlePasskeyLoginFinish only blocks new sessions; without this
-					// check a session issued before the disable keeps full API access
-					// for up to the absolute session timeout (12h) — including the
-					// implicit-admin grant below for a root-scope account, and the
-					// ability to step up assurance. Revoke the session server-side
-					// (best effort) so the rejection is durable, and answer with the
-					// same 401 a revoked session gets: the response must not
-					// distinguish "disabled" from "revoked".
+					// immediately, not at session expiry.
 					if acct.Disabled {
-						s.csrfTokens.Delete(webSess.ID)
-						if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
-							s.logger.Warn("Failed to revoke session of disabled account",
-								"session_id", logging.SanitizeLogValue(webSess.ID),
-								"error", logging.SanitizeLogValue(revokeErr.Error()))
-						}
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						endWebSession("disabled-account")
 						return
 					}
-					authCount = len(acct.Credentials)
-					globalScope = acct.RootScope
+					// Both the login passkey and the last proving passkey must still be
+					// on the account. An empty ID is refused: passkey login, the only
+					// issuer of web sessions, always records both.
+					if !accountHoldsCredential(acct, webSess.LoginCredentialID) ||
+						!accountHoldsCredential(acct, webSess.CredentialID) {
+						endWebSession("revoked-passkey")
+						return
+					}
 					if acct.RootScope {
 						// Root-scope accounts are platform administrators: they hold
 						// every permission, exactly as the mTLS-admin and CLI-session
@@ -1317,10 +1352,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						permissions = append(permissions, acct.Permissions...)
 					}
 				}
-				webTenant := webSess.TenantID
-				if webAcct != nil && webAcctErr == nil {
-					webTenant = s.accountPrincipalTenant(r.Context(), webAcct)
-				}
+				authCount := len(webAcct.Credentials)
+				globalScope := webAcct.RootScope
+				webTenant := s.accountPrincipalTenant(r.Context(), webAcct)
 				webPrincipal := &Principal{
 					ID:                 webSess.PrincipalID,
 					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),

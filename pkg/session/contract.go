@@ -62,6 +62,10 @@ type Session struct {
 	// CredentialID is the WebAuthn credential ID that established AssuranceStrong.
 	// Nil/empty when no device-bound proof has been recorded for this session.
 	CredentialID []byte
+	// LoginCredentialID is the WebAuthn credential ID of the first elevation, which
+	// for a web session is the passkey that logged it in. It is set once and never
+	// changed by a later step-up, so revoking that passkey can end the session.
+	LoginCredentialID []byte
 	// BoundIP is the source IP at the last successful strong-factor proof.
 	// Empty until the first proof. IP-change detection compares the current request
 	// IP against this value — not the IP at original session issuance.

@@ -301,3 +301,55 @@ func TestElevate_ReturnsTokenWithCorrectLength(t *testing.T) {
 		t.Errorf("newToken length = %d, want 43 (base64url no-padding for 32 bytes)", len(newToken))
 	}
 }
+
+// TestElevate_LoginCredentialIDSetOnce verifies the first Elevate fixes
+// LoginCredentialID and a later step-up changes only CredentialID (Issue #5166).
+func TestElevate_LoginCredentialIDSetOnce(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:           10 * time.Minute,
+		AbsoluteTimeout:       1 * time.Hour,
+		GraceWindow:           30 * time.Second,
+		SilentReproofInterval: 5 * time.Minute,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	sess, _, err := mgr.Issue(ctx, "alice", "web", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if len(sess.LoginCredentialID) != 0 {
+		t.Fatalf("LoginCredentialID before Elevate = %x, want empty", sess.LoginCredentialID)
+	}
+
+	credX, credY := []byte("cred-x"), []byte("cred-y")
+	first, _, err := mgr.Elevate(ctx, sess.ID, credX, "192.0.2.10")
+	if err != nil {
+		t.Fatalf("first Elevate: %v", err)
+	}
+	if !bytes.Equal(first.CredentialID, credX) || !bytes.Equal(first.LoginCredentialID, credX) {
+		t.Fatalf("after first Elevate: CredentialID=%q LoginCredentialID=%q, want both %q",
+			first.CredentialID, first.LoginCredentialID, credX)
+	}
+
+	second, newToken, err := mgr.Elevate(ctx, sess.ID, credY, "192.0.2.10")
+	if err != nil {
+		t.Fatalf("second Elevate: %v", err)
+	}
+	if !bytes.Equal(second.CredentialID, credY) {
+		t.Errorf("CredentialID = %q, want %q", second.CredentialID, credY)
+	}
+	if !bytes.Equal(second.LoginCredentialID, credX) {
+		t.Errorf("LoginCredentialID = %q, want it to stay %q", second.LoginCredentialID, credX)
+	}
+
+	got, err := mgr.Validate(ctx, newToken)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !bytes.Equal(got.LoginCredentialID, credX) || !bytes.Equal(got.CredentialID, credY) {
+		t.Errorf("stored LoginCredentialID=%q CredentialID=%q, want %q / %q",
+			got.LoginCredentialID, got.CredentialID, credX, credY)
+	}
+}

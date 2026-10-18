@@ -37,7 +37,7 @@ func TestWebAccount_RootScope_ResolvesEveryPermission(t *testing.T) {
 		TenantID:  "",
 		RootScope: true,
 	})
-	cookie := issueWebSession(t, mgr, "root-admin-regression", "")
+	cookie := issueWebSession(t, srv, mgr, "root-admin-regression", "")
 
 	// Capture the resolved principal.
 	var capturedPrincipal *Principal
@@ -109,7 +109,7 @@ func TestWebAccount_TenantScoped_ConfinedToExplicitGrants(t *testing.T) {
 		RootScope:   false,
 		Permissions: []string{"steward:list", "steward:read"},
 	})
-	cookie := issueWebSession(t, mgr, "tenant-operator-regression", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "tenant-operator-regression", "tenant-a")
 
 	var capturedPrincipal *Principal
 	captureHandler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

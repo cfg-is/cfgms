@@ -3,6 +3,7 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -386,6 +387,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		hash := session.HashToken(tok)
 		now := time.Now().UTC().Truncate(time.Second)
 		credID := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04}
+		loginCredID := []byte{0xCA, 0xFE, 0xBA, 0xBE, 0x05, 0x06}
 
 		sess := &session.Session{
 			ID:                "sc-continuity",
@@ -397,6 +399,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 			AbsoluteExpiresAt: now.Add(cfg.AbsoluteTimeout),
 			Assurance:         session.AssuranceStrong,
 			CredentialID:      credID,
+			LoginCredentialID: loginCredID,
 			BoundIP:           "198.51.100.42",
 			LastProvenAt:      now,
 			RootScoped:        true,
@@ -438,6 +441,10 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 			}
 		}
 
+		if !bytes.Equal(got.LoginCredentialID, loginCredID) {
+			t.Errorf("LoginCredentialID: got %x, want %x", got.LoginCredentialID, loginCredID)
+		}
+
 		// ListAll must also return the continuity fields intact.
 		all, err := store.ListAll(ctx)
 		if err != nil {
@@ -461,6 +468,9 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 		if found.LastProvenAt.IsZero() {
 			t.Error("ListAll LastProvenAt: got zero, want non-zero")
+		}
+		if !bytes.Equal(found.LoginCredentialID, loginCredID) {
+			t.Errorf("ListAll LoginCredentialID: got %x, want %x", found.LoginCredentialID, loginCredID)
 		}
 		if len(found.CredentialID) != len(credID) {
 			t.Errorf("ListAll CredentialID length: got %d, want %d", len(found.CredentialID), len(credID))

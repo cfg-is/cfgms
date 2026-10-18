@@ -1810,6 +1810,7 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 			bound_ip            TEXT    NOT NULL DEFAULT '',
 			last_proven_at      TIMESTAMP WITH TIME ZONE,
 			credential_id       BYTEA,
+			login_credential_id BYTEA,
 			root_scoped         BOOLEAN NOT NULL DEFAULT FALSE,
 			channel             TEXT    NOT NULL DEFAULT ''
 		);`
@@ -1867,6 +1868,7 @@ func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS bound_ip       TEXT    NOT NULL DEFAULT ''`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS last_proven_at TIMESTAMP WITH TIME ZONE`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS credential_id  BYTEA`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS login_credential_id BYTEA`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS root_scoped    BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS channel        TEXT    NOT NULL DEFAULT ''`,
 	}

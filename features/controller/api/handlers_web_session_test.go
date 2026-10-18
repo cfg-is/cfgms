@@ -723,11 +723,17 @@ func TestWebLogout_CSRFRequired(t *testing.T) {
 // api subrouter: GET is exempt; cookie-auth POST without CSRF header → 403;
 // cookie-auth POST with correct CSRF header → passes; API-key POST is never checked.
 func TestCSRFMiddleware_SessionBound(t *testing.T) {
-	srv, _ := setupPasskeySessionServer(t)
+	srv, username := setupPasskeySessionServer(t)
 
 	// Issue a session directly and inject a CSRF token (no need for passkey ceremony here).
-	_, token, err := srv.webSessionManager.Issue(context.Background(),
-		"webauthn-test-user", "test", "test-tenant")
+	acct, err := srv.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	credID, err := hex.DecodeString(svAuthCredentialIDHex)
+	require.NoError(t, err)
+	sess, _, err := srv.webSessionManager.Issue(context.Background(), acct.ID, "test", acct.TenantID)
+	require.NoError(t, err)
+	_, token, err := srv.webSessionManager.Elevate(context.Background(), sess.ID, credID, "198.51.100.77")
 	require.NoError(t, err)
 	webSess, err := srv.webSessionManager.Validate(context.Background(), token)
 	require.NoError(t, err)
