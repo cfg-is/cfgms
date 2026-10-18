@@ -6,9 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,6 +255,11 @@ func cloneDir(workDir, tenantID, url string) string {
 
 func newGitTestRouter(t *testing.T, tenants ...string) (*controllerRouter, string) {
 	t.Helper()
+	return newGitTestRouterOpts(t, nil, tenants...)
+}
+
+func newGitTestRouterOpts(t *testing.T, opts []RouterOption, tenants ...string) (*controllerRouter, string) {
+	t.Helper()
 	ts := newTenantStore(t)
 	for _, id := range tenants {
 		addTenant(t, ts, id, "", nil)
@@ -259,7 +267,7 @@ func newGitTestRouter(t *testing.T, tenants ...string) (*controllerRouter, strin
 	cs, err := flatfile.NewFlatFileConfigStore(t.TempDir())
 	require.NoError(t, err)
 	workDir := t.TempDir()
-	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), workDir, logging.NewNoopLogger()).(*controllerRouter)
+	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), workDir, logging.NewNoopLogger(), opts...).(*controllerRouter)
 	t.Cleanup(router.Close)
 	return router, workDir
 }
@@ -581,4 +589,132 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 	// directly (no fallback), so the broken remote surfaces as a returned error.
 	_, _, syncErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	assert.Error(t, syncErr, "sync must return an error when the cached git store's remote is broken")
+}
+
+// slowRemote is an HTTP git remote that never answers until released. It records how
+// many requests arrived and signals the first one.
+type slowRemote struct {
+	url      string
+	requests atomic.Int64
+	arrived  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (sr *slowRemote) releaseAll() { sr.once.Do(func() { close(sr.release) }) }
+
+func newSlowRemote(t *testing.T) *slowRemote {
+	t.Helper()
+	sr := &slowRemote{arrived: make(chan struct{}, 16), release: make(chan struct{})}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		sr.requests.Add(1)
+		sr.arrived <- struct{}{}
+		select {
+		case <-sr.release:
+		case <-req.Context().Done():
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	sr.url = srv.URL + "/repo.git"
+	t.Cleanup(srv.Close) // runs after the release below
+	t.Cleanup(sr.releaseAll)
+	return sr
+}
+
+func (sr *slowRemote) waitArrived(t *testing.T) {
+	t.Helper()
+	select {
+	case <-sr.arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("clone request never reached the remote")
+	}
+}
+
+// TestStoreForSource_HangingCloneDoesNotBlockCachedSource verifies the global lock is not
+// held across a clone: a read of an already-cached source completes while another
+// source's clone is hanging.
+func TestStoreForSource_HangingCloneDoesNotBlockCachedSource(t *testing.T) {
+	router, _ := newGitTestRouter(t, "a", "b")
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	urlA := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("a\n")})
+	_, err := router.storeForSource(ctx, "a", gitInfo(urlA))
+	require.NoError(t, err)
+
+	slow := newSlowRemote(t)
+	slowDone := make(chan error, 1)
+	go func() {
+		_, e := router.storeForSource(ctx, "b", gitInfo(slow.url))
+		slowDone <- e
+	}()
+	slow.waitArrived(t)
+
+	cachedDone := make(chan error, 1)
+	go func() {
+		_, e := router.storeForSource(ctx, "a", gitInfo(urlA))
+		cachedDone <- e
+	}()
+	select {
+	case e := <-cachedDone:
+		require.NoError(t, e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cached source blocked behind another source's hanging clone")
+	}
+
+	// A different, new source also clones in parallel with the hanging one.
+	urlC := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("c\n")})
+	newDone := make(chan error, 1)
+	go func() {
+		_, e := router.storeForSource(ctx, "c", gitInfo(urlC))
+		newDone <- e
+	}()
+	select {
+	case e := <-newDone:
+		require.NoError(t, e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("new source blocked behind another source's hanging clone")
+	}
+
+	slow.releaseAll()
+	require.Error(t, <-slowDone)
+}
+
+// TestStoreForSource_ConcurrentSameNewSourceClonesOnce verifies two concurrent requests
+// for the same new source share one clone.
+func TestStoreForSource_ConcurrentSameNewSourceClonesOnce(t *testing.T) {
+	router, workDir := newGitTestRouter(t, "a")
+	ctx := ctxkeys.WithSystem(context.Background())
+	slow := newSlowRemote(t)
+
+	errs := make(chan error, 2)
+	go func() {
+		_, e := router.storeForSource(ctx, "a", gitInfo(slow.url))
+		errs <- e
+	}()
+	slow.waitArrived(t)
+	go func() {
+		_, e := router.storeForSource(ctx, "a", gitInfo(slow.url))
+		errs <- e
+	}()
+	time.Sleep(200 * time.Millisecond) // let the second caller join the in-flight build
+	slow.releaseAll()
+
+	require.Error(t, <-errs)
+	require.Error(t, <-errs)
+	assert.Equal(t, int64(1), slow.requests.Load(), "both callers must share one clone attempt")
+	assert.Empty(t, dirEntries(t, workDir))
+}
+
+// TestStoreForSource_CloneDeadlineReturnsErrorAndLeavesNothing verifies a clone that
+// exceeds the operation deadline fails and removes its directory.
+func TestStoreForSource_CloneDeadlineReturnsErrorAndLeavesNothing(t *testing.T) {
+	router, workDir := newGitTestRouterOpts(t, []RouterOption{WithGitOperationTimeout(300 * time.Millisecond)}, "a")
+	ctx := ctxkeys.WithSystem(context.Background())
+	slow := newSlowRemote(t)
+
+	start := time.Now()
+	_, err := router.storeForSource(ctx, "a", gitInfo(slow.url))
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 10*time.Second, "clone must be bounded by the deadline")
+	assert.Empty(t, dirEntries(t, workDir), "timed-out clone must leave no directory")
 }

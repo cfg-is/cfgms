@@ -36,7 +36,32 @@ const (
 	// gitStoreTTL is deliberately very long: a git store must not silently expire.
 	// Entries leave the cache by per-tenant replacement or the LRU bound.
 	gitStoreTTL = 100 * 365 * 24 * time.Hour
+
+	// defaultGitOperationTimeout bounds a single git clone or pull so that a remote
+	// that never answers cannot hold a request (or a clone directory) indefinitely.
+	defaultGitOperationTimeout = 2 * time.Minute
 )
+
+// RouterOption configures optional router behaviour.
+type RouterOption func(*controllerRouter)
+
+// WithGitOperationTimeout sets the deadline applied to each git clone and pull.
+// Non-positive values keep the default.
+func WithGitOperationTimeout(d time.Duration) RouterOption {
+	return func(r *controllerRouter) {
+		if d > 0 {
+			r.gitOpTimeout = d
+		}
+	}
+}
+
+// gitStoreCall is a git store construction in flight for one cache key. Callers that
+// need the same key wait on done and share the result instead of cloning again.
+type gitStoreCall struct {
+	done  chan struct{}
+	store *gitprovider.GitConfigStore
+	err   error
+}
 
 // gitStoreEntry is the value held in the git store cache.
 type gitStoreEntry struct {
@@ -65,10 +90,15 @@ type controllerRouter struct {
 	secretStore secretsiface.SecretStore
 	gitWorkDir  string
 	logger      logging.Logger
-	// gitStoreMu serialises creation and removal of clone directories. It is never
-	// held by the cache's eviction callback; the callback only queues the directory
-	// in pendingRemovals, and whoever holds (or next takes) gitStoreMu drains it.
+	// gitStoreMu guards the git store bookkeeping (cache lookup/insert, tenantGitKey,
+	// inflight) and serialises clone directory removal against those. It is never held
+	// across network I/O: construction runs outside it, serialised per cache key by
+	// inflight, and a key under construction is never removed by a drain. It is never
+	// held by the cache's eviction callback either; the callback only queues the
+	// directory in pendingRemovals, and whoever holds (or next takes) gitStoreMu drains it.
 	gitStoreMu      sync.Mutex
+	inflight        map[string]*gitStoreCall // cache key -> construction in flight (guarded by gitStoreMu)
+	gitOpTimeout    time.Duration
 	gitStoreCache   *cache.Cache      // key: tenantID+":"+sha256(url); value: gitStoreEntry
 	tenantGitKey    map[string]string // tenantID -> its single live cache key (guarded by gitStoreMu)
 	pendingMu       sync.Mutex
@@ -101,6 +131,7 @@ func NewControllerRouterWithGit(
 	secretStore secretsiface.SecretStore,
 	gitWorkDir string,
 	logger logging.Logger,
+	opts ...RouterOption,
 ) routerinterfaces.ConfigSourceRouter {
 	r := &controllerRouter{
 		controllerStore: controllerStore,
@@ -116,6 +147,11 @@ func NewControllerRouterWithGit(
 		gitWorkDir:   gitWorkDir,
 		logger:       logger,
 		tenantGitKey: make(map[string]string),
+		inflight:     make(map[string]*gitStoreCall),
+		gitOpTimeout: defaultGitOperationTimeout,
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 	r.gitStoreCache = r.newGitStoreCache(maxGitStoreEntries)
 	return r
@@ -174,6 +210,14 @@ func (r *controllerRouter) drainPendingRemovalsLocked() {
 	}
 	for _, p := range pending {
 		if _, isLive := live[p.key]; isLive {
+			continue
+		}
+		if _, building := r.inflight[p.key]; building {
+			// The key is being (re)built; its directory is not ours to remove yet.
+			// Requeue so the construction's completion drains it.
+			r.pendingMu.Lock()
+			r.pendingRemovals = append(r.pendingRemovals, p)
+			r.pendingMu.Unlock()
 			continue
 		}
 		if r.tenantGitKey[p.tenantID] == p.key {
@@ -290,27 +334,27 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 	cacheKey := tenantID + ":" + urlHash
 
 	r.gitStoreMu.Lock()
-	defer func() {
-		r.drainPendingRemovalsLocked()
-		r.gitStoreMu.Unlock()
-		// An eviction callback that raced with the lock holder only queued its entry;
-		// pick up anything queued after the drain above.
-		r.pendingMu.Lock()
-		queued := len(r.pendingRemovals) > 0
-		r.pendingMu.Unlock()
-		if queued {
-			r.gitStoreMu.Lock()
-			r.drainPendingRemovalsLocked()
-			r.gitStoreMu.Unlock()
-		}
-	}()
-
 	// Clear out directories of entries evicted since the last call before any
 	// directory for this key is (re)created.
 	r.drainPendingRemovalsLocked()
 
 	if v, ok := r.gitStoreCache.Get(cacheKey); ok {
+		r.unlockAndDrain()
 		return v.(gitStoreEntry).store, nil
+	}
+
+	// Another caller is already building this source: share its result.
+	if call, ok := r.inflight[cacheKey]; ok {
+		r.unlockAndDrain()
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("git config source for tenant %q is unavailable", tenantID)
+		}
+		if call.err != nil {
+			return nil, call.err
+		}
+		return call.store, nil
 	}
 
 	// A different URL for this tenant replaces its previous entry.
@@ -320,12 +364,23 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 		r.drainPendingRemovalsLocked()
 	}
 
+	call := &gitStoreCall{done: make(chan struct{})}
+	r.inflight[cacheKey] = call
+	r.gitStoreMu.Unlock()
+
+	// Network I/O runs without gitStoreMu so one slow remote cannot block other
+	// sources. It is detached from the caller's cancellation (other callers may be
+	// sharing it) and bounded by the git operation deadline instead.
 	logger := r.logger
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
+	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.gitOpTimeout)
+	gs, err := gitprovider.NewGitConfigStore(buildCtx, info, tenantID, r.secretStore, r.gitWorkDir, logger)
+	cancel()
 
-	gs, err := gitprovider.NewGitConfigStore(ctx, info, tenantID, r.secretStore, r.gitWorkDir, logger)
+	r.gitStoreMu.Lock()
+	delete(r.inflight, cacheKey)
 	if err != nil {
 		slog.Warn("configrouting: failed to create git store",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
@@ -334,12 +389,39 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		// The cause (which can carry work-directory paths) is logged, not returned.
-		return nil, fmt.Errorf("git config source for tenant %q is unavailable", tenantID)
+		call.err = fmt.Errorf("git config source for tenant %q is unavailable", tenantID)
+	} else {
+		// A concurrent build for another source of this tenant may have landed first;
+		// the tenant keeps a single live entry.
+		if oldKey, ok := r.tenantGitKey[tenantID]; ok && oldKey != cacheKey {
+			r.gitStoreCache.Delete(oldKey)
+		}
+		r.tenantGitKey[tenantID] = cacheKey
+		_ = r.gitStoreCache.Set(cacheKey, gitStoreEntry{store: gs, tenantID: tenantID, repoDir: gs.RepoDir()}, gitStoreTTL)
+		call.store = gs
 	}
+	close(call.done)
+	r.unlockAndDrain()
 
-	r.tenantGitKey[tenantID] = cacheKey
-	_ = r.gitStoreCache.Set(cacheKey, gitStoreEntry{store: gs, tenantID: tenantID, repoDir: gs.RepoDir()}, gitStoreTTL)
-	return gs, nil
+	if call.err != nil {
+		return nil, call.err
+	}
+	return call.store, nil
+}
+
+// unlockAndDrain drains queued clone removals, releases gitStoreMu (held by the
+// caller) and picks up anything an eviction callback queued after the drain.
+func (r *controllerRouter) unlockAndDrain() {
+	r.drainPendingRemovalsLocked()
+	r.gitStoreMu.Unlock()
+	r.pendingMu.Lock()
+	queued := len(r.pendingRemovals) > 0
+	r.pendingMu.Unlock()
+	if queued {
+		r.gitStoreMu.Lock()
+		r.drainPendingRemovalsLocked()
+		r.gitStoreMu.Unlock()
+	}
 }
 
 // SyncTenantWithRemote pulls the remote for tenantID's git source and returns the
@@ -372,7 +454,9 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 		)
 		return "", "", fmt.Errorf("sync: failed to read pre-pull HEAD for %q: %w", tenantID, err)
 	}
-	newSHA, err = gitStore.SyncWithRemote(ctx)
+	syncCtx, cancel := context.WithTimeout(ctx, r.gitOpTimeout)
+	defer cancel()
+	newSHA, err = gitStore.SyncWithRemote(syncCtx)
 	return prevSHA, newSHA, err
 }
 
