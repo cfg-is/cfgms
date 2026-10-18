@@ -1139,7 +1139,22 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !verifyEnrollmentToken(acct, rawToken) {
+	// The token lookup may be served from the cache; re-read the durable store so a
+	// disable committed by another node or request is honoured.
+	freshAcct, freshErr := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
+	if freshErr != nil {
+		s.logger.Error("Failed to verify account state for enrollment begin",
+			"error", logging.SanitizeLogValue(freshErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up account", "STORE_ERROR")
+		return
+	}
+	if freshAcct != nil {
+		acct = freshAcct
+	}
+
+	// A disabled account must not gain a credential (containment control).
+	if acct.Disabled || !verifyEnrollmentToken(acct, rawToken) {
 		s.writeErrorResponse(w, http.StatusUnauthorized,
 			"Invalid or expired enrollment token", "TOKEN_INVALID")
 		return
@@ -1246,7 +1261,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 			"Failed to look up account", "STORE_ERROR")
 		return
 	}
-	if acct == nil || !verifyEnrollmentToken(acct, rawToken) {
+	if acct == nil || acct.Disabled || !verifyEnrollmentToken(acct, rawToken) {
 		s.writeErrorResponse(w, http.StatusUnauthorized,
 			"Enrollment token is no longer valid", "TOKEN_INVALID")
 		return
@@ -1300,7 +1315,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 			"Failed to verify account state", "STORE_ERROR")
 		return
 	}
-	if freshAcct == nil || !verifyEnrollmentToken(freshAcct, rawToken) {
+	if freshAcct == nil || freshAcct.Disabled || !verifyEnrollmentToken(freshAcct, rawToken) {
 		// Token was revoked or expired by an admin between begin and finish.
 		s.writeErrorResponse(w, http.StatusGone,
 			"Enrollment token is no longer valid", "TOKEN_INVALID")

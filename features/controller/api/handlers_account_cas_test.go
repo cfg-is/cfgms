@@ -264,3 +264,49 @@ func TestPasskeyEnrollFinish_LostSwap_DisableNotReverted(t *testing.T) {
 	assert.Empty(t, stored.Credentials, "no credential may be stored on a lost swap")
 	assert.False(t, bytes.Contains(rec.Body.Bytes(), credID))
 }
+
+func TestCreateAccountReset_LostSwap_DisableNotUndone(t *testing.T) {
+	server, race := casRaceServer(t)
+	createCASAccount(t, server, "cas-reset-disable", []string{"steward:list"})
+	seedCredential(t, server, "cas-reset-disable")
+
+	race.arm("cas-reset-disable", func() {
+		commitCompetingWrite(t, server, "cas-reset-disable", func(a *account) { a.Disabled = true })
+	})
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "cas-reset-disable", TenantID: "tenant-a", Permissions: []string{"steward:list"}, ResetCredentials: true,
+	})
+
+	assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+	assert.NotContains(t, rec.Body.String(), "enrollment_magic_link", "a link minted for a lost write must never be returned")
+	stored := casStoredAccount(t, server, "cas-reset-disable")
+	assert.True(t, stored.Disabled, "the concurrent disable must survive")
+	assert.Len(t, stored.Credentials, 1, "credentials must not be wiped by a lost reset")
+}
+
+func TestPasskeyEnroll_DisabledAccountRefused(t *testing.T) {
+	const username = "cas-enroll-disabled"
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig("example.org", "example.org", []string{"https://example.org"})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	rawToken := parseCreateResponse(t, rec).EnrollmentMagicLink
+	require.NotEmpty(t, rawToken)
+
+	commitCompetingWrite(t, server, username, func(a *account) { a.Disabled = true })
+
+	rec = doEnrollBegin(t, server, rawToken)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "begin body: %s", rec.Body.String())
+
+	acct := casStoredAccount(t, server, username)
+	injectEnrollSession(server, rawToken, webauthn.SessionData{
+		UserID:         []byte(acct.ID),
+		RelyingPartyID: "example.org",
+	}, 10*time.Minute)
+	rec = doEnrollFinish(t, server, rawToken, finishBody(t, "AA", "AA", "AA"))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "finish body: %s", rec.Body.String())
+	assert.Empty(t, casStoredAccount(t, server, username).Credentials, "a disabled account must not gain a credential")
+}

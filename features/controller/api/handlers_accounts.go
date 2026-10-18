@@ -878,17 +878,6 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If a reset moves the account to a different storage tenant, remove the old
-	// record so the store never holds two live records for one username.
-	if existing != nil && accountStorageTenant(existing.TenantID) != accountStorageTenant(acct.TenantID) {
-		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
-		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
-			s.logger.Warn("Failed to delete account record from previous tenant",
-				"username", logging.SanitizeLogValue(acct.Username),
-				"error", logging.SanitizeLogValue(delErr.Error()))
-		}
-	}
-
 	// Issue #2974: mint a single-use, TTL-bounded enrollment magic link, but only for
 	// an account in the zero-authenticator state. An enrollment link is a bearer
 	// credential that registers a *first* passkey, so minting one against an account
@@ -920,11 +909,37 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		acct.EnrollmentLinkRevoked = existing.EnrollmentLinkHash != ""
 	}
 
-	if err := s.persistAccount(r.Context(), acct, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist account to secret store", "error", logging.SanitizeLogValue(err.Error()),
+	// The CAS version comes from the record this reset was built on, so a disable or
+	// credential revocation committed since that read is never silently undone. A
+	// record moved to a different storage tenant is a new key: create-if-absent.
+	moved := existing != nil && accountStorageTenant(existing.TenantID) != accountStorageTenant(acct.TenantID)
+	if existing != nil && !moved {
+		acct.Version = existing.Version
+	}
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), acct, actingPrincipalID)
+	if persistErr != nil {
+		s.logger.Error("Failed to persist account to secret store", "error", logging.SanitizeLogValue(persistErr.Error()),
 			"username", logging.SanitizeLogValue(acct.Username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist account", "STORE_ERROR")
 		return
+	}
+	if !swapped {
+		// No cache update, session revocation, audit event or returned link.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry", "ACCOUNT_MODIFIED")
+		return
+	}
+	acct.Version = newVersion
+
+	// If a reset moved the account to a different storage tenant, remove the old
+	// record so the store never holds two live records for one username.
+	if moved {
+		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
+		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
+			s.logger.Warn("Failed to delete account record from previous tenant",
+				"username", logging.SanitizeLogValue(acct.Username),
+				"error", logging.SanitizeLogValue(delErr.Error()))
+		}
 	}
 	s.cacheAccount(acct)
 
