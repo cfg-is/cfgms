@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2254,4 +2255,241 @@ func TestWebAuthnAdminPath_RootTenantBoundCaller_CannotReachRootScopeAccount(t *
 		rec = doBegin(t, server, rootOperator)
 		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	})
+}
+
+// --- Issue #5158: register-finish reloads the account and writes with CAS ---
+
+// Spec test vector (W3C Level 3 §16.2 NoneES256) used by the register-finish
+// concurrency tests below; same fixture as TestWebAuthnRegistration/Finish_Success.
+const (
+	rfRPID          = "example.org"
+	rfOrigin        = "https://example.org"
+	rfAttObjectHex  = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220" //nolint:gosec // W3C spec test vector, not a real secret
+	rfClientDataHex = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
+	rfCredIDHex     = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec // W3C spec test vector credential ID
+	rfChallengeHex  = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
+)
+
+// rfPrepareFinish injects a pending registration session for the spec vector and
+// returns the matching finish request body and the credential ID the finish adds.
+func rfPrepareFinish(t *testing.T, server *Server, username string) (*bytes.Reader, []byte) {
+	t.Helper()
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+
+	attObj, err := hex.DecodeString(rfAttObjectHex)
+	require.NoError(t, err)
+	cdj, err := hex.DecodeString(rfClientDataHex)
+	require.NoError(t, err)
+	credID, err := hex.DecodeString(rfCredIDHex)
+	require.NoError(t, err)
+	challenge, err := hex.DecodeString(rfChallengeHex)
+	require.NoError(t, err)
+
+	injectSession(server, username, webauthn.SessionData{
+		Challenge:        base64.RawURLEncoding.EncodeToString(challenge),
+		UserID:           []byte(acct.ID),
+		UserVerification: protocol.VerificationPreferred,
+		RelyingPartyID:   rfRPID,
+		CredParams: []protocol.CredentialParameter{
+			{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+		},
+	}, 10*time.Minute)
+
+	body := finishBody(t, base64.RawURLEncoding.EncodeToString(credID),
+		base64.RawURLEncoding.EncodeToString(cdj),
+		base64.RawURLEncoding.EncodeToString(attObj))
+	return body, credID
+}
+
+// storeOnlyWrite reads the durable record, applies mutate and writes it straight
+// to the store, bypassing cacheAccount so the cached copy stays stale.
+func storeOnlyWrite(t *testing.T, server *Server, username string, mutate func(a *account)) {
+	t.Helper()
+	cached, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	fresh, err := server.loadAccountFromStore(context.Background(), username, accountStorageTenant(cached.TenantID))
+	require.NoError(t, err)
+	require.NotNil(t, fresh)
+	mutate(fresh)
+	_, ok, err := server.persistAccountCAS(context.Background(), fresh, "test-direct-write")
+	require.NoError(t, err)
+	require.True(t, ok)
+	// loadAccountFromStore re-cached the pre-mutation record; restore the stale copy.
+	server.cacheAccount(cached)
+}
+
+func TestWebAuthnRegisterFinish_ReloadsAccountFromStore(t *testing.T) {
+	credX := []byte("credential-x-removed-by-admin")
+
+	t.Run("removed credential is not restored", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, rfRPID, []string{rfOrigin})
+		injectCredential(t, server, username, credX)
+		body, newID := rfPrepareFinish(t, server, username)
+
+		// Admin removes X directly in the store; the cache still holds it.
+		storeOnlyWrite(t, server, username, func(a *account) { a.Credentials = nil })
+		server.mu.RLock()
+		cached := server.accounts[username]
+		server.mu.RUnlock()
+		require.NotNil(t, cached)
+		require.Len(t, cached.Credentials, 1, "precondition: cache is stale and still holds X")
+
+		rec := doFinish(t, server, username, body)
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+		stored, err := server.loadAccountFromStore(context.Background(), username, accountStorageTenant(cached.TenantID))
+		require.NoError(t, err)
+		require.Len(t, stored.Credentials, 1)
+		assert.Equal(t, newID, stored.Credentials[0].ID)
+		for _, c := range stored.Credentials {
+			assert.NotEqual(t, credX, c.ID, "admin-removed credential must not be restored")
+		}
+	})
+
+	t.Run("account disabled in store is refused", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, rfRPID, []string{rfOrigin})
+		body, _ := rfPrepareFinish(t, server, username)
+
+		storeOnlyWrite(t, server, username, func(a *account) { a.Disabled = true })
+
+		rec := doFinish(t, server, username, body)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "ACCOUNT_DISABLED", errCode(t, rec.Body.Bytes()))
+
+		cached, err := server.getAccount(context.Background(), username)
+		require.NoError(t, err)
+		stored, err := server.loadAccountFromStore(context.Background(), username, accountStorageTenant(cached.TenantID))
+		require.NoError(t, err)
+		assert.True(t, stored.Disabled, "account must stay disabled")
+		assert.Empty(t, stored.Credentials, "nothing may be written")
+	})
+}
+
+// TestWebAuthnRegisterFinish_ConcurrentWriterNeverLosesCredential races a register
+// finish against a second credential being written to the same account. Either both
+// credentials survive, or the finish reports 409 ACCOUNT_MODIFIED and the other
+// credential survives; a silent loss is the failure.
+func TestWebAuthnRegisterFinish_ConcurrentWriterNeverLosesCredential(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		server, username := setupWebAuthnServer(t, rfRPID, []string{rfOrigin})
+		body, newID := rfPrepareFinish(t, server, username)
+		otherID := []byte("concurrent-credential")
+
+		acct, err := server.getAccount(context.Background(), username)
+		require.NoError(t, err)
+		tenant := accountStorageTenant(acct.TenantID)
+
+		var wg sync.WaitGroup
+		var rec *httptest.ResponseRecorder
+		var casOK bool
+		var casErr error
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec = doFinish(t, server, username, body)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			fresh, err := server.loadAccountFromStore(context.Background(), username, tenant)
+			if err != nil || fresh == nil {
+				casErr = fmt.Errorf("reload failed: %v", err)
+				return
+			}
+			upd := *fresh
+			upd.Credentials = append(append([]WebAuthnCredential(nil), fresh.Credentials...),
+				WebAuthnCredential{ID: otherID, Label: "other", RegisteredAt: time.Now()})
+			_, casOK, casErr = server.persistAccountCAS(context.Background(), &upd, "test-concurrent")
+		}()
+		close(start)
+		wg.Wait()
+		require.NoError(t, casErr)
+
+		stored, err := server.loadAccountFromStore(context.Background(), username, tenant)
+		require.NoError(t, err)
+		has := func(id []byte) bool {
+			for _, c := range stored.Credentials {
+				if bytes.Equal(c.ID, id) {
+					return true
+				}
+			}
+			return false
+		}
+		switch rec.Code {
+		case http.StatusCreated:
+			assert.True(t, has(newID), "finish reported success but credential missing")
+			if casOK {
+				assert.True(t, has(otherID), "concurrent credential silently lost")
+			}
+		case http.StatusConflict:
+			assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+			assert.False(t, has(newID))
+			assert.True(t, has(otherID))
+		default:
+			t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestWebAuthnRegisterFinish_LostSwap_Returns409 forces the compare-and-swap loss
+// deterministically: an administrator write lands immediately after the handler's
+// reload from the store, so the version the handler read is stale when it swaps.
+// The finish must report 409 ACCOUNT_MODIFIED, write nothing, and leave the
+// administrator's write intact.
+func TestWebAuthnRegisterFinish_LostSwap_Returns409(t *testing.T) {
+	server, username := setupWebAuthnServer(t, rfRPID, []string{rfOrigin})
+	body, newID := rfPrepareFinish(t, server, username)
+	otherID := []byte("admin-written-credential")
+
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	tenant := accountStorageTenant(acct.TenantID)
+	before, err := server.loadAccountFromStore(context.Background(), username, tenant)
+	require.NoError(t, err)
+	require.NotNil(t, before)
+
+	rs := installRacingStore(t, server)
+	hookRan := false
+	rs.mu.Lock()
+	// The handler lists the store twice: getAccount in resolveAccountForCredentials,
+	// then the reload in handleWebAuthnRegisterFinish. Fire right after the reload.
+	// A hook that fired any earlier would be seen by the reload and yield 201, so a
+	// mis-count fails this test rather than passing it.
+	rs.fireOnList = 2
+	rs.hook = func() {
+		hookRan = true
+		cur, err := server.loadAccountFromStore(context.Background(), username, tenant)
+		require.NoError(t, err)
+		require.NotNil(t, cur)
+		cur.Credentials = append(cur.Credentials,
+			WebAuthnCredential{ID: otherID, Label: "admin", RegisteredAt: time.Now().UTC()})
+		_, ok, err := server.persistAccountCAS(context.Background(), cur, "test-admin")
+		require.NoError(t, err)
+		require.True(t, ok, "administrator write must win the swap")
+	}
+	rs.mu.Unlock()
+
+	rec := doFinish(t, server, username, body)
+	require.True(t, hookRan, "administrator write must have run between reload and swap")
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+
+	rs.mu.Lock()
+	casCalls := rs.casCalls
+	rs.mu.Unlock()
+	assert.Equal(t, 2, casCalls, "administrator swap plus the handler's losing swap")
+
+	stored, err := server.loadAccountFromStore(context.Background(), username, tenant)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, before.Version+1, stored.Version, "only the administrator write may land")
+	require.Len(t, stored.Credentials, 1)
+	assert.Equal(t, otherID, stored.Credentials[0].ID, "administrator credential must survive")
+	for _, c := range stored.Credentials {
+		assert.NotEqual(t, newID, c.ID, "the losing registration must not be written")
+	}
 }
