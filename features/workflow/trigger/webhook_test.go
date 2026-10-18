@@ -842,6 +842,9 @@ func TestHTTPWebhookHandler_SanitizesRemoteAddrAndUserAgentInLogFile(t *testing.
 		"localhost",
 		8080,
 	)
+	// Registered after the logging cleanup so it runs first (LIFO): background
+	// workflow goroutines must finish before logging is closed.
+	t.Cleanup(handler.workflowWg.Wait)
 
 	const controlRemoteAddr = "10.0.0.1\x07evil:1234"
 	const controlUserAgent = "ua\x07evil"

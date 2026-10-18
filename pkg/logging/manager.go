@@ -29,6 +29,11 @@ type LoggingManager struct {
 	// eventBus fans out log entries to subscribers asynchronously.
 	eventBus eventbusInterfaces.EventBus
 
+	// lifecycle guards initialized and the provider/event bus lifetime: every
+	// public operation holds RLock for the whole call, Close holds Lock, so a
+	// call that passed the initialized check never uses a closed provider.
+	// Close-internal paths (flushBatch, batchingRoutine) must not take it.
+	lifecycle     sync.RWMutex
 	initialized   bool
 	defaultFields map[string]interface{}
 }
@@ -103,7 +108,7 @@ func InitializeGlobalLogging(config *LoggingConfig) error {
 	managerMutex.Lock()
 	defer managerMutex.Unlock()
 
-	if globalManager != nil && globalManager.initialized {
+	if globalManager != nil && globalManager.isInitialized() {
 		// Close existing provider before initializing new one
 		if err := globalManager.Close(); err != nil {
 			fmt.Printf("Warning: failed to close existing logging provider: %v\n", err)
@@ -177,8 +182,18 @@ func NewLoggingManager(config *LoggingConfig) (*LoggingManager, error) {
 	return manager, nil
 }
 
+// isInitialized reports whether the manager is open for use.
+func (m *LoggingManager) isInitialized() bool {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+	return m.initialized
+}
+
 // WriteEntry writes a single log entry using the global provider
 func (m *LoggingManager) WriteEntry(ctx context.Context, entry interfaces.LogEntry) error {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+
 	if !m.initialized {
 		return fmt.Errorf("logging manager not initialized")
 	}
@@ -211,6 +226,9 @@ func (m *LoggingManager) WriteEntry(ctx context.Context, entry interfaces.LogEnt
 
 // WriteBatch writes multiple log entries efficiently
 func (m *LoggingManager) WriteBatch(ctx context.Context, entries []interfaces.LogEntry) error {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+
 	if !m.initialized {
 		return fmt.Errorf("logging manager not initialized")
 	}
@@ -233,6 +251,9 @@ func (m *LoggingManager) WriteBatch(ctx context.Context, entries []interfaces.Lo
 
 // QueryTimeRange queries log entries within a time range
 func (m *LoggingManager) QueryTimeRange(ctx context.Context, query interfaces.TimeRangeQuery) ([]interfaces.LogEntry, error) {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+
 	if !m.initialized {
 		return nil, fmt.Errorf("logging manager not initialized")
 	}
@@ -242,6 +263,9 @@ func (m *LoggingManager) QueryTimeRange(ctx context.Context, query interfaces.Ti
 
 // QueryCount returns count of log entries matching criteria
 func (m *LoggingManager) QueryCount(ctx context.Context, query interfaces.CountQuery) (int64, error) {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+
 	if !m.initialized {
 		return 0, fmt.Errorf("logging manager not initialized")
 	}
@@ -251,6 +275,9 @@ func (m *LoggingManager) QueryCount(ctx context.Context, query interfaces.CountQ
 
 // GetStats returns operational statistics
 func (m *LoggingManager) GetStats(ctx context.Context) (interfaces.ProviderStats, error) {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+
 	if !m.initialized {
 		return interfaces.ProviderStats{}, fmt.Errorf("logging manager not initialized")
 	}
@@ -260,6 +287,9 @@ func (m *LoggingManager) GetStats(ctx context.Context) (interfaces.ProviderStats
 
 // Flush forces all pending writes to be committed
 func (m *LoggingManager) Flush(ctx context.Context) error {
+	m.lifecycle.RLock()
+	defer m.lifecycle.RUnlock()
+
 	if !m.initialized {
 		return fmt.Errorf("logging manager not initialized")
 	}
@@ -274,6 +304,9 @@ func (m *LoggingManager) Flush(ctx context.Context) error {
 
 // Close shuts down the logging manager
 func (m *LoggingManager) Close() error {
+	m.lifecycle.Lock()
+	defer m.lifecycle.Unlock()
+
 	if !m.initialized {
 		return nil
 	}

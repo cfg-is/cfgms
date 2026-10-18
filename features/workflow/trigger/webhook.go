@@ -51,6 +51,7 @@ type HTTPWebhookHandler struct {
 	authFailureLimiters map[string]*rate.Limiter
 	mutex               sync.RWMutex
 	running             bool
+	workflowWg          sync.WaitGroup // tracks asynchronous workflow goroutines
 	address             string
 	port                int
 }
@@ -120,6 +121,13 @@ func (wh *HTTPWebhookHandler) Start(ctx context.Context) error {
 
 // Stop stops the webhook handler HTTP server
 func (wh *HTTPWebhookHandler) Stop(ctx context.Context) error {
+	err := wh.stop(ctx)
+	// Wait outside wh.mutex: the workflow goroutines take it to update statistics.
+	wh.workflowWg.Wait()
+	return err
+}
+
+func (wh *HTTPWebhookHandler) stop(ctx context.Context) error {
 	wh.mutex.Lock()
 	defer wh.mutex.Unlock()
 
@@ -312,9 +320,11 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 	// Execute workflow asynchronously
 	execution.Status = TriggerExecutionStatusRunning
 
+	wh.workflowWg.Add(1)
 	// #nosec G118 -- the accepted webhook returns an execution handle while the
 	// workflow continues; the configured trigger timeout bounds it when present.
 	go func() {
+		defer wh.workflowWg.Done()
 		// The triggered execution belongs to the trigger's own tenant, not whatever
 		// (usually absent) tenant the inbound webhook request carried — the caller
 		// who owns this trigger is who debug_engine.StartDebugSession must match
