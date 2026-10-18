@@ -32,7 +32,7 @@ type egReadProvider interface {
 	GetEntity(ctx context.Context, eid eginterfaces.EIDRef, opts eginterfaces.GetEntityOpts) (*egtypes.EntityView, error)
 	QueryEntities(ctx context.Context, filter eginterfaces.EntityFilter, page eginterfaces.PageToken) (*eginterfaces.EntityPage, error)
 	GetEdges(ctx context.Context, filter eginterfaces.EdgeFilter) ([]*eginterfaces.EdgeView, error)
-	GetNeighborhood(ctx context.Context, eid eginterfaces.EIDRef, edgeTypes []string, direction egtypes.TraversalDirection, depth int) (*egtypes.Neighborhood, error)
+	GetNeighborhood(ctx context.Context, eid eginterfaces.EIDRef, edgeTypes []string, direction egtypes.TraversalDirection, depth int, cut eginterfaces.TenantCut) (*egtypes.Neighborhood, error)
 	GetHistory(ctx context.Context, eid eginterfaces.EIDRef, r eginterfaces.TimeRange) ([]*eginterfaces.ObservationRecord, error)
 	Diff(ctx context.Context, eid eginterfaces.EIDRef, r eginterfaces.TimeRange) (*eginterfaces.StateDiff, error)
 	GetTimeline(ctx context.Context, eids []eginterfaces.EIDRef, r eginterfaces.TimeRange) ([]*eginterfaces.TimelineEvent, error)
@@ -556,8 +556,8 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 
 // handleGetNeighborhood handles GET /api/v1/entities/{eid:.+}/neighborhood.
 // Query params: depth (1-3, default 1), direction (outbound|inbound|both), edge_type (repeatable).
-// The caller's tenant is verified via GetEntity before traversal because the provider
-// derives the tenant filter from the root entity's own tenant, not the caller's credential.
+// The caller's tenant is verified via GetEntity before traversal, and the traversal
+// is cut at the caller's own authorized tenant scope, never the root entity's tenant.
 func (s *Server) handleGetNeighborhood(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
 		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
@@ -597,15 +597,21 @@ func (s *Server) handleGetNeighborhood(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Verify caller can access the root entity before traversing its neighborhood.
-	// The provider uses the root entity's owning_tenant as the traversal filter, not
-	// the caller's credential — so a cross-tenant caller without this pre-check
-	// could retrieve a foreign entity's subgraph (ADR-022 §7).
+	// Verify caller can access the root entity before traversing its neighborhood
+	// (ADR-022 §7).
 	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/neighborhood") {
 		return
 	}
 
-	neighborhood, err := s.egProvider.GetNeighborhood(r.Context(), eid, q["edge_type"], direction, depth)
+	// The traversal cut is the caller's authorized scope. A caller with no
+	// resolvable scope is refused rather than walked unrestricted.
+	tenant, ids := s.entityCut(r)
+	if tenant == noTenantScope {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	neighborhood, err := s.egProvider.GetNeighborhood(r.Context(), eid, q["edge_type"], direction, depth, eginterfaces.NewTenantCut(tenant, ids))
 	if err != nil {
 		if isEntityNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -619,8 +625,8 @@ func (s *Server) handleGetNeighborhood(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The provider cuts a traversal at the root entity's own tenant, but a
-	// boundary-subject root caller must not rely on that: drop any node it may not
+	// The provider cuts a traversal at the caller's tenant scope, but a
+	// boundary-subject root caller (unrestricted scope) must not rely on that: drop any node it may not
 	// read and every edge that touches one.
 	if scope := s.tenantReadScope(r, "GET /api/v1/entities/{eid}/neighborhood"); scope.boundarySubject() {
 		neighborhood = filterReadableNeighborhood(scope, neighborhood)

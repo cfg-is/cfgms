@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 )
@@ -279,16 +280,21 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 		_ = srows.Close()
 
 		// Same-as edge observations involving this subject (group-membership changes).
+		// The match is exact and case-sensitive (SQLite LIKE folds case, which would
+		// match another tenant's eid differing only in case), so it compares the
+		// subject's own text with substr.
+		sameAsPrefix := "same-as|" + subject + "|"
+		sameAsSuffix := "|" + subject
 		saRows, err := p.db.QueryContext(ctx, `
 			SELECT l.id, l.observed_at, l.kind, l.subject
 			FROM eg_observation_log l
-			WHERE (l.subject LIKE ? ESCAPE '\' OR l.subject LIKE ? ESCAPE '\')
+			WHERE ((substr(l.subject, 1, ?) = ?) OR (substr(l.subject, 1, 8) = 'same-as|' AND substr(l.subject, -?) = ?))
 			  AND l.observed_at >= ?
 			  AND l.observed_at <= ?
 			ORDER BY l.id DESC
 			LIMIT ?`,
-			"same-as|"+escapeLIKE(subject)+"|%",
-			"same-as|%|"+escapeLIKE(subject),
+			utf8.RuneCountInString(sameAsPrefix), sameAsPrefix,
+			utf8.RuneCountInString(sameAsSuffix), sameAsSuffix,
 			rfc3339(r.From), rfc3339(r.To), interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
@@ -306,6 +312,10 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 			}
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
 			_, fromSubj, toSubj, _ := parseEdgeSubject(edgeSubject)
+			// Only an edge with the subject itself as an endpoint belongs here.
+			if fromSubj != subject && toSubj != subject {
+				continue
+			}
 			peer := fromSubj
 			if fromSubj == subject {
 				peer = toSubj
@@ -331,9 +341,17 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 		_ = saRows.Close()
 
 		// The correlator writes cross-tenant same-as edges by design; an event
-		// carries both ends, so it is dropped unless the peer is inside the cut. The
-		// check runs after the rows are closed so it never holds a second connection.
+		// carries both ends, so it is dropped unless the matched endpoint and the
+		// peer are both inside the cut. The checks run after the rows are closed so
+		// they never hold a second connection.
+		selfVisible, err := p.subjectVisible(ctx, cut, subject)
+		if err != nil {
+			return nil, err
+		}
 		for i, ev := range saEvents {
+			if !selfVisible {
+				break
+			}
 			visible, err := p.subjectVisible(ctx, cut, saPeers[i])
 			if err != nil {
 				return nil, err

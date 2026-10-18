@@ -21,8 +21,9 @@ const (
 )
 
 // GetNeighborhood returns a depth-bounded connected subgraph starting at eid.
-// The implicit tenant filter is derived from the root entity's current owning_tenant:
-// at every hop, both edge endpoints must be within that subtree (ADR-023 §4).
+// The tenant filter is the caller's authorized cut, not the root entity's tenant
+// (a placeholder root has none): at every hop, both edge endpoints must be inside
+// it (ADR-023 §4).
 //
 // depth ≤ 0 is treated as the contract default (2).
 // depth > 3 is rejected with an error per the access contract.
@@ -32,6 +33,7 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 	edgeTypes []string,
 	direction types.TraversalDirection,
 	depth int,
+	cut interfaces.TenantCut,
 ) (*types.Neighborhood, error) {
 	if depth > neighborhoodMaxDepth {
 		return nil, fmt.Errorf("entitygraph/database: depth %d exceeds maximum %d", depth, neighborhoodMaxDepth)
@@ -39,15 +41,6 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 	if depth <= 0 {
 		depth = neighborhoodDefaultDepth
 	}
-
-	// Derive implicit tenant filter from the root entity's current owning_tenant.
-	// GetNeighborhood carries no resolved descendant set, so the cut is the root's
-	// own tenant only: an edge to a descendant tenant's entity is not followed
-	// (fail closed) rather than matched by a tenant-ID string prefix.
-	var tenantFilter string
-	_ = p.db.QueryRowContext(ctx,
-		`SELECT owning_tenant FROM eg_entity_index WHERE subject = $1`, eid.String(),
-	).Scan(&tenantFilter)
 
 	// BFS over the edge projection, bounded in nodes and in projection rows.
 	type edgeKey struct{ from, to, edgeType string }
@@ -59,7 +52,6 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 	visited := map[string]bool{eid.String(): true}
 	order := []string{eid.String()}
 	frontier := []string{eid.String()}
-	cut := interfaces.NewTenantCut(tenantFilter, nil)
 
 walk:
 	for hop := 0; hop < depth && len(frontier) > 0; hop++ {

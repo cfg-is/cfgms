@@ -199,6 +199,10 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			}
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
 			_, fromSubj, toSubj, _ := parseEdgeSubject(edgeSubject)
+			// Only an edge with the subject itself as an endpoint belongs here.
+			if fromSubj != subject && toSubj != subject {
+				continue
+			}
 			peer := fromSubj
 			if fromSubj == subject {
 				peer = toSubj
@@ -224,9 +228,17 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 		_ = saRows.Close()
 
 		// The correlator writes cross-tenant same-as edges by design; an event
-		// carries both ends, so it is dropped unless the peer is inside the cut. The
-		// check runs after the rows are closed so it never holds a second connection.
+		// carries both ends, so it is dropped unless the matched endpoint and the
+		// peer are both inside the cut. The checks run after the rows are closed so
+		// they never hold a second connection.
+		selfVisible, err := p.subjectVisible(ctx, cut, subject)
+		if err != nil {
+			return nil, err
+		}
 		for i, ev := range saEvents {
+			if !selfVisible {
+				break
+			}
 			visible, err := p.subjectVisible(ctx, cut, saPeers[i])
 			if err != nil {
 				return nil, err

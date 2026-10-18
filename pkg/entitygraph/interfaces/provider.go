@@ -340,8 +340,12 @@ type EntityGraphProvider interface {
 	GetEdges(ctx context.Context, filter EdgeFilter) ([]*EdgeView, error)
 
 	// GetNeighborhood returns a depth-bounded connected subgraph starting at eid.
-	// depth must be ≤3 per the access contract.
-	GetNeighborhood(ctx context.Context, eid EIDRef, edgeTypes []string, direction types.TraversalDirection, depth int) (*types.Neighborhood, error)
+	// depth must be ≤3 per the access contract. cut is the caller's authorized
+	// tenant cut, never derived from the root entity (a placeholder root has no
+	// owning tenant): at every hop both edge endpoints must be inside it. An
+	// inactive cut is the caller's explicit unrestricted (root) scope; a caller
+	// with no resolvable scope must be refused before this call.
+	GetNeighborhood(ctx context.Context, eid EIDRef, edgeTypes []string, direction types.TraversalDirection, depth int, cut TenantCut) (*types.Neighborhood, error)
 
 	// GetHistory returns the versioned observation log for a subject over a time range.
 	GetHistory(ctx context.Context, eid EIDRef, r TimeRange) ([]*ObservationRecord, error)
