@@ -37,6 +37,13 @@ type CacheConfig struct {
 
 	// Clock provides time for expiration and LRU tracking. If nil, uses time.Now().
 	Clock Clock
+
+	// OnEvict, when set on a Cache, is called once for every entry that leaves the
+	// cache: size-limit eviction, TTL expiry, Delete, DeleteMany, Clear and
+	// overwrite of an existing key. Evicted entries are collected while the cache
+	// mutex is held and the callback runs after it is released, so the callback
+	// may block or call back into the cache. Not used by RuntimeCache.
+	OnEvict func(key string, value interface{})
 }
 
 // DefaultCacheConfig returns a sensible default configuration

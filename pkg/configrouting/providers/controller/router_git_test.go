@@ -6,8 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -180,9 +184,10 @@ func TestNewControllerRouterWithGit_RoutesGitTenantToGitStore(t *testing.T) {
 		"ctrl-tenant read must route to controller store which has nothing stored")
 }
 
-// TestNewControllerRouterWithGit_FallsBackOnInitFailure verifies that when GitConfigStore
-// construction fails, storeForSource falls back to the controller store.
-func TestNewControllerRouterWithGit_FallsBackOnInitFailure(t *testing.T) {
+// TestNewControllerRouterWithGit_FailsClosedOnInitFailure verifies that when GitConfigStore
+// construction fails, reads and writes return an error — never the controller store's data
+// and never ErrConfigNotFound from the wrong store — and no clone directory is left behind.
+func TestNewControllerRouterWithGit_FailsClosedOnInitFailure(t *testing.T) {
 	ts := newTenantStore(t)
 	addTenant(t, ts, "git-tenant", "", nil)
 
@@ -192,8 +197,9 @@ func TestNewControllerRouterWithGit_FallsBackOnInitFailure(t *testing.T) {
 
 	gitWorkDir := t.TempDir()
 	router := NewControllerRouterWithGit(controllerStore, ts, newGitRouterSecretStore(nil), gitWorkDir, logging.NewNoopLogger()).(*controllerRouter)
+	defer router.Close()
 
-	// Store a value in controller store for the git-tenant so we can detect fallback.
+	// A value in the controller store for the same key: a fallback would return it.
 	controllerEntry := &cfgconfig.ConfigEntry{
 		Key:    &cfgconfig.ConfigKey{TenantID: "git-tenant", Namespace: "fallback", Name: "cfg"},
 		Data:   []byte("fallback: true\n"),
@@ -201,17 +207,173 @@ func TestNewControllerRouterWithGit_FallsBackOnInitFailure(t *testing.T) {
 	}
 	require.NoError(t, controllerStore.StoreConfig(ctxkeys.WithSystem(context.Background()), controllerEntry))
 
-	// Inject a git source pointing to a non-existent repo to trigger init failure.
 	injectGitSource(router, "git-tenant", pkgconfig.ConfigSourceInfo{
 		Type:    pkgconfig.ConfigSourceTypeGit,
 		URL:     "/nonexistent/repo/path",
 		SubPath: "configs",
 	})
 
-	// storeForSource must fall back to controller store when git init fails.
-	entry, readErr := router.GetConfig(ctxkeys.WithSystem(context.Background()), controllerEntry.Key)
-	require.NoError(t, readErr, "fallback to controller store must succeed")
-	assert.Equal(t, controllerEntry.Data, entry.Data, "fallback must return controller store data")
+	ctx := ctxkeys.WithSystem(context.Background())
+	entry, readErr := router.GetConfig(ctx, controllerEntry.Key)
+	require.Error(t, readErr, "unreachable git source must fail the read")
+	assert.Nil(t, entry)
+	assert.NotErrorIs(t, readErr, cfgconfig.ErrConfigNotFound, "must not look like a missing config")
+
+	writeErr := router.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:    &cfgconfig.ConfigKey{TenantID: "git-tenant", Namespace: "ns", Name: "new"},
+		Data:   []byte("x: 1\n"),
+		Format: cfgconfig.ConfigFormatYAML,
+	})
+	require.Error(t, writeErr, "unreachable git source must fail the write")
+	require.Error(t, router.DeleteConfig(ctx, controllerEntry.Key))
+	require.Error(t, router.StoreConfigBatch(ctx, []*cfgconfig.ConfigEntry{{Key: controllerEntry.Key}}))
+	require.Error(t, router.DeleteConfigBatch(ctx, []*cfgconfig.ConfigKey{controllerEntry.Key}))
+
+	assert.Empty(t, dirEntries(t, gitWorkDir), "failed construction must leave no directory behind")
+}
+
+// dirEntries lists every path (relative) under root, excluding root itself.
+func dirEntries(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	require.NoError(t, filepath.WalkDir(root, func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p != root {
+			rel, _ := filepath.Rel(root, p)
+			out = append(out, rel)
+		}
+		return nil
+	}))
+	return out
+}
+
+func cloneDir(workDir, tenantID, url string) string {
+	return filepath.Join(workDir, tenantID, fmt.Sprintf("%x", sha256.Sum256([]byte(url))))
+}
+
+func newGitTestRouter(t *testing.T, tenants ...string) (*controllerRouter, string) {
+	t.Helper()
+	return newGitTestRouterOpts(t, nil, tenants...)
+}
+
+func newGitTestRouterOpts(t *testing.T, opts []RouterOption, tenants ...string) (*controllerRouter, string) {
+	t.Helper()
+	ts := newTenantStore(t)
+	for _, id := range tenants {
+		addTenant(t, ts, id, "", nil)
+	}
+	cs, err := flatfile.NewFlatFileConfigStore(t.TempDir())
+	require.NoError(t, err)
+	workDir := t.TempDir()
+	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), workDir, logging.NewNoopLogger(), opts...).(*controllerRouter)
+	t.Cleanup(router.Close)
+	return router, workDir
+}
+
+func gitInfo(url string) *pkgconfig.ConfigSourceInfo {
+	return &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeGit, URL: url, SubPath: "configs"}
+}
+
+// TestStoreForSource_CacheBoundEvictsOldestAndRemovesClones verifies the global LRU bound:
+// the cache never exceeds the bound and evicted entries' clone directories are removed.
+func TestStoreForSource_CacheBoundEvictsOldestAndRemovesClones(t *testing.T) {
+	const bound = 3
+	tenants := []string{"t1", "t2", "t3", "t4", "t5"}
+	router, workDir := newGitTestRouter(t, tenants...)
+	router.gitStoreCache.Close()
+	router.gitStoreCache = router.newGitStoreCache(bound)
+	t.Cleanup(router.gitStoreCache.Close)
+
+	ctx := ctxkeys.WithSystem(context.Background())
+	urls := map[string]string{}
+	for _, id := range tenants {
+		urls[id] = createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte(id + "\n")})
+		_, err := router.storeForSource(ctx, id, gitInfo(urls[id]))
+		require.NoError(t, err)
+		assert.LessOrEqual(t, router.gitStoreCache.Size(), bound)
+	}
+
+	assert.Equal(t, bound, router.gitStoreCache.Size(), "cache size stays at the bound")
+	for _, id := range tenants[:2] {
+		assert.NoDirExists(t, cloneDir(workDir, id, urls[id]), "evicted entry's clone must be removed")
+	}
+	for _, id := range tenants[2:] {
+		assert.DirExists(t, cloneDir(workDir, id, urls[id]), "live entry's clone must remain")
+	}
+}
+
+// TestStoreForSource_SourceChangeRemovesPreviousClone verifies a tenant keeps one live
+// entry: changing its URL removes the old clone and leaves other tenants untouched.
+func TestStoreForSource_SourceChangeRemovesPreviousClone(t *testing.T) {
+	router, workDir := newGitTestRouter(t, "a", "b")
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	urlA1 := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("a1\n")})
+	urlA2 := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("a2\n")})
+	urlB := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("b\n")})
+
+	for id, u := range map[string]string{"a": urlA1, "b": urlB} {
+		_, err := router.storeForSource(ctx, id, gitInfo(u))
+		require.NoError(t, err)
+	}
+	require.DirExists(t, cloneDir(workDir, "a", urlA1))
+
+	_, err := router.storeForSource(ctx, "a", gitInfo(urlA2))
+	require.NoError(t, err)
+
+	assert.NoDirExists(t, cloneDir(workDir, "a", urlA1), "previous source's clone must be removed")
+	assert.DirExists(t, cloneDir(workDir, "a", urlA2))
+	assert.DirExists(t, cloneDir(workDir, "b", urlB), "other tenants are untouched")
+	assert.Equal(t, 2, router.gitStoreCache.Size(), "one live entry per tenant")
+}
+
+// TestStoreForSource_FailedConstructionLeavesNoDirectory covers the failed-clone path: the
+// directory the call created is removed.
+func TestStoreForSource_FailedConstructionLeavesNoDirectory(t *testing.T) {
+	router, workDir := newGitTestRouter(t, "a")
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	_, err := router.storeForSource(ctx, "a", gitInfo(filepath.Join(t.TempDir(), "missing")))
+	require.Error(t, err)
+	assert.Empty(t, dirEntries(t, workDir))
+}
+
+// TestStoreForSource_ConcurrentSameKeyKeepsClone hammers one key and a replacement to
+// verify removal and re-creation are serialized: the live entry's clone always exists.
+func TestStoreForSource_ConcurrentSameKeyKeepsClone(t *testing.T) {
+	router, workDir := newGitTestRouter(t, "a")
+	ctx := ctxkeys.WithSystem(context.Background())
+	url1 := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("1\n")})
+	url2 := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("2\n")})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			u := url1
+			if i%2 == 1 {
+				u = url2
+			}
+			for j := 0; j < 5; j++ {
+				_, err := router.storeForSource(ctx, "a", gitInfo(u))
+				assert.NoError(t, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Exactly one entry is live and its clone exists; the other is gone.
+	require.Equal(t, 1, router.gitStoreCache.Size())
+	var live int
+	for _, u := range []string{url1, url2} {
+		if _, err := os.Stat(cloneDir(workDir, "a", u)); err == nil {
+			live++
+		}
+	}
+	assert.Equal(t, 1, live)
 }
 
 // TestNewControllerRouterWithGit_GitStoreIsCached verifies that two reads for the same
@@ -245,9 +407,7 @@ func TestNewControllerRouterWithGit_GitStoreIsCached(t *testing.T) {
 	require.NoError(t, err)
 
 	// Cache must hold exactly one entry for t1.
-	router.gitStoreMu.Lock()
-	cacheSize := len(router.gitStoreCache)
-	router.gitStoreMu.Unlock()
+	cacheSize := router.gitStoreCache.Size()
 	assert.Equal(t, 1, cacheSize, "git store cache must hold exactly one entry per (tenant,url)")
 }
 
@@ -260,7 +420,8 @@ func TestStoreForSource_ControllerTypeReturnsControllerStore(t *testing.T) {
 	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), t.TempDir(), logging.NewNoopLogger()).(*controllerRouter)
 	ctrlSource := &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeController}
 
-	store := router.storeForSource(ctxkeys.WithSystem(context.Background()), "any-tenant", ctrlSource)
+	store, err := router.storeForSource(ctxkeys.WithSystem(context.Background()), "any-tenant", ctrlSource)
+	require.NoError(t, err)
 	assert.Same(t, cs, store, "controller source must route to controllerStore")
 }
 
@@ -335,11 +496,11 @@ func TestSyncTenantWithRemote_GitTenantReturnsSHAs(t *testing.T) {
 	assert.Len(t, new2, 40)
 }
 
-// TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore verifies the graceful
-// degradation path: when the source URL is updated to a non-existent remote *before* the
-// git store is constructed, storeForSource falls back to controllerStore (clone fails →
-// no GitConfigStore → SyncTenantWithRemote returns ("","",nil), not an error).
-func TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore(t *testing.T) {
+// TestSyncTenantWithRemote_BrokenURLFailsClosed verifies that when the source URL is
+// updated to a non-existent remote, constructing the git store fails and
+// SyncTenantWithRemote returns an error instead of falling back to the controller store.
+// The previous source's clone is removed and the failed one leaves nothing behind.
+func TestSyncTenantWithRemote_BrokenURLFailsClosed(t *testing.T) {
 	remoteDir := createBareRepoForRouterTest(t, map[string][]byte{
 		"configs/default/app.yaml": []byte("v1\n"),
 	})
@@ -370,20 +531,25 @@ func TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore(t *testing.T) 
 		SubPath: "configs",
 	})
 
-	// The git store cache key changed (URL hash changed) so storeForSource will try to create
-	// a new GitConfigStore pointing at the broken URL — construction will fail (clone error)
-	// and storeForSource falls back to controllerStore, meaning SyncTenantWithRemote returns ("","",nil).
-	// This is the expected graceful-degradation path.
+	// The cache key changed (URL hash changed), so storeForSource constructs a new
+	// GitConfigStore for the broken URL; the clone fails and the error is returned.
 	prev, newSHA, syncErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
-	require.NoError(t, syncErr, "broken-URL fallback to controller store must not error")
+	require.Error(t, syncErr, "broken-URL source must not fall back to the controller store")
 	assert.Empty(t, prev)
 	assert.Empty(t, newSHA)
+	assert.Empty(t, dirEntries(t, gitWorkDir), "old clone removed and failed clone left nothing behind")
+
+	// Reads fail with a non-NotFound error too.
+	_, getErr := router.GetConfig(ctxkeys.WithSystem(context.Background()),
+		&cfgconfig.ConfigKey{TenantID: "git-tenant", Namespace: "default", Name: "app"})
+	require.Error(t, getErr)
+	assert.NotErrorIs(t, getErr, cfgconfig.ErrConfigNotFound)
 }
 
 // TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote verifies that when the
 // already-cached git store has its remote URL corrupted in .git/config, the next call
 // to SyncTenantWithRemote propagates the pull error rather than silently swallowing it.
-// This is distinct from BrokenURLFallsBackToControllerStore, which tests a broken URL
+// This is distinct from BrokenURLFailsClosed, which tests a broken URL
 // at construction time — here the git store is already cached so the pull error surfaces.
 func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) {
 	remoteDir := createBareRepoForRouterTest(t, map[string][]byte{
@@ -423,4 +589,132 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 	// directly (no fallback), so the broken remote surfaces as a returned error.
 	_, _, syncErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	assert.Error(t, syncErr, "sync must return an error when the cached git store's remote is broken")
+}
+
+// slowRemote is an HTTP git remote that never answers until released. It records how
+// many requests arrived and signals the first one.
+type slowRemote struct {
+	url      string
+	requests atomic.Int64
+	arrived  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (sr *slowRemote) releaseAll() { sr.once.Do(func() { close(sr.release) }) }
+
+func newSlowRemote(t *testing.T) *slowRemote {
+	t.Helper()
+	sr := &slowRemote{arrived: make(chan struct{}, 16), release: make(chan struct{})}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		sr.requests.Add(1)
+		sr.arrived <- struct{}{}
+		select {
+		case <-sr.release:
+		case <-req.Context().Done():
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	sr.url = srv.URL + "/repo.git"
+	t.Cleanup(srv.Close) // runs after the release below
+	t.Cleanup(sr.releaseAll)
+	return sr
+}
+
+func (sr *slowRemote) waitArrived(t *testing.T) {
+	t.Helper()
+	select {
+	case <-sr.arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("clone request never reached the remote")
+	}
+}
+
+// TestStoreForSource_HangingCloneDoesNotBlockCachedSource verifies the global lock is not
+// held across a clone: a read of an already-cached source completes while another
+// source's clone is hanging.
+func TestStoreForSource_HangingCloneDoesNotBlockCachedSource(t *testing.T) {
+	router, _ := newGitTestRouter(t, "a", "b")
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	urlA := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("a\n")})
+	_, err := router.storeForSource(ctx, "a", gitInfo(urlA))
+	require.NoError(t, err)
+
+	slow := newSlowRemote(t)
+	slowDone := make(chan error, 1)
+	go func() {
+		_, e := router.storeForSource(ctx, "b", gitInfo(slow.url))
+		slowDone <- e
+	}()
+	slow.waitArrived(t)
+
+	cachedDone := make(chan error, 1)
+	go func() {
+		_, e := router.storeForSource(ctx, "a", gitInfo(urlA))
+		cachedDone <- e
+	}()
+	select {
+	case e := <-cachedDone:
+		require.NoError(t, e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cached source blocked behind another source's hanging clone")
+	}
+
+	// A different, new source also clones in parallel with the hanging one.
+	urlC := createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte("c\n")})
+	newDone := make(chan error, 1)
+	go func() {
+		_, e := router.storeForSource(ctx, "c", gitInfo(urlC))
+		newDone <- e
+	}()
+	select {
+	case e := <-newDone:
+		require.NoError(t, e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("new source blocked behind another source's hanging clone")
+	}
+
+	slow.releaseAll()
+	require.Error(t, <-slowDone)
+}
+
+// TestStoreForSource_ConcurrentSameNewSourceClonesOnce verifies two concurrent requests
+// for the same new source share one clone.
+func TestStoreForSource_ConcurrentSameNewSourceClonesOnce(t *testing.T) {
+	router, workDir := newGitTestRouter(t, "a")
+	ctx := ctxkeys.WithSystem(context.Background())
+	slow := newSlowRemote(t)
+
+	errs := make(chan error, 2)
+	go func() {
+		_, e := router.storeForSource(ctx, "a", gitInfo(slow.url))
+		errs <- e
+	}()
+	slow.waitArrived(t)
+	go func() {
+		_, e := router.storeForSource(ctx, "a", gitInfo(slow.url))
+		errs <- e
+	}()
+	time.Sleep(200 * time.Millisecond) // let the second caller join the in-flight build
+	slow.releaseAll()
+
+	require.Error(t, <-errs)
+	require.Error(t, <-errs)
+	assert.Equal(t, int64(1), slow.requests.Load(), "both callers must share one clone attempt")
+	assert.Empty(t, dirEntries(t, workDir))
+}
+
+// TestStoreForSource_CloneDeadlineReturnsErrorAndLeavesNothing verifies a clone that
+// exceeds the operation deadline fails and removes its directory.
+func TestStoreForSource_CloneDeadlineReturnsErrorAndLeavesNothing(t *testing.T) {
+	router, workDir := newGitTestRouterOpts(t, []RouterOption{WithGitOperationTimeout(300 * time.Millisecond)}, "a")
+	ctx := ctxkeys.WithSystem(context.Background())
+	slow := newSlowRemote(t)
+
+	start := time.Now()
+	_, err := router.storeForSource(ctx, "a", gitInfo(slow.url))
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 10*time.Second, "clone must be bounded by the deadline")
+	assert.Empty(t, dirEntries(t, workDir), "timed-out clone must leave no directory")
 }

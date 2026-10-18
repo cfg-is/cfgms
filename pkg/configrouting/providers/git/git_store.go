@@ -58,7 +58,7 @@ func NewGitConfigStore(
 	secretStore secretsiface.SecretStore,
 	workDir string,
 	logger logging.Logger,
-) (*GitConfigStore, error) {
+) (store *GitConfigStore, err error) {
 	// Validate tenantID against workDir before constructing any paths.
 	// ValidateAndCleanPath requires workDir to exist; callers must ensure this.
 	// The cleaned return value (not the raw tenantID) is used in filepath.Join so that
@@ -71,9 +71,26 @@ func NewGitConfigStore(
 	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(source.URL)))
 	repoDir := filepath.Join(cleanedBase, urlHash)
 
+	// A directory that already holds a clone is never removed on failure.
+	_, statErr := os.Stat(filepath.Join(repoDir, ".git"))
+	hadClone := statErr == nil
+
 	if err := os.MkdirAll(repoDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create repo directory: %w", err)
 	}
+	// Remove the directory this call created (or an empty/partial one) when construction
+	// fails, so a failed source leaves nothing behind.
+	constructed := false
+	defer func() {
+		if !constructed && !hadClone {
+			if rmErr := RemoveCloneDir(workDir, repoDir); rmErr != nil && logger != nil {
+				logger.Warn("git-store: failed to remove clone directory after failed construction",
+					"clone_dir_hash", urlHash,
+					"error_category", categorizeError(rmErr),
+				)
+			}
+		}
+	}()
 
 	s := &GitConfigStore{
 		source:      source,
@@ -99,7 +116,92 @@ func NewGitConfigStore(
 		password = "" //nolint:ineffassign // zeroize after success
 	}
 
+	constructed = true
 	return s, nil
+}
+
+// RepoDir returns the clone directory of this store.
+func (s *GitConfigStore) RepoDir() string { return s.repoDir }
+
+// RemoveCloneDir deletes a clone directory and its tenant directory when that is left
+// empty. dir is removed only when its cleaned path is strictly inside workDir
+// (security.ValidateAndCleanPath); anything else is refused with an error.
+func RemoveCloneDir(workDir, dir string) error {
+	rel, err := relativeToWorkDir(workDir, dir)
+	if err != nil {
+		return fmt.Errorf("refusing to remove clone directory: %w", err)
+	}
+	cleaned, err := security.ValidateAndCleanPath(workDir, rel)
+	if err != nil {
+		return fmt.Errorf("refusing to remove clone directory: %w", err)
+	}
+	cleanedBase, err := security.ValidateAndCleanPath(workDir, ".")
+	if err != nil {
+		return fmt.Errorf("refusing to remove clone directory: %w", err)
+	}
+	if cleaned == cleanedBase {
+		return errors.New("refusing to remove clone directory: path is the work directory itself")
+	}
+	if err := os.RemoveAll(cleaned); err != nil {
+		return fmt.Errorf("failed to remove clone directory: %w", err)
+	}
+	// Best effort: drop the tenant directory when this was its last clone. os.Remove
+	// fails (and is ignored) on a non-empty directory.
+	if parent := filepath.Dir(cleaned); parent != cleanedBase {
+		_ = os.Remove(parent)
+	}
+	return nil
+}
+
+// relativeToWorkDir returns dir relative to workDir. An absolute dir may be spelled
+// against the raw workDir or against its symlink-resolved form (a store's repoDir is
+// built from the resolved path: /private/var on macOS, long names on Windows), so both
+// are tried. A dir outside both is returned unchanged for ValidateAndCleanPath to reject.
+func relativeToWorkDir(workDir, dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return dir, nil
+	}
+	rawBase, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", err
+	}
+	bases := []string{rawBase}
+	if resolved, evalErr := filepath.EvalSymlinks(rawBase); evalErr == nil && resolved != rawBase {
+		bases = append(bases, resolved)
+	}
+	// The target may itself be spelled through a symlink (/var vs /private/var), and
+	// may be partly removed already, so resolve its deepest existing ancestor too.
+	targets := []string{filepath.Clean(dir)}
+	if resolved := evalDeepestExisting(targets[0]); resolved != targets[0] {
+		targets = append(targets, resolved)
+	}
+	for _, b := range bases {
+		for _, t := range targets {
+			rel, relErr := filepath.Rel(b, t)
+			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+				return rel, nil
+			}
+		}
+	}
+	return dir, nil
+}
+
+// evalDeepestExisting resolves symlinks on the longest existing ancestor of p and
+// re-appends the non-existent tail. It returns p unchanged when nothing resolves.
+func evalDeepestExisting(p string) string {
+	tail := ""
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
 }
 
 // SyncWithRemote pulls latest changes from the remote. On success it returns the
