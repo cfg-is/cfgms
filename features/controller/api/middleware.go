@@ -1004,11 +1004,6 @@ func hasHeaderCredentials(r *http.Request) bool {
 	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
-// authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
-// States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
-// (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
-// M-AUTH-1: Load API keys from secret store on-demand if not in cache.
-// Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
 // accountHoldsCredential reports whether id is a non-empty credential ID present
 // on the account.
 func accountHoldsCredential(acct *account, id []byte) bool {
@@ -1023,6 +1018,11 @@ func accountHoldsCredential(acct *account, id []byte) bool {
 	return false
 }
 
+// authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
+// States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
+// (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
+// M-AUTH-1: Load API keys from secret store on-demand if not in cache.
+// Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Issue #1675: relay principal — pre-validated by RelayHandler after grant check.
