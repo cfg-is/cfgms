@@ -17,6 +17,7 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 )
 
 // --- canonical encoding helpers for edge test fixtures ---
@@ -965,4 +966,78 @@ func TestE9_RejectedEntryDoesNotSuppressValidSiblings(t *testing.T) {
 	// The hostile sibling must not have landed under its injected anchor either.
 	assert.Empty(t, outboundEdges(t, p, "cluster:victim-k"),
 		"the rejected sibling must not create an edge on the attacker-chosen anchor")
+}
+
+// --- Edge declaration caps ---
+
+// manyEdgeDecls returns n distinct `contains` declarations whose targets are
+// cluster:<prefix>-<i>.
+func manyEdgeDecls(prefix string, n int) []interface{} {
+	out := make([]interface{}, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, map[string]interface{}{
+			"type": "contains", "to": fmt.Sprintf("cluster:%s-%d", prefix, i),
+		})
+	}
+	return out
+}
+
+// TestEdgeCap_OverPerFragmentCapDropsAllDeclarations verifies that a fragment
+// declaring maxEdgesPerFragment+1 edges stores no edge, still stores its entity
+// observation, and never stores the reserved key.
+func TestEdgeCap_OverPerFragmentCapDropsAllDeclarations(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	frag := makeFragWithEdges("cluster:cap-over", "observer:hyperv",
+		map[string]string{"state": "healthy"},
+		manyEdgeDecls("o", dnasync.MaxEdgesPerFragmentForTest+1))
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-cap-over",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	assert.Empty(t, outboundEdges(t, p, "cluster:cap-over"), "over-cap fragment must store no edge")
+
+	view, err := p.GetEntity(ctx, mustParseEID(t, "cluster:cap-over"), interfaces.GetEntityOpts{})
+	require.NoError(t, err)
+	require.NotNil(t, view, "entity observation must still be written")
+	assert.Equal(t, "healthy", view.Entity.Attributes["state"])
+	_, hasKey := view.Entity.Attributes["__entitygraph_edges"]
+	assert.False(t, hasKey, "reserved key must be stripped even when the list is dropped")
+}
+
+// TestEdgeCap_OverPerFragmentCapRetractsNothing verifies that an over-cap
+// fragment carries no claim scope: edges stored by an earlier, in-cap report
+// from the same producer survive.
+func TestEdgeCap_OverPerFragmentCapRetractsNothing(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	good := makeFragWithEdges("cluster:cap-keep", "observer:hyperv",
+		map[string]string{"state": "healthy"}, manyEdgeDecls("k", 2))
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-cap-keep",
+		[]*commonpb.Fragment{good}, nil, types.DefaultTaxonomy()))
+	require.Len(t, outboundEdges(t, p, "cluster:cap-keep"), 2)
+
+	bad := makeFragWithEdges("cluster:cap-keep", "observer:hyperv",
+		map[string]string{"state": "healthy"},
+		manyEdgeDecls("k", dnasync.MaxEdgesPerFragmentForTest+1))
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-cap-keep",
+		[]*commonpb.Fragment{bad}, nil, types.DefaultTaxonomy()))
+	assert.Len(t, outboundEdges(t, p, "cluster:cap-keep"), 2, "earlier edges must not be retracted")
+}
+
+// TestEdgeCap_ExactlyPerFragmentCapAllWritten verifies the cap is inclusive.
+func TestEdgeCap_ExactlyPerFragmentCapAllWritten(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+
+	frag := makeFragWithEdges("cluster:cap-exact", "observer:hyperv",
+		map[string]string{"state": "healthy"},
+		manyEdgeDecls("e", dnasync.MaxEdgesPerFragmentForTest))
+	require.NoError(t, w.WriteFragmentDelta(context.Background(), "node-cap-exact",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	assert.Len(t, outboundEdges(t, p, "cluster:cap-exact"), dnasync.MaxEdgesPerFragmentForTest)
 }

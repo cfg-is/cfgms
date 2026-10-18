@@ -280,9 +280,129 @@ func TestHandleGetEdges_ReturnsEmpty(t *testing.T) {
 	srv.router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "no-edges must return 200: %s", rec.Body.String())
-	var edges []*eginterfaces.EdgeView
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &edges))
-	assert.Empty(t, edges)
+	var page edgePage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Empty(t, page.Edges)
+	assert.Empty(t, page.NextToken)
+	assert.Contains(t, rec.Body.String(), `"Edges":[]`, "an empty page is an empty array, not null")
+}
+
+// seedEdges reports n `contains` edges from host:<from> to n distinct hosts of
+// one tenant, in one batch.
+func seedEdges(t *testing.T, p *sqlite.SQLiteEntityGraphProvider, from string, n int) {
+	t.Helper()
+	reportEntity(t, p, from, "test-tenant", "host")
+	now := time.Now().UTC()
+	obs := make([]egtypes.Observation, 0, n*2)
+	for i := 0; i < n; i++ {
+		to := fmt.Sprintf("%s-to%04d", from, i)
+		for _, o := range []struct{ subject, kind string }{{to, "entity"}, {"contains|" + from + "|" + to, "edge"}} {
+			ob := egtypes.Observation{
+				Source: "test:reporter", ObservedAt: now, RecordedAt: now, Subject: o.subject,
+				Kind: egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{},
+			}
+			if o.kind == "entity" {
+				ob.Payload = map[string]interface{}{"entity_kind": "host", "owning_tenant": "test-tenant", "hostname": to}
+			}
+			obs = append(obs, ob)
+		}
+	}
+	require.NoError(t, p.ReportObservations(context.Background(),
+		eginterfaces.ObservationBatch{Source: "test:reporter", Observations: obs}))
+}
+
+func getEdgePage(t *testing.T, srv *Server, apiKey, from, query string) (*httptest.ResponseRecorder, edgePage) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/"+from+"/edges"+query, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	var page edgePage
+	if rec.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	}
+	return rec, page
+}
+
+func TestHandleGetEdges_PagesThroughPageToken(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedEdges(t, p, "host:pg-src", 25)
+
+	var sizes []int
+	seen := map[string]struct{}{}
+	token := ""
+	for i := 0; i < 5; i++ {
+		q := "?limit=10"
+		if token != "" {
+			q += "&page_token=" + token
+		}
+		rec, page := getEdgePage(t, srv, apiKey, "host:pg-src", q)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		sizes = append(sizes, len(page.Edges))
+		for _, e := range page.Edges {
+			key := e.Edge.To.String()
+			_, dup := seen[key]
+			assert.False(t, dup, "edge %s repeated across pages", key)
+			seen[key] = struct{}{}
+		}
+		token = page.NextToken
+		if token == "" {
+			break
+		}
+	}
+	assert.Equal(t, []int{10, 10, 5}, sizes)
+	assert.Len(t, seen, 25)
+}
+
+func TestHandleGetEdges_DefaultPageSize(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedEdges(t, p, "host:df-src", eginterfaces.DefaultEdgePageSize+5)
+
+	rec, page := getEdgePage(t, srv, apiKey, "host:df-src", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, page.Edges, eginterfaces.DefaultEdgePageSize)
+	assert.NotEmpty(t, page.NextToken)
+}
+
+func TestHandleGetEdges_FullLastPageHasNoToken(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	max := eginterfaces.MaxEdgePageSize
+	q := fmt.Sprintf("?limit=%d", max)
+
+	seedEdges(t, p, "host:fl-src", max)
+	rec, page := getEdgePage(t, srv, apiKey, "host:fl-src", q)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, page.Edges, max)
+	assert.Empty(t, page.NextToken, "a full last page carries no token")
+
+	seedEdges(t, p, "host:fl-src2", max+1)
+	rec, page = getEdgePage(t, srv, apiKey, "host:fl-src2", q)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, page.Edges, max)
+	assert.NotEmpty(t, page.NextToken, "one more edge means another page")
+}
+
+func TestHandleGetEdges_BadParamsAre400(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	reportEntity(t, p, "host:bp-src", "test-tenant", "host")
+
+	for _, q := range []string{
+		"?limit=0", "?limit=-1", "?limit=abc",
+		fmt.Sprintf("?limit=%d", eginterfaces.MaxEdgePageSize+1),
+		"?page_token=!!not-base64!!",
+	} {
+		rec, _ := getEdgePage(t, srv, apiKey, "host:bp-src", q)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "query %q", q)
+	}
 }
 
 // ---- /api/v1/entities/{eid}/neighborhood (GetNeighborhood) ----
@@ -870,8 +990,9 @@ func TestHandleAssertEdge_HappyPath(t *testing.T) {
 	srv.router.ServeHTTP(getRec, getReq)
 
 	require.Equal(t, http.StatusOK, getRec.Code, "GetEdges after assertion: %s", getRec.Body.String())
-	var edges []*eginterfaces.EdgeView
-	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &edges))
+	var edgesPage edgePage
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &edgesPage))
+	edges := edgesPage.Edges
 	require.Len(t, edges, 1, "asserted edge must appear in GetEdges result")
 	assert.Equal(t, "depends-on", edges[0].Edge.Type)
 	// The source class is the segment before the first ':', so the prefix must be

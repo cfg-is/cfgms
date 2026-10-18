@@ -31,6 +31,18 @@ const edgeSubjectSep = "|"
 // same reason as maxClusterAuthorityNameLen (resolve.go), and to the same limit.
 const maxEdgeFieldLen = 253
 
+// maxEdgesPerFragment bounds the number of __entitygraph_edges entries one
+// fragment may declare. The list is steward-supplied and otherwise limited only
+// by the 8 MiB fragment size, and every entry becomes an observation and a
+// projection row. The largest legitimate producer is the hyperv cluster fragment
+// (cluster.go), one `contains` edge per member node, and a Hyper-V cluster has at
+// most 64 nodes; a VM fragment (vm.go) emits a handful (its switches plus one
+// placement edge). 256 is well above both. A fragment over the cap loses all its
+// edge declarations (decodeEdgeDeclarations), not just the excess: which entries
+// to keep would be the producer's choice, and a misbehaving producer is the only
+// one that gets here.
+const maxEdgesPerFragment = 256
+
 // validEdgeField reports whether a steward-supplied edge `type` or `to` value is
 // accepted: non-empty, bounded, and safe as an edge-subject component.
 func validEdgeField(s string) bool {
@@ -106,6 +118,8 @@ func edgeSubject(edgeType string, fromEID, toEID types.EID) (string, bool) {
 // values are resolved by extracting the leading kind token and calling
 // ResolveSubjectEID — the same branch logic used for the fragment's own subject.
 //
+// A list longer than maxEdgesPerFragment yields nothing at all.
+//
 // Malformed, unresolvable, or unsafe entries are silently skipped; a missing
 // topology edge is recoverable, an ingest failure is not. "Unsafe" means the
 // resolved edge type or either endpoint fails safeEdgeComponent — see there for
@@ -129,6 +143,11 @@ func decodeEdgeDeclarations(
 
 	edgeList, ok := raw.([]interface{})
 	if !ok || len(edgeList) == 0 {
+		return nil, nil
+	}
+	// No observations and no claim scopes: with no scope nothing already stored
+	// is retracted, so an over-cap producer only freezes its own earlier edges.
+	if len(edgeList) > maxEdgesPerFragment {
 		return nil, nil
 	}
 

@@ -9,6 +9,7 @@ package interfaces
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -123,12 +124,65 @@ type EdgeFilter struct {
 	// the caller from the tenant tree's ParentID ancestry. Absent, only entities
 	// owned by TenantFilter itself are visible (fail closed).
 	TenantSubtreeIDs []string
+
+	// Limit is the page size. Providers clamp it to [1, MaxEdgePageSize+1]; 0
+	// means MaxEdgePageSize, so no caller can read an unbounded edge set. The one
+	// row above MaxEdgePageSize lets a caller that asks for limit+1 rows tell a
+	// full last page from a page with more behind it.
+	Limit int
+	// After is the Cursor of the last edge of the previous page. Edges are ordered
+	// by their projection key and only keys after it are returned. A cursor that
+	// is not valid base64url fails with ErrInvalidEdgeCursor; one that decodes to
+	// a key that matches nothing just selects different rows inside the caller's
+	// own tenant cut, which stays in the query.
+	After string
 }
 
 // EdgeView wraps an Edge with freshness metadata.
 type EdgeView struct {
 	Edge      *types.Edge
 	Freshness types.Freshness
+	// Cursor identifies this edge's position (base64url of its projection key).
+	// Pass it as EdgeFilter.After to read the page that follows.
+	Cursor string
+}
+
+const (
+	// DefaultEdgePageSize is the page size the REST handler uses when the caller
+	// gives no limit.
+	DefaultEdgePageSize = 100
+	// MaxEdgePageSize is the largest page a caller may ask for, and the page a
+	// GetEdges call with Limit 0 returns.
+	MaxEdgePageSize = 1000
+)
+
+// ErrInvalidEdgeCursor is returned by GetEdges when EdgeFilter.After is not a
+// valid cursor.
+var ErrInvalidEdgeCursor = errors.New("entitygraph: invalid edge cursor")
+
+// ClampEdgeLimit returns the effective row count for an EdgeFilter.Limit.
+func ClampEdgeLimit(limit int) int {
+	if limit <= 0 {
+		return MaxEdgePageSize
+	}
+	if limit > MaxEdgePageSize+1 {
+		return MaxEdgePageSize + 1
+	}
+	return limit
+}
+
+// EncodeEdgeCursor encodes an edge projection key as an opaque cursor.
+func EncodeEdgeCursor(key string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(key))
+}
+
+// DecodeEdgeCursor reverses EncodeEdgeCursor.
+func DecodeEdgeCursor(cursor string) (string, error) {
+	b, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", ErrInvalidEdgeCursor
+	}
+	return string(b), nil
 }
 
 // TimeRange is an inclusive time interval for history and diff operations.

@@ -56,9 +56,18 @@ func addHost(t *testing.T, p interfaces.EntityGraphProvider, subject, mac string
 
 func sameAsEdgeCount(t *testing.T, p interfaces.EntityGraphProvider) int {
 	t.Helper()
-	edges, err := p.GetEdges(context.Background(), interfaces.EdgeFilter{Types: []string{"same-as"}})
-	require.NoError(t, err)
-	return len(edges)
+	total, after := 0, ""
+	for {
+		edges, err := p.GetEdges(context.Background(), interfaces.EdgeFilter{
+			Types: []string{"same-as"}, Limit: interfaces.MaxEdgePageSize, After: after,
+		})
+		require.NoError(t, err)
+		if len(edges) == 0 {
+			return total
+		}
+		total += len(edges)
+		after = edges[len(edges)-1].Cursor
+	}
 }
 
 // --- normalizeMAC join-key hygiene ---

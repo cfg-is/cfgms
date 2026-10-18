@@ -103,6 +103,9 @@ func materializePlaceholderNode(ctx context.Context, tx *sql.Tx, subject string)
 // GetEdges returns edges matching the filter. Tenant filtering is applied via a
 // JOIN against eg_entity_index (current endpoint ownership), never via any
 // tenant column on the edge row itself (ADR-023 §4 / Story-3 AC 5).
+//
+// Rows are ordered by edge key and paged by filter.Limit and filter.After; a
+// Limit of 0 returns at most MaxEdgePageSize rows.
 func (p *DatabaseEntityGraphProvider) GetEdges(ctx context.Context, filter interfaces.EdgeFilter) ([]*interfaces.EdgeView, error) {
 	var conds []string
 	var args []interface{}
@@ -138,10 +141,23 @@ func (p *DatabaseEntityGraphProvider) GetEdges(ctx context.Context, filter inter
 		)
 	}
 
+	// The table has no edge_key column; the cursor key is the same unit-separator
+	// join of the primary key columns that the sqlite provider stores, compared
+	// bytewise so the order does not depend on the database collation.
+	const edgeKeyExpr = `(ep.from_subject || chr(31) || ep.edge_type || chr(31) || ep.to_subject || chr(31) || ep.source) COLLATE "C"`
+	if filter.After != "" {
+		afterKey, err := interfaces.DecodeEdgeCursor(filter.After)
+		if err != nil {
+			return nil, err
+		}
+		conds = append(conds, edgeKeyExpr+" > "+addArg(afterKey)+` COLLATE "C"`)
+	}
+
 	where := ""
 	if len(conds) > 0 {
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
+	limitPH := addArg(interfaces.ClampEdgeLimit(filter.Limit))
 
 	// #nosec G202 -- where is composed solely from fixed predicates and
 	// generated $N placeholders; all filter values are bound through args.
@@ -149,7 +165,8 @@ func (p *DatabaseEntityGraphProvider) GetEdges(ctx context.Context, filter inter
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject
 		  LEFT JOIN eg_entity_index ti ON ti.subject = ep.to_subject
-		  LEFT JOIN eg_payload_content pc ON pc.content_hash = ep.payload_hash` + where
+		  LEFT JOIN eg_payload_content pc ON pc.content_hash = ep.payload_hash` + where +
+		" ORDER BY " + edgeKeyExpr + " LIMIT " + limitPH
 
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -203,6 +220,8 @@ func (p *DatabaseEntityGraphProvider) GetEdges(ctx context.Context, filter inter
 		views = append(views, &interfaces.EdgeView{
 			Edge:      edge,
 			Freshness: types.Freshness{ObservedAt: oa, RecordedAt: oa},
+			Cursor: interfaces.EncodeEdgeCursor(
+				fromSubj + "\x1f" + edgeType + "\x1f" + toSubj + "\x1f" + source),
 		})
 	}
 	if err := rows.Err(); err != nil {

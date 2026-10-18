@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -179,17 +180,17 @@ func TestRootEntityEdges_DropClientEndpoint(t *testing.T) {
 
 	rec := f.get(t, f.server.handleGetEdges, path, boundRootOperator("rg-edge-no"), vars)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var edges []*eginterfaces.EdgeView
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &edges))
-	assert.Empty(t, edges)
+	var page edgePage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Empty(t, page.Edges)
 
 	with := boundRootOperator("rg-edge-yes")
 	grantCrossing(t, f.server, with.ID, rgMSP)
 	rec = f.get(t, f.server.handleGetEdges, path, with, vars)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	edges = nil
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &edges))
-	assert.Len(t, edges, 1)
+	page = edgePage{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Len(t, page.Edges, 1)
 }
 
 // TestFilterReadableNeighborhood drops a client-tenant neighbor and the edges that
@@ -342,4 +343,65 @@ func TestCockpitWatch_RootCrossingBoundary(t *testing.T) {
 	rec := watch(with)
 	assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
 	assert.NotEqual(t, http.StatusNotFound, rec.Code)
+}
+
+// TestRootEntityEdges_PageTokenNeverNamesHiddenEndpoint: a page token is the
+// cursor of an edge the caller was shown, so paging a boundary-subject caller
+// through edges with an unreadable one in the middle never discloses the client
+// entity, and still yields every readable edge once.
+func TestRootEntityEdges_PageTokenNeverNamesHiddenEndpoint(t *testing.T) {
+	f := newRGFixture(t)
+	now := time.Now().UTC()
+	var obs []egtypes.Observation
+	for _, e := range []struct{ typ, to string }{
+		{"contains", "host:rg-r1"}, {"contains", "host:rg-r2"}, {"zz-uses", "host:rg-r3"}, {"zz-uses", "host:rg-r4"},
+	} {
+		reportEntity(t, f.prov, e.to, testRootTenantID, "host")
+		obs = append(obs, egtypes.Observation{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: e.typ + "|" + rgRootEID + "|" + e.to,
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		})
+	}
+	require.NoError(t, f.prov.ReportObservations(context.Background(),
+		eginterfaces.ObservationBatch{Source: "test:reporter", Observations: obs}))
+
+	op := boundRootOperator("rg-edge-page")
+	vars := map[string]string{"eid": rgRootEID}
+	// Edges sort contains→r1, contains→r2, runs-on→client, zz-uses→r3, zz-uses→r4,
+	// so limit=3 puts the hidden client edge as the last row of the first page
+	// window, and every other limit places it elsewhere in a window.
+	for limit := 1; limit <= 5; limit++ {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			var seen []string
+			token := ""
+			for i := 0; i < 10; i++ {
+				path := fmt.Sprintf("/api/v1/entities/%s/edges?limit=%d", rgRootEID, limit)
+				if token != "" {
+					path += "&page_token=" + token
+				}
+				rec := f.get(t, f.server.handleGetEdges, path, op, vars)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), rgClientEID, "response must not name the hidden endpoint")
+				var page edgePage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+				assert.LessOrEqual(t, len(page.Edges), limit)
+				for _, e := range page.Edges {
+					seen = append(seen, e.Edge.To.String())
+				}
+				if page.NextToken != "" {
+					key, err := eginterfaces.DecodeEdgeCursor(page.NextToken)
+					require.NoError(t, err)
+					assert.NotContains(t, key, rgClientEID, "token must not name the hidden endpoint")
+				}
+				token = page.NextToken
+				if token == "" {
+					break
+				}
+			}
+			assert.Empty(t, token, "paging must terminate")
+			assert.ElementsMatch(t, []string{"host:rg-r1", "host:rg-r2", "host:rg-r3", "host:rg-r4"}, seen)
+		})
+	}
 }

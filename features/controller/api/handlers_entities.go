@@ -492,7 +492,8 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetEdges handles GET /api/v1/entities/{eid:.+}/edges.
-// Query params: edge_type (repeatable), source, direction (outbound|inbound).
+// Query params: edge_type (repeatable), source, direction (outbound|inbound),
+// limit (1-MaxEdgePageSize, default DefaultEdgePageSize), page_token.
 func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
 		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
@@ -511,6 +512,15 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	limit := eginterfaces.DefaultEdgePageSize
+	if limStr := q.Get("limit"); limStr != "" {
+		l, err := strconv.Atoi(limStr)
+		if err != nil || l < 1 || l > eginterfaces.MaxEdgePageSize {
+			http.Error(w, "limit must be an integer between 1 and 1000", http.StatusBadRequest)
+			return
+		}
+		limit = l
+	}
 	tenant, ids := s.entityCut(r)
 	filter := eginterfaces.EdgeFilter{
 		FromEID:          &eid,
@@ -518,6 +528,7 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 		Source:           q.Get("source"),
 		TenantFilter:     tenant,
 		TenantSubtreeIDs: ids,
+		After:            q.Get("page_token"),
 	}
 
 	if q.Get("direction") == "inbound" {
@@ -525,33 +536,103 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 		filter.ToEID = &eid
 	}
 
-	edges, err := s.egProvider.GetEdges(r.Context(), filter)
-	if err != nil {
-		s.logger.Error("handleGetEdges: query failed",
-			"eid", logging.SanitizeLogValue(eid.String()),
-			"error", logging.SanitizeLogValue(err.Error()),
-		)
-		http.Error(w, "query failed", http.StatusInternalServerError)
-		return
-	}
-
 	// A boundary-subject root caller's cut is unrestricted, so an edge whose other
 	// end is a client entity would otherwise name it: keep only edges whose both
 	// ends the caller may read.
-	if scope := s.tenantReadScope(r, route); scope.boundarySubject() {
-		edges, err = s.filterReadableEdges(r.Context(), scope, edges)
+	scope := s.tenantReadScope(r, route)
+	boundary := scope.boundarySubject()
+	// A boundary-subject caller's provider pages are read in batches of at least
+	// DefaultEdgePageSize, so a small requested limit does not exhaust the scan
+	// passes on a short run of unreadable edges.
+	batch := limit
+	if boundary && batch < eginterfaces.DefaultEdgePageSize {
+		batch = eginterfaces.DefaultEdgePageSize
+	}
+	// One row more than the batch tells a full last page from one with more behind it.
+	filter.Limit = batch + 1
+
+	// The page may come out short of a full provider page, and the next-page
+	// token is always the cursor of the last edge returned. The cursor spells out
+	// the edge's endpoints, so a token taken from an edge the caller may not read
+	// would name a client-tenant entity; for a boundary-subject caller the walk
+	// therefore reads further provider pages until it has a full page of readable
+	// edges (at most maxEdgeScanPasses) and never hands out a hidden edge's cursor.
+	var edges []*eginterfaces.EdgeView
+	nextToken := ""
+	for pass := 0; pass < maxEdgeScanPasses; pass++ {
+		raw, err := s.egProvider.GetEdges(r.Context(), filter)
+		if errors.Is(err, eginterfaces.ErrInvalidEdgeCursor) {
+			http.Error(w, "invalid page_token", http.StatusBadRequest)
+			return
+		}
 		if err != nil {
-			s.logger.Error("handleGetEdges: endpoint lookup failed",
+			s.logger.Error("handleGetEdges: query failed",
 				"eid", logging.SanitizeLogValue(eid.String()),
 				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
+		more := len(raw) > batch
+		if more {
+			raw = raw[:batch]
+		}
+		page := raw
+		if boundary {
+			page, err = s.filterReadableEdges(r.Context(), scope, raw)
+			if err != nil {
+				s.logger.Error("handleGetEdges: endpoint lookup failed",
+					"eid", logging.SanitizeLogValue(eid.String()),
+					"error", logging.SanitizeLogValue(err.Error()),
+				)
+				http.Error(w, "query failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		if room := limit - len(edges); len(page) > room {
+			page = page[:room]
+			more = true
+		}
+		edges = append(edges, page...)
+		if !more || len(edges) >= limit || !boundary {
+			if more && len(edges) > 0 {
+				nextToken = edges[len(edges)-1].Cursor
+			}
+			break
+		}
+		// Unreadable edges ended this provider page: continue after it.
+		filter.After = raw[len(raw)-1].Cursor
+		if pass == maxEdgeScanPasses-1 {
+			if len(edges) == 0 {
+				// No readable edge to anchor a token on, and the hidden edge's
+				// cursor would name its endpoints: refuse rather than end the
+				// listing early and silently drop the readable edges behind it.
+				s.writeErrorResponse(w, http.StatusUnprocessableEntity,
+					"too many unreadable edges to page past", "EDGE_SCAN_LIMIT")
+				return
+			}
+			nextToken = edges[len(edges)-1].Cursor
+		}
+	}
+	if boundary {
 		scope.LogSummary()
 	}
 
-	writeEntityJSON(w, edges)
+	if edges == nil {
+		edges = []*eginterfaces.EdgeView{}
+	}
+	writeEntityJSON(w, edgePage{Edges: edges, NextToken: nextToken})
+}
+
+// maxEdgeScanPasses bounds the provider pages one edges request reads on behalf
+// of a boundary-subject caller whose pages are partly unreadable.
+const maxEdgeScanPasses = 10
+
+// edgePage is the response of GET /api/v1/entities/{eid}/edges. NextToken is
+// empty on the last page.
+type edgePage struct {
+	Edges     []*eginterfaces.EdgeView
+	NextToken string
 }
 
 // handleGetNeighborhood handles GET /api/v1/entities/{eid:.+}/neighborhood.

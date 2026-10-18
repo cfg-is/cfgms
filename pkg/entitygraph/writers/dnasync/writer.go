@@ -48,13 +48,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// maxEdgesPerBatch bounds the edge declarations one WriteFragmentDelta call
+// accepts across all its fragments. maxEdgesPerFragment bounds one fragment, but
+// a steward can send many fragments in a call. 4096 is 16 maximal fragments; a
+// fleet-realistic call (one cluster fragment plus a few dozen VM fragments with a
+// handful of edges each) is a small fraction of it. Fragments are taken in order;
+// the first one that would take the total over the limit and every one after it
+// lose their declarations.
+const maxEdgesPerBatch = 4096
 
 // Writer is the DNA-sync → entity-graph internal writer.
 type Writer struct {
@@ -128,6 +139,9 @@ func (w *Writer) WriteFragmentDelta(
 	var allObs []types.Observation
 	var hostClaimScope *types.ClaimScope   // non-nil when any host-scoped observation is produced
 	var edgeClaimScopes []types.ClaimScope // per-(source,edgeType) scopes from edge declarations
+	batchEdges := 0                        // edge observations accepted so far
+	droppedEdgeFragments := 0              // fragments whose declarations maxEdgesPerBatch dropped
+	lastDroppedFragID := ""
 
 	for _, frag := range fragments {
 		fragID := frag.GetFragmentId()
@@ -180,6 +194,17 @@ func (w *Writer) WriteFragmentDelta(
 		// Decode edge declarations. This strips __entitygraph_edges from payload
 		// so the key is absent when the entity observation below is stored.
 		eObs, eCS := decodeEdgeDeclarations(peerHostAuthority, eid, observedAt, now, payload, taxonomy, w.membership)
+		if batchEdges+len(eObs) > maxEdgesPerBatch {
+			// The batch is over its edge budget: this fragment and every later one
+			// lose their declarations (their entity observations are still written).
+			batchEdges = maxEdgesPerBatch
+			if len(eObs) > 0 {
+				droppedEdgeFragments++
+				lastDroppedFragID = fragID
+			}
+			eObs, eCS = nil, nil
+		}
+		batchEdges += len(eObs)
 		allObs = append(allObs, eObs...)
 		edgeClaimScopes = append(edgeClaimScopes, eCS...)
 
@@ -199,6 +224,15 @@ func (w *Writer) WriteFragmentDelta(
 		if cs != nil && hostClaimScope == nil {
 			hostClaimScope = cs
 		}
+	}
+
+	if droppedEdgeFragments > 0 {
+		slog.Warn("dnasync: edge declarations dropped, batch edge limit reached",
+			"peer", logging.SanitizeLogValue(peerHostAuthority),
+			"dropped_fragments", droppedEdgeFragments,
+			"last_dropped_fragment_id", logging.SanitizeLogValue(lastDroppedFragID),
+			"limit", maxEdgesPerBatch,
+		)
 	}
 
 	if len(allObs) == 0 {
