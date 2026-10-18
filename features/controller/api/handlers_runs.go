@@ -663,7 +663,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to list runs",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list runs", "INTERNAL_ERROR")
 		return
