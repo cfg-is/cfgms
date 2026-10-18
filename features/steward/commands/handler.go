@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/features/config/signature"
@@ -37,6 +38,9 @@ type Handler struct {
 
 	// Steward identification
 	stewardID string
+
+	// remoteTerminalDisabled is steward-local policy (Issue #5146).
+	remoteTerminalDisabled atomic.Bool
 
 	// Command handlers
 	handlers map[cpTypes.CommandType]CommandFunc

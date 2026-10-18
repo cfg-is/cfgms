@@ -354,3 +354,46 @@ func TestOpenTerminal_NoControllerCARoots_FailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenTerminal_RemoteTerminalDisabled_RejectedBeforeEnvelope: with local policy
+// disabling remote terminal, even a command carrying a valid operator envelope is
+// refused with the local-policy error and the dialer is never called. (Issue #5146)
+func TestOpenTerminal_RemoteTerminalDisabled_RejectedBeforeEnvelope(t *testing.T) {
+	dialer := newRecordingDialer()
+	h, signer := newOpenTerminalHandler(t)
+	h.RegisterOpenTerminalHandler(dialer)
+	h.DisableRemoteTerminal()
+
+	valid := validTerminalParams(t, signer, allowedShell(), "sess-disabled")
+	cases := map[string]map[string]interface{}{
+		"valid envelope":    valid,
+		"no envelope":       {"session_id": "sess-x", "shell": allowedShell()},
+		"no shell":          {"session_id": "sess-y"},
+		"non-allowed shell": {"session_id": "sess-z", "shell": "/bin/evil-shell"},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := h.handleOpenTerminal(context.Background(), &cpTypes.Command{ID: "ot-disabled", StewardID: "steward-test", Params: params}, dialer)
+			require.ErrorIs(t, err, ErrRemoteTerminalDisabled)
+			assert.Equal(t, "remote terminal disabled by local policy", err.Error())
+			assert.NotErrorIs(t, err, ErrUnauthenticatedCommand)
+		})
+	}
+	h.Wait()
+	assert.Empty(t, dialer.dialCalls(), "Dial must never be called when remote terminal is disabled")
+}
+
+// TestOpenTerminal_RemoteTerminalDefaultEnabled: without DisableRemoteTerminal the
+// valid envelope still dials. (Issue #5146)
+func TestOpenTerminal_RemoteTerminalDefaultEnabled(t *testing.T) {
+	dialer := newBlockingDialer()
+	h, signer := newOpenTerminalHandler(t)
+	params := validTerminalParams(t, signer, allowedShell(), "sess-default")
+	require.NoError(t, h.handleOpenTerminal(context.Background(), &cpTypes.Command{ID: "ot-default", StewardID: "steward-test", Params: params}, dialer))
+	select {
+	case <-dialer.callCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dialer not called with remote terminal enabled")
+	}
+	dialer.allowReturn(nil)
+}

@@ -5,6 +5,7 @@ package commands
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,6 +20,17 @@ import (
 // Implemented by client.TerminalBridge.
 type TerminalDialer interface {
 	Dial(ctx context.Context, sessionID, shellStr string, cols, rows int) error
+}
+
+// ErrRemoteTerminalDisabled is returned for every open_terminal command when the
+// endpoint's local steward.cfg disables remote terminal.
+var ErrRemoteTerminalDisabled = errors.New("remote terminal disabled by local policy")
+
+// DisableRemoteTerminal makes the open_terminal handler refuse every command.
+// It is called once at start-up from the local steward.cfg; there is no runtime
+// toggle, so only a restart can change it.
+func (h *Handler) DisableRemoteTerminal() {
+	h.remoteTerminalDisabled.Store(true)
 }
 
 // RegisterOpenTerminalHandler registers the open_terminal command handler on h.
@@ -37,6 +49,13 @@ func (h *Handler) RegisterOpenTerminalHandler(dialer TerminalDialer) {
 // On success the command completes immediately and the bridge runs independently.
 func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, dialer TerminalDialer) error {
 	sessionID, _ := cmd.Params["session_id"].(string)
+	// Local policy comes first: before any envelope check, shell lookup or dialer call.
+	if h.remoteTerminalDisabled.Load() {
+		h.logger.Info("open_terminal: refused, remote terminal disabled by local policy",
+			"command_id", logging.SanitizeLogValue(cmd.ID),
+			"session_id", logging.SanitizeLogValue(sessionID))
+		return ErrRemoteTerminalDisabled
+	}
 	shellStr, _ := cmd.Params["shell"].(string)
 
 	var cols, rows int

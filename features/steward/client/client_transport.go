@@ -240,6 +240,9 @@ type TransportClient struct {
 	// than taking its own configuration knob.
 	moduleTrustMode stewardtypes.ModuleTrustMode
 
+	// remoteTerminalDisabled mirrors TransportConfig.RemoteTerminalDisabled.
+	remoteTerminalDisabled bool
+
 	// moduleTrustAdditionalPublishers mirrors
 	// TransportConfig.ModuleTrustAdditionalPublishers — steward.cfg's
 	// module_trust.additional_publishers, forwarded to every executor's
@@ -581,6 +584,11 @@ type TransportConfig struct {
 	// default for an unset mode.
 	ModuleTrustMode stewardtypes.ModuleTrustMode
 
+	// RemoteTerminalDisabled is steward.cfg's remote_terminal.enabled: false. Set
+	// only from the local file at start-up; never from controller-delivered config.
+	// The zero value keeps remote terminal enabled. (Issue #5146)
+	RemoteTerminalDisabled bool
+
 	// ModuleTrustAdditionalPublishers is steward.cfg's
 	// module_trust.additional_publishers — publisher names trusted in addition
 	// to the baked-in CFGMS identity, consulted only when ModuleTrustMode is
@@ -794,6 +802,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		commandMaxParamsBytes:           cfg.SignedCommandMaxParamsBytes,
 		scriptSigning:                   cfg.ScriptSigning,
 		moduleTrustMode:                 cfg.ModuleTrustMode,
+		remoteTerminalDisabled:          cfg.RemoteTerminalDisabled,
 		moduleTrustAdditionalPublishers: cfg.ModuleTrustAdditionalPublishers,
 		publicBeta:                      cfg.PublicBeta,
 		identityPersistFunc:             cfg.IdentityPersistFunc,
@@ -1741,6 +1750,10 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// when the transport client was not yet available at setup, and makes the
 	// wiring exercisable with an in-process control plane.
 	handler.RegisterOpenTerminalHandler(&terminalDialer{c: c})
+	if c.remoteTerminalDisabled {
+		// Local policy (steward.cfg remote_terminal.enabled: false); restart-only. (Issue #5146)
+		handler.DisableRemoteTerminal()
+	}
 
 	// Register steward_action handler — structured, operator-signed actions from a
 	// closed verb allowlist (service start/stop/restart) via in-process OS APIs. (Issue #4623)
