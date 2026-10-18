@@ -331,8 +331,10 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"url", logging.SanitizeLogValue(info.URL),
 			"error_category", "initialization_failure",
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
-		return nil, fmt.Errorf("git config source for tenant %q is unavailable: %w", tenantID, err)
+		// The cause (which can carry work-directory paths) is logged, not returned.
+		return nil, fmt.Errorf("git config source for tenant %q is unavailable", tenantID)
 	}
 
 	r.tenantGitKey[tenantID] = cacheKey

@@ -321,8 +321,8 @@ func TestStoreForSource_SourceChangeRemovesPreviousClone(t *testing.T) {
 	assert.Equal(t, 2, router.gitStoreCache.Size(), "one live entry per tenant")
 }
 
-// TestStoreForSource_FailedConstructionLeavesNoDirectory covers the failed-clone path and
-// verifies an existing valid clone is never removed by a failed construction.
+// TestStoreForSource_FailedConstructionLeavesNoDirectory covers the failed-clone path: the
+// directory the call created is removed.
 func TestStoreForSource_FailedConstructionLeavesNoDirectory(t *testing.T) {
 	router, workDir := newGitTestRouter(t, "a")
 	ctx := ctxkeys.WithSystem(context.Background())
@@ -330,7 +330,6 @@ func TestStoreForSource_FailedConstructionLeavesNoDirectory(t *testing.T) {
 	_, err := router.storeForSource(ctx, "a", gitInfo(filepath.Join(t.TempDir(), "missing")))
 	require.Error(t, err)
 	assert.Empty(t, dirEntries(t, workDir))
-
 }
 
 // TestStoreForSource_ConcurrentSameKeyKeepsClone hammers one key and a replacement to
@@ -351,7 +350,8 @@ func TestStoreForSource_ConcurrentSameKeyKeepsClone(t *testing.T) {
 				u = url2
 			}
 			for j := 0; j < 5; j++ {
-				_, _ = router.storeForSource(ctx, "a", gitInfo(u))
+				_, err := router.storeForSource(ctx, "a", gitInfo(u))
+				assert.NoError(t, err)
 			}
 		}(i)
 	}
