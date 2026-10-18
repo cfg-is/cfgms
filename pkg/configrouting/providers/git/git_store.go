@@ -85,7 +85,7 @@ func NewGitConfigStore(
 		if !constructed && !hadClone {
 			if rmErr := RemoveCloneDir(workDir, repoDir); rmErr != nil && logger != nil {
 				logger.Warn("git-store: failed to remove clone directory after failed construction",
-					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"clone_dir_hash", urlHash,
 					"error_category", categorizeError(rmErr),
 				)
 			}
