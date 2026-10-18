@@ -64,6 +64,8 @@ func commandToProto(cmd *types.Command) *transportpb.Command {
 		TenantId:  cmd.TenantID,
 		Timestamp: timestamppb.New(cmd.Timestamp),
 		Term:      cmd.Term,
+
+		SigningPayloadVersion: cmd.SigningPayloadVersion,
 	}
 	if len(cmd.Params) > 0 {
 		pb.Params = interfaceMapToStringMap(cmd.Params)
@@ -82,6 +84,8 @@ func commandFromProto(pb *transportpb.Command) *types.Command {
 		TenantID:  pb.GetTenantId(),
 		Timestamp: protoTimestampToTime(pb.GetTimestamp()),
 		Term:      pb.GetTerm(),
+
+		SigningPayloadVersion: pb.GetSigningPayloadVersion(),
 	}
 	if len(pb.GetParams()) > 0 {
 		cmd.Params = stringMapToInterfaceMap(pb.GetParams())
@@ -145,6 +149,8 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 		Timestamp: pb.GetTimestamp(),
 		Params:    filteredParams,
 		Term:      pb.GetTerm(),
+
+		SigningPayloadVersion: pb.GetSigningPayloadVersion(),
 	}
 	cmd := commandFromProto(pbClean)
 	if cmd == nil {
@@ -296,6 +302,8 @@ func heartbeatToProto(hb *types.Heartbeat) *transportpb.Heartbeat {
 		DnaHash:         hb.DNAHash,
 		ActiveSessions:  hb.ActiveSessions,
 		ConnectionState: hb.ConnectionState,
+
+		SigningPayloadVersions: hb.SigningPayloadVersions,
 	}
 	// Merge Metrics and DNAAggregateRoot into pb.Metrics.
 	// DNAAggregateRoot is side-channelled through the Metrics map because the
@@ -331,6 +339,8 @@ func heartbeatFromProto(pb *transportpb.Heartbeat) *types.Heartbeat {
 		DNAHash:         pb.GetDnaHash(),
 		ActiveSessions:  pb.GetActiveSessions(),
 		ConnectionState: pb.GetConnectionState(),
+
+		SigningPayloadVersions: pb.GetSigningPayloadVersions(),
 	}
 	// Extract DNAAggregateRoot from Metrics (side-channelled in heartbeatToProto).
 	// Remaining Metrics (without the aggregate root key) are surfaced as hb.Metrics.

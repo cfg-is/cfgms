@@ -31,6 +31,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -1921,4 +1922,124 @@ func TestExecuteScriptHandler_LegacyContentOnlySignature_Rejected(t *testing.T) 
 	err = h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
 		"a signature computed over content alone (pre-#3694 format) must be rejected")
+}
+
+// ---------------------------------------------------------------------------
+// Term-covering signing payload (Issue #5174)
+// ---------------------------------------------------------------------------
+
+// newTermSigningHandler builds a verifying handler whose one-way term-signed switch
+// is persisted in dir through a real FenceRatchet.
+func newTermSigningHandler(t *testing.T, verifier signature.Verifier, dir string) *Handler {
+	t.Helper()
+	h, err := New(&Config{
+		StewardID:        "steward-test",
+		OnStatus:         noopStatus,
+		Logger:           newTestLogger(t),
+		Verifier:         verifier,
+		ReplayWindow:     5 * time.Minute,
+		TermSigningState: stewardconfig.NewFenceRatchet(dir),
+	})
+	require.NoError(t, err)
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(context.Context, *cpTypes.Command) error { return nil })
+	return h
+}
+
+// signTermCommand signs cmd over the v2 payload and stamps the version on it.
+func signTermCommand(t *testing.T, signer signature.Signer, cmd cpTypes.Command, version uint32) *cpTypes.SignedCommand {
+	t.Helper()
+	if version == cpTypes.SigningPayloadV2 {
+		cmd.SigningPayloadVersion = version
+	}
+	b, err := cpTypes.CommandSigningBytesVersion(&cmd, cpTypes.InterfaceParamsToStringMap(cmd.Params), version)
+	require.NoError(t, err)
+	sig, err := signer.Sign(b)
+	require.NoError(t, err)
+	return &cpTypes.SignedCommand{Command: cmd, Signature: sig}
+}
+
+func termTestCommand(id string, term uint64) cpTypes.Command {
+	return cpTypes.Command{
+		ID:        id,
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+		Term:      term,
+	}
+}
+
+func TestHandleCommand_V2TermAlteredAfterSigningRejected(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	dir := t.TempDir()
+	h := newTermSigningHandler(t, verifier, dir)
+
+	sc := signTermCommand(t, signer, termTestCommand("v2-tamper", 5), cpTypes.SigningPayloadV2)
+	sc.Command.Term = 9_000_000 // changed in transit
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	h.Wait()
+
+	// The rejected command must not have flipped the one-way switch.
+	signed, termErr := stewardconfig.NewFenceRatchet(dir).TermSigned()
+	require.NoError(t, termErr)
+	assert.False(t, signed)
+}
+
+func TestHandleCommand_OldVersionRejectedAfterV2Accepted(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	dir := t.TempDir()
+	h := newTermSigningHandler(t, verifier, dir)
+
+	// Before the switch a stamped v1 command is still accepted.
+	require.NoError(t, h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-before", 3), cpTypes.SigningPayloadV1)))
+
+	require.NoError(t, h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v2-ok", 4), cpTypes.SigningPayloadV2)))
+	h.Wait()
+
+	// A correctly v1-signed stamped command is now refused as unauthenticated.
+	err := h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-after", 5), cpTypes.SigningPayloadV1))
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+
+	// An unstamped v1 command carries no unsigned term and is unaffected.
+	require.NoError(t, h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-unstamped", 0), cpTypes.SigningPayloadV1)))
+	h.Wait()
+
+	// The switch survives a rebuild from the same persisted state.
+	rebuilt := newTermSigningHandler(t, verifier, dir)
+	err = rebuilt.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-after-restart", 6), cpTypes.SigningPayloadV1))
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+
+	// A different state directory has no switch set.
+	fresh := newTermSigningHandler(t, verifier, t.TempDir())
+	require.NoError(t, fresh.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-fresh", 6), cpTypes.SigningPayloadV1)))
+	fresh.Wait()
+}
+
+func TestHandleCommand_UnknownOrAbsentVersionNeverSelectsV2(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	h := newTermSigningHandler(t, verifier, t.TempDir())
+
+	// Signed over v2 bytes but naming no version: verified as v1, so it fails.
+	cmd := termTestCommand("absent", 5)
+	cmd.SigningPayloadVersion = cpTypes.SigningPayloadV2
+	b, err := cpTypes.CommandSigningBytesVersion(&cmd, nil, cpTypes.SigningPayloadV2)
+	require.NoError(t, err)
+	sig, err := signer.Sign(b)
+	require.NoError(t, err)
+	cmd.SigningPayloadVersion = 0
+	err = h.HandleCommand(context.Background(), &cpTypes.SignedCommand{Command: cmd, Signature: sig})
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+
+	// A version this build does not know is refused.
+	unknown := signTermCommand(t, signer, termTestCommand("unknown", 5), cpTypes.SigningPayloadV1)
+	unknown.Command.SigningPayloadVersion = 77
+	err = h.HandleCommand(context.Background(), unknown)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 }

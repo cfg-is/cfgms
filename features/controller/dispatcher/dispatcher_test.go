@@ -2266,3 +2266,58 @@ func TestDispatcher_AckFailureLogNeutralizesControlCharacters(t *testing.T) {
 	assert.NotContains(t, rec, "\r")
 	assert.Len(t, strings.Split(rec, "\n"), 1)
 }
+
+// bytesRecordingSigner captures the exact bytes it is asked to sign.
+type bytesRecordingSigner struct {
+	testCommandSigner
+	signed *[][]byte
+}
+
+func (s bytesRecordingSigner) Sign(b []byte) (*configsignature.ConfigSignature, error) {
+	*s.signed = append(*s.signed, append([]byte(nil), b...))
+	return s.testCommandSigner.Sign(b)
+}
+
+// TestDispatcher_SigningPayloadVersionFollowsStewardCapability proves AC 4 for the
+// dispatcher: a steward that advertised the term-covering payload gets a command
+// signed over it, and one that did not keeps the current payload.
+func TestDispatcher_SigningPayloadVersionFollowsStewardCapability(t *testing.T) {
+	caps := controlplaneTypes.NewSigningCapabilities()
+	caps.Record("steward-new", controlplaneTypes.SupportedSigningPayloadVersions())
+	caps.Record("steward-old", nil)
+
+	var signed [][]byte
+	controlPlane := &testControlPlane{}
+	d, err := New(&Config{
+		Queue:               newTestQueue(t, nil),
+		ControlPlane:        controlPlane,
+		Signer:              bytesRecordingSigner{signed: &signed},
+		SigningCapabilities: caps,
+		TermSource:          fixedTermSource(11),
+		Logger:              logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
+	for _, steward := range []string{"steward-new", "steward-old"} {
+		exec := &script.QueuedExecution{ExecutionID: "exec-" + steward, Shell: script.ShellBash}
+		require.NoError(t, d.sendCommand(context.Background(), steward, exec, prepared))
+	}
+
+	require.Len(t, controlPlane.sent, 2)
+	require.Len(t, signed, 2)
+	for i, want := range []uint32{controlplaneTypes.SigningPayloadV2, controlplaneTypes.SigningPayloadV1} {
+		cmd := controlPlane.sent[i].Command
+		expected, err := controlplaneTypes.CommandSigningBytesVersion(&cmd,
+			controlplaneTypes.InterfaceParamsToStringMap(cmd.Params), want)
+		require.NoError(t, err)
+		assert.Equal(t, string(expected), string(signed[i]), "steward %s", cmd.StewardID)
+	}
+	assert.Equal(t, controlplaneTypes.SigningPayloadV2, controlPlane.sent[0].Command.SigningPayloadVersion)
+	assert.Zero(t, controlPlane.sent[1].Command.SigningPayloadVersion)
+	assert.Equal(t, uint64(11), controlPlane.sent[0].Command.Term)
+}
+
+type fixedTermSource uint64
+
+func (f fixedTermSource) GetTerm() uint64 { return uint64(f) }

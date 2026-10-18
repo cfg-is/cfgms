@@ -787,3 +787,22 @@ func TestMapRoundTrip(t *testing.T) {
 
 	assert.Equal(t, original, result)
 }
+
+// TestSigningPayloadVersion_RoundTrip: the payload version on a command and the
+// versions on a heartbeat survive the proto conversion (#5174).
+func TestSigningPayloadVersion_RoundTrip(t *testing.T) {
+	sc := &types.SignedCommand{Command: types.Command{
+		ID: "c1", Type: types.CommandSyncConfig, StewardID: "s1", Term: 4,
+		SigningPayloadVersion: types.SigningPayloadV2,
+	}}
+	back := signedCommandFromProto(signedCommandToProto(sc))
+	require.NotNil(t, back)
+	assert.Equal(t, types.SigningPayloadV2, back.Command.SigningPayloadVersion)
+	assert.Equal(t, uint64(4), back.Command.Term)
+
+	absent := signedCommandFromProto(signedCommandToProto(&types.SignedCommand{Command: types.Command{ID: "c2", StewardID: "s1"}}))
+	assert.Zero(t, absent.Command.SigningPayloadVersion)
+
+	hb := heartbeatFromProto(heartbeatToProto(&types.Heartbeat{StewardID: "s1", SigningPayloadVersions: []uint32{1, 2}}))
+	assert.Equal(t, []uint32{1, 2}, hb.SigningPayloadVersions)
+}

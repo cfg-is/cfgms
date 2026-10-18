@@ -434,17 +434,18 @@ func (*ControlMessage_Response) isControlMessage_Payload() {}
 
 // Command is sent from controller to steward via ControlChannel.
 type Command struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Type          CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
-	StewardId     string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Params        map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Priority      int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
-	Term          uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Id                    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Type                  CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
+	StewardId             string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	TenantId              string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Timestamp             *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Params                map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Priority              int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
+	Term                  uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
+	SigningPayloadVersion uint32                 `protobuf:"varint,9,opt,name=signing_payload_version,json=signingPayloadVersion,proto3" json:"signing_payload_version,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Command) Reset() {
@@ -529,6 +530,13 @@ func (x *Command) GetPriority() int32 {
 func (x *Command) GetTerm() uint64 {
 	if x != nil {
 		return x.Term
+	}
+	return 0
+}
+
+func (x *Command) GetSigningPayloadVersion() uint32 {
+	if x != nil {
+		return x.SigningPayloadVersion
 	}
 	return 0
 }
@@ -646,8 +654,11 @@ type Heartbeat struct {
 	DnaHash         string                 `protobuf:"bytes,7,opt,name=dna_hash,json=dnaHash,proto3" json:"dna_hash,omitempty"`                         // for hash-based sync detection
 	ActiveSessions  int32                  `protobuf:"varint,8,opt,name=active_sessions,json=activeSessions,proto3" json:"active_sessions,omitempty"`   // number of active control-channel streams (1 when connected, 0 otherwise)
 	ConnectionState string                 `protobuf:"bytes,9,opt,name=connection_state,json=connectionState,proto3" json:"connection_state,omitempty"` // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// signing_payload_versions lists the command signing-payload versions this
+	// steward can verify (#5174). Absent (empty) means only version 1.
+	SigningPayloadVersions []uint32 `protobuf:"varint,10,rep,packed,name=signing_payload_versions,json=signingPayloadVersions,proto3" json:"signing_payload_versions,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -741,6 +752,13 @@ func (x *Heartbeat) GetConnectionState() string {
 		return x.ConnectionState
 	}
 	return ""
+}
+
+func (x *Heartbeat) GetSigningPayloadVersions() []uint32 {
+	if x != nil {
+		return x.SigningPayloadVersions
+	}
+	return nil
 }
 
 // Response is sent from steward to controller for command acknowledgment.
@@ -838,7 +856,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x05event\x18\x02 \x01(\v2\x16.cfgms.transport.EventH\x00R\x05event\x12:\n" +
 	"\theartbeat\x18\x03 \x01(\v2\x1a.cfgms.transport.HeartbeatH\x00R\theartbeat\x127\n" +
 	"\bresponse\x18\x04 \x01(\v2\x19.cfgms.transport.ResponseH\x00R\bresponseB\t\n" +
-	"\apayload\"\xea\x02\n" +
+	"\apayload\"\xa2\x03\n" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x1c.cfgms.transport.CommandTypeR\x04type\x12\x1d\n" +
@@ -848,7 +866,8 @@ const file_transport_control_proto_rawDesc = "" +
 	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12<\n" +
 	"\x06params\x18\x06 \x03(\v2$.cfgms.transport.Command.ParamsEntryR\x06params\x12\x1a\n" +
 	"\bpriority\x18\a \x01(\x05R\bpriority\x12\x12\n" +
-	"\x04term\x18\b \x01(\x04R\x04term\x1a9\n" +
+	"\x04term\x18\b \x01(\x04R\x04term\x126\n" +
+	"\x17signing_payload_version\x18\t \x01(\rR\x15signingPayloadVersion\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x03\n" +
@@ -865,7 +884,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\bseverity\x18\b \x01(\x0e2\x19.cfgms.transport.SeverityR\bseverity\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc1\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfb\x03\n" +
 	"\tHeartbeat\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1b\n" +
@@ -876,7 +895,9 @@ const file_transport_control_proto_rawDesc = "" +
 	"\aversion\x18\x06 \x01(\tR\aversion\x12\x19\n" +
 	"\bdna_hash\x18\a \x01(\tR\adnaHash\x12'\n" +
 	"\x0factive_sessions\x18\b \x01(\x05R\x0eactiveSessions\x12)\n" +
-	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x1a:\n" +
+	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x128\n" +
+	"\x18signing_payload_versions\x18\n" +
+	" \x03(\rR\x16signingPayloadVersions\x1a:\n" +
 	"\fMetricsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x02\n" +

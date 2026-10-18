@@ -1252,13 +1252,15 @@ func (c *TransportClient) reportRejection(ctx context.Context, sc *cpTypes.Signe
 // checkTermFence is the compare step only: it never changes ratchet state. An
 // admitted stamped command is recorded as in flight under the same lock, and the
 // caller must follow with commitTermFence or releaseTermFence.
-// Command.Term is not covered by the command signature, so an unauthenticated
-// command could otherwise raise the mark and fence out every legitimate command.
-// The ratchet advances in commitTermFence, after the command has authenticated.
+// Command.Term is covered by the signature only under signing-payload v2 (#5174),
+// so an unauthenticated command could otherwise raise the mark and fence out every
+// legitimate command. The ratchet advances in commitTermFence, after the command
+// has authenticated; once this steward has accepted a v2 command, the handler
+// refuses stamped v1 commands, so every term that moves the mark is signed.
 //
 // Every value in the rejection log line is attacker-influenced (a compromised or
-// downgraded controller chooses Command.ID/Type/Term freely — Term is transport-
-// trusted only, not covered by the command signature) and goes through
+// downgraded controller chooses Command.ID/Type/Term freely — Term is unsigned
+// until the command authenticates) and goes through
 // logging.SanitizeLogValue() per this repo's standing log-injection rule.
 func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 	term := sc.Command.Term
@@ -1502,10 +1504,13 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	}
 
 	handler, err := commands.New(&commands.Config{
-		StewardID:          stewardID,
-		OnStatus:           statusCallback,
-		Logger:             c.logger,
-		Verifier:           verifier,
+		StewardID: stewardID,
+		OnStatus:  statusCallback,
+		Logger:    c.logger,
+		Verifier:  verifier,
+		// Issue #5174: the one-way switch that refuses stamped commands signed
+		// without term coverage is persisted beside the fence ratchet.
+		TermSigningState:   c.fenceRatchet,
 		ReplayWindow:       c.commandReplayWindow,
 		MaxParamsBytes:     c.commandMaxParamsBytes,
 		SigningConfig:      signingConfig,
@@ -2099,6 +2104,9 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		ActiveSessions:   activeSessions,
 		ConnectionState:  connectionState,
 		Version:          version.Short(),
+		// Issue #5174: tell the controller which command signing-payload
+		// versions this steward can verify so it can sign the term.
+		SigningPayloadVersions: cpTypes.SupportedSigningPayloadVersions(),
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {

@@ -157,9 +157,8 @@ func TestEventFilter_Match(t *testing.T) {
 // which compute signing bytes without the field — keep verifying commands from a
 // term-stamping controller during a rolling upgrade.
 //
-// If a future story puts the term under the signature (behind a negotiated
-// signing-payload version), this test is the thing that must change with it, together
-// with the hazard note on commandSigningPayload.
+// This holds for the version-1 payload only; SigningPayloadV2 (#5174) covers the
+// term, see TestCommandSigningBytesV2_CoversTerm.
 func TestCommandSigningBytes_TermIsNotSigned(t *testing.T) {
 	base := Command{
 		ID:        "cmd-1",
@@ -183,4 +182,81 @@ func TestCommandSigningBytes_TermIsNotSigned(t *testing.T) {
 		"Command.Term must not affect signing bytes — it is transport-trusted only (#3390)")
 	assert.NotContains(t, string(termBytes), "term",
 		"signing payload must not carry a term field")
+}
+
+// TestCommandSigningBytes_V1GoldenUnchanged pins the v1 payload to bytes captured
+// from the pre-#5174 implementation, so signatures already issued keep verifying.
+func TestCommandSigningBytes_V1GoldenUnchanged(t *testing.T) {
+	cmd := Command{
+		ID:        "cmd-golden",
+		Type:      CommandSyncConfig,
+		StewardID: "steward-1",
+		TenantID:  "tenant-1",
+		Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Term:      7,
+	}
+	raw := map[string]string{"a": "1", "b": "two"}
+	const golden = `{"id":"cmd-golden","type":"sync_config","steward_id":"steward-1","tenant_id":"tenant-1","timestamp":"2026-01-02T03:04:05Z","params":{"a":"1","b":"two"}}`
+
+	got, err := CommandSigningBytes(&cmd, raw)
+	require.NoError(t, err)
+	assert.Equal(t, golden, string(got))
+
+	viaVersion, err := CommandSigningBytesVersion(&cmd, raw, SigningPayloadV1)
+	require.NoError(t, err)
+	assert.Equal(t, golden, string(viaVersion))
+}
+
+// TestCommandSigningBytesV2_CoversTerm: under v2 the term and the payload version
+// are part of the signed bytes, and every v1 field is still covered.
+func TestCommandSigningBytesV2_CoversTerm(t *testing.T) {
+	base := Command{
+		ID:        "cmd-1",
+		Type:      CommandSyncConfig,
+		StewardID: "steward-1",
+		TenantID:  "tenant-1",
+		Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Term:      5,
+	}
+	raw := map[string]string{"k": "v"}
+
+	baseBytes, err := CommandSigningBytesVersion(&base, raw, SigningPayloadV2)
+	require.NoError(t, err)
+
+	changed := base
+	changed.Term = 6
+	termBytes, err := CommandSigningBytesVersion(&changed, raw, SigningPayloadV2)
+	require.NoError(t, err)
+	assert.NotEqual(t, string(baseBytes), string(termBytes), "changing only Term must change v2 bytes")
+
+	v1Bytes, err := CommandSigningBytesVersion(&base, raw, SigningPayloadV1)
+	require.NoError(t, err)
+	assert.NotEqual(t, string(v1Bytes), string(baseBytes))
+	assert.Contains(t, string(baseBytes), `"payload_version":2`)
+
+	mutators := map[string]func(c *Command){
+		"id":        func(c *Command) { c.ID = "other" },
+		"type":      func(c *Command) { c.Type = CommandSyncDNA },
+		"steward":   func(c *Command) { c.StewardID = "other" },
+		"tenant":    func(c *Command) { c.TenantID = "other" },
+		"timestamp": func(c *Command) { c.Timestamp = c.Timestamp.Add(time.Second) },
+	}
+	for name, mutate := range mutators {
+		c := base
+		mutate(&c)
+		b, err := CommandSigningBytesVersion(&c, raw, SigningPayloadV2)
+		require.NoError(t, err)
+		assert.NotEqual(t, string(baseBytes), string(b), "v2 must cover %s", name)
+	}
+	paramBytes, err := CommandSigningBytesVersion(&base, map[string]string{"k": "x"}, SigningPayloadV2)
+	require.NoError(t, err)
+	assert.NotEqual(t, string(baseBytes), string(paramBytes), "v2 must cover params")
+}
+
+func TestCommandSigningBytesVersion_UnknownVersionRejected(t *testing.T) {
+	cmd := Command{ID: "c", Timestamp: time.Now()}
+	for _, v := range []uint32{0, 3, 99} {
+		_, err := CommandSigningBytesVersion(&cmd, nil, v)
+		assert.ErrorIs(t, err, ErrUnknownSigningPayloadVersion, "version %d", v)
+	}
 }

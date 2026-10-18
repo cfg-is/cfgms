@@ -65,9 +65,10 @@ type lockMetaEntry struct {
 type Dispatcher struct {
 	queue              *script.ExecutionQueue
 	controlPlane       controlplaneInterfaces.ControlPlaneProvider
-	signer             signature.Signer            // optional; when nil commands are sent unsigned
-	isLocallyConnected func(stewardID string) bool // optional; nil = dispatch to every queued device
-	termSource         TermSource                  // optional; when nil commands carry term 0
+	signer             signature.Signer                       // optional; when nil commands are sent unsigned
+	isLocallyConnected func(stewardID string) bool            // optional; nil = dispatch to every queued device
+	termSource         TermSource                             // optional; when nil commands carry term 0
+	signingCaps        *controlplaneTypes.SigningCapabilities // optional; nil signs every command over the v1 payload (#5174)
 	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
@@ -190,6 +191,10 @@ type Config struct {
 	// Decision 6), so a cluster without it can never run ad-hoc scripts
 	// (Issue #4510). Nil sends term 0 (single-server behaviour).
 	TermSource TermSource
+	// SigningCapabilities selects the signing-payload version per steward (#5174).
+	// Share one instance with the command publisher and relay handler. Nil signs
+	// every command over the v1 payload.
+	SigningCapabilities *controlplaneTypes.SigningCapabilities
 	// ActionAudit receives each steward action the expiry sweep closes without a
 	// result. Optional: when nil the closure is still logged and recorded on the
 	// job, but not written to the audit log.
@@ -238,6 +243,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		signer:              cfg.Signer,
 		isLocallyConnected:  cfg.IsLocallyConnected,
 		termSource:          cfg.TermSource,
+		signingCaps:         cfg.SigningCapabilities,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
 		actionAudit:         cfg.ActionAudit,
 		pollInterval:        interval,
@@ -627,20 +633,7 @@ func (d *Dispatcher) currentTerm() uint64 {
 // as sent; it is the controller's outer layer and is independent of any operator
 // envelope carried in the params.
 func (d *Dispatcher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
-	signed := &controlplaneTypes.SignedCommand{Command: *cmd}
-	if d.signer != nil {
-		rawParams := controlplaneTypes.InterfaceParamsToStringMap(cmd.Params)
-		cmdBytes, err := controlplaneTypes.CommandSigningBytes(cmd, rawParams)
-		if err != nil {
-			return nil, fmt.Errorf("marshal command for signing: %w", err)
-		}
-		sig, err := d.signer.Sign(cmdBytes)
-		if err != nil {
-			return nil, fmt.Errorf("sign command: %w", err)
-		}
-		signed.Signature = sig
-	}
-	return signed, nil
+	return controlplaneTypes.SignCommand(cmd, d.signer, d.signingCaps)
 }
 
 // sendCommand builds and transmits a CommandExecuteScript via the control plane.

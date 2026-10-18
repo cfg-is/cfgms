@@ -63,6 +63,12 @@ type Handler struct {
 	// and deterministic test synchronization.
 	wg sync.WaitGroup
 
+	// termSigned is the one-way switch (Issue #5174): once set, a stamped command
+	// signed over the v1 payload (whose term is unsigned) is refused as
+	// unauthenticated. termState persists it; nil keeps it in memory only.
+	termSigned atomic.Bool
+	termState  TermSigningState
+
 	// Story #919: command authentication fields.
 
 	// verifier validates the cryptographic signature on each SignedCommand.
@@ -167,6 +173,13 @@ type Config struct {
 	// When nil, signature verification is skipped.
 	Verifier signature.Verifier
 
+	// TermSigningState persists the one-way switch set once a command signed over
+	// the term-covering payload (cpTypes.SigningPayloadV2) has been accepted
+	// (Issue #5174). After it is set, stamped commands signed over the v1 payload
+	// are refused as unauthenticated. Typically the steward's FenceRatchet. When
+	// nil the switch is held in memory only.
+	TermSigningState TermSigningState
+
 	// ReplayWindow is the maximum age of an accepted command timestamp.
 	// Defaults to 5 minutes when zero.
 	ReplayWindow time.Duration
@@ -235,6 +248,15 @@ const (
 	envelopeNonceCacheTTL = 24 * time.Hour
 )
 
+// TermSigningState is the durable home of the one-way term-signed switch
+// (Issue #5174). *config.FenceRatchet implements it beside the fence ratchet.
+type TermSigningState interface {
+	// TermSigned reports whether the switch has been set.
+	TermSigned() (bool, error)
+	// MarkTermSigned sets the switch durably; it is never unset.
+	MarkTermSigned() error
+}
+
 // New creates a new command handler and, when a CommandStore is configured,
 // sweeps commands left in "executing" state from a previous run that have been
 // executing longer than ExecutingRestartTimeout, marking them as failed with
@@ -285,6 +307,17 @@ func New(cfg *Config) (*Handler, error) {
 		webauthnManifestFloor:   &manifestFreshnessFloor{},
 		revocationVerifier:      cfg.RevocationVerifier,
 		eventEmitter:            cfg.EventEmitter,
+		termState:               cfg.TermSigningState,
+	}
+
+	// Restore the one-way term-signed switch persisted by a previous run.
+	if cfg.TermSigningState != nil {
+		signed, err := cfg.TermSigningState.TermSigned()
+		if err != nil {
+			cfg.Logger.Warn("Failed to load term-signed switch; starting with it unset",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		h.termSigned.Store(signed)
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -403,10 +436,28 @@ func (h *Handler) unregisterRelay(executionID string) {
 	h.relays.Delete(executionID)
 }
 
+// markTermSigned sets the one-way term-signed switch and persists it. A
+// persistence failure is logged; the in-memory switch stays authoritative for the
+// life of the process.
+func (h *Handler) markTermSigned() {
+	if h.termSigned.Swap(true) {
+		return
+	}
+	if h.termState == nil {
+		return
+	}
+	if err := h.termState.MarkTermSigned(); err != nil {
+		h.logger.Warn("Failed to persist term-signed switch; in-memory state is still authoritative",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
 // HandleCommand processes an incoming signed command from the controller.
 //
 // Story #919: Before dispatching, the command is authenticated:
-//  1. Signature is verified against CommandSigningBytes(cmd, rawParams) when a verifier is configured.
+//  1. Signature is verified against the signing payload version the command names
+//     (CommandSigningBytesVersion) when a verifier is configured. A stamped v1 command is
+//     refused once a term-covering v2 command has been accepted (Issue #5174).
 //  2. signed.Command.StewardID must match this handler's steward identity.
 //  3. signed.Command.Timestamp must be within the configured replay window.
 //  4. signed.Command.ID must not already be present in the replay cache (dedup).
@@ -417,6 +468,9 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	}
 
 	cmd := &signed.Command
+
+	// termSignedCommand is true once a v2 signature (covering Term) has verified.
+	termSignedCommand := false
 
 	// 1. Signature verification (only when a verifier is configured).
 	// Read verifier under the lock because UpdateVerifier may replace it concurrently
@@ -435,13 +489,22 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if rawParams == nil {
 			rawParams = cpTypes.InterfaceParamsToStringMap(cmd.Params)
 		}
-		cmdBytes, err := cpTypes.CommandSigningBytes(cmd, rawParams)
+		// Verify against the payload version the command names. An absent version
+		// is v1 and never selects v2 (Issue #5174).
+		version := cpTypes.CommandPayloadVersion(cmd)
+		if version == cpTypes.SigningPayloadV1 && cmd.Term > 0 && h.termSigned.Load() {
+			// This steward has seen a term-signed command, so a stamped command
+			// whose term is unsigned can only be a downgrade.
+			return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
+		}
+		cmdBytes, err := cpTypes.CommandSigningBytesVersion(cmd, rawParams, version)
 		if err != nil {
-			return fmt.Errorf("marshal command for verification: %w", err)
+			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
 		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
+		termSignedCommand = version == cpTypes.SigningPayloadV2
 	}
 
 	// 2. StewardID match.
@@ -477,6 +540,14 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err := h.preflightScriptSignature(cmd); err != nil {
 			return err
 		}
+	}
+
+	// The command is fully authenticated: its term is covered by a verified
+	// signature, so from here on this steward refuses unsigned-term stamped
+	// commands. Set only now, so a stale, replayed or malformed command cannot
+	// flip the switch.
+	if termSignedCommand {
+		h.markTermSigned()
 	}
 
 	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)

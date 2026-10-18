@@ -41,7 +41,8 @@ type RelayHandler struct {
 	controlPlane cpInterfaces.ControlPlaneProvider
 	runManager   *controllerrun.Manager
 	apiHandler   http.Handler
-	signer       signature.Signer // optional; nil = unsigned commands (test mode)
+	signer       signature.Signer             // optional; nil = unsigned commands (test mode)
+	signingCaps  *cpTypes.SigningCapabilities // optional; nil signs over the v1 payload (#5174)
 	logger       logging.Logger
 }
 
@@ -61,6 +62,12 @@ func NewRelayHandler(
 		signer:       signer,
 		logger:       logger,
 	}
+}
+
+// SetSigningCapabilities wires the per-steward signing-payload registry shared
+// with the command publisher and dispatcher (#5174). Call before Start.
+func (h *RelayHandler) SetSigningCapabilities(caps *cpTypes.SigningCapabilities) {
+	h.signingCaps = caps
 }
 
 // Start subscribes to EventRelayRequest events. Returns when ctx is cancelled.
@@ -225,18 +232,9 @@ func (h *RelayHandler) sendRelayResponse(
 		},
 	}
 
-	signed := &cpTypes.SignedCommand{Command: *cmd}
-	if h.signer != nil {
-		rawParams := cpTypes.InterfaceParamsToStringMap(cmd.Params)
-		cmdBytes, err := cpTypes.CommandSigningBytes(cmd, rawParams)
-		if err != nil {
-			return fmt.Errorf("relay: sign response: %w", err)
-		}
-		sig, err := h.signer.Sign(cmdBytes)
-		if err != nil {
-			return fmt.Errorf("relay: sign response: %w", err)
-		}
-		signed.Signature = sig
+	signed, err := cpTypes.SignCommand(cmd, h.signer, h.signingCaps)
+	if err != nil {
+		return fmt.Errorf("relay: sign response: %w", err)
 	}
 
 	if err := h.controlPlane.SendCommand(ctx, signed); err != nil {

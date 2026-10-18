@@ -421,3 +421,50 @@ func TestPublisher_Stop_CancelsPendingFenceRetries(t *testing.T) {
 	case <-time.After(2500 * time.Millisecond):
 	}
 }
+
+// TestPublisher_SigningPayloadVersionFollowsStewardCapability proves AC 4 for the
+// publisher: a steward that advertised the term-covering payload receives a command
+// whose signature verifies over it (and fails once the term is altered), while a
+// steward that did not advertise it receives the current payload.
+func TestPublisher_SigningPayloadVersionFollowsStewardCapability(t *testing.T) {
+	signer, verifier := newTestSignerAndVerifier(t)
+	caps := types.NewSigningCapabilities()
+	caps.Record("steward-new", types.SupportedSigningPayloadVersions())
+	caps.Record("steward-old", nil)
+
+	sent := make(chan *types.SignedCommand, 2)
+	pub, err := commands.New(&commands.Config{
+		ControlPlane:        &sendHookCP{onSend: func(sc *types.SignedCommand) error { sent <- sc; return nil }},
+		Signer:              signer,
+		TermSource:          &staticTermSource{term: 9},
+		SigningCapabilities: caps,
+		Logger:              logging.NewLogger("error"),
+	})
+	require.NoError(t, err)
+
+	_, err = pub.PublishCommand(context.Background(), "steward-new", types.CommandSyncConfig, map[string]interface{}{"k": "v"})
+	require.NoError(t, err)
+	newCmd := <-sent
+	_, err = pub.PublishCommand(context.Background(), "steward-old", types.CommandSyncConfig, map[string]interface{}{"k": "v"})
+	require.NoError(t, err)
+	oldCmd := <-sent
+
+	raw := func(sc *types.SignedCommand) map[string]string {
+		return types.InterfaceParamsToStringMap(sc.Command.Params)
+	}
+
+	assert.Equal(t, types.SigningPayloadV2, newCmd.Command.SigningPayloadVersion)
+	v2Bytes, err := types.CommandSigningBytesVersion(&newCmd.Command, raw(newCmd), types.SigningPayloadV2)
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(v2Bytes, newCmd.Signature))
+	tampered := newCmd.Command
+	tampered.Term = 1 << 60
+	tamperedBytes, err := types.CommandSigningBytesVersion(&tampered, raw(newCmd), types.SigningPayloadV2)
+	require.NoError(t, err)
+	assert.Error(t, verifier.Verify(tamperedBytes, newCmd.Signature), "altering the term must break the v2 signature")
+
+	assert.Zero(t, oldCmd.Command.SigningPayloadVersion)
+	v1Bytes, err := types.CommandSigningBytes(&oldCmd.Command, raw(oldCmd))
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(v1Bytes, oldCmd.Signature))
+}
