@@ -449,6 +449,12 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
+	if freshAcct.ID != acct.ID {
+		// Deleted and recreated under the same username since the request began.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the registration", "ACCOUNT_MODIFIED")
+		return
+	}
 	if freshAcct.Disabled {
 		s.writeErrorResponse(w, http.StatusForbidden, "Account is disabled", "ACCOUNT_DISABLED")
 		return

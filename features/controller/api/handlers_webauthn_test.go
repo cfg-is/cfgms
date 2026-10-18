@@ -2434,3 +2434,62 @@ func TestWebAuthnRegisterFinish_ConcurrentWriterNeverLosesCredential(t *testing.
 		}
 	}
 }
+
+// TestWebAuthnRegisterFinish_LostSwap_Returns409 forces the compare-and-swap loss
+// deterministically: an administrator write lands immediately after the handler's
+// reload from the store, so the version the handler read is stale when it swaps.
+// The finish must report 409 ACCOUNT_MODIFIED, write nothing, and leave the
+// administrator's write intact.
+func TestWebAuthnRegisterFinish_LostSwap_Returns409(t *testing.T) {
+	server, username := setupWebAuthnServer(t, rfRPID, []string{rfOrigin})
+	body, newID := rfPrepareFinish(t, server, username)
+	otherID := []byte("admin-written-credential")
+
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	tenant := accountStorageTenant(acct.TenantID)
+	before, err := server.loadAccountFromStore(context.Background(), username, tenant)
+	require.NoError(t, err)
+	require.NotNil(t, before)
+
+	rs := installRacingStore(t, server)
+	hookRan := false
+	rs.mu.Lock()
+	// The handler lists the store twice: getAccount in resolveAccountForCredentials,
+	// then the reload in handleWebAuthnRegisterFinish. Fire right after the reload.
+	// A hook that fired any earlier would be seen by the reload and yield 201, so a
+	// mis-count fails this test rather than passing it.
+	rs.fireOnList = 2
+	rs.hook = func() {
+		hookRan = true
+		cur, err := server.loadAccountFromStore(context.Background(), username, tenant)
+		require.NoError(t, err)
+		require.NotNil(t, cur)
+		cur.Credentials = append(cur.Credentials,
+			WebAuthnCredential{ID: otherID, Label: "admin", RegisteredAt: time.Now().UTC()})
+		_, ok, err := server.persistAccountCAS(context.Background(), cur, "test-admin")
+		require.NoError(t, err)
+		require.True(t, ok, "administrator write must win the swap")
+	}
+	rs.mu.Unlock()
+
+	rec := doFinish(t, server, username, body)
+	require.True(t, hookRan, "administrator write must have run between reload and swap")
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+
+	rs.mu.Lock()
+	casCalls := rs.casCalls
+	rs.mu.Unlock()
+	assert.Equal(t, 2, casCalls, "administrator swap plus the handler's losing swap")
+
+	stored, err := server.loadAccountFromStore(context.Background(), username, tenant)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, before.Version+1, stored.Version, "only the administrator write may land")
+	require.Len(t, stored.Credentials, 1)
+	assert.Equal(t, otherID, stored.Credentials[0].ID, "administrator credential must survive")
+	for _, c := range stored.Credentials {
+		assert.NotEqual(t, newID, c.ID, "the losing registration must not be written")
+	}
+}
