@@ -108,7 +108,7 @@ func TestConn_Deadlines(t *testing.T) {
 func TestConn_CloseDeliversWrittenData(t *testing.T) {
 	tlsPair := newTestTLSPair(t)
 	for i := 0; i < 20; i++ {
-		serverConn, clientConn := dialPair(t, tlsPair)
+		serverConn, clientConn, closePair := dialPairClosable(t, tlsPair)
 		_, err := serverConn.Write([]byte("trailers"))
 		require.NoError(t, err)
 		require.NoError(t, serverConn.Close())
@@ -117,6 +117,7 @@ func TestConn_CloseDeliversWrittenData(t *testing.T) {
 		got, err := io.ReadAll(clientConn)
 		require.NoError(t, err, "iteration %d", i)
 		assert.Equal(t, "trailers", string(got), "iteration %d", i)
+		closePair()
 	}
 }
 

@@ -4,7 +4,10 @@
 package quic
 
 import (
+	"context"
 	"crypto/tls"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,10 +86,40 @@ func newTestTLSPair(t *testing.T) *testTLSPair {
 // server and drains it before returning, so callers receive clean connections.
 func dialPair(t *testing.T, tlsPair *testTLSPair) (serverConn, clientConn *Conn) {
 	t.Helper()
+	serverConn, clientConn, closePair := dialPairClosable(t, tlsPair)
+	t.Cleanup(closePair)
+	return serverConn, clientConn
+}
+
+// testHandshakeTimeout bounds the dial in dialPairClosable so a stuck handshake
+// fails fast with a clear error instead of waiting out QUIC's 30s idle timeout.
+const testHandshakeTimeout = 10 * time.Second
+
+// dialPairClosable is dialPair for callers that open many pairs in one test. It
+// returns a close func that closes both connections and the listener, so a loop
+// can release each iteration's UDP socket and goroutines before the next dial
+// instead of holding them until the parent test ends. The close func is
+// idempotent and is also registered with t.Cleanup as a backstop.
+func dialPairClosable(t *testing.T, tlsPair *testTLSPair) (serverConn, clientConn *Conn, closePair func()) {
+	t.Helper()
 
 	lis, err := Listen("127.0.0.1:0", tlsPair.server, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = lis.Close() })
+	var cc net.Conn
+	var sc *Conn
+	var once sync.Once
+	closePair = func() {
+		once.Do(func() {
+			if cc != nil {
+				_ = cc.Close()
+			}
+			if sc != nil {
+				_ = sc.Close()
+			}
+			_ = lis.Close()
+		})
+	}
+	t.Cleanup(closePair)
 
 	type serverResult struct {
 		conn *Conn
@@ -103,16 +136,24 @@ func dialPair(t *testing.T, tlsPair *testTLSPair) (serverConn, clientConn *Conn)
 	}()
 
 	addr := lis.Addr().String()
-	cc, err := Dial(t.Context(), addr, tlsPair.client, nil)
-	require.NoError(t, err)
+	dialCtx, cancelDial := context.WithTimeout(t.Context(), testHandshakeTimeout)
+	defer cancelDial()
+	cc, err = Dial(dialCtx, addr, tlsPair.client, nil)
+	require.NoError(t, err, "QUIC handshake to %s did not complete within %s", addr, testHandshakeTimeout)
 
 	// QUIC only delivers stream notifications when data is received on the
 	// stream. Write a single sync byte to wake up the server's AcceptStream.
 	_, err = cc.Write([]byte{0x00})
 	require.NoError(t, err)
 
-	sr := <-serverCh
+	var sr serverResult
+	select {
+	case sr = <-serverCh:
+	case <-time.After(testHandshakeTimeout):
+		require.FailNow(t, "server did not accept the connection", "no stream from %s within %s", addr, testHandshakeTimeout)
+	}
 	require.NoError(t, sr.err)
+	sc = sr.conn
 
 	// Drain the sync byte from the server side so tests start with clean buffers.
 	require.NoError(t, sr.conn.SetReadDeadline(time.Now().Add(10*time.Second)))
@@ -121,8 +162,5 @@ func dialPair(t *testing.T, tlsPair *testTLSPair) (serverConn, clientConn *Conn)
 	require.NoError(t, err)
 	require.NoError(t, sr.conn.SetReadDeadline(time.Time{}))
 
-	t.Cleanup(func() { _ = cc.Close() })
-	t.Cleanup(func() { _ = sr.conn.Close() })
-
-	return sr.conn, cc.(*Conn)
+	return sr.conn, cc.(*Conn), closePair
 }
