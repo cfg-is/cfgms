@@ -341,10 +341,12 @@ func (s *delayedAcquireStore) AcquireOrRenew(ctx context.Context, name, holderID
 	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
 }
 
-// Issue #5028: a holder whose every store write (the first acquire and each
-// renewal) takes three renew intervals — slow, but inside the safety margin —
-// must keep exclusion across a cycle longer than the TTL. The delay is derived
-// from the renew interval so it scales with the lease's own margin.
+// Issue #5028 / #5106: a holder whose every store write (the first acquire and
+// each renewal) takes half the Manager's MaxAllowedRenewalLatency — slow, but
+// inside the configured bound — must keep exclusion across a cycle longer than
+// the TTL. The delay is derived from the Manager's own bound, so the test
+// stays within the margin the Manager was built with; delays beyond it are
+// covered by TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderAcquires.
 func TestSingletonJob_SlowStoreWrites_WithinMargin_NoDuplicateRun(t *testing.T) {
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
@@ -357,12 +359,15 @@ func TestSingletonJob_SlowStoreWrites_WithinMargin_NoDuplicateRun(t *testing.T) 
 // it earlier races node-1's first acquire (the probe's first tick is 100ms
 // out, and a runner that delays node-1's acquire by more than that lets node-2
 // take the lease first — a test-setup race, not a lease defect, Issue #5028).
-// When slowWrites is set, node-1's store writes are delayed by 3*renewInterval.
+// When slowWrites is set, node-1's store writes are delayed by half the
+// Manager's MaxAllowedRenewalLatency.
+func m1Bound(renewInterval time.Duration) time.Duration { return renewInterval }
+
 func runSlowCycleNoDuplicate(t *testing.T, base business.LeaseStore, ttl, renewInterval time.Duration, slowWrites bool) {
 	t.Helper()
 	store1 := base
 	if slowWrites {
-		store1 = &delayedAcquireStore{LeaseStore: base, delay: 3 * renewInterval}
+		store1 = &delayedAcquireStore{LeaseStore: base, delay: m1Bound(renewInterval) / 2}
 	}
 	m1, err := NewManager(store1, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
@@ -657,4 +662,53 @@ func TestSingletonJob_LogsSanitizedLeaseName(t *testing.T) {
 	assert.Equal(t, logging.SanitizeLogValue(tainted), logged)
 	assert.NotContains(t, logged, "\n")
 	assert.NotContains(t, logged, "\r")
+}
+
+// stallingRenewStore lets the first AcquireOrRenew through, then blocks every
+// later call for stall, ignoring ctx — a store write that is slow rather than
+// failed, so the renewal call never returns an error.
+type stallingRenewStore struct {
+	business.LeaseStore
+	stall time.Duration
+	calls int32
+}
+
+func (s *stallingRenewStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	if atomic.AddInt32(&s.calls, 1) > 1 {
+		time.Sleep(s.stall)
+	}
+	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// [REQUIRED TEST] (Issue #5106) A renewal call that is still in flight when
+// the local-authority deadline passes must not let fn outlive its lease: fn's
+// context is cancelled by the deadline, and at that instant another holder
+// still cannot acquire the lease (the store row has not expired).
+func TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderAcquires(t *testing.T) {
+	base := newTestStore(t)
+	ttl := 2 * time.Second
+	renewInterval := 200 * time.Millisecond
+	store := &stallingRenewStore{LeaseStore: base, stall: ttl + renewInterval}
+	m1, err := NewManager(store, ttl, renewInterval, renewInterval)
+	require.NoError(t, err)
+	m2, err := NewManager(base, ttl, renewInterval, renewInterval)
+	require.NoError(t, err)
+	job1, err := NewSingletonJob(m1, "stall", "node-1", ttl, renewInterval, nil)
+	require.NoError(t, err)
+
+	start := time.Now()
+	var cancelledAfter time.Duration
+	var acquiredAtCancel bool
+	ran := job1.RunIfLeader(context.Background(), func(ctx context.Context) {
+		select {
+		case <-ctx.Done():
+			cancelledAfter = time.Since(start)
+			_, acquiredAtCancel, _ = m2.TryAcquire(context.Background(), "stall", "node-2", ttl)
+		case <-time.After(ttl + ttl/2):
+		}
+	})
+	assert.True(t, ran)
+	require.NotZero(t, cancelledAfter, "fn's context was never cancelled while a renewal was stalled")
+	assert.Less(t, cancelledAfter, ttl, "fn must be cancelled before the store row can expire")
+	assert.False(t, acquiredAtCancel, "another holder must not be able to acquire when fn is cancelled")
 }
