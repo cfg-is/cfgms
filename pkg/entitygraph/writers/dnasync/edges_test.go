@@ -1041,3 +1041,69 @@ func TestEdgeCap_ExactlyPerFragmentCapAllWritten(t *testing.T) {
 
 	assert.Len(t, outboundEdges(t, p, "cluster:cap-exact"), dnasync.MaxEdgesPerFragmentForTest)
 }
+
+// TestEdgeCap_RepeatedDeltasCannotExceedPerSubjectTotal verifies the per-fragment
+// cap does not let repeated deltas grow one subject's stored edges without bound:
+// each delta declares a full fragment of a new edge type, and once the subject
+// holds maxEdgesPerSubject edges, further declarations are dropped while the
+// entity observation is still written.
+func TestEdgeCap_RepeatedDeltasCannotExceedPerSubjectTotal(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	const subject = "cluster:cap-total"
+	perFrag := dnasync.MaxEdgesPerFragmentForTest
+	deltas := dnasync.MaxEdgesPerSubjectForTest/perFrag + 2
+	for d := 0; d < deltas; d++ {
+		decls := make([]interface{}, 0, perFrag)
+		for i := 0; i < perFrag; i++ {
+			decls = append(decls, map[string]interface{}{
+				"type": fmt.Sprintf("kind-%d", d), "to": fmt.Sprintf("cluster:t-%d-%d", d, i),
+			})
+		}
+		frag := makeFragWithEdges("cluster:cap-total", "observer:hyperv",
+			map[string]string{"state": fmt.Sprintf("s%d", d)}, decls)
+		require.NoError(t, w.WriteFragmentDelta(ctx, "node-cap-total",
+			[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+	}
+
+	from := mustParseEID(t, subject)
+	total, after := 0, ""
+	for {
+		page, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &from, Limit: interfaces.MaxEdgePageSize, After: after})
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		total += len(page)
+		after = page[len(page)-1].Cursor
+	}
+	assert.Equal(t, dnasync.MaxEdgesPerSubjectForTest, total,
+		"stored edges for one subject must stop at the per-subject total")
+
+	view, err := p.GetEntity(ctx, from, interfaces.GetEntityOpts{})
+	require.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("s%d", deltas-1), view.Entity.Attributes["state"],
+		"entity observation must still be written when edges are dropped")
+}
+
+// TestEdgeCap_ResendOfSameTypeNotCountedAgainstSubjectTotal verifies a producer
+// re-declaring its own edge type (which replaces the earlier edges) is not
+// refused by the per-subject total.
+func TestEdgeCap_ResendOfSameTypeNotCountedAgainstSubjectTotal(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	for i := 0; i < 8; i++ {
+		frag := makeFragWithEdges("cluster:cap-resend", "observer:hyperv",
+			map[string]string{"state": "healthy"},
+			manyEdgeDecls(fmt.Sprintf("r%d", i), dnasync.MaxEdgesPerFragmentForTest))
+		require.NoError(t, w.WriteFragmentDelta(ctx, "node-cap-resend",
+			[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+	}
+	edges := outboundEdges(t, p, "cluster:cap-resend")
+	require.Len(t, edges, dnasync.MaxEdgesPerFragmentForTest)
+	assert.Contains(t, edges[0].Edge.To.String(), "cluster:r7-")
+}

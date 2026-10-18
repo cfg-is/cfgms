@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,4 +228,39 @@ func TestCorrelateFlushesBoundedBatches(t *testing.T) {
 	require.Equal(t, wantEdges, total, "every pair must be reported exactly once")
 	require.Equal(t, wantEdges, sameAsEdgeCount(t, real),
 		"every edge must be persisted across chunk boundaries")
+}
+
+// TestCorrelateCapsMACsPerEntity verifies a steward-supplied MAC list cannot turn
+// into unbounded same-as edges: one entity reporting more than maxMACsPerEntity
+// addresses, each shared with a distinct peer entity, yields at most
+// maxMACsPerEntity edges.
+func TestCorrelateCapsMACsPerEntity(t *testing.T) {
+	p := newInternalTestProvider(t)
+	w, err := New(p)
+	require.NoError(t, err)
+
+	total := maxMACsPerEntity + 20
+	macs := make([]string, total)
+	for i := range macs {
+		macs[i] = fmt.Sprintf("00:15:5D:00:%02X:%02X", i/256, i%256)
+		addHost(t, p, fmt.Sprintf("host:peer-%03d", i), macs[i])
+	}
+	now := time.Now().UTC()
+	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{
+		Source: "test",
+		Observations: []types.Observation{{
+			Source: "test", ObservedAt: now, RecordedAt: now,
+			Subject: "host:many-macs", Kind: types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"entity_kind":   "host",
+				"owning_tenant": "root",
+				"mac_addresses": strings.Join(macs, ","),
+			},
+		}},
+	}))
+
+	require.NoError(t, w.Correlate(context.Background()))
+	require.Equal(t, maxMACsPerEntity, sameAsEdgeCount(t, p),
+		"MACs past maxMACsPerEntity must not produce same-as edges")
 }

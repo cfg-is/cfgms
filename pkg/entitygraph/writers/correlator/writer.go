@@ -44,6 +44,7 @@ package correlator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -57,6 +58,13 @@ import (
 const observationSource = "correlator:mac"
 
 const (
+	// maxMACsPerEntity bounds the MAC addresses considered for one entity. MACs
+	// come from steward-supplied attributes, and each shared MAC can become a
+	// same-as edge, so an unbounded list is unbounded edge growth. A real
+	// machine, or a Hyper-V VM, has far fewer adapters; the excess is dropped
+	// and counted in a warning.
+	maxMACsPerEntity = 64
+
 	// maxJoinGroupSize bounds the number of distinct entities that may share one
 	// normalized MAC before the correlator treats that MAC as a non-identity
 	// signal and skips it entirely.
@@ -125,9 +133,15 @@ func New(provider interfaces.EntityGraphProvider) (*Writer, error) {
 // it in place. That is safe: same-as observations are content-hash deduped and
 // the sweep is idempotent, so a re-run reconverges.
 func (w *Writer) Correlate(ctx context.Context) error {
-	candidates, err := w.collectMACs(ctx)
+	truncatedEntities := 0
+	candidates, err := w.collectMACs(ctx, &truncatedEntities)
 	if err != nil {
 		return fmt.Errorf("correlator: collect MACs: %w", err)
+	}
+	if truncatedEntities > 0 {
+		slog.Warn("correlator: MAC list capped for entities",
+			"entities", truncatedEntities,
+			"limit", maxMACsPerEntity)
 	}
 
 	// Build MAC → []EID index.
@@ -202,7 +216,7 @@ func (w *Writer) report(ctx context.Context, observations []types.Observation) e
 // collectMACs enumerates all entities and returns a map from EID to their
 // normalized MAC addresses. The sweep uses no tenant filter — the correlator
 // operates controller-wide.
-func (w *Writer) collectMACs(ctx context.Context) (map[types.EID][]string, error) {
+func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[types.EID][]string, error) {
 	result := make(map[types.EID][]string)
 	page := interfaces.PageToken{PageSize: 500}
 
@@ -219,7 +233,11 @@ func (w *Writer) collectMACs(ctx context.Context) (map[types.EID][]string, error
 			if err != nil {
 				continue // entity deleted between query and fetch — skip
 			}
-			if macs := extractMACs(full); len(macs) > 0 {
+			macs, truncated := extractMACsCapped(full)
+			if truncated {
+				*truncatedEntities++
+			}
+			if len(macs) > 0 {
 				result[ev.Entity.EID] = macs
 			}
 		}
@@ -244,9 +262,17 @@ func (w *Writer) collectMACs(ctx context.Context) (map[types.EID][]string, error
 // Both sides may use colon-delimited, hyphen-delimited, or bare 12-hex-char
 // notation. All are normalized before comparison.
 func extractMACs(view *types.EntityView) []string {
+	macs, _ := extractMACsCapped(view)
+	return macs
+}
+
+// extractMACsCapped is extractMACs limited to maxMACsPerEntity addresses; the
+// bool reports whether valid addresses beyond the limit were dropped.
+func extractMACsCapped(view *types.EntityView) ([]string, bool) {
 	if view == nil || view.Entity == nil {
-		return nil
+		return nil, false
 	}
+	truncated := false
 	attrs := view.Entity.Attributes
 
 	seen := make(map[string]bool)
@@ -255,6 +281,10 @@ func extractMACs(view *types.EntityView) []string {
 	add := func(raw string) {
 		raw = strings.TrimSpace(raw)
 		if n := normalizeMAC(raw); n != "" && !seen[n] {
+			if len(macs) >= maxMACsPerEntity {
+				truncated = true
+				return
+			}
 			seen[n] = true
 			macs = append(macs, n)
 		}
@@ -287,7 +317,7 @@ func extractMACs(view *types.EntityView) []string {
 		}
 	}
 
-	return macs
+	return macs, truncated
 }
 
 // normalizeMAC normalizes a MAC address string to uppercase colon-delimited

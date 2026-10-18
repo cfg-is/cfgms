@@ -8,4 +8,5 @@ package dnasync
 const (
 	MaxEdgesPerFragmentForTest = maxEdgesPerFragment
 	MaxEdgesPerBatchForTest    = maxEdgesPerBatch
+	MaxEdgesPerSubjectForTest  = maxEdgesPerSubject
 )

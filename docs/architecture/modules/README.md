@@ -314,6 +314,7 @@ skipped (the fragment's entity observation is unaffected):
 |-----|-------|----------------------|
 | Entries in one fragment's `__entitygraph_edges` | 256 | The fragment's whole declaration list is dropped: no edge is written and no retraction scope is created, so edges already stored for that producer are neither replaced nor retracted (they stay until the producer sends a list within the cap). The entity observation is still written and the key is still stripped |
 | Declared edges in one `WriteFragmentDelta` batch | 4096 | Fragments are taken in order; the first fragment that would take the batch total over the limit, and every fragment after it, lose their declarations. Their entity observations are still written. One warning per call reports the number of fragments dropped |
+| Edges one peer keeps stored from one subject | 1024 | Counted across deltas, excluding stored edges of the types the new declaration replaces. A fragment whose declarations would take the subject past the total loses them (entity observation still written; the subject's existing edges stay). One warning per call |
 
 The largest legitimate producer is a cluster fragment with one `contains` edge per member node (at most 64 nodes); a VM fragment declares a handful.
 

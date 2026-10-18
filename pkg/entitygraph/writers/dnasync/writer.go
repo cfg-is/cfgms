@@ -67,6 +67,15 @@ import (
 // lose their declarations.
 const maxEdgesPerBatch = 4096
 
+// maxEdgesPerSubject bounds the edges one peer may keep stored from one subject
+// across all its deltas. maxEdgesPerFragment and maxEdgesPerBatch bound a single
+// delta only; a declaration of a type replaces that peer's earlier edges of the
+// same type from the subject, so the stored total can grow only through new edge
+// types, and edge types are producer-supplied. A fragment whose declarations
+// would take the subject past this total loses them (its entity observation is
+// still written), which freezes that subject's existing edges.
+const maxEdgesPerSubject = 1024
+
 // Writer is the DNA-sync → entity-graph internal writer.
 type Writer struct {
 	provider   interfaces.EntityGraphProvider
@@ -141,6 +150,8 @@ func (w *Writer) WriteFragmentDelta(
 	var edgeClaimScopes []types.ClaimScope // per-(source,edgeType) scopes from edge declarations
 	batchEdges := 0                        // edge observations accepted so far
 	droppedEdgeFragments := 0              // fragments whose declarations maxEdgesPerBatch dropped
+	subjectCapFragments := 0               // fragments whose declarations maxEdgesPerSubject dropped
+	lastSubjectCapFragID := ""
 	lastDroppedFragID := ""
 
 	for _, frag := range fragments {
@@ -204,6 +215,11 @@ func (w *Writer) WriteFragmentDelta(
 			}
 			eObs, eCS = nil, nil
 		}
+		if len(eObs) > 0 && !w.withinSubjectCap(ctx, peerHostAuthority, eid, eObs) {
+			subjectCapFragments++
+			lastSubjectCapFragID = fragID
+			eObs, eCS = nil, nil
+		}
 		batchEdges += len(eObs)
 		allObs = append(allObs, eObs...)
 		edgeClaimScopes = append(edgeClaimScopes, eCS...)
@@ -232,6 +248,15 @@ func (w *Writer) WriteFragmentDelta(
 			"dropped_fragments", droppedEdgeFragments,
 			"last_dropped_fragment_id", logging.SanitizeLogValue(lastDroppedFragID),
 			"limit", maxEdgesPerBatch,
+		)
+	}
+
+	if subjectCapFragments > 0 {
+		slog.Warn("dnasync: edge declarations dropped, per-subject edge limit reached",
+			"peer", logging.SanitizeLogValue(peerHostAuthority),
+			"dropped_fragments", subjectCapFragments,
+			"last_dropped_fragment_id", logging.SanitizeLogValue(lastSubjectCapFragID),
+			"limit", maxEdgesPerSubject,
 		)
 	}
 
@@ -268,6 +293,37 @@ func (w *Writer) WriteFragmentDelta(
 	}
 
 	return w.provider.ReportObservations(ctx, batch)
+}
+
+// withinSubjectCap reports whether declaring eObs keeps the edges peer holds from
+// eid within maxEdgesPerSubject. Stored edges of the types being declared are
+// not counted: this declaration's claim scope retracts them. A failed read
+// counts as over the cap, so the declarations are dropped rather than trusted.
+func (w *Writer) withinSubjectCap(ctx context.Context, peer string, eid types.EID, eObs []types.Observation) bool {
+	declared := make(map[string]struct{}, len(eObs))
+	for _, o := range eObs {
+		if idx := strings.Index(o.Subject, "|"); idx >= 0 {
+			declared[o.Subject[:idx]] = struct{}{}
+		}
+	}
+	total := len(eObs)
+	filter := interfaces.EdgeFilter{FromEID: &eid, Source: peer, Limit: interfaces.MaxEdgePageSize}
+	for total <= maxEdgesPerSubject {
+		views, err := w.provider.GetEdges(ctx, filter)
+		if err != nil {
+			return false
+		}
+		for _, v := range views {
+			if _, replaced := declared[v.Edge.Type]; !replaced {
+				total++
+			}
+		}
+		if len(views) < interfaces.MaxEdgePageSize {
+			break
+		}
+		filter.After = views[len(views)-1].Cursor
+	}
+	return total <= maxEdgesPerSubject
 }
 
 // buildPayload constructs the observation payload for a fragment.
