@@ -63,7 +63,8 @@ func NewDefaultMountPointValidator(opts ...MountPointValidatorOption) *DefaultMo
 //  1. Re-runs full URL security validation (scheme allowlist, RFC 1918 rejection, userinfo rejection)
 //     independently of parse-time checks — does not trust stored metadata.
 //  2. Applies a 10-second context deadline (caller may supply a shorter one).
-//  3. Fetches credentials from secretStore only, then tests connectivity via go-git
+//  3. Fetches credentials from secretStore only, refuses any credential not bound
+//     to info.URL (CheckCredentialBinding) before use, then tests connectivity via go-git
 //     remote.ListContext() with no git binary required.
 //
 // Returns nil for non-git sources. Returns an error that never contains credential material.
@@ -88,7 +89,13 @@ func (v *DefaultMountPointValidator) ValidateMountPoint(ctx context.Context, inf
 		if err != nil {
 			return fmt.Errorf("failed to fetch credential from secret store: %w", err)
 		}
-		if secret != nil && secret.Value != "" {
+		// The binding is read from the secret's own metadata only, and checked
+		// before the value reaches an Authorization header. A store that returns
+		// no metadata fails closed.
+		if err := CheckCredentialBinding(secret, info.URL); err != nil {
+			return err
+		}
+		if secret.Value != "" {
 			auth = &githttp.BasicAuth{
 				Username: "git", // conventional placeholder for token-based auth
 				Password: secret.Value,

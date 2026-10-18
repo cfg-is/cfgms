@@ -508,6 +508,12 @@ func (s *GitConfigStore) fetchCredential(ctx context.Context) (username, passwor
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get credential %q: %w", s.source.CredentialRef, err)
 	}
+	// Refuse a credential not bound to this repository before its value is
+	// returned for use in an Authorization header. The binding comes from the
+	// secret's own metadata; a store that returns none fails closed.
+	if err := pkgconfig.CheckCredentialBinding(secret, s.source.URL); err != nil {
+		return "", "", err
+	}
 	return "x-access-token", secret.Value, nil
 }
 

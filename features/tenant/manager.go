@@ -813,6 +813,12 @@ func (m *Manager) validateTenantRequest(req *TenantRequest) error {
 // validateCredentialRefOwnership enforces that a tenant's config_source_credential
 // names a secret inside that tenant's own namespace.
 //
+// Ownership is not the whole check. It keeps the reference inside the caller's
+// tenant but does not tie the secret to a repository. The second check is the
+// binding: the secret's own metadata must carry the repository URL it was stored
+// for (pkg/config CheckCredentialBinding), and the consuming sinks refuse the
+// credential when it does not match config_source_url.
+//
 // The reference is a secret-store key in "<tenant_id>/<secret_key>" form (see
 // pkg/secrets/providers/sops and pkg/secrets/providers/openbao splitKey), and the
 // consuming sinks — pkg/config's MountPointValidator and the configrouting git
