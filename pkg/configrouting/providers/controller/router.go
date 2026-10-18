@@ -28,6 +28,29 @@ import (
 
 const sourceCacheTTL = time.Minute
 
+const (
+	// maxGitStoreEntries bounds the number of live git store cache entries (and so
+	// clone directories) across all tenants. Least-recently-used entries are evicted.
+	maxGitStoreEntries = 256
+
+	// gitStoreTTL is deliberately very long: a git store must not silently expire.
+	// Entries leave the cache by per-tenant replacement or the LRU bound.
+	gitStoreTTL = 100 * 365 * 24 * time.Hour
+)
+
+// gitStoreEntry is the value held in the git store cache.
+type gitStoreEntry struct {
+	store    *gitprovider.GitConfigStore
+	tenantID string
+	repoDir  string
+}
+
+// pendingRemoval is a clone directory whose cache entry has left the cache.
+type pendingRemoval struct {
+	key string
+	gitStoreEntry
+}
+
 // controllerRouter implements ConfigSourceRouter routing reads to the appropriate store.
 type controllerRouter struct {
 	controllerStore cfgconfig.ConfigStore
@@ -39,11 +62,17 @@ type controllerRouter struct {
 	snapshotMu sync.RWMutex
 
 	// git source fields (nil when not configured — controller-only mode)
-	secretStore   secretsiface.SecretStore
-	gitWorkDir    string
-	logger        logging.Logger
-	gitStoreMu    sync.Mutex
-	gitStoreCache map[string]*gitprovider.GitConfigStore // key: tenantID+":"+sha256(url)
+	secretStore secretsiface.SecretStore
+	gitWorkDir  string
+	logger      logging.Logger
+	// gitStoreMu serialises creation and removal of clone directories. It is never
+	// held by the cache's eviction callback; the callback only queues the directory
+	// in pendingRemovals, and whoever holds (or next takes) gitStoreMu drains it.
+	gitStoreMu      sync.Mutex
+	gitStoreCache   *cache.Cache      // key: tenantID+":"+sha256(url); value: gitStoreEntry
+	tenantGitKey    map[string]string // tenantID -> its single live cache key (guarded by gitStoreMu)
+	pendingMu       sync.Mutex
+	pendingRemovals []pendingRemoval
 }
 
 // NewControllerRouter creates a ConfigSourceRouter that delegates all reads and writes
@@ -73,7 +102,7 @@ func NewControllerRouterWithGit(
 	gitWorkDir string,
 	logger logging.Logger,
 ) routerinterfaces.ConfigSourceRouter {
-	return &controllerRouter{
+	r := &controllerRouter{
 		controllerStore: controllerStore,
 		tenantStore:     tenantStore,
 		sourceCache: cache.NewCache(cache.CacheConfig{
@@ -83,16 +112,89 @@ func NewControllerRouterWithGit(
 			CleanupInterval: 5 * time.Minute,
 			EvictionPolicy:  cache.EvictionLRU,
 		}),
-		secretStore:   secretStore,
-		gitWorkDir:    gitWorkDir,
-		logger:        logger,
-		gitStoreCache: make(map[string]*gitprovider.GitConfigStore),
+		secretStore:  secretStore,
+		gitWorkDir:   gitWorkDir,
+		logger:       logger,
+		tenantGitKey: make(map[string]string),
+	}
+	r.gitStoreCache = r.newGitStoreCache(maxGitStoreEntries)
+	return r
+}
+
+// newGitStoreCache builds the bounded git store cache whose eviction callback queues
+// the departing entry's clone directory for removal.
+func (r *controllerRouter) newGitStoreCache(maxEntries int) *cache.Cache {
+	return cache.NewCache(cache.CacheConfig{
+		Name:            "configrouting-git-store",
+		MaxRuntimeItems: maxEntries,
+		DefaultTTL:      gitStoreTTL,
+		CleanupInterval: 5 * time.Minute,
+		EvictionPolicy:  cache.EvictionLRU,
+		OnEvict:         r.onGitStoreEvicted,
+	})
+}
+
+// onGitStoreEvicted runs after the cache mutex is released. It queues the clone
+// directory and removes it right away unless gitStoreMu is held — in which case the
+// holder (storeForSource) drains the queue before it returns.
+func (r *controllerRouter) onGitStoreEvicted(key string, value interface{}) {
+	entry, ok := value.(gitStoreEntry)
+	if !ok {
+		return
+	}
+	r.pendingMu.Lock()
+	r.pendingRemovals = append(r.pendingRemovals, pendingRemoval{key: key, gitStoreEntry: entry})
+	r.pendingMu.Unlock()
+
+	if r.gitStoreMu.TryLock() {
+		r.drainPendingRemovalsLocked()
+		r.gitStoreMu.Unlock()
 	}
 }
 
-// Close stops the background cache cleanup goroutine. Call on shutdown or after tests.
+// drainPendingRemovalsLocked removes the queued clone directories. Caller holds
+// gitStoreMu. A directory whose key is back in the cache (re-created after it was
+// evicted) is live and is left alone.
+func (r *controllerRouter) drainPendingRemovalsLocked() {
+	r.pendingMu.Lock()
+	pending := r.pendingRemovals
+	r.pendingRemovals = nil
+	r.pendingMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+
+	live := make(map[string]struct{})
+	for _, k := range r.gitStoreCache.Keys() {
+		live[k] = struct{}{}
+	}
+	logger := r.logger
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
+	for _, p := range pending {
+		if _, isLive := live[p.key]; isLive {
+			continue
+		}
+		if r.tenantGitKey[p.tenantID] == p.key {
+			delete(r.tenantGitKey, p.tenantID)
+		}
+		if err := gitprovider.RemoveCloneDir(r.gitWorkDir, p.repoDir); err != nil {
+			logger.Warn("configrouting: failed to remove evicted git clone directory",
+				"tenant_id", logging.SanitizeLogValue(p.tenantID),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+		}
+	}
+}
+
+// Close stops the background cache cleanup goroutines. Call on shutdown or after tests.
+// Clone directories are left in place.
 func (r *controllerRouter) Close() {
 	r.sourceCache.Close()
+	if r.gitStoreCache != nil {
+		r.gitStoreCache.Close()
+	}
 }
 
 // GetEffectiveConfigSource resolves the config source for tenantID, walking the tenant
@@ -168,21 +270,54 @@ func (r *controllerRouter) InvalidateTenantCache(tenantID string) {
 }
 
 // storeForSource returns the ConfigStore to use for the given tenantID and source.
-// Returns controllerStore for controller sources or when git dependencies are not wired.
-// Returns a cached GitConfigStore for git sources; constructs one on first access.
-func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, info *pkgconfig.ConfigSourceInfo) cfgconfig.ConfigStore {
+// Returns controllerStore for controller sources or when git dependencies are not wired
+// (no secret store or no work directory). Returns a cached GitConfigStore for git
+// sources; constructs one on first access.
+//
+// It fails closed: when the effective source is git and the git store cannot be
+// constructed, it returns an error and never the controller store — a fallback would
+// make reads report "not found" from the wrong store and send writes to it.
+//
+// A tenant has at most one live cache entry. When the tenant's source URL changes, the
+// previous entry is deleted and its clone directory removed; the cache is also bounded
+// by maxGitStoreEntries (LRU), and every entry that leaves it has its clone removed.
+func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, info *pkgconfig.ConfigSourceInfo) (cfgconfig.ConfigStore, error) {
 	if info.Type != pkgconfig.ConfigSourceTypeGit || r.secretStore == nil || r.gitWorkDir == "" {
-		return r.controllerStore
+		return r.controllerStore, nil
 	}
 
 	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(info.URL)))
 	cacheKey := tenantID + ":" + urlHash
 
 	r.gitStoreMu.Lock()
-	defer r.gitStoreMu.Unlock()
+	defer func() {
+		r.drainPendingRemovalsLocked()
+		r.gitStoreMu.Unlock()
+		// An eviction callback that raced with the lock holder only queued its entry;
+		// pick up anything queued after the drain above.
+		r.pendingMu.Lock()
+		queued := len(r.pendingRemovals) > 0
+		r.pendingMu.Unlock()
+		if queued {
+			r.gitStoreMu.Lock()
+			r.drainPendingRemovalsLocked()
+			r.gitStoreMu.Unlock()
+		}
+	}()
 
-	if gs, ok := r.gitStoreCache[cacheKey]; ok {
-		return gs
+	// Clear out directories of entries evicted since the last call before any
+	// directory for this key is (re)created.
+	r.drainPendingRemovalsLocked()
+
+	if v, ok := r.gitStoreCache.Get(cacheKey); ok {
+		return v.(gitStoreEntry).store, nil
+	}
+
+	// A different URL for this tenant replaces its previous entry.
+	if oldKey, ok := r.tenantGitKey[tenantID]; ok && oldKey != cacheKey {
+		r.gitStoreCache.Delete(oldKey)
+		delete(r.tenantGitKey, tenantID)
+		r.drainPendingRemovalsLocked()
 	}
 
 	logger := r.logger
@@ -192,16 +327,17 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 
 	gs, err := gitprovider.NewGitConfigStore(ctx, info, tenantID, r.secretStore, r.gitWorkDir, logger)
 	if err != nil {
-		slog.Warn("configrouting: failed to create git store, falling back to controller store",
+		slog.Warn("configrouting: failed to create git store",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"url", logging.SanitizeLogValue(info.URL),
 			"error_category", "initialization_failure",
 		)
-		return r.controllerStore
+		return nil, fmt.Errorf("git config source for tenant %q is unavailable: %w", tenantID, err)
 	}
 
-	r.gitStoreCache[cacheKey] = gs
-	return gs
+	r.tenantGitKey[tenantID] = cacheKey
+	_ = r.gitStoreCache.Set(cacheKey, gitStoreEntry{store: gs, tenantID: tenantID, repoDir: gs.RepoDir()}, gitStoreTTL)
+	return gs, nil
 }
 
 // SyncTenantWithRemote pulls the remote for tenantID's git source and returns the
@@ -217,10 +353,13 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 		return "", "", nil
 	}
 
-	store := r.storeForSource(ctx, tenantID, info)
+	store, err := r.storeForSource(ctx, tenantID, info)
+	if err != nil {
+		return "", "", fmt.Errorf("sync: %w", err)
+	}
 	gitStore, ok := store.(*gitprovider.GitConfigStore)
 	if !ok {
-		return "", "", nil // git dependencies not configured or store init failed
+		return "", "", nil // git dependencies not configured
 	}
 
 	prevSHA, err = gitStore.GetCurrentSHA()
@@ -289,7 +428,46 @@ func (r *controllerRouter) routeRead(ctx context.Context, tenantID string, fn fu
 	if err != nil {
 		return err
 	}
-	return fn(r.storeForSource(ctx, tenantID, info))
+	store, err := r.storeForSource(ctx, tenantID, info)
+	if err != nil {
+		return err
+	}
+	return fn(store)
+}
+
+// checkWriteTargets verifies, for every tenant a write touches, that a git-sourced
+// tenant's git store can be constructed. Writes still land in the controller store
+// (git sources are read-only), but a git tenant whose source is broken fails the
+// write instead of silently proceeding. A source that cannot be resolved at all does
+// not block the write, which never depended on source resolution.
+func (r *controllerRouter) checkWriteTargets(ctx context.Context, tenantIDs ...string) error {
+	for _, tenantID := range tenantIDs {
+		if tenantID == "" {
+			continue
+		}
+		info, err := r.GetEffectiveConfigSource(ctx, tenantID)
+		if err != nil {
+			continue
+		}
+		if _, err := r.storeForSource(ctx, tenantID, info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func entryTenant(e *cfgconfig.ConfigEntry) string {
+	if e == nil || e.Key == nil {
+		return ""
+	}
+	return e.Key.TenantID
+}
+
+func keyTenant(k *cfgconfig.ConfigKey) string {
+	if k == nil {
+		return ""
+	}
+	return k.TenantID
 }
 
 // --- ConfigStore read methods ---
@@ -348,23 +526,43 @@ func (r *controllerRouter) ResolveConfigWithInheritance(ctx context.Context, key
 	return result, err
 }
 
-// --- ConfigStore write methods — always route to controllerStore ---
+// --- ConfigStore write methods — always route to controllerStore (after checkWriteTargets) ---
 // External git sources are read-only; all writes go to the controller store regardless
 // of the declared source type.
 
 func (r *controllerRouter) StoreConfig(ctx context.Context, config *cfgconfig.ConfigEntry) error {
+	if err := r.checkWriteTargets(ctx, entryTenant(config)); err != nil {
+		return err
+	}
 	return r.controllerStore.StoreConfig(ctx, config)
 }
 
 func (r *controllerRouter) DeleteConfig(ctx context.Context, key *cfgconfig.ConfigKey) error {
+	if err := r.checkWriteTargets(ctx, keyTenant(key)); err != nil {
+		return err
+	}
 	return r.controllerStore.DeleteConfig(ctx, key)
 }
 
 func (r *controllerRouter) StoreConfigBatch(ctx context.Context, configs []*cfgconfig.ConfigEntry) error {
+	tenants := make([]string, 0, len(configs))
+	for _, c := range configs {
+		tenants = append(tenants, entryTenant(c))
+	}
+	if err := r.checkWriteTargets(ctx, tenants...); err != nil {
+		return err
+	}
 	return r.controllerStore.StoreConfigBatch(ctx, configs)
 }
 
 func (r *controllerRouter) DeleteConfigBatch(ctx context.Context, keys []*cfgconfig.ConfigKey) error {
+	tenants := make([]string, 0, len(keys))
+	for _, k := range keys {
+		tenants = append(tenants, keyTenant(k))
+	}
+	if err := r.checkWriteTargets(ctx, tenants...); err != nil {
+		return err
+	}
 	return r.controllerStore.DeleteConfigBatch(ctx, keys)
 }
 

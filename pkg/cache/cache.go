@@ -22,6 +22,23 @@ type Cache struct {
 	accessSeq   uint64 // monotonic counter for deterministic LRU ordering
 }
 
+// evictedItem is an entry that left the cache, held until the mutex is released.
+type evictedItem struct {
+	key   string
+	value interface{}
+}
+
+// notifyEvicted invokes the OnEvict callback for each item. It must be called
+// without holding the cache mutex.
+func (c *Cache) notifyEvicted(items []evictedItem) {
+	if c.config.OnEvict == nil {
+		return
+	}
+	for _, it := range items {
+		c.config.OnEvict(it.key, it.value)
+	}
+}
+
 // now returns the current time using the configured clock, or time.Now() if no clock is set.
 func (c *Cache) now() time.Time {
 	if c.config.Clock != nil {
@@ -86,7 +103,8 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 // If TTL is 0, uses the cache's default TTL
 func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	var evicted []evictedItem
+	defer func() { c.mutex.Unlock(); c.notifyEvicted(evicted) }()
 
 	if ttl == 0 {
 		ttl = c.config.DefaultTTL
@@ -94,6 +112,9 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 
 	now := c.now()
 	c.accessSeq++
+	if old, exists := c.items[key]; exists {
+		evicted = append(evicted, evictedItem{key, old.Value})
+	}
 	c.items[key] = &CacheEntry{
 		Value:         value,
 		ExpiresAt:     now.Add(ttl),
@@ -104,7 +125,7 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 	}
 
 	// Enforce size limits
-	c.enforceMaxSize()
+	evicted = append(evicted, c.enforceMaxSize()...)
 	c.updateSizeStats()
 
 	return nil
@@ -114,13 +135,16 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 // Returns true if the item was deleted, false if it didn't exist
 func (c *Cache) Delete(key string) bool {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	var evicted []evictedItem
+	defer func() { c.mutex.Unlock(); c.notifyEvicted(evicted) }()
 
-	if _, exists := c.items[key]; !exists {
+	entry, exists := c.items[key]
+	if !exists {
 		return false
 	}
 
 	delete(c.items, key)
+	evicted = append(evicted, evictedItem{key, entry.Value})
 	c.updateSizeStats()
 	return true
 }
@@ -128,8 +152,14 @@ func (c *Cache) Delete(key string) bool {
 // Clear removes all items from the cache
 func (c *Cache) Clear() {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	var evicted []evictedItem
+	defer func() { c.mutex.Unlock(); c.notifyEvicted(evicted) }()
 
+	if c.config.OnEvict != nil {
+		for key, entry := range c.items {
+			evicted = append(evicted, evictedItem{key, entry.Value})
+		}
+	}
 	c.items = make(map[string]*CacheEntry)
 	c.stats.Size = 0
 }
@@ -204,7 +234,8 @@ func (c *Cache) GetMany(keys []string) map[string]interface{} {
 // If TTL is 0, uses the cache's default TTL
 func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	var evicted []evictedItem
+	defer func() { c.mutex.Unlock(); c.notifyEvicted(evicted) }()
 
 	if ttl == 0 {
 		ttl = c.config.DefaultTTL
@@ -214,6 +245,9 @@ func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 	expiresAt := now.Add(ttl)
 	for key, value := range items {
 		c.accessSeq++
+		if old, exists := c.items[key]; exists {
+			evicted = append(evicted, evictedItem{key, old.Value})
+		}
 		c.items[key] = &CacheEntry{
 			Value:         value,
 			ExpiresAt:     expiresAt,
@@ -225,7 +259,7 @@ func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 	}
 
 	// Enforce size limits
-	c.enforceMaxSize()
+	evicted = append(evicted, c.enforceMaxSize()...)
 	c.updateSizeStats()
 
 	return nil
@@ -235,12 +269,14 @@ func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 // Returns the number of items actually deleted
 func (c *Cache) DeleteMany(keys []string) int {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	var evicted []evictedItem
+	defer func() { c.mutex.Unlock(); c.notifyEvicted(evicted) }()
 
 	deleted := 0
 	for _, key := range keys {
-		if _, exists := c.items[key]; exists {
+		if entry, exists := c.items[key]; exists {
 			delete(c.items, key)
+			evicted = append(evicted, evictedItem{key, entry.Value})
 			deleted++
 		}
 	}
@@ -271,7 +307,8 @@ func (c *Cache) startCleanupRoutine() {
 // cleanupExpiredItems removes expired entries from the cache
 func (c *Cache) cleanupExpiredItems() {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	var evicted []evictedItem
+	defer func() { c.mutex.Unlock(); c.notifyEvicted(evicted) }()
 
 	now := c.now()
 	expired := int64(0)
@@ -279,6 +316,7 @@ func (c *Cache) cleanupExpiredItems() {
 	for key, entry := range c.items {
 		if c.isExpired(entry) {
 			delete(c.items, key)
+			evicted = append(evicted, evictedItem{key, entry.Value})
 			expired++
 		}
 	}
@@ -296,30 +334,31 @@ func (c *Cache) updateSizeStats() {
 // enforceMaxSize removes items based on eviction policy if we exceed the limit
 // (must be called while holding mutex)
 // Supports FIFO, LRU (Least Recently Used), and LFU (Least Frequently Used)
-func (c *Cache) enforceMaxSize() {
+// It returns the evicted entries so the caller can notify OnEvict after unlocking.
+func (c *Cache) enforceMaxSize() []evictedItem {
 	maxSize := c.config.MaxRuntimeItems
 	if maxSize <= 0 {
-		return // No size limit
+		return nil // No size limit
 	}
 
 	if len(c.items) <= maxSize {
-		return
+		return nil
 	}
 
 	count := len(c.items) - maxSize
 
 	switch c.config.EvictionPolicy {
 	case EvictionLRU:
-		c.evictLRU(count)
+		return c.evictLRU(count)
 	case EvictionLFU:
-		c.evictLFU(count)
+		return c.evictLFU(count)
 	default: // EvictionFIFO or unspecified
-		c.evictFIFO(count)
+		return c.evictFIFO(count)
 	}
 }
 
 // evictFIFO removes the oldest created items (simple FIFO eviction)
-func (c *Cache) evictFIFO(count int) {
+func (c *Cache) evictFIFO(count int) []evictedItem {
 	type entry struct {
 		key       string
 		createdAt time.Time
@@ -341,16 +380,19 @@ func (c *Cache) evictFIFO(count int) {
 	}
 
 	// Remove oldest entries
+	var evicted []evictedItem
 	for i := 0; i < count && i < len(entries); i++ {
+		evicted = append(evicted, evictedItem{entries[i].key, c.items[entries[i].key].Value})
 		delete(c.items, entries[i].key)
 	}
 
 	c.stats.Evictions += int64(count)
+	return evicted
 }
 
 // evictLRU removes the least recently accessed items using monotonic sequence
 // numbers for deterministic ordering regardless of clock resolution.
-func (c *Cache) evictLRU(count int) {
+func (c *Cache) evictLRU(count int) []evictedItem {
 	type entry struct {
 		key       string
 		accessSeq uint64
@@ -372,15 +414,18 @@ func (c *Cache) evictLRU(count int) {
 	}
 
 	// Remove least recently accessed entries
+	var evicted []evictedItem
 	for i := 0; i < count && i < len(entries); i++ {
+		evicted = append(evicted, evictedItem{entries[i].key, c.items[entries[i].key].Value})
 		delete(c.items, entries[i].key)
 	}
 
 	c.stats.Evictions += int64(count)
+	return evicted
 }
 
 // evictLFU removes the least frequently accessed items
-func (c *Cache) evictLFU(count int) {
+func (c *Cache) evictLFU(count int) []evictedItem {
 	type entry struct {
 		key         string
 		accessCount int64
@@ -402,11 +447,14 @@ func (c *Cache) evictLFU(count int) {
 	}
 
 	// Remove least frequently accessed entries
+	var evicted []evictedItem
 	for i := 0; i < count && i < len(entries); i++ {
+		evicted = append(evicted, evictedItem{entries[i].key, c.items[entries[i].key].Value})
 		delete(c.items, entries[i].key)
 	}
 
 	c.stats.Evictions += int64(count)
+	return evicted
 }
 
 // Helper functions for debugging
