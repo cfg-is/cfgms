@@ -69,6 +69,22 @@ cfg tenant end-crossing client-1 <crossing-id>
 - **Listing.** `crossings` prints active and pending records with their id, kind, reason category, status and expiry, or `no active crossings` and exits 0 when there are none. `--json` prints every record the server returned, including expired and ended ones.
 - **Errors.** The server's message is printed and the command exits non-zero: `401` (session expired, or step-up not completed), `403` (for example `NOT_ROOT_SCOPED`, `ROOT_SCOPED_CANNOT_GRANT`), `404` (tenant or crossing not found), `400` (`INVALID_REASON_CATEGORY`, `INVALID_DURATION`, `JUSTIFICATION_REQUIRED`), `SAME_APPROVER` and `NOT_PENDING` when approving. When access to a tenant is refused because no crossing is active, the message suggests `cfg tenant break-glass`.
 
+## Git config source credential
+
+A tenant's git config source authenticates with a token that is bound to one repository URL. Store the credential with `cfg tenant config-source set-credential`, then point the tenant at it. The order matters:
+
+1. Store the credential: `printf '%s\n' "$TOKEN" | cfg tenant config-source set-credential <tenant-id> --url https://git.example.com/org/configs.git`. The command prints the `credential_ref` (`<tenant-id>/config-source-git`).
+2. Set the tenant metadata `config_source_credential` to that `credential_ref` and `config_source_url` to the same repository URL (together with `config_source_type: git`).
+
+| Command | What it does |
+|---------|--------------|
+| `cfg tenant config-source set-credential <tenant-id> --url <repository URL> [--json]` | Stores the token with its repository binding; a second call replaces both |
+
+- **Token.** No flag or argument accepts the token. It is read as one line from standard input, or typed at a no-echo prompt when standard input is a terminal. It never appears in process arguments, and the command never prints it.
+- **Binding.** The secret records the normalized repository URL (scheme and host lowercased, default port, trailing `/` and `.git` removed). The URL must pass the same checks as `config_source_url`: HTTPS, no embedded credentials, no private or loopback address.
+- **Permissions.** Needs `tenant:manage`. A root-scoped operator needs an active crossing into the tenant. An unknown or out-of-scope tenant is reported as not found.
+- **Audit.** Each call emits `config_source.credential.set` naming the tenant, the actor and the bound URL, never the token.
+
 ## M365 connection
 
 A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connection exists only on an existing client tenant**, a tenant whose parent is an MSP tenant (a direct child of the root tenant). The root tenant, an MSP tenant, a tenant that does not exist, a tenant below a client tenant and a client tenant that is not a child of the MSP named in the request are all refused before anything is written. No command creates a tenant, an account or a consent record. Setup is described in the [M365 Integration Guide](../M365_INTEGRATION_GUIDE.md#part-2-connecting-client-tenants).

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Metadata key constants for config source routing on mount points.
@@ -20,6 +22,14 @@ const (
 	MetaKeyConfigSourceCredential   = "config_source_credential" // #nosec G101 -- metadata key name, not a credential
 	MetaKeyConfigSourcePollInterval = "config_source_poll_interval"
 )
+
+// SecretMetaKeyBoundRepositoryURL is the secret-metadata key holding the normalized
+// repository URL a git config-source credential was stored for.
+const SecretMetaKeyBoundRepositoryURL = "bound_repository_url"
+
+// ConfigSourceCredentialKeyName is the secret key suffix under a tenant namespace
+// that holds the git config-source credential: "<tenant id>/config-source-git".
+const ConfigSourceCredentialKeyName = "config-source-git"
 
 // ConfigSourceType identifies how a mount point's configuration is fetched.
 type ConfigSourceType string
@@ -171,3 +181,67 @@ var ssrfExtraBlocks = func() []*net.IPNet {
 	}
 	return blocks
 }()
+
+// NormalizeRepositoryURL returns the canonical form of a repository URL used for
+// credential binding: lowercase scheme and host, default port (80 for http, 443 for
+// https) dropped, fragment dropped, and a trailing "/" and ".git" removed from the
+// path. A value that does not parse is returned trimmed of surrounding space only,
+// so it can still be compared for equality.
+func NormalizeRepositoryURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	path := strings.TrimRight(u.EscapedPath(), "/")
+	path = strings.TrimSuffix(path, ".git")
+	path = strings.TrimRight(path, "/")
+	out := scheme + "://"
+	if u.User != nil {
+		out += u.User.String() + "@"
+	}
+	out += host + path
+	if u.RawQuery != "" {
+		out += "?" + u.RawQuery
+	}
+	return out
+}
+
+// CheckCredentialBinding returns nil only when secret carries a bound_repository_url
+// metadata value exactly equal to the normalized repoURL. Scheme, host, port and path
+// must all match; a prefix, suffix or same-host match is refused. Errors never contain
+// the secret value.
+func CheckCredentialBinding(secret *secretsiface.Secret, repoURL string) error {
+	if secret == nil {
+		return fmt.Errorf("credential is not bound to a repository: no secret")
+	}
+	bound, ok := secret.Metadata[SecretMetaKeyBoundRepositoryURL]
+	if !ok || bound == "" {
+		return fmt.Errorf("credential is not bound to a repository: missing %s metadata", SecretMetaKeyBoundRepositoryURL)
+	}
+	want := NormalizeRepositoryURL(repoURL)
+	if want == "" || bound != want {
+		return fmt.Errorf("credential is bound to a different repository than the configured source")
+	}
+	return nil
+}
+
+// ValidateSourceURL applies the config_source_url security rules (https scheme, no
+// userinfo, no private/loopback/link-local IP literal) to raw. Callers that accept a
+// repository URL from an operator use it so the URL is checked exactly as
+// ParseConfigSource checks it.
+func ValidateSourceURL(raw string) error {
+	return validateSourceURL(raw)
+}

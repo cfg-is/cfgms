@@ -53,6 +53,8 @@ require (
 
 require github.com/ebitengine/purego v0.11.1
 
+require golang.org/x/term v0.47.0
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.1 // indirect

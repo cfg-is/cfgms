@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 func TestParseConfigSource_Defaults(t *testing.T) {
@@ -177,4 +179,55 @@ func TestParseConfigSource_PollIntervalDefaults(t *testing.T) {
 	info, err := ParseConfigSource(meta)
 	require.NoError(t, err)
 	assert.Equal(t, 5*time.Minute, info.PollInterval)
+}
+
+func TestNormalizeRepositoryURL(t *testing.T) {
+	const want = "https://github.com/acme/configs"
+	for _, in := range []string{
+		"https://github.com/acme/configs",
+		"https://github.com/acme/configs.git",
+		"https://github.com/acme/configs/",
+		"https://github.com/acme/configs.git/",
+		"HTTPS://GitHub.COM/acme/configs",
+		"https://github.com:443/acme/configs",
+	} {
+		assert.Equal(t, want, NormalizeRepositoryURL(in), in)
+	}
+	assert.Equal(t, "https://github.com:8443/acme/configs", NormalizeRepositoryURL("https://github.com:8443/acme/configs.git"))
+	assert.Equal(t, "https://github.com/Acme/Configs", NormalizeRepositoryURL("https://github.com/Acme/Configs"), "path case is preserved")
+}
+
+func TestCheckCredentialBinding(t *testing.T) {
+	const tokenValue = "ghp_supersecrettokenvalue"
+	bound := func(u string) *secretsiface.Secret {
+		return &secretsiface.Secret{Value: tokenValue, Metadata: map[string]string{SecretMetaKeyBoundRepositoryURL: NormalizeRepositoryURL(u)}}
+	}
+	a := "https://github.com/acme/configs"
+
+	for _, u := range []string{a, a + ".git", a + "/", "https://GITHUB.com:443/acme/configs.git/"} {
+		assert.NoError(t, CheckCredentialBinding(bound(a), u), u)
+	}
+
+	failing := map[string]struct {
+		secret *secretsiface.Secret
+		url    string
+	}{
+		"different repo":    {bound(a), "https://github.com/acme/other"},
+		"different host":    {bound(a), "https://gitlab.com/acme/configs"},
+		"different port":    {bound(a), "https://github.com:8443/acme/configs"},
+		"different scheme":  {bound(a), "http://github.com/acme/configs"},
+		"url is prefix":     {bound(a + "-extra"), a},
+		"binding is prefix": {bound(a), a + "-extra"},
+		"url is subpath":    {bound("https://github.com/acme"), a},
+		"binding subpath":   {bound(a), "https://github.com/acme"},
+		"no metadata":       {&secretsiface.Secret{Value: tokenValue}, a},
+		"empty binding":     {&secretsiface.Secret{Value: tokenValue, Metadata: map[string]string{SecretMetaKeyBoundRepositoryURL: ""}}, a},
+		"nil secret":        {nil, a},
+		"empty url":         {bound(a), ""},
+	}
+	for name, tc := range failing {
+		err := CheckCredentialBinding(tc.secret, tc.url)
+		require.Error(t, err, name)
+		assert.NotContains(t, err.Error(), tokenValue, name)
+	}
 }
