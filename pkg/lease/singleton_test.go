@@ -361,16 +361,15 @@ func TestSingletonJob_SlowStoreWrites_WithinMargin_NoDuplicateRun(t *testing.T) 
 // take the lease first — a test-setup race, not a lease defect, Issue #5028).
 // When slowWrites is set, node-1's store writes are delayed by half the
 // Manager's MaxAllowedRenewalLatency.
-func m1Bound(renewInterval time.Duration) time.Duration { return renewInterval }
-
 func runSlowCycleNoDuplicate(t *testing.T, base business.LeaseStore, ttl, renewInterval time.Duration, slowWrites bool) {
 	t.Helper()
-	store1 := base
-	if slowWrites {
-		store1 = &delayedAcquireStore{LeaseStore: base, delay: m1Bound(renewInterval) / 2}
-	}
+	store1 := &delayedAcquireStore{LeaseStore: base}
 	m1, err := NewManager(store1, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
+	if slowWrites {
+		// Derived from the Manager's own bound; set before any store call.
+		store1.delay = m1.MaxAllowedRenewalLatency() / 2
+	}
 	m2, err := NewManager(base, ttl, renewInterval, renewInterval)
 	require.NoError(t, err)
 
