@@ -3537,7 +3537,7 @@ Get the current state, provenance, and freshness for a single entity.
 |--------|-----------|
 | 400 | Malformed EID, or `as_of` not RFC 3339 |
 | 404 | Entity does not exist, or is outside the caller's tenant subtree |
-| 422 | `collapse_group` was set and the same-as group has more than 256 members inside the caller's tenant subtree (code `COLLAPSE_GROUP_TOO_LARGE`). Returned only to a caller who may read the entity; the same read without `collapse_group` succeeds |
+| 422 | `collapse_group` was set and the same-as group is too large or too expensive to collapse: more than 256 members inside the caller's tenant subtree, or an `as_of` walk that exceeded its 3 second budget (code `COLLAPSE_GROUP_TOO_LARGE`). Returned only to a caller who may read the entity; the same read without `collapse_group` succeeds |
 
 #### GET /api/v1/entities/{eid}/edges
 
@@ -3618,8 +3618,10 @@ Depth-bounded connected subgraph starting at `{eid}`.
 **Response (200):** `Neighborhood`
 
 ```json
-{ "Root": "host:SRV-001", "Nodes": [ { "EID": "host:SRV-001", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" } ], "Edges": [] }
+{ "Root": "host:SRV-001", "Nodes": [ { "EID": "host:SRV-001", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" } ], "Edges": [], "Truncated": false }
 ```
+
+The walk is capped at 1000 nodes (the root counts) and 5000 edge projection rows (one `Source` per row). When either cap is reached the walk stops, `Truncated` is `true`, and every returned edge still has both endpoints in `Nodes`. The caps count only nodes and edges inside the caller's tenant subtree, so `Truncated` does not reveal hidden neighbors.
 
 **Error responses:**
 
@@ -3683,11 +3685,13 @@ Merged change-event stream across one or more entities.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `eid` | string, repeatable, required | Subject EID(s); at least one required |
+| `eid` | string, repeatable, required | Subject EID(s); 1 to 100 |
 | `from` | RFC 3339 (required) | Range start |
 | `to` | RFC 3339 (required), must be after `from` | Range end |
 
 **Response (200):** `[]TimelineEvent`, each `{ "Subject": "...", "OccurredAt": "...", "Kind": "state-change", "Detail": {} }`
+
+The stream holds at most 1000 events, the newest ones. When more matched, the response carries the header `X-Timeline-Truncated: true`; the header is absent otherwise.
 
 Each `eid` is access-checked individually before the timeline is fetched: if
 **any** requested EID does not exist or is outside the caller's tenant subtree,
@@ -3697,7 +3701,7 @@ the whole request returns 404 and no data for the other EIDs is disclosed.
 
 | Status | Condition |
 |--------|-----------|
-| 400 | No `eid` given, a malformed `eid`, or `from`/`to` missing, malformed, or out of order |
+| 400 | No `eid` given, more than 100 `eid` values, a malformed `eid`, or `from`/`to` missing, malformed, or out of order |
 | 404 | Any requested `eid` does not exist, or is outside the caller's tenant subtree |
 
 #### GET /api/v1/entities/{eid}/drift

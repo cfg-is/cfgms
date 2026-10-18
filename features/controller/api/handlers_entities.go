@@ -48,6 +48,9 @@ const maxNeighborhoodDepth = 3
 // entityMaxPageSize caps page_size to prevent resource exhaustion on large fleets.
 const entityMaxPageSize = 1000
 
+// maxTimelineEIDs is the most eid query values one timeline request accepts.
+const maxTimelineEIDs = 100
+
 // parseEIDFromPath extracts and parses the "eid" gorilla/mux variable. The path
 // variable uses {eid:.+} so it captures slashes; gorilla/mux URL-decodes the
 // value before returning it from mux.Vars.
@@ -283,7 +286,7 @@ func filterReadableNeighborhood(scope *tenantReadScope, n *egtypes.Neighborhood)
 		return nil
 	}
 	kept := make(map[string]struct{}, len(n.Nodes))
-	out := &egtypes.Neighborhood{Root: n.Root, Nodes: []*egtypes.Entity{}, Edges: []*egtypes.Edge{}}
+	out := &egtypes.Neighborhood{Root: n.Root, Nodes: []*egtypes.Entity{}, Edges: []*egtypes.Edge{}, Truncated: n.Truncated}
 	for _, node := range n.Nodes {
 		if node == nil || !scope.Allows(node.OwningTenant) {
 			continue
@@ -714,7 +717,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetTimeline handles GET /api/v1/entities/timeline.
-// Query params: eid (repeatable, at least one required), from, to (RFC 3339, required).
+// Query params: eid (repeatable, 1 to maxTimelineEIDs), from, to (RFC 3339, required).
 // Each EID is verified via GetEntity first (ADR-022 §7); the cut is also passed to
 // GetTimeline so same-as events whose peer is outside it are dropped.
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
@@ -727,6 +730,10 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	eidStrs := q["eid"]
 	if len(eidStrs) == 0 {
 		http.Error(w, "at least one eid query parameter is required", http.StatusBadRequest)
+		return
+	}
+	if len(eidStrs) > maxTimelineEIDs {
+		http.Error(w, "too many eid query parameters", http.StatusBadRequest)
 		return
 	}
 
@@ -782,6 +789,13 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		)
 		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
+	}
+
+	// The provider returns at most MaxTimelineEvents+1 events; the extra one only
+	// signals that the stream was cut.
+	if len(events) > eginterfaces.MaxTimelineEvents {
+		events = events[len(events)-eginterfaces.MaxTimelineEvents:]
+		w.Header().Set("X-Timeline-Truncated", "true")
 	}
 
 	writeEntityJSON(w, events)

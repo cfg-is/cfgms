@@ -165,3 +165,56 @@ func TestContentHashDedup_Database(t *testing.T) {
 		`SELECT COUNT(*) FROM eg_observation_log WHERE subject = $1`, eid.String()).Scan(&count))
 	require.Equal(t, 1, count, "bit-identical re-observation must not append a log row")
 }
+
+// TestCollapseAsOfWalkBudget covers the as-of group walk time budget (Issue #5170):
+// an expired budget is ErrCollapseGroupTooLarge, the default budget succeeds, and
+// a canceled caller gets its own context error.
+func TestCollapseAsOfWalkBudget(t *testing.T) {
+	p := newTestDBProvider(t, skipIfNoPostgres(t))
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	a, b := "host:budget-a", "host:budget-b"
+	for _, e := range []string{a, b} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				dbObs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": "root",
+				}),
+			},
+		}))
+	}
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "operator:test",
+		Observations: []types.Observation{
+			dbObs("same-as|"+a+"|"+b, "operator:test", types.ObservationKindState, now, map[string]interface{}{}),
+		},
+	}))
+
+	asOf := now.Add(time.Second)
+	opts := interfaces.GetEntityOpts{CollapseGroup: true, AsOf: &asOf, TenantFilter: "root"}
+	eid := dbMustEID(t, a)
+
+	t.Run("default budget succeeds", func(t *testing.T) {
+		_, err := p.GetEntity(ctx, eid, opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("expired budget is too large", func(t *testing.T) {
+		orig := collapseAsOfWalkBudget
+		collapseAsOfWalkBudget = time.Nanosecond
+		t.Cleanup(func() { collapseAsOfWalkBudget = orig })
+		_, err := p.GetEntity(ctx, eid, opts)
+		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
+	})
+
+	t.Run("canceled caller is not mapped", func(t *testing.T) {
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		_, err := p.GetEntity(canceled, eid, opts)
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
+	})
+}

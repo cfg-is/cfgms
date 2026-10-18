@@ -74,6 +74,10 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("DesiredStateIsolation", func(t *testing.T) { testEGDesiredStateIsolation(t, factory) })         // AC 5 (isolation)
 	// Issue #3375: apply-outcome observations are log-only event records.
 	t.Run("ApplyOutcomeIsolation", func(t *testing.T) { testEGApplyOutcomeIsolation(t, factory) })
+	// Issue #5170: read-side walk caps
+	t.Run("NeighborhoodNodeCap", func(t *testing.T) { testEGNeighborhoodNodeCap(t, factory) })
+	t.Run("NeighborhoodEdgeCap", func(t *testing.T) { testEGNeighborhoodEdgeCap(t, factory) })
+	t.Run("TimelineEventCap", func(t *testing.T) { testEGTimelineEventCap(t, factory) })
 	// Story-6: temporal reads + same-as collapse-group (Issue #2876)
 	t.Run("HistoryDiffCorrectness", func(t *testing.T) { testEGHistoryDiffCorrectness(t, factory) })         // AC 1
 	t.Run("TimelineMultiSubject", func(t *testing.T) { testEGTimelineMultiSubject(t, factory) })             // AC 2
@@ -3067,4 +3071,141 @@ func testEGTimelineSameAsTenantCut(t *testing.T, factory EntityGraphProviderFact
 	require.Len(t, got, 1, "the cross-tenant same-as event must not appear in the other tenant's timeline")
 	assert.Contains(t, got[0], inCut.String())
 	assert.NotContains(t, got[0], outCut.String())
+}
+
+// egReportBatches ingests observations in batches of 500 so a large seed does
+// not depend on a provider batch limit.
+func egReportBatches(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, obs []types.Observation) {
+	t.Helper()
+	const size = 500
+	for start := 0; start < len(obs); start += size {
+		end := min(start+size, len(obs))
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source:       obs[start].Source,
+			Observations: obs[start:end],
+		}))
+	}
+}
+
+// egSeedNeighbors reports a root and n neighbors in one tenant, each linked to
+// the root by a "contains" edge, and returns the root.
+func egSeedNeighbors(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, authority string, n int) interfaces.EIDRef {
+	t.Helper()
+	root := egEID(t, fmt.Sprintf("host:%s/root", authority))
+	now := time.Now().UTC()
+	payload := func() map[string]interface{} {
+		return map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/" + authority}
+	}
+	obs := []types.Observation{egObservation(root.String(), "observer:scan", now, payload())}
+	for i := 0; i < n; i++ {
+		peer := fmt.Sprintf("host:%s/n%05d", authority, i)
+		obs = append(obs,
+			egObservation(peer, "observer:scan", now, payload()),
+			egObservation("contains|"+root.String()+"|"+peer, "observer:scan", now, map[string]interface{}{}),
+		)
+	}
+	egReportBatches(ctx, t, p, obs)
+	return root
+}
+
+func egNodeSet(n *types.Neighborhood) map[string]struct{} {
+	set := make(map[string]struct{}, len(n.Nodes))
+	for _, node := range n.Nodes {
+		set[node.EID.String()] = struct{}{}
+	}
+	return set
+}
+
+// testEGNeighborhoodNodeCap verifies the node cap: over the cap the walk stops at
+// MaxNeighborhoodNodes, flags Truncated and returns no dangling edge; just under
+// the cap everything comes back (Issue #5170).
+func testEGNeighborhoodNodeCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	p := factory(t)
+	root := egSeedNeighbors(ctx, t, p, "ncap-over", interfaces.MaxNeighborhoodNodes+50)
+	n, err := p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(n.Nodes), interfaces.MaxNeighborhoodNodes)
+	assert.True(t, n.Truncated, "a walk past the node cap must be flagged truncated")
+	nodes := egNodeSet(n)
+	assert.Contains(t, nodes, root.String(), "the root always counts")
+	for _, e := range n.Edges {
+		assert.Contains(t, nodes, e.From.String())
+		assert.Contains(t, nodes, e.To.String())
+	}
+
+	p = factory(t)
+	root = egSeedNeighbors(ctx, t, p, "ncap-under", interfaces.MaxNeighborhoodNodes-1-5)
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1)
+	require.NoError(t, err)
+	assert.Len(t, n.Nodes, interfaces.MaxNeighborhoodNodes-5)
+	assert.Len(t, n.Edges, interfaces.MaxNeighborhoodNodes-1-5)
+	assert.False(t, n.Truncated)
+}
+
+// testEGNeighborhoodEdgeCap verifies the edge cap counts projection rows: many
+// sources for one pair merge into one Edge, yet the Sources total stays capped.
+func testEGNeighborhoodEdgeCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	ctx := context.Background()
+	p := factory(t)
+
+	a := egEID(t, "host:ecap/a")
+	b := egEID(t, "host:ecap/b")
+	now := time.Now().UTC()
+	payload := map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/ecap"}
+	egReportBatches(ctx, t, p, []types.Observation{
+		egObservation(a.String(), "observer:scan", now, payload),
+		egObservation(b.String(), "observer:scan", now, payload),
+	})
+	edgeSubject := "contains|" + a.String() + "|" + b.String()
+	var edgeObs []types.Observation
+	for i := 0; i < interfaces.MaxNeighborhoodEdges+20; i++ {
+		edgeObs = append(edgeObs, egObservation(edgeSubject, fmt.Sprintf("observer:src%05d", i), now, map[string]interface{}{}))
+	}
+	egReportBatches(ctx, t, p, edgeObs)
+
+	n, err := p.GetNeighborhood(ctx, a, nil, types.TraversalOutbound, 1)
+	require.NoError(t, err)
+	assert.True(t, n.Truncated)
+	total := 0
+	for _, e := range n.Edges {
+		total += len(e.Sources)
+	}
+	assert.LessOrEqual(t, total, interfaces.MaxNeighborhoodEdges)
+	assert.Positive(t, total)
+}
+
+// testEGTimelineEventCap verifies a timeline over a few entities returns at most
+// MaxTimelineEvents+1 events, the newest.
+func testEGTimelineEventCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	ctx := context.Background()
+	p := factory(t)
+
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	eids := []interfaces.EIDRef{egEID(t, "host:tcap/h1"), egEID(t, "host:tcap/h2"), egEID(t, "host:tcap/h3")}
+	per := interfaces.MaxTimelineEvents/2 + 100
+	var obs []types.Observation
+	for i := 0; i < per; i++ {
+		for _, eid := range eids {
+			at := t0.Add(time.Duration(i) * time.Millisecond)
+			obs = append(obs, egObservation(eid.String(), "observer:scan", at, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": "root/tcap", "seq": i,
+			}))
+		}
+	}
+	egReportBatches(ctx, t, p, obs)
+
+	events, err := p.GetTimeline(ctx, eids, interfaces.TimeRange{From: t0.Add(-time.Minute), To: time.Now().UTC().Add(time.Minute)})
+	require.NoError(t, err)
+	assert.Len(t, events, interfaces.MaxTimelineEvents+1)
+	for i := 1; i < len(events); i++ {
+		assert.False(t, events[i].OccurredAt.Before(events[i-1].OccurredAt))
+	}
+	// The newest event survives the cut.
+	last := events[len(events)-1]
+	assert.Equal(t, t0.Add(time.Duration(per-1)*time.Millisecond).UnixMilli(), last.OccurredAt.UnixMilli())
 }

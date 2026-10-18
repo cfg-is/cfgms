@@ -127,8 +127,9 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			  AND l.kind IN ('state', 'absence', 'apply-outcome')
 			  AND l.observed_at >= $2
 			  AND l.observed_at <= $3
-			ORDER BY l.id ASC`,
-			subject, fromStr, toStr,
+			ORDER BY l.id DESC
+			LIMIT $4`,
+			subject, fromStr, toStr, interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: timeline scan for %s: %w", subject, err)
@@ -177,10 +178,11 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			WHERE (l.subject LIKE $1 ESCAPE '\' OR l.subject LIKE $2 ESCAPE '\')
 			  AND l.observed_at >= $3
 			  AND l.observed_at <= $4
-			ORDER BY l.id ASC`,
+			ORDER BY l.id DESC
+			LIMIT $5`,
 			"same-as|"+escapeLIKE(subject)+"|%",
 			"same-as|%|"+escapeLIKE(subject),
-			fromStr, toStr,
+			fromStr, toStr, interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("entitygraph/database: timeline same-as scan for %s: %w", subject, err)
@@ -233,19 +235,12 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 				events = append(events, ev)
 			}
 		}
+
+		// Keep only the newest events so memory stays bounded across subjects.
+		events = newestTimelineEvents(events)
 	}
 
-	// Merge all events into a single time-ordered stream.
-	sort.SliceStable(events, func(i, j int) bool {
-		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
-			vi, _ := events[i].Detail["version"].(int64)
-			vj, _ := events[j].Detail["version"].(int64)
-			return vi < vj
-		}
-		return events[i].OccurredAt.Before(events[j].OccurredAt)
-	})
-
-	return events, nil
+	return newestTimelineEvents(events), nil
 }
 
 // subjectVisible reports whether subject is owned inside cut. It is true for an
@@ -266,4 +261,22 @@ func (p *DatabaseEntityGraphProvider) subjectVisible(ctx context.Context, cut in
 		return false, fmt.Errorf("entitygraph/database: timeline tenant cut for %s: %w", subject, err)
 	}
 	return cut.Visible(owningTenant), nil
+}
+
+// newestTimelineEvents orders events oldest first and keeps the newest
+// MaxTimelineEvents+1 of them; the extra event tells the caller the stream was
+// cut.
+func newestTimelineEvents(events []*interfaces.TimelineEvent) []*interfaces.TimelineEvent {
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
+			vi, _ := events[i].Detail["version"].(int64)
+			vj, _ := events[j].Detail["version"].(int64)
+			return vi < vj
+		}
+		return events[i].OccurredAt.Before(events[j].OccurredAt)
+	})
+	if len(events) > interfaces.MaxTimelineEvents+1 {
+		events = events[len(events)-(interfaces.MaxTimelineEvents+1):]
+	}
+	return events
 }

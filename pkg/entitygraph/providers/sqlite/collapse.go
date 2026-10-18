@@ -40,6 +40,10 @@ func tenantSubtreeCond(col string, cut interfaces.TenantCut, args *[]interface{}
 	return fmt.Sprintf("%s IN (%s)", col, strings.Join(phs, ", "))
 }
 
+// collapseAsOfWalkBudget is the wall-clock budget of one as-of group walk. It is
+// a variable only so a test can shorten it.
+var collapseAsOfWalkBudget = interfaces.CollapseAsOfWalkBudget
+
 // groupWalk is the bounded breadth-first state shared by both same-as walks.
 type groupWalk struct {
 	visited map[string]struct{}
@@ -161,6 +165,18 @@ func asOfPeerBranch(likePattern, peerExpr string, peerArgs []interface{}, asOfSt
 // Retracted edges and peers outside the cut are removed in SQL, so they never
 // count toward MaxCollapseGroupMembers.
 func (p *SQLiteEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Context, eid interfaces.EIDRef, asOf time.Time, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
+	walkCtx, cancel := context.WithTimeout(ctx, collapseAsOfWalkBudget)
+	defer cancel()
+	members, err := p.walkGroupMembersAsOf(walkCtx, eid, asOf, cut)
+	if err != nil && walkCtx.Err() != nil && ctx.Err() == nil {
+		// The budget expired, not the caller: the group is too expensive to collapse.
+		return nil, interfaces.ErrCollapseGroupTooLarge
+	}
+	return members, err
+}
+
+// walkGroupMembersAsOf is the as-of walk itself, run under the budgeted context.
+func (p *SQLiteEntityGraphProvider) walkGroupMembersAsOf(ctx context.Context, eid interfaces.EIDRef, asOf time.Time, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
 	asOfStr := rfc3339(asOf)
 	w := newGroupWalk(eid.String())
 

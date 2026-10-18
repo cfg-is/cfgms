@@ -1409,3 +1409,99 @@ func TestHandleGetEntity_CollapseGroupTooLarge_Returns422(t *testing.T) {
 			"a caller who may not read the entity must not learn a group exists: %s", rec.Body.String())
 	})
 }
+
+// ---- Issue #5170: read-side walk caps ----
+
+func timelineCapURL(eids []string) string {
+	var sb strings.Builder
+	sb.WriteString("/api/v1/entities/timeline?from=2020-01-01T00:00:00Z&to=2099-01-02T00:00:00Z")
+	for _, e := range eids {
+		sb.WriteString("&eid=" + e)
+	}
+	return sb.String()
+}
+
+func TestHandleGetTimeline_EIDCountCap(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:list"})
+
+	eids := make([]string, 0, maxTimelineEIDs+1)
+	for i := 0; i <= maxTimelineEIDs; i++ {
+		eid := fmt.Sprintf("host:tlcap%03d", i)
+		if i < maxTimelineEIDs {
+			reportEntity(t, p, eid, "test-tenant", "host")
+		}
+		eids = append(eids, eid)
+	}
+	get := func(list []string) int {
+		req := httptest.NewRequest(http.MethodGet, timelineCapURL(list), nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	assert.Equal(t, http.StatusOK, get(eids[:maxTimelineEIDs]), "exactly the cap is accepted")
+	assert.Equal(t, http.StatusBadRequest, get(eids), "one more than the cap is rejected before any lookup")
+}
+
+func TestHandleGetTimeline_RowCapHeader(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:list"})
+	reportEntity(t, p, "host:tlrows", "test-tenant", "host")
+
+	seed := func(total int) {
+		base := time.Now().UTC().Add(-time.Hour)
+		var obs []egtypes.Observation
+		for i := 0; i < total; i++ {
+			at := base.Add(time.Duration(i) * time.Millisecond)
+			obs = append(obs, egtypes.Observation{
+				Source: "test:rows", ObservedAt: at, RecordedAt: at, Subject: "host:tlrows",
+				Kind: egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{"entity_kind": "host", "owning_tenant": "test-tenant", "seq": i + total},
+			})
+		}
+		require.NoError(t, p.ReportObservations(context.Background(),
+			eginterfaces.ObservationBatch{Source: "test:rows", Observations: obs}))
+	}
+	get := func() (int, string) {
+		req := httptest.NewRequest(http.MethodGet, timelineCapURL([]string{"host:tlrows"}), nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var events []*eginterfaces.TimelineEvent
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+		return len(events), rec.Header().Get("X-Timeline-Truncated")
+	}
+
+	seed(10)
+	n, hdr := get()
+	assert.Less(t, n, eginterfaces.MaxTimelineEvents)
+	assert.Empty(t, hdr, "no header below the cap")
+
+	seed(eginterfaces.MaxTimelineEvents + 50)
+	n, hdr = get()
+	assert.Equal(t, eginterfaces.MaxTimelineEvents, n)
+	assert.Equal(t, "true", hdr)
+}
+
+// TestFilterReadableNeighborhood_KeepsTruncated: the filter builds a new
+// Neighborhood and must carry Truncated across for a boundary-subject caller.
+func TestFilterReadableNeighborhood_KeepsTruncated(t *testing.T) {
+	f := newRGFixture(t)
+	rootEID, err := egtypes.ParseEID(rgRootEID)
+	require.NoError(t, err)
+	n := &egtypes.Neighborhood{
+		Root:      rootEID,
+		Nodes:     []*egtypes.Entity{{EID: rootEID, OwningTenant: testRootTenantID}},
+		Truncated: true,
+	}
+	req := asRootOperator(httptest.NewRequest(http.MethodGet, "/x", nil), boundRootOperator("trunc-nbr"), nil)
+	got := filterReadableNeighborhood(f.server.tenantReadScope(req, "TEST"), n)
+	assert.True(t, got.Truncated)
+	n.Truncated = false
+	got = filterReadableNeighborhood(f.server.tenantReadScope(req, "TEST"), n)
+	assert.False(t, got.Truncated)
+}

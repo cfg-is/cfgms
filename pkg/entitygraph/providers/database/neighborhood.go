@@ -5,7 +5,6 @@ package database
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -16,6 +15,9 @@ import (
 const (
 	neighborhoodMaxDepth     = 3
 	neighborhoodDefaultDepth = 2
+	// neighborhoodChunk caps the IN-list length of one query so a large frontier
+	// never reaches a driver variable limit.
+	neighborhoodChunk = 500
 )
 
 // GetNeighborhood returns a depth-bounded connected subgraph starting at eid.
@@ -47,53 +49,123 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 		`SELECT owning_tenant FROM eg_entity_index WHERE subject = $1`, eid.String(),
 	).Scan(&tenantFilter)
 
+	// BFS over the edge projection, bounded in nodes and in projection rows.
 	type edgeKey struct{ from, to, edgeType string }
 	edgeMap := make(map[edgeKey]*types.Edge)
+	var edgeOrder []*types.Edge
+	seenRows := make(map[[4]string]struct{})
+	rowCount := 0
+	truncated := false
 	visited := map[string]bool{eid.String(): true}
+	order := []string{eid.String()}
 	frontier := []string{eid.String()}
+	cut := interfaces.NewTenantCut(tenantFilter, nil)
 
+walk:
 	for hop := 0; hop < depth && len(frontier) > 0; hop++ {
-		hopEdges, err := p.queryNeighborhoodEdges(ctx, frontier, edgeTypes, direction, interfaces.NewTenantCut(tenantFilter, nil))
-		if err != nil {
-			return nil, err
-		}
-
 		var nextFrontier []string
-		for _, e := range hopEdges {
-			k := edgeKey{from: e.From.String(), to: e.To.String(), edgeType: e.Type}
-			if existing, ok := edgeMap[k]; ok {
-				existing.Sources = append(existing.Sources, e.Sources...)
-			} else {
-				edgeMap[k] = e
+		for start := 0; start < len(frontier); start += neighborhoodChunk {
+			chunk := frontier[start:min(start+neighborhoodChunk, len(frontier))]
+			remaining := interfaces.MaxNeighborhoodEdges - rowCount
+			hopEdges, err := p.queryNeighborhoodEdges(ctx, chunk, edgeTypes, direction, cut, remaining+1)
+			if err != nil {
+				return nil, err
 			}
-
-			peer := peerSubject(e, frontier, direction)
-			if peer != "" && !visited[peer] {
-				visited[peer] = true
-				nextFrontier = append(nextFrontier, peer)
+			for _, e := range hopEdges {
+				if rowCount >= interfaces.MaxNeighborhoodEdges {
+					truncated = true
+					break walk
+				}
+				// Determine the peer node relative to what we traversed from.
+				peer := peerSubject(e, chunk, direction)
+				if peer != "" && !visited[peer] {
+					if len(visited) >= interfaces.MaxNeighborhoodNodes {
+						truncated = true
+						continue
+					}
+					visited[peer] = true
+					order = append(order, peer)
+					nextFrontier = append(nextFrontier, peer)
+				}
+				// A projection row can come back from two chunks, or again on a
+				// later hop; it counts and merges once.
+				rk := [4]string{e.From.String(), e.To.String(), e.Type, e.Sources[0].Source}
+				if _, dup := seenRows[rk]; dup {
+					continue
+				}
+				seenRows[rk] = struct{}{}
+				rowCount++
+				k := edgeKey{from: e.From.String(), to: e.To.String(), edgeType: e.Type}
+				if existing, ok := edgeMap[k]; ok {
+					existing.Sources = append(existing.Sources, e.Sources...)
+				} else {
+					edgeMap[k] = e
+					edgeOrder = append(edgeOrder, e)
+				}
 			}
 		}
 		frontier = nextFrontier
 	}
 
-	edges := make([]*types.Edge, 0, len(edgeMap))
-	for _, e := range edgeMap {
-		edges = append(edges, e)
+	// Only edges with both endpoints in the returned node set survive: an edge to
+	// a peer dropped at the node cap, or visited via the other direction, is out.
+	edges := make([]*types.Edge, 0, len(edgeOrder))
+	for _, e := range edgeOrder {
+		if visited[e.From.String()] && visited[e.To.String()] {
+			edges = append(edges, e)
+		}
 	}
 
-	nodes := make([]*types.Entity, 0, len(visited))
-	for subject := range visited {
+	nodes, err := p.loadNeighborhoodNodes(ctx, order)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.Neighborhood{Root: eid, Nodes: nodes, Edges: edges, Truncated: truncated}, nil
+}
+
+// loadNeighborhoodNodes loads the kind and owning tenant of every subject in
+// batched IN queries of at most neighborhoodChunk subjects, in subjects order.
+func (p *DatabaseEntityGraphProvider) loadNeighborhoodNodes(ctx context.Context, subjects []string) ([]*types.Entity, error) {
+	type indexRow struct{ kind, tenant string }
+	index := make(map[string]indexRow, len(subjects))
+	for start := 0; start < len(subjects); start += neighborhoodChunk {
+		chunk := subjects[start:min(start+neighborhoodChunk, len(subjects))]
+		args := make([]interface{}, len(chunk))
+		for i, s := range chunk {
+			args[i] = s
+		}
+		// #nosec G202 -- the IN list is generated $N placeholders only; every
+		// subject is bound through args.
+		rows, err := p.db.QueryContext(ctx,
+			`SELECT subject, entity_kind, owning_tenant FROM eg_entity_index WHERE subject IN `+dollarPlaceholders(len(chunk)), args...)
+		if err != nil {
+			return nil, fmt.Errorf("entitygraph/database: load nodes: %w", err)
+		}
+		for rows.Next() {
+			var subject string
+			var r indexRow
+			if err := rows.Scan(&subject, &r.kind, &r.tenant); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("entitygraph/database: scan node: %w", err)
+			}
+			index[subject] = r
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("entitygraph/database: iterate nodes: %w", err)
+		}
+		_ = rows.Close()
+	}
+
+	nodes := make([]*types.Entity, 0, len(subjects))
+	for _, subject := range subjects {
 		entityEID, err := types.ParseEID(subject)
 		if err != nil {
 			continue
 		}
-		var kind, tenant string
-		err = p.db.QueryRowContext(ctx,
-			`SELECT entity_kind, owning_tenant FROM eg_entity_index WHERE subject = $1`, subject,
-		).Scan(&kind, &tenant)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("entitygraph/database: load node %s: %w", subject, err)
-		}
+		r := index[subject]
+		kind := r.kind
 		if kind == "" {
 			kind = entityEID.AuthorityType()
 		}
@@ -101,11 +173,10 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 			EID:          entityEID,
 			Kind:         kind,
 			Attributes:   map[string]interface{}{},
-			OwningTenant: tenant,
+			OwningTenant: r.tenant,
 		})
 	}
-
-	return &types.Neighborhood{Root: eid, Nodes: nodes, Edges: edges}, nil
+	return nodes, nil
 }
 
 // queryNeighborhoodEdges returns edges connected to any subject in the frontier
@@ -117,6 +188,7 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 	edgeTypes []string,
 	direction types.TraversalDirection,
 	cut interfaces.TenantCut,
+	limit int,
 ) ([]*types.Edge, error) {
 	if len(frontier) == 0 {
 		return nil, nil
@@ -179,7 +251,9 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject
 		  LEFT JOIN eg_entity_index ti ON ti.subject = ep.to_subject
-		  WHERE ` + strings.Join(conds, " AND ")
+		  WHERE ` + strings.Join(conds, " AND ") +
+		" ORDER BY ep.from_subject, ep.to_subject, ep.edge_type, ep.source" +
+		" LIMIT " + addArg(limit)
 
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -240,4 +314,16 @@ func peerSubject(e *types.Edge, frontier []string, direction types.TraversalDire
 		}
 		return ""
 	}
+}
+
+// dollarPlaceholders returns a parenthesised $1..$n placeholder list.
+func dollarPlaceholders(n int) string {
+	if n == 0 {
+		return "(NULL)"
+	}
+	phs := make([]string, n)
+	for i := range phs {
+		phs[i] = fmt.Sprintf("$%d", i+1)
+	}
+	return "(" + strings.Join(phs, ",") + ")"
 }

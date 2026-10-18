@@ -355,9 +355,9 @@ the mandatory tenant filter, and entity-targeted reads accept a `same-as` collap
 | `GetDesiredState(eid)` | desired state + originating config revision |
 | `QueryEntities(filter, page)` | entities by type / attribute predicates / text, paged |
 | `GetEdges(filter)` | edges by endpoint / type / source |
-| `GetNeighborhood(eid, edge_types, direction, depth)` | connected subgraph; depth default 2, contract max 3 |
+| `GetNeighborhood(eid, edge_types, direction, depth)` | connected subgraph; depth default 2, contract max 3; at most `MaxNeighborhoodNodes` (1000) nodes and `MaxNeighborhoodEdges` (5000) projection rows, `Truncated` set when either is hit |
 | `GetHistory(subject, range)` / `Diff(subject, t1, t2)` | versions over time; delta between two times |
-| `GetTimeline(subjects[], range)` | merged state-change + drift + apply-outcome event stream |
+| `GetTimeline(subjects[], range)` | merged state-change + drift + apply-outcome event stream; newest `MaxTimelineEvents` (1000) events, the API accepts at most 100 subjects |
 | `GetDriftState(eid)` / `ListDrifted(filter)` | persisted drift-diff (full compared field set); fleet drift survey |
 | `Watch(filter, cursor)` | durable, cursor-replayable change feed of entity/edge/drift events |
 | `ResolveIdentity(claims)` | best-known `eid`(s) for device/object identity claims ("caller says PC-0231") — *not* a PSA/CRM contact lookup |
@@ -365,7 +365,9 @@ the mandatory tenant filter, and entity-targeted reads accept a `same-as` collap
 Traversal is **depth-bounded neighborhood expansion, not a general graph query language** — a
 deliberate contract restriction (with the explicit depth cap) so both relational and
 property-graph backends can implement it without contortion; every cockpit/twin/DEX need
-identified so far composes from these operations.
+identified so far composes from these operations. Every read-side walk is bounded the same way as
+the depth cap: `MaxNeighborhoodNodes` (1000), `MaxNeighborhoodEdges` (5000), `MaxTimelineEvents`
+(1000) and `CollapseAsOfWalkBudget` (3 s, past which an as-of collapse is `ErrCollapseGroupTooLarge`).
 
 **Boundary: telemetry and DEX signals.** Per ADR-017 clause 4 / A1.4, live performance and
 experience data (latency, resource use, app-hangs) is telemetry — it is **not stored in and not
