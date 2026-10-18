@@ -82,7 +82,12 @@ func NewGitConfigStore(
 	// fails, so a failed source leaves nothing behind.
 	defer func() {
 		if err != nil && !hadClone {
-			_ = RemoveCloneDir(workDir, repoDir)
+			if rmErr := RemoveCloneDir(workDir, repoDir); rmErr != nil && logger != nil {
+				logger.Warn("git-store: failed to remove clone directory after failed construction",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"error", logging.SanitizeLogValue(rmErr.Error()),
+				)
+			}
 		}
 	}()
 
@@ -120,7 +125,11 @@ func (s *GitConfigStore) RepoDir() string { return s.repoDir }
 // empty. dir is removed only when its cleaned path is strictly inside workDir
 // (security.ValidateAndCleanPath); anything else is refused with an error.
 func RemoveCloneDir(workDir, dir string) error {
-	cleaned, err := security.ValidateAndCleanPath(workDir, dir)
+	rel, err := relativeToWorkDir(workDir, dir)
+	if err != nil {
+		return fmt.Errorf("refusing to remove clone directory: %w", err)
+	}
+	cleaned, err := security.ValidateAndCleanPath(workDir, rel)
 	if err != nil {
 		return fmt.Errorf("refusing to remove clone directory: %w", err)
 	}
@@ -140,6 +149,31 @@ func RemoveCloneDir(workDir, dir string) error {
 		_ = os.Remove(parent)
 	}
 	return nil
+}
+
+// relativeToWorkDir returns dir relative to workDir. An absolute dir may be spelled
+// against the raw workDir or against its symlink-resolved form (a store's repoDir is
+// built from the resolved path: /private/var on macOS, long names on Windows), so both
+// are tried. A dir outside both is returned unchanged for ValidateAndCleanPath to reject.
+func relativeToWorkDir(workDir, dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return dir, nil
+	}
+	rawBase, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", err
+	}
+	bases := []string{rawBase}
+	if resolved, evalErr := filepath.EvalSymlinks(rawBase); evalErr == nil && resolved != rawBase {
+		bases = append(bases, resolved)
+	}
+	for _, b := range bases {
+		rel, relErr := filepath.Rel(b, filepath.Clean(dir))
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return rel, nil
+		}
+	}
+	return dir, nil
 }
 
 // SyncWithRemote pulls latest changes from the remote. On success it returns the

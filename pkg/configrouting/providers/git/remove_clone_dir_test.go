@@ -53,3 +53,21 @@ func TestRemoveCloneDir_RefusesOutsideAndWorkDir(t *testing.T) {
 	assert.FileExists(t, filepath.Join(outside, "keep"))
 	assert.FileExists(t, filepath.Join(workDir, "keep"))
 }
+
+// A store's repoDir is built from the symlink-resolved work directory, while callers
+// hold the raw one (macOS /var -> /private/var, Windows short names). Removal must
+// accept the resolved spelling.
+func TestRemoveCloneDir_WorkDirReachedThroughSymlink(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	clone := filepath.Join(real, "tenant", "abc")
+	require.NoError(t, os.MkdirAll(clone, 0750))
+
+	require.NoError(t, RemoveCloneDir(link, clone))
+	assert.NoDirExists(t, clone)
+	assert.NoDirExists(t, filepath.Join(real, "tenant"))
+	assert.DirExists(t, real)
+}
