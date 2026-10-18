@@ -4,11 +4,15 @@ package config
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,12 +26,25 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 )
 
 // testSecretStore is a simple in-process secret store for validator tests.
 // It is a real implementation (not a mock): it stores and returns secrets from a map.
 type testSecretStore struct {
 	secrets map[string]string
+	// bound maps a secret key to the repository URL written into its
+	// bound_repository_url metadata. A key absent here has no metadata.
+	bound map[string]string
+}
+
+// newBoundTestSecretStore returns a store whose every secret is bound to repoURL.
+func newBoundTestSecretStore(secrets map[string]string, repoURL string) *testSecretStore {
+	b := make(map[string]string, len(secrets))
+	for k := range secrets {
+		b[k] = NormalizeRepositoryURL(repoURL)
+	}
+	return &testSecretStore{secrets: secrets, bound: b}
 }
 
 func newTestSecretStore(secrets map[string]string) *testSecretStore {
@@ -39,7 +56,11 @@ func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsifac
 	if !ok {
 		return nil, secretsiface.ErrSecretNotFound
 	}
-	return &secretsiface.Secret{Key: key, Value: v}, nil
+	sec := &secretsiface.Secret{Key: key, Value: v}
+	if u, ok := s.bound[key]; ok {
+		sec.Metadata = map[string]string{SecretMetaKeyBoundRepositoryURL: u}
+	}
+	return sec, nil
 }
 
 func (s *testSecretStore) StoreSecret(_ context.Context, _ *secretsiface.SecretRequest) error {
@@ -162,7 +183,7 @@ func TestValidateMountPoint_CredentialFailure(t *testing.T) {
 	port := srv.Listener.Addr().(*net.TCPAddr).Port
 	repoURL := fmt.Sprintf("https://localhost:%d/repo", port)
 
-	ss := newTestSecretStore(map[string]string{"mytoken": "super-secret-value"})
+	ss := newBoundTestSecretStore(map[string]string{"mytoken": "super-secret-value"}, repoURL)
 
 	v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
 	info := &ConfigSourceInfo{
@@ -218,7 +239,7 @@ func TestValidateMountPoint_NoCredentialLeakedInError(t *testing.T) {
 	restore := installEmptyTransport(t) // always fails
 	defer restore()
 
-	ss := newTestSecretStore(map[string]string{"myref": sensitiveToken})
+	ss := newBoundTestSecretStore(map[string]string{"myref": sensitiveToken}, testRepoURL)
 
 	v := NewDefaultMountPointValidator()
 	info := &ConfigSourceInfo{
@@ -300,4 +321,103 @@ func TestSanitizeConnectionError(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "mysecretpassword")
 	assert.Contains(t, err.Error(), "[REDACTED]")
+}
+
+// bindingTestServer starts a real HTTPS server that records whether any request
+// carried an Authorization header and returns its repository URL.
+func bindingTestServer(t *testing.T) (repoURL string, sawAuth func() bool) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := false
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			mu.Lock()
+			seen = true
+			mu.Unlock()
+		}
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	return fmt.Sprintf("https://localhost:%d/repo", port), func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen
+	}
+}
+
+// TestValidateMountPoint_CredentialBinding covers the binding check: a credential
+// bound to another repository, or to none, is refused before any network call.
+func TestValidateMountPoint_CredentialBinding(t *testing.T) {
+	const token = "binding-secret-token-xyz"
+	const fix = "cfg tenant config-source set-credential"
+
+	t.Run("bound to another repository is refused with no Authorization header", func(t *testing.T) {
+		urlB, sawAuth := bindingTestServer(t)
+		ss := newBoundTestSecretStore(map[string]string{"ref": token}, "https://other.cfgms.local/repo")
+		v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+		err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: urlB, CredentialRef: "ref"}, ss)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fix)
+		assert.NotContains(t, err.Error(), token)
+		assert.False(t, sawAuth(), "server must receive no Authorization header")
+	})
+
+	t.Run("unbound credential is refused", func(t *testing.T) {
+		urlB, sawAuth := bindingTestServer(t)
+		ss := newTestSecretStore(map[string]string{"ref": token})
+		v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+		err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: urlB, CredentialRef: "ref"}, ss)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fix)
+		assert.NotContains(t, err.Error(), token)
+		assert.False(t, sawAuth())
+	})
+
+	t.Run("bound credential is sent, also across host case and trailing slash", func(t *testing.T) {
+		urlA, sawAuth := bindingTestServer(t)
+		ss := newBoundTestSecretStore(map[string]string{"ref": token}, urlA)
+		v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+		for _, u := range []string{urlA, strings.Replace(urlA, "localhost", "LOCALHOST", 1), urlA + "/"} {
+			err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: u, CredentialRef: "ref"}, ss)
+			// The server answers 401, so the call fails at the network step, not the binding.
+			require.Error(t, err, u)
+			assert.NotContains(t, err.Error(), "not bound", u)
+		}
+		assert.True(t, sawAuth(), "bound credential must reach the matching host")
+	})
+}
+
+// TestCheckCredentialBinding_RealSopsStore proves a secret written with the binding
+// metadata into the real sops store reads back and passes the binding check.
+func TestCheckCredentialBinding_RealSopsStore(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyPath, key, 0o600))
+
+	store, err := sops.NewSOPSSecretStore(&sops.SOPSSecretStoreConfig{
+		StorageProvider: "flatfile",
+		StorageConfig:   map[string]interface{}{"root": filepath.Join(dir, "data")},
+		KeyFile:         keyPath,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	const repo = "https://git.cfgms.local/acme/configs"
+	ctx := context.Background()
+	require.NoError(t, store.StoreSecret(ctx, &secretsiface.SecretRequest{
+		Key:       ConfigSourceCredentialKeyName,
+		Value:     "tok",
+		Metadata:  map[string]string{SecretMetaKeyBoundRepositoryURL: NormalizeRepositoryURL(repo)},
+		TenantID:  "tenant-a",
+		CreatedBy: "test",
+	}))
+	got, err := store.GetSecret(ctx, "tenant-a/"+ConfigSourceCredentialKeyName)
+	require.NoError(t, err)
+	require.NoError(t, CheckCredentialBinding(got, repo))
+	require.NoError(t, CheckCredentialBinding(got, "https://GIT.cfgms.local/acme/configs/"))
+	require.Error(t, CheckCredentialBinding(got, "https://evil.cfgms.local/acme/configs"))
 }

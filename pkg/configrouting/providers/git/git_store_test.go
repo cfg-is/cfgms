@@ -6,9 +6,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +43,16 @@ func newMemorySecretStore(pairs map[string]string) *memorySecretStore {
 	s := &memorySecretStore{secrets: make(map[string]*secretsiface.Secret)}
 	for k, v := range pairs {
 		s.secrets[k] = &secretsiface.Secret{Key: k, Value: v}
+	}
+	return s
+}
+
+// newBoundMemorySecretStore returns a store whose every secret carries a
+// bound_repository_url binding to repoURL, as the operator-path route writes it.
+func newBoundMemorySecretStore(pairs map[string]string, repoURL string) *memorySecretStore {
+	s := newMemorySecretStore(pairs)
+	for _, sec := range s.secrets {
+		sec.Metadata = map[string]string{pkgconfig.SecretMetaKeyBoundRepositoryURL: pkgconfig.NormalizeRepositoryURL(repoURL)}
 	}
 	return s
 }
@@ -418,7 +432,7 @@ func TestGitConfigStore_NoCredentialLeakedInError(t *testing.T) {
 		SubPath:       "configs",
 		CredentialRef: "my-git-token",
 	}
-	ss := newMemorySecretStore(map[string]string{"my-git-token": secretToken})
+	ss := newBoundMemorySecretStore(map[string]string{"my-git-token": secretToken}, remoteDir)
 
 	store, err := NewGitConfigStore(context.Background(), source, "tenant1", ss, workDir, logging.NewNoopLogger())
 	require.NoError(t, err)
@@ -476,7 +490,7 @@ func TestGitConfigStore_StructFieldsNoCredential(t *testing.T) {
 		SubPath:       "configs",
 		CredentialRef: "my-cred",
 	}
-	ss := newMemorySecretStore(map[string]string{"my-cred": secretToken})
+	ss := newBoundMemorySecretStore(map[string]string{"my-cred": secretToken}, remoteDir)
 
 	store, err := NewGitConfigStore(context.Background(), source, "tenant1", ss, workDir, logging.NewNoopLogger())
 	require.NoError(t, err)
@@ -836,4 +850,89 @@ func TestGitConfigStore_ResolveConfigWithInheritance(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, content, string(entry.Data))
+}
+
+// bindingHTTPSServer starts a real HTTPS server and records any Authorization header.
+func bindingHTTPSServer(t *testing.T) (repoURL string, sawAuth func() bool) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := false
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			mu.Lock()
+			seen = true
+			mu.Unlock()
+		}
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	return fmt.Sprintf("https://localhost:%d/repo", port), func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen
+	}
+}
+
+// TestGitConfigStore_CredentialBinding covers the three binding cases for the
+// constructor (clone) path against a real HTTPS server.
+func TestGitConfigStore_CredentialBinding(t *testing.T) {
+	const token = "git-store-binding-token"
+	const fix = "cfg tenant config-source set-credential"
+	newSource := func(u string) *pkgconfig.ConfigSourceInfo {
+		return &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeGit, URL: u, CredentialRef: "ref"}
+	}
+
+	t.Run("bound to another repository is refused with no Authorization header", func(t *testing.T) {
+		urlB, sawAuth := bindingHTTPSServer(t)
+		ss := newBoundMemorySecretStore(map[string]string{"ref": token}, "https://other.cfgms.local/repo")
+		_, err := NewGitConfigStore(context.Background(), newSource(urlB), "tenant1", ss, t.TempDir(), logging.NewNoopLogger())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fix)
+		assert.NotContains(t, err.Error(), token)
+		assert.False(t, sawAuth())
+	})
+
+	t.Run("unbound credential is refused", func(t *testing.T) {
+		urlB, sawAuth := bindingHTTPSServer(t)
+		ss := newMemorySecretStore(map[string]string{"ref": token})
+		_, err := NewGitConfigStore(context.Background(), newSource(urlB), "tenant1", ss, t.TempDir(), logging.NewNoopLogger())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fix)
+		assert.NotContains(t, err.Error(), token)
+		assert.False(t, sawAuth())
+	})
+
+	t.Run("bound credential is returned, also across host case and trailing slash", func(t *testing.T) {
+		urlA := "https://git.cfgms.local/acme/configs"
+		ss := newBoundMemorySecretStore(map[string]string{"ref": token}, urlA)
+		for _, u := range []string{urlA, "https://GIT.cfgms.local/acme/configs", urlA + "/"} {
+			s := &GitConfigStore{source: newSource(u), secretStore: ss}
+			_, pw, err := s.fetchCredential(context.Background())
+			require.NoError(t, err, u)
+			assert.Equal(t, token, pw, u)
+		}
+	})
+}
+
+// TestGitConfigStore_SyncRefusesAfterSourceURLChange proves the binding is rechecked at
+// every pull: a source URL changed after construction no longer matches the credential.
+func TestGitConfigStore_SyncRefusesAfterSourceURLChange(t *testing.T) {
+	const token = "git-store-sync-token"
+	remoteDir := createBareRemote(t, map[string][]byte{"configs/default/app.yaml": []byte("ok: true\n")})
+	source := &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeGit, URL: remoteDir, SubPath: "configs", CredentialRef: "ref"}
+	ss := newBoundMemorySecretStore(map[string]string{"ref": token}, remoteDir)
+
+	store, err := NewGitConfigStore(context.Background(), source, "tenant1", ss, t.TempDir(), logging.NewNoopLogger())
+	require.NoError(t, err)
+	_, err = store.SyncWithRemote(context.Background())
+	require.NoError(t, err)
+
+	urlB, sawAuth := bindingHTTPSServer(t)
+	source.URL = urlB
+	_, err = store.SyncWithRemote(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cfg tenant config-source set-credential")
+	assert.NotContains(t, err.Error(), token)
+	assert.False(t, sawAuth())
 }

@@ -1873,6 +1873,19 @@ with an empty steward ID) — not the save=deploy steward fan-out, which is a
 separate, write-triggered push registered in
 `features/controller/api/server.go`.
 
+A git credential is tied to the repository it was stored for. The credential
+named by `config_source_credential` carries a `bound_repository_url` value in
+its own secret metadata, written by `cfg tenant config-source set-credential`;
+the binding is never read from tenant metadata. Both the mount-point validator
+and the git config store (at clone and at every pull) compare that binding with
+`config_source_url` by exact equality after normalization, before the secret
+value reaches an `Authorization` header. An existing credential without the
+binding stops working until it is stored again with `set-credential`, and a
+secret store whose provider returns no metadata fails closed. An unbound or
+mismatched credential is refused with an error that names the fix (store it
+again with `cfg tenant config-source set-credential`) and never contains the
+secret value.
+
 **Tests:** `pkg/lease/singleton_test.go` and
 `pkg/ha/background_loop_lease_test.go` prove the `SingletonJob`/
 `NewBackgroundLoopLease` primitives directly (two-node mutual exclusion, and a

@@ -219,21 +219,24 @@ func NormalizeRepositoryURL(raw string) string {
 	return out
 }
 
+// credentialRebindHint names the operator action that fixes a failed binding check.
+const credentialRebindHint = "store it again with `cfg tenant config-source set-credential`"
+
 // CheckCredentialBinding returns nil only when secret carries a bound_repository_url
 // metadata value exactly equal to the normalized repoURL. Scheme, host, port and path
 // must all match; a prefix, suffix or same-host match is refused. Errors never contain
 // the secret value.
 func CheckCredentialBinding(secret *secretsiface.Secret, repoURL string) error {
 	if secret == nil {
-		return fmt.Errorf("credential is not bound to a repository: no secret")
+		return fmt.Errorf("credential is not bound to a repository: %s", credentialRebindHint)
 	}
 	bound, ok := secret.Metadata[SecretMetaKeyBoundRepositoryURL]
 	if !ok || bound == "" {
-		return fmt.Errorf("credential is not bound to a repository: missing %s metadata", SecretMetaKeyBoundRepositoryURL)
+		return fmt.Errorf("credential is not bound to a repository: %s", credentialRebindHint)
 	}
 	want := NormalizeRepositoryURL(repoURL)
 	if want == "" || bound != want {
-		return fmt.Errorf("credential is bound to a different repository than the configured source")
+		return fmt.Errorf("credential is not bound to this repository: %s", credentialRebindHint)
 	}
 	return nil
 }
