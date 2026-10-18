@@ -140,11 +140,16 @@ func (p *DatabaseEntityGraphProvider) resolveGroupMembersCurrentState(ctx contex
 // pattern in $likeIdx, reduced to the peer subject by peerExpr, with retracted
 // edges (judged on the latest row, not any older one) and peers outside the cut
 // removed in SQL. $asOfIdx is the asOf bound; n is the next free placeholder.
-func asOfPeerBranch(likeIdx, asOfIdx int, peerExpr string, cut interfaces.TenantCut, n *int, args *[]interface{}) string {
+//
+// subjectExpr is the indexed expression the pattern is matched against: the
+// subject itself, or reverse(subject) for the to-direction so a leading-wildcard
+// suffix match becomes a prefix match on the reverse-lookup index (Issue #5170).
+func asOfPeerBranch(likeIdx, asOfIdx int, subjectExpr, peerExpr string, cut interfaces.TenantCut, n *int, args *[]interface{}) string {
 	q := fmt.Sprintf(`SELECT b.peer FROM (
 				SELECT %s AS peer, l.kind AS kind
 				FROM eg_observation_log l
-				WHERE l.subject LIKE $%d ESCAPE '\'
+				WHERE %s LIKE $%d ESCAPE '\'
+				  AND l.subject LIKE 'same-as|%%'
 				  AND l.observed_at <= $%d
 				  AND NOT EXISTS (
 				      SELECT 1 FROM eg_observation_log m
@@ -153,7 +158,7 @@ func asOfPeerBranch(likeIdx, asOfIdx int, peerExpr string, cut interfaces.Tenant
 				             OR (m.observed_at = l.observed_at AND m.id > l.id))
 				  )
 			) b
-			WHERE b.kind <> 'absence'`, peerExpr, likeIdx, asOfIdx, asOfIdx)
+			WHERE b.kind <> 'absence'`, peerExpr, subjectExpr, likeIdx, asOfIdx, asOfIdx)
 	if cut.Active() {
 		q += " AND b.peer IN (SELECT subject FROM eg_entity_index WHERE " +
 			tenantSubtreeCond("owning_tenant", cut, n, args) + ")"
@@ -193,14 +198,15 @@ func (p *DatabaseEntityGraphProvider) walkGroupMembersAsOf(ctx context.Context, 
 		// $1 from-pattern, $2 to-pattern, $3 asOf, $4 peer offset, $5 current length.
 		args := []interface{}{
 			"same-as|" + escapeLIKE(current) + "|%",
-			"same-as|%|" + escapeLIKE(current),
+			// Matched against reverse(subject): "same-as|%|<current>" reversed.
+			escapeLIKE(reverseString(current)) + "|%|sa-emas",
 			asOfStr,
 			fromPrefixLen + 1,
 			toLen,
 		}
 		n := 6
-		fromBranch := asOfPeerBranch(1, 3, "substr(l.subject, $4::int)", cut, &n, &args)
-		toBranch := asOfPeerBranch(2, 3, "substr(l.subject, 9, length(l.subject) - 9 - $5::int)", cut, &n, &args)
+		fromBranch := asOfPeerBranch(1, 3, "l.subject", "substr(l.subject, $4::int)", cut, &n, &args)
+		toBranch := asOfPeerBranch(2, 3, "reverse(l.subject)", "substr(l.subject, 9, length(l.subject) - 9 - $5::int)", cut, &n, &args)
 		args = append(args, interfaces.MaxCollapseGroupMembers+1)
 
 		// #nosec G202 -- the branches hold fixed SQL and generated $N
@@ -420,4 +426,13 @@ func (p *DatabaseEntityGraphProvider) resolveCollapseGroup(ctx context.Context, 
 		Merged:    merged,
 		Conflicts: conflicts,
 	}, nil
+}
+
+// reverseString reverses s by characters, matching PostgreSQL's reverse().
+func reverseString(s string) string {
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return string(r)
 }

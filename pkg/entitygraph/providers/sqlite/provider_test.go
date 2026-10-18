@@ -657,3 +657,32 @@ func TestCollapseAsOfWalkBudget(t *testing.T) {
 		require.NotErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
 	})
 }
+
+// TestSameAsAsOfIndex proves the reverse-lookup migration (Issue #5170) is
+// idempotent on an existing database and that the as-of peer query uses it.
+func TestSameAsAsOfIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "eg.db")
+	p, err := NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err)
+	require.NoError(t, p.Close())
+
+	// Reopen the existing database: the migration must run again without error.
+	p, err = NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err)
+	defer func() { _ = p.Close() }()
+
+	var args []interface{}
+	q := asOfPeerBranch("same-as|x|%", "substr(l.subject, ?)", []interface{}{1}, "2026-01-01T00:00:00Z", interfaces.TenantCut{}, &args)
+	rows, err := p.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+q, args...)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var plan string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		plan += detail + "\n"
+	}
+	require.NoError(t, rows.Err())
+	assert.Contains(t, plan, "eg_observation_log_sameas_asof")
+}

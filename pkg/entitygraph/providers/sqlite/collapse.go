@@ -144,6 +144,7 @@ func asOfPeerBranch(likePattern, peerExpr string, peerArgs []interface{}, asOfSt
 				SELECT ` + peerExpr + ` AS peer, l.kind AS kind
 				FROM eg_observation_log l
 				WHERE l.subject LIKE ? ESCAPE '\'
+				  AND l.subject >= 'same-as|' AND l.subject < 'same-as}'
 				  AND l.observed_at <= ?
 				  AND NOT EXISTS (
 				      SELECT 1 FROM eg_observation_log m

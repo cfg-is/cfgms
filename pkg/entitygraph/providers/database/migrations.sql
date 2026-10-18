@@ -30,6 +30,16 @@ CREATE INDEX IF NOT EXISTS idx_eg_log_source   ON eg_observation_log(source);
 CREATE INDEX IF NOT EXISTS idx_eg_log_tenant   ON eg_observation_log(tenant_path);
 CREATE INDEX IF NOT EXISTS idx_eg_log_subj_src ON eg_observation_log(subject, source);
 
+-- Issue #5170: the as-of same-as walk matches edge subjects "same-as|<from>|<to>"
+-- by prefix (from-direction) and by suffix (to-direction). These partial indexes
+-- hold only same-as rows: a pattern-ops index on subject serves the prefix match,
+-- and one on reverse(subject) turns the suffix match into a prefix match.
+-- IF NOT EXISTS keeps the migration idempotent on existing databases.
+CREATE INDEX IF NOT EXISTS idx_eg_log_sameas_fwd ON eg_observation_log (subject text_pattern_ops)
+    WHERE subject LIKE 'same-as|%';
+CREATE INDEX IF NOT EXISTS idx_eg_log_sameas_rev ON eg_observation_log (reverse(subject) text_pattern_ops)
+    WHERE subject LIKE 'same-as|%';
+
 CREATE TABLE IF NOT EXISTS eg_entity_current (
     subject         TEXT NOT NULL,
     source          TEXT NOT NULL,
