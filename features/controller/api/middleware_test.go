@@ -1347,12 +1347,61 @@ func setupTestServerWithWebSession(t *testing.T, clockFn func() time.Time) (*Ser
 	return srv, mgr, store
 }
 
-// issueWebSession is a test helper that mints a web session and returns the cookie.
-func issueWebSession(t *testing.T, mgr session.Manager, principalID, tenantID string) *http.Cookie {
+// fixtureCredentialID is the passkey credential that fixture web sessions are
+// logged in with. The middleware ends a web session whose login credential is not
+// on the account (Issue #5166), so a fixture session needs one.
+var fixtureCredentialID = []byte("fixture-login-credential")
+
+// fixtureLoginSourceIP is deliberately not the httptest request IP, so the elevated
+// fixture session reads back at AssuranceBasic (IP-change downgrade), like the
+// un-elevated sessions these fixtures minted before.
+const fixtureLoginSourceIP = "198.51.100.77"
+
+// ensureAccountHoldsCredential makes the account for principalID (creating a
+// minimal one when none is cached) hold a passkey with credID.
+func ensureAccountHoldsCredential(srv *Server, principalID, tenantID string, credID []byte) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.accounts == nil {
+		srv.accounts = make(map[string]*account)
+	}
+	var acct *account
+	for _, a := range srv.accounts {
+		if a != nil && a.ID == principalID {
+			acct = a
+			break
+		}
+	}
+	if acct == nil {
+		acct = &account{ID: principalID, Username: principalID, TenantID: tenantID}
+		srv.accounts[acct.Username] = acct
+	}
+	for _, c := range acct.Credentials {
+		if bytes.Equal(c.ID, credID) {
+			return
+		}
+	}
+	acct.Credentials = append(acct.Credentials, WebAuthnCredential{ID: credID, PublicKey: []byte("pk-" + string(credID))})
+}
+
+// issueWebSession is a test helper that mints a web session the way passkey login
+// does (Issue then Elevate with a credential that is on the account) and returns
+// the cookie.
+func issueWebSession(t *testing.T, srv *Server, mgr session.Manager, principalID, tenantID string) *http.Cookie {
 	t.Helper()
-	_, tok, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
+	return &http.Cookie{Name: cookieWebSession, Value: loginWebSession(t, srv, mgr, principalID, "web-login", tenantID)}
+}
+
+// loginWebSession mints a web session the way passkey login does and returns its
+// token. The account for principalID is made to hold fixtureCredentialID.
+func loginWebSession(t *testing.T, srv *Server, mgr session.Manager, principalID, connection, tenantID string) string {
+	t.Helper()
+	ensureAccountHoldsCredential(srv, principalID, tenantID, fixtureCredentialID)
+	sess, _, err := mgr.Issue(context.Background(), principalID, connection, tenantID)
 	require.NoError(t, err)
-	return &http.Cookie{Name: cookieWebSession, Value: tok}
+	_, tok, err := mgr.Elevate(context.Background(), sess.ID, fixtureCredentialID, fixtureLoginSourceIP)
+	require.NoError(t, err)
+	return tok
 }
 
 // TestWebSessionCookie_ValidCookie_BuildsPrincipal verifies that a request carrying a
@@ -1360,7 +1409,7 @@ func issueWebSession(t *testing.T, mgr session.Manager, principalID, tenantID st
 func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
-	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 
 	var capturedPrincipal *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1394,7 +1443,7 @@ func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
 func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdmin(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
-	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 
 	var capturedPrincipal *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1446,7 +1495,7 @@ func TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp(t *test
 		TenantID:  "",
 		RootScope: true,
 	})
-	cookie := issueWebSession(t, mgr, "admin-principal-id", "")
+	cookie := issueWebSession(t, srv, mgr, "admin-principal-id", "")
 
 	var capturedPrincipal *Principal
 	capture := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1512,7 +1561,7 @@ func TestWebSessionCookie_TenantScopedAccountIsEnumerated(t *testing.T) {
 		RootScope:   false,
 		Permissions: []string{"steward:list"},
 	})
-	cookie := issueWebSession(t, mgr, "operator-principal-id", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "operator-principal-id", "tenant-a")
 
 	var capturedPrincipal *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1544,7 +1593,7 @@ func TestWebSessionCookie_TenantScopedAccountIsEnumerated(t *testing.T) {
 // carries exactly HttpOnly; Secure; SameSite=Strict; Path=/ (ADR-018 §1).
 func TestWebSessionCookie_RenewalCookieFlags(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
-	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1576,7 +1625,7 @@ func TestWebSessionCookie_IdleExpiry_Returns401(t *testing.T) {
 	clk := newWebSessionTestClock()
 	srv, mgr, _ := setupTestServerWithWebSession(t, clk.Now)
 
-	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 
 	// Advance past web session idle timeout (60m).
 	clk.Advance(61 * time.Minute)
@@ -1601,7 +1650,7 @@ func TestWebSessionCookie_AbsoluteExpiry_Returns401(t *testing.T) {
 	clk := newWebSessionTestClock()
 	srv, mgr, _ := setupTestServerWithWebSession(t, clk.Now)
 
-	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 
 	// Advance past web session absolute timeout (12h).
 	clk.Advance(13 * time.Hour)
@@ -1625,7 +1674,7 @@ func TestWebSessionCookie_AbsoluteExpiry_Returns401(t *testing.T) {
 func TestWebSessionCookie_Revoked_Returns401(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
-	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 
 	// Validate once to obtain the session ID, then revoke.
 	sess, err := mgr.Validate(context.Background(), cookie.Value)
@@ -1652,7 +1701,7 @@ func TestWebSessionCookie_Revoked_Returns401(t *testing.T) {
 func TestWebSessionCookie_CoexistenceMatrix(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
-	webCookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	webCookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
 	apiKeyStr := NewTestKey(t, srv, []string{"steward:read"})
 
 	// Issue a Bearer session token via the cfg sessionManager (ADR-014 path).
@@ -2453,6 +2502,9 @@ func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
 		// Issue via mgrWrite and elevate to AssuranceStrong in the shared store.
 		webSess, token, err := mgrWrite.Issue(context.Background(), "alice", "web-login", "tenant-a")
 		require.NoError(t, err)
+		ensureAccountHoldsCredential(srv, "alice", "tenant-a", fixtureCredentialID)
+		webSess.LoginCredentialID = fixtureCredentialID
+		webSess.CredentialID = fixtureCredentialID
 		webSess.Assurance = session.AssuranceStrong
 		webSess.BoundIP = httptestIP
 		webSess.LastProvenAt = time.Now()
@@ -2487,6 +2539,9 @@ func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
 		// BoundIP differs from httptest RemoteAddr so Validate downgrades.
 		webSess, token, err := mgrWrite.Issue(context.Background(), "alice", "web-login", "tenant-a")
 		require.NoError(t, err)
+		ensureAccountHoldsCredential(srv, "alice", "tenant-a", fixtureCredentialID)
+		webSess.LoginCredentialID = fixtureCredentialID
+		webSess.CredentialID = fixtureCredentialID
 		webSess.Assurance = session.AssuranceStrong
 		webSess.BoundIP = "10.0.0.1"
 		webSess.LastProvenAt = time.Now()
@@ -3937,6 +3992,7 @@ func TestWebSessionCookie_PhishingResistantRootScopeAccount_CarriesMarker(t *tes
 		RootScope: true,
 	})
 
+	ensureAccountHoldsCredential(srv, "web-root-op", "", []byte("cred-1"))
 	sess, _, err := mgr.Issue(context.Background(), "web-root-op", "web-login", "")
 	require.NoError(t, err)
 	// Elevate with an empty sourceIP: BoundIP stays "" so no source-IP-change downgrade
@@ -4014,7 +4070,7 @@ func TestWebSessionCookie_RootScopeAccount_BasicAssurance_NoMarker(t *testing.T)
 	})
 
 	// Issue only — never elevated, so Assurance stays Basic.
-	cookie := issueWebSession(t, mgr, "web-root-op-basic", "")
+	cookie := issueWebSession(t, srv, mgr, "web-root-op-basic", "")
 
 	var captured *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4085,6 +4141,7 @@ func TestWebSessionCookie_RootScopeMarker_RemovedOnAssuranceDowngrade(t *testing
 		RootScope: true,
 	})
 
+	ensureAccountHoldsCredential(srv, "web-root-op-downgrade", "", []byte("cred-1"))
 	sess, _, err := mgr.Issue(context.Background(), "web-root-op-downgrade", "web-login", "")
 	require.NoError(t, err)
 	// Bind the elevation to an IP different from httptest's default RemoteAddr
@@ -4123,6 +4180,7 @@ func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testi
 		RootScope: true,
 	})
 
+	ensureAccountHoldsCredential(srv, "web-root-op-cleared", "", []byte("cred-1"))
 	sess, _, err := mgr.Issue(context.Background(), "web-root-op-cleared", "web-login", "")
 	require.NoError(t, err)
 	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
@@ -4151,6 +4209,8 @@ func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testi
 		Username:  "web-root-op-cleared",
 		TenantID:  "tenant-a",
 		RootScope: false,
+		// Demoting the account must not drop the passkey that logged the session in.
+		Credentials: []WebAuthnCredential{{ID: []byte("cred-1"), PublicKey: []byte("pk-cred-1")}},
 	})
 
 	captured = nil
@@ -4180,6 +4240,7 @@ func TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension(t 
 		RootScope: true,
 	})
 
+	ensureAccountHoldsCredential(srv, "web-root-op-cert-bound", "", []byte("cred-1"))
 	sess, _, err := mgr.Issue(context.Background(), "web-root-op-cert-bound", "web-login", "")
 	require.NoError(t, err)
 	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
@@ -4280,6 +4341,7 @@ func TestWebSessionCookie_RootScopedAccount_ConfinedByCatchAllBoundaryGate(t *te
 		RootScope: true,
 	})
 
+	ensureAccountHoldsCredential(server, "web-root-operator-1", "", []byte("cred-1"))
 	sess, _, err := mgr.Issue(context.Background(), "web-root-operator-1", "web-login", "")
 	require.NoError(t, err)
 	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")

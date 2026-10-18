@@ -489,6 +489,9 @@ func (m *manager) Elevate(ctx context.Context, sessionID string, credentialID []
 	updated.Assurance = AssuranceStrong
 	updated.BoundIP = sourceIP
 	updated.CredentialID = credentialID
+	if len(updated.LoginCredentialID) == 0 {
+		updated.LoginCredentialID = credentialID
+	}
 	updated.LastProvenAt = now
 	updated.LastActivity = now
 	prevHash := ms.currentHash

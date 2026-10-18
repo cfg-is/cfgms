@@ -89,6 +89,7 @@ func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session
 		sess.BoundIP,
 		lastProvenAt,
 		sess.CredentialID,
+		sess.LoginCredentialID,
 		sess.RootScoped,
 		sess.Channel,
 	}
@@ -100,8 +101,8 @@ func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session
 		INSERT INTO session_token_records
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?
+			 assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?
 		WHERE 1 = 1`+guard+`
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = excluded.session_id,
@@ -115,6 +116,7 @@ func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session
 			bound_ip            = excluded.bound_ip,
 			last_proven_at      = excluded.last_proven_at,
 			credential_id       = excluded.credential_id,
+			login_credential_id = excluded.login_credential_id,
 			root_scoped         = excluded.root_scoped,
 			channel             = excluded.channel`, args...)
 	if err != nil {
@@ -181,17 +183,18 @@ func (s *SQLiteSessionTokenStore) Get(ctx context.Context, tokenHash string) (*s
 	var assurance int
 	var lastProvenAt sql.NullString
 	var credentialID []byte
+	var loginCredentialID []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_records
 		WHERE token_hash = ?
 		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)`, tokenHash, now,
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&issuedAt, &lastActivity, &absoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped, &sess.Channel,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -209,6 +212,9 @@ func (s *SQLiteSessionTokenStore) Get(ctx context.Context, tokenHash string) (*s
 	if len(credentialID) > 0 {
 		sess.CredentialID = credentialID
 	}
+	if len(loginCredentialID) > 0 {
+		sess.LoginCredentialID = loginCredentialID
+	}
 	return &sess, nil
 }
 
@@ -222,10 +228,11 @@ func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*sess
 	var assurance int
 	var lastProvenAt sql.NullString
 	var credentialID []byte
+	var loginCredentialID []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_records
 		WHERE session_id = ?
 		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)
@@ -233,7 +240,7 @@ func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*sess
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&issuedAt, &lastActivity, &absoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped, &sess.Channel,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -250,6 +257,9 @@ func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*sess
 	}
 	if len(credentialID) > 0 {
 		sess.CredentialID = credentialID
+	}
+	if len(loginCredentialID) > 0 {
+		sess.LoginCredentialID = loginCredentialID
 	}
 	return &sess, nil
 }
@@ -279,7 +289,7 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_records
 		WHERE hash_expires_at IS NULL OR hash_expires_at > ?
 		ORDER BY rowid`, now)
@@ -297,10 +307,11 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 		var assurance int
 		var lastProvenAt sql.NullString
 		var credentialID []byte
+		var loginCredentialID []byte
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&issuedAt, &lastActivity, &absoluteExpiresAt,
-			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped, &sess.Channel,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: session token list scan failed: %w", err)
 		}
@@ -317,6 +328,9 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 		}
 		if len(credentialID) > 0 {
 			sess.CredentialID = credentialID
+		}
+		if len(loginCredentialID) > 0 {
+			sess.LoginCredentialID = loginCredentialID
 		}
 		cp := sess
 		sessions = append(sessions, &cp)

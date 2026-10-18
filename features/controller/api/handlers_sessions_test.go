@@ -950,8 +950,7 @@ func TestCrossChannelValidation_InMemoryCachePath(t *testing.T) {
 	require.NoError(t, err)
 
 	// Issue a web session.
-	_, webToken, err := webMgr.Issue(ctx, "alice", "web-ctrl", testRootTenantID)
-	require.NoError(t, err)
+	webToken := loginWebSession(t, srv, webMgr, "alice", "web-ctrl", testRootTenantID)
 
 	// CLI token as Bearer → uses CLI manager → validates OK (same channel, in-memory).
 	cliReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
@@ -1016,14 +1015,13 @@ func TestCrossChannelValidation_PostRestartStoreRehydrationPath(t *testing.T) {
 	webMgr := session.NewManager(webCfg, store, time.Now)
 	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", testRootTenantID)
 	require.NoError(t, err)
-	_, webToken, err := webMgr.Issue(ctx, "bob", "web-ctrl", testRootTenantID)
-	require.NoError(t, err)
+	srv := setupTestServer(t)
+	webToken := loginWebSession(t, srv, webMgr, "bob", "web-ctrl", testRootTenantID)
 
 	// Simulate restart: fresh managers with empty in-memory maps over the same store.
 	freshCliMgr := session.NewManager(cliCfg, store, time.Now)
 	freshWebMgr := session.NewManager(webCfg, store, time.Now)
 
-	srv := setupTestServer(t)
 	srv.SetSessionManager(freshCliMgr)
 	srv.SetWebSessionManager(freshWebMgr)
 

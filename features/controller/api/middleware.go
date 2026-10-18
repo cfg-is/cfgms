@@ -1009,6 +1009,20 @@ func hasHeaderCredentials(r *http.Request) bool {
 // (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
 // M-AUTH-1: Load API keys from secret store on-demand if not in cache.
 // Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
+// accountHoldsCredential reports whether id is a non-empty credential ID present
+// on the account.
+func accountHoldsCredential(acct *account, id []byte) bool {
+	if len(id) == 0 {
+		return false
+	}
+	for _, c := range acct.Credentials {
+		if bytes.Equal(c.ID, id) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Issue #1675: relay principal — pre-validated by RelayHandler after grant check.
@@ -1272,26 +1286,50 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				implicitAdminWeb := false
 				permissions := []string{}
 				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
-				if webAcctErr == nil && webAcct != nil {
+				// A web session lives only while the passkeys behind it exist (Issue
+				// #5166): the account is the proof, so every request resolves it. A
+				// lookup error fails closed with 503 and leaves the session intact
+				// (the error may be transient); a missing account proves no
+				// credential and ends the session.
+				if webAcctErr != nil {
+					s.logger.Error("Web session account lookup failed",
+						"session_id", logging.SanitizeLogValue(webSess.ID),
+						"error", logging.SanitizeLogValue(webAcctErr.Error()))
+					s.writeErrorResponse(w, http.StatusServiceUnavailable,
+						"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+					return
+				}
+				// endWebSession revokes the session server-side (best effort) so the
+				// rejection is durable, and answers with the same 401 for every reason:
+				// the response must not distinguish "disabled", "passkey revoked" and
+				// "revoked".
+				endWebSession := func(reason string) {
+					s.csrfTokens.Delete(webSess.ID)
+					if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
+						s.logger.Warn("Failed to revoke "+reason+" web session",
+							"session_id", logging.SanitizeLogValue(webSess.ID),
+							"error", logging.SanitizeLogValue(revokeErr.Error()))
+					}
+					s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+				}
+				if webAcct == nil {
+					endWebSession("unbound")
+					return
+				}
+				{
 					acct := webAcct
 					// Issue #3126: an administratively disabled account loses access
-					// immediately, not at session expiry. The login gate in
-					// handlePasskeyLoginFinish only blocks new sessions; without this
-					// check a session issued before the disable keeps full API access
-					// for up to the absolute session timeout (12h) — including the
-					// implicit-admin grant below for a root-scope account, and the
-					// ability to step up assurance. Revoke the session server-side
-					// (best effort) so the rejection is durable, and answer with the
-					// same 401 a revoked session gets: the response must not
-					// distinguish "disabled" from "revoked".
+					// immediately, not at session expiry.
 					if acct.Disabled {
-						s.csrfTokens.Delete(webSess.ID)
-						if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
-							s.logger.Warn("Failed to revoke session of disabled account",
-								"session_id", logging.SanitizeLogValue(webSess.ID),
-								"error", logging.SanitizeLogValue(revokeErr.Error()))
-						}
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						endWebSession("disabled-account")
+						return
+					}
+					// Both the login passkey and the last proving passkey must still be
+					// on the account. An empty ID is refused: passkey login, the only
+					// issuer of web sessions, always records both.
+					if !accountHoldsCredential(acct, webSess.LoginCredentialID) ||
+						!accountHoldsCredential(acct, webSess.CredentialID) {
+						endWebSession("revoked-passkey")
 						return
 					}
 					authCount = len(acct.Credentials)

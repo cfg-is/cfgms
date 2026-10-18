@@ -17,7 +17,7 @@ import (
 )
 
 // webSessionRequest returns a request carrying a web session cookie for an
-// account cached on srv, issued (not elevated) for tenantID.
+// account cached on srv, issued for tenantID with a passkey that is on the account.
 func webSessionRequest(t *testing.T, srv *Server, issue func(principalID, tenantID string) string, acct *account, method, path string) *http.Request {
 	t.Helper()
 	srv.cacheAccount(acct)
@@ -35,7 +35,10 @@ func webSessionRequest(t *testing.T, srv *Server, issue func(principalID, tenant
 func TestRootTenantBinding_WebSessions(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 	issue := func(principalID, tenantID string) string {
-		_, token, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
+		ensureAccountHoldsCredential(srv, principalID, tenantID, fixtureCredentialID)
+		sess, _, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
+		require.NoError(t, err)
+		_, token, err := mgr.Elevate(context.Background(), sess.ID, fixtureCredentialID, fixtureLoginSourceIP)
 		require.NoError(t, err)
 		return token
 	}
@@ -83,7 +86,10 @@ func TestRootTenantBinding_RootWebSessionReachesRootOnlyEndpoints(t *testing.T) 
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 	srv.blobStore = newFSBlobStore(t)
 	issue := func(principalID, tenantID string) string {
-		_, token, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
+		ensureAccountHoldsCredential(srv, principalID, tenantID, fixtureCredentialID)
+		sess, _, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
+		require.NoError(t, err)
+		_, token, err := mgr.Elevate(context.Background(), sess.ID, fixtureCredentialID, fixtureLoginSourceIP)
 		require.NoError(t, err)
 		return token
 	}

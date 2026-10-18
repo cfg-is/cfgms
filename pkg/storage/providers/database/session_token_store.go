@@ -184,15 +184,19 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 	if len(sess.CredentialID) > 0 {
 		credentialID = sess.CredentialID
 	}
+	var loginCredentialID interface{}
+	if len(sess.LoginCredentialID) > 0 {
+		loginCredentialID = sess.LoginCredentialID
+	}
 
 	// The only dynamic fragment is the constant guard above; all values are bound parameters.
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO session_token_store
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel)
+			 assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel)
 		SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::timestamptz, $7::timestamptz,
-		       $8::timestamptz, NULL, $9::int, $10::text, $11::timestamptz, $12::bytea, $13::boolean, $14::text`+guard+`
+		       $8::timestamptz, NULL, $9::int, $10::text, $11::timestamptz, $12::bytea, $13::bytea, $14::boolean, $15::text`+guard+`
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = EXCLUDED.session_id,
 			principal_id        = EXCLUDED.principal_id,
@@ -205,6 +209,7 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 			bound_ip            = EXCLUDED.bound_ip,
 			last_proven_at      = EXCLUDED.last_proven_at,
 			credential_id       = EXCLUDED.credential_id,
+			login_credential_id = EXCLUDED.login_credential_id,
 			root_scoped         = EXCLUDED.root_scoped,
 			channel             = EXCLUDED.channel`,
 		tokenHash,
@@ -219,6 +224,7 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 		sess.BoundIP,
 		ts.lastProvenAt,
 		credentialID,
+		loginCredentialID,
 		sess.RootScoped,
 		sess.Channel,
 	)
@@ -240,10 +246,11 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	var assurance int
 	var lastProvenAt sql.NullTime
 	var credentialID []byte
+	var loginCredentialID []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_store
 		WHERE token_hash = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())`,
@@ -251,7 +258,7 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped, &sess.Channel,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -269,6 +276,9 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	if len(credentialID) > 0 {
 		sess.CredentialID = credentialID
 	}
+	if len(loginCredentialID) > 0 {
+		sess.LoginCredentialID = loginCredentialID
+	}
 	return &sess, nil
 }
 
@@ -280,10 +290,11 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 	var assurance int
 	var lastProvenAt sql.NullTime
 	var credentialID []byte
+	var loginCredentialID []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_store
 		WHERE session_id = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())
@@ -292,7 +303,7 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped, &sess.Channel,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -309,6 +320,9 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 	}
 	if len(credentialID) > 0 {
 		sess.CredentialID = credentialID
+	}
+	if len(loginCredentialID) > 0 {
+		sess.LoginCredentialID = loginCredentialID
 	}
 	return &sess, nil
 }
@@ -364,7 +378,7 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_store
 		WHERE hash_expires_at IS NULL OR hash_expires_at > NOW()
 		ORDER BY issued_at`)
@@ -381,10 +395,11 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 		var assurance int
 		var lastProvenAt sql.NullTime
 		var credentialID []byte
+		var loginCredentialID []byte
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped, &sess.Channel,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
 		); err != nil {
 			return nil, fmt.Errorf("database: session token list scan failed: %w", err)
 		}
@@ -401,6 +416,9 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 		}
 		if len(credentialID) > 0 {
 			sess.CredentialID = credentialID
+		}
+		if len(loginCredentialID) > 0 {
+			sess.LoginCredentialID = loginCredentialID
 		}
 		cp := sess
 		sessions = append(sessions, &cp)
