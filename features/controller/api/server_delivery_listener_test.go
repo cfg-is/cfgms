@@ -38,14 +38,16 @@ func newDeliveryListenerServer(t *testing.T, certMgr *cert.Manager) *Server {
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
 
 	server := setupTestServer(t)
-	server.cfg.MetricsListenAddr = reservePrivateMetricsAddress(t)
+	metricsListener := bindLoopbackListener(t)
+	server.SetMetricsListener(metricsListener)
+	server.cfg.MetricsListenAddr = metricsListener.Addr().String()
 	server.cfg.Certificate.EnableCertManagement = true
 	server.certManager = certMgr
 	// Cluster mode is the gate on internalRaftTLSConfig, whose result is also
 	// the delivery listener's TLS material. The inherited controller-CA client
 	// pool is the trust anchor here, exactly as it is in production.
 	server.cfg.HA = &config.HAConfig{Mode: "cluster"}
-	server.cfg.InternalListenAddr = reservePrivateMetricsAddress(t)
+	server.SetInternalListener(bindLoopbackListener(t))
 	return server
 }
 
@@ -184,7 +186,9 @@ func TestServerStartClose_DeliveryListenerServesAuthorizedPeersOnly(t *testing.T
 	certMgr := newTLSTestCertManager(t)
 	server := newDeliveryListenerServer(t, certMgr)
 
-	deliveryAddr := reservePrivateMetricsAddress(t)
+	deliveryListener := bindLoopbackListener(t)
+	deliveryAddr := deliveryListener.Addr().String()
+	server.SetDeliveryListener(deliveryListener)
 	server.SetDeliveryHandler(newDeliveryHandler(t), deliveryAddr, func() []string { return []string{"node-peer"} })
 
 	require.NoError(t, server.Start())
@@ -240,7 +244,9 @@ func TestServerClose_DeliveryGracefulStopHonoursContext(t *testing.T) {
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseOnce)
 
-	deliveryAddr := reservePrivateMetricsAddress(t)
+	deliveryListener := bindLoopbackListener(t)
+	deliveryAddr := deliveryListener.Addr().String()
+	server.SetDeliveryListener(deliveryListener)
 	server.SetDeliveryHandler(newDeliveryHandler(t), deliveryAddr, func() []string {
 		select {
 		case entered <- struct{}{}:

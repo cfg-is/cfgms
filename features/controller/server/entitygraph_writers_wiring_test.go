@@ -18,9 +18,7 @@ package server
 
 import (
 	"context"
-	"math/rand/v2"
 	"net"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,30 +47,6 @@ func newUngatedSweepLease(t *testing.T, name string) lease.SingletonJob {
 	job, err := (*ha.Manager)(nil).NewBackgroundLoopLease(name, logging.NewNoopLogger())
 	require.NoError(t, err)
 	return job
-}
-
-// reservePrivateMetricsAddressForWiring returns a free loopback address
-// outside the ephemeral port range, suitable for config.MetricsListenAddr —
-// ValidatePrivateListenerAddress requires a fixed numeric port (never 0), and
-// Server.Start()'s API server fails closed without one. Mirrors
-// features/controller/api's own reservePrivateMetricsAddress test helper
-// (unexported there, so reimplemented here rather than imported).
-func reservePrivateMetricsAddressForWiring(t *testing.T) string {
-	t.Helper()
-	high := 32767
-	low := 20000
-	for attempt := 0; attempt < 100; attempt++ {
-		port := low + rand.IntN(high-low+1)
-		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		listener, err := net.Listen("tcp", address)
-		if err != nil {
-			continue // in use by another process — try another port
-		}
-		require.NoError(t, listener.Close())
-		return address
-	}
-	t.Fatalf("no free loopback port in %d-%d after 100 attempts", low, high)
-	return ""
 }
 
 // newWiredEntityGraphTestServer builds a full Server via New(), the same
@@ -129,11 +103,17 @@ func newStartableWiredEntityGraphTestServer(t *testing.T, logger logging.Logger)
 
 	root := t.TempDir()
 	certPath := root + "/certs"
-	httpAddr := reservePrivateMetricsAddressForWiring(t)
+	// Port 0 lets the OS pick the public port at Start; the private metrics
+	// listener is bound here and handed to the API server still open, so no
+	// reserved port is ever released before it is used.
+	httpAddr := "127.0.0.1:0"
+	metricsListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = metricsListener.Close() })
 	cfg := &config.Config{
 		ListenAddr:        httpAddr,
 		ExternalURL:       "https://" + httpAddr,
-		MetricsListenAddr: reservePrivateMetricsAddressForWiring(t),
+		MetricsListenAddr: metricsListener.Addr().String(),
 		CertPath:          certPath,
 		DataDir:           root + "/data",
 		AdminBundlePath:   root + "/admin.bundle.yaml",
@@ -153,12 +133,14 @@ func newStartableWiredEntityGraphTestServer(t *testing.T, logger logging.Logger)
 	// First-run initialization (`controller --init`): New() refuses to start an
 	// uninitialized controller (ErrNotInitialized) when cert management is
 	// enabled, matching test/integration/controller/health_routes_test.go.
-	_, err := initialization.Run(cfg, logger)
+	_, err = initialization.Run(cfg, logger)
 	require.NoError(t, err, "initialization.Run")
 
 	srv, err := New(cfg, logger)
 	require.NoError(t, err)
 	require.NotNil(t, srv)
+	require.NotNil(t, srv.httpServer, "New must build the API server")
+	srv.httpServer.SetMetricsListener(metricsListener)
 	t.Cleanup(func() { assert.NoError(t, srv.Stop()) })
 	return srv
 }

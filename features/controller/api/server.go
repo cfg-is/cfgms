@@ -75,6 +75,9 @@ type Server struct {
 	internalHTTPServer              *http.Server
 	deliveryHandler                 *internaldelivery.Server // ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery RPC
 	deliveryListenAddr              string
+	injectedMetricsListener         net.Listener
+	injectedInternalListener        net.Listener
+	injectedDeliveryListener        net.Listener
 	deliveryPeerNodeIDs             func() []string // cluster node IDs authorized to call the delivery RPC (nil denies every caller)
 	deliveryGRPCServer              *grpc.Server
 	router                          *mux.Router
@@ -1024,6 +1027,9 @@ func (s *Server) Start() error {
 	// Determine listen address for HTTP server (different from gRPC)
 	httpAddr := s.getHTTPListenAddr()
 	metricsAddr := s.cfg.MetricsListenAddr
+	if s.injectedMetricsListener != nil {
+		metricsAddr = s.injectedMetricsListener.Addr().String()
+	}
 	if err := config.ValidatePrivateListenerAddress(metricsAddr); err != nil {
 		return fmt.Errorf("invalid private metrics listener: %w", err)
 	}
@@ -1044,6 +1050,9 @@ func (s *Server) Start() error {
 	var internalTLSConfig *tls.Config
 	if s.cfg.HA.IsClusterMode() {
 		internalAddr = s.cfg.InternalListenAddr
+		if s.injectedInternalListener != nil {
+			internalAddr = s.injectedInternalListener.Addr().String()
+		}
 		if err := validatePrivateListenAddr(internalAddr); err != nil {
 			return fmt.Errorf("invalid internal Raft listener: %w", err)
 		}
@@ -1059,14 +1068,20 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("bind public API listener: %w", err)
 	}
-	metricsListener, err := net.Listen("tcp", metricsAddr)
-	if err != nil {
-		_ = publicListener.Close()
-		return fmt.Errorf("bind private metrics listener: %w", err)
+	metricsListener := s.injectedMetricsListener
+	if metricsListener == nil {
+		metricsListener, err = net.Listen("tcp", metricsAddr)
+		if err != nil {
+			_ = publicListener.Close()
+			return fmt.Errorf("bind private metrics listener: %w", err)
+		}
 	}
 	var internalListener net.Listener
 	if internalTLSConfig != nil {
-		internalListener, err = net.Listen("tcp", internalAddr)
+		internalListener = s.injectedInternalListener
+		if internalListener == nil {
+			internalListener, err = net.Listen("tcp", internalAddr)
+		}
 		if err != nil {
 			_ = publicListener.Close()
 			_ = metricsListener.Close()
@@ -1079,8 +1094,12 @@ func (s *Server) Start() error {
 	// its connections directly rather than sharing net/http's listener — reusing
 	// the same mTLS trust material (internalTLSConfig, the HA peer CA).
 	var deliveryListener net.Listener
-	if internalTLSConfig != nil && s.deliveryHandler != nil && s.deliveryListenAddr != "" {
-		if err := validatePrivateListenAddr(s.deliveryListenAddr); err != nil {
+	deliveryAddr := s.deliveryListenAddr
+	if s.injectedDeliveryListener != nil {
+		deliveryAddr = s.injectedDeliveryListener.Addr().String()
+	}
+	if internalTLSConfig != nil && s.deliveryHandler != nil && deliveryAddr != "" {
+		if err := validatePrivateListenAddr(deliveryAddr); err != nil {
 			_ = publicListener.Close()
 			_ = metricsListener.Close()
 			if internalListener != nil {
@@ -1088,7 +1107,10 @@ func (s *Server) Start() error {
 			}
 			return fmt.Errorf("invalid internal delivery listener: %w", err)
 		}
-		deliveryListener, err = net.Listen("tcp", s.deliveryListenAddr)
+		deliveryListener = s.injectedDeliveryListener
+		if deliveryListener == nil {
+			deliveryListener, err = net.Listen("tcp", deliveryAddr)
+		}
 		if err != nil {
 			_ = publicListener.Close()
 			_ = metricsListener.Close()
@@ -1791,6 +1813,34 @@ func (s *Server) SetDeliveryHandler(handler *internaldelivery.Server, listenAddr
 	s.deliveryHandler = handler
 	s.deliveryListenAddr = listenAddr
 	s.deliveryPeerNodeIDs = peerNodeIDs
+}
+
+// SetMetricsListener hands Start an already-bound listener for the private
+// metrics endpoint instead of having it bind cfg.MetricsListenAddr. The listener's
+// bound address is validated with config.ValidatePrivateListenerAddress, so the
+// production rules are unchanged. Once Start succeeds it owns the listener and
+// Close closes it; if Start returns early, the caller still owns it. A nil listener (the default) keeps the net.Listen path.
+// Call before Start().
+func (s *Server) SetMetricsListener(l net.Listener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injectedMetricsListener = l
+}
+
+// SetInternalListener is SetMetricsListener for the cluster-mode internal Raft
+// listener; it is ignored outside cluster mode.
+func (s *Server) SetInternalListener(l net.Listener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injectedInternalListener = l
+}
+
+// SetDeliveryListener is SetMetricsListener for the internal delivery listener.
+// It takes effect only when SetDeliveryHandler has also been called.
+func (s *Server) SetDeliveryListener(l net.Listener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injectedDeliveryListener = l
 }
 
 // Registry returns the wired active-steward connection registry, or nil if
