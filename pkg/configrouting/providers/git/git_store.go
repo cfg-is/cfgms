@@ -85,7 +85,7 @@ func NewGitConfigStore(
 			if rmErr := RemoveCloneDir(workDir, repoDir); rmErr != nil && logger != nil {
 				logger.Warn("git-store: failed to remove clone directory after failed construction",
 					"tenant_id", logging.SanitizeLogValue(tenantID),
-					"error", logging.SanitizeLogValue(rmErr.Error()),
+					"error_category", categorizeError(rmErr),
 				)
 			}
 		}
@@ -167,13 +167,39 @@ func relativeToWorkDir(workDir, dir string) (string, error) {
 	if resolved, evalErr := filepath.EvalSymlinks(rawBase); evalErr == nil && resolved != rawBase {
 		bases = append(bases, resolved)
 	}
+	// The target may itself be spelled through a symlink (/var vs /private/var), and
+	// may be partly removed already, so resolve its deepest existing ancestor too.
+	targets := []string{filepath.Clean(dir)}
+	if resolved := evalDeepestExisting(targets[0]); resolved != targets[0] {
+		targets = append(targets, resolved)
+	}
 	for _, b := range bases {
-		rel, relErr := filepath.Rel(b, filepath.Clean(dir))
-		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
-			return rel, nil
+		for _, t := range targets {
+			rel, relErr := filepath.Rel(b, t)
+			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+				return rel, nil
+			}
 		}
 	}
 	return dir, nil
+}
+
+// evalDeepestExisting resolves symlinks on the longest existing ancestor of p and
+// re-appends the non-existent tail. It returns p unchanged when nothing resolves.
+func evalDeepestExisting(p string) string {
+	tail := ""
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
 }
 
 // SyncWithRemote pulls latest changes from the remote. On success it returns the
