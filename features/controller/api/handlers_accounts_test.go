@@ -1287,6 +1287,11 @@ func (s *errStoreSecretStore) StoreSecret(_ context.Context, _ *secretsif.Secret
 	return s.storeErr
 }
 
+// CompareAndSwapSecret fails the same way: the account-write handlers commit through it.
+func (s *errStoreSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, _ *secretsif.SecretRequest) (int, bool, error) {
+	return 0, false, s.storeErr
+}
+
 // TestAccounts_RevokeFailsClosedOnStoreError is the [REQUIRED TEST] for the
 // fail-closed revocation property (Issue #2974): when the durable write fails the
 // cached record must NOT be marked revoked, so a retry still finds an outstanding

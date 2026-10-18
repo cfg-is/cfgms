@@ -878,17 +878,6 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If a reset moves the account to a different storage tenant, remove the old
-	// record so the store never holds two live records for one username.
-	if existing != nil && accountStorageTenant(existing.TenantID) != accountStorageTenant(acct.TenantID) {
-		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
-		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
-			s.logger.Warn("Failed to delete account record from previous tenant",
-				"username", logging.SanitizeLogValue(acct.Username),
-				"error", logging.SanitizeLogValue(delErr.Error()))
-		}
-	}
-
 	// Issue #2974: mint a single-use, TTL-bounded enrollment magic link, but only for
 	// an account in the zero-authenticator state. An enrollment link is a bearer
 	// credential that registers a *first* passkey, so minting one against an account
@@ -920,11 +909,37 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		acct.EnrollmentLinkRevoked = existing.EnrollmentLinkHash != ""
 	}
 
-	if err := s.persistAccount(r.Context(), acct, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist account to secret store", "error", logging.SanitizeLogValue(err.Error()),
+	// The CAS version comes from the record this reset was built on, so a disable or
+	// credential revocation committed since that read is never silently undone. A
+	// record moved to a different storage tenant is a new key: create-if-absent.
+	moved := existing != nil && accountStorageTenant(existing.TenantID) != accountStorageTenant(acct.TenantID)
+	if existing != nil && !moved {
+		acct.Version = existing.Version
+	}
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), acct, actingPrincipalID)
+	if persistErr != nil {
+		s.logger.Error("Failed to persist account to secret store", "error", logging.SanitizeLogValue(persistErr.Error()),
 			"username", logging.SanitizeLogValue(acct.Username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist account", "STORE_ERROR")
 		return
+	}
+	if !swapped {
+		// No cache update, session revocation, audit event or returned link.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry", "ACCOUNT_MODIFIED")
+		return
+	}
+	acct.Version = newVersion
+
+	// If a reset moved the account to a different storage tenant, remove the old
+	// record so the store never holds two live records for one username.
+	if moved {
+		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
+		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
+			s.logger.Warn("Failed to delete account record from previous tenant",
+				"username", logging.SanitizeLogValue(acct.Username),
+				"error", logging.SanitizeLogValue(delErr.Error()))
+		}
 	}
 	s.cacheAccount(acct)
 
@@ -1023,17 +1038,24 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	// reload the live link for the rest of its TTL. Revocation must fail closed.
 	pending := *acct
 	pending.EnrollmentLinkRevoked = true
-	if err := s.persistAccount(r.Context(), &pending, actingPrincipalID); err != nil {
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &pending, actingPrincipalID)
+	if persistErr != nil {
 		s.logger.Error("Failed to persist enrollment link revocation",
-			"error", logging.SanitizeLogValue(err.Error()),
+			"error", logging.SanitizeLogValue(persistErr.Error()),
 			"username", logging.SanitizeLogValue(username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke enrollment link", "STORE_ERROR")
+		return
+	}
+	if !swapped {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the revocation", "ACCOUNT_MODIFIED")
 		return
 	}
 	// Durable write succeeded — now reflect it in the cached record. The cached
 	// pointer identity is preserved so concurrent holders observe the revocation.
 	s.mu.Lock()
 	acct.EnrollmentLinkRevoked = true
+	acct.Version = newVersion
 	s.mu.Unlock()
 	s.cacheAccount(acct)
 
@@ -1426,12 +1448,21 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		updated.EnrollmentLinkRevoked = false
 	}
 
-	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist account update", "error", logging.SanitizeLogValue(err.Error()),
+	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &updated, actingPrincipalID)
+	if persistErr != nil {
+		s.logger.Error("Failed to persist account update", "error", logging.SanitizeLogValue(persistErr.Error()),
 			"username", logging.SanitizeLogValue(username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update account", "STORE_ERROR")
 		return
 	}
+	if !swapped {
+		// Nothing below may run for a lost write: no session revocation, no audit,
+		// and the raw enrollment link minted above is never returned.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the update", "ACCOUNT_MODIFIED")
+		return
+	}
+	updated.Version = newVersion
 	s.cacheAccount(&updated)
 
 	// Issue #3126: both containment operations terminate the account's live browser
