@@ -148,7 +148,7 @@ async function hashRetryBody(body: RequestInit['body']): Promise<string> {
 async function presenceBinding(request: StepUpRequest) {
   return {
     method: (request.init.method ?? 'GET').toUpperCase(),
-    path: request.path.split('?')[0]!,
+    path: request.path,
     body_hash: await hashRetryBody(request.init.body),
     permission_id: request.permission,
   }

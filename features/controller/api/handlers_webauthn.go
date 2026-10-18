@@ -59,6 +59,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -99,6 +100,30 @@ type presenceActionBinding struct {
 	Path         string `json:"path"`
 	BodyHash     string `json:"body_hash"`
 	PermissionID string `json:"permission_id"`
+}
+
+// canonicalRequestTarget returns the path plus the query string with parameters
+// URL-decoded and sorted by key (values keep their order), so a presence token is
+// bound to the target tenant/resource chosen by query parameters as well as the path.
+func canonicalRequestTarget(path, rawQuery string) string {
+	if rawQuery == "" {
+		return path
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return path + "?" + rawQuery
+	}
+	if len(q) == 0 {
+		return path
+	}
+	return path + "?" + q.Encode()
+}
+
+// canonicalizeBindingTarget canonicalizes a client-supplied request target
+// ("/path?query") with the same form requirePermission computes at use.
+func canonicalizeBindingTarget(target string) string {
+	path, rawQuery, _ := strings.Cut(target, "?")
+	return canonicalRequestTarget(path, rawQuery)
 }
 
 // valid reports whether every field of the binding is populated. BodyHash is the
@@ -572,6 +597,7 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			in.Method = strings.ToUpper(in.Method)
+			in.Path = canonicalizeBindingTarget(in.Path)
 			action = &in
 		}
 	}

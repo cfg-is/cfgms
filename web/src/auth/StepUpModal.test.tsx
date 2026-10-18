@@ -205,7 +205,7 @@ describe('StepUpModal — presence action binding (Issue #5142)', () => {
     const sent = JSON.parse(String(beginCall?.[1]?.body)) as Record<string, string>
     expect(sent).toEqual({
       method: 'POST',
-      path: '/api/v1/modules/approvals/x/approve',
+      path: '/api/v1/modules/approvals/x/approve?tenant=t1',
       // SHA-256("hello")
       body_hash: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
       permission_id: 'module:approve',

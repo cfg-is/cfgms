@@ -1911,7 +1911,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					return
 				}
 				if record.boundPermissionID == "" || record.boundMethod != r.Method ||
-					record.boundPath != r.URL.Path || record.boundBodyHash != bodyHash ||
+					record.boundPath != canonicalRequestTarget(r.URL.Path, r.URL.RawQuery) || record.boundBodyHash != bodyHash ||
 					record.boundPermissionID != permissionID {
 					s.logger.Warn("Presence token action-binding mismatch",
 						"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),

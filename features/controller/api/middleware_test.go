@@ -2006,7 +2006,7 @@ func mintPresenceTokenFor(t *testing.T, s *Server, principalID string, req *http
 	t.Helper()
 	bodyHash, err := hashRequestBodyForPresenceBinding(req)
 	require.NoError(t, err)
-	return mintBoundPresenceToken(t, s, principalID, req.Method, req.URL.Path, bodyHash, permissionID)
+	return mintBoundPresenceToken(t, s, principalID, req.Method, canonicalRequestTarget(req.URL.Path, req.URL.RawQuery), bodyHash, permissionID)
 }
 
 // storePresenceTokenForTest stores rec the way the server under test keeps presence
@@ -4390,6 +4390,40 @@ func TestAuthenticationMiddleware_RenewReportsRevoked_Returns401(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "INVALID_SESSION_TOKEN")
 			assert.Empty(t, rec.Header().Get("X-Session-Token"))
 			assert.Empty(t, rec.Header().Get("Set-Cookie"))
+		})
+	}
+}
+
+func TestRequirePermission_UserPresence_ActionBinding_QueryString(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	base := "/api/v1/test/presence-action"
+
+	cases := []struct {
+		name  string
+		bound string
+		used  string
+		want  int
+	}{
+		{"other tenant refused", base + "?tenant=A", base + "?tenant=B", http.StatusUnauthorized},
+		{"same tenant admitted", base + "?tenant=A", base + "?tenant=A", http.StatusOK},
+		{"query added at use refused", base, base + "?tenant=B", http.StatusUnauthorized},
+		{"query dropped at use refused", base + "?tenant=A", base, http.StatusUnauthorized},
+		{"reordered query is same target", base + "?a=2&b=1", base + "?b=1&a=2", http.StatusOK},
+		{"encoded value is same target", base + "?tenant=a%20b", base + "?tenant=a+b", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := mintBoundPresenceToken(t, server, "test-admin", http.MethodPost,
+				canonicalizeBindingTarget(tc.bound), emptyBodyHashHex, "test:presence-required")
+			req := requestWithTLSCert(http.MethodPost, tc.used, adminCert)
+			req.Header.Set(presenceTokenHeader, token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tc.want, rec.Code)
 		})
 	}
 }
