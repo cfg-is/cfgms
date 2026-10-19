@@ -121,6 +121,9 @@ func materializePlaceholderNode(ctx context.Context, tx *sql.Tx, subject string)
 //
 // One EdgeView is returned per eg_edge_projection row (per source). Multiple
 // sources asserting the same (from, to, type) edge produce multiple EdgeViews.
+//
+// Rows are ordered by edge_key and paged by filter.Limit and filter.After; see
+// EdgeFilter for the clamp. A Limit of 0 returns at most MaxEdgePageSize rows.
 func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfaces.EdgeFilter) ([]*interfaces.EdgeView, error) {
 	var conds []string
 	var args []interface{}
@@ -152,18 +155,29 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 		)
 	}
 
+	if filter.After != "" {
+		afterKey, err := interfaces.DecodeEdgeCursor(filter.After)
+		if err != nil {
+			return nil, err
+		}
+		conds = append(conds, "ep.edge_key > ?")
+		args = append(args, afterKey)
+	}
+
 	where := ""
 	if len(conds) > 0 {
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
+	args = append(args, interfaces.ClampEdgeLimit(filter.Limit))
 
 	// #nosec G202 -- where is composed solely from fixed predicates and "?"
 	// placeholders; all filter values are passed separately through args.
-	q := `SELECT ep.from_subject, ep.to_subject, ep.edge_type, ep.source, ep.observed_at, ep.payload_hash, pc.payload
+	q := `SELECT ep.edge_key, ep.from_subject, ep.to_subject, ep.edge_type, ep.source, ep.observed_at, ep.payload_hash, pc.payload
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject
 		  LEFT JOIN eg_entity_index ti ON ti.subject = ep.to_subject
-		  LEFT JOIN eg_payload_content pc ON pc.payload_hash = ep.payload_hash` + where
+		  LEFT JOIN eg_payload_content pc ON pc.payload_hash = ep.payload_hash` + where +
+		" ORDER BY ep.edge_key LIMIT ?"
 
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -173,9 +187,9 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 
 	var views []*interfaces.EdgeView
 	for rows.Next() {
-		var fromSubj, toSubj, edgeType, source, observedAt, payloadHash string
+		var edgeKey, fromSubj, toSubj, edgeType, source, observedAt, payloadHash string
 		var payloadJSON sql.NullString
-		if err := rows.Scan(&fromSubj, &toSubj, &edgeType, &source, &observedAt, &payloadHash, &payloadJSON); err != nil {
+		if err := rows.Scan(&edgeKey, &fromSubj, &toSubj, &edgeType, &source, &observedAt, &payloadHash, &payloadJSON); err != nil {
 			return nil, fmt.Errorf("entitygraph/sqlite: scan edge row: %w", err)
 		}
 
@@ -217,6 +231,7 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 		views = append(views, &interfaces.EdgeView{
 			Edge:      edge,
 			Freshness: types.Freshness{ObservedAt: oa, RecordedAt: oa},
+			Cursor:    interfaces.EncodeEdgeCursor(edgeKey),
 		})
 	}
 	if err := rows.Err(); err != nil {

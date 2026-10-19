@@ -3552,11 +3552,20 @@ List edges attached to an entity.
 | `edge_type` | string, repeatable | Filter by edge type (e.g. `?edge_type=contains&edge_type=runs-on`) |
 | `source` | string | Filter by asserting source identity |
 | `direction` | `outbound` \| `inbound` | Which side of the edge `{eid}` occupies (default `outbound`: edges where `{eid}` is `From`) |
+| `limit` | integer | Page size, 1 to 1000 (default 100). Out of range is `400` |
+| `page_token` | string | The `NextToken` of the previous page. A value that is not a valid token is `400` |
 
-**Response (200):** `[]EdgeView`, each `{ "Edge": {...}, "Freshness": {...} }`
+**Response (200):** `{ "Edges": [...], "NextToken": "" }`. `Edges` is a list of `EdgeView`, each
+`{ "Edge": {...}, "Freshness": {...}, "Cursor": "..." }`, in a stable order. The endpoint no longer
+returns every edge: without `limit` it returns the first 100. `NextToken` is empty on the last page,
+including a last page that is exactly `limit` long. Otherwise pass it as `page_token` for the next
+page. A caller subject to the root tenant boundary never sees an edge to a client-tenant entity it
+may not read, and a `NextToken` never names one: the server reads further pages to fill the page
+with readable edges. If ten consecutive reads of the store hold no readable edge, the response is
+`422` with code `EDGE_SCAN_LIMIT` rather than a silently truncated listing.
 
 This endpoint does not pre-check entity existence — an unknown or cross-tenant
-`{eid}` returns an empty list (`[]`), not 404, because `GetEdges` filters by the
+`{eid}` returns an empty page (`"Edges": []`), not 404, because `GetEdges` filters by the
 EID's `owning_tenant` at the storage layer.
 
 #### POST /api/v1/entities/edges

@@ -19,6 +19,7 @@ package interfaces_test
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,9 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("NeighborhoodDepthCap", func(t *testing.T) { testEGNeighborhoodDepthCap(t, factory) })         // AC 3
 	t.Run("NeighborhoodTenantPerHop", func(t *testing.T) { testEGNeighborhoodTenantPerHop(t, factory) }) // AC 4
 	t.Run("GetEdgesTenantFilter", func(t *testing.T) { testEGGetEdgesTenantFilter(t, factory) })         // AC 5
+	t.Run("GetEdgesPaging", func(t *testing.T) { testEGGetEdgesPaging(t, factory) })
+	t.Run("GetEdgesLimitClamp", func(t *testing.T) { testEGGetEdgesLimitClamp(t, factory) })
+	t.Run("GetEdgesBadCursor", func(t *testing.T) { testEGGetEdgesBadCursor(t, factory) })
 	// Story-4: claim-scoped ingest + source-closure retraction (Issue #2874)
 	t.Run("ClaimScopeEntityReplace", func(t *testing.T) { testEGClaimScopeEntityReplace(t, factory) })     // AC 1
 	t.Run("ClaimScopeEdgeReplace", func(t *testing.T) { testEGClaimScopeEdgeReplace(t, factory) })         // AC 2
@@ -3275,4 +3279,103 @@ func testEGTimelineSameAsCaseExact(t *testing.T, factory EntityGraphProviderFact
 	}
 	require.Len(t, got, 1)
 	assert.Contains(t, got[0], peerMine.String())
+}
+
+// egReportEdgeBatch reports n `contains` edges from fromEID to n distinct targets
+// in one batch. The targets are placeholder nodes (no tenant).
+func egReportEdgeBatch(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, source, fromEID, prefix string, n int) {
+	t.Helper()
+	obs := make([]types.Observation, 0, n)
+	now := time.Now().UTC()
+	for i := 0; i < n; i++ {
+		subject := fmt.Sprintf("contains|%s|host:%s/to%04d", fromEID, prefix, i)
+		obs = append(obs, egObservation(subject, source, now, map[string]interface{}{}))
+	}
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{Source: source, Observations: obs}))
+}
+
+// testEGGetEdgesPaging verifies that GetEdges pages through After in edge order
+// without gaps or duplicates, and that the tenant cut holds on every page.
+func testEGGetEdgesPaging(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	fromEID := egEID(t, "host:pg-auth/from1")
+	egReport(ctx, t, p, "observer:scan", fromEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/pg-a",
+	})
+	// 25 in-cut edges (targets are unowned placeholders, which the cut accepts
+	// only when the filter is inactive, so own them explicitly).
+	for i := 0; i < 25; i++ {
+		to := egEID(t, fmt.Sprintf("host:pg-auth/to%02d", i))
+		egReport(ctx, t, p, "observer:scan", to.String(), map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": "root/pg-a",
+		})
+		egReportEdge(ctx, t, p, "observer:scan", fromEID.String(), to.String(), "contains")
+	}
+	// One edge into another tenant sorts among them but must never appear.
+	foreign := egEID(t, "host:pg-auth/to12x")
+	egReport(ctx, t, p, "observer:scan", foreign.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/pg-b",
+	})
+	egReportEdge(ctx, t, p, "observer:scan", fromEID.String(), foreign.String(), "contains")
+
+	var seen []string
+	var sizes []int
+	after := ""
+	for page := 0; page < 5; page++ {
+		fromRef := fromEID
+		edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{
+			FromEID: &fromRef, TenantFilter: "root/pg-a", Limit: 10, After: after,
+		})
+		require.NoError(t, err)
+		if len(edges) == 0 {
+			break
+		}
+		sizes = append(sizes, len(edges))
+		for _, e := range edges {
+			require.NotEmpty(t, e.Cursor, "every row carries a cursor")
+			seen = append(seen, e.Edge.To.String())
+		}
+		after = edges[len(edges)-1].Cursor
+	}
+	assert.Equal(t, []int{10, 10, 5}, sizes)
+	require.Len(t, seen, 25)
+	assert.True(t, sort.StringsAreSorted(seen), "rows come back in key order: %v", seen)
+	uniq := map[string]struct{}{}
+	for _, s := range seen {
+		assert.NotEqual(t, foreign.String(), s, "cross-tenant edge must not be paged out")
+		uniq[s] = struct{}{}
+	}
+	assert.Len(t, uniq, 25, "no duplicates")
+}
+
+// testEGGetEdgesLimitClamp verifies that no Limit reads an unbounded edge set.
+func testEGGetEdgesLimitClamp(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	fromEID := egEID(t, "host:cl-auth/from1")
+	egReportEdgeBatch(ctx, t, p, "observer:scan", fromEID.String(), "cl-auth", interfaces.MaxEdgePageSize+2)
+
+	fromRef := fromEID
+	edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef})
+	require.NoError(t, err)
+	assert.Len(t, edges, interfaces.MaxEdgePageSize, "Limit 0 means MaxEdgePageSize")
+
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef, Limit: interfaces.MaxEdgePageSize * 10})
+	require.NoError(t, err)
+	assert.Len(t, edges, interfaces.MaxEdgePageSize+1, "Limit above the maximum clamps to MaxEdgePageSize+1")
+}
+
+// testEGGetEdgesBadCursor verifies a malformed After is rejected with
+// ErrInvalidEdgeCursor.
+func testEGGetEdgesBadCursor(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	fromRef := egEID(t, "host:bc-auth/from1")
+	_, err := p.GetEdges(context.Background(), interfaces.EdgeFilter{FromEID: &fromRef, After: "!!not base64!!"})
+	assert.ErrorIs(t, err, interfaces.ErrInvalidEdgeCursor)
 }

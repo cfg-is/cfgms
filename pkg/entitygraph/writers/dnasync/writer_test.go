@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -1231,4 +1233,35 @@ func TestF4_NoResolverWiredYieldsEmptyTenant(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, view)
 	require.Empty(t, view.Entity.OwningTenant, "with no resolver wired, owning_tenant must be empty, never the claimed value")
+}
+
+// TestEdgeCap_BatchLimitDropsLaterFragmentDeclarations verifies that fragments
+// whose declarations would take the batch past maxEdgesPerBatch lose them, that
+// earlier fragments keep theirs, and that every entity observation is written.
+func TestEdgeCap_BatchLimitDropsLaterFragmentDeclarations(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	perFrag := dnasync.MaxEdgesPerFragmentForTest
+	kept := dnasync.MaxEdgesPerBatchForTest / perFrag
+	total := kept + 2
+	var frags []*commonpb.Fragment
+	for i := 0; i < total; i++ {
+		frags = append(frags, makeFragWithEdges(fmt.Sprintf("cluster:bcap-%d", i), "observer:hyperv",
+			map[string]string{"state": "healthy"}, manyEdgeDecls(fmt.Sprintf("b%d", i), perFrag)))
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-bcap", frags, nil, types.DefaultTaxonomy()))
+
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("cluster:bcap-%d", i)
+		view, err := p.GetEntity(ctx, mustParseEID(t, id), interfaces.GetEntityOpts{})
+		require.NoError(t, err)
+		require.NotNil(t, view, "entity observation of %s must be written", id)
+		if i < kept {
+			assert.Len(t, outboundEdges(t, p, id), perFrag, "%s is within the batch limit", id)
+		} else {
+			assert.Empty(t, outboundEdges(t, p, id), "%s is past the batch limit", id)
+		}
+	}
 }
