@@ -961,8 +961,16 @@ func TestWORMAuditStore_StartAndCloseReconciliationLoop(t *testing.T) {
 	store.Start(ctx)
 	blobStore.setFailing(false)
 
+	// The condition runs on testify's poller goroutine while the loop is
+	// concurrently deleting the marker, so it must not use require/FailNow
+	// (markerExists): on Windows a stat racing the delete can return a
+	// transient sharing/access error, and FailNow from that goroutine would
+	// kill the poll and surface only as "Condition never satisfied". A stat
+	// error means "not yet known to be gone" — keep polling.
+	markerKey := blob.BlobKey{TenantID: tenantID, Namespace: pendingMarkerNamespace, Name: e.ID}
 	require.Eventually(t, func() bool {
-		return !markerExists(t, markerStore, tenantID, e.ID)
+		exists, err := markerStore.BlobExists(context.Background(), markerKey)
+		return err == nil && !exists
 	}, time.Second, 5*time.Millisecond, "the running reconciliation loop must ship the pending entry on its own tick")
 
 	closeDone := make(chan error, 1)
