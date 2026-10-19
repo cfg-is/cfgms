@@ -687,6 +687,10 @@ func TestControlChannel_Event_PerStreamInFlightCap(t *testing.T) {
 
 	require.Eventually(t, func() bool { return env.stats(t).EventsDropped >= extra },
 		5*time.Second, 10*time.Millisecond, "events past the stream cap must be dropped")
+	// Admitted handlers run on their own goroutines, so the drops can be counted
+	// before any of them has entered the probe; wait for them to start.
+	require.Eventually(t, func() bool { return probe.started.Load() >= maxInFlightEventsPerStream },
+		5*time.Second, 10*time.Millisecond, "events within the stream cap must reach the handler")
 	assert.EqualValues(t, maxInFlightEventsPerStream, probe.started.Load())
 	assert.EqualValues(t, maxInFlightEventsPerStream, probe.max.Load())
 
@@ -759,6 +763,10 @@ func TestControlChannel_Heartbeat_PerStreamAndPerTenantConcurrency(t *testing.T)
 	}
 	require.Eventually(t, func() bool { return env.stats(t).HeartbeatsDropped >= extra },
 		5*time.Second, 10*time.Millisecond, "heartbeats past one in flight must be dropped")
+	// The admitted handler runs on its own goroutine and may not have entered
+	// the probe yet when the drops are counted; wait for it to start.
+	require.Eventually(t, func() bool { return probe.started.Load() >= 1 },
+		5*time.Second, 10*time.Millisecond, "the in-flight heartbeat must reach the handler")
 	assert.EqualValues(t, 1, probe.started.Load())
 
 	// Per tenant: leave exactly the slot the in-flight heartbeat holds plus none
