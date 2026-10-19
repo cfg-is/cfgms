@@ -190,7 +190,7 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	acct, err := s.getAccount(r.Context(), principal.ID)
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Operator-payload sign begin: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -368,7 +368,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		return
 	}
 
-	acct, err := s.getAccount(r.Context(), principal.ID)
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Operator-payload sign finish: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),

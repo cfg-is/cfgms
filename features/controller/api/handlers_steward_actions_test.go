@@ -555,7 +555,7 @@ func TestStewardAction_WebAuthnProofCarriesManifest(t *testing.T) {
 	env := actionEnvelope(t, a, []string{saSteward}, "n-webauthn", exp)
 	proof := f.proofFor(t, env)
 
-	p := &Principal{ID: f.username, Name: f.username, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true}
+	p := &Principal{ID: f.principal.ID, Name: f.username, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true}
 	rec := n.do(http.MethodPost, "/stewards/"+saSteward+"/services/spooler/actions", p, map[string]interface{}{
 		"action": "restart", "justification": "restart", "nonce": "n-webauthn",
 		"expires_at": exp.Format(time.RFC3339), "targets": []string{saSteward}, "webauthn": proof.WebAuthn,

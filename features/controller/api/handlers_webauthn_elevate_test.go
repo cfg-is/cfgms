@@ -186,7 +186,7 @@ func TestStepUpBegin_AccountNotFound_404(t *testing.T) {
 func TestStepUpBegin_NoCredentials_409(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 	// A freshly-created account has zero credentials.
-	principal := &Principal{ID: username, Name: username}
+	principal := &Principal{ID: testAccountID(t, server, username), Name: username}
 	rec := doStepUpBegin(t, server, principal, "some-session-id")
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Equal(t, "NO_CREDENTIALS", errCode(t, rec.Body.Bytes()))
@@ -199,7 +199,7 @@ func TestStepUpBegin_Success_200(t *testing.T) {
 	injectCredential(t, server, username, credID)
 
 	const sessID = "test-web-session-id"
-	principal := &Principal{ID: username, Name: username}
+	principal := &Principal{ID: testAccountID(t, server, username), Name: username}
 	rec := doStepUpBegin(t, server, principal, sessID)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -259,7 +259,7 @@ func TestStepUpFinish_AccountNotFound_404(t *testing.T) {
 
 func TestStepUpFinish_NoActiveSession_400(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 	// No session injected — begin was never called.
 	rec := doStepUpFinish(t, server, principal, "sess", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -268,9 +268,9 @@ func TestStepUpFinish_NoActiveSession_400(t *testing.T) {
 
 func TestStepUpFinish_SessionExpired_400(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 	// Inject an already-expired session.
-	injectElevateSession(server, "sess", webauthn.SessionData{}, -time.Second, username)
+	injectElevateSession(server, "sess", webauthn.SessionData{}, -time.Second, testAccountID(t, server, username))
 	rec := doStepUpFinish(t, server, principal, "sess", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
@@ -281,7 +281,7 @@ func TestStepUpFinish_Throttled_429(t *testing.T) {
 
 	credID := []byte("throttle-test-cred")
 	injectCredential(t, server, username, credID)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	// Record enough failures to trigger the per-session throttle.
 	const sessID = "throttle-sess"
@@ -290,7 +290,7 @@ func TestStepUpFinish_Throttled_429(t *testing.T) {
 	}
 
 	// Inject a fresh (non-expired) session.
-	injectElevateSession(server, sessID, webauthn.SessionData{}, time.Minute, username)
+	injectElevateSession(server, sessID, webauthn.SessionData{}, time.Minute, testAccountID(t, server, username))
 
 	rec := doStepUpFinish(t, server, principal, sessID, nil)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
@@ -338,10 +338,10 @@ func TestStepUpFinish_SignCountClone_400(t *testing.T) {
 	}
 
 	const sessID = "clone-detect-sess"
-	injectElevateSession(server, sessID, sd, time.Minute, username)
+	injectElevateSession(server, sessID, sd, time.Minute, testAccountID(t, server, username))
 
 	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 	rec := doStepUpFinish(t, server, principal, sessID, body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()))
@@ -412,10 +412,10 @@ func TestStepUpFinish_Success(t *testing.T) {
 	require.NoError(t, valErr)
 	realSessID := webSess.ID
 
-	injectElevateSession(server, realSessID, sd, time.Minute, username)
+	injectElevateSession(server, realSessID, sd, time.Minute, testAccountID(t, server, username))
 
 	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/elevate/finish", body)
 	req = withPrincipal(req, principal)
@@ -511,11 +511,11 @@ func stepUpRaceFixture(t *testing.T) (*Server, string, *racingSecretStore, *Prin
 		Expires:              time.Now().Add(10 * time.Minute),
 	}
 	const sessID = "race-sess"
-	injectElevateSession(server, sessID, sd, time.Minute, username)
+	injectElevateSession(server, sessID, sd, time.Minute, testAccountID(t, server, username))
 
 	rs := installRacingStore(t, server)
 	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
-	return server, username, rs, &Principal{ID: username}, sessID, body
+	return server, username, rs, &Principal{ID: testAccountID(t, server, username)}, sessID, body
 }
 
 func TestStepUpFinish_CredentialRemovedDuringAssertion_Refused(t *testing.T) {
@@ -558,4 +558,15 @@ func TestStepUpFinish_SwapKeepsLosing_RefusedAfterOneRetry(t *testing.T) {
 	creds := storedAccount(t, server, username).Credentials
 	require.Len(t, creds, 1)
 	assert.Zero(t, creds[0].SignCount)
+}
+
+// testAccountID returns the account UUID for username. Cookie-authenticated web
+// principals carry the account UUID as Principal.ID (sessions are issued with
+// acct.ID), so tests modelling a real session must use it rather than the username.
+func testAccountID(t *testing.T, server *Server, username string) string {
+	t.Helper()
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct, "account %q must exist", username)
+	return acct.ID
 }

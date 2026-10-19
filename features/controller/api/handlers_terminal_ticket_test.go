@@ -248,7 +248,7 @@ func TestTerminalTicket_WebAuthnMintsTicketWithManifest(t *testing.T) {
 	exp := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
 	env := terminalEnvelope(t, ttSteward, "bash", []string{ttSteward}, "n-wa", exp)
 	proof := f.proofFor(t, env)
-	p := &Principal{ID: f.username, Name: f.username, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true}
+	p := &Principal{ID: f.principal.ID, Name: f.username, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true}
 	ticket := decodeTicket(t, n.do("/terminal/tickets/"+ttSteward, p, ticketBody("bash", "n-wa", exp, []string{ttSteward}, &proof)))
 
 	n.server.terminalTickets.Range(func(k, _ any) bool {

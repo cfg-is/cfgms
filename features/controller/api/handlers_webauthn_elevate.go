@@ -93,7 +93,7 @@ func (s *Server) handleStepUpBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getAccount(r.Context(), principal.ID)
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Step-up begin: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -173,7 +173,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getAccount(r.Context(), principal.ID)
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Step-up finish: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),

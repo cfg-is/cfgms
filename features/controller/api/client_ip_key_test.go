@@ -162,9 +162,9 @@ func TestClientIPKey_HandlerThrottleSites(t *testing.T) {
 				trustTestProxyNet(t, s)
 				return s.recordElevateFailure, func(remote, xff string) int {
 					const sessID = "ip-key-elevate"
-					injectElevateSession(s, sessID, webauthn.SessionData{}, time.Minute, username)
+					injectElevateSession(s, sessID, webauthn.SessionData{}, time.Minute, testAccountID(t, s, username))
 					req := withPrincipal(ipKeyTestRequest(http.MethodPost, "/api/v1/webauthn/elevate/finish", remote, xff),
-						&Principal{ID: username})
+						&Principal{ID: testAccountID(t, s, username)})
 					req = req.WithContext(context.WithValue(req.Context(), webSessionIDContextKey, sessID))
 					rec := httptest.NewRecorder()
 					s.handleStepUpFinish(rec, req)
@@ -183,10 +183,10 @@ func TestClientIPKey_HandlerThrottleSites(t *testing.T) {
 					s.operatorPayloadSignSessions.Store(sessID, &operatorPayloadSignSession{
 						data:      webauthn.SessionData{},
 						expires:   time.Now().Add(time.Minute),
-						accountID: username,
+						accountID: testAccountID(t, s, username),
 					})
 					req := withPrincipal(ipKeyTestRequest(http.MethodPost, "/api/v1/operator-payload/sign/finish", remote, xff),
-						&Principal{ID: username})
+						&Principal{ID: testAccountID(t, s, username)})
 					req = req.WithContext(context.WithValue(req.Context(), webSessionIDContextKey, sessID))
 					rec := httptest.NewRecorder()
 					s.handleOperatorPayloadSignFinish(rec, req)
