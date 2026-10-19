@@ -132,3 +132,32 @@ func TestCacheOnEvict_ReceivesEvictedValue(t *testing.T) {
 
 	assert.Equal(t, []interface{}{"old"}, got)
 }
+
+type frozenClock struct{ t time.Time }
+
+func (f frozenClock) Now() time.Time { return f.t }
+
+func TestCacheEvictFIFO_SameTickPicksOldest(t *testing.T) {
+	clock := frozenClock{t: time.Unix(1700000000, 0)}
+
+	t.Run("set then setmany evicts first", func(t *testing.T) {
+		c, rec := newEvictCache(t, CacheConfig{MaxRuntimeItems: 1, DefaultTTL: time.Hour, EvictionPolicy: EvictionFIFO, Clock: clock})
+		require.NoError(t, c.Set("a", 1, 0))
+		require.NoError(t, c.SetMany(map[string]interface{}{"b": 2}, 0))
+
+		assert.Equal(t, map[string]int{"a": 1}, callsFor(rec))
+	})
+
+	t.Run("oldest first across repeated evictions", func(t *testing.T) {
+		c, rec := newEvictCache(t, CacheConfig{MaxRuntimeItems: 3, DefaultTTL: time.Hour, EvictionPolicy: EvictionFIFO, Clock: clock})
+		for i, k := range []string{"a", "b", "c"} {
+			require.NoError(t, c.Set(k, i, 0))
+		}
+		require.NoError(t, c.Set("d", 3, 0))
+		assert.Equal(t, map[string]int{"a": 1}, callsFor(rec))
+		require.NoError(t, c.Set("e", 4, 0))
+		assert.Equal(t, map[string]int{"a": 1, "b": 1}, callsFor(rec))
+		require.NoError(t, c.Set("f", 5, 0))
+		assert.Equal(t, map[string]int{"a": 1, "b": 1, "c": 1}, callsFor(rec))
+	})
+}

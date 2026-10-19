@@ -120,6 +120,7 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 		ExpiresAt:     now.Add(ttl),
 		CreatedAt:     now,
 		LastAccessed:  now,
+		CreatedSeq:    c.accessSeq,
 		LastAccessSeq: c.accessSeq,
 		AccessCount:   0,
 	}
@@ -253,6 +254,7 @@ func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 			ExpiresAt:     expiresAt,
 			CreatedAt:     now,
 			LastAccessed:  now,
+			CreatedSeq:    c.accessSeq,
 			LastAccessSeq: c.accessSeq,
 			AccessCount:   0,
 		}
@@ -357,23 +359,24 @@ func (c *Cache) enforceMaxSize() []evictedItem {
 	}
 }
 
-// evictFIFO removes the oldest created items (simple FIFO eviction)
+// evictFIFO removes the oldest inserted items, ordered by CreatedSeq rather than
+// wall-clock time so coarse clocks cannot cause the wrong victim
 func (c *Cache) evictFIFO(count int) []evictedItem {
 	type entry struct {
-		key       string
-		createdAt time.Time
+		key        string
+		createdSeq uint64
 	}
 
-	// Collect all entries with creation times
+	// Collect all entries with insertion sequence numbers
 	entries := make([]entry, 0, len(c.items))
 	for key, item := range c.items {
-		entries = append(entries, entry{key: key, createdAt: item.CreatedAt})
+		entries = append(entries, entry{key: key, createdSeq: item.CreatedSeq})
 	}
 
-	// Sort by creation time (oldest first)
+	// Sort by insertion sequence (oldest first); timestamps may tie on coarse clocks
 	for i := 0; i < len(entries)-1; i++ {
 		for j := i + 1; j < len(entries); j++ {
-			if entries[i].createdAt.After(entries[j].createdAt) {
+			if entries[i].createdSeq > entries[j].createdSeq {
 				entries[i], entries[j] = entries[j], entries[i]
 			}
 		}

@@ -76,6 +76,7 @@ type CacheEntry struct {
 	ExpiresAt     time.Time
 	CreatedAt     time.Time // When the entry was created
 	LastAccessed  time.Time // When the entry was last accessed (for LRU)
+	CreatedSeq    uint64    // Monotonic insertion sequence number for deterministic FIFO ordering
 	LastAccessSeq uint64    // Monotonic sequence number for deterministic LRU ordering
 	AccessCount   int64     // Number of times accessed (for LFU)
 }
