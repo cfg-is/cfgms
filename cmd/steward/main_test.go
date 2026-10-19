@@ -1416,16 +1416,36 @@ func TestRunSteward_ControllerUnreachable_StartsDegraded(t *testing.T) {
 		return nil, fmt.Errorf("controller unreachable: connection refused")
 	})
 
-	// Use a 500ms context — far less than the 30s launcher startup window.
-	// The connectFunc blocks on error and retries; runStewardInternal must wait
-	// for ctx.Done() rather than exit early on the first connect failure.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	// Startup time before the first connect (e.g. the Windows data-dir lockdown)
+	// varies by host, so do not race a fixed wall-clock budget: wait for the
+	// first connect attempt with a generous bound, then cancel. The connectFunc
+	// fails and retries; runStewardInternal must stay up (degraded) rather than
+	// exit early on the first connect failure.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runStewardInternal(ctx, "tok_test_degraded", "", "", alwaysFails)
+	done := make(chan error, 1)
+	go func() {
+		done <- runStewardInternal(ctx, "tok_test_degraded", "", "", alwaysFails)
+	}()
 
-	assert.NoError(t, err, "runStewardInternal must return nil when ctx is cancelled (not an error)")
-	assert.Positive(t, connectAttempts.Load(), "connect must have been attempted at least once")
+	require.Eventually(t, func() bool { return connectAttempts.Load() > 0 },
+		30*time.Second, 10*time.Millisecond, "connect must have been attempted at least once")
+
+	// After a failed connect the steward must still be running.
+	select {
+	case err := <-done:
+		t.Fatalf("runStewardInternal exited after a failed connect instead of staying degraded: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err, "runStewardInternal must return nil when ctx is cancelled (not an error)")
+	case <-time.After(30 * time.Second):
+		t.Fatal("runStewardInternal did not return after context cancel")
+	}
 }
 
 // TestRunSteward_EarlyLoggerBeforeProviderInit verifies AC2: the early stderr
