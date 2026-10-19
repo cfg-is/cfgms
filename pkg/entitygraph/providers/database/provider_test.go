@@ -203,7 +203,7 @@ func TestCollapseAsOfWalkBudget(t *testing.T) {
 
 	t.Run("expired budget is too large", func(t *testing.T) {
 		orig := collapseAsOfWalkBudget
-		collapseAsOfWalkBudget = time.Nanosecond
+		collapseAsOfWalkBudget = -time.Second // already expired at creation: no clock-resolution dependence
 		t.Cleanup(func() { collapseAsOfWalkBudget = orig })
 		_, err := p.GetEntity(ctx, eid, opts)
 		require.ErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
