@@ -251,7 +251,7 @@ func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[t
 	return result, nil
 }
 
-// extractMACs returns the normalized (uppercase colon-delimited) MAC addresses
+// extractMACsCapped returns the normalized (uppercase colon-delimited) MAC addresses
 // for an entity. Two attribute layouts are supported:
 //
 //   - host entities (steward self-registration): mac_addresses (comma-separated
@@ -261,13 +261,9 @@ func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[t
 //
 // Both sides may use colon-delimited, hyphen-delimited, or bare 12-hex-char
 // notation. All are normalized before comparison.
-func extractMACs(view *types.EntityView) []string {
-	macs, _ := extractMACsCapped(view)
-	return macs
-}
-
-// extractMACsCapped is extractMACs limited to maxMACsPerEntity addresses; the
-// bool reports whether valid addresses beyond the limit were dropped.
+//
+// At most maxMACsPerEntity addresses are returned; the bool reports whether
+// valid addresses beyond the limit were dropped.
 func extractMACsCapped(view *types.EntityView) ([]string, bool) {
 	if view == nil || view.Entity == nil {
 		return nil, false
