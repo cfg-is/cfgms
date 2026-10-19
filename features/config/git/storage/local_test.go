@@ -112,3 +112,20 @@ func TestLocalRepositoryStore_ReadFile_RefusesSymlinks(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "file not found")
 }
+
+func TestLocalRepositoryStore_ReadFile_RefusesInCheckoutSymlinks(t *testing.T) {
+	repo := newSeededRepository(t)
+	require.NoError(t, os.Symlink("modules/firewall/config.yaml", filepath.Join(repo, "inl.yaml")))
+	require.NoError(t, os.Symlink("modules/firewall", filepath.Join(repo, "inldir")))
+
+	store := gitstorage.NewLocalRepositoryStore("", "")
+	ctx := context.Background()
+
+	data, err := store.ReadFile(ctx, repo, "inl.yaml")
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	data, err = store.ReadFile(ctx, repo, "inldir/config.yaml")
+	require.Error(t, err)
+	assert.Nil(t, data)
+}
