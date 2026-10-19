@@ -83,3 +83,32 @@ func TestLocalRepositoryStore_GetHistory(t *testing.T) {
 		assert.Equal(t, "service configuration", commits[0].Message)
 	})
 }
+
+func TestLocalRepositoryStore_ReadFile_RefusesSymlinks(t *testing.T) {
+	repo := newSeededRepository(t)
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	outsideDir := filepath.Dir(outside)
+
+	require.NoError(t, os.Symlink(outside, filepath.Join(repo, "leak.yaml")))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(repo, "linkdir")))
+
+	store := gitstorage.NewLocalRepositoryStore("", "")
+	ctx := context.Background()
+
+	data, err := store.ReadFile(ctx, repo, "leak.yaml")
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	data, err = store.ReadFile(ctx, repo, "linkdir/secret.txt")
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	data, err = store.ReadFile(ctx, repo, "modules/firewall/config.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "policy: baseline\n", string(data))
+
+	_, err = store.ReadFile(ctx, repo, "missing.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file not found")
+}

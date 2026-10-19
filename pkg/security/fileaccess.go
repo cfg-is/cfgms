@@ -18,6 +18,7 @@ package security
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,64 @@ func SecureReadFile(basePath, userPath string) ([]byte, error) {
 	// #nosec G304 - Secure file access wrapper with comprehensive path validation
 	// This function specifically prevents directory traversal attacks
 	return os.ReadFile(validatedPath)
+}
+
+// ErrNotRegularFile reports that a path names something other than a regular file.
+var ErrNotRegularFile = errors.New("not a regular file")
+
+// ErrSymlinkInPath reports that a path component is a symbolic link.
+var ErrSymlinkInPath = errors.New("symbolic link in path")
+
+// ReadRegularFileNoSymlinks reads relPath from inside the directory baseDir
+// without following any symbolic link. The read goes through an os.Root scoped
+// to baseDir, so nothing can resolve outside it. Every path component is
+// checked with Lstat and a link anywhere in the path (including a directory in
+// the middle) is refused with ErrSymlinkInPath. The type is checked on the open
+// handle, and anything but a regular file is refused with ErrNotRegularFile.
+// A missing file returns an error satisfying os.IsNotExist. The handle's
+// FileInfo is returned so callers need not stat the path a second time.
+func ReadRegularFileNoSymlinks(baseDir, relPath string) ([]byte, os.FileInfo, error) {
+	rel := filepath.FromSlash(relPath)
+	if !filepath.IsLocal(rel) {
+		return nil, nil, fmt.Errorf("path %q escapes the base directory", relPath)
+	}
+	rel = filepath.Clean(rel)
+
+	root, err := os.OpenRoot(baseDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i := range parts {
+		info, lerr := root.Lstat(filepath.Join(parts[:i+1]...))
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, nil, ErrSymlinkInPath
+		}
+	}
+
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, ErrNotRegularFile
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, info, nil
 }
 
 // writeFileNoFollow writes data like os.WriteFile but never follows a link at the leaf.
@@ -241,42 +300,52 @@ func resolveMissingTail(absBasePath, rel, userPath string) (string, error) {
 	if rel != "." {
 		components = strings.Split(rel, string(filepath.Separator))
 	}
+components:
 	for i, component := range components {
-		if resolved, evalErr := filepath.EvalSymlinks(filepath.Join(resolvedDir, component)); evalErr == nil {
-			inBase, err := containedPath(absBasePath, resolved, userPath)
+		// A plain component that another process creates between EvalSymlinks failing and
+		// Lstat succeeding is resolved again rather than rejected; the bound keeps a path
+		// that keeps flipping from looping forever.
+		for attempt := 0; attempt < maxResolveAttempts; attempt++ {
+			if resolved, evalErr := filepath.EvalSymlinks(filepath.Join(resolvedDir, component)); evalErr == nil {
+				inBase, err := containedPath(absBasePath, resolved, userPath)
+				if err != nil {
+					return "", err
+				}
+				followed, err := followReparsePoints(absBasePath, inBase, userPath)
+				if err != nil {
+					return "", err
+				}
+				resolvedDir = followed
+				continue components
+			}
+			// resolvedDir is canonical and inside the base, so joining one component onto it
+			// cannot traverse a link. os.Lstat never follows the leaf; on Windows it reports a
+			// dangling junction as a reparse point where a Root-relative Lstat did not.
+			candidate, err := containedPath(absBasePath, filepath.Join(resolvedDir, component), userPath)
 			if err != nil {
 				return "", err
 			}
-			followed, err := followReparsePoints(absBasePath, inBase, userPath)
-			if err != nil {
-				return "", err
+			info, lstatErr := os.Lstat(candidate)
+			if lstatErr != nil {
+				if os.IsPermission(lstatErr) {
+					return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
+				}
+				// Any other failure means the component does not exist (ErrNotExist, or Windows
+				// ERROR_INVALID_NAME for "a:b"): it and everything after it are the new tail.
+				return filepath.Join(append([]string{resolvedDir}, components[i:]...)...), nil
 			}
-			resolvedDir = followed
-			continue
-		}
-		// resolvedDir is canonical and inside the base, so joining one component onto it
-		// cannot traverse a link. os.Lstat never follows the leaf; on Windows it reports a
-		// dangling junction as a reparse point where a Root-relative Lstat did not.
-		candidate, err := containedPath(absBasePath, filepath.Join(resolvedDir, component), userPath)
-		if err != nil {
-			return "", err
-		}
-		info, lstatErr := os.Lstat(candidate)
-		if lstatErr != nil {
-			if os.IsPermission(lstatErr) {
-				return "", fmt.Errorf("failed to inspect path component of %s: %w", userPath, lstatErr)
+			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+				return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
 			}
-			// Any other failure means the component does not exist (ErrNotExist, or Windows
-			// ERROR_INVALID_NAME for "a:b"): it and everything after it are the new tail.
-			return filepath.Join(append([]string{resolvedDir}, components[i:]...)...), nil
-		}
-		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			return "", fmt.Errorf("dangling link or reparse point in path %s: refusing to follow", userPath)
 		}
 		return "", fmt.Errorf("failed to resolve path component of %s", userPath)
 	}
 	return resolvedDir, nil
 }
+
+// maxResolveAttempts bounds how often resolveMissingTail re-resolves one component that
+// appeared concurrently between its EvalSymlinks and Lstat checks.
+const maxResolveAttempts = 3
 
 // maxReparseHops bounds followReparsePoints so a junction cycle cannot loop forever.
 const maxReparseHops = 32

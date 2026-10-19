@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateAndCleanPath(t *testing.T) {
@@ -468,4 +471,31 @@ func TestSecureOpenFile(t *testing.T) {
 			t.Errorf("Should be file system error, not path validation, got %v", err)
 		}
 	})
+}
+
+func TestReadRegularFileNoSymlinks(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "s.txt"), []byte("secret"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "d"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(base, "d", "ok.txt"), []byte("ok"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "s.txt"), filepath.Join(base, "leaf")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(base, "dirlink")))
+	require.NoError(t, os.Symlink(filepath.Join(base, "d"), filepath.Join(base, "inlink")))
+
+	data, info, err := ReadRegularFileNoSymlinks(base, "d/ok.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "ok", string(data))
+	assert.NotNil(t, info)
+
+	for _, p := range []string{"leaf", "dirlink/s.txt", "inlink/ok.txt"} {
+		_, _, err = ReadRegularFileNoSymlinks(base, p)
+		assert.ErrorIs(t, err, ErrSymlinkInPath, p)
+	}
+	_, _, err = ReadRegularFileNoSymlinks(base, "d")
+	assert.ErrorIs(t, err, ErrNotRegularFile)
+	_, _, err = ReadRegularFileNoSymlinks(base, "../x")
+	assert.Error(t, err)
+	_, _, err = ReadRegularFileNoSymlinks(base, "nope")
+	assert.True(t, os.IsNotExist(err))
 }
