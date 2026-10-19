@@ -2502,6 +2502,27 @@ Receive a git push event from an upstream SCM and trigger a config sync. The rou
 - `405 Method Not Allowed`: non-POST request.
 - `503 Service Unavailable`: no git-sync handler wired.
 
+### Role Configs
+
+#### GET /api/v1/roles
+
+List the role configs of the target tenant (`tenant` query parameter).
+
+**Authentication:** Required
+**Required permission:** `role:read`
+
+**Response:** `data` is the array of valid role configs. A role config that cannot be read or parsed is not omitted: it is reported in a top-level `errors` array, a sibling of `data`, with one `{name, reason}` item per broken role. `reason` is a fixed string (`malformed role config`), never the raw parse error. `errors` is absent when every role is readable.
+
+```json
+{
+  "data": [{"name": "web-servers", "selector": "os:linux"}],
+  "errors": [{"name": "broken-role", "reason": "malformed role config"}],
+  "timestamp": "2026-10-19T12:00:00Z"
+}
+```
+
+`cfg role ls` prints each reported role to stderr as a warning and still lists the valid roles.
+
 ### Rollback Management
 
 Rollback endpoints are registered only when a `RollbackManager` is wired in (`SetRollbackManager()`). They are available in all deployments that include the rollback feature.

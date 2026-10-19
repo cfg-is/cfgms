@@ -139,6 +139,37 @@ func TestRoleLsCmd_HappyPath(t *testing.T) {
 	assert.Contains(t, output, "os:linux")
 }
 
+// TestRoleLsCmd_ReportsUnreadableRoles verifies that roles listed in the errors
+// array are warned about on stderr while valid roles are still listed.
+func TestRoleLsCmd_ReportsUnreadableRoles(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"name": "role-a", "selector": "os:linux", "created_by": "admin"},
+			},
+			"errors": []map[string]interface{}{
+				{"name": "broken-role", "reason": "malformed role config"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cleanup := setRoleFlags(t, srv.URL)
+	defer cleanup()
+
+	var out, errOut bytes.Buffer
+	roleLsCmd.SetOut(&out)
+	roleLsCmd.SetErr(&errOut)
+	defer roleLsCmd.SetErr(nil)
+	require.NoError(t, runRoleLs(roleLsCmd, nil))
+
+	assert.Contains(t, out.String(), "role-a")
+	assert.NotContains(t, out.String(), "broken-role")
+	assert.Contains(t, errOut.String(), "broken-role")
+	assert.Contains(t, errOut.String(), "malformed role config")
+}
+
 // TestRoleLsCmd_Empty verifies that runRoleLs prints a helpful message when empty.
 func TestRoleLsCmd_Empty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

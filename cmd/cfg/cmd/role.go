@@ -236,10 +236,18 @@ func runRoleLs(cmd *cobra.Command, _ []string) error {
 	}
 
 	var apiResp struct {
-		Data []roleConfig `json:"data"`
+		Data   []roleConfig `json:"data"`
+		Errors []struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		} `json:"errors"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	for _, e := range apiResp.Errors {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: role %q unreadable: %q\n", e.Name, e.Reason)
 	}
 
 	if len(apiResp.Data) == 0 {

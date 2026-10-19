@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -163,6 +165,52 @@ func TestHandleListRoleConfigs_ReturnsTenantRoles(t *testing.T) {
 		names = append(names, m["name"].(string))
 	}
 	assert.ElementsMatch(t, []string{"role-alpha", "role-beta"}, names)
+}
+
+// TestHandleListRoleConfigs_ReportsMalformedEntry verifies an unparseable role
+// config is reported in the errors array instead of being dropped.
+func TestHandleListRoleConfigs_ReportsMalformedEntry(t *testing.T) {
+	server := setupRoleConfigServer(t)
+	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(validRolePayload("good-role", "all")))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	bad := []byte("{not valid json")
+	now := time.Now().UTC()
+	require.NoError(t, server.roleConfigStore.StoreConfig(context.Background(), &cfgconfig.ConfigEntry{
+		Key:       &cfgconfig.ConfigKey{TenantID: "test-tenant", Namespace: "role-policies", Name: "broken-role"},
+		Data:      bad,
+		Format:    cfgconfig.ConfigFormatJSON,
+		Checksum:  fmt.Sprintf("%x", sha256.Sum256(bad)),
+		CreatedAt: now,
+		UpdatedAt: now,
+		CreatedBy: "test",
+		UpdatedBy: "test",
+		Source:    "role-admin",
+	}))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec = httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp struct {
+		Data   []map[string]interface{} `json:"data"`
+		Errors []roleListError          `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "good-role", resp.Data[0]["name"])
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, "broken-role", resp.Errors[0].Name)
+	assert.Equal(t, "malformed role config", resp.Errors[0].Reason)
+	assert.NotContains(t, rec.Body.String(), "invalid character")
 }
 
 // TestHandleDeleteRoleConfig_RemovesRole verifies DELETE /api/v1/roles/{name} removes
