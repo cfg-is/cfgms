@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/internal/keysafe"
 )
@@ -305,6 +307,23 @@ func (s *FlatFileConfigStore) DeleteConfig(ctx context.Context, key *cfgconfig.C
 	return nil
 }
 
+// inConfigsLayout reports whether path, relative to root, has a "configs" path
+// segment before its file name (a segment test: hierarchical tenant IDs are
+// directories).
+func inConfigsLayout(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	for _, part := range parts[:len(parts)-1] {
+		if part == "configs" {
+			return true
+		}
+	}
+	return false
+}
+
 // ListConfigs returns all configuration entries matching the filter.
 func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	if filter != nil {
@@ -351,13 +370,27 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig
 
 		// path originates from WalkDir rooted at s.root; readFile retries
 		// transient Windows sharing violations from concurrent writers.
+		// Only files under a <tenant>/configs/ path are configs; other
+		// flatfile stores may share the root.
+		if !inConfigsLayout(s.root, path) {
+			return nil
+		}
 		raw, err := readFile(path)
 		if err != nil {
-			return nil // skip unreadable files
+			if os.IsNotExist(err) {
+				return nil // removed after the walk saw it: a concurrent delete
+			}
+			slog.Error("config store: unreadable config file",
+				"path", logging.SanitizeLogValue(path),
+				"error", logging.SanitizeLogValue(err.Error()))
+			return errors.New("failed to read config file")
 		}
 		var entry cfgconfig.ConfigEntry
 		if err := json.Unmarshal(raw, &entry); err != nil {
-			return nil // skip malformed files
+			slog.Error("config store: malformed config file",
+				"path", logging.SanitizeLogValue(path),
+				"error", logging.SanitizeLogValue(err.Error()))
+			return errors.New("failed to parse config file")
 		}
 		if applyConfigFilter(&entry, filter) {
 			results = append(results, &entry)

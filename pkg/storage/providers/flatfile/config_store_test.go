@@ -832,3 +832,90 @@ func TestInvalidKeyIsNotConfigNotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
 }
+
+// newRawConfigStore returns a store plus its root so tests can plant raw files.
+func newRawConfigStore(t *testing.T) (*flatfile.FlatFileConfigStore, string) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileConfigStore(root)
+	require.NoError(t, err)
+	return store, root
+}
+
+func plantFile(t *testing.T, path string, data []byte, mode os.FileMode) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, data, mode))
+}
+
+func TestListConfigs_UnparsableFileIsError(t *testing.T) {
+	store, root := newRawConfigStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.StoreConfig(ctx, testEntry("t1", "ns", "ok", []byte(`a`), cfgconfig.ConfigFormatJSON)))
+	bad := filepath.Join(root, "t1", "configs", "ns", "broken.json")
+	plantFile(t, bad, []byte("{not json"), 0o600)
+
+	for name, filter := range map[string]*cfgconfig.ConfigFilter{
+		"tenant filter": {TenantID: "t1"},
+		"empty filter":  {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.ListConfigs(ctx, filter)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), bad)
+			assert.NotContains(t, err.Error(), "broken.json")
+			assert.NotContains(t, err.Error(), root)
+		})
+	}
+}
+
+func TestListConfigs_UnreadableFileIsError(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("cannot make a file unreadable on this platform/user")
+	}
+	store, root := newRawConfigStore(t)
+	ctx := context.Background()
+	bad := filepath.Join(root, "t1", "configs", "ns", "locked.json")
+	plantFile(t, bad, []byte("{}"), 0o000)
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
+
+	for name, filter := range map[string]*cfgconfig.ConfigFilter{
+		"tenant filter": {TenantID: "t1"},
+		"empty filter":  {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.ListConfigs(ctx, filter)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), bad)
+		})
+	}
+}
+
+func TestListConfigs_StrayFileOutsideConfigsIgnored(t *testing.T) {
+	store, root := newRawConfigStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.StoreConfig(ctx, testEntry("t1", "ns", "ok", []byte(`a`), cfgconfig.ConfigFormatJSON)))
+	plantFile(t, filepath.Join(root, "other", "stray.json"), []byte("{not json"), 0o600)
+	plantFile(t, filepath.Join(root, "t1", "notes.yaml"), []byte(": : bad"), 0o600)
+
+	results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+}
+
+func TestListConfigs_FileRemovedAfterWalkIsSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	store, root := newRawConfigStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.StoreConfig(ctx, testEntry("t1", "ns", "ok", []byte(`a`), cfgconfig.ConfigFormatJSON)))
+	// A dangling link is seen by the walk but fails to open with not-exist,
+	// the same outcome as a file deleted between the walk and the read.
+	link := filepath.Join(root, "t1", "configs", "ns", "gone.json")
+	require.NoError(t, os.Symlink(filepath.Join(root, "missing-target"), link))
+
+	results, err := store.ListConfigs(ctx, &cfgconfig.ConfigFilter{TenantID: "t1"})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+}

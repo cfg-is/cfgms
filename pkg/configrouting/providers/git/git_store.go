@@ -355,7 +355,7 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		}
 		data, readErr := configRoot.ReadFile(relativePath)
 		if readErr != nil {
-			return nil // skip unreadable files
+			return fmt.Errorf("read config file: %w", readErr)
 		}
 
 		rel, relErr := filepath.Rel(base, path)
