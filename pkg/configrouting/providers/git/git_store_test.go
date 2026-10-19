@@ -936,3 +936,41 @@ func TestGitConfigStore_SyncRefusesAfterSourceURLChange(t *testing.T) {
 	assert.NotContains(t, err.Error(), token)
 	assert.False(t, sawAuth())
 }
+
+// TestGitConfigStore_GetConfig_RefusesSymlinks asserts a symlink committed in an
+// external source cannot be used to read files outside the checkout.
+func TestGitConfigStore_GetConfig_RefusesSymlinks(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{
+		"configs/networking/firewall.yaml": []byte("ok: true\n"),
+	})
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+		newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	outsideDir := t.TempDir()
+	secret := filepath.Join(outsideDir, "secret.yaml")
+	require.NoError(t, os.WriteFile(secret, []byte("secret: 1\n"), 0o600))
+
+	cfgDir := filepath.Join(store.RepoDir(), "configs")
+	require.NoError(t, os.Symlink(secret, filepath.Join(cfgDir, "networking", "leak.yaml")))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(cfgDir, "linked")))
+
+	get := func(ns, name string) (*cfgconfig.ConfigEntry, error) {
+		return store.GetConfig(context.Background(), &cfgconfig.ConfigKey{TenantID: "tenant1", Namespace: ns, Name: name})
+	}
+
+	entry, err := get("networking", "leak")
+	require.Error(t, err)
+	assert.Nil(t, entry)
+
+	entry, err = get("linked", "secret")
+	require.Error(t, err)
+	assert.Nil(t, entry)
+
+	entry, err = get("networking", "firewall")
+	require.NoError(t, err)
+	assert.Equal(t, "ok: true\n", string(entry.Data))
+
+	_, err = get("networking", "missing")
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+}

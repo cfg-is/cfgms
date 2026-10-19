@@ -267,12 +267,17 @@ func (s *GitConfigStore) GetCurrentSHA() (string, error) {
 
 // GetConfig reads the config file at <repoDir>/<subPath>/<namespace>/<name>.yaml.
 func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
-	fullPath, err := s.keyToPath(key)
+	relPath, err := s.keyToRelativePath(key)
 	if err != nil {
 		return nil, err
 	}
+	// Validate for traversal, then read through a root that refuses symlinks:
+	// the clone is an external source and may hold committed links.
+	if _, err := security.ValidateAndCleanPath(s.repoDir, relPath); err != nil {
+		return nil, fmt.Errorf("invalid config key path: %w", err)
+	}
 
-	data, err := os.ReadFile(fullPath) // #nosec G304 — path validated by ValidateAndCleanPath
+	data, info, err := security.ReadRegularFileNoSymlinks(s.repoDir, relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, cfgconfig.ErrConfigNotFound
@@ -280,17 +285,13 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
 
-	info, _ := os.Stat(fullPath)
-	entry := &cfgconfig.ConfigEntry{
-		Key:    key,
-		Data:   data,
-		Format: cfgconfig.ConfigFormatYAML,
-	}
-	if info != nil {
-		entry.UpdatedAt = info.ModTime()
-		entry.CreatedAt = info.ModTime()
-	}
-	return entry, nil
+	return &cfgconfig.ConfigEntry{
+		Key:       key,
+		Data:      data,
+		Format:    cfgconfig.ConfigFormatYAML,
+		UpdatedAt: info.ModTime(),
+		CreatedAt: info.ModTime(),
+	}, nil
 }
 
 // ListConfigs enumerates config files under <repoDir>/<subPath>/<filter.Namespace>/.
@@ -581,20 +582,6 @@ func (s *GitConfigStore) keyToRelativePath(key *cfgconfig.ConfigKey) (string, er
 	}
 	parts = append(parts, key.Namespace, key.Name+".yaml")
 	return path.Join(parts...), nil
-}
-
-// keyToPath builds and validates the absolute filesystem path for a ConfigKey.
-// Uses security.ValidateAndCleanPath to reject traversal attempts.
-func (s *GitConfigStore) keyToPath(key *cfgconfig.ConfigKey) (string, error) {
-	relPath, err := s.keyToRelativePath(key)
-	if err != nil {
-		return "", err
-	}
-	fullPath, err := security.ValidateAndCleanPath(s.repoDir, relPath)
-	if err != nil {
-		return "", fmt.Errorf("invalid config key path: %w", err)
-	}
-	return fullPath, nil
 }
 
 // --- credential and error helpers ---

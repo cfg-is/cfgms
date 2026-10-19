@@ -110,12 +110,28 @@ func (s *LocalRepositoryStore) Push(ctx context.Context, localPath string) error
 
 // ReadFile reads a file from the repository
 func (s *LocalRepositoryStore) ReadFile(ctx context.Context, localPath, filePath string) ([]byte, error) {
-	fullPath, err := security.ValidateAndCleanPath(localPath, filePath)
+	// The validation is only a traversal pre-check. Its result is symlink-resolved,
+	// so derive the relative path from the unresolved input: the reader must see
+	// the links in order to refuse them.
+	if _, err := security.ValidateAndCleanPath(localPath, filePath); err != nil {
+		return nil, fmt.Errorf("invalid file path: %w", err)
+	}
+	absBase, err := filepath.Abs(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("invalid file path: %w", err)
 	}
+	rel := filepath.Clean(filePath)
+	if filepath.IsAbs(rel) {
+		rel, err = filepath.Rel(absBase, rel)
+		if err != nil {
+			return nil, fmt.Errorf("invalid file path: %w", err)
+		}
+	}
+	resolvedBase := absBase
 
-	data, err := os.ReadFile(fullPath)
+	// Read through a root that refuses symlinks; the validation above is only
+	// a pre-check and cannot close the check-then-read race.
+	data, _, err := security.ReadRegularFileNoSymlinks(resolvedBase, rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("file not found: %s", filePath)
@@ -534,16 +550,6 @@ func (s *LocalRepositoryStore) SetAuth(username, password string) {
 	} else {
 		s.auth = nil
 	}
-}
-
-// InitRepository initializes a new repository
-func (s *LocalRepositoryStore) InitRepository(ctx context.Context, localPath string, bare bool) error {
-	_, err := git.PlainInit(localPath, bare)
-	if err != nil {
-		return fmt.Errorf("failed to init repository: %w", err)
-	}
-
-	return nil
 }
 
 // AddRemote adds a remote to the repository
