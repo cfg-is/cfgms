@@ -261,16 +261,40 @@ func (s *Server) handleListRoleConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	roles := make([]*RoleConfig, 0, len(entries))
+	var failures []roleListError
 	for _, entry := range entries {
 		rc, err := unmarshalRoleConfig(entry)
 		if err != nil {
-			s.logger.Warn("Skipping malformed role config entry", "name", logging.SanitizeLogValue(entry.Key.Name), "error", err)
+			s.logger.Warn("Malformed role config entry reported in listing",
+				"name", logging.SanitizeLogValue(entry.Key.Name),
+				"error", logging.SanitizeLogValue(err.Error()))
+			failures = append(failures, roleListError{Name: entry.Key.Name, Reason: roleMalformedReason})
 			continue
 		}
 		roles = append(roles, rc)
 	}
 
-	s.writeSuccessResponse(w, roles)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	s.encodeJSONBody(w, roleListResponse{Data: roles, Errors: failures, Timestamp: time.Now().UTC()}, "success")
+}
+
+// roleMalformedReason is the fixed, sanitized reason reported for a role config
+// that cannot be read or parsed; the raw parse error is only logged.
+const roleMalformedReason = "malformed role config"
+
+// roleListError names a role config that could not be listed.
+type roleListError struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// roleListResponse is the GET /api/v1/roles body: APIResponse plus a sibling
+// errors array so unreadable roles are reported rather than silently omitted.
+type roleListResponse struct {
+	Data      []*RoleConfig   `json:"data"`
+	Errors    []roleListError `json:"errors,omitempty"`
+	Timestamp time.Time       `json:"timestamp"`
 }
 
 // handleDeleteRoleConfig implements DELETE /api/v1/roles/{name}.
