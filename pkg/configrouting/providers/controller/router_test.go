@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -453,4 +454,62 @@ func TestCacheTTL_ExpiredEntryNotReturned(t *testing.T) {
 	clk.now = start.Add(100 * time.Millisecond)
 	_, ok := c.Get("root")
 	assert.False(t, ok, "cache must not return an expired entry")
+}
+
+// failingGetTenantStore decorates a real TenantStore so GetTenant fails for the
+// listed IDs while failing is set.
+type failingGetTenantStore struct {
+	business.TenantStore
+	failIDs map[string]error
+	failing atomic.Bool
+}
+
+func (s *failingGetTenantStore) GetTenant(ctx context.Context, id string) (*business.TenantData, error) {
+	if s.failing.Load() {
+		if err, ok := s.failIDs[id]; ok {
+			return nil, err
+		}
+	}
+	return s.TenantStore.GetTenant(ctx, id)
+}
+
+func TestGetEffectiveConfigSource_PathTenantLoadFailureIsError(t *testing.T) {
+	inner := newTenantStore(t)
+	addTenant(t, inner, "root", "", map[string]string{
+		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeController),
+	})
+	addTenant(t, inner, "mid", "root", map[string]string{
+		pkgconfig.MetaKeyConfigSourceType: string(pkgconfig.ConfigSourceTypeGit),
+		pkgconfig.MetaKeyConfigSourceURL:  "https://git.example.com/acme/configs.git",
+	})
+	addTenant(t, inner, "leaf", "mid", nil)
+	ts := &failingGetTenantStore{TenantStore: inner, failIDs: map[string]error{"mid": errors.New("backend unavailable")}}
+	ts.failing.Store(true)
+
+	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	info, err := router.GetEffectiveConfigSource(ctx, "leaf")
+	require.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), "mid")
+
+	// Nothing was cached: once the store is healthy the ancestor's git source resolves.
+	ts.failing.Store(false)
+	info, err = router.GetEffectiveConfigSource(ctx, "leaf")
+	require.NoError(t, err)
+	assert.Equal(t, pkgconfig.ConfigSourceTypeGit, info.Type)
+}
+
+func TestGetEffectiveConfigSource_PathTenantDoesNotExistIsSkipped(t *testing.T) {
+	inner := newTenantStore(t)
+	addTenant(t, inner, "root", "", nil)
+	addTenant(t, inner, "leaf", "root", nil)
+	ts := &failingGetTenantStore{TenantStore: inner, failIDs: map[string]error{"leaf": business.ErrTenantDoesNotExist}}
+	ts.failing.Store(true)
+
+	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "leaf")
+	require.NoError(t, err)
+	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }

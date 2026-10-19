@@ -255,7 +255,7 @@ func (s *Server) handleListRoleConfigs(w http.ResponseWriter, r *http.Request) {
 		Namespace: "role-policies",
 	})
 	if err != nil {
-		s.logger.Error("Failed to list role configs", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+		s.logger.Error("Failed to list role configs", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list role configs", "INTERNAL_ERROR")
 		return
 	}

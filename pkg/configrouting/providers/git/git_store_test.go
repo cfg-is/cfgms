@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -973,4 +974,25 @@ func TestGitConfigStore_GetConfig_RefusesSymlinks(t *testing.T) {
 
 	_, err = get("networking", "missing")
 	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+}
+
+// TestGitConfigStore_ListConfigs_UnreadableFileIsError verifies a .yaml file the
+// store cannot read fails the listing instead of vanishing from it.
+func TestGitConfigStore_ListConfigs_UnreadableFileIsError(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("cannot make a file unreadable on this platform/user")
+	}
+	remoteDir := createBareRemote(t, map[string][]byte{
+		"configs/networking/fw.yaml":  []byte("type: firewall\n"),
+		"configs/networking/dns.yaml": []byte("type: dns\n"),
+	})
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1", newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	locked := filepath.Join(store.RepoDir(), "configs", "networking", "dns.yaml")
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+
+	_, err = store.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant1"})
+	require.Error(t, err)
 }

@@ -10,6 +10,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -260,7 +261,10 @@ func (r *controllerRouter) GetEffectiveConfigSource(ctx context.Context, tenantI
 		tid := path[i]
 		tenant, err := r.tenantStore.GetTenant(ctx, tid)
 		if err != nil {
-			continue // skip tenants that can't be loaded
+			if errors.Is(err, business.ErrTenantDoesNotExist) {
+				continue // absent level
+			}
+			return nil, fmt.Errorf("failed to load tenant %q on config source path: %w", logging.SanitizeLogValue(tid), err)
 		}
 		if _, hasType := tenant.Metadata[pkgconfig.MetaKeyConfigSourceType]; hasType {
 			info, err := pkgconfig.ParseConfigSource(tenant.Metadata)
