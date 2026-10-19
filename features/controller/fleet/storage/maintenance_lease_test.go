@@ -217,20 +217,50 @@ func twoMaintenanceLeaseJobs(t *testing.T, name string, ttl, renew time.Duration
 // lease throughout — the DNA storage maintenance sweep is the longest-running
 // of the converted background loops (Flush + Optimize + retention enforcement
 // over the full dataset).
+//
+// Time is controlled, not slept (Issue #5178): the earlier version let the
+// cycle run 1.5x the TTL on the wall clock while node-b probed every 100ms,
+// which made the verdict depend on the runner scheduling node-a's renewal
+// goroutine inside a 1.6s window. On a loaded native Windows runner (unretried
+// flatfile rename path, coarse timers) one stalled renewal lapsed node-a's
+// authority and node-b legitimately took over. Here node-a's lease Clock is a
+// manualClock: each renewal tick is released by the test only after the
+// previous renewal was observed to complete, node-b probes after every
+// observed renewal, and the cycle is held open until logical time has passed
+// 1.5x the TTL.
 func TestManager_MaintenanceLease_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *testing.T) {
-	// Generous margin (ttl-renew=1.8s of scheduling slack per renewal) so this
-	// test does not race itself when the full suite runs packages in parallel
-	// under load — a tight margin here would make an occasional missed renewal
-	// window (goroutine scheduling delay, not a logic bug) look like a broken
-	// renewal loop.
 	ttl := 2 * time.Second
 	renew := 200 * time.Millisecond
-	leaseJobA, leaseJobB := twoMaintenanceLeaseJobs(t, "dna-storage-maintenance-slow-test", ttl, renew)
+	cycle := ttl + ttl/2
 
-	// The cycle runs 1.5x the lease TTL — impossible to complete without the
-	// background renewal loop extending the lease past its original expiry.
+	type renewalEvent struct {
+		n      int32
+		failed bool
+	}
+	events := make(chan renewalEvent, 64)
+
+	realStore := pkgtesting.SetupTestLeaseStore(t)
+	observedStore := &transientErrorLeaseStore{
+		LeaseStore: realStore, holderID: "node-a", // callNumber 0: never injects a failure
+		afterCall: func(n int32, failed bool) { events <- renewalEvent{n: n, failed: failed} },
+	}
+
+	clockA := newManualClock()
+	mgrAManager, err := lease.NewManagerWithClock(observedStore, ttl, renew, renew, clockA)
+	require.NoError(t, err)
+	mgrBManager, err := lease.NewManager(realStore, ttl, renew, renew)
+	require.NoError(t, err)
+
+	const name = "dna-storage-maintenance-slow-test"
+	leaseJobA, err := lease.NewSingletonJob(mgrAManager, name, "node-a", ttl, renew, nil)
+	require.NoError(t, err)
+	leaseJobB, err := lease.NewSingletonJob(mgrBManager, name, "node-b", ttl, renew, nil)
+	require.NoError(t, err)
+
+	blocking := &blockingFlushBackend{started: make(chan struct{}), release: make(chan struct{})}
 	mgrA := newMaintenanceLeaseManager(t, func(real Backend) Backend {
-		return &slowFlushBackend{Backend: real, delay: ttl + ttl/2}
+		blocking.Backend = real
+		return blocking
 	})
 	mgrA.SetMaintenanceLease(leaseJobA)
 
@@ -238,32 +268,54 @@ func TestManager_MaintenanceLease_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *tes
 	mgrB.SetMaintenanceLease(leaseJobB)
 
 	var nodeBAttempts int32
-	stopProbing := make(chan struct{})
-	probeDone := make(chan struct{})
+	probeB := func() {
+		mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+			atomic.AddInt32(&nodeBAttempts, 1)
+			mgrB.runMaintenance()
+		})
+	}
+
+	runCtxCh := make(chan context.Context, 1)
+	var ctxErrAfterCycle error
+	doneA := make(chan bool, 1)
 	go func() {
-		defer close(probeDone)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopProbing:
-				return
-			case <-ticker.C:
-				mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
-					atomic.AddInt32(&nodeBAttempts, 1)
-					mgrB.runMaintenance()
-				})
-			}
-		}
+		doneA <- mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(runCtx context.Context) {
+			runCtxCh <- runCtx
+			mgrA.runMaintenance()
+			ctxErrAfterCycle = runCtx.Err()
+		})
 	}()
 
-	ranA := mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
-		mgrA.runMaintenance()
-	})
-	close(stopProbing)
-	<-probeDone
+	runCtx := <-runCtxCh
+	<-blocking.started
+	<-events // the initial TryAcquire
+
+	// Each iteration: release exactly one renewal tick, wait for that renewal to finish, probe node-b.
+	start := clockA.Now()
+	renewals := 0
+	select {
+	case <-clockA.registered: // the renewal ticker exists; it is the only registration here
+	case <-runCtx.Done():
+		require.FailNow(t, "node-a's run context was cancelled before its first renewal tick")
+	}
+	for clockA.Now().Sub(start) < cycle {
+		if runCtx.Err() != nil {
+			require.FailNow(t, "node-a's run context was cancelled mid-cycle",
+				"after %d renewals (logical elapsed %s)", renewals, clockA.Now().Sub(start))
+		}
+		clockA.advance(renew)
+		ev := <-events
+		require.False(t, ev.failed, "no failure is injected in this test")
+		renewals++
+		probeB()
+	}
+	close(blocking.release)
+	ranA := <-doneA
 
 	assert.True(t, ranA)
+	assert.NoError(t, ctxErrAfterCycle, "node-a's context must survive a cycle longer than the TTL")
+	assert.GreaterOrEqual(t, renewals, int(cycle/renew),
+		"the cycle must have outlived the TTL through successful renewals")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&nodeBAttempts),
 		"node-b must never run while node-a's slow cycle is still renewing the lease")
 }
