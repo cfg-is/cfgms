@@ -241,7 +241,7 @@ func TestOperatorPayloadSignBegin_AccountNotFound_404(t *testing.T) {
 
 func TestOperatorPayloadSignBegin_NoCredentials_409(t *testing.T) {
 	server, username := setupOperatorPayloadSignServer(t)
-	principal := &Principal{ID: username, Name: username}
+	principal := &Principal{ID: testAccountID(t, server, username), Name: username}
 	rec := doSignBegin(t, server, principal, "sess", validBeginBody())
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Equal(t, "NO_CREDENTIALS", errCode(t, rec.Body.Bytes()))
@@ -250,7 +250,7 @@ func TestOperatorPayloadSignBegin_NoCredentials_409(t *testing.T) {
 func TestOperatorPayloadSignBegin_MissingContent_400(t *testing.T) {
 	server, username := setupOperatorPayloadSignServer(t)
 	injectSignCredential(t, server, username, []byte("cred-1"), []byte("pubkey"), 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	b, _ := json.Marshal(OperatorPayloadSignBeginRequest{Selector: "all", Shell: "bash"})
 	rec := doSignBegin(t, server, principal, "sess", bytes.NewReader(b))
@@ -261,7 +261,7 @@ func TestOperatorPayloadSignBegin_MissingContent_400(t *testing.T) {
 func TestOperatorPayloadSignBegin_MissingShell_400(t *testing.T) {
 	server, username := setupOperatorPayloadSignServer(t)
 	injectSignCredential(t, server, username, []byte("cred-1"), []byte("pubkey"), 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	b, _ := json.Marshal(OperatorPayloadSignBeginRequest{Selector: "all", Content: []byte("echo hi")})
 	rec := doSignBegin(t, server, principal, "sess", bytes.NewReader(b))
@@ -272,7 +272,7 @@ func TestOperatorPayloadSignBegin_MissingShell_400(t *testing.T) {
 func TestOperatorPayloadSignBegin_NoTargetsMatched_400(t *testing.T) {
 	server, username := setupOperatorPayloadSignServer(t)
 	injectSignCredential(t, server, username, []byte("cred-1"), []byte("pubkey"), 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	b, _ := json.Marshal(OperatorPayloadSignBeginRequest{
 		Selector: "name:no-such-host*", Content: []byte("echo hi"), Shell: "bash",
@@ -291,7 +291,7 @@ func TestOperatorPayloadSignBegin_ChallengeEqualsEnvelopeHash(t *testing.T) {
 	credID := []byte("begin-hash-cred")
 	_, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	rec := doSignBegin(t, server, principal, "sess", validBeginBody())
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -338,7 +338,7 @@ func TestOperatorPayloadSignBegin_NonceDiffersAcrossCalls(t *testing.T) {
 	credID := []byte("nonce-diff-cred")
 	_, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	rec1 := doSignBegin(t, server, principal, "sess-1", validBeginBody())
 	require.Equal(t, http.StatusOK, rec1.Code)
@@ -384,7 +384,7 @@ func TestOperatorPayloadSignBegin_ExceedsBlastRadius_Rejected(t *testing.T) {
 	}))
 
 	// "all" resolves both seeded stewards — 2 targets, over the tenant's bound of 1.
-	principal := &Principal{ID: username, TenantID: "tenant-a"}
+	principal := &Principal{ID: testAccountID(t, server, username), TenantID: "tenant-a"}
 	rec := doSignBegin(t, server, principal, "sess", validBeginBody())
 	require.Equal(t, http.StatusBadRequest, rec.Code,
 		"a resolved target list over the tenant's blast-radius bound must be hard rejected; body: %s", rec.Body.String())
@@ -436,7 +436,7 @@ func TestOperatorPayloadSignFinish_AccountNotFound_404(t *testing.T) {
 
 func TestOperatorPayloadSignFinish_NoActiveSession_400(t *testing.T) {
 	server, username := setupOperatorPayloadSignServer(t)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 	rec := doSignFinish(t, server, principal, "sess", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "NO_ACTIVE_SIGN_SESSION", errCode(t, rec.Body.Bytes()))
@@ -444,11 +444,11 @@ func TestOperatorPayloadSignFinish_NoActiveSession_400(t *testing.T) {
 
 func TestOperatorPayloadSignFinish_SessionExpired_400(t *testing.T) {
 	server, username := setupOperatorPayloadSignServer(t)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 	server.operatorPayloadSignSessions.Store("sess", &operatorPayloadSignSession{
 		data:      webauthn.SessionData{},
 		expires:   time.Now().Add(-time.Second),
-		accountID: username,
+		accountID: testAccountID(t, server, username),
 	})
 	rec := doSignFinish(t, server, principal, "sess", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -460,7 +460,7 @@ func TestOperatorPayloadSignFinish_Throttled_429(t *testing.T) {
 	credID := []byte("throttle-cred")
 	_, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	const sessID = "throttle-sess"
 	for i := 0; i < 4; i++ {
@@ -469,7 +469,7 @@ func TestOperatorPayloadSignFinish_Throttled_429(t *testing.T) {
 	server.operatorPayloadSignSessions.Store(sessID, &operatorPayloadSignSession{
 		data:      webauthn.SessionData{},
 		expires:   time.Now().Add(time.Minute),
-		accountID: username,
+		accountID: testAccountID(t, server, username),
 	})
 
 	rec := doSignFinish(t, server, principal, sessID, nil)
@@ -633,7 +633,7 @@ func TestOperatorPayloadSignFinish_ReplayedSession_Rejected(t *testing.T) {
 	credID := []byte("replay-cred")
 	priv, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	const sessID = "replay-sess"
 	beginRec := doSignBegin(t, server, principal, sessID, validBeginBody())
@@ -665,7 +665,7 @@ func TestOperatorPayloadSignFinish_SignCountClone_400(t *testing.T) {
 	priv, pubKey := generateSyntheticCredential(t)
 	// Stored sign count 100; the assertion response below will carry 0.
 	injectSignCredential(t, server, username, credID, pubKey, 100)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	const sessID = "clone-sess"
 	beginRec := doSignBegin(t, server, principal, sessID, validBeginBody())
@@ -693,7 +693,7 @@ func TestOperatorPayloadSignFinish_ForgedKey_Rejected(t *testing.T) {
 	credID := []byte("forged-cred")
 	_, registeredPubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, registeredPubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	const sessID = "forged-sess"
 	beginRec := doSignBegin(t, server, principal, sessID, validBeginBody())
@@ -724,7 +724,7 @@ func TestOperatorPayloadSignFinish_Success_EndToEnd(t *testing.T) {
 	credID := []byte("success-cred")
 	priv, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	const sessID = "success-sess"
 	beginRec := doSignBegin(t, server, principal, sessID, validBeginBody())
@@ -785,7 +785,7 @@ func TestOperatorPayloadSignBegin_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	credID := []byte("nonauthoritative-begin-cred")
 	_, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	server.haManager = newNonAuthoritativeHAManager(t)
 	server.SetNonceStore(newClusterFixture(t).nonces) // ClusterMode ceremony state is cluster-shared (Issue #4527)
@@ -816,7 +816,7 @@ func TestOperatorPayloadSignFinish_SucceedsOnNonAuthoritativeNode(t *testing.T) 
 	credID := []byte("nonauthoritative-finish-cred")
 	priv, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pubKey, 0)
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	server.haManager = newNonAuthoritativeHAManager(t)
 	server.SetNonceStore(newClusterFixture(t).nonces) // ClusterMode ceremony state is cluster-shared (Issue #4527)

@@ -193,7 +193,7 @@ func newWebAuthnActionFixture(t *testing.T) *webAuthnActionFixture {
 	priv, pub := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, credID, pub, 0)
 	setAccountGrant(t, server, username, true)
-	return &webAuthnActionFixture{server: server, username: username, principal: &Principal{ID: username}, priv: priv, credID: credID}
+	return &webAuthnActionFixture{server: server, username: username, principal: principalForAccount(t, server, username), priv: priv, credID: credID}
 }
 
 func setAccountGrant(t *testing.T, server *Server, username string, grant bool) {

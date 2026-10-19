@@ -237,7 +237,8 @@ func TestWebAuthnCluster_StepUpBeginOnAFinishOnB(t *testing.T) {
 	b, _ := setupPasskeySessionServer(t)
 	f.join(a)
 	f.join(b)
-	principal := &Principal{ID: username}
+	shareAccount(t, a, b, username)
+	principal := &Principal{ID: testAccountID(t, a, username)}
 	const sessID = "elevate-cluster-session"
 
 	require.Equal(t, http.StatusOK, doStepUpBegin(t, a, principal, sessID).Code)
@@ -278,7 +279,7 @@ func TestWebAuthnCluster_RegisterPresenceAndSignAcrossNodes(t *testing.T) {
 	assert.Equal(t, "NO_ACTIVE_PRESENCE_SESSION", errCode(t, doPresenceFinish(t, a, pa).Body.Bytes()))
 
 	// payload sign
-	sp := &Principal{ID: username}
+	sp := &Principal{ID: testAccountID(t, a, username)}
 	require.Equal(t, http.StatusOK, doSignBegin(t, a, sp, "sign-cluster-sess", validBeginBody()).Code)
 	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, doSignFinish(t, b, sp, "sign-cluster-sess", junkBody()).Body.Bytes()))
 	assert.Equal(t, "NO_ACTIVE_SIGN_SESSION", errCode(t, doSignFinish(t, a, sp, "sign-cluster-sess", junkBody()).Body.Bytes()))
@@ -296,7 +297,8 @@ func TestWebAuthnCluster_CeremoniesAreNamespaced(t *testing.T) {
 	f.join(a)
 	f.join(b)
 	injectCredentialWithPublicKey(t, b, username, []byte("cred-ns"), []byte("pk"), 0)
-	principal := &Principal{ID: username}
+	shareAccount(t, a, b, username)
+	principal := &Principal{ID: testAccountID(t, a, username)}
 
 	// A login challenge stored under ceremony ID X cannot finish an elevation whose
 	// web session ID is also X.
@@ -335,13 +337,13 @@ func TestWebAuthnCluster_FinishRefusesMismatchedBinding(t *testing.T) {
 	t.Run("elevate", func(t *testing.T) {
 		require.Equal(t, ceremonyOK, n.putElevateSession(ctx, "bind-sess", &webAuthnElevateSession{
 			data: specLoginSession(t), expires: exp, accountID: "someone-else"}))
-		rec := doStepUpFinish(t, n, &Principal{ID: username}, "bind-sess", junkBody())
+		rec := doStepUpFinish(t, n, &Principal{ID: testAccountID(t, n, username)}, "bind-sess", junkBody())
 		assert.Equal(t, "NO_ACTIVE_ELEVATION_SESSION", errCode(t, rec.Body.Bytes()))
 	})
 	t.Run("payload-sign", func(t *testing.T) {
 		require.Equal(t, ceremonyOK, n.putPayloadSignSession(ctx, "bind-sess", &operatorPayloadSignSession{
 			data: specLoginSession(t), expires: exp, accountID: "someone-else"}))
-		rec := doSignFinish(t, n, &Principal{ID: username}, "bind-sess", junkBody())
+		rec := doSignFinish(t, n, &Principal{ID: testAccountID(t, n, username)}, "bind-sess", junkBody())
 		assert.Equal(t, "NO_ACTIVE_SIGN_SESSION", errCode(t, rec.Body.Bytes()))
 	})
 	t.Run("register", func(t *testing.T) {
@@ -386,8 +388,8 @@ func TestWebAuthnCluster_ExpiredEntryRefusedWithoutSweep(t *testing.T) {
 	// A long store TTL but an entry whose own expiry has passed: the finish-side check
 	// refuses it even though no sweep ever ran.
 	require.Equal(t, ceremonyOK, n.putElevateSession(context.Background(), "exp-sess", &webAuthnElevateSession{
-		data: specLoginSession(t), expires: time.Now().Add(-time.Second), accountID: username}))
-	rec := doStepUpFinish(t, n, &Principal{ID: username}, "exp-sess", junkBody())
+		data: specLoginSession(t), expires: time.Now().Add(-time.Second), accountID: testAccountID(t, n, username)}))
+	rec := doStepUpFinish(t, n, &Principal{ID: testAccountID(t, n, username)}, "exp-sess", junkBody())
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
 
@@ -548,7 +550,7 @@ func TestWebAuthnCluster_UnwiredNonceStoreReturns503ForEveryCeremony(t *testing.
 	e.haManager = f.manager
 
 	p := principalForAccount(t, n, username)
-	sp := &Principal{ID: username}
+	sp := &Principal{ID: testAccountID(t, n, username)}
 	unavailable := func(t *testing.T, rec *httptest.ResponseRecorder) {
 		t.Helper()
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
@@ -610,7 +612,7 @@ func TestWebAuthnCluster_NonceStoreErrorRefusesRequest(t *testing.T) {
 	f.join(n)
 	fs := &failingNonceStore{NonceStore: f.nonces}
 	n.SetNonceStore(fs)
-	sp := &Principal{ID: username}
+	sp := &Principal{ID: testAccountID(t, n, username)}
 
 	fs.failPut = true
 	assert.Equal(t, http.StatusServiceUnavailable, doBegin(t, n, username).Code, "PutNonce error refuses begin")
@@ -644,7 +646,7 @@ func TestWebAuthnCluster_NonceStoreErrorRefusesRequest(t *testing.T) {
 func TestWebAuthnCluster_NonClusterKeepsNodeLocalState(t *testing.T) {
 	server, username := setupPasskeySessionServer(t)
 	assert.False(t, server.webAuthnClusterMode())
-	principal := &Principal{ID: username}
+	principal := &Principal{ID: testAccountID(t, server, username)}
 	require.Equal(t, http.StatusOK, doStepUpBegin(t, server, principal, "local-sess").Code)
 	assert.Equal(t, 1, syncMapLen(&server.webAuthnElevateSessions), "non-cluster path stays in memory")
 
@@ -656,4 +658,14 @@ func TestWebAuthnCluster_NonClusterKeepsNodeLocalState(t *testing.T) {
 	var back webAuthnElevateWire
 	require.NoError(t, json.Unmarshal(b, &back))
 	assert.Equal(t, wire.Data.Challenge, back.Data.Challenge, "SessionData survives the JSON wire round trip")
+}
+
+// shareAccount makes node b hold the same account record (and so the same account
+// ID) as node a, as nodes of one cluster do via the shared store.
+func shareAccount(t *testing.T, a, b *Server, username string) {
+	t.Helper()
+	acct, err := a.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NoError(t, b.persistAccount(context.Background(), acct, "test"))
+	b.cacheAccount(acct)
 }

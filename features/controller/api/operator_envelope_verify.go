@@ -135,7 +135,7 @@ func (s *Server) verifyActionWebAuthn(ctx context.Context, envelope operatorpayl
 	if principal == nil {
 		return "", fmt.Errorf("webauthn operator proof requires an authenticated principal")
 	}
-	acct, err := s.getAccount(ctx, principal.ID)
+	acct, err := s.getAccountByID(ctx, principal.ID)
 	if err != nil {
 		return "", fmt.Errorf("load operator account: %w", err)
 	}
