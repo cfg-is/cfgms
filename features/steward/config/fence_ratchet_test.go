@@ -391,3 +391,41 @@ func TestFenceRatchet_TermSignedSwitch(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, signed)
 }
+
+func TestFenceRatchet_CorruptStateFailsClosedForTermSigned(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not json"), 0o600))
+
+	signed, err := NewFenceRatchet(dir).TermSigned()
+	require.Error(t, err)
+	assert.True(t, signed, "a corrupt state file must read as term-signed")
+	assert.NotContains(t, err.Error(), "not json")
+}
+
+func TestFenceRatchet_MissingStateReadsUnsigned(t *testing.T) {
+	signed, err := NewFenceRatchet(t.TempDir()).TermSigned()
+	require.NoError(t, err)
+	assert.False(t, signed)
+}
+
+func TestFenceRatchet_SaveOverCorruptStateKeepsTermSigned(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not json"), 0o600))
+
+	require.NoError(t, NewFenceRatchet(dir).Save(true, 4))
+
+	signed, err := NewFenceRatchet(dir).TermSigned()
+	require.NoError(t, err)
+	assert.True(t, signed, "Save must not turn a corrupt file into TermSigned=false")
+}
+
+func TestFenceRatchet_MarkTermSignedOverCorruptStateWritesTrue(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not json"), 0o600))
+
+	require.NoError(t, NewFenceRatchet(dir).MarkTermSigned())
+
+	signed, err := NewFenceRatchet(dir).TermSigned()
+	require.NoError(t, err)
+	assert.True(t, signed)
+}

@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2125,4 +2126,60 @@ func TestHandleCommand_ConcurrentV1AndV2NeverAcceptsV1AfterSwitch(t *testing.T) 
 	wg.Wait()
 	h.Wait()
 	assert.Zero(t, violations.Load(), "a v1 stamped command was accepted after a v2 command had been accepted")
+}
+
+// flakyTermState wraps a real FenceRatchet and fails the first MarkTermSigned.
+type flakyTermState struct {
+	*stewardconfig.FenceRatchet
+	mu    sync.Mutex
+	marks int
+}
+
+func (f *flakyTermState) MarkTermSigned() error {
+	f.mu.Lock()
+	f.marks++
+	n := f.marks
+	f.mu.Unlock()
+	if n == 1 {
+		return errors.New("disk full")
+	}
+	return f.FenceRatchet.MarkTermSigned()
+}
+
+func TestNewHandler_CorruptFenceStateRefusesStampedV1(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "fence_ratchet.json"), []byte("{corrupt"), 0o600))
+
+	h := newTermSigningHandler(t, verifier, dir)
+	err := h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-corrupt", 5), cpTypes.SigningPayloadV1))
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+}
+
+func TestHandleCommand_FailedTermSignedPersistIsRetried(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	dir := t.TempDir()
+	state := &flakyTermState{FenceRatchet: stewardconfig.NewFenceRatchet(dir)}
+	h, err := New(&Config{
+		StewardID:        "steward-test",
+		OnStatus:         noopStatus,
+		Logger:           newTestLogger(t),
+		Verifier:         verifier,
+		ReplayWindow:     5 * time.Minute,
+		TermSigningState: state,
+	})
+	require.NoError(t, err)
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(context.Context, *cpTypes.Command) error { return nil })
+
+	for _, id := range []string{"v2-first", "v2-second"} {
+		require.NoError(t, h.HandleCommand(context.Background(),
+			signTermCommand(t, signer, termTestCommand(id, 4), cpTypes.SigningPayloadV2)))
+	}
+	h.Wait()
+
+	rebuilt := newTermSigningHandler(t, verifier, dir)
+	err = rebuilt.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v1-after-restart", 6), cpTypes.SigningPayloadV1))
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 }

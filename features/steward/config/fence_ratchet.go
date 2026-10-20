@@ -150,7 +150,9 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 			// Unreadable or corrupt on-disk state carries no high-water mark worth
 			// preserving; overwriting it with the current state is a repair, and
 			// treating this instance as seeded keeps the guard active from here on.
-			r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, false, true
+			// The term-signed switch is the exception: it fails closed, so the
+			// repair never turns a corrupt file into TermSigned=false.
+			r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, true, true
 		}
 	}
 
@@ -168,7 +170,8 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 // TermSigned reports whether the one-way term-signed switch has been set
 // (#5174): the steward has accepted a command whose term was covered by a
 // verified signature, so it must refuse stamped commands signed without it.
-// A missing file reads as false; the zero value (dir = "") always reads false.
+// A missing file reads as false; a corrupt or unreadable file reads as true
+// together with the error (fail closed); the zero value (dir = "") always reads false.
 func (r *FenceRatchet) TermSigned() (bool, error) {
 	if r == nil || r.dir == "" {
 		return false, nil
@@ -179,7 +182,9 @@ func (r *FenceRatchet) TermSigned() (bool, error) {
 
 	state, err := r.loadStateLocked()
 	if err != nil {
-		return false, err
+		// Fail closed: state that cannot be read or parsed reads as switched, so a
+		// corrupt file cannot re-open the window the switch closes.
+		return true, err
 	}
 	return state.TermSigned, nil
 }
@@ -198,7 +203,8 @@ func (r *FenceRatchet) MarkTermSigned() error {
 
 	if !r.seeded {
 		if _, err := r.loadStateLocked(); err != nil {
-			// As in Save: unreadable state has nothing worth preserving.
+			// As in Save: unreadable state has no term worth preserving, and the
+			// rewrite below carries TermSigned=true (fail closed).
 			r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, false, true
 		}
 	}

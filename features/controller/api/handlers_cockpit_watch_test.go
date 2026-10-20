@@ -57,6 +57,8 @@ type watchProbe struct {
 	mu          sync.Mutex
 	lastFilter  eginterfaces.WatchFilter
 	lastChannel <-chan eginterfaces.WatchEvent
+	lastErr     error
+	lastCtx     context.Context
 }
 
 func newWatchProbe(t *testing.T) *watchProbe {
@@ -70,6 +72,7 @@ func newWatchProbe(t *testing.T) *watchProbe {
 func (p *watchProbe) Watch(ctx context.Context, filter eginterfaces.WatchFilter, cursor string) (<-chan eginterfaces.WatchEvent, error) {
 	p.mu.Lock()
 	p.lastFilter = filter
+	p.lastCtx = ctx
 	p.mu.Unlock()
 
 	if p.bypassFilters {
@@ -83,6 +86,7 @@ func (p *watchProbe) Watch(ctx context.Context, filter eginterfaces.WatchFilter,
 	ch, err := p.SQLiteEntityGraphProvider.Watch(ctx, filter, cursor)
 	p.mu.Lock()
 	p.lastChannel = ch
+	p.lastErr = err
 	p.mu.Unlock()
 	// Signal after the real Watch returns: at that point the provider has already
 	// resolved its start cursor, so the caller may commit observations without
@@ -92,16 +96,17 @@ func (p *watchProbe) Watch(ctx context.Context, filter eginterfaces.WatchFilter,
 	return ch, err
 }
 
-// watchChannel returns the channel the real provider's Watch call returned,
-// so a test can observe it closing when the handler's session context is
-// cancelled (features/entitygraph/providers/sqlite/watch.go's watchLoop
-// closes its channel only on ctx.Done()).
-func (p *watchProbe) watchChannel(t *testing.T) <-chan eginterfaces.WatchEvent {
+// watchSession returns the session context the handler passed into Watch and
+// the channel and error the real provider's Watch call returned, so a test can
+// observe both the session context being cancelled and the provider's channel
+// closing as a result (pkg/entitygraph/providers/sqlite/watch.go's watchLoop
+// closes its channel only on ctx.Done()). When Watch failed the channel is nil.
+func (p *watchProbe) watchSession(t *testing.T) (context.Context, <-chan eginterfaces.WatchEvent, error) {
 	t.Helper()
 	p.waitSubscribed(t)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastChannel
+	return p.lastCtx, p.lastChannel, p.lastErr
 }
 
 // waitSubscribed blocks until the handler has established its Watch subscription.
@@ -726,8 +731,31 @@ func TestHandleCockpitWatch_DeadConnectionCancelsContext(t *testing.T) {
 	// indistinguishable server-side from a peer that vanished mid-session.
 
 	probe.waitSubscribed(t)
-	ch := probe.watchChannel(t)
+	sessionCtx, ch, watchErr := probe.watchSession(t)
+	require.NotNil(t, sessionCtx, "handler did not pass a session context into Watch")
 
+	// The session context is what the read pump's cancel() ends; observing it
+	// done is direct proof the dead connection's read deadline fired.
+	select {
+	case <-sessionCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("dead connection's read pump never cancelled the session context")
+	}
+
+	// The read pump starts before the handler calls Watch, so on a loaded
+	// machine the pong window can elapse — and cancel() run — while the provider
+	// is still resolving its start cursor. Watch then fails (context.Canceled or
+	// the driver's interrupt error) and returns a nil channel; there is no
+	// polling goroutine to leak, and receiving from the nil channel would block
+	// forever. The cancelled session context asserted above is the whole proof.
+	if watchErr != nil {
+		assert.Nil(t, ch, "a failed Watch must not hand back a channel")
+		return
+	}
+	require.NotNil(t, ch, "Watch returned neither a channel nor an error")
+
+	// Watch succeeded: the provider's polling goroutine must observe the
+	// cancellation and close its channel, or it leaks.
 	select {
 	case _, ok := <-ch:
 		assert.False(t, ok, "provider channel should be closed, not deliver an event")
