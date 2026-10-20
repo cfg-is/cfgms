@@ -20,6 +20,10 @@
 // becomes simple set-membership — is the delivered steward's ID in the list — requiring no
 // selector-parsing capability on the steward at all.
 //
+// The canonical layout is sha256(content)|shell|targets|nonce|expiresAt|executionContext;
+// the run-as account is bound so a command's delivered execution_context cannot be
+// changed without invalidating the signature.
+//
 // This package only encodes the envelope. Selector resolution, nonce generation, expiry
 // policy, and replay-cache tracking are all owned by consuming stories.
 package operatorpayload
@@ -54,7 +58,7 @@ const envelopeTargetSep = ","
 
 // Envelope is the canonical set of coordinates an operator signs to authorize command
 // execution: the command content, its shell, the frozen list of resolved target steward
-// IDs, a replay-prevention nonce, and an expiry.
+// IDs, a replay-prevention nonce, an expiry, and the account it runs as.
 type Envelope struct {
 	// Content is the raw command/script content. It is hashed (SHA-256) rather than
 	// embedded verbatim into the canonical message: unlike the other fields, script
@@ -79,16 +83,24 @@ type Envelope struct {
 
 	// ExpiresAt is the instant after which the envelope is no longer valid.
 	ExpiresAt time.Time
+
+	// ExecutionContext is the account the script runs as (e.g. "logged_in_user"). Empty
+	// means "none declared" and is allowed; it is still emitted as a sixth field so an
+	// empty and a non-empty context can never produce the same bytes.
+	ExecutionContext string
 }
 
 // CanonicalBytes returns the deterministic, injective byte sequence an operator signs for
-// e: sha256(content)|shell|target1,target2,...|nonce|expiresAt.
+// e: sha256(content)|shell|target1,target2,...|nonce|expiresAt|executionContext.
 //
 // Every field is required and validated for the reserved separators before joining, so no
 // two distinct Envelope values can ever produce identical output. Targets are joined with
 // envelopeTargetSep before being placed into the envelopeFieldSep-joined message; since
 // each target is individually checked against both separators, splitting the message
 // exactly recovers the original target list.
+//
+// ExecutionContext is optional: an empty value is emitted as an empty sixth field, and a
+// non-empty value is rejected if it contains envelopeFieldSep.
 //
 // ExpiresAt is serialized via RFC3339, which is unambiguous and never contains either
 // reserved separator.
@@ -118,6 +130,11 @@ func CanonicalBytes(e Envelope) ([]byte, error) {
 		return nil, fmt.Errorf("%w: expiresAt is empty", ErrInvalidEnvelope)
 	}
 
+	if strings.Contains(e.ExecutionContext, envelopeFieldSep) {
+		return nil, fmt.Errorf("%w: executionContext %q contains the reserved %q separator",
+			ErrInvalidEnvelope, e.ExecutionContext, envelopeFieldSep)
+	}
+
 	contentHash := sha256.Sum256(e.Content)
 
 	parts := []string{
@@ -126,6 +143,7 @@ func CanonicalBytes(e Envelope) ([]byte, error) {
 		strings.Join(e.Targets, envelopeTargetSep),
 		e.Nonce,
 		e.ExpiresAt.UTC().Format(time.RFC3339),
+		e.ExecutionContext,
 	}
 	return []byte(strings.Join(parts, envelopeFieldSep)), nil
 }
