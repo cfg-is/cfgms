@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -184,7 +185,8 @@ func (r *FenceRatchet) TermSigned() (bool, error) {
 	if err != nil {
 		// Fail closed: state that cannot be read or parsed reads as switched, so a
 		// corrupt file cannot re-open the window the switch closes.
-		return true, err
+		// The error is destined for logs, so it must name no host path.
+		return true, errors.New(strings.ReplaceAll(err.Error(), r.filePath(), "<fence ratchet state>"))
 	}
 	return state.TermSigned, nil
 }

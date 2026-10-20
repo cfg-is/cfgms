@@ -429,3 +429,27 @@ func TestFenceRatchet_MarkTermSignedOverCorruptStateWritesTrue(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, signed)
 }
+
+// TestFenceRatchet_TermSignedErrorNamesNoHostPath asserts the fail-closed error
+// from TermSigned (logged at handler startup) carries no host path, for both
+// the parse and the read failure branches.
+func TestFenceRatchet_TermSignedErrorNamesNoHostPath(t *testing.T) {
+	t.Run("corrupt", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not-json}"), 0o600))
+		signed, err := NewFenceRatchet(dir).TermSigned()
+		require.Error(t, err)
+		assert.True(t, signed)
+		assert.Contains(t, err.Error(), "parse fence ratchet")
+		assert.NotContains(t, err.Error(), dir)
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Mkdir(filepath.Join(dir, fenceRatchetFileName), 0o700))
+		signed, err := NewFenceRatchet(dir).TermSigned()
+		require.Error(t, err)
+		assert.True(t, signed)
+		assert.Contains(t, err.Error(), "read fence ratchet")
+		assert.NotContains(t, err.Error(), dir)
+	})
+}
