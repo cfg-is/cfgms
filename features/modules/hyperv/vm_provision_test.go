@@ -1209,3 +1209,57 @@ func TestProvisionVM_CloudInitSeedAttachToVMStartTimingLogged(t *testing.T) {
 	assert.Equal(t, seedAttachedAtNano, seedAtInStartNano,
 		"seed_attached_at in vm-start log must match the value from the attach log")
 }
+
+// TestDeleteSeedMediaForVM_RejectsUnsafeNames asserts a VM name that fails
+// vmNamePattern never reaches the transport, so a crafted resource ID cannot
+// steer Remove-Item outside the seed directory.
+func TestDeleteSeedMediaForVM_RejectsUnsafeNames(t *testing.T) {
+	for _, name := range []string{`..\..\x`, `a\b`, `*`, `a/b`, ``} {
+		t.Run(name, func(t *testing.T) {
+			transport := &testPSTransport{}
+			m := provisionModuleWithTransport(t, transport)
+			m.seedDir = `C:\cfgms-seeds`
+
+			m.deleteSeedMediaForVM(context.Background(), name, `C:\VMs\x.vhdx`)
+
+			transport.mu.Lock()
+			calls := transport.calls
+			transport.mu.Unlock()
+			assert.Empty(t, callsContaining(calls, psDeleteSeedMedia),
+				"unsafe VM name must not produce a delete call")
+		})
+	}
+}
+
+func TestDeleteSeedMediaForVM_ValidNameDeletesBothFiles(t *testing.T) {
+	transport := &testPSTransport{}
+	m := provisionModuleWithTransport(t, transport)
+	m.seedDir = `C:\cfgms-seeds`
+
+	m.deleteSeedMediaForVM(context.Background(), "web-01", `C:\VMs\web-01.vhdx`)
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	deletes := callsContaining(calls, psDeleteSeedMedia)
+	require.Len(t, deletes, 2)
+	var paths []string
+	for _, d := range deletes {
+		for _, a := range d.args {
+			if s, ok := a.(string); ok {
+				paths = append(paths, s)
+			}
+		}
+	}
+	assert.Contains(t, paths, `C:\cfgms-seeds\cfgms-seed-web-01.vhdx`)
+	assert.Contains(t, paths, `C:\cfgms-seeds\cfgms-answer-web-01.iso`)
+}
+
+func TestValidateSeedMediaPath(t *testing.T) {
+	assert.NoError(t, validateSeedMediaPath(`C:\s\cfgms-seed-a.vhdx`, "", `C:\s`))
+	assert.NoError(t, validateSeedMediaPath(`C:\VMs\cfgms-seed-a.vhdx`, `C:\VMs\a.vhdx`, ""))
+	assert.Error(t, validateSeedMediaPath(`C:\s\..\x\cfgms-seed-a.vhdx`, "", `C:\s`))
+	assert.Error(t, validateSeedMediaPath(`C:\s\sub\cfgms-seed-a.vhdx`, "", `C:\s`))
+	assert.Error(t, validateSeedMediaPath(`C:\elsewhere\cfgms-seed-a.vhdx`, "", `C:\s`))
+	assert.Error(t, validateSeedMediaPath(`C:\s\cfgms-seed-..\..\a.vhdx`, "", `C:\s`))
+}

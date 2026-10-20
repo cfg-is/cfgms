@@ -327,6 +327,45 @@ func validateSeedPath(path string) error {
 	return nil
 }
 
+// validateSeedMediaPath confirms mediaPath is a direct child of the intended
+// seed directory (seedDir, else the directory of vhdPath): it must pass
+// validateSeedPath, contain no ".." segments, and its file name must carry no
+// separators. A VM name carrying path separators or ".." therefore cannot steer
+// a delete outside the seed directory.
+func validateSeedMediaPath(mediaPath, vhdPath, seedDir string) error {
+	if err := validateSeedPath(mediaPath); err != nil {
+		return err
+	}
+	norm := func(p string) string {
+		return strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`)
+	}
+	dir := seedDir
+	if dir == "" {
+		dir = vhdPath
+		if i := strings.LastIndexAny(vhdPath, `\/`); i >= 0 {
+			dir = vhdPath[:i]
+		}
+	}
+	for _, seg := range strings.Split(norm(mediaPath), `\`) {
+		if seg == ".." {
+			return ErrInvalidSeedPath
+		}
+	}
+	cleanPath := norm(mediaPath)
+	i := strings.LastIndex(cleanPath, `\`)
+	if i < 0 {
+		return ErrInvalidSeedPath
+	}
+	name := cleanPath[i+1:]
+	if name == "" || name == "." || strings.ContainsAny(name, `\/`) {
+		return ErrInvalidSeedPath
+	}
+	if !strings.EqualFold(cleanPath[:i], norm(dir)) {
+		return ErrInvalidSeedPath
+	}
+	return nil
+}
+
 // provisionVM performs the create-from-source flow for a VM that was just
 // created by createVM and carries a source block (ADR-009 §3, §5). It:
 //
@@ -787,8 +826,11 @@ func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName s
 	}
 
 	// Detach the seed VHDX so the answer file is gone on the next boot.
+	if !vmNamePattern.MatchString(vmName) {
+		return m.failProvision(ctx, cfg, vmName, record, ErrInvalidSeedPath)
+	}
 	seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
-	if vErr := validateSeedPath(seedPath); vErr != nil {
+	if vErr := validateSeedMediaPath(seedPath, cfg.VHDPath, m.seedDir); vErr != nil {
 		return m.failProvision(ctx, cfg, vmName, record, vErr)
 	}
 	if _, psErr := m.transport.ExecutePS(ctx, psDetachSeedVHD, map[string]string{
@@ -806,6 +848,9 @@ func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName s
 	// path deletes the answer ISO built by psBuildAnswerIso.
 	isoPath := answerISOPath(vmName, cfg.VHDPath, m.seedDir)
 	for _, mediaPath := range []string{seedPath, isoPath} {
+		if validateSeedMediaPath(mediaPath, cfg.VHDPath, m.seedDir) != nil {
+			continue
+		}
 		if _, psErr := m.transport.ExecutePS(ctx, psDeleteSeedMedia, map[string]string{
 			"Path": mediaPath,
 		}); psErr != nil {
@@ -900,8 +945,8 @@ func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
 			seedVHDPath(rec.VMName, vhdPath, m.seedDir),
 			answerISOPath(rec.VMName, vhdPath, m.seedDir),
 		} {
-			if validateSeedPath(mediaPath) != nil {
-				// Path not derivable (seedDir unset and VM absent from cache); skip.
+			if !vmNamePattern.MatchString(rec.VMName) || validateSeedMediaPath(mediaPath, vhdPath, m.seedDir) != nil {
+				// Path not derivable (seedDir unset and VM absent from cache) or unsafe; skip.
 				continue
 			}
 			if _, psErr := m.transport.ExecutePS(ctx, psDeleteSeedMedia, map[string]string{
@@ -932,14 +977,14 @@ func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
 // VM deletion nothing ever rebuilds, so this synchronous delete is the only thing
 // that reclaims the seed VHDX and the answer ISO.
 func (m *hypervModule) deleteSeedMediaForVM(ctx context.Context, vmName, vhdPath string) {
-	if m.transport == nil {
+	if m.transport == nil || !vmNamePattern.MatchString(vmName) {
 		return
 	}
 	for _, mediaPath := range []string{
 		seedVHDPath(vmName, vhdPath, m.seedDir),
 		answerISOPath(vmName, vhdPath, m.seedDir),
 	} {
-		if validateSeedPath(mediaPath) != nil {
+		if validateSeedMediaPath(mediaPath, vhdPath, m.seedDir) != nil {
 			// Path not derivable (seedDir unset and VHD path unknown); skip.
 			continue
 		}
