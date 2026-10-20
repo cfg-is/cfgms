@@ -64,8 +64,11 @@ func TestCanonicalBytes_DifferentNonceProducesDifferentOutput(t *testing.T) {
 // collide on one signed message.
 func TestCanonicalBytes_RejectsSeparatorInField(t *testing.T) {
 	cases := map[string]func(*operatorpayload.Envelope){
-		"shell contains outer separator":  func(e *operatorpayload.Envelope) { e.Shell = "ba|sh" },
-		"nonce contains outer separator":  func(e *operatorpayload.Envelope) { e.Nonce = "non|ce" },
+		"shell contains outer separator": func(e *operatorpayload.Envelope) { e.Shell = "ba|sh" },
+		"nonce contains outer separator": func(e *operatorpayload.Envelope) { e.Nonce = "non|ce" },
+		"execution context contains outer separator": func(e *operatorpayload.Envelope) {
+			e.ExecutionContext = "logged|in_user"
+		},
 		"target contains outer separator": func(e *operatorpayload.Envelope) { e.Targets = []string{"host|1"} },
 		"target contains inner separator": func(e *operatorpayload.Envelope) { e.Targets = []string{"host,1"} },
 		"one of several targets is dirty": func(e *operatorpayload.Envelope) {
@@ -82,6 +85,22 @@ func TestCanonicalBytes_RejectsSeparatorInField(t *testing.T) {
 			assert.ErrorIs(t, err, operatorpayload.ErrInvalidEnvelope)
 		})
 	}
+}
+
+// TestCanonicalBytes_RejectsSeparatorInExecutionContext proves the executionContext
+// separator check itself fires (not some other field's validation): "a|b" as a sixth
+// field would otherwise let a run-as value forge an extra field boundary.
+func TestCanonicalBytes_RejectsSeparatorInExecutionContext(t *testing.T) {
+	e := baseEnvelope()
+	e.ExecutionContext = "a|b"
+
+	_, err := operatorpayload.CanonicalBytes(e)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, operatorpayload.ErrInvalidEnvelope)
+	assert.Contains(t, err.Error(), "executionContext")
+
+	_, err = operatorpayload.ChallengeHash(e)
+	require.ErrorIs(t, err, operatorpayload.ErrInvalidEnvelope)
 }
 
 // TestCanonicalBytes_RejectsEmptyField proves an unbound coordinate cannot be signed —
@@ -204,11 +223,12 @@ func TestChallengeHash_BindsEveryEnvelopeField(t *testing.T) {
 	require.NoError(t, err)
 
 	variants := map[string]func(e *operatorpayload.Envelope){
-		"content":   func(e *operatorpayload.Envelope) { e.Content = []byte("echo other") },
-		"shell":     func(e *operatorpayload.Envelope) { e.Shell = "powershell" },
-		"targets":   func(e *operatorpayload.Envelope) { e.Targets = []string{"host-1", "host-2"} },
-		"nonce":     func(e *operatorpayload.Envelope) { e.Nonce = "nonce-2" },
-		"expiresAt": func(e *operatorpayload.Envelope) { e.ExpiresAt = e.ExpiresAt.Add(time.Hour) },
+		"content":          func(e *operatorpayload.Envelope) { e.Content = []byte("echo other") },
+		"shell":            func(e *operatorpayload.Envelope) { e.Shell = "powershell" },
+		"targets":          func(e *operatorpayload.Envelope) { e.Targets = []string{"host-1", "host-2"} },
+		"nonce":            func(e *operatorpayload.Envelope) { e.Nonce = "nonce-2" },
+		"expiresAt":        func(e *operatorpayload.Envelope) { e.ExpiresAt = e.ExpiresAt.Add(time.Hour) },
+		"executionContext": func(e *operatorpayload.Envelope) { e.ExecutionContext = "logged_in_user" },
 	}
 	for name, mutate := range variants {
 		t.Run(name, func(t *testing.T) {
@@ -232,4 +252,33 @@ func TestChallengeBytes_InvalidEnvelopeRejected(t *testing.T) {
 
 	_, err = operatorpayload.ChallengeHash(env)
 	require.ErrorIs(t, err, operatorpayload.ErrInvalidEnvelope)
+}
+
+// TestCanonicalBytes_ExecutionContextIsBound proves the run-as context is part of the
+// signed bytes: an envelope with no declared context and one with "logged_in_user" must
+// not collide, and the context is always the sixth field.
+func TestCanonicalBytes_ExecutionContextIsBound(t *testing.T) {
+	none := baseEnvelope()
+	loggedIn := baseEnvelope()
+	loggedIn.ExecutionContext = "logged_in_user"
+	system := baseEnvelope()
+	system.ExecutionContext = "system"
+
+	gotNone, err := operatorpayload.CanonicalBytes(none)
+	require.NoError(t, err)
+	gotLoggedIn, err := operatorpayload.CanonicalBytes(loggedIn)
+	require.NoError(t, err)
+	gotSystem, err := operatorpayload.CanonicalBytes(system)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, gotNone, gotLoggedIn)
+	assert.NotEqual(t, gotLoggedIn, gotSystem)
+	assert.True(t, bytes.HasSuffix(gotNone, []byte("|")), "empty context is still a sixth field")
+	assert.True(t, bytes.HasSuffix(gotLoggedIn, []byte("|logged_in_user")))
+
+	hashNone, err := operatorpayload.ChallengeHash(none)
+	require.NoError(t, err)
+	hashLoggedIn, err := operatorpayload.ChallengeHash(loggedIn)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashNone, hashLoggedIn)
 }
