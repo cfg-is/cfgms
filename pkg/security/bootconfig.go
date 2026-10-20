@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 )
 
 // BootConfigFileName is the canonical steward boot-config file name. The
@@ -65,44 +64,12 @@ func BootConfigFileNames() []string {
 // IsProtectedBootConfigPath reports whether path is a boot-config file the
 // steward loader may read, or one of the directories holding them. Local
 // settings such as remote_terminal.enabled live there and must not be
-// changeable by controller-delivered resources. Symlinks in the parent
-// directory are resolved before comparing.
+// changeable by controller-delivered resources.
+//
+// The comparison is platform specific. On Windows it compares the canonical
+// file identity (volume serial + file index) and fails closed when that
+// identity cannot be established; elsewhere it compares cleaned paths with the
+// parent directory's symlinks resolved.
 func IsProtectedBootConfigPath(path string) bool {
-	target := resolveForCompare(path)
-	for _, dir := range BootConfigDirs() {
-		d := resolveForCompare(dir)
-		if samePath(target, d) {
-			return true
-		}
-		for _, name := range BootConfigFileNames() {
-			if samePath(target, filepath.Join(d, name)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// resolveForCompare cleans path and resolves symlinks in its parent
-// directory (the leaf may not exist yet or may itself be the link target).
-func resolveForCompare(path string) string {
-	clean := filepath.Clean(path)
-	if abs, err := filepath.Abs(clean); err == nil {
-		clean = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-		return resolved
-	}
-	parent, leaf := filepath.Split(clean)
-	if resolvedParent, err := filepath.EvalSymlinks(filepath.Clean(parent)); err == nil {
-		return filepath.Join(resolvedParent, leaf)
-	}
-	return clean
-}
-
-func samePath(a, b string) bool {
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
+	return isProtectedBootConfigPath(path)
 }
