@@ -3612,10 +3612,10 @@ like any other source's edges.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `edge_type` | string | A known taxonomy edge kind, or an open `related:<discriminator>` subtype (ADR-022 §2). Must not contain `\|`. |
+| `edge_type` | string | A known taxonomy edge kind, or an open `related:<discriminator>` subtype (ADR-022 §2). Must not contain `\|`; at most 128 bytes. |
 | `from_eid` | string | Source endpoint EID. Must parse and resolve within the caller's tenant subtree. |
 | `to_eid` | string | Target endpoint EID. Must parse and resolve within the caller's tenant subtree. |
-| `attributes` | object | Optional opaque edge attributes. Provider-reserved metadata keys (`tenant_path`, `owning_tenant`, `entity_kind`, `hostname`, `mac_addrs`, `machine_sid`, `dir_object_guid`, `serial_number`, `cloud_object_id`) are rejected. |
+| `attributes` | object | Optional opaque edge attributes. Provider-reserved metadata keys (`tenant_path`, `owning_tenant`, `entity_kind`, `hostname`, `mac_addrs`, `machine_sid`, `dir_object_guid`, `serial_number`, `cloud_object_id`) are rejected. Limits: at most 32 attributes, each key at most 128 bytes, each value at most 4 KiB encoded and nested at most 4 levels deep, and the encoded map at most 16 KiB. Oversize requests return 400 with an error that does not echo values. |
 
 **Response (201):** empty body.
 
@@ -3623,13 +3623,24 @@ like any other source's edges.
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Malformed request body, invalid `edge_type` (unknown kind, not a `related:*` subtype, or contains `\|`), reserved attribute key present, or either EID fails to parse |
+| 400 | Malformed request body, invalid `edge_type` (unknown kind, not a `related:*` subtype, contains `\|`, or over 128 bytes), reserved attribute key present, an attribute limit exceeded, or either EID fails to parse |
+| 401 | No authenticated principal ID; or a root-tenant caller subject to the ADR-025 crossing boundary names an endpoint owned by a tenant with no active grant or break-glass crossing (`WWW-Authenticate` carries `required="tenant-crossing"`). Nothing is written. |
 | 404 | `from_eid` or `to_eid` does not exist, or is outside the caller's tenant subtree (ADR-022 §7 — not 403, to avoid disclosing cross-tenant existence) |
+| 500 | An endpoint's owner could not be resolved, or the audit event could not be recorded (the edge is not written) |
 | 503 | Entity graph provider unavailable |
 
 Tenant scoping: both endpoint EIDs are resolved against the caller's tenant
 subtree before the edge is written; a cross-tenant `from_eid` or `to_eid`
 returns 404 with no partial write, matching the read-path convention above.
+For a root-tenant caller subject to the ADR-025 crossing boundary, each endpoint's
+owning tenant is also decided through the tenant-crossing check; both endpoints are
+decided before anything is written.
+
+Audit: every accepted assertion writes an `entity.edge_asserted` audit event naming
+the principal, both endpoint EIDs and the edge type (never attribute values), in the
+audit scope of each endpoint's owning tenant and, when the assertion crosses into
+another tenant, in the caller's own tenant scope. The event is recorded before the
+edge is written; if it cannot be recorded the edge is not written.
 
 #### GET /api/v1/entities/{eid}/neighborhood
 
