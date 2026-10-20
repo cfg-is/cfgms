@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -288,11 +291,15 @@ type wsNode struct {
 	proof   *transport.TerminalProof
 	recheck transport.SessionRecheck
 	authRef *authSessionRef // when set, connect marks the request as session-authenticated
+	// credRecheck, when set, is carried in the request context as the re-check of an
+	// API-key or admin-certificate principal.
+	credRecheck authRecheck
 }
 
 func newWSNode(t *testing.T) *wsNode {
 	t.Helper()
 	n := &wsNode{ticketNode: newTicketX509Node(t)}
+	n.credRecheck = func(context.Context) bool { return true }
 	n.server.SetTerminalHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.reached++
 		n.proof, _ = transport.TerminalProofFromContext(r.Context())
@@ -330,6 +337,9 @@ func (n *wsNode) connect(p *Principal, stewardID, webSession, protocols string, 
 	}
 	if n.authRef != nil {
 		req = req.WithContext(context.WithValue(req.Context(), authSessionContextKey, *n.authRef))
+	}
+	if n.credRecheck != nil {
+		req = req.WithContext(context.WithValue(req.Context(), authRecheckContextKey, n.credRecheck))
 	}
 	rec := httptest.NewRecorder()
 	n.router.ServeHTTP(rec, req)
@@ -432,7 +442,7 @@ func TestTerminalWS_OutOfTenantDoesNotConsumeTicket(t *testing.T) {
 }
 
 // A session-authenticated upgrade hands the handler a re-check that follows the shared
-// store; a principal with no session gets none.
+// store.
 func TestTerminalWS_SessionRecheckFollowsSessionStore(t *testing.T) {
 	n := newWSNode(t)
 	cfg := session.Config{IdleTimeout: time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: time.Second}
@@ -442,15 +452,68 @@ func TestTerminalWS_SessionRecheckFollowsSessionStore(t *testing.T) {
 	sess, _, err := sm.Issue(context.Background(), "op-1", "web", saTenant)
 	require.NoError(t, err)
 
-	tk := n.seed("op-1", ttSteward, "")
-	require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
-	assert.Nil(t, n.recheck, "a principal with no session must not be re-checked")
-
 	n.authRef = &authSessionRef{manager: sm, id: sess.ID}
-	tk = n.seed("op-1", ttSteward, "")
+	tk := n.seed("op-1", ttSteward, "")
 	require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
 	require.NotNil(t, n.recheck)
 	assert.True(t, n.recheck(context.Background()))
 	require.NoError(t, sm.Revoke(context.Background(), sess.ID))
 	assert.False(t, n.recheck(context.Background()), "a revoked session must fail the re-check")
+}
+
+// An API-key principal's relay is re-checked against the key: the handler's context
+// carries a re-check that turns false once the key is revoked.
+func TestTerminalWS_APIKeyRecheckFollowsKeyRevocation(t *testing.T) {
+	n := newWSNode(t)
+	key := &APIKey{ID: "k-1", Key: "terminal-test-key", Name: "k", TenantID: saTenant}
+	n.server.mu.Lock()
+	n.server.apiKeys[key.Key] = key
+	n.server.mu.Unlock()
+	n.credRecheck = n.server.apiKeyRecheck(key)
+
+	tk := n.seed("op-1", ttSteward, "")
+	require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
+	require.NotNil(t, n.recheck, "an API-key relay must carry a re-check")
+	assert.True(t, n.recheck(context.Background()))
+
+	n.server.mu.Lock()
+	delete(n.server.apiKeys, key.Key)
+	n.server.mu.Unlock()
+	assert.False(t, n.recheck(context.Background()), "a revoked API key must fail the re-check")
+}
+
+// An admin-certificate principal's relay is re-checked against the certificate manager.
+func TestTerminalWS_AdminCertRecheckFollowsRevocation(t *testing.T) {
+	n := newWSNode(t)
+	require.NotNil(t, n.server.certManager)
+	issued, err := n.server.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "terminal-admin", ValidityDays: 1, KeySize: 2048, ClientID: "terminal-admin",
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	block, _ := pem.Decode(issued.CertificatePEM)
+	require.NotNil(t, block)
+	peer, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	n.credRecheck = n.server.adminCertRecheck(peer)
+
+	tk := n.seed("op-1", ttSteward, "")
+	require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
+	require.NotNil(t, n.recheck, "an admin-certificate relay must carry a re-check")
+	assert.True(t, n.recheck(context.Background()))
+
+	require.NoError(t, n.server.certManager.Revoke(issued.SerialNumber))
+	assert.False(t, n.recheck(context.Background()), "a revoked certificate must fail the re-check")
+}
+
+// A request with a valid ticket but no credential re-check is refused before the handler.
+func TestTerminalWS_NoRecheckRefused(t *testing.T) {
+	n := newWSNode(t)
+	n.credRecheck = nil
+	tk := n.seed("op-1", ttSteward, "")
+	rec := n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "TERMINAL_RECHECK_UNAVAILABLE", errorCode(t, rec))
+	assert.Equal(t, 1, ticketCount(n.server), "a refused request must not burn the ticket")
+	assert.Zero(t, n.reached, "the handler must not run without a re-check")
 }
