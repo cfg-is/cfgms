@@ -27,9 +27,11 @@ const (
 // Sweep order:
 //  1. Tombstone removal: fully delete retracted subjects whose absence row
 //     predates the effective tombstone horizon.
-//  2. History pruning: remove non-pinned log rows older than the effective
+//  2. Abandoned edge claim scopes: remove eg_claim_scope_prior rows whose anchor
+//     entity no longer exists anywhere (scope rows only; never edges or log rows).
+//  3. History pruning: remove non-pinned log rows older than the effective
 //     history depth for each subject's current owning tenant.
-//  3. Orphan cleanup: remove payload_content rows unreferenced by the log.
+//  4. Orphan cleanup: remove payload_content rows unreferenced by the log.
 func (p *SQLiteEntityGraphProvider) RunRetentionGC(ctx context.Context, policy interfaces.RetentionPolicy) error {
 	historyDays := policy.HistoryDays
 	if historyDays <= 0 {
@@ -49,6 +51,9 @@ func (p *SQLiteEntityGraphProvider) RunRetentionGC(ctx context.Context, policy i
 
 	if err := p.sweepTombstones(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: retention gc: sweep tombstones: %w", err)
+	}
+	if err := p.sweepAbandonedEdgeScopes(ctx); err != nil {
+		return fmt.Errorf("entitygraph/sqlite: retention gc: sweep abandoned edge scopes: %w", err)
 	}
 	if err := p.pruneHistory(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: retention gc: prune history: %w", err)
@@ -412,4 +417,104 @@ func (p *SQLiteEntityGraphProvider) sweepOrphanPayloads(ctx context.Context) err
 		return fmt.Errorf("entitygraph/sqlite: sweep orphan payloads: %w", err)
 	}
 	return nil
+}
+
+// maxAbandonedScopesPerRun bounds how many abandoned edge scopes one
+// retention run removes; the remainder is picked up by the next run.
+const maxAbandonedScopesPerRun = 500
+
+// edgeScopeAnchor extracts the anchor EID from an eg_claim_scope_prior key of
+// the form source\x1fedge\x1fedgeType\x1fanchorEID\x1fdirection. ok is false
+// for any key that does not parse into the edge kind and a non-empty anchor.
+func edgeScopeAnchor(scopeKey string) (anchor string, ok bool) {
+	parts := strings.Split(scopeKey, "\x1f")
+	if len(parts) != 5 || parts[1] != "edge" || parts[3] == "" {
+		return "", false
+	}
+	return parts[3], true
+}
+
+// sweepAbandonedEdgeScopes deletes eg_claim_scope_prior rows of edge scopes
+// whose anchor has no entity index, current-state, log, edge-log, or edge
+// projection row. It deletes scope rows only and runs in one transaction: any
+// lookup or delete error rolls back every delete of the run.
+func (p *SQLiteEntityGraphProvider) sweepAbandonedEdgeScopes(ctx context.Context) (err error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT scope_key FROM eg_claim_scope_prior
+		 WHERE instr(scope_key, char(31) || 'edge' || char(31)) > 0
+		 ORDER BY scope_key`)
+	if err != nil {
+		return fmt.Errorf("list edge scopes: %w", err)
+	}
+	var keys []string
+	for rows.Next() {
+		var k string
+		if scanErr := rows.Scan(&k); scanErr != nil {
+			_ = rows.Close()
+			return scanErr
+		}
+		keys = append(keys, k)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
+	var abandoned []string
+	for _, key := range keys {
+		if len(abandoned) >= maxAbandonedScopesPerRun {
+			break
+		}
+		anchor, ok := edgeScopeAnchor(key)
+		if !ok {
+			continue
+		}
+		var live bool
+		live, err = anchorHasRows(ctx, tx, anchor)
+		if err != nil {
+			return fmt.Errorf("anchor lookup: %w", err)
+		}
+		if !live {
+			abandoned = append(abandoned, key)
+		}
+	}
+
+	for _, key := range abandoned {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM eg_claim_scope_prior WHERE scope_key = ?`, key); err != nil {
+			return fmt.Errorf("delete scope: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// anchorHasRows reports whether anchor still appears in the entity index,
+// current state, the log (as subject or edge endpoint), or edge projection.
+func anchorHasRows(ctx context.Context, tx *sql.Tx, anchor string) (bool, error) {
+	esc := interfaces.EscapeLikePattern(anchor)
+	var live bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM eg_entity_index WHERE subject = ?1)
+		    OR EXISTS (SELECT 1 FROM eg_entity_current WHERE subject = ?1)
+		    OR EXISTS (SELECT 1 FROM eg_observation_log WHERE subject = ?1)
+		    OR EXISTS (SELECT 1 FROM eg_observation_log
+		               WHERE subject LIKE ?2 ESCAPE '\' OR subject LIKE ?3 ESCAPE '\')
+		    OR EXISTS (SELECT 1 FROM eg_edge_projection WHERE from_subject = ?1 OR to_subject = ?1)`,
+		anchor, "%|"+esc+"|%", "%|"+esc,
+	).Scan(&live)
+	return live, err
 }

@@ -30,6 +30,9 @@ const (
 // The never-prune-current invariant is enforced across all projection tables.
 // Per-tenant-subtree policy overrides from eg_retention_policy are applied,
 // with the most-specific matching tenant_path prefix winning (ADR-023 §7).
+//
+// After the tombstone step, abandoned edge claim-scope rows (anchor with no
+// entity, log, or edge rows left) are removed; scope rows only.
 func (p *DatabaseEntityGraphProvider) RunRetentionGC(ctx context.Context, policy interfaces.RetentionPolicy) error {
 	historyDays := policy.HistoryDays
 	if historyDays <= 0 {
@@ -76,6 +79,9 @@ func (p *DatabaseEntityGraphProvider) RunRetentionGC(ctx context.Context, policy
 
 	if err := p.dbSweepTombstones(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/database: retention gc: sweep tombstones: %w", err)
+	}
+	if err := p.dbSweepAbandonedEdgeScopes(ctx); err != nil {
+		return fmt.Errorf("entitygraph/database: retention gc: sweep abandoned edge scopes: %w", err)
 	}
 	if err := p.dbPruneHistory(ctx, now, historyDays, tombstoneDays, overrides, policy.TenantAncestors); err != nil {
 		return fmt.Errorf("entitygraph/database: retention gc: prune history: %w", err)
@@ -408,6 +414,101 @@ func (p *DatabaseEntityGraphProvider) dbSweepOrphanPayloads(ctx context.Context)
 	`)
 	if err != nil {
 		return fmt.Errorf("entitygraph/database: sweep orphan payloads: %w", err)
+	}
+	return nil
+}
+
+// maxAbandonedScopesPerRun bounds how many abandoned edge scopes one
+// retention run removes; the remainder is picked up by the next run.
+const maxAbandonedScopesPerRun = 500
+
+// dbEdgeScopeAnchor extracts the anchor EID from a claim_scope_key of the form
+// edge\x1fedgeType\x1fanchorEID\x1fdirection. ok is false for any key that
+// does not parse into the edge kind and a non-empty anchor.
+func dbEdgeScopeAnchor(key string) (anchor string, ok bool) {
+	parts := strings.Split(key, "\x1f")
+	if len(parts) != 4 || parts[0] != "edge" || parts[2] == "" {
+		return "", false
+	}
+	return parts[2], true
+}
+
+// dbSweepAbandonedEdgeScopes deletes eg_claim_scope_prior rows of edge scopes
+// whose anchor has no entity index, current-state, log, edge-log, or edge
+// projection row. It deletes scope rows only and runs in one transaction: any
+// lookup or delete error rolls back every delete of the run.
+func (p *DatabaseEntityGraphProvider) dbSweepAbandonedEdgeScopes(ctx context.Context) (err error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT source, claim_scope_key FROM eg_claim_scope_prior
+		 WHERE claim_scope_key LIKE 'edge' || chr(31) || '%'
+		 ORDER BY source, claim_scope_key`)
+	if err != nil {
+		return fmt.Errorf("list edge scopes: %w", err)
+	}
+	type scopeID struct{ source, key string }
+	var scopes []scopeID
+	for rows.Next() {
+		var s scopeID
+		if scanErr := rows.Scan(&s.source, &s.key); scanErr != nil {
+			_ = rows.Close()
+			return scanErr
+		}
+		scopes = append(scopes, s)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
+	var abandoned []scopeID
+	for _, s := range scopes {
+		if len(abandoned) >= maxAbandonedScopesPerRun {
+			break
+		}
+		anchor, ok := dbEdgeScopeAnchor(s.key)
+		if !ok {
+			continue
+		}
+		esc := interfaces.EscapeLikePattern(anchor)
+		var live bool
+		err = tx.QueryRowContext(ctx, `
+			SELECT EXISTS (SELECT 1 FROM eg_entity_index WHERE subject = $1)
+			    OR EXISTS (SELECT 1 FROM eg_entity_current WHERE subject = $1)
+			    OR EXISTS (SELECT 1 FROM eg_observation_log WHERE subject = $1)
+			    OR EXISTS (SELECT 1 FROM eg_observation_log
+			               WHERE subject LIKE $2 ESCAPE '\' OR subject LIKE $3 ESCAPE '\')
+			    OR EXISTS (SELECT 1 FROM eg_edge_projection WHERE from_subject = $1 OR to_subject = $1)`,
+			anchor, "%|"+esc+"|%", "%|"+esc,
+		).Scan(&live)
+		if err != nil {
+			return fmt.Errorf("anchor lookup: %w", err)
+		}
+		if !live {
+			abandoned = append(abandoned, s)
+		}
+	}
+
+	for _, s := range abandoned {
+		if _, err = tx.ExecContext(ctx,
+			`DELETE FROM eg_claim_scope_prior WHERE source = $1 AND claim_scope_key = $2`,
+			s.source, s.key); err != nil {
+			return fmt.Errorf("delete scope: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

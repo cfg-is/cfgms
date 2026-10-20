@@ -181,7 +181,8 @@ projection rebuild-by-replay — against **both** providers.
   applies: the absence-as-latest is retained until the horizon passes, after which the subject
   is fully forgotten — log rows and projections removed. This is deliberately the *one* way the
   graph forgets a subject, and it is what prevents every entity ever retracted from accumulating
-  as an immortal tombstone.
+  as an immortal tombstone. Edge claim-scope rows whose anchor entity has vanished entirely are
+  swept in the same GC run (scope rows only; edges and log rows are never touched by that step).
 - GC is a background sweep honoring the effective (current-owner) policy per subject. The
   existing DNA store's pruning machinery (`sqlite_backend.go` retention sweep) is the in-tree
   template for **dedup-safe pruning only** — its time-cutoff path has no keep-latest guard, so

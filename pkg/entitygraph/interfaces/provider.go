@@ -446,6 +446,15 @@ type EntityGraphProvider interface {
 	// Retracted subjects survive until the tombstone horizon, then are fully
 	// removed (log rows + all projections).
 	//
+	// After the tombstone step, abandoned edge claim-scope rows are removed. An
+	// edge scope is abandoned when its anchor entity has no entity-index row, no
+	// current-state row, no log row as the subject, no edge log row naming it as
+	// an endpoint, and no edge projection row with it as from or to subject.
+	// Only the scope rows are deleted, never edge projection or log rows;
+	// entity-addressed scopes are untouched, and an uncertain lookup counts as
+	// live. Each run removes a bounded number of scopes; the remainder is picked
+	// up by the next run.
+	//
 	// policy carries the global defaults; per-tenant overrides stored via
 	// SetRetentionPolicy take precedence (the nearest ancestor override wins).
 	// The call is idempotent and safe to run on multiple nodes concurrently
