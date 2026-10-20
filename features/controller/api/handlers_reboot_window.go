@@ -440,11 +440,7 @@ func (s *Server) rebootWindowTenantConfigKey(ctx context.Context, tenantID strin
 		if err != nil {
 			return nil, fmt.Errorf("get tenant path: %w", err)
 		}
-		if n := len(path) - 1; n >= int(pkgconfig.LevelGroup) {
-			level = pkgconfig.LevelGroup
-		} else {
-			level = pkgconfig.InheritanceLevel(n)
-		}
+		level = pkgconfig.TenantLevelForDepth(len(path) - 1)
 	}
 	key, ok := pkgconfig.TenantLevelConfigKey(level, tenantID)
 	if !ok {

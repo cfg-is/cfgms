@@ -1596,3 +1596,47 @@ func TestResolveConfiguration_HierarchicalTenantIDWithOnlyAncestorAndDeviceConfi
 	require.Len(t, effective.Config.Resources, 1)
 	assert.Equal(t, "device-resource", effective.Config.Resources[0].Name)
 }
+
+func TestTenantLevelForDepth(t *testing.T) {
+	assert.Equal(t, LevelMSP, TenantLevelForDepth(0))
+	assert.Equal(t, LevelClient, TenantLevelForDepth(1))
+	assert.Equal(t, LevelGroup, TenantLevelForDepth(2))
+	assert.Equal(t, LevelGroup, TenantLevelForDepth(3))
+	assert.Equal(t, LevelGroup, TenantLevelForDepth(7))
+	_, ok := TenantLevelConfigKey(TenantLevelForDepth(-1), "x")
+	assert.False(t, ok, "negative depth has no tenant document")
+}
+
+func TestResolveConfiguration_DeepTenantPath_ReadsGroupDocument(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+
+	ts := sm.GetTenantStore()
+	require.NotNil(t, ts)
+	for _, td := range []*business.TenantData{
+		{ID: "root", Name: "Root", Status: business.TenantStatusActive},
+		{ID: "msp", Name: "MSP", ParentID: "root", Status: business.TenantStatusActive},
+		{ID: "client", Name: "Client", ParentID: "msp", Status: business.TenantStatusActive},
+		{ID: "site", Name: "Site", ParentID: "client", Status: business.TenantStatusActive},
+	} {
+		require.NoError(t, ts.CreateTenant(ctx, td))
+	}
+
+	deepCfg := stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{ConvergeInterval: "17m"},
+	}
+	require.NoError(t, sm.GetConfigStore().StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "site", Namespace: "group-policies", Name: "site-groups"},
+		Data: marshalStewardConfig(t, deepCfg),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "site", "steward-1")
+	require.NoError(t, err)
+	assert.Equal(t, "17m", effective.Config.Steward.ConvergeInterval, "depth-3 tenant document must be resolved")
+	for _, src := range effective.Sources {
+		if src.TenantID == "site" {
+			assert.Equal(t, int(LevelGroup), src.Level, "deep tenant is labelled with the group level")
+		}
+	}
+}
