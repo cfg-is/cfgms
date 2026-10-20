@@ -21,6 +21,7 @@ import (
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -520,4 +521,96 @@ func TestMemberClusters_PeerAttachedSteward(t *testing.T) {
 	// A steward that exists in neither view still resolves to no clusters.
 	assert.Empty(t, adapter.MemberClusters("no-such-steward"),
 		"an unknown steward ID must not resolve to any cluster")
+}
+
+// faultTenantStore delegates to a real TenantStore but fails GetTenant with a
+// fixed non-not-found error, simulating a storage fault.
+type faultTenantStore struct {
+	business.TenantStore
+	err error
+}
+
+func (f *faultTenantStore) GetTenant(context.Context, string) (*business.TenantData, error) {
+	return nil, f.err
+}
+
+// faultConfigStore delegates to a real ConfigStore but fails GetConfig with a
+// fixed non-not-found error, simulating a storage fault.
+type faultConfigStore struct {
+	cfgconfig.ConfigStore
+	err error
+}
+
+func (f *faultConfigStore) GetConfig(context.Context, *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	return nil, f.err
+}
+
+// newFaultInjectedService builds a service over the real test stores with the
+// given tenant/config store overrides (nil keeps the real store).
+func newFaultInjectedService(t *testing.T, real *interfaces.StorageManager, tenantStore business.TenantStore, configStore cfgconfig.ConfigStore) *ConfigurationServiceV2 {
+	t.Helper()
+	if tenantStore == nil {
+		tenantStore = real.GetTenantStore()
+	}
+	if configStore == nil {
+		configStore = real.GetConfigStore()
+	}
+	sm := interfaces.NewStorageManagerFromStores(
+		configStore, real.GetAuditStore(), real.GetRBACStore(), tenantStore,
+		real.GetRegistrationTokenStore(), real.GetSessionStore(), real.GetStewardStore(),
+		real.GetCommandStore(), real.GetTriggerStore(), real.GetPushStore())
+	return NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
+}
+
+// TestGetConfiguration_TenantReadFault_FailsClosed is the required test for
+// Issue #5225: a GetTenant error that is not ErrTenantDoesNotExist must not be
+// treated as "tenant has no hierarchy record" and served a device-only config.
+func TestGetConfiguration_TenantReadFault_FailsClosed(t *testing.T) {
+	real := pkgtesting.SetupTestStorage(t)
+	faulty := &faultTenantStore{TenantStore: real.GetTenantStore(), err: fmt.Errorf("storage backend unavailable")}
+	svc := newFaultInjectedService(t, real, faulty, nil)
+
+	ctx := context.WithValue(ctxkeys.WithSystem(context.Background()), ctxkeys.TenantID, "tenant-fault")
+	// Store the device document through a healthy service over the same stores.
+	require.NoError(t, newFaultInjectedService(t, real, nil, nil).SetConfiguration(ctx, "tenant-fault", "steward-fault", &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{ID: "steward-fault"},
+		Modules: map[string]string{"file": "file"},
+		Resources: []stewardtypes.ResourceConfig{
+			{Name: "device-resource", Module: "file", Config: map[string]interface{}{"path": "/tmp/x"}},
+		},
+	}))
+
+	resp, err := svc.GetConfiguration(ctx, &controllerpb.ConfigRequest{StewardId: "steward-fault"})
+	require.Error(t, err)
+	assert.Nil(t, resp, "no config may be served on a tenant read fault")
+}
+
+// TestGetConfiguration_NoTenantRecord_MissingDevice_NotFound confirms the
+// genuine not-found paths still yield the NOT_FOUND response, not an error.
+func TestGetConfiguration_NoTenantRecord_MissingDevice_NotFound(t *testing.T) {
+	svc := newFaultInjectedService(t, pkgtesting.SetupTestStorage(t), nil, nil)
+	ctx := context.WithValue(ctxkeys.WithSystem(context.Background()), ctxkeys.TenantID, "tenant-unknown")
+
+	resp, err := svc.GetConfiguration(ctx, &controllerpb.ConfigRequest{StewardId: "steward-none"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, commonpb.Status_NOT_FOUND, resp.Status.Code)
+}
+
+// TestGetClusterDeclaredResources_ReadFaultVsNotFound is the required test for
+// Issue #5225: only a missing document means "no declared resources".
+func TestGetClusterDeclaredResources_ReadFaultVsNotFound(t *testing.T) {
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	real := pkgtesting.SetupTestStorage(t)
+	faulty := &faultConfigStore{ConfigStore: real.GetConfigStore(), err: fmt.Errorf("storage backend unavailable")}
+	svc := newFaultInjectedService(t, real, nil, faulty)
+	res, err := svc.GetClusterDeclaredResources(ctx, "tenant-c", "cluster-a")
+	require.Error(t, err)
+	assert.Nil(t, res)
+
+	svc = newFaultInjectedService(t, real, nil, nil)
+	res, err = svc.GetClusterDeclaredResources(ctx, "tenant-c", "cluster-missing")
+	require.NoError(t, err)
+	assert.Nil(t, res)
 }

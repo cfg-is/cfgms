@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -497,7 +499,16 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		// Fall back to delivering the device-level config directly so SyncConfig
 		// still serves the steward; the full cascade still applies whenever the
 		// tenant hierarchy is known. (Issue #1722)
-		effective = s.resolveDeviceLevelFallback(ctx, tenantID, req.StewardId)
+		var fallbackErr error
+		effective, fallbackErr = s.resolveDeviceLevelFallback(ctx, tenantID, req.StewardId)
+		if fallbackErr != nil {
+			// A storage fault is not "absent": serving a device-only config would
+			// silently skip the tenant, cluster and role layers.
+			s.logger.Error("Failed to resolve configuration fallback",
+				"steward_id", logging.SanitizeLogValue(req.StewardId),
+				"error", logging.SanitizeLogValue(fallbackErr.Error()))
+			return nil, fmt.Errorf("resolve configuration fallback: %w", fallbackErr)
+		}
 		if effective == nil {
 			s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
 			return &controller.ConfigResponse{
@@ -555,19 +566,28 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 // resolveDeviceLevelFallback returns the steward's device-level configuration as an
 // EffectiveConfiguration when the full tenant cascade cannot be resolved because the
 // steward's tenant has no tenant-hierarchy record. It returns nil — leaving the caller
-// to report NOT_FOUND — when the tenant does exist (the cascade error is then a genuine
-// failure that must not be masked) or when no device-level config is stored for the
-// steward. (Issue #1722)
-func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context, tenantID, stewardID string) *config.EffectiveConfiguration {
-	if _, err := s.storageManager.GetTenantStore().GetTenant(ctx, tenantID); err == nil {
+// to report NOT_FOUND — (nil, nil) — when the tenant does exist (the cascade error is
+// then a genuine failure that must not be masked) or when no device-level config is
+// stored for the steward. Only business.ErrTenantDoesNotExist means "no hierarchy
+// record"; any other GetTenant error, or a device-level read error other than
+// cfgconfig.ErrConfigNotFound, is returned so the caller fails closed. (Issues #1722, #5225)
+func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
+	_, err := s.storageManager.GetTenantStore().GetTenant(ctx, tenantID)
+	if err == nil {
 		// The tenant exists as a full record, so the cascade failure is a real
 		// error — do not paper over it with a device-only fallback.
-		return nil
+		return nil, nil
+	}
+	if !errors.Is(err, business.ErrTenantDoesNotExist) {
+		return nil, fmt.Errorf("read tenant record: %w", err)
 	}
 
 	deviceCfg, err := s.configManager.GetConfiguration(ctx, tenantID, stewardID)
 	if err != nil {
-		return nil
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read device configuration: %w", err)
 	}
 
 	return &config.EffectiveConfiguration{
@@ -582,7 +602,7 @@ func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context,
 			},
 		},
 		GeneratedAt: time.Now(),
-	}
+	}, nil
 }
 
 // SetConfiguration stores a configuration for a specific steward using ConfigStore
@@ -680,7 +700,9 @@ func (s *ConfigurationServiceV2) GetConfigStore() cfgconfig.ConfigStore {
 // Returns nil resources (no error) when no cluster-policies document exists for
 // the cluster — the caller treats this as an empty declared set, meaning
 // only dead-owner and split-brain conditions can be detected (not create-coverage
-// gaps). A non-nil error is returned only for genuine parse failures.
+// gaps). Only cfgconfig.ErrConfigNotFound means "absent"; any other store read
+// error and any parse failure is returned (wrapped) so a storage fault is not
+// mistaken for a cluster with no declared resources. (Issue #5225)
 func (s *ConfigurationServiceV2) GetClusterDeclaredResources(ctx context.Context, tenantID, clusterName string) ([]stewardtypes.ResourceConfig, error) {
 	key := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
@@ -689,7 +711,10 @@ func (s *ConfigurationServiceV2) GetClusterDeclaredResources(ctx context.Context
 	}
 	entry, err := s.storageManager.GetConfigStore().GetConfig(ctx, key)
 	if err != nil {
-		return nil, nil // not found is non-fatal; no declared resources
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, nil // not found is non-fatal; no declared resources
+		}
+		return nil, fmt.Errorf("reading cluster-policies/%s: %w", clusterName, err)
 	}
 	var cfg stewardtypes.StewardConfig
 	if err := yaml.Unmarshal(entry.Data, &cfg); err != nil {
