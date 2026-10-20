@@ -71,7 +71,9 @@ func newUserEncryptor(dir string) (platformEncryptor, error) {
 // newUserDPAPIEncryptor creates a user-scope DPAPI encryptor whose entropy is
 // HKDF-SHA256 over machineID with the per-store salt kept in dir. A blob
 // copied to another machine (a roaming profile, say) meets a different
-// MachineGuid there and does not decrypt.
+// MachineGuid there and does not decrypt. The MachineGuid is an identity, not
+// a secret: this stops a blob being used as-is elsewhere, while the user scope
+// of DPAPI is what keeps other accounts out.
 func newUserDPAPIEncryptor(machineID []byte, dir string) (*dpapiEncryptor, error) {
 	if len(machineID) == 0 {
 		return nil, fmt.Errorf("machine ID cannot be empty")

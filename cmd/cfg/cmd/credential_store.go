@@ -56,6 +56,11 @@ func newCredentialStore() (*CredentialStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("credential store: init encryptor: %w", err)
 	}
+	// The encryptor has created or read the salt; it is key material, so it
+	// gets the same per-file protection as the credentials.
+	if err := secureCredentialFile(filepath.Join(dir, "salt")); err != nil {
+		return nil, fmt.Errorf("credential store: secure salt: %w", err)
+	}
 	unlocker, err := credentialStoreUnlockerFn(dir)
 	if err != nil {
 		return nil, fmt.Errorf("credential store: init unlocker: %w", err)

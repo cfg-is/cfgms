@@ -93,7 +93,8 @@ func secureCredentialsDir(dir string) error {
 		return fmt.Errorf("read owner of credentials directory %s: %w", dir, err)
 	}
 	if owner == nil || (!owner.Equals(user) && !owner.IsWellKnown(windows.WinLocalSystemSid)) {
-		return fmt.Errorf("credentials directory %s is owned by a principal other than the current user or SYSTEM, refusing to use it", dir)
+		return fmt.Errorf("credentials directory %s is owned by a principal other than the current user or SYSTEM, refusing to use it; "+
+			"if you created it (for example from an elevated shell), remove it and store the credential again with 'cfg connect' or 'cfg credential enroll'", dir)
 	}
 
 	dacl, err := daclFromSDDL(credentialDirDACLSDDL(sid))

@@ -8,6 +8,7 @@ package cmd
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"unsafe"
@@ -71,11 +72,30 @@ func TestCredentialStore_WindowsDACLIsUserAndSystemOnly(t *testing.T) {
 	assertUserAndSystemOnly(t, filepath.Join(credDir, "ctrl.enc"))
 }
 
+// assertOnlyUserAndSystemACEs asserts path's DACL (protected or inherited)
+// names only the current user and SYSTEM.
+func assertOnlyUserAndSystemACEs(t *testing.T, path string) {
+	t.Helper()
+	user, err := currentUserSID()
+	require.NoError(t, err)
+	_, sids := credentialDACL(t, path)
+	require.NotEmpty(t, sids, path)
+	for _, sid := range sids {
+		assert.Contains(t, []string{user.String(), "S-1-5-18"}, sid,
+			"%s grants access to a principal other than the current user and SYSTEM", path)
+	}
+}
+
 // TestCredentialStore_WindowsDACLAppliedToExistingDir covers an upgrade: the
-// directory already exists with the inherited profile ACL.
+// directory already exists with the inherited profile ACL and holds a file
+// from the old scheme. The new DACL must reach that file and the salt.
 func TestCredentialStore_WindowsDACLAppliedToExistingDir(t *testing.T) {
 	credDir := filepath.Join(t.TempDir(), "credentials")
 	require.NoError(t, os.Mkdir(credDir, 0700))
+	stale := filepath.Join(credDir, "old.enc")
+	require.NoError(t, os.WriteFile(stale, []byte("old-scheme blob"), 0600))
+	_, before := credentialDACL(t, stale)
+	require.Contains(t, before, "S-1-5-32-544", "precondition: the temp dir ACL grants Administrators")
 	overrideCredentialsDir(t, credDir)
 
 	store, err := newCredentialStore()
@@ -84,6 +104,26 @@ func TestCredentialStore_WindowsDACLAppliedToExistingDir(t *testing.T) {
 
 	assertUserAndSystemOnly(t, credDir)
 	assertUserAndSystemOnly(t, filepath.Join(credDir, "ctrl.enc"))
+	assertOnlyUserAndSystemACEs(t, stale)
+	assertUserAndSystemOnly(t, filepath.Join(credDir, "salt"))
+}
+
+func TestCredentialStore_WindowsRefusesJunction(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "elsewhere")
+	require.NoError(t, os.Mkdir(target, 0700))
+	credDir := filepath.Join(base, "credentials")
+	if out, err := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "mklink", "/J", credDir, target).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J failed: %v: %s", err, out)
+	}
+	overrideCredentialsDir(t, credDir)
+
+	_, err := newCredentialStore()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), credDir)
+	entries, err := os.ReadDir(target)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing may be written through the junction")
 }
 
 func TestCredentialStore_WindowsRefusesDirOwnedByAnotherPrincipal(t *testing.T) {
