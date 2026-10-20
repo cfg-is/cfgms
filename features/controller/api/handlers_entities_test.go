@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1684,4 +1685,65 @@ func TestHandleAssertEdge_LimitsRejected(t *testing.T) {
 			"deep": nest(maxAssertedAttributeDepth - 1),
 		}))
 	})
+}
+
+// TestFilterReadableTimelineEvents feeds the peer filter events shaped as the
+// sqlite and database providers emit them (edge_subject, from, to).
+func TestFilterReadableTimelineEvents(t *testing.T) {
+	f := newRGFixture(t)
+	scope := f.server.tenantReadScope(asRootOperator(httptest.NewRequest(http.MethodGet, "/", nil), boundRootOperator("flt-op"), nil), "GET /api/v1/entities/timeline")
+	require.True(t, scope.boundarySubject())
+
+	ev := func(kind, es, from, to string) *eginterfaces.TimelineEvent {
+		return &eginterfaces.TimelineEvent{
+			Subject: egtypes.EID{}, Kind: kind,
+			Detail: map[string]interface{}{"edge_subject": es, "from": from, "to": to},
+		}
+	}
+	root, client := rgRootEID, rgClientEID
+	cases := []struct {
+		name string
+		ev   *eginterfaces.TimelineEvent
+		keep bool
+	}{
+		{"all root", ev("same-as-change", "same-as|"+root+"|"+root, root, root), true},
+		{"client peer in from/to", ev("same-as-change", "same-as|"+root+"|"+client, root, client), false},
+		{"readable from/to, client in edge_subject", ev("same-as-change", "same-as|"+root+"|"+client, root, root), false},
+		{"unparseable from", ev("same-as-change", "same-as|"+root+"|"+root, "not an eid", root), false},
+		{"malformed edge_subject", ev("same-as-change", "same-as|"+root, root, root), false},
+		{"unknown entity", ev("same-as-change", "same-as|"+root+"|host:nope", root, "host:nope"), false},
+		{"other kinds untouched", ev("state-change", "", "", ""), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := f.server.filterReadableTimelineEvents(context.Background(), scope, []*eginterfaces.TimelineEvent{tc.ev})
+			require.NoError(t, err)
+			assert.Equal(t, tc.keep, len(out) == 1)
+		})
+	}
+}
+
+// TestHandleGetTimeline_PeerOwnerLookupErrorReturns500: an error resolving a
+// named peer's owner fails the request without returning the event.
+func TestHandleGetTimeline_PeerOwnerLookupErrorReturns500(t *testing.T) {
+	f := newRGFixture(t)
+	closed := newTestEntityGraphProvider(t)
+	require.NoError(t, closed.Close())
+	now := time.Now().UTC()
+	require.NoError(t, f.prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:reporter",
+		Observations: []egtypes.Observation{{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: "same-as|" + rgRootEID + "|" + rgClientEID,
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		}},
+	}))
+	f.server.egProvider = eidRoutedEGProvider{egReadProvider: f.prov, routedEID: rgClientEID, routedSrc: closed}
+
+	q := url.Values{"eid": {rgRootEID}, "from": {now.Add(-time.Hour).Format(time.RFC3339)}, "to": {now.Add(time.Hour).Format(time.RFC3339)}}
+	rec := f.get(t, f.server.handleGetTimeline, "/api/v1/entities/timeline?"+q.Encode(), boundRootOperator("flt-err"), nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "closed")
+	assert.NotContains(t, rec.Body.String(), "rg-client-host")
 }
