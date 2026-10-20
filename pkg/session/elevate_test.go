@@ -353,3 +353,30 @@ func TestElevate_LoginCredentialIDSetOnce(t *testing.T) {
 			got.LoginCredentialID, got.CredentialID, credX, credY)
 	}
 }
+
+// TestIssueBound_PersistsBothCredentialIDs verifies IssueBound records the login and
+// step-up credential IDs at creation, for both ordinary and root-scoped forms, and that
+// Validate returns them (Issue #5199).
+func TestIssueBound_PersistsBothCredentialIDs(t *testing.T) {
+	for _, rootScoped := range []bool{false, true} {
+		cfg := session.DefaultConfig()
+		mgr, _ := newTestManager(t, cfg, &fakeClock{t: time.Now()})
+		ctx := context.Background()
+		login, step := []byte("login-cred"), []byte("step-cred")
+
+		sess, tok, err := mgr.IssueBound(ctx, "alice", "cli-login", "tenant-1", rootScoped, login, step)
+		if err != nil {
+			t.Fatalf("IssueBound: %v", err)
+		}
+		if sess.RootScoped != rootScoped {
+			t.Fatalf("RootScoped = %v, want %v", sess.RootScoped, rootScoped)
+		}
+		got, err := mgr.Validate(ctx, tok)
+		if err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !bytes.Equal(got.LoginCredentialID, login) || !bytes.Equal(got.CredentialID, step) {
+			t.Fatalf("credentials = %q/%q, want %q/%q", got.LoginCredentialID, got.CredentialID, login, step)
+		}
+	}
+}

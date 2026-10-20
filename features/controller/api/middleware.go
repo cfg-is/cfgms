@@ -1163,6 +1163,24 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 							"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
 						return
 					}
+					// CLI-login sessions live only while the passkeys that approved them exist
+					// (Issue #5199). Revoking a passkey is how a phished account is contained,
+					// so a legacy CLI session with no recorded credential is refused too
+					// (fail closed; the user re-runs CLI login once) rather than kept until
+					// expiry. A missing account is refused the same way. Sessions from
+					// POST /api/v1/sessions use other connection names and are unaffected.
+					if sess.ConnectionName == cliLoginConnectionName &&
+						(acct == nil ||
+							!accountHoldsCredential(acct, sess.LoginCredentialID) ||
+							(len(sess.CredentialID) > 0 && !accountHoldsCredential(acct, sess.CredentialID))) {
+						if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
+							s.logger.Warn("Failed to revoke cli-login session with a revoked credential",
+								"session_id", logging.SanitizeLogValue(sess.ID),
+								"error", logging.SanitizeLogValue(revokeErr.Error()))
+						}
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						return
+					}
 					if acct != nil {
 						if acct.Disabled {
 							// Disabled account: reject with the same 401 a revoked session gets.

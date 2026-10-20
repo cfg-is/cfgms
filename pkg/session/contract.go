@@ -182,6 +182,12 @@ type Manager interface {
 	// root-scoped SaaS operator may call this — never in response to a request-supplied
 	// flag, and there is deliberately no method to flip RootScoped on an existing session.
 	IssueRootScoped(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error)
+	// IssueBound mints a session that records, at creation, the WebAuthn credential IDs
+	// of the session it derives from (Issue #5199): loginCredentialID and credentialID
+	// become LoginCredentialID and CredentialID, so revoking either passkey can end it.
+	// rootScoped carries the same caller-verification contract as IssueRootScoped.
+	// Elevate remains the only way to set credentials on an existing session.
+	IssueBound(ctx context.Context, principalID, connectionName, tenantID string, rootScoped bool, loginCredentialID, credentialID []byte) (*Session, string, error)
 	Validate(ctx context.Context, token string) (*Session, error)
 	Renew(ctx context.Context, token string) (*Session, string, error)
 	Revoke(ctx context.Context, id string) error

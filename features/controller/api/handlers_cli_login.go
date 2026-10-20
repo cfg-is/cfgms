@@ -610,15 +610,32 @@ func (s *Server) handleApproveCliLoginRequest(w http.ResponseWriter, r *http.Req
 	// Scope inheritance mirrors handleSessionCreate exactly (ADR-025 Amendment 1
 	// A1.3 / Amendment 4): read from the authenticated principal, never inferred from
 	// an empty TenantID, never staged on the request record in between.
-	var (
-		sess  *session.Session
-		token string
-	)
-	if principal.RootScoped {
-		sess, token, err = s.sessionManager.IssueRootScoped(r.Context(), principal.ID, cliLoginConnectionName, principal.TenantID)
-	} else {
-		sess, token, err = s.sessionManager.Issue(r.Context(), principal.ID, cliLoginConnectionName, principal.TenantID)
+	// The CLI session is bound to the passkeys of the web session that approved it
+	// (Issue #5199), so revoking either passkey ends it. Approval from anything but a
+	// passkey web session (admin certificate, API key) is refused: there is no
+	// credential to bind, and an unbound session would outlive a passkey revocation.
+	ref, hasRef := r.Context().Value(authSessionContextKey).(authSessionRef)
+	if !hasRef || ref.manager == nil {
+		s.writeErrorResponse(w, http.StatusForbidden, "Login approval requires a passkey web session", "PASSKEY_SESSION_REQUIRED")
+		return
 	}
+	approver, getErr := ref.manager.GetByID(r.Context(), ref.id)
+	if getErr != nil {
+		if errors.Is(getErr, session.ErrSessionNotFound) || errors.Is(getErr, session.ErrSessionRevoked) || errors.Is(getErr, session.ErrSessionExpired) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Login approval requires a passkey web session", "PASSKEY_SESSION_REQUIRED")
+			return
+		}
+		s.logger.Error("Failed to read approving session for cli-login approval",
+			"error", logging.SanitizeLogValue(getErr.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+		return
+	}
+	if approver == nil || len(approver.LoginCredentialID) == 0 {
+		s.writeErrorResponse(w, http.StatusForbidden, "Login approval requires a passkey web session", "PASSKEY_SESSION_REQUIRED")
+		return
+	}
+	sess, token, err := s.sessionManager.IssueBound(r.Context(), principal.ID, cliLoginConnectionName,
+		principal.TenantID, principal.RootScoped, approver.LoginCredentialID, approver.CredentialID)
 	if err != nil {
 		s.logger.Error("Failed to issue session for cli-login approval",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
