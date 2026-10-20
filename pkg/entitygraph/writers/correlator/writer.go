@@ -43,9 +43,11 @@ package correlator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,6 +93,20 @@ const (
 	// write-lock hold. Correlate flushes at this size instead of accumulating
 	// the whole sweep in memory.
 	maxObservationBatch = 1000
+
+	// maxScopesPerBatch bounds the claim scopes (one per anchor) declared in one
+	// ReportObservations call. A batch of scopes with no observations is valid.
+	maxScopesPerBatch = 500
+
+	// sameAsEdgeType is the edge type this writer asserts and scopes.
+	sameAsEdgeType = "same-as"
+)
+
+// Effective per-batch caps. They equal the constants above and are variables only
+// so internal tests can force a sweep across several flushes.
+var (
+	observationBatchLimit = maxObservationBatch
+	scopeBatchLimit       = maxScopesPerBatch
 )
 
 // nonIdentifyingMACs are unicast, non-zero MACs that are nevertheless fixed
@@ -118,23 +134,35 @@ func New(provider interfaces.EntityGraphProvider) (*Writer, error) {
 
 // Correlate runs one identity-correlation sweep. It enumerates all entities,
 // groups them by normalized MAC address, and asserts same-as edges between
-// pairs from different authority segments.
+// pairs from different authority segments. It also retracts same-as edges whose
+// MAC match has stopped being true.
 //
 // VM GUID agreement alone (no MAC agreement) never produces a same-as edge —
 // GUID is corroborating-only per ADR-022 §3.
 //
+// Retraction: every entity the sweep enumerates is an anchor, and each flushed
+// batch declares one edge-addressed claim scope (same-as, TraversalBoth) per
+// anchor it contains. A provider diffs a scope against the observations of the
+// single ReportObservations call that carries it, so a batch holds the complete
+// current same-as edge set of every anchor it scopes; an edge between A and B is
+// emitted in both A's and B's batch. Anchors are packed into batches whole, so
+// one flush never retracts what another flush asserted.
+//
 // Fan-out bounds: a MAC shared by more than maxJoinGroupSize entities is skipped
 // (see maxJoinGroupSize), and observations are flushed to the provider in
-// batches of at most maxObservationBatch rather than accumulated for the whole
-// sweep. Together these bound both the edges a single MAC can assert and the
-// memory and transaction size of one sweep, independent of fleet size.
+// batches of at most maxObservationBatch observations and maxScopesPerBatch
+// scopes rather than accumulated for the whole sweep. An anchor whose edge set
+// alone exceeds the observation cap is skipped with a warning and declares no
+// scope: its stale edges stay rather than risk a false retraction.
 //
-// Flushing mid-sweep means a provider failure can leave the edges written before
-// it in place. That is safe: same-as observations are content-hash deduped and
-// the sweep is idempotent, so a re-run reconverges.
+// Fail closed: a GetEntity error other than interfaces.ErrNotFound aborts the
+// sweep before anything is reported, and a ReportObservations failure stops the
+// sweep at once. Flushing mid-sweep can leave the batches written before a
+// failure in place; that is safe because each batch is self-consistent and the
+// sweep is idempotent, so a re-run reconverges.
 func (w *Writer) Correlate(ctx context.Context) error {
 	truncatedEntities := 0
-	candidates, err := w.collectMACs(ctx, &truncatedEntities)
+	candidates, anchors, err := w.collectMACs(ctx, &truncatedEntities)
 	if err != nil {
 		return fmt.Errorf("correlator: collect MACs: %w", err)
 	}
@@ -152,9 +180,8 @@ func (w *Writer) Correlate(ctx context.Context) error {
 		}
 	}
 
-	now := time.Now().UTC()
-	batch := make([]types.Observation, 0, maxObservationBatch)
-
+	// Per-anchor current same-as subject sets.
+	edgeSets := make(map[string]map[string]struct{}, len(anchors))
 	for _, members := range macIndex {
 		members = dedupEIDs(members)
 		if len(members) < 2 {
@@ -175,38 +202,124 @@ func (w *Writer) Correlate(ctx context.Context) error {
 				if !ok {
 					continue // EID carries the edge-subject delimiter — see sameAsSubject
 				}
-				batch = append(batch, types.Observation{
-					Source:     observationSource,
-					ObservedAt: now,
-					RecordedAt: now,
-					Subject:    subject,
-					Kind:       types.ObservationKindState,
-					Confidence: types.ConfidenceHigh,
-					Payload:    map[string]interface{}{},
-				})
-				if len(batch) == maxObservationBatch {
-					if err := w.report(ctx, batch); err != nil {
-						return err
+				for _, end := range [2]string{a.String(), b.String()} {
+					set := edgeSets[end]
+					if set == nil {
+						set = make(map[string]struct{})
+						edgeSets[end] = set
 					}
-					// Fresh backing array: the flushed slice is now owned by
-					// the provider for the duration of its call.
-					batch = make([]types.Observation, 0, maxObservationBatch)
+					set[subject] = struct{}{}
 				}
 			}
 		}
 	}
 
-	return w.report(ctx, batch)
+	now := time.Now().UTC()
+	pk := newBatchPacker(w, now)
+	for _, anchor := range anchors {
+		key := anchor.String()
+		if !validAnchor(key) {
+			continue // forged anchor must not become a scope key
+		}
+		set := edgeSets[key]
+		if len(set) > observationBatchLimit {
+			slog.Warn("correlator: anchor edge set exceeds batch cap; skipping retraction scope",
+				"edges", len(set),
+				"limit", observationBatchLimit)
+			continue
+		}
+		subjects := make([]string, 0, len(set))
+		for s := range set {
+			subjects = append(subjects, s)
+		}
+		sort.Strings(subjects)
+		if err := pk.add(ctx, anchor, subjects); err != nil {
+			return err
+		}
+	}
+	return pk.flush(ctx)
 }
 
-// report writes one bounded observation batch. An empty batch is a no-op.
-func (w *Writer) report(ctx context.Context, observations []types.Observation) error {
-	if len(observations) == 0 {
+// validAnchor reports whether an EID string may be declared as a scope anchor.
+func validAnchor(eid string) bool {
+	return !strings.Contains(eid, edgeSubjectSep) && !strings.Contains(eid, "\x1f")
+}
+
+// batchPacker packs whole anchors into bounded ObservationBatches.
+type batchPacker struct {
+	w      *Writer
+	now    time.Time
+	obs    []types.Observation
+	seen   map[string]struct{}
+	scopes []types.ClaimScope
+}
+
+func newBatchPacker(w *Writer, now time.Time) *batchPacker {
+	return &batchPacker{w: w, now: now, seen: make(map[string]struct{})}
+}
+
+// add appends the anchor's scope and complete subject set, flushing first when
+// the anchor would not fit in the current batch.
+func (p *batchPacker) add(ctx context.Context, anchor types.EID, subjects []string) error {
+	fresh := 0
+	for _, s := range subjects {
+		if _, dup := p.seen[s]; !dup {
+			fresh++
+		}
+	}
+	if len(p.scopes) >= scopeBatchLimit || len(p.obs)+fresh > observationBatchLimit {
+		if err := p.flush(ctx); err != nil {
+			return err
+		}
+	}
+	for _, s := range subjects {
+		if _, dup := p.seen[s]; dup {
+			continue
+		}
+		p.seen[s] = struct{}{}
+		p.obs = append(p.obs, types.Observation{
+			Source:     observationSource,
+			ObservedAt: p.now,
+			RecordedAt: p.now,
+			Subject:    s,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			Payload:    map[string]interface{}{},
+		})
+	}
+	p.scopes = append(p.scopes, types.ClaimScope{
+		Source: observationSource,
+		Pattern: types.ClaimScopePattern{
+			Edge: &types.EdgeScopePattern{
+				EdgeType:  sameAsEdgeType,
+				AnchorEID: anchor,
+				Direction: types.TraversalBoth,
+			},
+		},
+		AsOf: p.now,
+	})
+	return nil
+}
+
+// flush reports the pending batch and starts a fresh one.
+func (p *batchPacker) flush(ctx context.Context) error {
+	obs, scopes := p.obs, p.scopes
+	// Fresh backing arrays: the flushed slices are owned by the provider for the
+	// duration of its call.
+	p.obs, p.scopes = nil, nil
+	p.seen = make(map[string]struct{})
+	return p.w.report(ctx, obs, scopes)
+}
+
+// report writes one bounded batch. An empty batch is a no-op.
+func (w *Writer) report(ctx context.Context, observations []types.Observation, scopes []types.ClaimScope) error {
+	if len(observations) == 0 && len(scopes) == 0 {
 		return nil
 	}
 	if err := w.provider.ReportObservations(ctx, interfaces.ObservationBatch{
 		Source:       observationSource,
 		Observations: observations,
+		ClaimScopes:  scopes,
 	}); err != nil {
 		return fmt.Errorf("correlator: report observations: %w", err)
 	}
@@ -214,16 +327,22 @@ func (w *Writer) report(ctx context.Context, observations []types.Observation) e
 }
 
 // collectMACs enumerates all entities and returns a map from EID to their
-// normalized MAC addresses. The sweep uses no tenant filter — the correlator
-// operates controller-wide.
-func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[types.EID][]string, error) {
+// normalized MAC addresses, plus every enumerated entity as an anchor. The sweep
+// uses no tenant filter — the correlator operates controller-wide.
+//
+// Only interfaces.ErrNotFound (entity removed between query and fetch) skips an
+// entity, and a skipped entity is not an anchor. Any other GetEntity error
+// aborts the sweep: it must never be read as "MAC no longer reported".
+func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[types.EID][]string, []types.EID, error) {
 	result := make(map[types.EID][]string)
+	var anchors []types.EID
+	seenAnchors := make(map[string]struct{})
 	page := interfaces.PageToken{PageSize: 500}
 
 	for {
 		entityPage, err := w.provider.QueryEntities(ctx, interfaces.EntityFilter{}, page)
 		if err != nil {
-			return nil, fmt.Errorf("correlator: query entities: %w", err)
+			return nil, nil, fmt.Errorf("correlator: query entities: %w", err)
 		}
 
 		for _, ev := range entityPage.Entities {
@@ -231,7 +350,14 @@ func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[t
 			// is required for the full merged attribute set including network_adapters.
 			full, err := w.provider.GetEntity(ctx, ev.Entity.EID, interfaces.GetEntityOpts{})
 			if err != nil {
-				continue // entity deleted between query and fetch — skip
+				if errors.Is(err, interfaces.ErrNotFound) {
+					continue // entity deleted between query and fetch — skip
+				}
+				return nil, nil, fmt.Errorf("correlator: get entity: %w", err)
+			}
+			if _, dup := seenAnchors[ev.Entity.EID.String()]; !dup {
+				seenAnchors[ev.Entity.EID.String()] = struct{}{}
+				anchors = append(anchors, ev.Entity.EID)
 			}
 			macs, truncated := extractMACsCapped(full)
 			if truncated {
@@ -248,7 +374,7 @@ func (w *Writer) collectMACs(ctx context.Context, truncatedEntities *int) (map[t
 		page.Token = entityPage.NextToken
 	}
 
-	return result, nil
+	return result, anchors, nil
 }
 
 // extractMACsCapped returns the normalized (uppercase colon-delimited) MAC addresses
@@ -423,7 +549,7 @@ func sameAsSubject(a, b types.EID) (string, bool) {
 	if as > bs {
 		as, bs = bs, as
 	}
-	return "same-as" + edgeSubjectSep + as + edgeSubjectSep + bs, true
+	return sameAsEdgeType + edgeSubjectSep + as + edgeSubjectSep + bs, true
 }
 
 // dedupEIDs returns a copy of eids with duplicate EID strings removed,
