@@ -951,13 +951,11 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	acct.Version = newVersion
 
 	// If a reset moved the account to a different storage tenant, remove the old
-	// record so the store never holds two live records for one username.
+	// record so the store never holds two live records for one username (Issue #5205).
 	if moved {
-		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
-		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
-			s.logger.Warn("Failed to delete account record from previous tenant",
-				"username", logging.SanitizeLogValue(acct.Username),
-				"error", logging.SanitizeLogValue(delErr.Error()))
+		if status, code, msg := s.removeMovedAccountRecord(r.Context(), existing, acct); status != 0 {
+			s.writeErrorResponse(w, status, msg, code)
+			return
 		}
 	}
 	s.cacheAccount(acct)
@@ -1004,6 +1002,45 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		},
 		EnrollmentMagicLink: rawToken,
 	})
+}
+
+// removeMovedAccountRecord removes the previous-tenant record after a reset moved the
+// account, which already wrote the destination record (Issue #5205). The secrets
+// interface has no version-conditional delete, so the old record is re-read and removed
+// only when its Version still equals the one the reset was built on. If it changed (or
+// vanished) or the delete fails, the new destination record is removed so no second
+// live record exists, and the old record is left as it is. A non-zero status means the
+// request must fail with that status, code and message.
+func (s *Server) removeMovedAccountRecord(ctx context.Context, old, dest *account) (status int, code, msg string) {
+	rollback := func() {
+		destKey := fmt.Sprintf("%s/%s", accountStorageTenant(dest.TenantID), accountStoreKey(dest.Username))
+		if err := s.secretStore.DeleteSecret(ctx, destKey); err != nil {
+			s.logger.Error("Failed to remove destination account record after aborted move",
+				"username", logging.SanitizeLogValue(dest.Username),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+	current, err := s.loadAccountFromStore(ctx, old.Username, accountStorageTenant(old.TenantID))
+	if err != nil {
+		s.logger.Error("Failed to re-read account record from previous tenant",
+			"username", logging.SanitizeLogValue(old.Username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		rollback()
+		return http.StatusInternalServerError, "STORE_ERROR", "Failed to persist account"
+	}
+	if current == nil || current.Version != old.Version {
+		rollback()
+		return http.StatusConflict, "ACCOUNT_MODIFIED", "Account was concurrently modified; retry"
+	}
+	oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(old.TenantID), accountStoreKey(old.Username))
+	if err := s.secretStore.DeleteSecret(ctx, oldKey); err != nil {
+		s.logger.Error("Failed to delete account record from previous tenant",
+			"username", logging.SanitizeLogValue(old.Username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		rollback()
+		return http.StatusInternalServerError, "STORE_ERROR", "Failed to persist account"
+	}
+	return 0, "", ""
 }
 
 // handleRevokeEnrollmentLink handles POST /api/v1/accounts/{username}/enrollment-link/revoke.
@@ -1628,14 +1665,50 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	// Copy before mutating — acct points into the in-memory cache and a concurrent
 	// getAccountByCertSerial iterates s.accounts under RLock; writing a field on the
 	// shared pointer without holding the write lock is a data race.
-	disabled := *acct
-	disabled.Disabled = true
-	if err := s.persistAccount(r.Context(), &disabled, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to disable account before offboarding",
-			"username", logging.SanitizeLogValue(username),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to disable account before offboarding", "STORE_ERROR")
+	//
+	// The write is a compare-and-swap keyed on the version just read (Issue #5205): a
+	// concurrent cert bind, credential revocation or permission change moves the version, the
+	// swap loses, and the handler reloads and retries on the fresh record rather than
+	// reverting that change. Step 2 revokes the bindings of the record actually written.
+	const maxDisableAttempts = 3
+	var disabled account
+	disableCommitted := false
+	for attempt := 0; attempt < maxDisableAttempts; attempt++ {
+		if attempt > 0 {
+			acct, err = s.loadAccountFromStore(r.Context(), username, accountStorageTenant(acct.TenantID))
+			if err != nil {
+				s.logger.Error("Failed to reload account before offboarding",
+					"username", logging.SanitizeLogValue(username),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
+				return
+			}
+			if acct == nil {
+				s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+				return
+			}
+		}
+		disabled = *acct
+		disabled.Disabled = true
+		newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &disabled, actingPrincipalID)
+		if persistErr != nil {
+			s.logger.Error("Failed to disable account before offboarding",
+				"username", logging.SanitizeLogValue(username),
+				"error", logging.SanitizeLogValue(persistErr.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"Failed to disable account before offboarding", "STORE_ERROR")
+			return
+		}
+		if swapped {
+			disabled.Version = newVersion
+			disableCommitted = true
+			break
+		}
+	}
+	if !disableCommitted {
+		// Nothing cached; no revocation or delete runs on a record we did not disable.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry", "ACCOUNT_MODIFIED")
 		return
 	}
 	s.cacheAccount(&disabled)
@@ -1729,7 +1802,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Web admin account offboarded and deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.RootScope,
+		"root_scope", logging.SanitizeLogValue(strconv.FormatBool(acct.RootScope)),
 		"certs_revoked", certsRevoked,
 		"cli_sessions_revoked", cliSessionsRevoked,
 		"web_sessions_revoked", webSessionsRevoked,
