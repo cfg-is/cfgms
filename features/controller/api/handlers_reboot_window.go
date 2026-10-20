@@ -115,10 +115,12 @@ func (s *Server) handlePutTenantRebootWindow(w http.ResponseWriter, r *http.Requ
 	}
 	if existing != nil {
 		if parseErr := yaml.Unmarshal(existing.Data, storedCfg); parseErr != nil {
-			s.logger.Warn("Existing config parse error; starting fresh",
+			// An unparsable document must not be replaced: that would drop every other field.
+			s.logger.Error("Existing tenant config is unparsable; refusing to overwrite",
 				"tenant_id", logging.SanitizeLogValue(tenantID),
 				"error", logging.SanitizeLogValue(parseErr.Error()))
-			storedCfg = &stewardtypes.StewardConfig{}
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read existing config", "INTERNAL_ERROR")
+			return
 		}
 	}
 
@@ -297,10 +299,12 @@ func (s *Server) handlePutStewardRebootWindow(w http.ResponseWriter, r *http.Req
 	}
 	if existing != nil {
 		if parseErr := yaml.Unmarshal(existing.Data, storedCfg); parseErr != nil {
-			s.logger.Warn("Existing steward config parse error; starting fresh",
+			// An unparsable document must not be replaced: that would drop every other field.
+			s.logger.Error("Existing steward config is unparsable; refusing to overwrite",
 				"steward_id", logging.SanitizeLogValue(stewardID),
 				"error", logging.SanitizeLogValue(parseErr.Error()))
-			storedCfg = &stewardtypes.StewardConfig{}
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read existing config", "INTERNAL_ERROR")
+			return
 		}
 	}
 

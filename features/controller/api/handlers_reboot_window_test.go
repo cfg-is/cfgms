@@ -726,3 +726,85 @@ type rebootWindowPathStore struct {
 func (s rebootWindowPathStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
 	return s.path(ctx, tenantID)
 }
+
+// unparsableStoredConfigYAML is a stored document that carries other fields but
+// does not parse as a StewardConfig (a tab indent is invalid YAML).
+const unparsableStoredConfigYAML = "steward:\n\tbroken: [unterminated\nrequired_modules: {\n"
+
+// seedUnparsableConfig writes an unparsable document under key straight into the real
+// config store and returns the stored bytes.
+func seedUnparsableConfig(t *testing.T, server *Server, key *cfgconfig.ConfigKey) []byte {
+	t.Helper()
+	store := server.rebootWindowConfigStore()
+	require.NotNil(t, store)
+	data := []byte(unparsableStoredConfigYAML)
+	now := time.Now().UTC()
+	require.NoError(t, store.StoreConfig(context.Background(), &cfgconfig.ConfigEntry{
+		Key: key, Data: data, Format: cfgconfig.ConfigFormatYAML,
+		Checksum: "seed", CreatedAt: now, UpdatedAt: now, CreatedBy: "seed", UpdatedBy: "seed",
+	}))
+	return data
+}
+
+// TestPutTenantRebootWindow_UnparsableStoredConfig_5xxNoWrite verifies that a tenant PUT
+// over a stored document that does not parse fails and leaves the stored bytes untouched.
+// [REQUIRED TEST] per Issue #5224 acceptance criteria.
+func TestPutTenantRebootWindow_UnparsableStoredConfig_5xxNoWrite(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	tenantID := "unparsable-tenant"
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	key, err := server.rebootWindowTenantConfigKey(ctx, tenantID)
+	require.NoError(t, err)
+	seeded := seedUnparsableConfig(t, server, key)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"reboot_window:override"}, tenantID, ephemeralTTL)
+	body, err := json.Marshal(rebootWindowPutRequest{ScheduleYAML: sampleScheduleYAML})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+tenantID+"/reboot-window", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.GreaterOrEqual(t, rec.Code, 500, "unparsable stored config must fail the write: %s", rec.Body.String())
+	assert.Less(t, rec.Code, 600)
+
+	after, err := server.rebootWindowConfigStore().GetConfig(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, seeded, after.Data, "stored document must be unchanged")
+}
+
+// TestPutStewardRebootWindow_UnparsableStoredConfig_5xxNoWrite verifies that a steward PUT
+// over a stored document that does not parse fails and leaves the stored bytes untouched.
+// [REQUIRED TEST] per Issue #5224 acceptance criteria.
+func TestPutStewardRebootWindow_UnparsableStoredConfig_5xxNoWrite(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	stewardID := "unparsable-steward"
+	tenantID := "unparsable-steward-tenant"
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "localhost:7003", "online"))
+	key := &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "stewards", Name: stewardID}
+	seeded := seedUnparsableConfig(t, server, key)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"reboot_window:override"}, tenantID, ephemeralTTL)
+	body, err := json.Marshal(rebootWindowPutRequest{ScheduleYAML: sampleScheduleYAML})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/stewards/"+stewardID+"/reboot-window", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.GreaterOrEqual(t, rec.Code, 500, "unparsable stored config must fail the write: %s", rec.Body.String())
+	assert.Less(t, rec.Code, 600)
+
+	after, err := server.rebootWindowConfigStore().GetConfig(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, seeded, after.Data, "stored document must be unchanged")
+}
