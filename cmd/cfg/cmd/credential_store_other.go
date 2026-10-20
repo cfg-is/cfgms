@@ -23,6 +23,7 @@ func secureCredentialsDir(dir string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
+	// #nosec G703 - dir comes only from the user's own config directory and is checked below.
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err
@@ -49,6 +50,7 @@ func secureCredentialsDir(dir string) error {
 // refuses a symlink or a file owned by another user.
 func secureCredentialFile(path string) error {
 	path = filepath.Clean(path)
+	// #nosec G703 - path is the fixed credentials dir joined with a validated name or "salt".
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return err
