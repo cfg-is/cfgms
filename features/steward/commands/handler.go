@@ -70,6 +70,9 @@ type Handler struct {
 	termMu     sync.Mutex
 	termSigned atomic.Bool
 	termState  TermSigningState
+	// termPersisted records that termState holds the switch; guarded by termMu.
+	// While termSigned is set and this is not, each command retries the write.
+	termPersisted bool
 
 	// Story #919: command authentication fields.
 
@@ -314,12 +317,17 @@ func New(cfg *Config) (*Handler, error) {
 
 	// Restore the one-way term-signed switch persisted by a previous run.
 	if cfg.TermSigningState != nil {
+		// TermSigned returns true with the error when the state is corrupt or
+		// unreadable, so a load error starts the handler switched (fail closed).
 		signed, err := cfg.TermSigningState.TermSigned()
 		if err != nil {
-			cfg.Logger.Warn("Failed to load term-signed switch; starting with it unset",
+			cfg.Logger.Warn("Failed to load term-signed switch; treating it as set",
 				"error", logging.SanitizeLogValue(err.Error()))
 		}
 		h.termSigned.Store(signed)
+		// A loaded switch is already durable; an errored one is retried on the
+		// first command so a repaired file carries it.
+		h.termPersisted = signed && err == nil
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -443,28 +451,34 @@ func (h *Handler) unregisterRelay(executionID string) {
 // v1 command is refused once it is set. Check and set share one critical section, so
 // a v1 command and the first v2 command racing each other are ordered: no v1
 // stamped command is admitted after the switch is observed set. A persistence
-// failure is logged; the in-memory switch stays authoritative for the process.
+// failure is logged and retried on every later command until it succeeds; the
+// in-memory switch stays authoritative for the process meanwhile.
 func (h *Handler) admitTermSigning(version uint32, term uint64) error {
 	h.termMu.Lock()
 	defer h.termMu.Unlock()
 
 	if version == cpTypes.SigningPayloadV2 {
-		if h.termSigned.Load() {
-			return nil
-		}
 		h.termSigned.Store(true)
-		if h.termState != nil {
-			if err := h.termState.MarkTermSigned(); err != nil {
-				h.logger.Warn("Failed to persist term-signed switch; in-memory state is still authoritative",
-					"error", logging.SanitizeLogValue(err.Error()))
-			}
-		}
-		return nil
 	}
-	if term > 0 && h.termSigned.Load() {
+	h.persistTermSignedLocked()
+	if version != cpTypes.SigningPayloadV2 && term > 0 && h.termSigned.Load() {
 		return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
 	}
 	return nil
+}
+
+// persistTermSignedLocked writes the switch while it is set but not yet durable.
+// Callers must hold termMu.
+func (h *Handler) persistTermSignedLocked() {
+	if h.termState == nil || h.termPersisted || !h.termSigned.Load() {
+		return
+	}
+	if err := h.termState.MarkTermSigned(); err != nil {
+		h.logger.Warn("Failed to persist term-signed switch; in-memory state is still authoritative, will retry",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	h.termPersisted = true
 }
 
 // HandleCommand processes an incoming signed command from the controller.
@@ -510,7 +524,11 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		version := cpTypes.CommandPayloadVersion(cmd)
 		if version == cpTypes.SigningPayloadV1 && cmd.Term > 0 && h.termSigned.Load() {
 			// This steward has seen a term-signed command, so a stamped command
-			// whose term is unsigned can only be a downgrade.
+			// whose term is unsigned can only be a downgrade. Refused regardless
+			// of whether the pending persist succeeds.
+			h.termMu.Lock()
+			h.persistTermSignedLocked()
+			h.termMu.Unlock()
 			return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
 		}
 		cmdBytes, err := cpTypes.CommandSigningBytesVersion(cmd, rawParams, version)
