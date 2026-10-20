@@ -92,13 +92,13 @@ func TestResolveAssurance_NilStores(t *testing.T) {
 	srv := &Server{} // no stores
 
 	// certificate:provision is AssuranceStrong in the global map.
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "some-tenant", "certificate:provision")
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "some-tenant", "certificate:provision")
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 	assert.False(t, req.RequireUserPresence)
 
 	// A permission absent from the global map must return found=false.
-	req2, found2 := srv.resolveAssuranceRequirement(context.Background(), "some-tenant", "nonexistent:perm")
+	req2, found2, _ := srv.resolveAssuranceRequirement(context.Background(), "some-tenant", "nonexistent:perm")
 	assert.False(t, found2)
 	assert.Equal(t, session.AssuranceLevel(0), req2.Min)
 }
@@ -111,7 +111,7 @@ func TestResolveAssurance_EmptyTenantID(t *testing.T) {
 		tenantStore:          newTestTenantStoreWithPath(map[string][]string{}),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "", "certificate:provision")
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "", "certificate:provision")
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 }
@@ -129,7 +129,7 @@ func TestResolveAssurance_NoOverride(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", "certificate:provision")
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "certificate:provision")
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 	assert.False(t, req.RequireUserPresence)
@@ -162,7 +162,7 @@ func TestResolveAssurance_TenantRaisesMin(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min, "child override must raise Min to Strong")
 	assert.False(t, req.RequireUserPresence)
@@ -189,7 +189,7 @@ func TestResolveAssurance_TenantAddsPresence(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", "certificate:provision")
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "certificate:provision")
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min, "global floor Min must be preserved")
 	assert.True(t, req.RequireUserPresence, "tenant override must add RequireUserPresence")
@@ -220,7 +220,7 @@ func TestResolveAssurance_ParentOverrideInherited(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
 	require.True(t, found, "parent override must be found for child")
 	assert.Equal(t, session.AssuranceStrong, req.Min, "child must inherit parent's raised Min")
 }
@@ -257,7 +257,7 @@ func TestResolveAssurance_ChildCanFurtherTighten(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", testPerm)
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min, "parent Min must carry through")
 	assert.True(t, req.RequireUserPresence, "child RequireUserPresence must be applied on top of parent")
@@ -289,35 +289,33 @@ func TestResolveAssurance_SiblingTenantIndependent(t *testing.T) {
 	}
 
 	// sibling-a: has override with RequireUserPresence.
-	reqA, _ := srv.resolveAssuranceRequirement(context.Background(), "root/sibling-a", testPerm)
+	reqA, _, _ := srv.resolveAssuranceRequirement(context.Background(), "root/sibling-a", testPerm)
 	assert.True(t, reqA.RequireUserPresence, "sibling-a must have RequireUserPresence from its own override")
 
 	// sibling-b: no override — global floor only.
-	reqB, _ := srv.resolveAssuranceRequirement(context.Background(), "root/sibling-b", testPerm)
+	reqB, _, _ := srv.resolveAssuranceRequirement(context.Background(), "root/sibling-b", testPerm)
 	assert.False(t, reqB.RequireUserPresence, "sibling-b must NOT inherit sibling-a's override")
 	assert.Equal(t, session.AssuranceBasic, reqB.Min, "sibling-b must see global floor only")
 }
 
-// TestResolveAssurance_GetTenantPathError_FallsBackToFloor verifies that a
-// GetTenantPath error causes the resolver to log a warning and return the
-// global floor (fail-safe, not fail-open).
-func TestResolveAssurance_GetTenantPathError_FallsBackToFloor(t *testing.T) {
+// TestResolveAssurance_GetTenantPathError_ReturnsError verifies that a
+// GetTenantPath error is returned with no requirement (fail closed).
+func TestResolveAssurance_GetTenantPathError_ReturnsError(t *testing.T) {
 	srv := &Server{
 		assurancePolicyStore: newTestAssurancePolicyStore(),
 		tenantStore:          errorTenantStore{},
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "some-tenant", "certificate:provision")
-	require.True(t, found, "floor must still be found even on error")
-	assert.Equal(t, session.AssuranceStrong, req.Min, "must fall back to global floor on error")
-	assert.False(t, req.RequireUserPresence)
+	req, found, err := srv.resolveAssuranceRequirement(context.Background(), "some-tenant", "certificate:provision")
+	require.Error(t, err)
+	assert.False(t, found)
+	assert.Equal(t, Requirement{}, req)
 }
 
-// TestResolveAssurance_GetPolicyError_FallsBackToFloor verifies that a
-// GetPolicy error causes the resolver to log a warning and return the
-// global floor (fail-safe, not fail-open).
-func TestResolveAssurance_GetPolicyError_FallsBackToFloor(t *testing.T) {
+// TestResolveAssurance_GetPolicyError_ReturnsError verifies that a GetPolicy
+// error is returned with no requirement (fail closed).
+func TestResolveAssurance_GetPolicyError_ReturnsError(t *testing.T) {
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
 		"root/child": {"root", "root/child"},
 	})
@@ -327,9 +325,10 @@ func TestResolveAssurance_GetPolicyError_FallsBackToFloor(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", "certificate:provision")
-	require.True(t, found, "floor must still be found even on GetPolicy error")
-	assert.Equal(t, session.AssuranceStrong, req.Min, "must fall back to global floor on error")
+	req, found, err := srv.resolveAssuranceRequirement(context.Background(), "root/child", "certificate:provision")
+	require.Error(t, err)
+	assert.False(t, found)
+	assert.Equal(t, Requirement{}, req)
 }
 
 // TestResolveAssurance_UnknownPermission_FoundByOverride verifies that a permission
@@ -352,7 +351,7 @@ func TestResolveAssurance_UnknownPermission_FoundByOverride(t *testing.T) {
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root", "new:custom-perm")
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root", "new:custom-perm")
 	require.True(t, found, "tenant-declared perm must be reported as found")
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 }
@@ -385,7 +384,7 @@ func TestResolveAssurance_LegacyAccountOverride_PreservesPresence(t *testing.T) 
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:delete")
+	req, found, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:delete")
 	require.True(t, found)
 	assert.Equal(t, session.AssuranceStrong, req.Min, "global floor for account:delete must be preserved")
 	assert.True(t, req.RequireUserPresence,
@@ -413,11 +412,11 @@ func TestResolveAssurance_LegacyOverride_DoesNotLeakAcrossPermissions(t *testing
 		logger:               logging.NewNoopLogger(),
 	}
 
-	req, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:delete")
+	req, _, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:delete")
 	assert.False(t, req.RequireUserPresence,
 		"web-account:list must alias only to account:list, never to another account:* permission")
 
-	reqList, foundList := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:list")
+	reqList, foundList, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:list")
 	require.True(t, foundList, "an override stored under a legacy ID must make the renamed permission found")
 	assert.True(t, reqList.RequireUserPresence, "web-account:list must alias to account:list")
 }
