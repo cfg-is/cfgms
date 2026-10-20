@@ -30,10 +30,22 @@ type Encryptor interface {
 
 // NewPlatformEncryptor creates an OS-native encryptor for the given directory.
 // On Linux/macOS: AES-256-GCM with HKDF-SHA256 derived from the machine ID.
-// On Windows: DPAPI.
+// On Windows: machine-scope DPAPI (any account on the machine can decrypt).
 // The dir is used to persist the HKDF salt (Linux/macOS only).
 func NewPlatformEncryptor(dir string) (Encryptor, error) {
 	return newPlatformEncryptor(dir)
+}
+
+// NewUserEncryptor creates the encryptor for the cfg CLI's admin credential
+// store. On Windows it is user-scope DPAPI: only the Windows user who stored a
+// credential can decrypt it, and its entropy is derived from the machine's
+// MachineGuid and a random salt kept in dir, so a blob copied to another
+// machine does not decrypt there. On Linux/macOS it is the same AES-256-GCM
+// encryptor as NewPlatformEncryptor (key from the machine ID and the salt in
+// dir); the files' 0600 mode in the user's config directory binds it to the user.
+// Steward callers keep NewPlatformEncryptor.
+func NewUserEncryptor(dir string) (Encryptor, error) {
+	return newUserEncryptor(dir)
 }
 
 // NewEncryptorFromBytes creates an AES-256-GCM encryptor using the supplied machineID bytes

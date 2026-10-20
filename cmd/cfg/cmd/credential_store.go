@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,17 +41,18 @@ type CredentialStore struct {
 }
 
 // newCredentialStore returns a CredentialStore using the default machine-bound unlocker.
-// The credentials directory is created at mode 0700 if it does not exist.
+// The credentials directory is made private to the current user before any key material
+// (the encryptor's salt) is written to it: mode 0700 on Linux/macOS; on Windows a
+// protected DACL for the current user and SYSTEM only (see secureCredentialsDir).
 func newCredentialStore() (*CredentialStore, error) {
 	dir, err := credentialsDirFn()
 	if err != nil {
 		return nil, err
 	}
-	// #nosec G301 - 0700: traversable but private to the user
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := secureCredentialsDir(dir); err != nil {
 		return nil, fmt.Errorf("cannot create credentials directory: %w", err)
 	}
-	enc, err := steward.NewPlatformEncryptor(dir)
+	enc, err := steward.NewUserEncryptor(dir)
 	if err != nil {
 		return nil, fmt.Errorf("credential store: init encryptor: %w", err)
 	}
@@ -77,13 +79,21 @@ func (s *CredentialStore) Store(_ context.Context, name string, bundleBytes []by
 	if err := os.WriteFile(path, ciphertext, 0600); err != nil {
 		return fmt.Errorf("credential store: write %q: %w", name, err)
 	}
+	if err := secureCredentialFile(path); err != nil {
+		return fmt.Errorf("credential store: secure %q: %w", name, err)
+	}
 	return nil
 }
 
 // Load decrypts and returns the credential bytes for the named connection.
-// Returns a wrapped credential.ErrLocked on decrypt failure or when the credential is absent.
+// Returns a wrapped credential.ErrLocked on decrypt failure or when the credential is absent,
+// including a credential written under an earlier encryption scheme; the message tells the
+// admin to store it again.
 func (s *CredentialStore) Load(ctx context.Context, name string) ([]byte, error) {
 	plain, err := s.unlocker.Unlock(ctx, name)
+	if errors.Is(err, credential.ErrLocked) {
+		return nil, fmt.Errorf("credential store: load %q: %w (store the credential again with 'cfg connect' or 'cfg credential enroll')", name, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("credential store: load %q: %w", name, err)
 	}

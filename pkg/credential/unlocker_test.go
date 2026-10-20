@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,7 +59,7 @@ func TestMachineUnlocker_RoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Pre-write an .enc file using the same dir (same salt → same HKDF key).
-	enc, err := steward.NewPlatformEncryptor(tmpDir)
+	enc, err := steward.NewUserEncryptor(tmpDir)
 	require.NoError(t, err)
 
 	plaintext := []byte("test-bundle-bytes")
@@ -101,13 +102,36 @@ func TestMachineUnlocker_MissingFileReturnsErrLocked(t *testing.T) {
 func TestMachineUnlocker_TamperedCiphertextReturnsErrLocked(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	enc, err := steward.NewPlatformEncryptor(tmpDir)
+	enc, err := steward.NewUserEncryptor(tmpDir)
 	require.NoError(t, err)
 	ct, err := enc.Encrypt([]byte("original"))
 	require.NoError(t, err)
 
 	// Tamper: flip last byte.
 	ct[len(ct)-1] ^= 0xFF
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "ctrl.enc"), ct, 0600))
+
+	unlocker, err := credential.NewMachineUnlocker(tmpDir)
+	require.NoError(t, err)
+
+	_, err = unlocker.Unlock(context.Background(), "ctrl")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrLocked)
+}
+
+// TestMachineUnlocker_OldMachineScopeCredentialReturnsErrLocked verifies that a credential
+// written under the earlier machine-scope DPAPI scheme (the steward's encryptor) is not
+// silently decrypted: Unlock reports ErrLocked so the admin stores it again.
+func TestMachineUnlocker_OldMachineScopeCredentialReturnsErrLocked(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows has a separate machine-scope scheme; on Linux/macOS both encryptors are the same AES-256-GCM key")
+	}
+	tmpDir := t.TempDir()
+
+	old, err := steward.NewPlatformEncryptor(tmpDir)
+	require.NoError(t, err)
+	ct, err := old.Encrypt([]byte("bundle stored before the user-scope change"))
+	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "ctrl.enc"), ct, 0600))
 
 	unlocker, err := credential.NewMachineUnlocker(tmpDir)
@@ -160,7 +184,7 @@ func TestValidateCredentialName(t *testing.T) {
 func TestMachineUnlocker_NonInteractive(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	enc, err := steward.NewPlatformEncryptor(tmpDir)
+	enc, err := steward.NewUserEncryptor(tmpDir)
 	require.NoError(t, err)
 	ciphertext, err := enc.Encrypt([]byte("bundle-data"))
 	require.NoError(t, err)

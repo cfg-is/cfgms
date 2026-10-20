@@ -3,8 +3,8 @@
 // Package credential defines the CredentialUnlocker interface for pluggable credential access.
 //
 // Credential access for cfg admin sessions goes through CredentialUnlocker. The default
-// implementation (Story #3 of epic #2213) wraps pkg/secrets/providers/steward's platform
-// encryptor (DPAPI on Windows, machine-key AES-256-GCM on Linux/macOS). Additional unlock
+// implementation (Story #3 of epic #2213) wraps pkg/secrets/providers/steward's user
+// encryptor (user-scope DPAPI on Windows, machine-key AES-256-GCM on Linux/macOS). Additional unlock
 // methods (OS-native keychain, hardware token, passphrase) slot in additively via the same
 // seam without rework.
 //
@@ -63,12 +63,15 @@ func ValidateCredentialName(name string) error {
 	return nil
 }
 
-// NewMachineUnlocker creates a machine-bound CredentialUnlocker backed by the platform
-// encryptor (DPAPI on Windows, AES-256-GCM with HKDF on Linux/macOS).
+// NewMachineUnlocker creates a machine-bound CredentialUnlocker backed by the CLI
+// credential store's user encryptor (user-scope DPAPI bound to the machine's MachineGuid on
+// Windows, AES-256-GCM with HKDF on Linux/macOS).
 // dir is the credentials directory where <name>.enc files reside; a salt file for key
-// derivation is also maintained within dir.
+// derivation is also maintained within dir. A credential written under the earlier
+// machine-scope DPAPI scheme does not decrypt and Unlock reports ErrLocked; there is no
+// fallback decryption path.
 func NewMachineUnlocker(dir string) (CredentialUnlocker, error) {
-	enc, err := steward.NewPlatformEncryptor(dir)
+	enc, err := steward.NewUserEncryptor(dir)
 	if err != nil {
 		return nil, fmt.Errorf("credential: init platform encryptor: %w", err)
 	}
