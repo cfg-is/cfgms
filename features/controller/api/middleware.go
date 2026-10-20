@@ -1824,7 +1824,14 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// resolveAssuranceRequirement composes the global floor with any per-tenant
 			// overrides declared by ancestors of tenantID (root→leaf), taking the max
 			// of all Min values and OR-ing RequireUserPresence (ADR-021, Issue #2839).
-			assuranceReq, assuranceFound := s.resolveAssuranceRequirement(r.Context(), tenantID, permissionID)
+			assuranceReq, assuranceFound, assuranceErr := s.resolveAssuranceRequirement(r.Context(), tenantID, permissionID)
+			if assuranceErr != nil {
+				s.logger.Error("Failed to resolve assurance requirement",
+					"permission_id", logging.SanitizeLogValue(permissionID),
+					"tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(assuranceErr.Error()))
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+				return
+			}
 			if assuranceFound && principal.Assurance < assuranceReq.Min {
 				decision := &AuthorizationDecision{
 					Granted:      false,
@@ -2460,36 +2467,26 @@ func (s *Server) extractBoundaryTenantFromRequest(r *http.Request, resourceType 
 // returns the global floor unchanged — preserving today's exact behavior in unit tests
 // that build a bare Server without these stores.
 //
-// GetTenantPath or GetPolicy errors are logged at Warn and cause a fall-back to the
-// global floor: an override-resolution error must never turn a storage hiccup into a
-// fleet-wide outage on every gated endpoint. Falling back to the global floor is safe
-// because the floor is always the tightest guaranteed lower bound.
-func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, permissionID string) (Requirement, bool) {
+// A GetTenantPath or GetPolicy error is returned to the caller with no requirement: the
+// global floor is only a lower bound, and a tenant may have raised a permission that is
+// absent from the global map purely through a policy override, so falling back to it
+// would silently drop that tenant's stricter policy. Callers must fail closed.
+func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, permissionID string) (Requirement, bool, error) {
 	floor, found := permissionAssurance[permissionID]
 	if s.assurancePolicyStore == nil || s.tenantStore == nil || tenantID == "" {
-		return floor, found
+		return floor, found, nil
 	}
 
 	path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
 	if err != nil {
-		s.logger.Warn("resolveAssuranceRequirement: failed to get tenant path; using global floor",
-			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"permission_id", logging.SanitizeLogValue(permissionID),
-			"error", logging.SanitizeLogValue(err.Error()),
-		)
-		return floor, found
+		return Requirement{}, false, fmt.Errorf("get tenant path: %w", err)
 	}
 
 	result := floor
 	for _, t := range path {
 		policy, err := s.assurancePolicyStore.GetPolicy(ctx, t)
 		if err != nil {
-			s.logger.Warn("resolveAssuranceRequirement: failed to get assurance policy; using global floor",
-				"tenant_id", logging.SanitizeLogValue(t),
-				"permission_id", logging.SanitizeLogValue(permissionID),
-				"error", logging.SanitizeLogValue(err.Error()),
-			)
-			return floor, found
+			return Requirement{}, false, fmt.Errorf("get assurance policy: %w", err)
 		}
 		for _, ov := range policy.Overrides {
 			// overrideAppliesTo matches the exact ID and any pre-rename ID for the same
@@ -2509,7 +2506,7 @@ func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, perm
 			}
 		}
 	}
-	return result, found
+	return result, found, nil
 }
 
 // authSessionRef identifies the session that authenticated a request and the manager

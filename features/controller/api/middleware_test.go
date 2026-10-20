@@ -4489,3 +4489,90 @@ func TestRequirePermission_UserPresence_ActionBinding_QueryString(t *testing.T) 
 		})
 	}
 }
+
+// failingTenantStore wraps a real tenant store and fails GetTenantPath.
+type failingPathTenantStore struct {
+	*testTenantStoreWithPath
+}
+
+func (failingPathTenantStore) GetTenantPath(_ context.Context, _ string) ([]string, error) {
+	return nil, errors.New("tenant store secret-detail unavailable")
+}
+
+// failingPolicyStore wraps a real in-memory policy store and fails GetPolicy.
+type failingPolicyStore struct {
+	*testAssurancePolicyStore
+}
+
+func (failingPolicyStore) GetPolicy(_ context.Context, _ string) (*business.AssurancePolicy, error) {
+	return nil, errors.New("policy store secret-detail unavailable")
+}
+
+// assuranceFailClosedHandler builds a request chain for a permission absent from the
+// global map whose only presence requirement comes from a tenant policy override.
+func assuranceFailClosedHandler(t *testing.T, srv *Server) (http.Handler, *bool) {
+	t.Helper()
+	reached := false
+	setTenant := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantID, "root/child")))
+		})
+	}
+	h := srv.authenticationMiddleware(setTenant(
+		srv.requirePermission("test", "tenant-raised")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			}))))
+	return h, &reached
+}
+
+func newTenantRaisedPolicyStore(t *testing.T) *testAssurancePolicyStore {
+	t.Helper()
+	store := newTestAssurancePolicyStore()
+	require.NoError(t, store.SetPolicy(context.Background(), &business.AssurancePolicy{
+		TenantID: "root",
+		Overrides: []business.AssurancePolicyOverride{
+			{PermissionID: "test:tenant-raised", RequireUserPresence: true},
+		},
+	}))
+	return store
+}
+
+// TestRequirePermission_AssurancePolicyReadError_FailsClosed (Issue #5221): a store error
+// reading the tenant's assurance policy must not drop a presence requirement raised only
+// through a policy override.
+func TestRequirePermission_AssurancePolicyReadError_FailsClosed(t *testing.T) {
+	require.NotContains(t, permissionAssurance, "test:tenant-raised")
+	server := setupTestServer(t)
+	server.tenantStore = newTestTenantStoreWithPath(map[string][]string{"root/child": {"root", "root/child"}})
+	server.assurancePolicyStore = failingPolicyStore{newTenantRaisedPolicyStore(t)}
+
+	handler, reached := assuranceFailClosedHandler(t, server)
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/tenant-raised", makeSelfSignedAdminCert(t))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.False(t, *reached, "handler must not run when the policy cannot be read")
+	assert.Contains(t, rec.Body.String(), "SERVICE_UNAVAILABLE")
+	assert.NotContains(t, rec.Body.String(), "secret-detail")
+}
+
+// TestRequirePermission_TenantPathReadError_FailsClosed (Issue #5221): same for GetTenantPath.
+func TestRequirePermission_TenantPathReadError_FailsClosed(t *testing.T) {
+	require.NotContains(t, permissionAssurance, "test:tenant-raised")
+	server := setupTestServer(t)
+	server.tenantStore = failingPathTenantStore{newTestTenantStoreWithPath(nil)}
+	server.assurancePolicyStore = newTenantRaisedPolicyStore(t)
+
+	handler, reached := assuranceFailClosedHandler(t, server)
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/tenant-raised", makeSelfSignedAdminCert(t))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.False(t, *reached, "handler must not run when the tenant path cannot be read")
+	assert.Contains(t, rec.Body.String(), "SERVICE_UNAVAILABLE")
+	assert.NotContains(t, rec.Body.String(), "secret-detail")
+}

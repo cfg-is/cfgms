@@ -51,6 +51,7 @@ func TestHandleGetAssurancePolicy_NoStore_Returns503(t *testing.T) {
 func TestHandleGetAssurancePolicy_ReturnsEmptyOverrides(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":        {"root"},
 		"test-tenant": {"test-tenant"},
 	})
 	srv := newAssuranceTestServer(t, apStore, tsStore)
@@ -71,6 +72,7 @@ func TestHandleGetAssurancePolicy_ReturnsEmptyOverrides(t *testing.T) {
 func TestHandleGetAssurancePolicy_ReturnsStoredOverrides(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":        {"root"},
 		"test-tenant": {"test-tenant"},
 	})
 	strongStr := "strong"
@@ -182,6 +184,7 @@ func TestHandleSetAssurancePolicy_RequiresAssuranceStrong(t *testing.T) {
 func TestHandleSetAssurancePolicy_SetsOverride(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":        {"root"},
 		"test-tenant": {"test-tenant"},
 	})
 	srv := newAssuranceTestServer(t, apStore, tsStore)
@@ -210,6 +213,7 @@ func TestHandleSetAssurancePolicy_SetsOverride(t *testing.T) {
 func TestHandleSetAssurancePolicy_InvalidMinOverride_Returns400(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":        {"root"},
 		"test-tenant": {"test-tenant"},
 	})
 	srv := newAssuranceTestServer(t, apStore, tsStore)
@@ -280,6 +284,7 @@ func TestResolveAssurance_PresenceOverride_ChallengingInOverridingTenant(t *test
 	}))
 
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":                 {"root"},
 		"tenant-with-override": {"root", "tenant-with-override"},
 		"sibling-no-override":  {"root", "sibling-no-override"},
 	})
@@ -293,13 +298,13 @@ func TestResolveAssurance_PresenceOverride_ChallengingInOverridingTenant(t *test
 	require.False(t, globalReq.RequireUserPresence, "precondition: global map must not have RequireUserPresence for certificate:provision")
 
 	// Resolve for the overriding tenant — must require presence.
-	reqA, foundA := srv.resolveAssuranceRequirement(context.Background(), "tenant-with-override", "certificate:provision")
+	reqA, foundA, _ := srv.resolveAssuranceRequirement(context.Background(), "tenant-with-override", "certificate:provision")
 	require.True(t, foundA)
 	assert.True(t, reqA.RequireUserPresence, "overriding tenant must have RequireUserPresence=true")
 	assert.Equal(t, session.AssuranceStrong, reqA.Min)
 
 	// Resolve for the sibling tenant — no override, must NOT require presence.
-	reqB, foundB := srv.resolveAssuranceRequirement(context.Background(), "sibling-no-override", "certificate:provision")
+	reqB, foundB, _ := srv.resolveAssuranceRequirement(context.Background(), "sibling-no-override", "certificate:provision")
 	require.True(t, foundB)
 	assert.False(t, reqB.RequireUserPresence, "sibling without override must not require presence")
 	assert.Equal(t, session.AssuranceStrong, reqB.Min)
@@ -333,6 +338,7 @@ func TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission(t *
 	}))
 
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":                 {"root"},
 		"tenant-with-override": {"root", "tenant-with-override"},
 		"sibling-no-override":  {"root", "sibling-no-override"},
 	})
@@ -432,6 +438,7 @@ func TestHandleSetAssurancePolicy_ChildInheritsParentAndCanTighten(t *testing.T)
 	}))
 
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":  {"root"},
 		"child": {"root", "child"},
 	})
 	srv := setupTestServer(t)
@@ -452,7 +459,7 @@ func TestHandleSetAssurancePolicy_ChildInheritsParentAndCanTighten(t *testing.T)
 	require.Equal(t, http.StatusOK, rec1.Code, "child tightening must succeed: %s", rec1.Body.String())
 
 	// Verify both parent's Min and child's RequireUserPresence are in effect.
-	reqChild, foundChild := srv.resolveAssuranceRequirement(context.Background(), "child", testPerm)
+	reqChild, foundChild, _ := srv.resolveAssuranceRequirement(context.Background(), "child", testPerm)
 	require.True(t, foundChild)
 	assert.Equal(t, session.AssuranceStrong, reqChild.Min, "parent Min must carry through to child")
 	assert.True(t, reqChild.RequireUserPresence, "child RequireUserPresence must apply on top of parent")
@@ -499,6 +506,7 @@ func TestHandleSetAssurancePolicy_ClearsOverrides(t *testing.T) {
 		},
 	}))
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":        {"root"},
 		"test-tenant": {"test-tenant"},
 	})
 	srv := newAssuranceTestServer(t, apStore, tsStore)
@@ -522,6 +530,7 @@ func TestHandleSetAssurancePolicy_ClearsOverrides(t *testing.T) {
 func TestHandleSetAssurancePolicy_NilMinOverride_NoValidation(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root":        {"root"},
 		"test-tenant": {"test-tenant"},
 	})
 	srv := newAssuranceTestServer(t, apStore, tsStore)
