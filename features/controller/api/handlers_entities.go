@@ -280,6 +280,72 @@ func (s *Server) filterReadableEdges(ctx context.Context, scope *tenantReadScope
 	return out, nil
 }
 
+// timelineEventEIDs returns every entity a same-as-change event names: Detail
+// "from" and "to" and both endpoints of "edge_subject" (edge_type|from|to). ok is
+// false when any of them is missing or does not parse, so the event is dropped.
+func timelineEventEIDs(ev *eginterfaces.TimelineEvent) (eids []egtypes.EID, ok bool) {
+	fromStr, _ := ev.Detail["from"].(string)
+	toStr, _ := ev.Detail["to"].(string)
+	subject, _ := ev.Detail["edge_subject"].(string)
+	parts := strings.Split(subject, edgeSubjectDelimiter)
+	if len(parts) != 3 {
+		return nil, false
+	}
+	for _, raw := range []string{fromStr, toStr, parts[1], parts[2]} {
+		eid, err := egtypes.ParseEID(raw)
+		if err != nil {
+			return nil, false
+		}
+		eids = append(eids, eid)
+	}
+	return eids, true
+}
+
+// filterReadableTimelineEvents drops the same-as-change events that name an entity
+// the caller may not read. The event is dropped whole rather than redacted because
+// edge_subject carries the peer EID. An endpoint that does not parse or has no
+// entity index row is unreadable; an owner-lookup error is returned.
+func (s *Server) filterReadableTimelineEvents(ctx context.Context, scope *tenantReadScope, events []*eginterfaces.TimelineEvent) ([]*eginterfaces.TimelineEvent, error) {
+	readable := make(map[string]bool)
+	allowed := func(eid egtypes.EID) (bool, error) {
+		key := eid.String()
+		if ok, done := readable[key]; done {
+			return ok, nil
+		}
+		owner, found, err := s.entityOwner(ctx, eid, "", nil)
+		if err != nil {
+			return false, err
+		}
+		ok := found && scope.Allows(owner)
+		readable[key] = ok
+		return ok, nil
+	}
+	out := make([]*eginterfaces.TimelineEvent, 0, len(events))
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		if ev.Kind != "same-as-change" {
+			out = append(out, ev)
+			continue
+		}
+		eids, ok := timelineEventEIDs(ev)
+		for _, eid := range eids {
+			if !ok {
+				break
+			}
+			var err error
+			if ok, err = allowed(eid); err != nil {
+				return nil, err
+			}
+		}
+		if ok {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
 // filterReadableNeighborhood drops the nodes the caller may not read and every
 // edge that touches a dropped node, so a client-tenant entity is never named as
 // the neighbor of a visible one.
@@ -878,6 +944,20 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		)
 		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
+	}
+
+	// A root caller's provider cut is unrestricted, so the providers' own peer check
+	// is inactive: drop same-as events naming an entity the caller may not read.
+	// This runs before the cap so dropped events never count against it.
+	if scope.boundarySubject() {
+		events, err = s.filterReadableTimelineEvents(r.Context(), scope, events)
+		if err != nil {
+			s.logger.Error("handleGetTimeline: peer access check failed",
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+			http.Error(w, "lookup failed", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// The provider returns at most MaxTimelineEvents+1 events; the extra one only

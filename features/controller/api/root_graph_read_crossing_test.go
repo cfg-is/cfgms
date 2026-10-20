@@ -510,3 +510,35 @@ func TestRootAssertEdge_NoPrincipalRefused(t *testing.T) {
 	assert.False(t, f.assertedEdgeStored(t))
 	assert.Empty(t, f.edgeAuditEntries(t, testRootTenantID))
 }
+
+// TestRootTimeline_SameAsPeerCrossing: a same-as event between a root entity and a
+// client entity names the client eid in its detail, so a root caller gets it only
+// with a crossing on the client tenant.
+func TestRootTimeline_SameAsPeerCrossing(t *testing.T) {
+	f := newRGFixture(t)
+	now := time.Now().UTC()
+	require.NoError(t, f.prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:reporter",
+		Observations: []egtypes.Observation{{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: "same-as|" + rgRootEID + "|" + rgClientEID,
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		}},
+	}))
+	q := url.Values{"eid": {rgRootEID}, "from": {now.Add(-time.Hour).Format(time.RFC3339)}, "to": {now.Add(time.Hour).Format(time.RFC3339)}}
+	path := "/api/v1/entities/timeline?" + q.Encode()
+
+	without := boundRootOperator("rg-tl-no")
+	rec := f.get(t, f.server.handleGetTimeline, path, without, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "rg-client-host", "client eid must appear in no field")
+	assert.NotContains(t, rec.Body.String(), "same-as-change")
+
+	with := boundRootOperator("rg-tl-yes")
+	grantCrossing(t, f.server, with.ID, rgMSP)
+	rec = f.get(t, f.server.handleGetTimeline, path, with, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "same-as-change")
+	assert.Contains(t, rec.Body.String(), "rg-client-host")
+}
