@@ -8,8 +8,10 @@ package steward
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"unsafe"
 
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -32,17 +34,61 @@ type dataBlob struct {
 	pbData *byte
 }
 
+// userEntropyInfo is the HKDF context string for the entropy of the CLI
+// credential store's user-scope DPAPI blobs.
+const userEntropyInfo = "cfgms-cli-credentials-v1"
+
 // dpapiEncryptor implements platformEncryptor using Windows DPAPI.
 type dpapiEncryptor struct {
 	entropy []byte // Application-specific entropy for additional binding
+	// protectFlags are the CryptProtectData flags. With
+	// cryptprotectLocalMachine any account on the machine can decrypt;
+	// without it only the Windows user who encrypted can.
+	protectFlags uintptr
 }
 
-// newPlatformEncryptor creates a DPAPI-based encryptor for Windows.
+// newPlatformEncryptor creates the steward's machine-scope DPAPI encryptor.
 func newPlatformEncryptor(_ string) (platformEncryptor, error) {
 	// Compute application-specific entropy as SHA-256 of our info string
 	entropyHash := sha256.Sum256([]byte(hkdfInfo))
 	return &dpapiEncryptor{
-		entropy: entropyHash[:],
+		entropy:      entropyHash[:],
+		protectFlags: cryptprotectUIForbidden | cryptprotectLocalMachine,
+	}, nil
+}
+
+// newUserEncryptor creates the CLI credential store's user-scope DPAPI
+// encryptor, bound to this machine through its MachineGuid and to the store
+// through the salt in dir.
+func newUserEncryptor(dir string) (platformEncryptor, error) {
+	machineID, err := MachineID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read machine ID: %w", err)
+	}
+	return newUserDPAPIEncryptor(machineID, dir)
+}
+
+// newUserDPAPIEncryptor creates a user-scope DPAPI encryptor whose entropy is
+// HKDF-SHA256 over machineID with the per-store salt kept in dir. A blob
+// copied to another machine (a roaming profile, say) meets a different
+// MachineGuid there and does not decrypt. The MachineGuid is an identity, not
+// a secret: this stops a blob being used as-is elsewhere, while the user scope
+// of DPAPI is what keeps other accounts out.
+func newUserDPAPIEncryptor(machineID []byte, dir string) (*dpapiEncryptor, error) {
+	if len(machineID) == 0 {
+		return nil, fmt.Errorf("machine ID cannot be empty")
+	}
+	salt, err := loadOrGenerateSalt(dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load or generate salt: %w", err)
+	}
+	entropy := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, machineID, salt, []byte(userEntropyInfo)), entropy); err != nil {
+		return nil, fmt.Errorf("failed to derive DPAPI entropy: %w", err)
+	}
+	return &dpapiEncryptor{
+		entropy:      entropy,
+		protectFlags: cryptprotectUIForbidden,
 	}, nil
 }
 
@@ -80,7 +126,7 @@ func (e *dpapiEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 		uintptr(unsafe.Pointer(&entropy)),
 		0, // reserved
 		0, // no prompt struct
-		uintptr(cryptprotectUIForbidden|cryptprotectLocalMachine),
+		e.protectFlags,
 		uintptr(unsafe.Pointer(&output)),
 	)
 	if ret == 0 {

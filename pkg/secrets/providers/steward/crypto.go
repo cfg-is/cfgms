@@ -13,6 +13,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,10 +31,22 @@ type Encryptor interface {
 
 // NewPlatformEncryptor creates an OS-native encryptor for the given directory.
 // On Linux/macOS: AES-256-GCM with HKDF-SHA256 derived from the machine ID.
-// On Windows: DPAPI.
+// On Windows: machine-scope DPAPI (any account on the machine can decrypt).
 // The dir is used to persist the HKDF salt (Linux/macOS only).
 func NewPlatformEncryptor(dir string) (Encryptor, error) {
 	return newPlatformEncryptor(dir)
+}
+
+// NewUserEncryptor creates the encryptor for the cfg CLI's admin credential
+// store. On Windows it is user-scope DPAPI: only the Windows user who stored a
+// credential can decrypt it, and its entropy is derived from the machine's
+// MachineGuid and a random salt kept in dir, so a blob copied to another
+// machine does not decrypt there. On Linux/macOS it is the same AES-256-GCM
+// encryptor as NewPlatformEncryptor (key from the machine ID and the salt in
+// dir); the files' 0600 mode in the user's config directory binds it to the user.
+// Steward callers keep NewPlatformEncryptor.
+func NewUserEncryptor(dir string) (Encryptor, error) {
+	return newUserEncryptor(dir)
 }
 
 // NewEncryptorFromBytes creates an AES-256-GCM encryptor using the supplied machineID bytes
@@ -149,8 +162,16 @@ func loadOrGenerateSalt(secretsDir string) ([]byte, error) {
 
 	// Try to read existing salt
 	salt, err := os.ReadFile(saltPath) //#nosec G304 -- path is constructed from configured secrets directory
-	if err == nil && len(salt) == saltSize {
+	if err == nil {
+		if len(salt) != saltSize {
+			// Replacing the salt would make every stored secret unreadable and
+			// let a writer of this file choose the key input.
+			return nil, fmt.Errorf("salt file %s has invalid length %d (want %d); refusing to replace it", saltPath, len(salt), saltSize)
+		}
 		return salt, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to read salt file: %w", err)
 	}
 
 	// Generate new salt

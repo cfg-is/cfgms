@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,19 +41,25 @@ type CredentialStore struct {
 }
 
 // newCredentialStore returns a CredentialStore using the default machine-bound unlocker.
-// The credentials directory is created at mode 0700 if it does not exist.
+// The credentials directory is made private to the current user before any key material
+// (the encryptor's salt) is written to it: mode 0700 on Linux/macOS; on Windows a
+// protected DACL for the current user and SYSTEM only (see secureCredentialsDir).
 func newCredentialStore() (*CredentialStore, error) {
 	dir, err := credentialsDirFn()
 	if err != nil {
 		return nil, err
 	}
-	// #nosec G301 - 0700: traversable but private to the user
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := secureCredentialsDir(dir); err != nil {
 		return nil, fmt.Errorf("cannot create credentials directory: %w", err)
 	}
-	enc, err := steward.NewPlatformEncryptor(dir)
+	enc, err := steward.NewUserEncryptor(dir)
 	if err != nil {
 		return nil, fmt.Errorf("credential store: init encryptor: %w", err)
+	}
+	// The encryptor has created or read the salt; it is key material, so it
+	// gets the same per-file protection as the credentials.
+	if err := secureCredentialFile(filepath.Join(dir, "salt")); err != nil {
+		return nil, fmt.Errorf("credential store: secure salt: %w", err)
 	}
 	unlocker, err := credentialStoreUnlockerFn(dir)
 	if err != nil {
@@ -72,18 +79,43 @@ func (s *CredentialStore) Store(_ context.Context, name string, bundleBytes []by
 		return fmt.Errorf("credential store: encrypt %q: %w", name, err)
 	}
 	path := filepath.Join(s.dir, name+".enc")
-	// #nosec G306 G703 -- ValidateCredentialName rejects separators/traversal,
-	// s.dir is the fixed private credential root, and 0600 protects ciphertext.
-	if err := os.WriteFile(path, ciphertext, 0600); err != nil {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("credential store: refusing %q: credential path is a symlink", name)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("credential store: stat %q: %w", name, err)
+	}
+	// Write to a fresh 0600 temp file in the same directory and rename it over the
+	// target, so a pre-existing file's mode or owner never carries over.
+	tmp, err := os.CreateTemp(s.dir, name+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("credential store: write %q: %w", name, err)
+	}
+	tmpPath := tmp.Name()
+	_, werr := tmp.Write(ciphertext)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("credential store: write %q: %w", name, errors.Join(werr, cerr))
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("credential store: write %q: %w", name, err)
+	}
+	if err := secureCredentialFile(path); err != nil {
+		return fmt.Errorf("credential store: secure %q: %w", name, err)
 	}
 	return nil
 }
 
 // Load decrypts and returns the credential bytes for the named connection.
-// Returns a wrapped credential.ErrLocked on decrypt failure or when the credential is absent.
+// Returns a wrapped credential.ErrLocked on decrypt failure or when the credential is absent,
+// including a credential written under an earlier encryption scheme; the message tells the
+// admin to store it again.
 func (s *CredentialStore) Load(ctx context.Context, name string) ([]byte, error) {
 	plain, err := s.unlocker.Unlock(ctx, name)
+	if errors.Is(err, credential.ErrLocked) {
+		return nil, fmt.Errorf("credential store: load %q: %w (store the credential again with 'cfg connect' or 'cfg credential enroll')", name, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("credential store: load %q: %w", name, err)
 	}

@@ -56,6 +56,13 @@ func readLinuxMachineID() ([]byte, error) {
 	return machineID, nil
 }
 
+// newUserEncryptor creates the CLI credential store's encryptor. On this
+// platform it is the same AES-256-GCM encryptor as newPlatformEncryptor; the
+// store's 0600 files in the user's config directory bind it to the user.
+func newUserEncryptor(dir string) (platformEncryptor, error) {
+	return newPlatformEncryptor(dir)
+}
+
 // MachineID returns the host's stable machine identifier (/etc/machine-id).
 // Unlike the encryptor key source it has no per-directory fallback: when the
 // host has no machine ID the caller gets an error and must omit the attribute.

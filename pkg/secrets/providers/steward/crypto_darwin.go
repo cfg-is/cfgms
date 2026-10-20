@@ -25,6 +25,13 @@ func newPlatformEncryptor(secretsDir string) (platformEncryptor, error) {
 	return newAesGcmEncryptor(machineID, secretsDir)
 }
 
+// newUserEncryptor creates the CLI credential store's encryptor. On this
+// platform it is the same AES-256-GCM encryptor as newPlatformEncryptor; the
+// store's 0600 files in the user's config directory bind it to the user.
+func newUserEncryptor(dir string) (platformEncryptor, error) {
+	return newPlatformEncryptor(dir)
+}
+
 // MachineID returns the host's stable machine identifier (IOPlatformUUID).
 func MachineID() ([]byte, error) {
 	return readDarwinMachineID()

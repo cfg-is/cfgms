@@ -163,3 +163,36 @@ func TestAesGcmEncryptor_ShortCiphertext(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "ciphertext too short")
 }
+
+// TestUserEncryptor_RoundTrip is the cross-platform check that the CLI
+// credential store's encryptor builds and round-trips on every platform, and
+// that a second instance over the same directory (same salt) decrypts what the
+// first wrote.
+func TestUserEncryptor_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	enc, err := NewUserEncryptor(dir)
+	require.NoError(t, err)
+
+	ciphertext, err := enc.Encrypt([]byte("admin credential bundle"))
+	require.NoError(t, err)
+
+	again, err := NewUserEncryptor(dir)
+	require.NoError(t, err)
+	plaintext, err := again.Decrypt(ciphertext)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("admin credential bundle"), plaintext)
+}
+
+func TestLoadOrGenerateSalt_WrongLengthRefusedAndKept(t *testing.T) {
+	tmpDir := t.TempDir()
+	saltPath := filepath.Join(tmpDir, saltFileName)
+	require.NoError(t, os.WriteFile(saltPath, []byte("short"), 0600))
+
+	_, err := loadOrGenerateSalt(tmpDir)
+	require.Error(t, err)
+
+	got, rerr := os.ReadFile(saltPath)
+	require.NoError(t, rerr)
+	assert.Equal(t, "short", string(got))
+}
