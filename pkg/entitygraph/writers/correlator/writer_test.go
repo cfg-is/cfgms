@@ -4,6 +4,7 @@ package correlator_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -597,4 +598,91 @@ func TestEdgeSubjectDelimiterRejected_UnaffectedPairsStillMatch(t *testing.T) {
 		[]string{"host:hv-clean/vm:clean-vm", "host:clean-guest"},
 		[]string{edges[0].Edge.From.String(), edges[0].Edge.To.String()},
 	)
+}
+
+// TestMACRotationRetractsAndRestoresEdge is the REQUIRED TEST for retraction:
+// an edge disappears once the MAC match stops and returns when it resumes.
+func TestMACRotationRetractsAndRestoresEdge(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	host := func(subject, mac string) {
+		reportEntity(t, p, subject, map[string]interface{}{
+			"entity_kind":   "host",
+			"owning_tenant": "root",
+			"primary_mac":   mac,
+			"mac_addresses": mac,
+		})
+	}
+	host("host:rot-a", "0A:1B:2C:3D:4E:01")
+	host("host:rot-b", "0A:1B:2C:3D:4E:01")
+	require.NoError(t, w.Correlate(ctx))
+	require.Len(t, getSameAsEdges(t, p), 1)
+
+	host("host:rot-b", "0A:1B:2C:3D:4E:02")
+	require.NoError(t, w.Correlate(ctx))
+	require.Empty(t, getSameAsEdges(t, p), "edge must be retracted when the match stops")
+
+	host("host:rot-b", "0A:1B:2C:3D:4E:01")
+	require.NoError(t, w.Correlate(ctx))
+	require.Len(t, getSameAsEdges(t, p), 1, "edge must return when the match resumes")
+}
+
+// TestMACRemovedRetractsEdge covers an entity that no longer reports any usable
+// MAC: it is still an anchor, so its stale edge is retracted.
+func TestMACRemovedRetractsEdge(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	for _, s := range []string{"host:gone-a", "host:gone-b"} {
+		reportEntity(t, p, s, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": "root",
+			"mac_addresses": "0A:1B:2C:3D:4E:11",
+		})
+	}
+	require.NoError(t, w.Correlate(ctx))
+	require.Len(t, getSameAsEdges(t, p), 1)
+
+	reportEntity(t, p, "host:gone-b", map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root",
+		"mac_addresses": "00:00:00:00:00:00",
+	})
+	require.NoError(t, w.Correlate(ctx))
+	require.Empty(t, getSameAsEdges(t, p))
+}
+
+// failingGetProvider delegates to a real provider but fails GetEntity with a
+// non-ErrNotFound error, standing in for a transient store failure.
+type failingGetProvider struct {
+	interfaces.EntityGraphProvider
+}
+
+func (f failingGetProvider) GetEntity(context.Context, types.EID, interfaces.GetEntityOpts) (*types.EntityView, error) {
+	return nil, errors.New("transient store failure")
+}
+
+// TestGetEntityErrorAbortsAndKeepsEdges is the REQUIRED TEST for fail-closed
+// reads: a GetEntity failure aborts Correlate and leaves existing edges alone.
+func TestGetEntityErrorAbortsAndKeepsEdges(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	for _, s := range []string{"host:fc-a", "host:fc-b"} {
+		reportEntity(t, p, s, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": "root",
+			"mac_addresses": "0A:1B:2C:3D:4E:21",
+		})
+	}
+	require.NoError(t, w.Correlate(ctx))
+	require.Len(t, getSameAsEdges(t, p), 1)
+
+	fw, err := correlator.New(failingGetProvider{p})
+	require.NoError(t, err)
+	err = fw.Correlate(ctx)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "transient store failure")
+	require.Len(t, getSameAsEdges(t, p), 1, "existing edges must survive an aborted sweep")
 }

@@ -52,12 +52,41 @@ Three bounds apply:
    — including one injected by a compromised steward minting synthetic entities —
    can amplify into a fleet-scale edge burst.
 3. **Bounded write batches.** Observations are flushed to the provider in batches
-   of at most `maxObservationBatch` (1000) rather than accumulated for the whole
-   sweep. A provider ingests one batch in one transaction, so an unbounded batch
-   is both an unbounded allocation and an unbounded write-lock hold. Flushing
-   mid-sweep can leave earlier edges written if a later batch fails; that is safe
-   because same-as observations are content-hash deduped and the sweep is
-   idempotent.
+   of at most `maxObservationBatch` (1000) observations and `maxScopesPerBatch`
+   (500) claim scopes rather than accumulated for the whole sweep. A provider
+   ingests one batch in one transaction, so an unbounded batch is both an
+   unbounded allocation and an unbounded write-lock hold. Flushing mid-sweep can
+   leave earlier batches written if a later one fails; that is safe because each
+   batch is self-consistent, same-as observations are content-hash deduped and
+   the sweep is idempotent, so a re-run reconverges.
+
+### Retraction scope
+
+An edge must disappear when the MAC match that produced it stops (for example a
+steward rotating its reported MACs). Every entity the sweep enumerates is an
+**anchor**, including entities that no longer report a usable MAC. Each flushed
+batch declares one `ClaimScope` per anchor it contains: source
+`correlator:mac`, `EdgeScopePattern{EdgeType: "same-as", AnchorEID: <anchor>,
+Direction: TraversalBoth}`. A provider diffs a scope against the observations of
+the one `ReportObservations` call that carries it, so:
+
+- A batch contains the **complete current `same-as` edge set** of every anchor it
+  scopes. An edge between A and B is emitted in both A's batch and B's batch
+  (content-hash dedupe makes the repeat a no-op), so one flush never retracts an
+  edge another flush just asserted.
+- Anchors are packed into batches **whole**, within the observation and scope caps.
+- An anchor whose edge set alone exceeds `maxObservationBatch` is skipped with a
+  warning and declares no scope: its stale edges stay rather than risk a false
+  retraction.
+- An anchor whose EID contains the edge-subject delimiter (`|`) or `\x1f` never
+  becomes a scope key.
+
+The sweep fails closed. Only `interfaces.ErrNotFound` from `GetEntity` (entity
+removed between query and fetch) skips an entity, and a skipped entity is not
+an anchor. Any other `GetEntity` error aborts `Correlate` before any scope is
+reported, so a transient store error is never read as "MAC no longer reported".
+A `ReportObservations` error is returned (wrapped `correlator: report
+observations:`) and no further batches are sent.
 
 ## Query Strategy
 

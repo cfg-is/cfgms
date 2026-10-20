@@ -225,7 +225,10 @@ func TestCorrelateFlushesBoundedBatches(t *testing.T) {
 	for _, size := range rec.sizes {
 		total += size
 	}
-	require.Equal(t, wantEdges, total, "every pair must be reported exactly once")
+	// An edge is emitted in both anchors' batches; within one batch it is
+	// deduplicated, so a pair is reported once or twice.
+	require.GreaterOrEqual(t, total, wantEdges, "every pair must be reported")
+	require.LessOrEqual(t, total, 2*wantEdges, "a pair is reported at most once per anchor")
 	require.Equal(t, wantEdges, sameAsEdgeCount(t, real),
 		"every edge must be persisted across chunk boundaries")
 }
@@ -263,4 +266,86 @@ func TestCorrelateCapsMACsPerEntity(t *testing.T) {
 	require.NoError(t, w.Correlate(context.Background()))
 	require.Equal(t, maxMACsPerEntity, sameAsEdgeCount(t, p),
 		"MACs past maxMACsPerEntity must not produce same-as edges")
+}
+
+// lowerCaps shrinks the per-batch caps for one test.
+func lowerCaps(t *testing.T, obs, scopes int) {
+	t.Helper()
+	oldObs, oldScopes := observationBatchLimit, scopeBatchLimit
+	observationBatchLimit, scopeBatchLimit = obs, scopes
+	t.Cleanup(func() { observationBatchLimit, scopeBatchLimit = oldObs, oldScopes })
+}
+
+func setHostMAC(t *testing.T, p interfaces.EntityGraphProvider, i int, mac string) {
+	t.Helper()
+	addHost(t, p, fmt.Sprintf("host:rot-%03d", i), mac)
+}
+
+// TestCorrelateRetractionAcrossFlushes forces the sweep across many flushes and
+// rotates MACs repeatedly: live edges must survive every run and the edge count
+// must stay bounded by the live match count.
+func TestCorrelateRetractionAcrossFlushes(t *testing.T) {
+	lowerCaps(t, 7, 3)
+	p := newInternalTestProvider(t)
+	w, err := New(p)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	const pairs = 12
+	for i := 0; i < pairs*2; i++ {
+		setHostMAC(t, p, i, fmt.Sprintf("00:15:5D:01:%02X:00", i/2))
+	}
+	for run := 0; run < 2; run++ {
+		require.NoError(t, w.Correlate(ctx))
+		require.Equal(t, pairs, sameAsEdgeCount(t, p), "run %d: every live edge must survive", run)
+	}
+
+	// Rotate the odd member of each pair to a fresh MAC, then back, several times.
+	for rot := 0; rot < 3; rot++ {
+		for i := 0; i < pairs; i++ {
+			setHostMAC(t, p, i*2+1, fmt.Sprintf("00:15:5D:02:%02X:%02X", rot, i))
+		}
+		require.NoError(t, w.Correlate(ctx))
+		require.Equal(t, 0, sameAsEdgeCount(t, p), "rotation %d: stale edges must be retracted", rot)
+	}
+	for i := 0; i < pairs; i++ {
+		setHostMAC(t, p, i*2+1, fmt.Sprintf("00:15:5D:01:%02X:00", i))
+	}
+	require.NoError(t, w.Correlate(ctx))
+	require.Equal(t, pairs, sameAsEdgeCount(t, p))
+}
+
+// scopeRecorder is a pass-through wrapper recording the anchors scoped by
+// correlator batches; the embedded real provider executes every call.
+type scopeRecorder struct {
+	interfaces.EntityGraphProvider
+	anchors []string
+}
+
+func (r *scopeRecorder) ReportObservations(ctx context.Context, batch interfaces.ObservationBatch) error {
+	for _, sc := range batch.ClaimScopes {
+		r.anchors = append(r.anchors, sc.Pattern.Edge.AnchorEID.String())
+	}
+	return r.EntityGraphProvider.ReportObservations(ctx, batch)
+}
+
+// TestCorrelateOversizedAnchorGetsNoScope verifies an anchor whose edge set
+// exceeds the observation cap declares no scope, so its edges cannot be
+// retracted by a partial view.
+func TestCorrelateOversizedAnchorGetsNoScope(t *testing.T) {
+	real := newInternalTestProvider(t)
+	rec := &scopeRecorder{EntityGraphProvider: real}
+	w, err := New(rec)
+	require.NoError(t, err)
+
+	// host:big-0..3 share a MAC (3 edges each); host:solo has none (0 edges).
+	for i := 0; i < 4; i++ {
+		addHost(t, rec, fmt.Sprintf("host:big-%d", i), "00:15:5D:09:00:01")
+	}
+	addHost(t, rec, "host:solo", "00:15:5D:09:00:09")
+
+	lowerCaps(t, 2, 3)
+	require.NoError(t, w.Correlate(context.Background()))
+	require.Equal(t, []string{"host:solo"}, rec.anchors, "only the in-cap anchor is scoped")
+	require.Equal(t, 0, sameAsEdgeCount(t, real), "a skipped anchor asserts nothing")
 }
