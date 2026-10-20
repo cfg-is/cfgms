@@ -3324,3 +3324,109 @@ func TestAccounts_ListIncludesRoles(t *testing.T) {
 	}
 	assert.NotContains(t, listRec.Body.String(), `"roles"`)
 }
+
+// Issue #5205 [REQUIRED TEST]: a certificate bound between the offboarding read and the
+// disable write is revoked, and the stored account is disabled and keeps the binding.
+func TestOffboarding_CertBoundDuringDisable_IsRevoked(t *testing.T) {
+	srv, certMgr := setupCertBindingServer(t)
+	race := &raceSecretStore{SecretStore: srv.secretStore}
+	srv.secretStore = race
+	createTestAccount(t, srv, "off-race-cert")
+	serial := provisionTestClientCert(t, certMgr, "off-race-laptop")
+
+	race.arm("off-race-cert", func() {
+		commitCompetingWrite(t, srv, "off-race-cert", func(a *account) {
+			a.CertBindings = append(a.CertBindings, CertBinding{Serial: serial, Fingerprint: "fp", BoundAt: time.Now().UTC()})
+		})
+	})
+	rec := deleteAccount(t, srv, strongPrincipal(), "off-race-cert")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	revoked, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revoked, "the concurrently bound certificate must be revoked")
+}
+
+// The retry must stop at the disable: a lost final attempt leaves the record as the
+// competing writer left it, and a credential revocation committed mid-flight survives.
+func TestOffboarding_ConcurrentWrites_PreservedAndExhaustedReturns409(t *testing.T) {
+	t.Run("revoked credential survives the retry", func(t *testing.T) {
+		srv, certMgr := setupCertBindingServer(t)
+		race := &raceSecretStore{SecretStore: srv.secretStore}
+		srv.secretStore = race
+		createTestAccount(t, srv, "off-race-revoked")
+		serial := provisionTestClientCert(t, certMgr, "off-race-revoked-laptop")
+		rec := bindCertReq(t, srv, strongPrincipal(), "off-race-revoked", BindCertRequest{Serial: serial})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		// Without a cert manager the cascade stops after the disable, leaving the written
+		// record in the store to inspect.
+		srv.certManager = nil
+
+		race.arm("off-race-revoked", func() {
+			commitCompetingWrite(t, srv, "off-race-revoked", func(a *account) {
+				a.RevokedCredentialIDs = [][]byte{[]byte("revoked-1")}
+			})
+		})
+		rec = deleteAccount(t, srv, strongPrincipal(), "off-race-revoked")
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+		stored := casStoredAccount(t, srv, "off-race-revoked")
+		assert.True(t, stored.Disabled)
+		assert.Equal(t, [][]byte{[]byte("revoked-1")}, stored.RevokedCredentialIDs)
+		assert.Len(t, stored.CertBindings, 1)
+	})
+
+	t.Run("every attempt losing returns 409 and revokes nothing", func(t *testing.T) {
+		srv, certMgr := setupCertBindingServer(t)
+		race := &raceSecretStore{SecretStore: srv.secretStore}
+		srv.secretStore = race
+		createTestAccount(t, srv, "off-race-lost")
+		serial := provisionTestClientCert(t, certMgr, "off-race-lost-laptop")
+		rec := bindCertReq(t, srv, strongPrincipal(), "off-race-lost", BindCertRequest{Serial: serial})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var hook func()
+		hook = func() {
+			commitCompetingWrite(t, srv, "off-race-lost", func(a *account) {
+				a.RevokedCredentialIDs = append(a.RevokedCredentialIDs, []byte{byte(len(a.RevokedCredentialIDs))})
+			})
+			race.arm("off-race-lost", hook)
+		}
+		race.arm("off-race-lost", hook)
+		rec = deleteAccount(t, srv, strongPrincipal(), "off-race-lost")
+		race.arm("", nil)
+
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+		revoked, err := certMgr.IsRevoked(serial)
+		require.NoError(t, err)
+		assert.False(t, revoked, "no certificate may be revoked after a lost final attempt")
+		stored := casStoredAccount(t, srv, "off-race-lost")
+		assert.False(t, stored.Disabled)
+		assert.Len(t, stored.RevokedCredentialIDs, 3, "competing writes preserved")
+	})
+}
+
+// Issue #5205 [REQUIRED TEST]: a moved reset whose old-tenant record is disabled before
+// the old record's removal fails, leaves the old record disabled and no destination.
+func TestCreateAccount_MovedReset_OldRecordChanged_409(t *testing.T) {
+	srv, race := casRaceServer(t)
+	createCASAccount(t, srv, "moved-race", []string{"steward:list"})
+
+	// The disable lands right after the handler's read, before the old-record removal.
+	race.arm("moved-race", func() {
+		commitCompetingWrite(t, srv, "moved-race", func(a *account) { a.Disabled = true })
+	})
+	rec := postAccount(t, srv, testAdminPrincipal(), AccountRequest{Username: "moved-race", TenantID: "tenant-b"})
+	race.arm("", nil)
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+	metas, err := srv.secretStore.ListSecrets(context.Background(), &secretsif.SecretFilter{
+		Metadata: map[string]string{"username": "moved-race"},
+	})
+	require.NoError(t, err)
+	require.Len(t, metas, 1, "exactly one live record must remain")
+	assert.Equal(t, "tenant-a", metas[0].TenantID)
+	assert.Equal(t, "true", metas[0].Metadata["disabled"])
+}
