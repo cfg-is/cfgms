@@ -38,6 +38,9 @@ func (s *stubManager) Issue(_ context.Context, _, _, _ string) (*session.Session
 func (s *stubManager) IssueRootScoped(_ context.Context, _, _, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }
+func (s *stubManager) IssueBound(_ context.Context, _, _, _ string, _ bool, _, _ []byte) (*session.Session, string, error) {
+	return nil, "", nil
+}
 func (s *stubManager) Validate(_ context.Context, _ string) (*session.Session, error) {
 	return nil, nil
 }

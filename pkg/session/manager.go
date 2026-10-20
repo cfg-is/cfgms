@@ -57,17 +57,23 @@ func NewManager(cfg Config, store Store, clockFn func() time.Time) Manager {
 // record and an opaque 43-char base64url bearer token. The controller stores only
 // SHA-256(token); the raw token is returned once and never persisted.
 func (m *manager) Issue(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error) {
-	return m.issue(ctx, principalID, connectionName, tenantID, false)
+	return m.issue(ctx, principalID, connectionName, tenantID, false, nil, nil)
+}
+
+// IssueBound mints a session that records the WebAuthn credentials it derives from at
+// creation (Issue #5199). See the Manager interface doc comment.
+func (m *manager) IssueBound(ctx context.Context, principalID, connectionName, tenantID string, rootScoped bool, loginCredentialID, credentialID []byte) (*Session, string, error) {
+	return m.issue(ctx, principalID, connectionName, tenantID, rootScoped, loginCredentialID, credentialID)
 }
 
 // IssueRootScoped mints a new session for tenantID (the deployment's root tenant)
 // marked RootScoped (ADR-025 Amendment 1 A1.3, Issue #4665). See the Manager
 // interface doc comment for the caller-verification contract.
 func (m *manager) IssueRootScoped(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error) {
-	return m.issue(ctx, principalID, connectionName, tenantID, true)
+	return m.issue(ctx, principalID, connectionName, tenantID, true, nil, nil)
 }
 
-func (m *manager) issue(ctx context.Context, principalID, connectionName, tenantID string, rootScoped bool) (*Session, string, error) {
+func (m *manager) issue(ctx context.Context, principalID, connectionName, tenantID string, rootScoped bool, loginCredentialID, credentialID []byte) (*Session, string, error) {
 	token, err := GenerateToken()
 	if err != nil {
 		return nil, "", err
@@ -87,6 +93,12 @@ func (m *manager) issue(ctx context.Context, principalID, connectionName, tenant
 		Assurance:  AssuranceBasic,
 		RootScoped: rootScoped,
 		Channel:    m.cfg.Channel,
+	}
+	if len(loginCredentialID) > 0 {
+		sess.LoginCredentialID = append([]byte(nil), loginCredentialID...)
+	}
+	if len(credentialID) > 0 {
+		sess.CredentialID = append([]byte(nil), credentialID...)
 	}
 	ms := &managedSession{
 		session:     sess,

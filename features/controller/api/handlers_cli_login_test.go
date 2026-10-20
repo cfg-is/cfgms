@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -83,10 +84,30 @@ func decodeLodgeCliLoginResponse(t *testing.T, rec *httptest.ResponseRecorder) L
 
 func approveCliLogin(t *testing.T, server *Server, principal *Principal, id string, body ApproveCliLoginRequestBody) *httptest.ResponseRecorder {
 	t.Helper()
+	// Approval is only accepted from a passkey web session (Issue #5199): mint one on
+	// the server's own session manager, the way passkey login does (Issue + Elevate).
+	approver, _, err := server.sessionManager.Issue(context.Background(), principal.ID, "web-login", principal.TenantID)
+	require.NoError(t, err)
+	_, _, err = server.sessionManager.Elevate(context.Background(), approver.ID, cliApproverCred, "198.51.100.5")
+	require.NoError(t, err)
+	return approveCliLoginFromSession(t, server, principal, id, body, &authSessionRef{manager: server.sessionManager, id: approver.ID})
+}
+
+// cliApproverCred is the passkey credential ID recorded on the approving web session
+// minted by approveCliLogin.
+var cliApproverCred = []byte("cli-approver-passkey")
+
+// approveCliLoginFromSession approves with an explicit approving-session reference;
+// a nil ref models an approval not made from a web session.
+func approveCliLoginFromSession(t *testing.T, server *Server, principal *Principal, id string, body ApproveCliLoginRequestBody, ref *authSessionRef) *httptest.ResponseRecorder {
+	t.Helper()
 	payload, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/cli-login/"+id+"/approve", bytes.NewReader(payload))
 	req = withPrincipal(req, principal)
+	if ref != nil {
+		req = req.WithContext(context.WithValue(req.Context(), authSessionContextKey, *ref))
+	}
 	req = withVars(req, map[string]string{"id": id})
 	rec := httptest.NewRecorder()
 	server.handleApproveCliLoginRequest(rec, req)
@@ -1176,4 +1197,195 @@ func TestCliLogin_EmitsAuditEventsWithoutToken(t *testing.T) {
 	assert.True(t, actions["cli_login.lodged"])
 	assert.True(t, actions["cli_login.approved"])
 	assert.True(t, actions["cli_login.collected"])
+}
+
+// ---- passkey binding (Issue #5199) ----------------------------------------------------
+
+var (
+	cliBindCredX = []byte("cli-bind-credential-x")
+	cliBindCredY = []byte("cli-bind-credential-y")
+)
+
+// cliBindServer returns a server with a CLI session manager and a web session manager,
+// and an account that holds passkeys X and Y.
+func cliBindServer(t *testing.T) (*Server, string, *account) {
+	t.Helper()
+	srv, username := setupPasskeySessionServer(t)
+	injectCredentialWith(t, srv, username, WebAuthnCredential{ID: cliBindCredX})
+	injectCredentialWith(t, srv, username, WebAuthnCredential{ID: cliBindCredY})
+	acct, err := srv.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	srv.SetSessionManager(session.NewManager(cfg, store, time.Now))
+	return srv, username, acct
+}
+
+// cliBindApprove lodges a CLI login and approves it from a web session logged in with
+// login and stepped up with stepUps, returning the minted CLI bearer token.
+func cliBindApprove(t *testing.T, srv *Server, acct *account, login []byte, stepUps ...[]byte) string {
+	t.Helper()
+	ctx := context.Background()
+	web, _, err := srv.webSessionManager.Issue(ctx, acct.ID, "web-login", acct.TenantID)
+	require.NoError(t, err)
+	_, _, err = srv.webSessionManager.Elevate(ctx, web.ID, login, sessEndLoginIP)
+	require.NoError(t, err)
+	for _, c := range stepUps {
+		_, _, err = srv.webSessionManager.Elevate(ctx, web.ID, c, sessEndLoginIP)
+		require.NoError(t, err)
+	}
+
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, srv, hash))
+	principal := browserPrincipalAfterPasskeyLogin(acct.ID, false)
+	principal.TenantID = acct.TenantID
+	rec := approveCliLoginFromSession(t, srv, principal, lodged.RequestID,
+		ApproveCliLoginRequestBody{UserCode: lodged.UserCode}, &authSessionRef{manager: srv.webSessionManager, id: web.ID})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	stored, err := srv.getCliLoginRequestWithToken(ctx, lodged.RequestID)
+	require.NoError(t, err)
+	return stored.SessionToken
+}
+
+func cliBindRequest(t *testing.T, srv *Server, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec, req)
+	return rec
+}
+
+func TestCliLoginBinding_RevokingApprovingPasskeyEndsCliSession(t *testing.T) {
+	srv, username, acct := cliBindServer(t)
+	token := cliBindApprove(t, srv, acct, cliBindCredX)
+	require.Equal(t, http.StatusOK, cliBindRequest(t, srv, token).Code, "precondition: CLI session works")
+
+	sessEndRevoke(t, srv, username, cliBindCredX)
+
+	requireSessionRevoked(t, cliBindRequest(t, srv, token))
+	_, err := srv.sessionManager.Validate(context.Background(), token)
+	assert.Error(t, err, "the refused CLI session must be revoked")
+}
+
+func TestCliLoginBinding_UnrelatedPasskeyRevocationKeepsSession(t *testing.T) {
+	srv, username, acct := cliBindServer(t)
+	token := cliBindApprove(t, srv, acct, cliBindCredX)
+
+	sessEndRevoke(t, srv, username, cliBindCredY)
+
+	assert.Equal(t, http.StatusOK, cliBindRequest(t, srv, token).Code)
+}
+
+func TestCliLoginBinding_RevokedStepUpPasskeyEndsCliSession(t *testing.T) {
+	srv, username, acct := cliBindServer(t)
+	token := cliBindApprove(t, srv, acct, cliBindCredX, cliBindCredY)
+	require.Equal(t, http.StatusOK, cliBindRequest(t, srv, token).Code)
+
+	sessEndRevoke(t, srv, username, cliBindCredY)
+
+	requireSessionRevoked(t, cliBindRequest(t, srv, token))
+}
+
+func TestCliLoginBinding_LegacyUnboundCliSessionRefused(t *testing.T) {
+	srv, _, acct := cliBindServer(t)
+	_, token, err := srv.sessionManager.Issue(context.Background(), acct.ID, cliLoginConnectionName, acct.TenantID)
+	require.NoError(t, err)
+
+	requireSessionRevoked(t, cliBindRequest(t, srv, token))
+	_, err = srv.sessionManager.Validate(context.Background(), token)
+	assert.Error(t, err, "a legacy CLI session must be revoked")
+}
+
+func TestCliLoginBinding_OtherConnectionNamesUnaffected(t *testing.T) {
+	srv, _, acct := cliBindServer(t)
+	_, token, err := srv.sessionManager.Issue(context.Background(), acct.ID, "cfg-cli", acct.TenantID)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, cliBindRequest(t, srv, token).Code)
+}
+
+func TestCliLoginBinding_AccountLookupErrorIs503AndGrantsNothing(t *testing.T) {
+	srv, _, acct := cliBindServer(t)
+	token := cliBindApprove(t, srv, acct, cliBindCredX)
+
+	healthy := srv.secretStore
+	srv.secretStore = &errListSecretStore{SecretStore: healthy, listErr: errors.New("injected ListSecrets failure")}
+	rec := cliBindRequest(t, srv, token)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errCode(t, rec.Body.Bytes()))
+
+	srv.secretStore = healthy
+	assert.Equal(t, http.StatusOK, cliBindRequest(t, srv, token).Code,
+		"a transient lookup error must not revoke the session")
+}
+
+func TestCliLoginBinding_MissingAccountRefused(t *testing.T) {
+	srv, _, _ := cliBindServer(t)
+	_, token, err := srv.sessionManager.IssueBound(context.Background(), "no-such-account", cliLoginConnectionName,
+		"tenant-a", false, cliBindCredX, nil)
+	require.NoError(t, err)
+
+	requireSessionRevoked(t, cliBindRequest(t, srv, token))
+}
+
+func TestCliLoginBinding_ApprovalRefusedWithoutPasskeySession(t *testing.T) {
+	srv, _, acct := cliBindServer(t)
+	ctx := context.Background()
+	principal := browserPrincipalAfterPasskeyLogin(acct.ID, false)
+	principal.TenantID = acct.TenantID
+
+	unproven, _, err := srv.webSessionManager.Issue(ctx, acct.ID, "web-login", acct.TenantID)
+	require.NoError(t, err)
+
+	cases := map[string]*authSessionRef{
+		"no web session":            nil,
+		"missing session":           {manager: srv.webSessionManager, id: "no-such-session"},
+		"no recorded login passkey": {manager: srv.webSessionManager, id: unproven.ID},
+	}
+	for name, ref := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, hash := newTestVerifier(t)
+			lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, srv, hash))
+
+			rec := approveCliLoginFromSession(t, srv, principal, lodged.RequestID,
+				ApproveCliLoginRequestBody{UserCode: lodged.UserCode}, ref)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+			stored, err := srv.getCliLoginRequestByID(ctx, lodged.RequestID)
+			require.NoError(t, err)
+			assert.Equal(t, cliLoginRequestStatusPending, stored.Status, "request must stay pending")
+			assert.Empty(t, stored.SessionID, "no CLI session may be minted")
+		})
+	}
+	live, err := srv.sessionManager.List(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, live, "no CLI session may be minted by a refused approval")
+}
+
+func TestCliLoginBinding_SessionReadErrorIs503(t *testing.T) {
+	srv, _, acct := cliBindServer(t)
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, srv, hash))
+	principal := browserPrincipalAfterPasskeyLogin(acct.ID, false)
+
+	rec := approveCliLoginFromSession(t, srv, principal, lodged.RequestID,
+		ApproveCliLoginRequestBody{UserCode: lodged.UserCode},
+		&authSessionRef{manager: getByIDErrManager{Manager: srv.webSessionManager}, id: "x"})
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	live, err := srv.sessionManager.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, live)
+}
+
+// getByIDErrManager is a real manager whose GetByID reports a store failure.
+type getByIDErrManager struct{ session.Manager }
+
+func (getByIDErrManager) GetByID(context.Context, string) (*session.Session, error) {
+	return nil, errors.New("injected session store failure")
 }
