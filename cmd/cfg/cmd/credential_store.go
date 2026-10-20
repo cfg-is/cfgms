@@ -79,9 +79,26 @@ func (s *CredentialStore) Store(_ context.Context, name string, bundleBytes []by
 		return fmt.Errorf("credential store: encrypt %q: %w", name, err)
 	}
 	path := filepath.Join(s.dir, name+".enc")
-	// #nosec G306 G703 -- ValidateCredentialName rejects separators/traversal,
-	// s.dir is the fixed private credential root, and 0600 protects ciphertext.
-	if err := os.WriteFile(path, ciphertext, 0600); err != nil {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("credential store: refusing %q: credential path is a symlink", name)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("credential store: stat %q: %w", name, err)
+	}
+	// Write to a fresh 0600 temp file in the same directory and rename it over the
+	// target, so a pre-existing file's mode or owner never carries over.
+	tmp, err := os.CreateTemp(s.dir, name+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("credential store: write %q: %w", name, err)
+	}
+	tmpPath := tmp.Name()
+	_, werr := tmp.Write(ciphertext)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("credential store: write %q: %w", name, errors.Join(werr, cerr))
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("credential store: write %q: %w", name, err)
 	}
 	if err := secureCredentialFile(path); err != nil {

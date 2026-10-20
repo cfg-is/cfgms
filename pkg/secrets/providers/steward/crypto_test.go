@@ -183,3 +183,16 @@ func TestUserEncryptor_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("admin credential bundle"), plaintext)
 }
+
+func TestLoadOrGenerateSalt_WrongLengthRefusedAndKept(t *testing.T) {
+	tmpDir := t.TempDir()
+	saltPath := filepath.Join(tmpDir, saltFileName)
+	require.NoError(t, os.WriteFile(saltPath, []byte("short"), 0600))
+
+	_, err := loadOrGenerateSalt(tmpDir)
+	require.Error(t, err)
+
+	got, rerr := os.ReadFile(saltPath)
+	require.NoError(t, rerr)
+	assert.Equal(t, "short", string(got))
+}

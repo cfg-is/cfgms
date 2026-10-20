@@ -13,6 +13,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -161,8 +162,16 @@ func loadOrGenerateSalt(secretsDir string) ([]byte, error) {
 
 	// Try to read existing salt
 	salt, err := os.ReadFile(saltPath) //#nosec G304 -- path is constructed from configured secrets directory
-	if err == nil && len(salt) == saltSize {
+	if err == nil {
+		if len(salt) != saltSize {
+			// Replacing the salt would make every stored secret unreadable and
+			// let a writer of this file choose the key input.
+			return nil, fmt.Errorf("salt file %s has invalid length %d (want %d); refusing to replace it", saltPath, len(salt), saltSize)
+		}
 		return salt, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to read salt file: %w", err)
 	}
 
 	// Generate new salt
