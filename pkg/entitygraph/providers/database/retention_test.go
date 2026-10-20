@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +89,77 @@ loop:
 	require.True(t, acquiredAfter, "advisory lock must be free after RunRetentionGC returns")
 	_, err = probeConn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, gcAdvisoryLockKey)
 	require.NoError(t, err)
+}
+
+const dbRetentionSrc = "enforcing-module:retention-scope"
+
+func dbDeclareScope(t *testing.T, p *DatabaseEntityGraphProvider, anchor, peer types.EID, at time.Time) types.ClaimScopePattern {
+	t.Helper()
+	ent := func(e types.EID) types.Observation {
+		return dbObs(e.String(), dbRetentionSrc, types.ObservationKindState, at, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": "root/ret",
+		})
+	}
+	pattern := types.ClaimScopePattern{Edge: &types.EdgeScopePattern{
+		EdgeType: "same-as", AnchorEID: anchor, Direction: types.TraversalOutbound,
+	}}
+	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{
+		Source: dbRetentionSrc,
+		Observations: []types.Observation{
+			ent(anchor), ent(peer),
+			dbObs("same-as|"+anchor.String()+"|"+peer.String(), dbRetentionSrc, types.ObservationKindState, at, map[string]interface{}{}),
+		},
+		ClaimScopes: []types.ClaimScope{{Source: dbRetentionSrc, AsOf: at, Pattern: pattern}},
+	}))
+	return pattern
+}
+
+func dbScopeRows(t *testing.T, p *DatabaseEntityGraphProvider, pattern types.ClaimScopePattern) int {
+	t.Helper()
+	var n int
+	require.NoError(t, p.db.QueryRow(
+		`SELECT COUNT(*) FROM eg_claim_scope_prior WHERE source = $1 AND claim_scope_key = $2`,
+		dbRetentionSrc, dbPatternKey(pattern)).Scan(&n))
+	return n
+}
+
+func dbRetract(t *testing.T, p *DatabaseEntityGraphProvider, e types.EID, at time.Time) {
+	t.Helper()
+	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{
+		Source:       dbRetentionSrc,
+		Observations: []types.Observation{dbObs(e.String(), dbRetentionSrc, types.ObservationKindAbsence, at, map[string]interface{}{})},
+	}))
+}
+
+func TestRunRetentionGC_SweepsAbandonedEdgeScope(t *testing.T) {
+	p := newTestDBProvider(t, skipIfNoPostgres(t))
+	old := time.Now().UTC().AddDate(0, 0, -200)
+
+	dead, _ := types.ParseEID("host:retgc-auth/dead")
+	live, _ := types.ParseEID("host:retgc-auth/live")
+	p1, _ := types.ParseEID("host:retgc-auth/p1")
+	p2, _ := types.ParseEID("host:retgc-auth/p2")
+
+	deadScope := dbDeclareScope(t, p, dead, p1, old)
+	liveScope := dbDeclareScope(t, p, live, p2, time.Now().UTC())
+	dbRetract(t, p, dead, old.Add(time.Hour))
+
+	require.NoError(t, p.RunRetentionGC(context.Background(), interfaces.RetentionPolicy{HistoryDays: 30}))
+
+	require.Equal(t, 0, dbScopeRows(t, p, deadScope), "abandoned scope must be removed")
+	require.Equal(t, 1, dbScopeRows(t, p, liveScope), "live scope must remain")
+}
+
+func TestRunRetentionGC_KeepsScopeInsideTombstoneWindow(t *testing.T) {
+	p := newTestDBProvider(t, skipIfNoPostgres(t))
+	now := time.Now().UTC()
+
+	anchor, _ := types.ParseEID("host:retgc-auth/window")
+	peer, _ := types.ParseEID("host:retgc-auth/wpeer")
+	scope := dbDeclareScope(t, p, anchor, peer, now.Add(-time.Hour))
+	dbRetract(t, p, anchor, now)
+
+	require.NoError(t, p.RunRetentionGC(context.Background(), interfaces.RetentionPolicy{HistoryDays: 30}))
+
+	require.Equal(t, 1, dbScopeRows(t, p, scope), "retracted anchor inside tombstone window keeps its scope")
 }
