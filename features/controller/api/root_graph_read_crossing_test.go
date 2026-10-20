@@ -18,9 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 const rgMSP = "msp-graph"
@@ -44,6 +46,7 @@ func newRGFixture(t *testing.T) *rgFixture {
 	require.NoError(t, err)
 	prov := newTestEntityGraphProvider(t)
 	server.SetEntityGraphProvider(prov)
+	server.SetEntityGraphWriteProvider(prov)
 
 	reportEntity(t, prov, rgRootEID, testRootTenantID, "host")
 	reportEntity(t, prov, rgClientEID, rgMSP, "host")
@@ -404,4 +407,106 @@ func TestRootEntityEdges_PageTokenNeverNamesHiddenEndpoint(t *testing.T) {
 			assert.ElementsMatch(t, []string{"host:rg-r1", "host:rg-r2", "host:rg-r3", "host:rg-r4"}, seen)
 		})
 	}
+}
+
+// postAssertEdge posts an operator edge assertion as op, with principalID as the
+// authenticated user ID ("" leaves it unset).
+func (f *rgFixture) postAssertEdge(t *testing.T, op *Principal, userID, fromEID, toEID string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(assertEdgeRequest{EdgeType: "depends-on", FromEID: fromEID, ToEID: toEID, Attributes: map[string]interface{}{"note": "secret-attr-value"}})
+	require.NoError(t, err)
+	req := asRootOperator(httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges", strings.NewReader(string(body))), op, nil)
+	if userID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.UserIDKey, userID))
+	}
+	rec := httptest.NewRecorder()
+	f.server.handleAssertEdge(rec, req)
+	return rec
+}
+
+func (f *rgFixture) assertedEdgeStored(t *testing.T) bool {
+	t.Helper()
+	eid, err := egtypes.ParseEID(rgRootEID)
+	require.NoError(t, err)
+	edges, err := f.prov.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &eid, Types: []string{"depends-on"}})
+	require.NoError(t, err)
+	for _, e := range edges {
+		if e.Edge != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *rgFixture) edgeAuditEntries(t *testing.T, tenantID string) []*business.AuditEntry {
+	t.Helper()
+	require.NoError(t, f.server.auditManager.Flush(context.Background()))
+	entries, err := f.server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: tenantID})
+	require.NoError(t, err)
+	var out []*business.AuditEntry
+	for _, e := range entries {
+		if e.Action == entityEdgeAssertedAuditAction {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestRootAssertEdge_CrossingBoundary: a boundary-subject root caller asserting an
+// edge that touches a client-tenant entity is challenged without a crossing (nothing
+// stored, nothing audited) and, with one, stores the edge and audits it under the
+// owning tenant and root.
+func TestRootAssertEdge_CrossingBoundary(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-assert-op")
+
+	rec := f.postAssertEdge(t, op, op.ID, rgRootEID, rgClientEID)
+	assertCrossingChallenge(t, rec, rgMSP)
+	assert.False(t, f.assertedEdgeStored(t))
+	assert.Empty(t, f.edgeAuditEntries(t, rgMSP))
+	assert.Empty(t, f.edgeAuditEntries(t, testRootTenantID))
+
+	grantCrossing(t, f.server, op.ID, rgMSP)
+	rec = f.postAssertEdge(t, op, op.ID, rgRootEID, rgClientEID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.True(t, f.assertedEdgeStored(t))
+
+	for _, tenantID := range []string{rgMSP, testRootTenantID} {
+		entries := f.edgeAuditEntries(t, tenantID)
+		require.Len(t, entries, 1, "tenant %s", tenantID)
+		assert.Equal(t, op.ID, entries[0].UserID)
+		assert.Equal(t, rgRootEID, entries[0].Details["from_eid"])
+		assert.Equal(t, rgClientEID, entries[0].Details["to_eid"])
+		assert.Equal(t, "depends-on", entries[0].Details["edge_type"])
+		assert.NotContains(t, fmt.Sprint(entries[0].Details), "secret-attr-value")
+	}
+}
+
+// TestRootAssertEdge_AuditFailureWritesNothing: when the audit event cannot be
+// recorded the edge is not written.
+func TestRootAssertEdge_AuditFailureWritesNothing(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-assert-audit-op")
+	require.NoError(t, f.server.auditManager.Stop(context.Background()))
+
+	rec := f.postAssertEdge(t, op, op.ID, rgRootEID, rgRootEID)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.False(t, f.assertedEdgeStored(t))
+
+	f.server.auditManager = nil
+	rec = f.postAssertEdge(t, op, op.ID, rgRootEID, rgRootEID)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.False(t, f.assertedEdgeStored(t))
+}
+
+// TestRootAssertEdge_NoPrincipalRefused: a request with no authenticated principal
+// ID is refused and nothing is stored.
+func TestRootAssertEdge_NoPrincipalRefused(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("")
+
+	rec := f.postAssertEdge(t, op, "", rgRootEID, rgRootEID)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, f.assertedEdgeStored(t))
+	assert.Empty(t, f.edgeAuditEntries(t, testRootTenantID))
 }

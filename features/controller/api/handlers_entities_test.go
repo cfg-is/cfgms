@@ -1626,3 +1626,62 @@ func TestFilterReadableNeighborhood_KeepsTruncated(t *testing.T) {
 	got = filterReadableNeighborhood(f.server.tenantReadScope(req, "TEST"), n)
 	assert.False(t, got.Truncated)
 }
+
+// TestHandleAssertEdge_LimitsRejected asserts each bound on an operator edge
+// assertion returns 400 and stores nothing.
+func TestHandleAssertEdge_LimitsRejected(t *testing.T) {
+	nest := func(levels int) interface{} {
+		var v interface{} = "leaf"
+		for i := 0; i < levels; i++ {
+			v = map[string]interface{}{"n": v}
+		}
+		return v
+	}
+	manyAttrs := map[string]interface{}{}
+	for i := 0; i < maxAssertedAttributeCount+1; i++ {
+		manyAttrs[fmt.Sprintf("k%d", i)] = "v"
+	}
+	totalAttrs := map[string]interface{}{}
+	for i := 0; i < 8; i++ { // 8 values of 3 KiB each: every value fits, the map exceeds 16 KiB
+		totalAttrs[fmt.Sprintf("k%d", i)] = strings.Repeat("x", 3*1024)
+	}
+
+	cases := []struct {
+		name     string
+		edgeType string
+		attrs    map[string]interface{}
+	}{
+		{"edge_type length", "related:" + strings.Repeat("a", maxAssertedEdgeTypeBytes), nil},
+		{"attribute count", "depends-on", manyAttrs},
+		{"key length", "depends-on", map[string]interface{}{strings.Repeat("k", maxAssertedAttributeKeyBytes+1): "v"}},
+		{"value size", "depends-on", map[string]interface{}{"big": strings.Repeat("x", maxAssertedAttributeValueSize+1)}},
+		{"nesting depth", "depends-on", map[string]interface{}{"deep": nest(maxAssertedAttributeDepth + 1)}},
+		{"total size", "depends-on", totalAttrs},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestEntityGraphProvider(t)
+			srv := newEntityRWTestServer(t, p)
+			reportEntity(t, p, "host:lim-from", "tenant-a", "host")
+			reportEntity(t, p, "host:lim-to", "tenant-a", "host")
+			apiKey := NewEphemeralTestKey(t, srv, []string{"entity:write"}, "tenant-a", 5*time.Minute)
+
+			rec := postAssertEdge(t, srv, apiKey, assertEdgeBodyWithAttrs(t, tc.edgeType, "host:lim-from", "host:lim-to", tc.attrs))
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "xxxx")
+
+			from, err := egtypes.ParseEID("host:lim-from")
+			require.NoError(t, err)
+			edges, err := p.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &from, TenantFilter: "tenant-a"})
+			require.NoError(t, err)
+			assert.Empty(t, edges)
+		})
+	}
+
+	t.Run("limits accepted at the boundary", func(t *testing.T) {
+		require.NoError(t, validateAssertedAttributes(map[string]interface{}{
+			strings.Repeat("k", maxAssertedAttributeKeyBytes): "v",
+			"deep": nest(maxAssertedAttributeDepth - 1),
+		}))
+	})
+}

@@ -14,10 +14,12 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // egWriteProvider is the narrow write-only subset of interfaces.EntityGraphProvider
@@ -1006,6 +1008,9 @@ func validateAssertedEdgeType(edgeType string) error {
 	if edgeType == "" {
 		return errors.New("edge_type is required")
 	}
+	if len(edgeType) > maxAssertedEdgeTypeBytes {
+		return errors.New("edge_type is too long")
+	}
 	if strings.Contains(edgeType, edgeSubjectDelimiter) {
 		return errors.New("edge_type must not contain '|'")
 	}
@@ -1019,12 +1024,74 @@ func validateAssertedEdgeType(edgeType string) error {
 	return errors.New("edge_type must be a known edge type or a related:<discriminator> subtype")
 }
 
+// Bounds on an operator edge assertion. They are enforced before anything is
+// written so a caller cannot store an arbitrarily large attribute map up to the
+// request body limit.
+const (
+	maxAssertedEdgeTypeBytes      = 128
+	maxAssertedAttributeCount     = 32
+	maxAssertedAttributeKeyBytes  = 128
+	maxAssertedAttributeValueSize = 4 * 1024
+	maxAssertedAttributeDepth     = 4
+	maxAssertedAttributesSize     = 16 * 1024
+
+	entityEdgeAssertedAuditAction = "entity.edge_asserted"
+)
+
+// attributeDepth returns how many map/array levels v nests (a scalar is 0).
+func attributeDepth(v interface{}) int {
+	deepest := 0
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for _, child := range t {
+			if d := attributeDepth(child); d > deepest {
+				deepest = d
+			}
+		}
+		return deepest + 1
+	case []interface{}:
+		for _, child := range t {
+			if d := attributeDepth(child); d > deepest {
+				deepest = d
+			}
+		}
+		return deepest + 1
+	}
+	return 0
+}
+
 // validateAssertedAttributes rejects operator-supplied attributes that collide
-// with reservedObservationAttrs.
+// with reservedObservationAttrs or exceed the assertion bounds. Errors never
+// echo attribute keys or values.
 func validateAssertedAttributes(attrs map[string]interface{}) error {
-	for k := range attrs {
+	if len(attrs) > maxAssertedAttributeCount {
+		return errors.New("attributes has too many entries")
+	}
+	for k, v := range attrs {
 		if _, reserved := reservedObservationAttrs[k]; reserved {
 			return errors.New("attributes must not contain provider-reserved metadata keys")
+		}
+		if len(k) > maxAssertedAttributeKeyBytes {
+			return errors.New("attribute key is too long")
+		}
+		if attributeDepth(v) > maxAssertedAttributeDepth {
+			return errors.New("attribute value is nested too deeply")
+		}
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return errors.New("attribute value is not encodable")
+		}
+		if len(encoded) > maxAssertedAttributeValueSize {
+			return errors.New("attribute value is too large")
+		}
+	}
+	if len(attrs) > 0 {
+		encoded, err := json.Marshal(attrs)
+		if err != nil {
+			return errors.New("attributes are not encodable")
+		}
+		if len(encoded) > maxAssertedAttributesSize {
+			return errors.New("attributes are too large")
 		}
 	}
 	return nil
@@ -1071,40 +1138,69 @@ func (s *Server) handleAssertEdge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := callerTenantSubtree(r)
-
-	// Verify from_eid is within the caller's tenant subtree (ADR-022 §7).
-	ok, accessErr := s.verifyEntityAccess(r.Context(), fromEID, callerTenant)
-	if accessErr != nil {
-		s.logger.Error("handleAssertEdge: from_eid access check failed",
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-
-	// Verify to_eid is within the caller's tenant subtree (ADR-022 §7).
-	ok, accessErr = s.verifyEntityAccess(r.Context(), toEID, callerTenant)
-	if accessErr != nil {
-		s.logger.Error("handleAssertEdge: to_eid access check failed",
-			"error", logging.SanitizeLogValue(accessErr.Error()),
-		)
-		http.Error(w, "lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-
 	callerID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
 	if callerID == "" {
-		callerID = "unknown"
+		if p, _ := r.Context().Value(principalContextKey).(*Principal); p != nil {
+			callerID = p.ID
+		}
 	}
+	if callerID == "" {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	// Resolve both endpoints inside the caller's tenant cut (ADR-022 §7): a
+	// missing or out-of-cut endpoint is 404, and both must be found before any
+	// crossing decision is made.
+	callerTenant, subtreeIDs := s.entityCut(r)
+	fromOwner, found, err := s.entityOwner(r.Context(), fromEID, callerTenant, subtreeIDs)
+	if err != nil {
+		s.logger.Error("handleAssertEdge: from_eid access check failed",
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	toOwner, found, err := s.entityOwner(r.Context(), toEID, callerTenant, subtreeIDs)
+	if err != nil {
+		s.logger.Error("handleAssertEdge: to_eid access check failed",
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Decide both endpoints (ADR-025 A7.2) before writing anything.
+	const route = "POST /api/v1/entities/edges"
+	scope := callerTenantScope(r)
+	for _, owner := range []string{fromOwner, toOwner} {
+		access := s.tenantAccessForScope(r.Context(), scope, owner, route)
+		if access == tenantAuthAllowed {
+			continue
+		}
+		if !s.writeTenantCrossingIfNeeded(w, access, owner) {
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+		return
+	}
+
+	// The assertion is audited before it is written: no audit, no edge.
+	if err := s.auditEdgeAssertion(r, callerID, fromEID.String(), toEID.String(), req.EdgeType, fromOwner, toOwner); err != nil {
+		s.logger.Error("handleAssertEdge: audit failed",
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		http.Error(w, "assertion failed", http.StatusInternalServerError)
+		return
+	}
+
 	// The source class is the segment before the first ':', and it must be a
 	// declared class constant: "operator" is not one, so it resolves to the
 	// observer class and would store untrusted manual input at machine-observation
@@ -1146,6 +1242,61 @@ func (s *Server) handleAssertEdge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+// auditEdgeAssertion records an accepted edge assertion in the audit scope of
+// each endpoint's owning tenant, and in the caller's own tenant when the
+// assertion reaches another tenant's entity (a crossing). It names the principal,
+// both endpoints and the edge type, never the attribute values.
+func (s *Server) auditEdgeAssertion(r *http.Request, callerID, fromEID, toEID, edgeType, fromOwner, toOwner string) error {
+	if s.auditManager == nil {
+		return errors.New("audit manager unavailable")
+	}
+	tenants := make([]string, 0, 3)
+	seen := map[string]struct{}{}
+	add := func(t string) {
+		if t == "" {
+			return
+		}
+		if _, dup := seen[t]; dup {
+			return
+		}
+		seen[t] = struct{}{}
+		tenants = append(tenants, t)
+	}
+	add(fromOwner)
+	add(toOwner)
+	if own, ok := callerOwnTenant(r.Context()); ok {
+		for _, t := range tenants {
+			if t != own {
+				add(own)
+				break
+			}
+		}
+	}
+	if len(tenants) == 0 {
+		return errors.New("no tenant to audit the assertion under")
+	}
+	for _, t := range tenants {
+		b := audit.NewEventBuilder().
+			Tenant(t).
+			Type(business.AuditEventDataModification).
+			Action(entityEdgeAssertedAuditAction).
+			User(callerID, business.AuditUserTypeHuman).
+			Resource("entity_edge", fromEID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityMedium).
+			Details(map[string]interface{}{
+				"principal": callerID,
+				"from_eid":  fromEID,
+				"to_eid":    toEID,
+				"edge_type": edgeType,
+			})
+		if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleListDrifted handles GET /api/v1/entities/drifted.
