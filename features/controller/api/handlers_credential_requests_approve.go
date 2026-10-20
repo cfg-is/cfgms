@@ -298,11 +298,20 @@ func (s *Server) handleApproveCredentialRequest(w http.ResponseWriter, r *http.R
 			Permissions: []string{},
 			CreatedAt:   time.Now().UTC(),
 		}
-		if err := s.persistAccount(r.Context(), newAcct, principal.ID); err != nil {
-			s.logger.Error("Failed to persist headless-host account", "error", logging.SanitizeLogValue(err.Error()))
+		// Version 0 is create-if-absent (Issue #5205): a username another writer created
+		// since the existence check above is never overwritten.
+		newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), newAcct, principal.ID)
+		if persistErr != nil {
+			s.logger.Error("Failed to persist headless-host account", "error", logging.SanitizeLogValue(persistErr.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create account", "STORE_ERROR")
 			return
 		}
+		if !swapped {
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Account was concurrently modified; retry", "ACCOUNT_MODIFIED")
+			return
+		}
+		newAcct.Version = newVersion
 		s.cacheAccount(newAcct)
 		boundAccountID = newAcct.ID
 	}

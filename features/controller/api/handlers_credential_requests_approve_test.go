@@ -628,3 +628,22 @@ func TestApproveCredentialRequest_SucceedsOnAuthoritativeNode(t *testing.T) {
 		"approval must succeed on an authoritative node: %s", rec.Body.String())
 	assert.Equal(t, credentialRequestStatusApproved, decodeApproveResponse(t, rec).Status)
 }
+
+// Issue #5205 [REQUIRED TEST]: an account created for the same username between the
+// approval's existence check and its write is not overwritten.
+func TestApproveCredentialRequest_NewAccountCreatedConcurrently_NotOverwritten(t *testing.T) {
+	server, race := casRaceServer(t)
+	lodged := lodgeTestCredentialRequest(t, server, "approve-tenant-race")
+
+	race.arm("racing-host", func() {
+		createApprovalTestAccount(t, server, "racing-host", "approve-tenant-race")
+	})
+	rec := approveCredentialRequest(t, server, implicitAdminPrincipal("approver-race"), lodged.RequestID,
+		ApproveCredentialRequestBody{Fingerprint: lodged.PublicKeyFingerprint, NewAccountUsername: "racing-host"})
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, "ACCOUNT_MODIFIED", errCode(t, rec.Body.Bytes()))
+	stored := casStoredAccount(t, server, "racing-host")
+	assert.Equal(t, "approve-tenant-race", stored.TenantID)
+	assert.NotEmpty(t, stored.EnrollmentLinkHash, "the concurrently created account must survive, not the approval's")
+}
