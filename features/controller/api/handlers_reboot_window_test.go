@@ -674,3 +674,55 @@ func TestGetStewardRebootWindow_AccountBoundRootScopeWithoutCrossing_Challenged(
 		"an account-bound root-scope caller without a crossing must get a tenant-crossing challenge: %s", rec.Body.String())
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
 }
+
+// TestPutTenantRebootWindow_DepthThreeTenant_ResolvesThroughInheritance verifies a
+// reboot window written for a tenant four levels deep lands where the inheritance
+// resolver reads it. It fails if the writer and resolver map depth to keys differently.
+func TestPutTenantRebootWindow_DepthThreeTenant_ResolvesThroughInheritance(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	v, ok := testTenantStores.Load(server.tenantManager)
+	require.True(t, ok)
+	store := v.(tenant.Store)
+	// Wire the real tenant store so the handler derives the key from hierarchy depth.
+	server.SetTenantStore(rebootWindowPathStore{path: store.GetTenantPath})
+	parent := testRootTenantID
+	var tenantID string
+	for _, name := range []string{"deep-a", "deep-b", "deep-c"} {
+		tenantID = name
+		require.NoError(t, store.CreateTenant(ctx, &business.TenantData{
+			ID: tenantID, Name: name, ParentID: parent, Status: business.TenantStatusActive,
+		}))
+		parent = tenantID
+	}
+	path, err := store.GetTenantPath(ctx, tenantID)
+	require.NoError(t, err)
+	require.Len(t, path, 4, "tenant must sit at depth 3")
+
+	putBody, err := json.Marshal(rebootWindowPutRequest{ScheduleYAML: sampleScheduleYAML})
+	require.NoError(t, err)
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+tenantID+"/reboot-window", bytes.NewReader(putBody))
+	putReq = mux.SetURLVars(putReq, map[string]string{"tenant_id": tenantID})
+	putReq = putReq.WithContext(context.WithValue(putReq.Context(), principalContextKey,
+		&Principal{ID: "admin", GlobalScope: true, ImplicitAdmin: true}))
+	putRec := httptest.NewRecorder()
+	server.handlePutTenantRebootWindow(putRec, putReq)
+	require.Equal(t, http.StatusOK, putRec.Code, "tenant PUT should succeed: %s", putRec.Body.String())
+
+	rootCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	effective, err := server.configService.GetEffectiveConfiguration(rootCtx, tenantID, "")
+	require.NoError(t, err)
+	require.NotNil(t, effective.Config.Steward.RebootWindow, "depth-3 tenant reboot window must be applied by inheritance")
+}
+
+// rebootWindowPathStore adapts the real tenant store's hierarchy lookup to the
+// business.TenantStore the handler reads; only GetTenantPath is used.
+type rebootWindowPathStore struct {
+	business.TenantStore
+	path func(ctx context.Context, tenantID string) ([]string, error)
+}
+
+func (s rebootWindowPathStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
+	return s.path(ctx, tenantID)
+}

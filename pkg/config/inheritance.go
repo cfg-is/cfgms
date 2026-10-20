@@ -349,6 +349,18 @@ func tenantLeafName(tenantID string) string {
 	return tenantID
 }
 
+// TenantLevelForDepth maps a tenant's depth in the hierarchy (0 = root) to the
+// InheritanceLevel whose policy document it carries. Depths 2 and deeper share
+// LevelGroup. The resolver and every writer of tenant-level documents use it so
+// both sides derive the same ConfigKey. A negative depth has no level and maps to
+// an InheritanceLevel that TenantLevelConfigKey rejects.
+func TenantLevelForDepth(depth int) InheritanceLevel {
+	if depth >= int(LevelGroup) {
+		return LevelGroup
+	}
+	return InheritanceLevel(depth)
+}
+
 // TenantLevelConfigKey returns the ConfigKey of the policy document for a tenant at
 // the given hierarchy level. It is the single naming rule shared by the inheritance
 // reader and every writer of tenant-level documents, so a document is always saved
@@ -372,7 +384,9 @@ func TenantLevelConfigKey(level InheritanceLevel, tenantID string) (key *cfgconf
 // ConfigSourceTypeController so the configStore.GetConfig call below routes there;
 // Phase 2 (Story C) will use source.Type to dispatch to a git store.
 func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string, level int, source *ConfigSourceInfo) error {
+	// level arrives as the tenant's depth; map it so deep tenants use the group level.
 	_ = source // Phase 1: routing handled internally by configStore (always controller)
+	level = int(TenantLevelForDepth(level))
 	configKey, ok := TenantLevelConfigKey(InheritanceLevel(level), tenantID)
 	if !ok {
 		return nil // Skip unknown levels
