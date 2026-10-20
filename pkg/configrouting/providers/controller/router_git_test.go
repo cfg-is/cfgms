@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
@@ -717,4 +718,44 @@ func TestStoreForSource_CloneDeadlineReturnsErrorAndLeavesNothing(t *testing.T) 
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 10*time.Second, "clone must be bounded by the deadline")
 	assert.Empty(t, dirEntries(t, workDir), "timed-out clone must leave no directory")
+}
+
+// TestStoreForSource_ByteBudgetEvictsLRUAndRemovesClone verifies the total clone byte
+// budget: once exceeded, the least-recently-used clone is evicted and its directory removed.
+func TestStoreForSource_ByteBudgetEvictsLRUAndRemovesClone(t *testing.T) {
+	payload := make([]byte, 64<<10)
+	_, err := rand.Read(payload)
+	require.NoError(t, err)
+
+	tenants := []string{"t1", "t2", "t3"}
+	router, workDir := newGitTestRouter(t, tenants...)
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	urls := map[string]string{}
+	for _, id := range tenants {
+		urls[id] = createBareRepoForRouterTest(t, map[string][]byte{
+			"configs/ns/cfg.yaml": []byte(id + "\n"),
+			"configs/blob.bin":    payload,
+		})
+	}
+
+	// Measure one clone, then budget for two.
+	_, err = router.storeForSource(ctx, "t1", gitInfo(urls["t1"]))
+	require.NoError(t, err)
+	one := router.gitUsage[tenants[0]+":"+fmt.Sprintf("%x", sha256.Sum256([]byte(urls["t1"])))].bytes
+	require.Greater(t, one, int64(64<<10))
+	router.maxCacheBytes = one*2 + one/2
+
+	_, err = router.storeForSource(ctx, "t2", gitInfo(urls["t2"]))
+	require.NoError(t, err)
+	// Touch t1 so t2 is the least recently used.
+	_, err = router.storeForSource(ctx, "t1", gitInfo(urls["t1"]))
+	require.NoError(t, err)
+	_, err = router.storeForSource(ctx, "t3", gitInfo(urls["t3"]))
+	require.NoError(t, err)
+
+	assert.NoDirExists(t, cloneDir(workDir, "t2", urls["t2"]), "LRU clone must be evicted and removed")
+	assert.DirExists(t, cloneDir(workDir, "t1", urls["t1"]))
+	assert.DirExists(t, cloneDir(workDir, "t3", urls["t3"]))
+	assert.Equal(t, 2, router.gitStoreCache.Size())
 }

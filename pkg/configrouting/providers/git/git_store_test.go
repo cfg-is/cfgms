@@ -4,6 +4,7 @@ package git
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	gitstorage "github.com/cfgis/cfgms/features/config/git/storage"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -735,7 +737,7 @@ func TestGitConfigStore_GetConfigHistory(t *testing.T) {
 		Name:      "settings",
 	}, 10)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(history), 2, "history must contain at least 2 commits")
+	assert.Len(t, history, 1, "shallow clone holds only the HEAD commit")
 
 	// Each entry must have a non-zero timestamp and a SHA embedded in Data
 	for i, entry := range history {
@@ -766,10 +768,9 @@ func TestGitConfigStore_GetConfigVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ver: 2\n", string(v1.Data), "version 1 should be the most recent commit")
 
-	// Version 2 = previous commit (ver: 1)
-	v2, err := store.GetConfigVersion(context.Background(), key, 2)
-	require.NoError(t, err)
-	assert.Equal(t, "ver: 1\n", string(v2.Data), "version 2 should be the older commit")
+	// Version 2 does not exist: the clone is shallow
+	_, err = store.GetConfigVersion(context.Background(), key, 2)
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound, "shallow clone has no older versions")
 
 	// Out-of-bounds version returns ErrConfigNotFound
 	_, err = store.GetConfigVersion(context.Background(), key, 999)
@@ -995,4 +996,144 @@ func TestGitConfigStore_ListConfigs_UnreadableFileIsError(t *testing.T) {
 
 	_, err = store.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant1"})
 	require.Error(t, err)
+}
+
+// --- byte limits ---
+
+// randomBytes returns incompressible content so object size tracks content size.
+func randomBytes(t *testing.T, n int) []byte {
+	t.Helper()
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+	require.NoError(t, err)
+	return b
+}
+
+func TestGitConfigStore_CloneOverLimitIsRefusedAndLeavesNothing(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{
+		"configs/ns/a.yaml": []byte("k: v\n"),
+		"configs/big.bin":   randomBytes(t, 600<<10),
+	})
+	workDir := t.TempDir()
+
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+		newMemorySecretStore(nil), workDir, logging.NewNoopLogger(), WithMaxCloneBytes(100<<10))
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrCloneTooLarge)
+	assert.NotContains(t, err.Error(), workDir)
+
+	entries, readErr := os.ReadDir(workDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "partial clone directory must be removed")
+}
+
+// TestGitConfigStore_CompressibleCloneRefusedBeforeCheckout: a pack far under the limit
+// whose blob inflates far past it must be refused from the object headers, before any
+// worktree file is written — cancelling a context cannot stop a go-git checkout.
+func TestGitConfigStore_CompressibleCloneRefusedBeforeCheckout(t *testing.T) {
+	const limit = 100 << 10
+	remoteDir := createBareRemote(t, map[string][]byte{
+		"configs/ns/a.yaml": []byte("k: v\n"),
+		"configs/zeros.bin": make([]byte, 8<<20),
+	})
+
+	t.Run("checkout guard writes nothing", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "clone")
+		require.NoError(t, gitstorage.NewLocalRepositoryStore("", "").CloneShallow(context.Background(), remoteDir, dir))
+		require.Less(t, dirSize(dir), int64(limit), "the compressed fetch must fit the limit for this test to exercise the checkout guard")
+
+		s := &GitConfigStore{repoDir: dir, maxCloneBytes: limit}
+		err := s.checkoutWithinLimit(dir)
+		assert.ErrorIs(t, err, ErrCloneTooLarge)
+
+		_, statErr := os.Lstat(filepath.Join(dir, "configs", "zeros.bin"))
+		assert.True(t, os.IsNotExist(statErr), "the over-limit blob must never be checked out")
+		_, statErr = os.Lstat(filepath.Join(dir, "configs", "ns", "a.yaml"))
+		assert.True(t, os.IsNotExist(statErr), "no worktree file may be written when the tree is over the limit")
+	})
+
+	t.Run("store construction refuses and removes the clone", func(t *testing.T) {
+		workDir := t.TempDir()
+		store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+			newMemorySecretStore(nil), workDir, logging.NewNoopLogger(), WithMaxCloneBytes(limit))
+		require.Error(t, err)
+		assert.Nil(t, store)
+		assert.ErrorIs(t, err, ErrCloneTooLarge)
+		assert.NotContains(t, err.Error(), workDir)
+
+		entries, readErr := os.ReadDir(workDir)
+		require.NoError(t, readErr)
+		assert.Empty(t, entries, "refused clone directory must be removed")
+	})
+
+	t.Run("within limit checks out the worktree", func(t *testing.T) {
+		store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+			newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger(), WithMaxCloneBytes(64<<20))
+		require.NoError(t, err)
+		data, err := os.ReadFile(filepath.Join(store.RepoDir(), "configs", "ns", "a.yaml"))
+		require.NoError(t, err)
+		assert.Equal(t, "k: v\n", string(data))
+	})
+}
+
+func TestGitConfigStore_CloneIsShallow(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{"configs/ns/a.yaml": []byte("v: 1\n")})
+	addCommitToRemote(t, remoteDir, "configs/ns/a.yaml", []byte("v: 2\n"))
+	addCommitToRemote(t, remoteDir, "configs/ns/a.yaml", []byte("v: 3\n"))
+
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+		newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	shallow, err := os.ReadFile(filepath.Join(store.RepoDir(), ".git", "shallow"))
+	require.NoError(t, err, "a depth-1 clone records its shallow boundary")
+	assert.NotEmpty(t, shallow)
+}
+
+func newLimitStore(t *testing.T, files map[string][]byte, opts ...StoreOption) *GitConfigStore {
+	t.Helper()
+	remoteDir := createBareRemote(t, files)
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+		newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger(), opts...)
+	require.NoError(t, err)
+	return store
+}
+
+func TestGitConfigStore_OverLimitFileFailsListAndGet(t *testing.T) {
+	store := newLimitStore(t, map[string][]byte{
+		"configs/ns/small.yaml": []byte("a: 1\n"),
+		"configs/ns/other.yaml": []byte("b: 2\n"),
+		"configs/ns/huge.yaml":  randomBytes(t, 8<<10),
+	}, WithMaxConfigFileBytes(1<<10))
+
+	entries, err := store.ListConfigs(context.Background(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConfigFileTooLarge)
+	assert.Nil(t, entries, "no partial result set")
+	assert.NotContains(t, err.Error(), store.RepoDir())
+
+	got, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{Namespace: "ns", Name: "huge"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConfigFileTooLarge)
+	assert.Nil(t, got)
+	assert.NotContains(t, err.Error(), store.RepoDir())
+
+	ok, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{Namespace: "ns", Name: "small"})
+	require.NoError(t, err)
+	assert.Equal(t, "a: 1\n", string(ok.Data))
+}
+
+func TestGitConfigStore_ListTotalReadLimit(t *testing.T) {
+	files := map[string][]byte{}
+	for i := 0; i < 5; i++ {
+		files[fmt.Sprintf("configs/ns/f%d.yaml", i)] = randomBytes(t, 400)
+	}
+	store := newLimitStore(t, files, WithMaxConfigFileBytes(1<<10), WithMaxListReadBytes(1<<10))
+
+	entries, err := store.ListConfigs(context.Background(), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConfigReadTooLarge)
+	assert.Nil(t, entries)
+	assert.NotContains(t, err.Error(), store.RepoDir())
 }

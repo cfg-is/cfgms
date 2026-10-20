@@ -13,10 +13,14 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 
 	gitstorage "github.com/cfgis/cfgms/features/config/git/storage"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
@@ -28,6 +32,57 @@ import (
 
 // ErrReadOnlySource is returned by all write methods — external git repos are never written to.
 var ErrReadOnlySource = errors.New("git config store is read-only: external git sources cannot be written to")
+
+const (
+	// DefaultMaxCloneBytes bounds the on-disk size of one clone.
+	DefaultMaxCloneBytes int64 = 256 << 20
+	// DefaultMaxConfigFileBytes bounds one .yaml file read by GetConfig or ListConfigs.
+	DefaultMaxConfigFileBytes int64 = 1 << 20
+	// DefaultMaxListReadBytes bounds the total bytes one ListConfigs walk reads.
+	DefaultMaxListReadBytes int64 = 32 << 20
+
+	// cloneWatchInterval is how often the clone directory size is sampled mid-clone.
+	cloneWatchInterval = 20 * time.Millisecond
+)
+
+var (
+	// ErrCloneTooLarge is returned when a clone exceeds the per-clone byte limit.
+	ErrCloneTooLarge = errors.New("repository exceeds the clone size limit")
+	// ErrConfigFileTooLarge is returned when a config file exceeds the per-file read limit.
+	ErrConfigFileTooLarge = errors.New("config file exceeds the size limit")
+	// ErrConfigReadTooLarge is returned when a ListConfigs walk exceeds the total read limit.
+	ErrConfigReadTooLarge = errors.New("config files exceed the total read size limit")
+)
+
+// StoreOption configures optional GitConfigStore limits. Non-positive values keep the default.
+type StoreOption func(*GitConfigStore)
+
+// WithMaxCloneBytes sets the per-clone byte limit.
+func WithMaxCloneBytes(n int64) StoreOption {
+	return func(s *GitConfigStore) {
+		if n > 0 {
+			s.maxCloneBytes = n
+		}
+	}
+}
+
+// WithMaxConfigFileBytes sets the per-file read limit for GetConfig and ListConfigs.
+func WithMaxConfigFileBytes(n int64) StoreOption {
+	return func(s *GitConfigStore) {
+		if n > 0 {
+			s.maxFileBytes = n
+		}
+	}
+}
+
+// WithMaxListReadBytes sets the total bytes one ListConfigs walk may read.
+func WithMaxListReadBytes(n int64) StoreOption {
+	return func(s *GitConfigStore) {
+		if n > 0 {
+			s.maxListBytes = n
+		}
+	}
+}
 
 // GitConfigStore wraps LocalRepositoryStore to provide a read-only cfgconfig.ConfigStore
 // view of a single external HTTPS git repository for one mount-pointed tenant.
@@ -43,6 +98,10 @@ type GitConfigStore struct {
 	repoDir     string
 	secretStore secretsiface.SecretStore
 	logger      logging.Logger
+
+	maxCloneBytes int64
+	maxFileBytes  int64
+	maxListBytes  int64
 }
 
 // NewGitConfigStore constructs a GitConfigStore, cloning the remote repository into
@@ -58,6 +117,7 @@ func NewGitConfigStore(
 	secretStore secretsiface.SecretStore,
 	workDir string,
 	logger logging.Logger,
+	opts ...StoreOption,
 ) (store *GitConfigStore, err error) {
 	// Validate tenantID against workDir before constructing any paths.
 	// ValidateAndCleanPath requires workDir to exist; callers must ensure this.
@@ -98,6 +158,13 @@ func NewGitConfigStore(
 		repoDir:     repoDir,
 		secretStore: secretStore,
 		logger:      logger,
+
+		maxCloneBytes: DefaultMaxCloneBytes,
+		maxFileBytes:  DefaultMaxConfigFileBytes,
+		maxListBytes:  DefaultMaxListReadBytes,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	// Clone only if the repo hasn't been cloned yet.
@@ -107,10 +174,13 @@ func NewGitConfigStore(
 			return nil, fmt.Errorf("failed to fetch credential for clone: %w", credErr)
 		}
 		localStore := gitstorage.NewLocalRepositoryStore(username, password)
-		cloneErr := localStore.Clone(ctx, source.URL, repoDir)
+		cloneErr := s.cloneWithLimit(ctx, localStore, repoDir)
 		if cloneErr != nil {
 			stripped := sanitizeCredential(cloneErr, password)
 			password = "" //nolint:ineffassign // zeroize before return
+			if errors.Is(cloneErr, ErrCloneTooLarge) {
+				stripped = ErrCloneTooLarge
+			}
 			return nil, fmt.Errorf("failed to clone %s: %w", logging.SanitizeLogValue(source.URL), stripped)
 		}
 		password = "" //nolint:ineffassign // zeroize after success
@@ -119,6 +189,182 @@ func NewGitConfigStore(
 	constructed = true
 	return s, nil
 }
+
+// cloneWithLimit makes a shallow single-branch clone and enforces maxCloneBytes. go-git
+// has no transfer limit, so a watcher samples the clone directory and cancels the fetch
+// once it grows past the limit; the size is checked once more after the fetch returns.
+// The fetch does not check out the worktree: checkoutWithinLimit sizes the HEAD tree
+// first and checks it out only when it fits. The caller removes the directory on error.
+func (s *GitConfigStore) cloneWithLimit(ctx context.Context, localStore *gitstorage.LocalRepositoryStore, dir string) error {
+	cloneCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var exceeded bool
+	var mu sync.Mutex
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(cloneWatchInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if dirSize(dir) > s.maxCloneBytes {
+					mu.Lock()
+					exceeded = true
+					mu.Unlock()
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	err := localStore.CloneShallow(cloneCtx, s.source.URL, dir)
+	close(stop)
+	<-finished
+
+	mu.Lock()
+	over := exceeded
+	mu.Unlock()
+	if over || dirSize(dir) > s.maxCloneBytes {
+		return ErrCloneTooLarge
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.checkoutWithinLimit(dir); err != nil {
+		return err
+	}
+	if dirSize(dir) > s.maxCloneBytes {
+		return ErrCloneTooLarge
+	}
+	return nil
+}
+
+// checkoutWithinLimit checks out HEAD of the fetched-but-not-checked-out clone in dir,
+// but only after proving the checkout fits maxCloneBytes. Cancelling a context cannot
+// stop a go-git checkout, and a small, highly compressible pack can inflate to far more
+// than the limit, so the inflated size is computed first from object headers (no object
+// is inflated to size it): the on-disk fetch plus the commit, every tree and every blob
+// occurrence in the HEAD tree. Repeated subtrees and blobs are counted per occurrence,
+// because checkout writes each occurrence. Nothing is written to the worktree when the
+// total exceeds the limit.
+func (s *GitConfigStore) checkoutWithinLimit(dir string) error {
+	repo, err := gogit.PlainOpen(dir)
+	if err != nil {
+		return fmt.Errorf("failed to open clone: %w", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return fmt.Errorf("failed to read HEAD: %w", err)
+	}
+
+	budget := &cloneBudget{used: dirSize(dir), limit: s.maxCloneBytes}
+	if err := budget.addObject(repo.Storer, head.Hash()); err != nil {
+		return err
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return fmt.Errorf("failed to read HEAD commit: %w", err)
+	}
+	if err := budget.addTree(repo.Storer, commit.TreeHash); err != nil {
+		return err
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to open worktree: %w", err)
+	}
+	// Same reset a non-NoCheckout clone performs.
+	if err := w.Reset(&gogit.ResetOptions{Mode: gogit.MergeReset, Commit: head.Hash()}); err != nil {
+		return fmt.Errorf("failed to check out HEAD: %w", err)
+	}
+	return nil
+}
+
+// cloneBudget accumulates the bytes a checkout would produce against a limit.
+type cloneBudget struct {
+	used  int64
+	limit int64
+}
+
+// objectSizer is implemented by go-git's filesystem storage: it reads an object's size
+// from its (pack or loose) header without inflating the object.
+type objectSizer interface {
+	EncodedObjectSize(plumbing.Hash) (int64, error)
+}
+
+// addObject adds the inflated size of object h, read from its header, and fails with
+// ErrCloneTooLarge once the budget is exceeded.
+func (b *cloneBudget) addObject(st storer.EncodedObjectStorer, h plumbing.Hash) error {
+	sizer, ok := st.(objectSizer)
+	if !ok {
+		return fmt.Errorf("clone storage cannot size objects")
+	}
+	size, err := sizer.EncodedObjectSize(h)
+	if err != nil {
+		return fmt.Errorf("failed to size object: %w", err)
+	}
+	b.used += size
+	if size < 0 || b.used > b.limit {
+		return ErrCloneTooLarge
+	}
+	return nil
+}
+
+// addTree walks the tree rooted at root, adding every tree (sized before it is decoded)
+// and every blob occurrence to the budget. Submodule entries are not checked out by a
+// NoRecurseSubmodules checkout and are skipped.
+func (b *cloneBudget) addTree(st storer.EncodedObjectStorer, root plumbing.Hash) error {
+	pending := []plumbing.Hash{root}
+	for len(pending) > 0 {
+		h := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if err := b.addObject(st, h); err != nil {
+			return err
+		}
+		tree, err := object.GetTree(st, h)
+		if err != nil {
+			return fmt.Errorf("failed to read tree: %w", err)
+		}
+		for _, e := range tree.Entries {
+			switch e.Mode {
+			case filemode.Dir:
+				pending = append(pending, e.Hash)
+			case filemode.Submodule:
+				continue
+			default:
+				if err := b.addObject(st, e.Hash); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// dirSize returns the total size of the regular files under dir. Entries that vanish
+// or cannot be read are skipped.
+func dirSize(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, infoErr := d.Info(); infoErr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// CloneBytes returns the on-disk size of this store's clone.
+func (s *GitConfigStore) CloneBytes() int64 { return dirSize(s.repoDir) }
 
 // RepoDir returns the clone directory of this store.
 func (s *GitConfigStore) RepoDir() string { return s.repoDir }
@@ -277,12 +523,22 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 		return nil, fmt.Errorf("invalid config key path: %w", err)
 	}
 
+	// Refuse an oversized file before reading it.
+	if size, sizeErr := s.lstatSize(relPath); sizeErr == nil && size > s.maxFileBytes {
+		s.logOversize("get", relPath)
+		return nil, ErrConfigFileTooLarge
+	}
+
 	data, info, err := security.ReadRegularFileNoSymlinks(s.repoDir, relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, cfgconfig.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+	if int64(len(data)) > s.maxFileBytes {
+		s.logOversize("get", relPath)
+		return nil, ErrConfigFileTooLarge
 	}
 
 	return &cfgconfig.ConfigEntry{
@@ -292,6 +548,32 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 		UpdatedAt: info.ModTime(),
 		CreatedAt: info.ModTime(),
 	}, nil
+}
+
+// lstatSize returns the size of relPath inside the clone without following links.
+func (s *GitConfigStore) lstatSize(relPath string) (int64, error) {
+	root, err := os.OpenRoot(s.repoDir)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = root.Close() }()
+	info, err := root.Lstat(filepath.FromSlash(relPath))
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+// logOversize records a refused read; only the repository-relative name is logged.
+func (s *GitConfigStore) logOversize(op, relPath string) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Warn("git-store: refused over-limit config file",
+		"tenant_id", logging.SanitizeLogValue(s.tenantID),
+		"operation", op,
+		"file", logging.SanitizeLogValue(relPath),
+	)
 }
 
 // ListConfigs enumerates config files under <repoDir>/<subPath>/<filter.Namespace>/.
@@ -341,6 +623,7 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 	defer func() { _ = configRoot.Close() }()
 
 	var entries []*cfgconfig.ConfigEntry
+	var totalRead int64
 	err = filepath.Walk(searchDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil || info.IsDir() {
 			return walkErr
@@ -353,9 +636,25 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		if relErr != nil {
 			return nil
 		}
+		if info.Size() > s.maxFileBytes {
+			s.logOversize("list", relativePath)
+			return ErrConfigFileTooLarge
+		}
+		if totalRead+info.Size() > s.maxListBytes {
+			s.logOversize("list", relativePath)
+			return ErrConfigReadTooLarge
+		}
 		data, readErr := configRoot.ReadFile(relativePath)
 		if readErr != nil {
 			return fmt.Errorf("read config file: %w", readErr)
+		}
+		totalRead += int64(len(data))
+		if int64(len(data)) > s.maxFileBytes {
+			s.logOversize("list", relativePath)
+			return ErrConfigFileTooLarge
+		}
+		if totalRead > s.maxListBytes {
+			return ErrConfigReadTooLarge
 		}
 
 		rel, relErr := filepath.Rel(base, path)
@@ -388,83 +687,96 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 	return entries, nil
 }
 
-// GetConfigHistory returns commit history for the config file.
-func (s *GitConfigStore) GetConfigHistory(ctx context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
+// headCommitFile returns the HEAD commit and the file at relPath in it. The clone is
+// shallow (depth 1), so HEAD is the only commit available locally. found is false when
+// the file does not exist at HEAD.
+func (s *GitConfigStore) headCommitFile(relPath string) (commit *object.Commit, file *object.File, found bool, err error) {
+	repo, err := gogit.PlainOpen(s.repoDir)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to open repo: %w", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to read HEAD: %w", err)
+	}
+	commit, err = repo.CommitObject(head.Hash())
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to get commit object: %w", err)
+	}
+	file, err = commit.File(relPath)
+	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			return commit, nil, false, nil
+		}
+		return nil, nil, false, fmt.Errorf("failed to read file at HEAD: %w", err)
+	}
+	return commit, file, true, nil
+}
+
+// GetConfigHistory returns the history of the config file. Clones are shallow, so the
+// history holds at most one entry: the HEAD commit, when it contains the file.
+func (s *GitConfigStore) GetConfigHistory(_ context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
 	relPath, err := s.keyToRelativePath(key)
 	if err != nil {
 		return nil, err
 	}
-
-	localStore := gitstorage.NewLocalRepositoryStore("", "")
-	commits, err := localStore.GetHistory(ctx, s.repoDir, relPath, limit)
+	commit, _, found, err := s.headCommitFile(relPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config history: %w", err)
 	}
-
-	entries := make([]*cfgconfig.ConfigEntry, 0, len(commits))
-	for i, c := range commits {
-		entries = append(entries, &cfgconfig.ConfigEntry{
-			Key:       key,
-			Data:      []byte(c.SHA),
-			Format:    cfgconfig.ConfigFormatYAML,
-			Version:   int64(i + 1),
-			UpdatedAt: c.Timestamp,
-			CreatedAt: c.Timestamp,
-			UpdatedBy: c.Author.Name,
-			CreatedBy: c.Author.Name,
-		})
+	entries := []*cfgconfig.ConfigEntry{}
+	if !found || limit == 0 {
+		return entries, nil
 	}
-	return entries, nil
+	return append(entries, &cfgconfig.ConfigEntry{
+		Key:       key,
+		Data:      []byte(commit.Hash.String()),
+		Format:    cfgconfig.ConfigFormatYAML,
+		Version:   1,
+		UpdatedAt: commit.Author.When,
+		CreatedAt: commit.Author.When,
+		UpdatedBy: commit.Author.Name,
+		CreatedBy: commit.Author.Name,
+	}), nil
 }
 
-// GetConfigVersion returns the config file content at a specific commit in history.
-// version is 1-indexed (1 = most recent, 2 = one before that, etc.).
-func (s *GitConfigStore) GetConfigVersion(ctx context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
+// GetConfigVersion returns the config file content at a version. version is 1-indexed
+// (1 = HEAD). Clones are shallow, so only version 1 exists.
+func (s *GitConfigStore) GetConfigVersion(_ context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
 	if version < 1 {
 		return nil, fmt.Errorf("version must be >= 1, got %d", version)
 	}
-
 	relPath, err := s.keyToRelativePath(key)
 	if err != nil {
 		return nil, err
 	}
-
-	localStore := gitstorage.NewLocalRepositoryStore("", "")
-	commits, err := localStore.GetHistory(ctx, s.repoDir, relPath, int(version))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get history for version: %w", err)
-	}
-	if int(version) > len(commits) {
+	if version > 1 {
 		return nil, cfgconfig.ErrConfigNotFound
 	}
-
-	targetCommit := commits[version-1]
-	repo, err := gogit.PlainOpen(s.repoDir)
+	commit, file, found, err := s.headCommitFile(relPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open repo: %w", err)
+		return nil, err
 	}
-	commitObj, err := repo.CommitObject(plumbing.NewHash(targetCommit.SHA))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
+	if !found {
+		return nil, cfgconfig.ErrConfigNotFound
 	}
-	file, err := commitObj.File(relPath)
-	if err != nil {
-		return nil, fmt.Errorf("file not found at version %d: %w", version, err)
+	if file.Size > s.maxFileBytes {
+		s.logOversize("version", relPath)
+		return nil, ErrConfigFileTooLarge
 	}
 	content, err := file.Contents()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file contents at version %d: %w", version, err)
 	}
-
 	return &cfgconfig.ConfigEntry{
 		Key:       key,
 		Data:      []byte(content),
 		Format:    cfgconfig.ConfigFormatYAML,
 		Version:   version,
-		UpdatedAt: targetCommit.Timestamp,
-		CreatedAt: targetCommit.Timestamp,
-		UpdatedBy: targetCommit.Author.Name,
-		CreatedBy: targetCommit.Author.Name,
+		UpdatedAt: commit.Author.When,
+		CreatedAt: commit.Author.When,
+		UpdatedBy: commit.Author.Name,
+		CreatedBy: commit.Author.Name,
 	}, nil
 }
 

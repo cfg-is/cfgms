@@ -4,19 +4,15 @@ package server
 
 import (
 	"context"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-git/go-billy/v5/osfs"
 	gogit "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
-	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
-	"github.com/go-git/go-git/v5/storage"
-	"github.com/go-git/go-git/v5/storage/filesystem"
+	gitfile "github.com/go-git/go-git/v5/plumbing/transport/file"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -132,29 +128,60 @@ func (r *cascadeRecorder) count(tenantID string) int {
 	return r.calls[tenantID]
 }
 
-// installInMemoryGitTransport replaces go-git's "https" protocol handler with an
-// in-process server backed by loader for the duration of the test, exactly as
-// pkg/config/validator_test.go does for the same reason: tenant metadata's
-// config_source_url must satisfy pkg/config's https-only SSRF guard
-// (validateSourceURL), so the remote has to be addressed by a real "https://"
-// URL — the in-memory transport then serves that URL without any real network
-// or TLS listener. t.Cleanup restores the original handler.
-func installInMemoryGitTransport(t *testing.T, loader gitserver.MapLoader) {
+// localGitTransport serves "https://" remote URLs from on-disk repositories through
+// go-git's file transport, which runs the real git upload-pack binary. Tenant
+// metadata's config_source_url must satisfy pkg/config's https-only SSRF guard
+// (validateSourceURL), so the remote has to be addressed by a real "https://" URL;
+// this transport maps each such URL to a local repository without any network or TLS
+// listener. The real upload-pack is used (not go-git's in-process server) because the
+// controller's git config store makes shallow (depth 1) clones and pulls, which the
+// in-process server does not support.
+type localGitTransport struct {
+	dirs map[string]string // https URL -> local repository directory
+}
+
+func (l localGitTransport) localEndpoint(ep *transport.Endpoint) (*transport.Endpoint, error) {
+	dir, ok := l.dirs[ep.String()]
+	if !ok {
+		return nil, transport.ErrRepositoryNotFound
+	}
+	return transport.NewEndpoint(dir)
+}
+
+func (l localGitTransport) NewUploadPackSession(ep *transport.Endpoint, _ transport.AuthMethod) (transport.UploadPackSession, error) {
+	local, err := l.localEndpoint(ep)
+	if err != nil {
+		return nil, err
+	}
+	return gitfile.DefaultClient.NewUploadPackSession(local, nil)
+}
+
+func (l localGitTransport) NewReceivePackSession(ep *transport.Endpoint, _ transport.AuthMethod) (transport.ReceivePackSession, error) {
+	local, err := l.localEndpoint(ep)
+	if err != nil {
+		return nil, err
+	}
+	return gitfile.DefaultClient.NewReceivePackSession(local, nil)
+}
+
+// installLocalGitTransport replaces go-git's "https" protocol handler with a
+// localGitTransport over dirs for the duration of the test. t.Cleanup restores the
+// original handler.
+func installLocalGitTransport(t *testing.T, dirs map[string]string) {
 	t.Helper()
 	original := gitclient.Protocols["https"]
-	gitclient.InstallProtocol("https", gitserver.NewClient(loader))
+	gitclient.InstallProtocol("https", localGitTransport{dirs: dirs})
 	t.Cleanup(func() {
 		gitclient.InstallProtocol("https", original)
 	})
 }
 
-// newSeededBareRepo creates an on-disk repository (under t.TempDir) containing
-// one commit and returns a storer to register with gitserver.MapLoader together
-// with a separate *gogit.Repository handle the test uses to push further
-// commits. The two handles share no in-process state — only the files on disk —
-// so a test write and the system-under-test's read of the remote cannot be
-// paired by the race detector (go-git's memory.Storage has no locking).
-func newSeededBareRepo(t *testing.T, path string, content []byte) (storage.Storer, *gogit.Repository) {
+// newSeededRepo creates an on-disk repository (under t.TempDir) containing one
+// commit and returns its directory, to register with installLocalGitTransport,
+// together with a *gogit.Repository handle the test uses to commit further
+// changes. The system under test reads the remote through a separate git
+// upload-pack process, so the two share only the files on disk.
+func newSeededRepo(t *testing.T, path string, content []byte) (string, *gogit.Repository) {
 	t.Helper()
 	dir := t.TempDir()
 	repo, err := gogit.PlainInit(dir, false)
@@ -176,14 +203,12 @@ func newSeededBareRepo(t *testing.T, path string, content []byte) (storage.Store
 	})
 	require.NoError(t, err)
 
-	// Independent storer over the same .git directory for the server side.
-	serverStorer := filesystem.NewStorage(osfs.New(filepath.Join(dir, ".git")), cache.NewObjectLRUDefault())
-	return serverStorer, repo
+	return dir, repo
 }
 
 // pushCommit adds a second commit to repo's worktree — equivalent to a
-// remote receiving a push, since repo and the gitserver.MapLoader entry the
-// system-under-test clones/pulls from are backed by the same on-disk directory.
+// remote receiving a push, since repo and the localGitTransport entry the
+// system-under-test clones/pulls from are the same on-disk directory.
 func pushCommit(t *testing.T, repo *gogit.Repository, path string, content []byte) {
 	t.Helper()
 	wt, err := repo.Worktree()
@@ -271,14 +296,14 @@ func gitSourceMetadata(url string) map[string]string {
 // REQUIRED containment test, exercised in the same single tick window so only one
 // test pays the 1-minute floor).
 func TestWiredSyncService_PullsAndCascadesWithinRootOnly(t *testing.T) {
-	inRootStorer, inRootRepo := newSeededBareRepo(t, "app.yaml", []byte("version: 1\n"))
-	outOfRootStorer, outOfRootRepo := newSeededBareRepo(t, "app.yaml", []byte("other: 1\n"))
+	inRootDir, inRootRepo := newSeededRepo(t, "app.yaml", []byte("version: 1\n"))
+	outOfRootDir, outOfRootRepo := newSeededRepo(t, "app.yaml", []byte("other: 1\n"))
 
 	const inRootURL = "https://configsync-wiring-test.cfgms.local/in-root-repo"
 	const outOfRootURL = "https://configsync-wiring-test.cfgms.local/out-of-root-repo"
-	installInMemoryGitTransport(t, gitserver.MapLoader{
-		inRootURL:    inRootStorer,
-		outOfRootURL: outOfRootStorer,
+	installLocalGitTransport(t, map[string]string{
+		inRootURL:    inRootDir,
+		outOfRootURL: outOfRootDir,
 	})
 
 	storageManager := pkgtesting.SetupTestStorage(t)
@@ -383,9 +408,9 @@ func TestSyncService_RegisterRejectsCrossRootTenant(t *testing.T) {
 // 1-minute poll floor) is only possible if the ticker goroutine already observed
 // ctx.Done() and returned.
 func TestSyncService_LifecycleTiedToContextCancellation(t *testing.T) {
-	storer, _ := newSeededBareRepo(t, "app.yaml", []byte("version: 1\n"))
+	repoDir, _ := newSeededRepo(t, "app.yaml", []byte("version: 1\n"))
 	const url = "https://configsync-wiring-test.cfgms.local/lifecycle-repo"
-	installInMemoryGitTransport(t, gitserver.MapLoader{url: storer})
+	installLocalGitTransport(t, map[string]string{url: repoDir})
 
 	storageManager := pkgtesting.SetupTestStorage(t)
 	tenantStore := storageManager.GetTenantStore()
