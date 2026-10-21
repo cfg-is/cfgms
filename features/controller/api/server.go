@@ -854,11 +854,11 @@ func (s *Server) setupRouter() {
 	// One per-source budget across the three, bounding abuse of the public
 	// handshake (Issue #4532).
 	s.router.Handle("/api/v1/stewards/{device_id}/refresh/challenge",
-		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshChallenge))).Methods("POST", "OPTIONS")
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, s.validationMiddleware(http.HandlerFunc(s.handleRefreshChallenge)))).Methods("POST", "OPTIONS")
 	s.router.Handle("/api/v1/stewards/{device_id}/refresh/complete",
-		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshComplete))).Methods("POST", "OPTIONS")
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, s.validationMiddleware(http.HandlerFunc(s.handleRefreshComplete)))).Methods("POST", "OPTIONS")
 	s.router.Handle("/api/v1/stewards/{device_id}/refresh/claim",
-		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshClaim))).Methods("POST", "OPTIONS")
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, s.validationMiddleware(http.HandlerFunc(s.handleRefreshClaim)))).Methods("POST", "OPTIONS")
 
 	// All routes on the api subrouter require authentication (enforced by authenticationMiddleware).
 	// Routes whose permissions appear in permissionAssurance additionally enforce an assurance-level
