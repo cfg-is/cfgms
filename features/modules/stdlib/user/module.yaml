@@ -5,6 +5,11 @@ description: >
   Provides idempotent Get/Set management of account existence, group membership,
   lock/disable state, and password presence (observed only) via native OS account
   management tools (net.exe on Windows, useradd/usermod/userdel on Linux, dscl on macOS).
+  On Windows, account state and direct local group membership are read with the
+  locale-independent NetUserGetInfo and NetUserGetLocalGroups APIs, and group
+  membership converges to the declared list with NetLocalGroupAddMembers and
+  NetLocalGroupDelMembers: direct groups that are not declared are removed,
+  except the built-in Users group (SID S-1-5-32-545), which is never removed.
   Password setting is intentionally out of scope — the module reports whether an
   account has a password (has_credential, Get-only) but never accepts, stores, or
   transmits password material.
@@ -46,7 +51,7 @@ security:
 
 behavioral_envelope:
   shells_out_to:
-    - net.exe    # Windows: net user (account management), net localgroup (group membership)
+    - net.exe    # Windows: net user (create, delete, full name, enable/disable); reads and group changes use netapi32 in-process
     - useradd    # Linux: create local user accounts
     - usermod    # Linux: modify local user accounts (full name, groups, lock state)
     - userdel    # Linux: delete local user accounts

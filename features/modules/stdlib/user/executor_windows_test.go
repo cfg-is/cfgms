@@ -6,139 +6,144 @@
 package user
 
 import (
-	"reflect"
+	"crypto/rand"
+	"encoding/hex"
+	"sort"
+	"strings"
 	"testing"
+	"unsafe"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 )
 
-// TestParseWindowsGroups verifies extraction of "*"-prefixed group names from
-// the "Local Group Memberships" field of "net user" output.
-func TestParseWindowsGroups(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want []string
-	}{
-		{
-			name: "empty input",
-			in:   "",
-			want: nil,
-		},
-		{
-			name: "no groups (asterisks absent)",
-			in:   "   None",
-			want: nil,
-		},
-		{
-			name: "single group",
-			in:   "*Administrators",
-			want: []string{"Administrators"},
-		},
-		{
-			name: "multiple groups space separated",
-			in:   "*Administrators       *Users",
-			want: []string{"Administrators", "Users"},
-		},
-		{
-			name: "group name with embedded space is split on whitespace",
-			in:   "*Remote Desktop Users",
-			want: []string{"Remote"},
-		},
-		{
-			name: "bare asterisk yields no group",
-			in:   "*   *Users",
-			want: []string{"Users"},
-		},
-		{
-			name: "non-asterisk tokens ignored",
-			in:   "Local Group Memberships *Administrators",
-			want: []string{"Administrators"},
-		},
-	}
+var (
+	procNetLocalGroupAdd = modnetapi32.NewProc("NetLocalGroupAdd")
+	procNetLocalGroupDel = modnetapi32.NewProc("NetLocalGroupDel")
+)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseWindowsGroups(tt.in)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("parseWindowsGroups(%q) = %#v, want %#v", tt.in, got, tt.want)
-			}
-		})
+// requireElevated skips t unless the test runs elevated: creating local users
+// and groups needs an administrator, as the steward (SYSTEM) and the native
+// Windows CI runners are.
+func requireElevated(t *testing.T) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated administrator to create local users and groups")
 	}
 }
 
-// TestParseNetUserOutput verifies that a full "net user <username>" fixture is
-// parsed into the expected userState, including full name, active/locked state,
-// password-required flag, and sorted group memberships.
-func TestParseNetUserOutput(t *testing.T) {
-	const fixture = `User name                    alice
-Full Name                    Alice Smith
-Comment
-User's comment
-Country/region code          000 (System Default)
-Account active               Yes
-Account expires              Never
-
-Password last set            1/1/2026 10:00:00 AM
-Password expires             Never
-Password changeable          1/1/2026 10:00:00 AM
-Password required            Yes
-User may change password     Yes
-
-Workstations allowed         All
-Logon script
-User profile
-Home directory
-Last logon                   Never
-
-Logon hours allowed          All
-
-Local Group Memberships      *Users                *Administrators
-Global Group memberships     *None
-The command completed successfully.
-`
-
-	got := parseNetUserOutput(fixture)
-
-	if !got.Exists {
-		t.Error("parseNetUserOutput: Exists should be true")
-	}
-	if got.FullName != "Alice Smith" {
-		t.Errorf("FullName = %q, want %q", got.FullName, "Alice Smith")
-	}
-	if got.Locked {
-		t.Error("Locked should be false for an active account")
-	}
-	if !got.HasCredential {
-		t.Error("HasCredential should be true when 'Password required' is Yes")
-	}
-	want := []string{"Administrators", "Users"} // sorted
-	if !reflect.DeepEqual(got.Groups, want) {
-		t.Errorf("Groups = %#v, want %#v (sorted)", got.Groups, want)
-	}
+func randomSuffix(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 4)
+	_, err := rand.Read(b)
+	require.NoError(t, err)
+	return hex.EncodeToString(b)
 }
 
-// TestParseNetUserOutput_DisabledAndNoPassword verifies the locked/no-password
-// branches of the parser.
-func TestParseNetUserOutput_DisabledAndNoPassword(t *testing.T) {
-	const fixture = `User name                    svc
-Full Name                    Service Account
-Account active               No
-Password required            No
-Local Group Memberships      *Users
-`
+// createLocalGroup creates a local group named name (NetLocalGroupAdd, level
+// 0) and deletes it when the test ends.
+func createLocalGroup(t *testing.T, name string) string {
+	t.Helper()
+	p, err := windows.UTF16PtrFromString(name)
+	require.NoError(t, err)
+	info := struct{ name *uint16 }{name: p}
+	r, _, _ := procNetLocalGroupAdd.Call(0, 0, uintptr(unsafe.Pointer(&info)), 0)
+	require.Zero(t, r, "NetLocalGroupAdd %s: %v", name, windows.Errno(r))
+	t.Cleanup(func() { _, _, _ = procNetLocalGroupDel.Call(0, uintptr(unsafe.Pointer(p))) })
+	return name
+}
 
-	got := parseNetUserOutput(fixture)
+// testUser returns a fresh local user name and deletes that account when the
+// test ends.
+func testUser(t *testing.T, e *windowsExecutor) string {
+	t.Helper()
+	name := "cfgmsu" + randomSuffix(t)
+	t.Cleanup(func() { _ = e.setState(name, userState{Exists: false}) })
+	return name
+}
 
-	if !got.Locked {
-		t.Error("Locked should be true when 'Account active' is No")
-	}
-	if got.HasCredential {
-		t.Error("HasCredential should be false when 'Password required' is No")
-	}
-	if got.FullName != "Service Account" {
-		t.Errorf("FullName = %q, want %q", got.FullName, "Service Account")
-	}
-	want := []string{"Users"}
-	if !reflect.DeepEqual(got.Groups, want) {
-		t.Errorf("Groups = %#v, want %#v", got.Groups, want)
-	}
+func usersGroup(t *testing.T) string {
+	t.Helper()
+	name, err := builtinUsersGroupName()
+	require.NoError(t, err)
+	return name
+}
+
+func TestWindowsSetState_RemovesUndeclaredGroupButKeepsUsers(t *testing.T) {
+	requireElevated(t)
+	e := &windowsExecutor{}
+	keep := createLocalGroup(t, "cfgmsk"+randomSuffix(t))
+	drop := createLocalGroup(t, "cfgmsd"+randomSuffix(t))
+	name := testUser(t, e)
+
+	require.NoError(t, e.setState(name, userState{Exists: true, Groups: []string{keep, drop}}))
+	before, err := e.getState(name)
+	require.NoError(t, err)
+	require.Subset(t, before.Groups, []string{keep, drop, usersGroup(t)}, "precondition: the user is in both groups and Users")
+
+	require.NoError(t, e.setState(name, userState{Exists: true, Groups: []string{keep}}))
+
+	after, err := e.getState(name)
+	require.NoError(t, err)
+	assert.Contains(t, after.Groups, keep)
+	assert.NotContains(t, after.Groups, drop, "a group removed from the declared list must be left")
+	assert.Contains(t, after.Groups, usersGroup(t), "the built-in Users group is never removed")
+}
+
+func TestWindowsGetState_DisabledAccountWithNonASCIIGroup(t *testing.T) {
+	requireElevated(t)
+	e := &windowsExecutor{}
+	plain := createLocalGroup(t, "cfgmsp"+randomSuffix(t))
+	nonASCII := createLocalGroup(t, "cfgms-grün-Ω"+randomSuffix(t))
+	name := testUser(t, e)
+	require.NoError(t, e.setState(name, userState{Exists: true, Locked: true, Groups: []string{plain, nonASCII}}))
+
+	got, err := e.getState(name)
+	require.NoError(t, err)
+
+	want := []string{plain, nonASCII, usersGroup(t)}
+	sort.Strings(want)
+	assert.True(t, got.Exists)
+	assert.True(t, got.Locked, "a disabled account reads as locked")
+	assert.Equal(t, want, got.Groups, "the exact direct local-group list")
+}
+
+func TestWindowsGetState_BuiltinGuestReadsDisabled(t *testing.T) {
+	// The built-in Guest account is disabled by default and has a localized
+	// name; reading it needs no elevation.
+	computer, err := windows.ComputerName()
+	require.NoError(t, err)
+	domain, _, _, err := windows.LookupSID("", computer)
+	require.NoError(t, err)
+	sid, err := windows.CreateWellKnownDomainSid(windows.WinAccountGuestSid, domain)
+	require.NoError(t, err)
+	guest, _, _, err := sid.LookupAccount("")
+	require.NoError(t, err)
+
+	got, err := (&windowsExecutor{}).getState(guest)
+	require.NoError(t, err)
+	assert.True(t, got.Exists)
+	assert.True(t, got.Locked, "the built-in Guest account is disabled")
+	assert.NotEmpty(t, got.Groups, "Guest is a direct member of the built-in Guests group")
+}
+
+func TestWindowsGetState_MissingAccountIsAbsentNotError(t *testing.T) {
+	got, err := (&windowsExecutor{}).getState("cfgmsnone" + randomSuffix(t))
+	require.NoError(t, err)
+	assert.False(t, got.Exists)
+}
+
+func TestWindowsGetState_InvalidAccountNameIsError(t *testing.T) {
+	// NetUserGetInfo answers a 300-character name (local account names are at
+	// most 20) with ERROR_INVALID_PARAMETER, not NERR_UserNotFound.
+	got, err := (&windowsExecutor{}).getState(strings.Repeat("a", 300))
+	assert.Error(t, err, "a read failure other than user-not-found must not read as an absent user")
+	assert.False(t, got.Exists)
+}
+
+func TestGroupChanges(t *testing.T) {
+	add, remove := groupChanges([]string{"Administrators", "Users", "Backup Operators"}, []string{"administrators", "Remote Desktop Users"}, "Users")
+	assert.Equal(t, []string{"Remote Desktop Users"}, add)
+	assert.Equal(t, []string{"Backup Operators"}, remove, "Users is never removed; names compare case-insensitively")
 }
