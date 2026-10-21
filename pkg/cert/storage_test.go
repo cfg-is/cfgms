@@ -391,3 +391,98 @@ func TestFileStore_RemoveSigningKeyFile(t *testing.T) {
 	assert.Error(t, fs.RemoveSigningKeyFile("../escape"))
 	assert.Error(t, fs.RemoveSigningKeyFile(""))
 }
+
+// TestFileStore_RejectsLinkedSerialDirectory verifies a serial directory that is
+// a symlink to another certificate's directory inside the base is refused by
+// every operation and leaves the target's files intact.
+func TestFileStore_RejectsLinkedSerialDirectory(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	require.NoError(t, err)
+
+	exp := time.Now().Add(365 * 24 * time.Hour)
+	require.NoError(t, store.StoreCertificate(minimalCert("serial-b", CertificateTypeInternalServer, exp)))
+	require.NoError(t, os.Symlink(filepath.Join(dir, "serial-b"), filepath.Join(dir, "serial-a")))
+
+	assert.Error(t, store.StoreCertificate(minimalCert("serial-a", CertificateTypeInternalServer, exp)))
+	_, err = store.GetCertificate("serial-a")
+	assert.Error(t, err)
+	assert.Error(t, store.DeleteCertificate("serial-a"))
+
+	b, err := store.GetCertificate("serial-b")
+	require.NoError(t, err)
+	assert.Equal(t, "serial-b", b.SerialNumber)
+	assert.Contains(t, string(b.CertificatePEM), "BEGIN CERTIFICATE")
+	assert.Equal(t, "test-serial-b", b.CommonName)
+
+	// Reloading skips the linked directory instead of reading through it.
+	reloaded, err := NewFileStore(dir)
+	require.NoError(t, err)
+	_, ok := reloaded.certs["serial-a"]
+	assert.False(t, ok)
+}
+
+// TestStoreCertificate_RefusesLinkedLeafFiles verifies a link planted at any
+// per-certificate file is refused and its in-base target is never written.
+func TestStoreCertificate_RefusesLinkedLeafFiles(t *testing.T) {
+	exp := time.Now().Add(365 * 24 * time.Hour)
+	for _, name := range []string{"key.pem", "cert.pem", "chain.pem", "metadata.json"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewFileStore(dir)
+			require.NoError(t, err)
+			certDir := filepath.Join(dir, "serial-c")
+			require.NoError(t, os.MkdirAll(certDir, 0750))
+			sentinel := filepath.Join(dir, "sentinel.txt")
+			require.NoError(t, os.WriteFile(sentinel, []byte("sentinel"), 0600))
+			require.NoError(t, os.Symlink(sentinel, filepath.Join(certDir, name)))
+
+			c := minimalCert("serial-c", CertificateTypeInternalServer, exp)
+			c.IssuerChainPEM = []byte("chain")
+			assert.Error(t, store.StoreCertificate(c))
+
+			got, err := os.ReadFile(sentinel)
+			require.NoError(t, err)
+			assert.Equal(t, "sentinel", string(got))
+		})
+	}
+}
+
+// TestGetCertificate_RefusesLinkedLeafFiles verifies a cert.pem or metadata.json
+// symlink makes GetCertificate fail, and a normal round trip still works.
+func TestGetCertificate_RefusesLinkedLeafFiles(t *testing.T) {
+	exp := time.Now().Add(365 * 24 * time.Hour)
+	for _, name := range []string{"cert.pem", "metadata.json", "key.pem"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewFileStore(dir)
+			require.NoError(t, err)
+			require.NoError(t, store.StoreCertificate(minimalCert("serial-d", CertificateTypeInternalServer, exp)))
+
+			leaf := filepath.Join(dir, "serial-d", name)
+			copyPath := filepath.Join(dir, "copy-of-"+name)
+			require.NoError(t, os.Rename(leaf, copyPath))
+			require.NoError(t, os.Symlink(copyPath, leaf))
+
+			_, err = store.GetCertificate("serial-d")
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestFileStore_RoundTripStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	require.NoError(t, err)
+	c := minimalCert("serial-e", CertificateTypeInternalServer, time.Now().Add(time.Hour*24*365))
+	c.IssuerChainPEM = []byte("chain")
+	require.NoError(t, store.StoreCertificate(c))
+	require.NoError(t, store.StoreCertificate(c), "overwrite of regular files is allowed")
+	got, err := store.GetCertificate("serial-e")
+	require.NoError(t, err)
+	assert.Equal(t, c.PrivateKeyPEM, got.PrivateKeyPEM)
+	assert.Equal(t, c.IssuerChainPEM, got.IssuerChainPEM)
+	require.NoError(t, store.DeleteCertificate("serial-e"))
+	_, err = store.GetCertificate("serial-e")
+	assert.Error(t, err)
+}

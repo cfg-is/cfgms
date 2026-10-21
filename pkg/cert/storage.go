@@ -4,7 +4,9 @@ package cert
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // serialNumberPattern bounds the accepted shape of a certificate serial number
@@ -59,7 +64,48 @@ func resolveCertDir(basePath, serialNumber string) (string, error) {
 		return "", fmt.Errorf("certificate path escapes storage root")
 	}
 
-	return certDir, nil
+	// Return the resolved directory that was just checked, so later reads,
+	// writes and deletes do not walk the original path again. The leaf is
+	// rebuilt from the resolved base: the final component must not itself be
+	// a link or reparse point (a link to another certificate's directory
+	// inside the base passes the containment check above).
+	resolvedCertDir := filepath.Join(resolvedBase, serialNumber)
+	if err := refuseLinkedLeaf(resolvedCertDir); err != nil {
+		return "", fmt.Errorf("certificate directory is not a plain directory: %w", err)
+	}
+
+	return resolvedCertDir, nil
+}
+
+// errLinkedLeaf reports a symlink or reparse point where a plain entry is required.
+var errLinkedLeaf = errors.New("path is a symlink or reparse point")
+
+// refuseLinkedLeaf returns an error if path exists and is a symlink or other
+// irregular entry (reparse point). A missing path is accepted; any other Lstat
+// failure is returned (fail closed).
+func refuseLinkedLeaf(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return errLinkedLeaf
+	}
+	return nil
+}
+
+// writeCertFile writes one per-certificate file after refusing an existing link
+// at the leaf. SecureWriteFileWithPerms resolves the path before writing, so the
+// explicit Lstat of the unresolved leaf is what refuses a link to a target
+// inside the base; its no-follow open covers a link swapped in afterwards.
+func writeCertFile(certDir, name string, data []byte) error {
+	if err := refuseLinkedLeaf(filepath.Join(certDir, name)); err != nil {
+		return err
+	}
+	return security.SecureWriteFileWithPerms(certDir, name, data, 0600)
 }
 
 // resolveExistingAncestorSymlinks resolves symlinks on the deepest existing
@@ -145,8 +191,7 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 	}
 
 	// Store certificate PEM
-	certPath := filepath.Join(certDir, "cert.pem")
-	if err := os.WriteFile(certPath, cert.CertificatePEM, 0600); err != nil {
+	if err := writeCertFile(certDir, "cert.pem", cert.CertificatePEM); err != nil {
 		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 
@@ -154,16 +199,14 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 	// issued by an intermediate CA (Issue #3778); absent for every certificate
 	// issued today.
 	if len(cert.IssuerChainPEM) > 0 {
-		chainPath := filepath.Join(certDir, "chain.pem")
-		if err := os.WriteFile(chainPath, cert.IssuerChainPEM, 0600); err != nil {
+		if err := writeCertFile(certDir, "chain.pem", cert.IssuerChainPEM); err != nil {
 			return fmt.Errorf("failed to write issuer chain: %w", err)
 		}
 	}
 
 	// Store private key PEM (if available) with restricted permissions
 	if cert.PrivateKeyPEM != nil {
-		keyPath := filepath.Join(certDir, "key.pem")
-		if err := os.WriteFile(keyPath, cert.PrivateKeyPEM, 0600); err != nil {
+		if err := writeCertFile(certDir, "key.pem", cert.PrivateKeyPEM); err != nil {
 			return fmt.Errorf("failed to write private key: %w", err)
 		}
 	}
@@ -183,13 +226,12 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 		NeedsRenewal:        int(time.Until(cert.ExpiresAt).Hours()/24) < 30,
 	}
 
-	metadataPath := filepath.Join(certDir, "metadata.json")
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	if err := os.WriteFile(metadataPath, metadataJSON, 0600); err != nil {
+	if err := writeCertFile(certDir, "metadata.json", metadataJSON); err != nil {
 		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 
@@ -223,39 +265,31 @@ func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
 	}
 
 	// Load certificate PEM
-	certPath := filepath.Join(certDir, "cert.pem")
-	// #nosec G304 - Certificate storage requires loading certificate files from controlled paths
-	certPEM, err := os.ReadFile(certPath)
+	certPEM, _, err := security.ReadRegularFileNoSymlinks(certDir, "cert.pem")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate: %w", err)
 	}
 
 	// Load private key PEM (if exists)
-	var keyPEM []byte
-	keyPath := filepath.Join(certDir, "key.pem")
-	if _, err := os.Stat(keyPath); err == nil {
-		// #nosec G304 - Certificate storage requires loading private key files from controlled paths
-		keyPEM, err = os.ReadFile(keyPath)
-		if err != nil {
+	keyPEM, _, err := security.ReadRegularFileNoSymlinks(certDir, "key.pem")
+	if err != nil {
+		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to read private key: %w", err)
 		}
+		keyPEM = nil
 	}
 
 	// Load issuer chain PEM (if exists)
-	var issuerChainPEM []byte
-	chainPath := filepath.Join(certDir, "chain.pem")
-	if _, err := os.Stat(chainPath); err == nil {
-		// #nosec G304 - Certificate storage requires loading chain files from controlled paths
-		issuerChainPEM, err = os.ReadFile(chainPath)
-		if err != nil {
+	issuerChainPEM, _, err := security.ReadRegularFileNoSymlinks(certDir, "chain.pem")
+	if err != nil {
+		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to read issuer chain: %w", err)
 		}
+		issuerChainPEM = nil
 	}
 
 	// Load metadata
-	metadataPath := filepath.Join(certDir, "metadata.json")
-	// #nosec G304 - Certificate storage requires loading metadata files from controlled paths
-	metadataJSON, err := os.ReadFile(metadataPath)
+	metadataJSON, _, err := security.ReadRegularFileNoSymlinks(certDir, "metadata.json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata: %w", err)
 	}
@@ -504,16 +538,19 @@ func (fs *FileStore) loadCertificates() error {
 			continue
 		}
 
-		// Load metadata for this certificate
-		metadataPath := filepath.Join(fs.basePath, serialNumber, "metadata.json")
-		if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
-			continue // Skip directories without metadata
+		// Obtain the directory through the same link-refusing path as every
+		// other access; a linked or otherwise unacceptable directory is skipped.
+		certDir, err := resolveCertDir(fs.basePath, serialNumber)
+		if err != nil {
+			slog.Warn("skipping certificate directory",
+				"serial", logging.SanitizeLogValue(serialNumber),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
 		}
 
-		// #nosec G304 - Certificate listing requires loading metadata files from controlled paths
-		metadataJSON, err := os.ReadFile(metadataPath)
+		metadataJSON, _, err := security.ReadRegularFileNoSymlinks(certDir, "metadata.json")
 		if err != nil {
-			continue // Skip if we can't read metadata
+			continue // Skip directories without readable metadata
 		}
 
 		var metadata CertificateInfo
