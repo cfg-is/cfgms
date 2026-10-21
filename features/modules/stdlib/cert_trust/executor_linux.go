@@ -9,7 +9,8 @@
 // /etc/ssl/certs. Each trusted CA is stored as an individual PEM file
 // named cfgms-<fingerprint>.crt under /usr/local/share/ca-certificates/
 // (the staging directory) and the system bundle is refreshed by running
-// update-ca-certificates after each install or remove.
+// update-ca-certificates after each install or remove. A failed or missing
+// refresh is returned as an error and the staged file change is rolled back.
 //
 // Assumed distro family: Debian/Ubuntu (and derivatives).
 // On RPM-based distros (RHEL, Fedora) the staging dir and refresh command
@@ -22,11 +23,15 @@ package cert_trust
 
 import (
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // defaultLinuxTrustStoreRoot is the directory where installed CA PEM files are
@@ -42,18 +47,23 @@ type linuxExecutor struct {
 	// Default: /usr/local/share/ca-certificates. Overridable for testing via
 	// newLinuxExecutorWithRoot so tests never touch the real system trust store.
 	trustStoreRoot string
+
+	// refresh rebuilds the system bundle after a staging change. newExecutor
+	// wires update-ca-certificates; tests inject their own so nothing touches
+	// the real trust store.
+	refresh func() error
 }
 
 func newExecutor() trustStoreExecutor {
-	return &linuxExecutor{trustStoreRoot: defaultLinuxTrustStoreRoot}
+	return &linuxExecutor{trustStoreRoot: defaultLinuxTrustStoreRoot, refresh: runUpdateCACertificates}
 }
 
 // newLinuxExecutorWithRoot creates an executor with a custom trust store root.
 // Used in tests to avoid touching the real system trust store: pass t.TempDir()
-// as root. The update-ca-certificates call is attempted but non-fatal when the
-// root is not the real system directory.
+// as root. The refresh is a no-op that returns nil, so the real
+// update-ca-certificates is never run.
 func newLinuxExecutorWithRoot(root string) trustStoreExecutor {
-	return &linuxExecutor{trustStoreRoot: root}
+	return &linuxExecutor{trustStoreRoot: root, refresh: func() error { return nil }}
 }
 
 // list reads all PEM files from trustStoreRoot and returns a certEntry per valid
@@ -105,10 +115,10 @@ func (e *linuxExecutor) list() ([]certEntry, error) {
 }
 
 // install writes the DER-encoded certificate as a PEM file under trustStoreRoot,
-// named cfgms-<fingerprint>.crt, then runs update-ca-certificates to refresh
-// the system bundle. The update-ca-certificates call is best-effort: if the root
-// is not the real system directory (e.g. in tests), the command may fail and the
-// error is logged but does not fail the install.
+// named cfgms-<fingerprint>.crt, then runs the refresh command to rebuild the
+// system bundle. A failed or missing refresh is an error: the staged file is
+// rolled back (removed only if it did not exist before the call) so the staging
+// directory and the active bundle do not disagree.
 func (e *linuxExecutor) install(certDER []byte) error {
 	fp := certFingerprint(certDER)
 	filename := "cfgms-" + fp + ".crt"
@@ -125,42 +135,81 @@ func (e *linuxExecutor) install(certDER []byte) error {
 		Bytes: certDER,
 	})
 
+	_, statErr := os.Stat(destPath)
+	existed := statErr == nil
+
 	// #nosec G306 -- CA certificates are public verification material and must
 	// be readable by unprivileged TLS clients using the system trust store.
 	if err := os.WriteFile(destPath, pemData, 0644); err != nil {
 		return fmt.Errorf("write certificate %s: %w", destPath, err)
 	}
 
-	// update-ca-certificates refreshes the system bundle. This call is best-effort:
-	// in test environments pointing at a temp dir the command will fail, but the
-	// file write above is sufficient for the round-trip test to observe the cert.
-	if out, err := exec.Command("update-ca-certificates").CombinedOutput(); err != nil { // #nosec G204 - no user input
-		// Non-fatal: the cert file is written; the system bundle just won't reflect
-		// the change until update-ca-certificates can run successfully.
-		_ = out // error is an expected best-effort failure in non-system environments
+	if err := e.refresh(); err != nil {
+		if !existed {
+			_ = os.Remove(destPath)
+		}
+		return fmt.Errorf("refresh trust store after install: %w", err)
 	}
 
 	return nil
 }
 
 // remove deletes the PEM file for the given fingerprint from trustStoreRoot, then
-// runs update-ca-certificates to refresh the system bundle. If no file for the
-// fingerprint exists, remove is a no-op.
+// runs the refresh command to rebuild the system bundle. If no file for the
+// fingerprint exists, remove is a no-op that does not run the refresh. A failed
+// refresh is an error and the removed file is written back with its previous
+// bytes (mode 0644). The fingerprint is validated here, not only by the caller,
+// so no input can make destPath name a file outside trustStoreRoot.
 func (e *linuxExecutor) remove(fingerprint string) error {
+	if !fingerprintPattern.MatchString(fingerprint) {
+		return fmt.Errorf("%w: fingerprint must be 64 lowercase hex characters, got %q",
+			modules.ErrInvalidResourceID, logging.SanitizeLogValue(fingerprint))
+	}
 	filename := "cfgms-" + fingerprint + ".crt"
 	destPath := filepath.Join(e.trustStoreRoot, filename)
 
-	if err := os.Remove(destPath); err != nil {
+	// #nosec G304 -- fingerprint was checked against ^[0-9a-f]{64}$ above, so
+	// destPath is the trust root joined with a fixed-form filename.
+	previous, err := os.ReadFile(destPath)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // already absent — idempotent no-op
+		}
+		return fmt.Errorf("read certificate %s: %w", destPath, err)
+	}
+
+	if err := os.Remove(destPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
 		return fmt.Errorf("remove certificate %s: %w", destPath, err)
 	}
 
-	// update-ca-certificates refreshes the system bundle (best-effort, same as install).
-	if out, err := exec.Command("update-ca-certificates").CombinedOutput(); err != nil { // #nosec G204 - no user input
-		_ = out
+	if err := e.refresh(); err != nil {
+		// #nosec G306 G703 -- CA certificates are public verification material and
+		// must be world-readable (G306). destPath cannot traverse (G703): the
+		// fingerprint is checked against ^[0-9a-f]{64}$ at the top of remove, so
+		// the filename is cfgms-<64 hex>.crt directly under trustStoreRoot.
+		if restoreErr := os.WriteFile(destPath, previous, 0644); restoreErr != nil {
+			return fmt.Errorf("refresh trust store after remove: %w (restore %s failed: %s)",
+				err, destPath, logging.SanitizeLogValue(restoreErr.Error()))
+		}
+		return fmt.Errorf("refresh trust store after remove: %w", err)
 	}
 
 	return nil
+}
+
+// runUpdateCACertificates runs update-ca-certificates and reports a missing
+// tool or a failed run as an error.
+func runUpdateCACertificates() error {
+	out, err := exec.Command("update-ca-certificates").CombinedOutput() // #nosec G204 - no user input
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return fmt.Errorf("update-ca-certificates not found: trust-store tooling on this host is unsupported (Debian-family only): %w", err)
+	}
+	return fmt.Errorf("update-ca-certificates failed: %s: %w",
+		logging.SanitizeLogValue(strings.TrimSpace(string(out))), err)
 }

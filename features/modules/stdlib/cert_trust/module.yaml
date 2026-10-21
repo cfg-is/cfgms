@@ -44,7 +44,7 @@ security:
 
 behavioral_envelope:
   shells_out_to:
-    - update-ca-certificates  # Debian-family Linux: refreshes /etc/ssl/certs bundle
+    - update-ca-certificates  # Debian-family Linux: refreshes /etc/ssl/certs bundle; a failed or missing refresh is an error and the staged file change is rolled back
     - certutil                # Windows: manages Local Machine "Root" certificate store (addstore/delstore)
     - security                # macOS: security add-trusted-cert / remove-trusted-cert
   writes_paths:

@@ -6,7 +6,14 @@
 package cert_trust
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // TestLinuxExecutor_RoundTrip verifies that a cert installed via install() is
@@ -192,5 +199,156 @@ func TestLinuxModule_RoundTrip(t *testing.T) {
 	m = state.AsMap()
 	if s := m["state"].(string); s != "absent" {
 		t.Errorf("Get() after Set(absent): state = %q, want 'absent'", s)
+	}
+}
+
+func newFailingRefreshExecutor(t *testing.T, refresh func() error) (*linuxExecutor, string) {
+	t.Helper()
+	root := t.TempDir()
+	e := newLinuxExecutorWithRoot(root).(*linuxExecutor)
+	e.refresh = refresh
+	return e, root
+}
+
+// TestLinuxExecutor_InstallRefreshFailure verifies a failed refresh fails the
+// install and leaves no staged file behind.
+func TestLinuxExecutor_InstallRefreshFailure(t *testing.T) {
+	e, root := newFailingRefreshExecutor(t, func() error { return errors.New("boom") })
+	_, der := generateTestCAPEM(t)
+
+	if err := e.install(der); err == nil {
+		t.Fatal("install() must return an error when the refresh fails")
+	}
+	staged := filepath.Join(root, "cfgms-"+certFingerprint(der)+".crt")
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Fatalf("staged file must be rolled back, stat err = %v", err)
+	}
+}
+
+// TestLinuxExecutor_ReinstallRefreshFailureKeepsExistingFile verifies a failed
+// re-install of an already staged certificate leaves the existing file.
+func TestLinuxExecutor_ReinstallRefreshFailureKeepsExistingFile(t *testing.T) {
+	e, root := newFailingRefreshExecutor(t, func() error { return nil })
+	_, der := generateTestCAPEM(t)
+	if err := e.install(der); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	e.refresh = func() error { return errors.New("boom") }
+	if err := e.install(der); err == nil {
+		t.Fatal("install() must return an error when the refresh fails")
+	}
+	if _, err := os.Stat(filepath.Join(root, "cfgms-"+certFingerprint(der)+".crt")); err != nil {
+		t.Fatalf("pre-existing file must remain: %v", err)
+	}
+}
+
+// TestLinuxExecutor_RemoveRefreshFailure verifies a failed refresh fails the
+// remove and restores the staged file with its previous bytes.
+func TestLinuxExecutor_RemoveRefreshFailure(t *testing.T) {
+	e, root := newFailingRefreshExecutor(t, func() error { return nil })
+	_, der := generateTestCAPEM(t)
+	fp := certFingerprint(der)
+	if err := e.install(der); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	staged := filepath.Join(root, "cfgms-"+fp+".crt")
+	before, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.refresh = func() error { return errors.New("boom") }
+	if err := e.remove(fp); err == nil {
+		t.Fatal("remove() must return an error when the refresh fails")
+	}
+	after, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("staged file must be restored: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Error("restored file bytes differ from original")
+	}
+	info, err := os.Stat(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Errorf("restored mode = %v, want 0644", info.Mode().Perm())
+	}
+}
+
+// TestLinuxExecutor_RemoveAbsentSkipsRefresh verifies removing an absent file
+// is a no-op that does not run the refresh.
+func TestLinuxExecutor_RemoveAbsentSkipsRefresh(t *testing.T) {
+	called := false
+	e, _ := newFailingRefreshExecutor(t, func() error { called = true; return errors.New("boom") })
+	const absentFingerprint = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	if err := e.remove(absentFingerprint); err != nil {
+		t.Fatalf("remove of absent file: %v", err)
+	}
+	if called {
+		t.Error("refresh must not run when nothing was removed")
+	}
+}
+
+// TestLinuxExecutor_InstallMissingTool verifies a missing refresh tool is
+// reported as an unsupported host.
+func TestLinuxExecutor_InstallMissingTool(t *testing.T) {
+	e, _ := newFailingRefreshExecutor(t, func() error {
+		return errors.New("update-ca-certificates not found: trust-store tooling on this host is unsupported (Debian-family only): " + exec.ErrNotFound.Error())
+	})
+	_, der := generateTestCAPEM(t)
+	err := e.install(der)
+	if err == nil {
+		t.Fatal("install() must return an error when the tool is missing")
+	}
+	if !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "update-ca-certificates") {
+		t.Errorf("error should name the command and unsupported host, got: %v", err)
+	}
+}
+
+// TestRunUpdateCACertificates_MissingTool verifies the real refresh maps a
+// missing binary to the unsupported-host error.
+func TestRunUpdateCACertificates_MissingTool(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	err := runUpdateCACertificates()
+	if err == nil {
+		t.Fatal("expected error when update-ca-certificates is not on PATH")
+	}
+	if !errors.Is(err, exec.ErrNotFound) || !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestLinuxExecutor_RemoveRejectsInvalidFingerprint verifies remove validates
+// the fingerprint itself, so a traversal-shaped value cannot delete or rewrite
+// a file outside the trust store root, and the refresh never runs.
+func TestLinuxExecutor_RemoveRejectsInvalidFingerprint(t *testing.T) {
+	called := false
+	e, root := newFailingRefreshExecutor(t, func() error { called = true; return errors.New("boom") })
+
+	outside := filepath.Join(filepath.Dir(root), "cfgms-victim.crt")
+	if err := os.WriteFile(outside, []byte("victim"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(outside) })
+
+	for _, fp := range []string{
+		"../victim",
+		"/../../cfgms-victim",
+		"deadbeef",
+		"ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+		"",
+	} {
+		err := e.remove(fp)
+		if !errors.Is(err, modules.ErrInvalidResourceID) {
+			t.Errorf("remove(%q) error = %v, want ErrInvalidResourceID", fp, err)
+		}
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("file outside the trust root was touched: %v", err)
+	}
+	if called {
+		t.Error("refresh must not run for a rejected fingerprint")
 	}
 }

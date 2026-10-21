@@ -5,7 +5,8 @@
 // store entries for the CFGMS steward. It supports Linux (Debian-family,
 // /etc/ssl/certs + update-ca-certificates), Windows (CertOpenSystemStore), and
 // macOS (Security framework) through platform-specific executor implementations
-// selected at compile time via build tags.
+// selected at compile time via build tags. On Linux a failed or missing
+// update-ca-certificates refresh is an error, not a best-effort step.
 //
 // The module operates exclusively on the OS trust store (which CAs the OS
 // trusts system-wide). It is distinct from pkg/cert, which manages CFGMS's own
