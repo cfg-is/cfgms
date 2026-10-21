@@ -872,3 +872,83 @@ func TestSyncSkipsInvalidConfigNames(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, strings.TrimSpace(head), got.LastSyncedSHA)
 }
+
+// newTestSyncerWithWorkDir is newTestSyncer with a caller-visible workDir so a
+// test can inspect the on-disk checkout.
+func newTestSyncerWithWorkDir(t *testing.T) (*gitsync.Syncer, cfgconfig.ConfigStore, *gitsync.BindingStore, string) {
+	t.Helper()
+	root := t.TempDir()
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+	workDir := filepath.Join(root, "repos")
+	syncer, err := gitsync.NewSyncer(store, bindings, workDir, logging.ForComponent("gitsync-test"))
+	require.NoError(t, err)
+	return syncer, store, bindings, workDir
+}
+
+// checkoutDir returns the single scope checkout directory under workDir.
+func checkoutDir(t *testing.T, workDir string) string {
+	t.Helper()
+	gitDirs, err := filepath.Glob(filepath.Join(workDir, "*", ".git"))
+	require.NoError(t, err)
+	require.Len(t, gitDirs, 1)
+	return filepath.Dir(gitDirs[0])
+}
+
+func TestSyncPullsFromNewOriginAfterOriginURLChange(t *testing.T) {
+	bareA, _, _ := newTestRepo(t, map[string]string{"from-a.yaml": "a: 1\n", "shared.yaml": "src: a\n"})
+	bareB, _, _ := newTestRepo(t, map[string]string{"from-b.yaml": "b: 1\n", "shared.yaml": "src: b\n"})
+
+	syncer, store, bindings, _ := newTestSyncerWithWorkDir(t)
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareA, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+	require.NoError(t, getEntry(store, "policies", "from-a"))
+
+	binding.OriginURL = bareB
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+
+	require.NoError(t, getEntry(store, "policies", "from-b"))
+	requireNoEntry(t, store, "from-a")
+	entry, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root/test-tenant", Namespace: "policies", Name: "shared"})
+	require.NoError(t, err)
+	assert.Equal(t, "src: b\n", string(entry.Data))
+}
+
+func TestSyncUnchangedOriginURLKeepsCheckout(t *testing.T) {
+	bare, _, pushFiles := newTestRepo(t, map[string]string{"a.yaml": "a: 1\n"})
+
+	syncer, _, bindings, workDir := newTestSyncerWithWorkDir(t)
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bare, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+	marker := filepath.Join(checkoutDir(t, workDir), "marker.tmp")
+	require.NoError(t, os.WriteFile(marker, []byte("keep"), 0600))
+
+	pushFiles(map[string]string{"b.yaml": "b: 1\n"})
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+
+	_, err := os.Stat(marker)
+	assert.NoError(t, err, "checkout must not be re-cloned when OriginURL is unchanged")
+}
+
+func TestSyncFailsClosedWhenOriginRemoteMissing(t *testing.T) {
+	bare, _, _ := newTestRepo(t, map[string]string{"a.yaml": "a: 1\n"})
+
+	syncer, store, bindings, workDir := newTestSyncerWithWorkDir(t)
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bare, Branch: "main"}
+	require.NoError(t, bindings.Add(binding))
+	ctx := context.Background()
+	require.NoError(t, syncer.TriggerSync(ctx, binding))
+
+	runGit(t, checkoutDir(t, workDir), "remote", "remove", "origin")
+	require.NoError(t, store.DeleteConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root/test-tenant", Namespace: "policies", Name: "a"}))
+
+	assert.Error(t, syncer.TriggerSync(ctx, binding))
+	requireNoEntry(t, store, "a")
+}
