@@ -23,18 +23,44 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // windowsExecutor manages the Windows Local Machine "Root" trust store via
 // certutil.exe. No cgo or Windows crypto API headers are required.
 type windowsExecutor struct {
-	// tmpDir is the directory used to stage PEM/CER files for certutil operations.
-	// Defaults to os.TempDir(). Overridable for testing.
+	// tmpDir is the staging base directory for certutil operations. It is
+	// secured with security.EnsureAdminOnlyDir before every stage. Overridable
+	// for testing.
 	tmpDir string
+
+	// addStore adds the staged certificate file at path to the Root store and
+	// returns the command output. newExecutor sets it to certutilAddStore;
+	// tests replace it to observe the staged file without changing the
+	// machine trust store.
+	addStore func(path string) ([]byte, error)
 }
 
 func newExecutor() trustStoreExecutor {
-	return &windowsExecutor{tmpDir: os.TempDir()}
+	return &windowsExecutor{tmpDir: windowsStagingBase(), addStore: certutilAddStore}
+}
+
+// windowsStagingBase returns %ProgramData%\cfgms\staging, falling back to
+// C:\ProgramData when the ProgramData environment variable is unset. It lies
+// inside the %ProgramData%\cfgms tree that only SYSTEM and Administrators can
+// write, unlike the system temporary directory.
+func windowsStagingBase() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms", "staging")
+}
+
+// certutilAddStore runs certutil -addstore Root on the staged file at path.
+func certutilAddStore(path string) ([]byte, error) {
+	return exec.Command("certutil", "-addstore", "Root", path).CombinedOutput() // #nosec G204 - path is a file this executor just staged
 }
 
 // list enumerates the Local Machine "Root" store certificates via certutil -store Root.
@@ -95,18 +121,28 @@ func (e *windowsExecutor) list() ([]certEntry, error) {
 
 // install adds the DER-encoded certificate to the Local Machine "Root" store
 // using certutil -addstore Root <file>.
+//
+// The base directory is first secured so that only SYSTEM and Administrators
+// can write it; when it cannot be secured (for example it is owned by another
+// principal), nothing is staged and certutil does not run. The PEM is staged in
+// a fresh private subdirectory and removed when certutil returns, on success
+// and on failure.
 func (e *windowsExecutor) install(certDER []byte) error {
-	// Stage as a PEM file in a temp location then install with certutil.
-	fp := certFingerprint(certDER)
-	tmpFile := filepath.Join(e.tmpDir, "cfgms-cert-install-"+fp+".cer")
-
-	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	if err := os.WriteFile(tmpFile, pemData, 0600); err != nil {
-		return fmt.Errorf("write temp cert file: %w", err)
+	if err := security.EnsureAdminOnlyDir(e.tmpDir); err != nil {
+		return fmt.Errorf("secure staging base directory: %w", err)
 	}
-	defer func() { _ = os.Remove(tmpFile) }()
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	tmpFile, cleanup, err := stageForTrustCommand(e.tmpDir, pemData)
+	if err != nil {
+		return fmt.Errorf("stage cert file: %w", err)
+	}
+	defer cleanup()
 
-	out, err := exec.Command("certutil", "-addstore", "Root", tmpFile).CombinedOutput() // #nosec G204 - tmpFile is an internal path
+	addStore := e.addStore
+	if addStore == nil {
+		addStore = certutilAddStore
+	}
+	out, err := addStore(tmpFile)
 	if err != nil {
 		return fmt.Errorf("certutil -addstore Root: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
