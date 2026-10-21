@@ -205,7 +205,7 @@ func (p *Publisher) currentTerm() uint64 {
 }
 
 // signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when
-// non-nil. The signing-payload version is chosen per steward by
+// non-nil. Every command is signed over the v2 payload by
 // controlplaneTypes.SignCommand, the same path the dispatcher and relay handler use.
 func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer) (*controlplaneTypes.SignedCommand, error) {
 	return controlplaneTypes.SignCommand(cmd, signer)
