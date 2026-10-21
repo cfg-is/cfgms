@@ -536,7 +536,8 @@ func (m *entraUserModule) updateUser(ctx context.Context, token *auth.AccessToke
 			}
 		case "password_profile":
 			// The current password cannot be read back, so there is no diff to
-			// compute: a declared password profile is sent on every apply.
+			// compute: a declared password profile is sent on every apply, so a
+			// Set carrying a password resets it on every apply.
 			if pp := config.graphPasswordProfile(); pp != nil {
 				updateRequest.PasswordProfile = pp
 			}
