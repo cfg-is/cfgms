@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/cutover"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/spf13/cobra"
 )
 
@@ -193,6 +194,44 @@ func defaultCutoverStatePath() string {
 
 func isWindows() bool { return os.PathSeparator == '\\' }
 
+// loadVerifiedState loads the cutover state file after verifying its owner and
+// DACL (Windows only; a no-op elsewhere). A state file that does not exist is
+// not an error: LoadPersistedState returns the zero state, as on a fresh install.
+func loadVerifiedState(path string) (cutover.PersistedState, error) {
+	if _, err := os.Lstat(path); err == nil {
+		if err := security.VerifyAdminOnlyPath(path); err != nil {
+			return cutover.PersistedState{}, fmt.Errorf("state file %s failed ownership/permission check: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return cutover.PersistedState{}, fmt.Errorf("state file %s not accessible: %w", path, err)
+	}
+	return cutover.LoadPersistedState(path)
+}
+
+// validateStateBinary checks that an executable path read from the state file
+// is absolute, names an existing regular file (not a directory, symlink or
+// reparse point) and, on Windows, is not writable by non-admin principals.
+// The error names the state field.
+func validateStateBinary(field, path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return fmt.Errorf("state %s %q is not an absolute path", field, path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("state %s %q not accessible: %w", field, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("state %s %q is a symlink", field, path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("state %s %q is not a regular file", field, path)
+	}
+	if err := security.VerifyAdminOnlyWritablePath(path); err != nil {
+		return fmt.Errorf("state %s %q failed permission check: %w", field, path, err)
+	}
+	return nil
+}
+
 // runControllerUpgrade is the entry point for `cfg controller upgrade run`.
 func runControllerUpgrade(_ *cobra.Command, _ []string) error {
 	if upgradeBinaryPath == "" {
@@ -209,12 +248,16 @@ func runControllerUpgrade(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("upgrade: --binary %s is a directory, not an executable", upgradeBinaryPath)
 	}
 
-	previous, err := cutover.LoadPersistedState(upgradeStatePath)
+	previous, err := loadVerifiedState(upgradeStatePath)
 	if err != nil {
 		return fmt.Errorf("upgrade: load state: %w", err)
 	}
 	canonicalBinary := previous.CanonicalBinary
-	if canonicalBinary == "" {
+	if canonicalBinary != "" {
+		if err := validateStateBinary("CanonicalBinary", canonicalBinary); err != nil {
+			return fmt.Errorf("upgrade: %w", err)
+		}
+	} else {
 		// First-ever upgrade — no previous canonical recorded. Assume
 		// the binary currently serving on the canonical ports is at the
 		// same path as the one operators have been running by hand.
@@ -252,7 +295,7 @@ func runControllerUpgrade(_ *cobra.Command, _ []string) error {
 
 // runControllerUpgradeStatus prints the current cutover state.
 func runControllerUpgradeStatus(_ *cobra.Command, _ []string) error {
-	ps, err := cutover.LoadPersistedState(upgradeStatePath)
+	ps, err := loadVerifiedState(upgradeStatePath)
 	if err != nil {
 		return fmt.Errorf("status: load state: %w", err)
 	}
@@ -283,12 +326,18 @@ func runControllerUpgradeRollback(_ *cobra.Command, _ []string) error {
 	if upgradeConfigPath == "" {
 		return fmt.Errorf("--config is required")
 	}
-	ps, err := cutover.LoadPersistedState(upgradeStatePath)
+	ps, err := loadVerifiedState(upgradeStatePath)
 	if err != nil {
 		return fmt.Errorf("rollback: load state: %w", err)
 	}
 	if ps.QuarantinedBinary == "" {
 		return fmt.Errorf("rollback: no quarantined binary available — was a recent upgrade run?")
+	}
+	if err := validateStateBinary("QuarantinedBinary", ps.QuarantinedBinary); err != nil {
+		return fmt.Errorf("rollback: %w", err)
+	}
+	if err := validateStateBinary("CanonicalBinary", ps.CanonicalBinary); err != nil {
+		return fmt.Errorf("rollback: %w", err)
 	}
 
 	// Reconstruct an orchestrator whose canonical points at the
