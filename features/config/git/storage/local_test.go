@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -182,7 +183,9 @@ func TestLocalRepositoryStore_WriteFile_WritesAndStages(t *testing.T) {
 		assert.Equal(t, want, string(got))
 		fi, err := os.Stat(full)
 		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+		if runtime.GOOS != "windows" { // Windows does not report POSIX permission bits
+			assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+		}
 	}
 
 	r, err := gogit.PlainOpen(repo)
