@@ -1378,16 +1378,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #4528: in cluster mode the queue is the shared database store, so
 		// the node holding a steward's session dispatches its work whichever node
 		// queued it. Single-node keeps the in-memory store (nil).
-		// Issue #5174: one registry of the signing-payload versions each steward
-		// advertised, shared by every command signer (publisher, dispatcher) so the
-		// version choice has a single source.
-		// With a steward store the capability is shared by every node using it, so a
-		// node that never saw the steward's heartbeat still signs the version the
-		// steward expects.
-		signingCaps := controlplaneTypes.NewSigningCapabilities()
-		if capStewardStore := storageManager.GetStewardStore(); capStewardStore != nil {
-			signingCaps = controlplaneTypes.NewSharedSigningCapabilities(commands.NewSigningCapabilityStore(capStewardStore))
-		}
 		var queueStore scriptmodule.QueueStore
 		var isLocallyConnected func(string) bool
 		if cfg.HA.IsClusterMode() {
@@ -1421,8 +1411,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			IsLocallyConnected: isLocallyConnected,
 			// Issue #4510: same term source as the command publisher below, so
 			// execute_script passes the steward fence like every other command.
-			TermSource:          ha.CommandTermSource{Manager: haManager},
-			SigningCapabilities: signingCaps,
+			TermSource: ha.CommandTermSource{Manager: haManager},
 			// Issue #4625: steward actions the expiry sweep closes without a
 			// result ("expired" / "no_result") go to the durable audit log.
 			ActionAudit: dispatcher.NewAuditManagerSink(auditManager, logger),
@@ -1465,22 +1454,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 						"error", logging.SanitizeLogValue(err.Error()))
 				}
 			}
-		}
-
-		// Issue #5174: record the command signing-payload versions each steward
-		// advertises on its heartbeat; signers use them to choose a version.
-		if subErr := controlPlane.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
-			if hb != nil {
-				if recErr := signingCaps.Record(hb.StewardID, hb.SigningPayloadVersions); recErr != nil {
-					logger.Warn("Failed to record steward signing capability",
-						"steward_id", logging.SanitizeLogValue(hb.StewardID),
-						"error", logging.SanitizeLogValue(recErr.Error()))
-				}
-			}
-			return nil
-		}); subErr != nil {
-			logger.Warn("Failed to register signing-capability heartbeat handler; commands will use the v1 signing payload",
-				"error", logging.SanitizeLogValue(subErr.Error()))
 		}
 
 		// Initialize heartbeat monitoring service
@@ -1572,8 +1545,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			Signer:       commandSigner,
 			TermSource:   ha.CommandTermSource{Manager: haManager},
 			Logger:       logger,
-
-			SigningCapabilities: signingCaps,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)

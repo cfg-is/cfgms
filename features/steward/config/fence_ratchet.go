@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -54,9 +53,6 @@ type FenceRatchet struct {
 	// a freshly constructed FenceRatchet (e.g. after a Load error at startup).
 	savedSet  bool
 	savedTerm uint64
-	// savedTermSigned mirrors the one-way term-signed switch (#5174) so Save, which
-	// rewrites the whole file, never drops it.
-	savedTermSigned bool
 	// seeded records that savedSet/savedTerm reflect disk, so the seeding read
 	// happens at most once per process.
 	seeded bool
@@ -66,10 +62,6 @@ type FenceRatchet struct {
 type fenceRatchetState struct {
 	RatchetSet      bool   `json:"ratchet_set"`
 	HighestTermSeen uint64 `json:"highest_term_seen"`
-	// TermSigned is the one-way switch set once the steward has accepted a command
-	// whose term is covered by a verified signature (#5174). It is never cleared
-	// except by ClearRatchet.
-	TermSigned bool `json:"term_signed,omitempty"`
 }
 
 // NewFenceRatchet returns a FenceRatchet backed by a file in dir.
@@ -106,7 +98,7 @@ func (r *FenceRatchet) loadStateLocked() (fenceRatchetState, error) {
 
 	data, readErr := readFenceRatchetFile(r.filePath())
 	if os.IsNotExist(readErr) {
-		r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, false, true
+		r.savedSet, r.savedTerm, r.seeded = false, 0, true
 		return state, nil
 	}
 	if readErr != nil {
@@ -117,7 +109,7 @@ func (r *FenceRatchet) loadStateLocked() (fenceRatchetState, error) {
 		return fenceRatchetState{}, fmt.Errorf("parse fence ratchet %s: %w", r.filePath(), unmarshalErr)
 	}
 
-	r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = state.RatchetSet, state.HighestTermSeen, state.TermSigned, true
+	r.savedSet, r.savedTerm, r.seeded = state.RatchetSet, state.HighestTermSeen, true
 	return state, nil
 }
 
@@ -151,9 +143,7 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 			// Unreadable or corrupt on-disk state carries no high-water mark worth
 			// preserving; overwriting it with the current state is a repair, and
 			// treating this instance as seeded keeps the guard active from here on.
-			// The term-signed switch is the exception: it fails closed, so the
-			// repair never turns a corrupt file into TermSigned=false.
-			r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, true, true
+			r.savedSet, r.savedTerm, r.seeded = false, 0, true
 		}
 	}
 
@@ -164,59 +154,6 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 	return r.writeLocked(fenceRatchetState{
 		RatchetSet:      ratchetSet,
 		HighestTermSeen: highestTermSeen,
-		TermSigned:      r.savedTermSigned,
-	})
-}
-
-// TermSigned reports whether the one-way term-signed switch has been set
-// (#5174): the steward has accepted a command whose term was covered by a
-// verified signature, so it must refuse stamped commands signed without it.
-// A missing file reads as false; a corrupt or unreadable file reads as true
-// together with the error (fail closed); the zero value (dir = "") always reads false.
-func (r *FenceRatchet) TermSigned() (bool, error) {
-	if r == nil || r.dir == "" {
-		return false, nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	state, err := r.loadStateLocked()
-	if err != nil {
-		// Fail closed: state that cannot be read or parsed reads as switched, so a
-		// corrupt file cannot re-open the window the switch closes.
-		// The error is destined for logs, so it must name no host path.
-		return true, errors.New(strings.ReplaceAll(err.Error(), r.filePath(), "<fence ratchet state>"))
-	}
-	return state.TermSigned, nil
-}
-
-// MarkTermSigned sets the one-way term-signed switch and persists it next to the
-// ratchet state, atomically and without disturbing the stored term. It is
-// idempotent and there is no way to unset it except ClearRatchet (enrollment).
-// A no-op when dir is empty.
-func (r *FenceRatchet) MarkTermSigned() error {
-	if r == nil || r.dir == "" {
-		return nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.seeded {
-		if _, err := r.loadStateLocked(); err != nil {
-			// As in Save: unreadable state has no term worth preserving, and the
-			// rewrite below carries TermSigned=true (fail closed).
-			r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, false, true
-		}
-	}
-	if r.savedTermSigned {
-		return nil
-	}
-	return r.writeLocked(fenceRatchetState{
-		RatchetSet:      r.savedSet,
-		HighestTermSeen: r.savedTerm,
-		TermSigned:      true,
 	})
 }
 
@@ -276,7 +213,7 @@ func (r *FenceRatchet) writeLocked(state fenceRatchetState) error {
 	// Persist the directory entry created by the rename. The new file is already
 	// in place and durable in content, so a failure here is reported but the
 	// in-memory mirror still tracks what is on disk.
-	r.savedSet, r.savedTerm, r.savedTermSigned = state.RatchetSet, state.HighestTermSeen, state.TermSigned
+	r.savedSet, r.savedTerm = state.RatchetSet, state.HighestTermSeen
 	if syncErr := syncFenceRatchetDir(r.dir); syncErr != nil {
 		return fmt.Errorf("sync fence ratchet dir: %w", syncErr)
 	}
@@ -310,6 +247,6 @@ func (r *FenceRatchet) ClearRatchet() error {
 	}
 	// The reset is the one sanctioned way past Save's monotonic guard: drop the
 	// remembered high-water mark so the next Save starts the ratchet fresh.
-	r.savedSet, r.savedTerm, r.savedTermSigned, r.seeded = false, 0, false, true
+	r.savedSet, r.savedTerm, r.seeded = false, 0, true
 	return nil
 }

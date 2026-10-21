@@ -144,7 +144,7 @@ func newRelayForbiddenHandler(requiredPerm string) http.Handler {
 func TestRelayHandler_NoGrant_Returns403(t *testing.T) {
 	cp := &recordingControlPlane{}
 	manager := newRelayRunManager(t)
-	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, logging.NewNoopLogger())
 
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
@@ -179,7 +179,7 @@ func TestRelayHandler_ConsumedGrant_Returns403(t *testing.T) {
 	require.NoError(t, manager.CreateGrant("device-1", "tenant-1", "exec-consumed", []string{"runs:read"}, time.Hour))
 	require.NoError(t, manager.ConsumeGrant("exec-consumed"))
 
-	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, logging.NewNoopLogger())
 
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
@@ -213,7 +213,7 @@ func TestRelayHandler_WrongDevice_Returns403(t *testing.T) {
 	// Grant issued to device-B.
 	require.NoError(t, manager.CreateGrant("device-B", "tenant-1", "exec-B", []string{"runs:read"}, time.Hour))
 
-	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -249,7 +249,7 @@ func TestRelayHandler_ScopeEnforcement_Returns403(t *testing.T) {
 
 	// Use a handler that enforces "runs:write" permission.
 	apiHandler := newRelayForbiddenHandler("runs:write")
-	handler := NewRelayHandler(cp, manager, apiHandler, nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, apiHandler, nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -283,7 +283,7 @@ func TestRelayHandler_ValidGrant_RoutesRequest(t *testing.T) {
 	require.NoError(t, manager.CreateGrant("device-1", "tenant-1", "exec-valid", scope, time.Hour))
 
 	// Use the test handler that returns the principal's permissions.
-	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -324,7 +324,7 @@ func TestRelayHandler_AdminPrincipal_NeverConstructed(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewRelayHandler(cp, manager, captureHandler, nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, captureHandler, nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -356,7 +356,7 @@ func TestRelayHandler_ExpiredGrant_Returns403(t *testing.T) {
 	require.NoError(t, manager.CreateGrant("device-1", "tenant-1", "exec-expired", []string{"runs:read"}, time.Nanosecond))
 	time.Sleep(10 * time.Millisecond) // ensure TTL has elapsed
 
-	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -399,7 +399,7 @@ func TestRelayHandler_AuthMiddlewareBypass(t *testing.T) {
 	manager := newRelayRunManager(t)
 	require.NoError(t, manager.CreateGrant("device-1", "tenant-1", "exec-bypass", []string{"runs:read"}, time.Hour))
 
-	handler := NewRelayHandler(cp, manager, wrapped, nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, wrapped, nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -428,7 +428,7 @@ func TestRelayHandler_AuthMiddlewareBypass(t *testing.T) {
 func TestRelayHandler_IgnoresNonRelayEvents(t *testing.T) {
 	cp := &recordingControlPlane{}
 	manager := newRelayRunManager(t)
-	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, nil, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, manager, newRelayTestHandler(), nil, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
@@ -523,11 +523,9 @@ func TestRequirePermission_RelayPrincipal_ScopeEnforcedWhenRBACNil(t *testing.T)
 // that need to pass an http.Handler without a real server.
 var _ *httptest.ResponseRecorder = (*httptest.ResponseRecorder)(nil)
 
-// TestRelayHandler_ResponseUsesNegotiatedSigningVersion proves the relay response is
-// signed through the shared signing path: a steward that advertised the term-covering
-// payload gets a v2 response whose signature verifies over it, and one that did not
-// gets v1.
-func TestRelayHandler_ResponseUsesNegotiatedSigningVersion(t *testing.T) {
+// TestRelayHandler_ResponseSignedOverV2 proves the relay response is signed through
+// the shared signing path over the term-covering payload, for any steward (#5285).
+func TestRelayHandler_ResponseSignedOverV2(t *testing.T) {
 	ca, err := cert.NewCA(&cert.CAConfig{Organization: "Relay Test", Country: "US", ValidityDays: 1, KeySize: 2048})
 	require.NoError(t, err)
 	require.NoError(t, ca.Initialize(nil))
@@ -540,25 +538,18 @@ func TestRelayHandler_ResponseUsesNegotiatedSigningVersion(t *testing.T) {
 	verifier, err := configsignature.NewVerifier(&configsignature.VerifierConfig{CertificatePEM: sc.CertificatePEM})
 	require.NoError(t, err)
 
-	caps := cpTypes.NewSigningCapabilities()
-	require.NoError(t, caps.Record("device-new", cpTypes.SupportedSigningPayloadVersions()))
-	require.NoError(t, caps.Record("device-old", nil))
-
 	cp := &recordingControlPlane{}
-	handler := NewRelayHandler(cp, newRelayRunManager(t), newRelayTestHandler(), signer, caps, logging.NewNoopLogger())
+	handler := NewRelayHandler(cp, newRelayRunManager(t), newRelayTestHandler(), signer, logging.NewNoopLogger())
 	ctx := context.Background()
 	require.NoError(t, handler.Start(ctx))
 
-	for _, tc := range []struct {
-		device  string
-		version uint32
-	}{{"device-new", cpTypes.SigningPayloadV2}, {"device-old", cpTypes.SigningPayloadV1}} {
+	for _, device := range []string{"device-a", "device-b"} {
 		require.NoError(t, cp.TriggerEvent(ctx, &cpTypes.Event{
 			Type:      cpTypes.EventRelayRequest,
-			StewardID: tc.device,
+			StewardID: device,
 			Timestamp: time.Now(),
 			Details: map[string]interface{}{
-				"execution_id": "exec-" + tc.device,
+				"execution_id": "exec-" + device,
 				"sequence":     float64(1),
 				"method":       "GET",
 				"path":         "/api/v1/runs",
@@ -570,8 +561,8 @@ func TestRelayHandler_ResponseUsesNegotiatedSigningVersion(t *testing.T) {
 
 	cmds := cp.SentCommands()
 	require.Len(t, cmds, 2)
-	for i, want := range []uint32{cpTypes.SigningPayloadV2, cpTypes.SigningPayloadV1} {
-		got := cmds[i]
+	want := cpTypes.SigningPayloadV2
+	for _, got := range cmds {
 		b, err := cpTypes.CommandSigningBytesVersion(&got.Command, cpTypes.InterfaceParamsToStringMap(got.Command.Params), want)
 		require.NoError(t, err)
 		assert.NoError(t, verifier.Verify(b, got.Signature), "relay response must verify over payload v%d", want)

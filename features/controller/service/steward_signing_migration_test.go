@@ -99,7 +99,7 @@ func (c *simControlPlane) SendCommand(ctx context.Context, sc *types.SignedComma
 	if err != nil {
 		return err
 	}
-	bytes, err := types.CommandSigningBytes(&sc.Command, types.InterfaceParamsToStringMap(sc.Command.Params))
+	bytes, err := types.CommandSigningBytesVersion(&sc.Command, types.InterfaceParamsToStringMap(sc.Command.Params), types.CommandPayloadVersion(&sc.Command))
 	if err != nil {
 		return err
 	}

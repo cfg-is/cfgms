@@ -340,116 +340,24 @@ func TestFenceRatchet_LoadZeroFilledFileNamesPath(t *testing.T) {
 	assert.Zero(t, term)
 }
 
-// TestFenceRatchet_TermSignedSwitch covers the one-way term-signed switch (#5174):
-// it persists across restart, Save never drops it, MarkTermSigned never disturbs
-// the stored term, and only ClearRatchet resets it.
-func TestFenceRatchet_TermSignedSwitch(t *testing.T) {
+// TestFenceRatchet_LoadsLegacyStateWithObsoleteKey covers a state file written before
+// the one-way term-signed switch was removed (#5285): the obsolete key is ignored
+// and the ratchet values survive.
+func TestFenceRatchet_LoadsLegacyStateWithObsoleteKey(t *testing.T) {
 	dir := t.TempDir()
+	legacy := `{"ratchet_set":true,"highest_term_seen":42,"term_signed":true}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte(legacy), 0o600))
+
 	r := NewFenceRatchet(dir)
-
-	signed, err := r.TermSigned()
-	require.NoError(t, err)
-	assert.False(t, signed, "no file reads as unset")
-
-	require.NoError(t, r.Save(true, 7))
-	require.NoError(t, r.MarkTermSigned())
-	require.NoError(t, r.MarkTermSigned(), "idempotent")
-
 	set, term, err := r.Load()
 	require.NoError(t, err)
 	assert.True(t, set)
-	assert.Equal(t, uint64(7), term, "marking must not disturb the stored term")
+	assert.Equal(t, uint64(42), term)
 
-	// A later Save of a higher term keeps the switch.
-	require.NoError(t, r.Save(true, 9))
-
-	restarted := NewFenceRatchet(dir)
-	signed, err = restarted.TermSigned()
+	// Save over the legacy file keeps the monotonic guard and drops the old key.
+	require.NoError(t, r.Save(true, 43))
+	set, term, err = NewFenceRatchet(dir).Load()
 	require.NoError(t, err)
-	assert.True(t, signed, "switch survives restart and later Saves")
-	_, term, err = restarted.Load()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(9), term)
-
-	// Marking from a fresh instance that never loaded must keep the stored term.
-	other := t.TempDir()
-	require.NoError(t, NewFenceRatchet(other).Save(true, 4))
-	require.NoError(t, NewFenceRatchet(other).MarkTermSigned())
-	_, term, err = NewFenceRatchet(other).Load()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(4), term)
-
-	require.NoError(t, restarted.ClearRatchet())
-	signed, err = NewFenceRatchet(dir).TermSigned()
-	require.NoError(t, err)
-	assert.False(t, signed, "ClearRatchet resets the switch")
-
-	// In-memory (no dir) instance is a no-op and never errors.
-	mem := NewFenceRatchet("")
-	require.NoError(t, mem.MarkTermSigned())
-	signed, err = mem.TermSigned()
-	require.NoError(t, err)
-	assert.False(t, signed)
-}
-
-func TestFenceRatchet_CorruptStateFailsClosedForTermSigned(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not json"), 0o600))
-
-	signed, err := NewFenceRatchet(dir).TermSigned()
-	require.Error(t, err)
-	assert.True(t, signed, "a corrupt state file must read as term-signed")
-	assert.NotContains(t, err.Error(), "not json")
-}
-
-func TestFenceRatchet_MissingStateReadsUnsigned(t *testing.T) {
-	signed, err := NewFenceRatchet(t.TempDir()).TermSigned()
-	require.NoError(t, err)
-	assert.False(t, signed)
-}
-
-func TestFenceRatchet_SaveOverCorruptStateKeepsTermSigned(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not json"), 0o600))
-
-	require.NoError(t, NewFenceRatchet(dir).Save(true, 4))
-
-	signed, err := NewFenceRatchet(dir).TermSigned()
-	require.NoError(t, err)
-	assert.True(t, signed, "Save must not turn a corrupt file into TermSigned=false")
-}
-
-func TestFenceRatchet_MarkTermSignedOverCorruptStateWritesTrue(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not json"), 0o600))
-
-	require.NoError(t, NewFenceRatchet(dir).MarkTermSigned())
-
-	signed, err := NewFenceRatchet(dir).TermSigned()
-	require.NoError(t, err)
-	assert.True(t, signed)
-}
-
-// TestFenceRatchet_TermSignedErrorNamesNoHostPath asserts the fail-closed error
-// from TermSigned (logged at handler startup) carries no host path, for both
-// the parse and the read failure branches.
-func TestFenceRatchet_TermSignedErrorNamesNoHostPath(t *testing.T) {
-	t.Run("corrupt", func(t *testing.T) {
-		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, fenceRatchetFileName), []byte("{not-json}"), 0o600))
-		signed, err := NewFenceRatchet(dir).TermSigned()
-		require.Error(t, err)
-		assert.True(t, signed)
-		assert.Contains(t, err.Error(), "parse fence ratchet")
-		assert.NotContains(t, err.Error(), dir)
-	})
-	t.Run("unreadable", func(t *testing.T) {
-		dir := t.TempDir()
-		require.NoError(t, os.Mkdir(filepath.Join(dir, fenceRatchetFileName), 0o700))
-		signed, err := NewFenceRatchet(dir).TermSigned()
-		require.Error(t, err)
-		assert.True(t, signed)
-		assert.Contains(t, err.Error(), "read fence ratchet")
-		assert.NotContains(t, err.Error(), dir)
-	})
+	assert.True(t, set)
+	assert.Equal(t, uint64(43), term)
 }

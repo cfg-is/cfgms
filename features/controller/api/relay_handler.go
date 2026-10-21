@@ -41,22 +41,17 @@ type RelayHandler struct {
 	controlPlane cpInterfaces.ControlPlaneProvider
 	runManager   *controllerrun.Manager
 	apiHandler   http.Handler
-	signer       signature.Signer             // optional; nil = unsigned commands (test mode)
-	signingCaps  *cpTypes.SigningCapabilities // optional; nil signs over the v1 payload (#5174)
+	signer       signature.Signer // optional; nil = unsigned commands (test mode)
 	logger       logging.Logger
 }
 
 // NewRelayHandler creates a RelayHandler wired to the given control plane, run
 // manager, and API HTTP handler. signer may be nil in test or unsecured mode.
-// signingCaps is the per-steward signing-payload registry shared with the command
-// publisher and dispatcher (#5174); nil signs relay responses over the v1 payload.
-// It is a constructor argument so no construction path can leave the relay on v1.
 func NewRelayHandler(
 	controlPlane cpInterfaces.ControlPlaneProvider,
 	runManager *controllerrun.Manager,
 	apiHandler http.Handler,
 	signer signature.Signer,
-	signingCaps *cpTypes.SigningCapabilities,
 	logger logging.Logger,
 ) *RelayHandler {
 	return &RelayHandler{
@@ -64,7 +59,6 @@ func NewRelayHandler(
 		runManager:   runManager,
 		apiHandler:   apiHandler,
 		signer:       signer,
-		signingCaps:  signingCaps,
 		logger:       logger,
 	}
 }
@@ -232,7 +226,7 @@ func (h *RelayHandler) sendRelayResponse(
 		},
 	}
 
-	signed, err := cpTypes.SignCommand(cmd, h.signer, h.signingCaps)
+	signed, err := cpTypes.SignCommand(cmd, h.signer)
 	if err != nil {
 		return fmt.Errorf("relay: sign response: %w", err)
 	}

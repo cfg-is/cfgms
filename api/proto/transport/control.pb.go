@@ -41,9 +41,22 @@ const (
 	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT   CommandType = 9  // Issue #1817: controller pushes current signing cert on every steward connect
 	CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY CommandType = 10 // Issue #1943: controller pushes a new steward binary for self-upgrade
 	CommandType_COMMAND_TYPE_RELAY_RESPONSE      CommandType = 11 // Issue #1994: controller sends relay response back to steward relay goroutine
-	CommandType_COMMAND_TYPE_OPEN_TERMINAL       CommandType = 12 // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY
-	CommandType_COMMAND_TYPE_OBSERVE_MODULES     CommandType = 13 // Issue #3104: controller pushes resolved observe-module set to steward
-	CommandType_COMMAND_TYPE_STEWARD_ACTION      CommandType = 14 // Issue #4623: structured operator-signed steward action (service verbs)
+	// Issue #2760: steward dials out Terminal RPC and bridges to a local PTY.
+	// Command.params keys: session_id (string), shell (string), cols (int32), rows (int32),
+	// plus the operator envelope keys: targets, nonce, expires_at and the X.509 or
+	// WebAuthn signature fields (with webauthn_manifest), forwarded unchanged from the
+	// verified one-time ticket.
+	CommandType_COMMAND_TYPE_OPEN_TERMINAL CommandType = 12
+	// Issue #3104 (ADR-024 Amendment 1): controller pushes the resolved observe-module
+	// set back to the steward after receiving EventObserveSweepRequest.
+	// Command.params keys: "modules" (JSON array of ObserveModuleSpec objects).
+	CommandType_COMMAND_TYPE_OBSERVE_MODULES CommandType = 13
+	// Issue #4623: structured, operator-signed steward action (closed verb allowlist).
+	// Command.params keys: execution_id (string), verb (string, e.g. "service.start"),
+	// target_kind (string), target_name (string), parameters (map of string to string),
+	// plus the operator envelope keys: targets, nonce, expires_at and the X.509 or
+	// WebAuthn signature fields. No script text is carried.
+	CommandType_COMMAND_TYPE_STEWARD_ACTION CommandType = 14
 )
 
 // Enum value maps for CommandType.
@@ -127,13 +140,16 @@ const (
 	EventType_EVENT_TYPE_SCRIPT_COMPLETED  EventType = 9 // Issue #1997: execute_script finished (drives ad-hoc run completion)
 	// Issue #1997: the following events are also published steward->controller over the
 	// wire and were silently collapsing to UNSPECIFIED without an enum value.
-	EventType_EVENT_TYPE_DNA_CHANGED           EventType = 10 // steward DNA attributes changed (controller routes to handleDNAEvent)
-	EventType_EVENT_TYPE_RELAY_REQUEST         EventType = 11 // steward relays a script's REST call to the controller
-	EventType_EVENT_TYPE_UPGRADE_DOWNLOADED    EventType = 12 // steward.upgrade.downloaded
-	EventType_EVENT_TYPE_UPGRADE_SWAPPED       EventType = 13 // steward.upgrade.swapped
-	EventType_EVENT_TYPE_UPGRADE_COMMITTED     EventType = 14 // steward.upgrade.committed
-	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK   EventType = 15 // steward.upgrade.rolled_back
-	EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST EventType = 16 // Issue #3104: steward initiates Tier-2 observe sweep
+	EventType_EVENT_TYPE_DNA_CHANGED         EventType = 10 // steward DNA attributes changed (controller routes to handleDNAEvent)
+	EventType_EVENT_TYPE_RELAY_REQUEST       EventType = 11 // steward relays a script's REST call to the controller
+	EventType_EVENT_TYPE_UPGRADE_DOWNLOADED  EventType = 12 // steward.upgrade.downloaded
+	EventType_EVENT_TYPE_UPGRADE_SWAPPED     EventType = 13 // steward.upgrade.swapped
+	EventType_EVENT_TYPE_UPGRADE_COMMITTED   EventType = 14 // steward.upgrade.committed
+	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK EventType = 15 // steward.upgrade.rolled_back
+	// Issue #3104 (ADR-024 Amendment 1): steward initiates a Tier-2 whole-domain
+	// observe sweep by publishing baseline DNA; the controller responds with
+	// COMMAND_TYPE_OBSERVE_MODULES carrying the resolved module set.
+	EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST EventType = 16
 )
 
 // Enum value maps for EventType.
@@ -434,16 +450,22 @@ func (*ControlMessage_Response) isControlMessage_Payload() {}
 
 // Command is sent from controller to steward via ControlChannel.
 type Command struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	Id                    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Type                  CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
-	StewardId             string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
-	TenantId              string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Timestamp             *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Params                map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Priority              int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
-	Term                  uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
-	SigningPayloadVersion uint32                 `protobuf:"varint,9,opt,name=signing_payload_version,json=signingPayloadVersion,proto3" json:"signing_payload_version,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Type      CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
+	StewardId string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	TenantId  string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Params    map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Priority  int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
+	// term is the Raft term at which this command was published (#3390).
+	// Wire-compatible additive field: old stewards that do not understand it
+	// silently ignore the unknown field number. Enforcement is added in #3436.
+	Term uint64 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
+	// signing_payload_version names the signing-payload version the signer used
+	// (#5174). Zero or absent means version 1, which does not cover term; the
+	// verifier never treats an absent value as a newer version.
+	SigningPayloadVersion uint32 `protobuf:"varint,9,opt,name=signing_payload_version,json=signingPayloadVersion,proto3" json:"signing_payload_version,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -654,11 +676,8 @@ type Heartbeat struct {
 	DnaHash         string                 `protobuf:"bytes,7,opt,name=dna_hash,json=dnaHash,proto3" json:"dna_hash,omitempty"`                         // for hash-based sync detection
 	ActiveSessions  int32                  `protobuf:"varint,8,opt,name=active_sessions,json=activeSessions,proto3" json:"active_sessions,omitempty"`   // number of active control-channel streams (1 when connected, 0 otherwise)
 	ConnectionState string                 `protobuf:"bytes,9,opt,name=connection_state,json=connectionState,proto3" json:"connection_state,omitempty"` // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
-	// signing_payload_versions lists the command signing-payload versions this
-	// steward can verify (#5174). Absent (empty) means only version 1.
-	SigningPayloadVersions []uint32 `protobuf:"varint,10,rep,packed,name=signing_payload_versions,json=signingPayloadVersions,proto3" json:"signing_payload_versions,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -752,13 +771,6 @@ func (x *Heartbeat) GetConnectionState() string {
 		return x.ConnectionState
 	}
 	return ""
-}
-
-func (x *Heartbeat) GetSigningPayloadVersions() []uint32 {
-	if x != nil {
-		return x.SigningPayloadVersions
-	}
-	return nil
 }
 
 // Response is sent from steward to controller for command acknowledgment.
@@ -884,7 +896,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\bseverity\x18\b \x01(\x0e2\x19.cfgms.transport.SeverityR\bseverity\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfb\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe1\x03\n" +
 	"\tHeartbeat\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1b\n" +
@@ -895,12 +907,11 @@ const file_transport_control_proto_rawDesc = "" +
 	"\aversion\x18\x06 \x01(\tR\aversion\x12\x19\n" +
 	"\bdna_hash\x18\a \x01(\tR\adnaHash\x12'\n" +
 	"\x0factive_sessions\x18\b \x01(\x05R\x0eactiveSessions\x12)\n" +
-	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x128\n" +
-	"\x18signing_payload_versions\x18\n" +
-	" \x03(\rR\x16signingPayloadVersions\x1a:\n" +
+	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x1a:\n" +
 	"\fMetricsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\n" +
+	"\x10\vR\x18signing_payload_versions\"\xb4\x02\n" +
 	"\bResponse\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1d\n" +
@@ -929,7 +940,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x1bCOMMAND_TYPE_RELAY_RESPONSE\x10\v\x12\x1e\n" +
 	"\x1aCOMMAND_TYPE_OPEN_TERMINAL\x10\f\x12 \n" +
 	"\x1cCOMMAND_TYPE_OBSERVE_MODULES\x10\r\x12\x1f\n" +
-	"\x1bCOMMAND_TYPE_STEWARD_ACTION\x10\x0e*\xf8\x03\n" +
+	"\x1bCOMMAND_TYPE_STEWARD_ACTION\x10\x0e*\x9e\x04\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +
@@ -947,7 +958,8 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x1dEVENT_TYPE_UPGRADE_DOWNLOADED\x10\f\x12\x1e\n" +
 	"\x1aEVENT_TYPE_UPGRADE_SWAPPED\x10\r\x12 \n" +
 	"\x1cEVENT_TYPE_UPGRADE_COMMITTED\x10\x0e\x12\"\n" +
-	"\x1eEVENT_TYPE_UPGRADE_ROLLED_BACK\x10\x0f*x\n" +
+	"\x1eEVENT_TYPE_UPGRADE_ROLLED_BACK\x10\x0f\x12$\n" +
+	" EVENT_TYPE_OBSERVE_SWEEP_REQUEST\x10\x10*x\n" +
 	"\bSeverity\x12\x18\n" +
 	"\x14SEVERITY_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSEVERITY_INFO\x10\x01\x12\x14\n" +

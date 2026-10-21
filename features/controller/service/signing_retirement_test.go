@@ -138,7 +138,7 @@ func (e *retireEnv) verifiesWith(sc *types.SignedCommand, serial string) bool {
 	if sc.Signature == nil {
 		return false
 	}
-	b, err := types.CommandSigningBytes(&sc.Command, rawParamsOf(sc))
+	b, err := types.CommandSigningBytesVersion(&sc.Command, rawParamsOf(sc), types.CommandPayloadVersion(&sc.Command))
 	require.NoError(e.t, err)
 	return v.Verify(b, sc.Signature) == nil
 }
