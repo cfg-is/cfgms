@@ -6,6 +6,11 @@
 package user
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -121,4 +126,55 @@ func TestFirstFreeUID(t *testing.T) {
 			t.Fatal("firstFreeUID: expected error when range exhausted, got nil")
 		}
 	})
+}
+
+func TestGroupsToRemove(t *testing.T) {
+	protected := map[string]bool{"staff": true, "everyone": true, "localaccounts": true}
+	got := groupsToRemove([]string{"everyone", "localaccounts", "staff", "a", "b"}, []string{"a"}, protected)
+	if !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("groupsToRemove = %v, want [b]", got)
+	}
+	if m := missingGroups([]string{"staff"}, []string{"a", "staff"}); !reflect.DeepEqual(m, []string{"a"}) {
+		t.Fatalf("missingGroups = %v, want [a]", m)
+	}
+}
+
+// TestSetStateRemovesUndeclaredGroups creates a user in two extra groups, then
+// declares one and expects the other to be removed with protected groups kept.
+// Requires root; runs on native macOS only.
+func TestSetStateRemovesUndeclaredGroups(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to manage local accounts")
+	}
+	e := &darwinExecutor{}
+	suffix := fmt.Sprintf("%d", os.Getpid())
+	user, keep, drop := "cfgmstu"+suffix, "cfgmsga"+suffix, "cfgmsgb"+suffix
+	for _, g := range []string{keep, drop} {
+		if out, err := exec.Command("dseditgroup", "-o", "create", g).CombinedOutput(); err != nil {
+			t.Fatalf("create group %s: %v (%s)", g, err, out)
+		}
+		g := g
+		t.Cleanup(func() { _ = exec.Command("dseditgroup", "-o", "delete", g).Run() })
+	}
+	t.Cleanup(func() { _ = e.setState(user, userState{}) })
+
+	if err := e.setState(user, userState{Exists: true, Groups: []string{keep, drop}}); err != nil {
+		t.Fatalf("initial setState: %v", err)
+	}
+	if err := e.setState(user, userState{Exists: true, Groups: []string{keep}}); err != nil {
+		t.Fatalf("setState: %v", err)
+	}
+	st, err := e.getState(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := strings.Join(st.Groups, " ")
+	if strings.Contains(have, drop) {
+		t.Errorf("user still in %s: %s", drop, have)
+	}
+	for _, g := range []string{keep, "staff", "everyone", "localaccounts"} {
+		if !strings.Contains(" "+have+" ", " "+g+" ") {
+			t.Errorf("user missing %s: %s", g, have)
+		}
+	}
 }

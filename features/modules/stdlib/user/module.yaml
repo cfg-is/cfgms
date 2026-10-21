@@ -13,6 +13,11 @@ description: >
   never removed. Removing the last member that keeps the Administrators group
   (S-1-5-32-544) administered is refused. An empty or absent groups list leaves
   membership unchanged.
+  On macOS, a non-empty groups list is likewise exclusive: the user is added to
+  declared groups and removed (dseditgroup -d) from direct memberships that are
+  not declared. The primary group and the implicit groups every account has
+  (staff, everyone, localaccounts) are never removed. After applying, groups are
+  re-read and any difference from the declared list is returned as an error.
   Password setting is intentionally out of scope — the module reports whether an
   account has a password (has_credential, Get-only) but never accepts, stores, or
   transmits password material.
