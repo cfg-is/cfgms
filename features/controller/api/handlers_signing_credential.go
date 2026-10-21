@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // signingCredentialValidityDays is the validity period for CSR-issued payload-signing
@@ -152,6 +153,11 @@ func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.R
 	s.logger.Info("Issued payload-signing credential",
 		"principal", logging.SanitizeLogValue(commonName),
 		"serial", issuedCert.SerialNumber)
+
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(principal.TenantID), business.AuditEventSecurityEvent,
+		"signing_credential_issued", "signing_credential", issuedCert.SerialNumber,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{"serial_number": issuedCert.SerialNumber})
 
 	s.writeResponse(w, http.StatusCreated, SigningCredentialResponse{
 		CertificatePEM:   string(issuedCert.CertificatePEM),

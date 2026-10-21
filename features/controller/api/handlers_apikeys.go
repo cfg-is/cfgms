@@ -23,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // agentDevAPIPermissions is the API-key permission set for the agent.dev role.
@@ -281,6 +282,11 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		"name", logging.SanitizeLogValue(createReq.Name),
 		"tenant_id", logging.SanitizeLogValue(tenantID))
 
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(tenantID), business.AuditEventSecurityEvent,
+		"api_key_created", "api_key", keyID,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{"key_id": keyID})
+
 	s.writeResponse(w, http.StatusCreated, result)
 }
 
@@ -388,6 +394,12 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		"id", logging.SanitizeLogValue(keyID),
 		"name", logging.SanitizeLogValue(name),
 		"tenant_id", logging.SanitizeLogValue(tenantID))
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(tenantID), business.AuditEventSecurityEvent,
+		"api_key_deleted", "api_key", keyID,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{"key_id": keyID})
 
 	s.writeSuccessResponse(w, map[string]interface{}{
 		"id":      keyID,

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // callHandleListAPIKeys calls handleListAPIKeys directly with the given context tenant.
@@ -527,4 +528,87 @@ func TestHandleDeleteAPIKey_SecretStoreFailure_LogsNoKeyOrHash(t *testing.T) {
 	assert.Contains(t, out, "Failed to delete API key from secret store")
 	assert.NotContains(t, out, apiKey)
 	assert.NotContains(t, out, hashAPIKey(apiKey))
+}
+
+// TestHandleCreateAPIKey_RecordsAuditEvent is a [REQUIRED TEST]: a successful creation
+// writes one high-severity security audit entry naming the principal and key ID, and
+// the entry holds neither the key secret nor its hash.
+func TestHandleCreateAPIKey_RecordsAuditEvent(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := callHandleCreateAPIKey(server, []byte(`{"name":"audited-key","permissions":["steward:read"]}`), "audit-tenant-a")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp struct {
+		Data APIKeyCreateResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotEmpty(t, resp.Data.Key)
+
+	entries := auditEntriesByAction(t, server, "api_key_created")
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, business.AuditEventSecurityEvent, e.EventType)
+	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+	assert.Equal(t, "audit-tenant-a", e.TenantID)
+	assert.Equal(t, "test-caller", e.UserID)
+	assert.Equal(t, resp.Data.ID, e.ResourceID)
+	assert.Equal(t, resp.Data.ID, e.Details["key_id"])
+	raw, err := json.Marshal(e)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), resp.Data.Key)
+	assert.NotContains(t, string(raw), hashAPIKey(resp.Data.Key))
+}
+
+// TestHandleCreateAPIKey_Rejected_RecordsNoAuditEvent is a [REQUIRED TEST]: a rejected
+// creation leaves no audit entry for the caller's tenant.
+func TestHandleCreateAPIKey_Rejected_RecordsNoAuditEvent(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := callHandleCreateAPIKey(server, []byte(`{"name":"k","permissions":["does-not-exist:action"]}`), "audit-tenant-b")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "audit-tenant-b"})
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+// TestHandleDeleteAPIKey_RecordsAuditEvent is a [REQUIRED TEST]: a deletion writes one
+// audit entry naming the principal and key ID; a not-found deletion writes none.
+func TestHandleDeleteAPIKey_RecordsAuditEvent(t *testing.T) {
+	server := setupTestServer(t)
+
+	createRec := callHandleCreateAPIKey(server, []byte(`{"name":"to-delete","permissions":["steward:read"]}`), "audit-tenant-c")
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created struct {
+		Data APIKeyCreateResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	deleteAs := func(id string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/"+id, nil)
+		req = mux.SetURLVars(req, map[string]string{"id": id})
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("audit-tenant-c"))
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{ID: "deleter", TenantID: "audit-tenant-c", ImplicitAdmin: true})
+		rec := httptest.NewRecorder()
+		server.handleDeleteAPIKey(rec, req.WithContext(ctx))
+		return rec
+	}
+
+	require.Equal(t, http.StatusNotFound, deleteAs("no-such-key").Code)
+	assert.Empty(t, auditEntriesByAction(t, server, "api_key_deleted"))
+
+	require.Equal(t, http.StatusOK, deleteAs(created.Data.ID).Code)
+	entries := auditEntriesByAction(t, server, "api_key_deleted")
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, business.AuditEventSecurityEvent, e.EventType)
+	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+	assert.Equal(t, "audit-tenant-c", e.TenantID)
+	assert.Equal(t, "deleter", e.UserID)
+	assert.Equal(t, created.Data.ID, e.ResourceID)
+	raw, err := json.Marshal(e)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), created.Data.Key)
+	assert.NotContains(t, string(raw), hashAPIKey(created.Data.Key))
 }
