@@ -874,7 +874,7 @@ func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) 
 	seedThreeLevelTenants(t, ctx, sm)
 
 	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
-	brokenRoles := &fixedRoleProvider{err: errors.New("simulated role provider failure")}
+	brokenRoles := &fixedRoleProvider{err: errors.New("role provider read failure")}
 
 	injectedStewardID := "steward\n456\rinjected"
 	capture := logging.NewCapturingLogger()
@@ -918,7 +918,7 @@ func TestResolveConfiguration_RoleProviderError_FailsResolution(t *testing.T) {
 	seedThreeLevelTenants(t, ctx, sm)
 
 	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
-	cause := errors.New("simulated role provider failure")
+	cause := errors.New("role provider read failure")
 	ir := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, &fixedRoleProvider{err: cause})
 
 	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
