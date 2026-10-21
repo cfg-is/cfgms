@@ -34,7 +34,7 @@ func (p *OAuth2Provider) authorityAllowed(authorityURL string) bool {
 		return true
 	}
 	if p.gdapResolver != nil && p.gdapResolver.gdapClient != nil {
-		if r, rerr := url.Parse(p.gdapResolver.gdapClient.tokenBaseURL); rerr == nil && r.Host != "" && strings.EqualFold(r.Host, u.Host) {
+		if r, rerr := url.Parse(p.gdapResolver.gdapClient.tokenBaseURL); rerr == nil && r.Host != "" && strings.EqualFold(r.Host, u.Host) && u.Scheme == r.Scheme {
 			return true
 		}
 	}

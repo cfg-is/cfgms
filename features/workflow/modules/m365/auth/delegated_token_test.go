@@ -520,7 +520,7 @@ func hostOf(t *testing.T, raw string) string {
 func TestAuthorityAllowed(t *testing.T) {
 	p := NewOAuth2Provider(newKeyedCredentialStore(), nil, nil)
 	t.Cleanup(p.Close)
-	for url, want := range map[string]bool{
+	for authority, want := range map[string]bool{
 		"":                                      true,
 		"https://login.microsoftonline.com/tid": true,
 		"https://login.microsoftonline.us":      true,
@@ -531,6 +531,6 @@ func TestAuthorityAllowed(t *testing.T) {
 		"https://login.microsoftonline.com@evil.io": false,
 		"not a url": false,
 	} {
-		assert.Equal(t, want, p.authorityAllowed(url), url)
+		assert.Equal(t, want, p.authorityAllowed(authority), authority)
 	}
 }
