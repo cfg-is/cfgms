@@ -948,8 +948,10 @@ const psRemoveVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (
 // psRenameVM renames a VM object in place (#2776), and — if the VM is registered
 // as a clustered role whose group is named after the old VM name — renames that
 // cluster group too so the group name tracks the VM. A standalone VM (no matching
-// cluster group) skips the group rename. $OldName / $NewName travel via ArgumentList.
-const psRenameVM = `Rename-VM -Name $OldName -NewName $NewName -ErrorAction Stop; $grp = Get-ClusterGroup -Name $OldName -ErrorAction SilentlyContinue; if ($grp) { $grp.Name = $NewName }`
+// cluster group) skips the group rename. $OldName / $NewName travel via ArgumentList. VM and group are
+// selected by exact, case-sensitive comparison (never -Name) so a wildcard can
+// never match more than one object.
+const psRenameVM = `$vm = @(Get-VM | Where-Object { $_.Name -ceq $OldName }); if ($vm.Count -ne 1) { throw "expected exactly one VM named '$OldName', found $($vm.Count)" }; Rename-VM -VM $vm[0] -NewName $NewName -ErrorAction Stop; $grp = @(Get-ClusterGroup -ErrorAction SilentlyContinue | Where-Object { $_.Name -ceq $OldName }); if ($grp.Count -eq 1) { $grp[0].Name = $NewName }`
 
 // psConnectVMNic connects a NEW network adapter on the VM to the named switch.
 // Both $Name (host-side VM name) and $SwitchName travel via ArgumentList —
@@ -1455,6 +1457,20 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// Collapse SwitchName + SwitchNames into the canonical ordered set.
 	cfg.normalizeSwitches()
 
+	// Validate the desired config on BOTH the create and update paths so the
+	// switch-name allowlist (and VM-name / VHD checks) is enforced uniformly:
+	// the update path now routes switch names to Add/Remove-VMNetworkAdapter,
+	// so a malformed name must be rejected before reconcileNetwork, not only on
+	// create (defense-in-depth, even though values also travel via ArgumentList).
+	// Runs before ANY transport call (including the old_name rename) so a
+	// wildcard or malformed old_name never reaches PowerShell.
+	// Inject the module-level seed_dir so the HA-role CSV seed-dir rule can be
+	// enforced in Validate (seed_dir is module-level config, not a per-VM field).
+	cfg.seedDir = m.seedDir
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
 	// ALWAYS read the live host state via getVM as the source of truth for the
 	// reconcile decision — never the in-memory cache. The executor's drift
 	// detection reads the host directly, so the apply path must reconcile against
@@ -1506,18 +1522,6 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 
 	// The host object name is the exact VM name — no namespacing.
 	hostName := vmName
-
-	// Validate the desired config on BOTH the create and update paths so the
-	// switch-name allowlist (and VM-name / VHD checks) is enforced uniformly:
-	// the update path now routes switch names to Add/Remove-VMNetworkAdapter,
-	// so a malformed name must be rejected before reconcileNetwork, not only on
-	// create (defense-in-depth, even though values also travel via ArgumentList).
-	// Inject the module-level seed_dir so the HA-role CSV seed-dir rule can be
-	// enforced in Validate (seed_dir is module-level config, not a per-VM field).
-	cfg.seedDir = m.seedDir
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
 
 	// Cluster-wide existence gate (#2420): the identical ha_role resource
 	// cascades to every member steward, so a steward where the VM is locally
