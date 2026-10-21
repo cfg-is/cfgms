@@ -19,6 +19,7 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -2116,4 +2117,46 @@ func TestManager_ResolveMSPAdminContacts(t *testing.T) {
 	assert.Equal(t, []string{"ops@example.com"}, m.ResolveMSPAdminContacts(ctx, "msp-a"))
 	assert.Empty(t, m.ResolveMSPAdminContacts(ctx, testRootTenantID))
 	assert.Empty(t, m.ResolveMSPAdminContacts(ctx, "missing"))
+}
+
+// TestManager_CreateUpdate_AuditEvents verifies that creation and update record
+// tenant_created / tenant_updated events naming the context actor, and that a
+// validation failure records nothing.
+func TestManager_CreateUpdate_AuditEvents(t *testing.T) {
+	manager := newTestTenantManager(t)
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "admin-user")
+
+	query := func(tenantID, action string) []business.AuditEntry {
+		require.NoError(t, auditMgr.Flush(ctx))
+		entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+			TenantID: tenantID,
+			Actions:  []string{action},
+		})
+		require.NoError(t, err)
+		out := make([]business.AuditEntry, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, *e)
+		}
+		return out
+	}
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "audit-cu", Name: "audit-cu", ParentID: testRootTenantID})
+	require.NoError(t, err)
+
+	created := query(td.ID, "tenant_created")
+	require.Len(t, created, 1, "create must record one tenant_created event")
+	assert.Equal(t, "admin-user", created[0].UserID)
+	assert.Equal(t, td.ID, created[0].ResourceID)
+
+	_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{Name: "audit-cu-renamed", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	updated := query(td.ID, "tenant_updated")
+	require.Len(t, updated, 1, "update must record one tenant_updated event")
+	assert.Equal(t, "admin-user", updated[0].UserID)
+
+	_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{Name: "", ParentID: testRootTenantID})
+	require.Error(t, err)
+	assert.Len(t, query(td.ID, "tenant_updated"), 1, "rejected update must record no event")
 }

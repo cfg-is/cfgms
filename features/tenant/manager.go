@@ -220,6 +220,8 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		}
 	}
 
+	m.recordTenantLifecycleEvent(ctx, tenantID, td.Name, "tenant_created")
+
 	return td, nil
 }
 
@@ -319,6 +321,8 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	if auditAction != "" {
 		m.recordConfigSourceEvent(ctx, tenantID, auditURL, auditAction)
 	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, existing.Name, "tenant_updated")
 
 	// Invalidate the config source cache so the next resolution reflects the new metadata.
 	if m.router != nil {
