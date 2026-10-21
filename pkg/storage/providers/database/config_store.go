@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -115,6 +116,9 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *cfgconfig
 
 	// Check if configuration already exists to determine version and operation
 	existingConfig, err := s.getConfigInternal(ctx, tx, config.Key)
+	if err != nil && !errors.Is(err, cfgconfig.ErrConfigNotFound) {
+		return fmt.Errorf("failed to read existing configuration: %w", err)
+	}
 	isUpdate := err == nil && existingConfig != nil
 
 	if isUpdate {
@@ -903,6 +907,9 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 
 	// Check if configuration already exists
 	existingConfig, err := s.getConfigInternal(ctx, tx, config.Key)
+	if err != nil && !errors.Is(err, cfgconfig.ErrConfigNotFound) {
+		return fmt.Errorf("failed to read existing configuration: %w", err)
+	}
 	isUpdate := err == nil && existingConfig != nil
 
 	if isUpdate {
