@@ -33,6 +33,37 @@ type fakeGraphClient struct {
 	tokensUsed []string
 
 	users map[string]*graph.User // keyed by UserPrincipalName
+
+	updates        []*graph.UpdateUserRequest
+	licenseCalls   int
+	groupAddCalls  int
+	groupDelCalls  int
+	licenseRemoved int
+}
+
+func (f *fakeGraphClient) UpdateUser(_ context.Context, _ *auth.AccessToken, _ string, req *graph.UpdateUserRequest) error {
+	f.updates = append(f.updates, req)
+	return nil
+}
+
+func (f *fakeGraphClient) AssignLicense(_ context.Context, _ *auth.AccessToken, _, _ string, _ []string) error {
+	f.licenseCalls++
+	return nil
+}
+
+func (f *fakeGraphClient) RemoveLicense(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	f.licenseRemoved++
+	return nil
+}
+
+func (f *fakeGraphClient) AddUserToGroup(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	f.groupAddCalls++
+	return nil
+}
+
+func (f *fakeGraphClient) RemoveUserFromGroup(_ context.Context, _ *auth.AccessToken, _, _ string) error {
+	f.groupDelCalls++
+	return nil
 }
 
 func newFakeGraphClient() *fakeGraphClient {
@@ -205,3 +236,111 @@ func TestEntraUserModule_Set_CreatesUser_WithinOwnTenant(t *testing.T) {
 	require.True(t, ok, "CreateUser must have been called")
 	assert.Equal(t, "New User", created.DisplayName)
 }
+
+func seedExistingUser(t *testing.T) (*entraUserModule, *fakeGraphClient) {
+	t.Helper()
+	mod, credStore, fakeGraph := newTestModule(t)
+	seedTenant(t, credStore, "tenant-a", "m365-org-a", "tok-a")
+	fakeGraph.users["alice@org-a.example"] = &graph.User{
+		ID: "id-alice", UserPrincipalName: "alice@org-a.example", DisplayName: "Alice", AccountEnabled: true,
+	}
+	return mod, fakeGraph
+}
+
+func existingUserConfig() *EntraUserConfig {
+	return &EntraUserConfig{
+		UserPrincipalName: "alice@org-a.example",
+		DisplayName:       "Alice",
+		MailNickname:      "alice",
+		AccountEnabled:    true,
+		TenantID:          "m365-org-a",
+	}
+}
+
+// [REQUIRED TEST] Issue #5334: a password reset on an existing user must reach Graph.
+func TestEntraUserModule_Set_ExistingUser_PasswordReset(t *testing.T) {
+	mod, fakeGraph := seedExistingUser(t)
+	cfg := existingUserConfig()
+	cfg.PasswordProfile = &PasswordProfile{Password: "s3cret-Value!", ForceChangePasswordNextSignIn: true}
+
+	err := mod.Set(ctxForTenant("tenant-a"), "r", cfg)
+	require.NoError(t, err)
+	require.Len(t, fakeGraph.updates, 1)
+	pp := fakeGraph.updates[0].PasswordProfile
+	require.NotNil(t, pp)
+	assert.Equal(t, "s3cret-Value!", pp.Password)
+	assert.True(t, pp.ForceChangePasswordNextSignIn)
+}
+
+func TestEntraUserModule_Set_ExistingUser_ForceChangePasswordOnly(t *testing.T) {
+	mod, fakeGraph := seedExistingUser(t)
+	cfg := existingUserConfig()
+	cfg.ForceChangePassword = true
+
+	require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", cfg))
+	require.Len(t, fakeGraph.updates, 1)
+	pp := fakeGraph.updates[0].PasswordProfile
+	require.NotNil(t, pp)
+	assert.Empty(t, pp.Password)
+	assert.True(t, pp.ForceChangePasswordNextSignIn)
+}
+
+func TestEntraUserModule_Set_CreateUser_ForceChangePassword(t *testing.T) {
+	cfg := existingUserConfig()
+	cfg.ForceChangePassword = true
+	cfg.PasswordProfile = &PasswordProfile{Password: "pw"}
+	pp := cfg.graphPasswordProfile()
+	require.NotNil(t, pp)
+	assert.True(t, pp.ForceChangePasswordNextSignIn)
+	assert.Equal(t, "pw", pp.Password)
+}
+
+// [REQUIRED TEST] Issue #5334: managed_fields limits the update.
+func TestEntraUserModule_Set_ManagedFieldsSkipsLicensesAndGroups(t *testing.T) {
+	for name, managed := range map[string]interface{}{
+		"string slice": []string{"display_name"},
+		"any slice":    []interface{}{"display_name"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mod, fakeGraph := seedExistingUser(t)
+			cfg := existingUserConfig()
+			cfg.Licenses = []LicenseAssignment{{SkuID: "sku-1"}}
+			cfg.Groups = []string{"g1"}
+			cfg.PasswordProfile = &PasswordProfile{Password: "pw"}
+
+			state := &mapState{m: cfg.AsMap()}
+			state.m["managed_fields"] = managed
+			state.m["licenses"] = cfg.Licenses
+			state.m["groups"] = cfg.Groups
+
+			require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", state))
+			assert.Zero(t, fakeGraph.licenseCalls+fakeGraph.licenseRemoved)
+			assert.Zero(t, fakeGraph.groupAddCalls+fakeGraph.groupDelCalls)
+			assert.Empty(t, fakeGraph.updates, "password_profile is not managed, nothing to update")
+		})
+	}
+}
+
+func TestEntraUserModule_Set_ManagedFieldsInvalidType(t *testing.T) {
+	mod, _ := seedExistingUser(t)
+	state := &mapState{m: existingUserConfig().AsMap()}
+	state.m["managed_fields"] = "display_name"
+	require.Error(t, mod.Set(ctxForTenant("tenant-a"), "r", state))
+}
+
+func TestEntraUserModule_Set_UnsetManagedFieldsSyncsGroups(t *testing.T) {
+	mod, fakeGraph := seedExistingUser(t)
+	cfg := existingUserConfig()
+	cfg.Groups = []string{"g1"}
+	require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", cfg))
+	assert.Equal(t, 1, fakeGraph.groupAddCalls)
+}
+
+// mapState overrides AsMap so tests can supply raw config-map shapes (such as
+// managed_fields as []interface{}) the way a decoded workflow step does.
+type mapState struct {
+	EntraUserConfig
+	m map[string]interface{}
+}
+
+func (s *mapState) AsMap() map[string]interface{} { return s.m }
