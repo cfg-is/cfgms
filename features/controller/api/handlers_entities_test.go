@@ -490,9 +490,169 @@ func TestHandleGetHistory_ValidRange_ReturnsEmpty(t *testing.T) {
 	srv.router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "valid range: %s", rec.Body.String())
-	var records []*eginterfaces.ObservationRecord
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &records))
-	assert.Empty(t, records, "no observations in the requested historical range")
+	var page historyPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Empty(t, page.Records, "no observations in the requested historical range")
+	assert.Empty(t, page.NextToken)
+	assert.Contains(t, rec.Body.String(), `"Records":[]`, "an empty page is an empty array, not null")
+}
+
+// historyCountingProvider delegates to a real provider and counts GetHistory calls.
+type historyCountingProvider struct {
+	egReadProvider
+	calls int
+}
+
+func (c *historyCountingProvider) GetHistory(ctx context.Context, eid eginterfaces.EIDRef, r eginterfaces.TimeRange) ([]*eginterfaces.ObservationRecord, error) {
+	c.calls++
+	return c.egReadProvider.GetHistory(ctx, eid, r)
+}
+
+// seedHistory appends n observations with distinct payloads for eid.
+func seedHistory(t *testing.T, p *sqlite.SQLiteEntityGraphProvider, eid string, n int) {
+	t.Helper()
+	base := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < n; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		err := p.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+			Source: "test:reporter",
+			Observations: []egtypes.Observation{{
+				Source:     "test:reporter",
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid,
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   "host",
+					"owning_tenant": "test-tenant",
+					"seq":           i,
+				},
+			}},
+		})
+		require.NoError(t, err)
+	}
+}
+
+func getHistoryPage(t *testing.T, srv *Server, apiKey, eid, extra string) (*httptest.ResponseRecorder, historyPage) {
+	t.Helper()
+	from := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	to := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	target := "/api/v1/entities/" + eid + "/history?from=" + url.QueryEscape(from) + "&to=" + url.QueryEscape(to) + extra
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	var page historyPage
+	if rec.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	}
+	return rec, page
+}
+
+func TestHandleGetHistory_PagesThroughPageToken(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedHistory(t, p, "host:hp-src", 25)
+
+	var sizes []int
+	seen := map[int64]struct{}{}
+	var last int64
+	token := ""
+	for i := 0; i < 5; i++ {
+		extra := "&limit=10"
+		if token != "" {
+			extra += "&page_token=" + token
+		}
+		rec, page := getHistoryPage(t, srv, apiKey, "host:hp-src", extra)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		sizes = append(sizes, len(page.Records))
+		for _, r := range page.Records {
+			_, dup := seen[r.Version]
+			assert.False(t, dup, "version %d repeated across pages", r.Version)
+			assert.Greater(t, r.Version, last, "versions must ascend")
+			seen[r.Version] = struct{}{}
+			last = r.Version
+		}
+		token = page.NextToken
+		if token == "" {
+			break
+		}
+	}
+	assert.Equal(t, []int{10, 10, 5}, sizes)
+	assert.Len(t, seen, 25)
+}
+
+func TestHandleGetHistory_DefaultPageSize(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedHistory(t, p, "host:hd-src", eginterfaces.DefaultHistoryPageSize+5)
+
+	rec, page := getHistoryPage(t, srv, apiKey, "host:hd-src", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, page.Records, eginterfaces.DefaultHistoryPageSize)
+	assert.NotEmpty(t, page.NextToken)
+}
+
+func TestHandleGetHistory_FullLastPageHasNoToken(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedHistory(t, p, "host:hf-src", 10)
+
+	rec, page := getHistoryPage(t, srv, apiKey, "host:hf-src", "&limit=10")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, page.Records, 10)
+	assert.Empty(t, page.NextToken, "a full last page carries no token")
+}
+
+func TestHandleGetHistory_BadParamsAre400AndLoadNothing(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	counting := &historyCountingProvider{egReadProvider: p}
+	srv := newEntityTestServer(t, counting)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedHistory(t, p, "host:hb-src", 3)
+
+	for _, extra := range []string{
+		"&limit=0", "&limit=-1", "&limit=abc",
+		fmt.Sprintf("&limit=%d", eginterfaces.MaxHistoryPageSize+1),
+		"&page_token=abc", "&page_token=0", "&page_token=-5", "&page_token=1.5",
+		"&page_token=99999999999999999999",
+	} {
+		rec, _ := getHistoryPage(t, srv, apiKey, "host:hb-src", extra)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "query %q", extra)
+	}
+	assert.Zero(t, counting.calls, "a rejected request must not read the log")
+}
+
+func TestHandleGetHistory_PageTokenReplayedOnOtherEIDLeaksNothing(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+	seedHistory(t, p, "host:ha-one", 5)
+	seedHistory(t, p, "host:ha-two", 2)
+
+	_, first := getHistoryPage(t, srv, apiKey, "host:ha-one", "&limit=2")
+	require.NotEmpty(t, first.NextToken)
+	firstVersions := map[int64]struct{}{}
+	for _, r := range first.Records {
+		firstVersions[r.Version] = struct{}{}
+	}
+	_, all := getHistoryPage(t, srv, apiKey, "host:ha-one", "")
+	oneVersions := map[int64]struct{}{}
+	for _, r := range all.Records {
+		oneVersions[r.Version] = struct{}{}
+	}
+
+	rec, replay := getHistoryPage(t, srv, apiKey, "host:ha-two", "&page_token=1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, r := range replay.Records {
+		assert.Equal(t, "host:ha-two", r.Observation.Subject)
+		_, leaked := oneVersions[r.Version]
+		assert.False(t, leaked, "record of another entity returned")
+	}
 }
 
 func TestHandleGetHistory_EntityNotFound_Returns404(t *testing.T) {

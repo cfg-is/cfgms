@@ -3683,14 +3683,16 @@ Versioned observation log for an entity over a time range.
 |-----------|------|-------------|
 | `from` | RFC 3339 (required) | Range start |
 | `to` | RFC 3339 (required), must be after `from` | Range end |
+| `limit` | integer 1..1000, default 100 | Records per page |
+| `page_token` | positive integer | The `Version` of the last record of the previous page (the `NextToken` of that response) |
 
-**Response (200):** `[]ObservationRecord`, each `{ "Observation": {...}, "Version": 3 }`
+**Response (200):** `{ "Records": [...], "NextToken": "3" }`. Each record is `{ "Observation": {...}, "Version": 3 }`, in ascending `Version` order. A non-empty `NextToken` means more records follow: pass it as `page_token` to read the next page. `NextToken` is empty on the last page.
 
 **Error responses:**
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Malformed EID, or `from`/`to` missing, malformed, or `to` not after `from` |
+| 400 | Malformed EID, `from`/`to` missing, malformed, or `to` not after `from`, `limit` not an integer in 1..1000, or `page_token` not a positive integer |
 | 404 | Entity does not exist, or is outside the caller's tenant subtree |
 
 #### GET /api/v1/entities/{eid}/diff

@@ -114,7 +114,7 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 				continue
 			}
 
-			history, err := p.egProvider.GetHistory(ctx, eid, egTimeRange)
+			history, err := eginterfaces.ReadAllHistory(ctx, p.egProvider, eid, egTimeRange)
 			if err != nil {
 				// Sequential-reassignment form required for CodeQL's ReplaceSanitizer.
 				safeDeviceID := logging.SanitizeLogValue(deviceID)
@@ -204,7 +204,7 @@ func (p *DataProvider) discoverHostRecords(
 			eid := view.Entity.EID
 			deviceID := eid.AuthorityName()
 
-			history, err := p.egProvider.GetHistory(ctx, eid, egTimeRange)
+			history, err := eginterfaces.ReadAllHistory(ctx, p.egProvider, eid, egTimeRange)
 			if err != nil {
 				// Sequential-reassignment form required for CodeQL's ReplaceSanitizer.
 				safeDeviceID := logging.SanitizeLogValue(deviceID)
@@ -459,7 +459,7 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 		To:   timeRange.End,
 	}
 
-	history, err := p.egProvider.GetHistory(ctx, eid, egTimeRange)
+	history, err := eginterfaces.ReadAllHistory(ctx, p.egProvider, eid, egTimeRange)
 	if err != nil {
 		return stats, fmt.Errorf("failed to get entity history: %w", err)
 	}
