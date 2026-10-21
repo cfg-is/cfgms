@@ -256,8 +256,9 @@ func TestReceiveCommand_UnauthenticatedHighTerm_DoesNotAdvanceFence(t *testing.T
 	sign := func(id string, term uint64) *cpTypes.SignedCommand {
 		cmd := fencedCommand(id, term).Command
 		cmd.Params = map[string]interface{}{}
+		cmd.SigningPayloadVersion = cpTypes.SigningPayloadV2
 		raw := cpTypes.InterfaceParamsToStringMap(cmd.Params)
-		b, err := cpTypes.CommandSigningBytes(&cmd, raw)
+		b, err := cpTypes.CommandSigningBytesVersion(&cmd, raw, cpTypes.SigningPayloadV2)
 		require.NoError(t, err)
 		sig, err := signer.Sign(b)
 		require.NoError(t, err)

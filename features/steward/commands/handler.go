@@ -63,17 +63,6 @@ type Handler struct {
 	// and deterministic test synchronization.
 	wg sync.WaitGroup
 
-	// termSigned is the one-way switch (Issue #5174): once set, a stamped command
-	// signed over the v1 payload (whose term is unsigned) is refused as
-	// unauthenticated. termState persists it; nil keeps it in memory only.
-	// termMu makes the check and the set of the switch one step (admitTermSigning).
-	termMu     sync.Mutex
-	termSigned atomic.Bool
-	termState  TermSigningState
-	// termPersisted records that termState holds the switch; guarded by termMu.
-	// While termSigned is set and this is not, each command retries the write.
-	termPersisted bool
-
 	// Story #919: command authentication fields.
 
 	// verifier validates the cryptographic signature on each SignedCommand.
@@ -178,13 +167,6 @@ type Config struct {
 	// When nil, signature verification is skipped.
 	Verifier signature.Verifier
 
-	// TermSigningState persists the one-way switch set once a command signed over
-	// the term-covering payload (cpTypes.SigningPayloadV2) has been accepted
-	// (Issue #5174). After it is set, stamped commands signed over the v1 payload
-	// are refused as unauthenticated. Typically the steward's FenceRatchet. When
-	// nil the switch is held in memory only.
-	TermSigningState TermSigningState
-
 	// ReplayWindow is the maximum age of an accepted command timestamp.
 	// Defaults to 5 minutes when zero.
 	ReplayWindow time.Duration
@@ -253,15 +235,6 @@ const (
 	envelopeNonceCacheTTL = 24 * time.Hour
 )
 
-// TermSigningState is the durable home of the one-way term-signed switch
-// (Issue #5174). *config.FenceRatchet implements it beside the fence ratchet.
-type TermSigningState interface {
-	// TermSigned reports whether the switch has been set.
-	TermSigned() (bool, error)
-	// MarkTermSigned sets the switch durably; it is never unset.
-	MarkTermSigned() error
-}
-
 // New creates a new command handler and, when a CommandStore is configured,
 // sweeps commands left in "executing" state from a previous run that have been
 // executing longer than ExecutingRestartTimeout, marking them as failed with
@@ -312,22 +285,6 @@ func New(cfg *Config) (*Handler, error) {
 		webauthnManifestFloor:   &manifestFreshnessFloor{},
 		revocationVerifier:      cfg.RevocationVerifier,
 		eventEmitter:            cfg.EventEmitter,
-		termState:               cfg.TermSigningState,
-	}
-
-	// Restore the one-way term-signed switch persisted by a previous run.
-	if cfg.TermSigningState != nil {
-		// TermSigned returns true with the error when the state is corrupt or
-		// unreadable, so a load error starts the handler switched (fail closed).
-		signed, err := cfg.TermSigningState.TermSigned()
-		if err != nil {
-			cfg.Logger.Warn("Failed to load term-signed switch; treating it as set",
-				"error", logging.SanitizeLogValue(err.Error()))
-		}
-		h.termSigned.Store(signed)
-		// A loaded switch is already durable; an errored one is retried on the
-		// first command so a repaired file carries it.
-		h.termPersisted = signed && err == nil
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -446,47 +403,12 @@ func (h *Handler) unregisterRelay(executionID string) {
 	h.relays.Delete(executionID)
 }
 
-// admitTermSigning is the one atomic check-and-set of the one-way term-signed
-// switch (Issue #5174). A verified v2 command sets it (and persists it); a stamped
-// v1 command is refused once it is set. Check and set share one critical section, so
-// a v1 command and the first v2 command racing each other are ordered: no v1
-// stamped command is admitted after the switch is observed set. A persistence
-// failure is logged and retried on every later command until it succeeds; the
-// in-memory switch stays authoritative for the process meanwhile.
-func (h *Handler) admitTermSigning(version uint32, term uint64) error {
-	h.termMu.Lock()
-	defer h.termMu.Unlock()
-
-	if version == cpTypes.SigningPayloadV2 {
-		h.termSigned.Store(true)
-	}
-	h.persistTermSignedLocked()
-	if version != cpTypes.SigningPayloadV2 && term > 0 && h.termSigned.Load() {
-		return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
-	}
-	return nil
-}
-
-// persistTermSignedLocked writes the switch while it is set but not yet durable.
-// Callers must hold termMu.
-func (h *Handler) persistTermSignedLocked() {
-	if h.termState == nil || h.termPersisted || !h.termSigned.Load() {
-		return
-	}
-	if err := h.termState.MarkTermSigned(); err != nil {
-		h.logger.Warn("Failed to persist term-signed switch; in-memory state is still authoritative, will retry",
-			"error", logging.SanitizeLogValue(err.Error()))
-		return
-	}
-	h.termPersisted = true
-}
-
 // HandleCommand processes an incoming signed command from the controller.
 //
 // Story #919: Before dispatching, the command is authenticated:
 //  1. Signature is verified against the signing payload version the command names
-//     (CommandSigningBytesVersion) when a verifier is configured. A stamped v1 command is
-//     refused once a term-covering v2 command has been accepted (Issue #5174).
+//     (CommandSigningBytesVersion) when a verifier is configured. A stamped v1 command
+//     (Term > 0) is always refused before verification (Issue #5285).
 //  2. signed.Command.StewardID must match this handler's steward identity.
 //  3. signed.Command.Timestamp must be within the configured replay window.
 //  4. signed.Command.ID must not already be present in the replay cache (dedup).
@@ -498,9 +420,12 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 
 	cmd := &signed.Command
 
-	// verifiedVersion is the signing-payload version whose signature verified; 0 when
-	// no verifier is configured.
-	verifiedVersion := uint32(0)
+	// A stamped command (Term > 0) signed over the v1 payload carries a term its
+	// signature does not cover, so it is refused from first start, before any
+	// signature verification and with no state consulted (Issue #5285).
+	if cpTypes.CommandPayloadVersion(cmd) == cpTypes.SigningPayloadV1 && cmd.Term > 0 {
+		return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
+	}
 
 	// 1. Signature verification (only when a verifier is configured).
 	// Read verifier under the lock because UpdateVerifier may replace it concurrently
@@ -522,15 +447,6 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		// Verify against the payload version the command names. An absent version
 		// is v1 and never selects v2 (Issue #5174).
 		version := cpTypes.CommandPayloadVersion(cmd)
-		if version == cpTypes.SigningPayloadV1 && cmd.Term > 0 && h.termSigned.Load() {
-			// This steward has seen a term-signed command, so a stamped command
-			// whose term is unsigned can only be a downgrade. Refused regardless
-			// of whether the pending persist succeeds.
-			h.termMu.Lock()
-			h.persistTermSignedLocked()
-			h.termMu.Unlock()
-			return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
-		}
 		cmdBytes, err := cpTypes.CommandSigningBytesVersion(cmd, rawParams, version)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
@@ -538,7 +454,6 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
-		verifiedVersion = version
 	}
 
 	// 2. StewardID match.
@@ -572,17 +487,6 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	// invoked on rejection.
 	if cmd.Type == cpTypes.CommandExecuteScript {
 		if err := h.preflightScriptSignature(cmd); err != nil {
-			return err
-		}
-	}
-
-	// The command is fully authenticated. Admit it against the one-way term-signed
-	// switch in one atomic step: a verified v2 command sets the switch, and a stamped
-	// v1 command that passed the early check above is refused if a v2 command set the
-	// switch while it was being verified. Done only now, so a stale, replayed or
-	// malformed command cannot flip the switch.
-	if verifiedVersion != 0 {
-		if err := h.admitTermSigning(verifiedVersion, cmd.Term); err != nil {
 			return err
 		}
 	}

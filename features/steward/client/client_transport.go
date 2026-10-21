@@ -1504,13 +1504,10 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	}
 
 	handler, err := commands.New(&commands.Config{
-		StewardID: stewardID,
-		OnStatus:  statusCallback,
-		Logger:    c.logger,
-		Verifier:  verifier,
-		// Issue #5174: the one-way switch that refuses stamped commands signed
-		// without term coverage is persisted beside the fence ratchet.
-		TermSigningState:   c.fenceRatchet,
+		StewardID:          stewardID,
+		OnStatus:           statusCallback,
+		Logger:             c.logger,
+		Verifier:           verifier,
 		ReplayWindow:       c.commandReplayWindow,
 		MaxParamsBytes:     c.commandMaxParamsBytes,
 		SigningConfig:      signingConfig,
@@ -2104,9 +2101,6 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		ActiveSessions:   activeSessions,
 		ConnectionState:  connectionState,
 		Version:          version.Short(),
-		// Issue #5174: tell the controller which command signing-payload
-		// versions this steward can verify so it can sign the term.
-		SigningPayloadVersions: cpTypes.SupportedSigningPayloadVersions(),
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {

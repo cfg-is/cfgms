@@ -2278,43 +2278,38 @@ func (s bytesRecordingSigner) Sign(b []byte) (*configsignature.ConfigSignature, 
 	return s.testCommandSigner.Sign(b)
 }
 
-// TestDispatcher_SigningPayloadVersionFollowsStewardCapability proves AC 4 for the
-// dispatcher: a steward that advertised the term-covering payload gets a command
-// signed over it, and one that did not keeps the current payload.
-func TestDispatcher_SigningPayloadVersionFollowsStewardCapability(t *testing.T) {
-	caps := controlplaneTypes.NewSigningCapabilities()
-	require.NoError(t, caps.Record("steward-new", controlplaneTypes.SupportedSigningPayloadVersions()))
-	require.NoError(t, caps.Record("steward-old", nil))
-
+// TestDispatcher_SignsEveryCommandOverV2 proves AC 4 for the
+// dispatcher: every steward gets a command signed over the term-covering payload
+// (#5285).
+func TestDispatcher_SignsEveryCommandOverV2(t *testing.T) {
 	var signed [][]byte
 	controlPlane := &testControlPlane{}
 	d, err := New(&Config{
-		Queue:               newTestQueue(t, nil),
-		ControlPlane:        controlPlane,
-		Signer:              bytesRecordingSigner{signed: &signed},
-		SigningCapabilities: caps,
-		TermSource:          fixedTermSource(11),
-		Logger:              logging.NewNoopLogger(),
+		Queue:        newTestQueue(t, nil),
+		ControlPlane: controlPlane,
+		Signer:       bytesRecordingSigner{signed: &signed},
+		TermSource:   fixedTermSource(11),
+		Logger:       logging.NewNoopLogger(),
 	})
 	require.NoError(t, err)
 
 	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
-	for _, steward := range []string{"steward-new", "steward-old"} {
+	for _, steward := range []string{"steward-a", "steward-b"} {
 		exec := &script.QueuedExecution{ExecutionID: "exec-" + steward, Shell: script.ShellBash}
 		require.NoError(t, d.sendCommand(context.Background(), steward, exec, prepared))
 	}
 
 	require.Len(t, controlPlane.sent, 2)
 	require.Len(t, signed, 2)
-	for i, want := range []uint32{controlplaneTypes.SigningPayloadV2, controlplaneTypes.SigningPayloadV1} {
+	for i := range controlPlane.sent {
 		cmd := controlPlane.sent[i].Command
 		expected, err := controlplaneTypes.CommandSigningBytesVersion(&cmd,
-			controlplaneTypes.InterfaceParamsToStringMap(cmd.Params), want)
+			controlplaneTypes.InterfaceParamsToStringMap(cmd.Params), controlplaneTypes.SigningPayloadV2)
 		require.NoError(t, err)
 		assert.Equal(t, string(expected), string(signed[i]), "steward %s", cmd.StewardID)
 	}
 	assert.Equal(t, controlplaneTypes.SigningPayloadV2, controlPlane.sent[0].Command.SigningPayloadVersion)
-	assert.Zero(t, controlPlane.sent[1].Command.SigningPayloadVersion)
+	assert.Equal(t, controlplaneTypes.SigningPayloadV2, controlPlane.sent[1].Command.SigningPayloadVersion)
 	assert.Equal(t, uint64(11), controlPlane.sent[0].Command.Term)
 }
 

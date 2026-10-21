@@ -580,7 +580,7 @@ func TestEnsureStewardCurrent_SignsWithRotatingCertAfterOverlapExpiry(t *testing
 	if rawParams == nil {
 		rawParams = types.InterfaceParamsToStringMap(pushCmd.Command.Params)
 	}
-	cmdBytes, signBytesErr := types.CommandSigningBytes(&pushCmd.Command, rawParams)
+	cmdBytes, signBytesErr := types.CommandSigningBytesVersion(&pushCmd.Command, rawParams, types.CommandPayloadVersion(&pushCmd.Command))
 	require.NoError(t, signBytesErr)
 	require.NoError(t, oldVerifier.Verify(cmdBytes, pushCmd.Signature),
 		"push_signing_cert must be verifiable with the rotating (old) cert so offline stewards can bootstrap (Issue #1844)")

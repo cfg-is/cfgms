@@ -302,8 +302,6 @@ func heartbeatToProto(hb *types.Heartbeat) *transportpb.Heartbeat {
 		DnaHash:         hb.DNAHash,
 		ActiveSessions:  hb.ActiveSessions,
 		ConnectionState: hb.ConnectionState,
-
-		SigningPayloadVersions: hb.SigningPayloadVersions,
 	}
 	// Merge Metrics and DNAAggregateRoot into pb.Metrics.
 	// DNAAggregateRoot is side-channelled through the Metrics map because the
@@ -339,8 +337,6 @@ func heartbeatFromProto(pb *transportpb.Heartbeat) *types.Heartbeat {
 		DNAHash:         pb.GetDnaHash(),
 		ActiveSessions:  pb.GetActiveSessions(),
 		ConnectionState: pb.GetConnectionState(),
-
-		SigningPayloadVersions: pb.GetSigningPayloadVersions(),
 	}
 	// Extract DNAAggregateRoot from Metrics (side-channelled in heartbeatToProto).
 	// Remaining Metrics (without the aggregate root key) are surfaced as hb.Metrics.

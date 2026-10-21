@@ -136,9 +136,10 @@ message Heartbeat {
   string dna_hash = 7;      // for hash-based sync detection
   int32 active_sessions = 8;    // number of active control-channel streams (1 when connected, 0 otherwise)
   string connection_state = 9;  // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
-  // signing_payload_versions lists the command signing-payload versions this
-  // steward can verify (#5174). Empty means only version 1.
-  repeated uint32 signing_payload_versions = 10;
+  // Field 10 carried the steward's supported command signing-payload versions.
+  // The controller signs every command over v2 (#5285), so it is retired.
+  reserved 10;
+  reserved "signing_payload_versions";
 }
 
 // Response is sent from steward to controller for command acknowledgment.

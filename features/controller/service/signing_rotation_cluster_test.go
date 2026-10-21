@@ -158,7 +158,7 @@ func TestEnsureStewardCurrent_ClusterSignsWithRotatingCertFromSharedStore(t *tes
 	if rawParams == nil {
 		rawParams = types.InterfaceParamsToStringMap(push.Command.Params)
 	}
-	cmdBytes, err := types.CommandSigningBytes(&push.Command, rawParams)
+	cmdBytes, err := types.CommandSigningBytesVersion(&push.Command, rawParams, types.CommandPayloadVersion(&push.Command))
 	require.NoError(t, err)
 	require.NoError(t, oldVerifier.Verify(cmdBytes, push.Signature),
 		"the push served by node B must be signed with the rotating cert from the shared store")

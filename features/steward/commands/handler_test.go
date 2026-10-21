@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,7 +22,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +31,6 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -1927,27 +1924,26 @@ func TestExecuteScriptHandler_LegacyContentOnlySignature_Rejected(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// Term-covering signing payload (Issue #5174)
+// ---------------------------------------------------------------------------
+// Term-covering signing payload (Issue #5174, #5285)
 // ---------------------------------------------------------------------------
 
-// newTermSigningHandler builds a verifying handler whose one-way term-signed switch
-// is persisted in dir through a real FenceRatchet.
-func newTermSigningHandler(t *testing.T, verifier signature.Verifier, dir string) *Handler {
+// newTermSigningHandler builds a fresh verifying handler with no fence state.
+func newTermSigningHandler(t *testing.T, verifier signature.Verifier) *Handler {
 	t.Helper()
 	h, err := New(&Config{
-		StewardID:        "steward-test",
-		OnStatus:         noopStatus,
-		Logger:           newTestLogger(t),
-		Verifier:         verifier,
-		ReplayWindow:     5 * time.Minute,
-		TermSigningState: stewardconfig.NewFenceRatchet(dir),
+		StewardID:    "steward-test",
+		OnStatus:     noopStatus,
+		Logger:       newTestLogger(t),
+		Verifier:     verifier,
+		ReplayWindow: 5 * time.Minute,
 	})
 	require.NoError(t, err)
 	h.RegisterHandler(cpTypes.CommandSyncConfig, func(context.Context, *cpTypes.Command) error { return nil })
 	return h
 }
 
-// signTermCommand signs cmd over the v2 payload and stamps the version on it.
+// signTermCommand signs cmd over the given payload version and stamps v2 on it.
 func signTermCommand(t *testing.T, signer signature.Signer, cmd cpTypes.Command, version uint32) *cpTypes.SignedCommand {
 	t.Helper()
 	if version == cpTypes.SigningPayloadV2 {
@@ -1972,8 +1968,7 @@ func termTestCommand(id string, term uint64) cpTypes.Command {
 
 func TestHandleCommand_V2TermAlteredAfterSigningRejected(t *testing.T) {
 	signer, verifier := newTestSignerVerifier(t)
-	dir := t.TempDir()
-	h := newTermSigningHandler(t, verifier, dir)
+	h := newTermSigningHandler(t, verifier)
 
 	sc := signTermCommand(t, signer, termTestCommand("v2-tamper", 5), cpTypes.SigningPayloadV2)
 	sc.Command.Term = 9_000_000 // changed in transit
@@ -1981,54 +1976,32 @@ func TestHandleCommand_V2TermAlteredAfterSigningRejected(t *testing.T) {
 	err := h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 	h.Wait()
-
-	// The rejected command must not have flipped the one-way switch.
-	signed, termErr := stewardconfig.NewFenceRatchet(dir).TermSigned()
-	require.NoError(t, termErr)
-	assert.False(t, signed)
 }
 
-func TestHandleCommand_OldVersionRejectedAfterV2Accepted(t *testing.T) {
+// TestHandleCommand_StampedV1RefusedFromFirstStart pins the unconditional rule
+// (#5285): on a fresh handler with no fence state a stamped v1 command is refused,
+// a stamped v2 command is accepted, and an unstamped v1 command is unaffected.
+func TestHandleCommand_StampedV1RefusedFromFirstStart(t *testing.T) {
 	signer, verifier := newTestSignerVerifier(t)
-	dir := t.TempDir()
-	h := newTermSigningHandler(t, verifier, dir)
+	h := newTermSigningHandler(t, verifier)
 
-	// Before the switch a stamped v1 command is still accepted.
-	require.NoError(t, h.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v1-before", 3), cpTypes.SigningPayloadV1)))
-
-	require.NoError(t, h.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v2-ok", 4), cpTypes.SigningPayloadV2)))
-	h.Wait()
-
-	// A correctly v1-signed stamped command is now refused as unauthenticated.
 	err := h.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v1-after", 5), cpTypes.SigningPayloadV1))
+		signTermCommand(t, signer, termTestCommand("v1-stamped", 3), cpTypes.SigningPayloadV1))
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 
-	// An unstamped v1 command carries no unsigned term and is unaffected.
+	require.NoError(t, h.HandleCommand(context.Background(),
+		signTermCommand(t, signer, termTestCommand("v2-stamped", 4), cpTypes.SigningPayloadV2)))
+
 	require.NoError(t, h.HandleCommand(context.Background(),
 		signTermCommand(t, signer, termTestCommand("v1-unstamped", 0), cpTypes.SigningPayloadV1)))
 	h.Wait()
-
-	// The switch survives a rebuild from the same persisted state.
-	rebuilt := newTermSigningHandler(t, verifier, dir)
-	err = rebuilt.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v1-after-restart", 6), cpTypes.SigningPayloadV1))
-	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
-
-	// A different state directory has no switch set.
-	fresh := newTermSigningHandler(t, verifier, t.TempDir())
-	require.NoError(t, fresh.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v1-fresh", 6), cpTypes.SigningPayloadV1)))
-	fresh.Wait()
 }
 
 func TestHandleCommand_UnknownOrAbsentVersionNeverSelectsV2(t *testing.T) {
 	signer, verifier := newTestSignerVerifier(t)
-	h := newTermSigningHandler(t, verifier, t.TempDir())
+	h := newTermSigningHandler(t, verifier)
 
-	// Signed over v2 bytes but naming no version: verified as v1, so it fails.
+	// Signed over v2 bytes but naming no version: refused as a stamped v1 command.
 	cmd := termTestCommand("absent", 5)
 	cmd.SigningPayloadVersion = cpTypes.SigningPayloadV2
 	b, err := cpTypes.CommandSigningBytesVersion(&cmd, nil, cpTypes.SigningPayloadV2)
@@ -2043,143 +2016,5 @@ func TestHandleCommand_UnknownOrAbsentVersionNeverSelectsV2(t *testing.T) {
 	unknown := signTermCommand(t, signer, termTestCommand("unknown", 5), cpTypes.SigningPayloadV1)
 	unknown.Command.SigningPayloadVersion = 77
 	err = h.HandleCommand(context.Background(), unknown)
-	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
-}
-
-// pausingVerifier wraps a real verifier and parks every Verify call for a command
-// whose signature it was told to hold, after the real verification succeeded. It
-// forces the interleaving where a v1 command passes verification before a v2
-// command sets the one-way switch.
-type pausingVerifier struct {
-	signature.Verifier
-	holdSig string
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (p *pausingVerifier) Verify(data []byte, sig *signature.ConfigSignature) error {
-	if err := p.Verifier.Verify(data, sig); err != nil {
-		return err
-	}
-	if p.holdSig != "" && sig != nil && sig.Signature == p.holdSig {
-		close(p.entered)
-		<-p.release
-	}
-	return nil
-}
-
-// TestHandleCommand_V1StampedCommandRacingFirstV2IsRefused proves the term-signed
-// check and set are one step: a stamped v1 command that verified before the first v2
-// command set the switch is refused at admission, not accepted on a stale check.
-func TestHandleCommand_V1StampedCommandRacingFirstV2IsRefused(t *testing.T) {
-	signer, verifier := newTestSignerVerifier(t)
-	v1 := signTermCommand(t, signer, termTestCommand("v1-racing", 3), cpTypes.SigningPayloadV1)
-	pv := &pausingVerifier{
-		Verifier: verifier,
-		holdSig:  v1.Signature.Signature,
-		entered:  make(chan struct{}),
-		release:  make(chan struct{}),
-	}
-	h := newTermSigningHandler(t, pv, t.TempDir())
-
-	v1Result := make(chan error, 1)
-	go func() { v1Result <- h.HandleCommand(context.Background(), v1) }()
-	<-pv.entered // the v1 command has verified and is parked before admission
-
-	require.NoError(t, h.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v2-first", 4), cpTypes.SigningPayloadV2)))
-
-	close(pv.release)
-	require.ErrorIs(t, <-v1Result, ErrUnauthenticatedCommand,
-		"a v1 stamped command admitted after the switch was set must be refused")
-	h.Wait()
-}
-
-// TestHandleCommand_ConcurrentV1AndV2NeverAcceptsV1AfterSwitch hammers the switch
-// with concurrent stamped v1 and v2 commands. Once a v2 command has been accepted
-// and returned, no later v1 stamped command may be accepted.
-func TestHandleCommand_ConcurrentV1AndV2NeverAcceptsV1AfterSwitch(t *testing.T) {
-	signer, verifier := newTestSignerVerifier(t)
-	h := newTermSigningHandler(t, verifier, t.TempDir())
-
-	var v2Done atomic.Bool
-	var wg sync.WaitGroup
-	var violations atomic.Int32
-	for i := 0; i < 40; i++ {
-		wg.Add(2)
-		go func(i int) {
-			defer wg.Done()
-			sc := signTermCommand(t, signer, termTestCommand(fmt.Sprintf("v2-%d", i), 10), cpTypes.SigningPayloadV2)
-			if h.HandleCommand(context.Background(), sc) == nil {
-				v2Done.Store(true)
-			}
-		}(i)
-		go func(i int) {
-			defer wg.Done()
-			sc := signTermCommand(t, signer, termTestCommand(fmt.Sprintf("v1-%d", i), 10), cpTypes.SigningPayloadV1)
-			switchSetBefore := v2Done.Load()
-			if err := h.HandleCommand(context.Background(), sc); err == nil && switchSetBefore {
-				violations.Add(1)
-			}
-		}(i)
-	}
-	wg.Wait()
-	h.Wait()
-	assert.Zero(t, violations.Load(), "a v1 stamped command was accepted after a v2 command had been accepted")
-}
-
-// flakyTermState wraps a real FenceRatchet and fails the first MarkTermSigned.
-type flakyTermState struct {
-	*stewardconfig.FenceRatchet
-	mu    sync.Mutex
-	marks int
-}
-
-func (f *flakyTermState) MarkTermSigned() error {
-	f.mu.Lock()
-	f.marks++
-	n := f.marks
-	f.mu.Unlock()
-	if n == 1 {
-		return errors.New("disk full")
-	}
-	return f.FenceRatchet.MarkTermSigned()
-}
-
-func TestNewHandler_CorruptFenceStateRefusesStampedV1(t *testing.T) {
-	signer, verifier := newTestSignerVerifier(t)
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "fence_ratchet.json"), []byte("{corrupt"), 0o600))
-
-	h := newTermSigningHandler(t, verifier, dir)
-	err := h.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v1-corrupt", 5), cpTypes.SigningPayloadV1))
-	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
-}
-
-func TestHandleCommand_FailedTermSignedPersistIsRetried(t *testing.T) {
-	signer, verifier := newTestSignerVerifier(t)
-	dir := t.TempDir()
-	state := &flakyTermState{FenceRatchet: stewardconfig.NewFenceRatchet(dir)}
-	h, err := New(&Config{
-		StewardID:        "steward-test",
-		OnStatus:         noopStatus,
-		Logger:           newTestLogger(t),
-		Verifier:         verifier,
-		ReplayWindow:     5 * time.Minute,
-		TermSigningState: state,
-	})
-	require.NoError(t, err)
-	h.RegisterHandler(cpTypes.CommandSyncConfig, func(context.Context, *cpTypes.Command) error { return nil })
-
-	for _, id := range []string{"v2-first", "v2-second"} {
-		require.NoError(t, h.HandleCommand(context.Background(),
-			signTermCommand(t, signer, termTestCommand(id, 4), cpTypes.SigningPayloadV2)))
-	}
-	h.Wait()
-
-	rebuilt := newTermSigningHandler(t, verifier, dir)
-	err = rebuilt.HandleCommand(context.Background(),
-		signTermCommand(t, signer, termTestCommand("v1-after-restart", 6), cpTypes.SigningPayloadV1))
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 }

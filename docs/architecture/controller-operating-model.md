@@ -1096,33 +1096,20 @@ the **controller-side half** of the command fencing scheme defined in ADR-029:
   signature): a party between signer and steward could raise it to defeat the fence
   or set it to `MaxUint64` to wedge the steward's persisted high-water mark. Version 2
   (`CommandSigningBytesVersion` with `SigningPayloadV2`) signs every v1 field plus
-  `Term` and an explicit `payload_version`. It is negotiated, never assumed:
-  - *Advertise.* A steward lists the payload versions it can verify in
-    `Heartbeat.signing_payload_versions`. The controller records the highest
-    supported version per steward (`types.SigningCapabilities`) in the shared steward
-    store (`signing_payload_version`), so every controller node signs the version
-    the steward advertised to any node. A steward that has not advertised v2
-    receives v1. A node that cannot read the capability (store failure) fails the
-    send with an error the caller sees; it never guesses a version.
+  `Term` and an explicit `payload_version`. The controller signs every command over v2
+  (#5285); there is no per-steward choice:
   - *One signing path.* The publisher, the script dispatcher and the relay handler
-    all sign through `types.SignCommand`, which picks the version from that
-    registry. The version used is carried in `Command.signing_payload_version`
-    (field 9); absent means v1. v1 commands are byte-identical to before.
+    all sign through `types.SignCommand`, which always signs over v2 and sets
+    `Command.signing_payload_version` (field 9) to 2.
   - *Verify.* `commands.Handler.HandleCommand` verifies against the version the
     command names. An absent version is v1 and never selects v2; an unknown version
     is refused. A v2 command whose `Term` was altered after signing fails with
     `ErrUnauthenticatedCommand`.
-  - *One-way switch.* After a correctly signed v2 command is accepted, the steward
-    sets `term_signed` in `fence_ratchet.json` (next to the ratchet, same atomic
-    write; only `ClearRatchet` at enrollment resets it) and refuses every later
-    stamped (`Term > 0`) v1 command as unauthenticated. The term fence therefore
-    advances only for terms covered by a verified signature, or for v1 commands
-    received before the switch.
-  - *Atomic switch.* The steward checks and sets `term_signed` in one critical
-    section at admission, after verification, so a stamped v1 command racing the
-    first v2 command is refused if the switch was set first.
-  - *Relay.* The relay handler takes the same registry at construction, so relay
-    responses use the negotiated version.
+  - *Stamped v1 is always refused.* `HandleCommand` refuses every command that is
+    signed over v1 and carries `Term > 0` with `ErrUnauthenticatedCommand`, from
+    first start and before signature verification. No steward state is consulted.
+    A v1 command with `Term == 0` carries no unsigned term and follows the normal
+    verification path.
   - The v1 payload remains supported until no supported steward release lacks v2.
 - **Fence coverage is per-steward-determinable.** An operator can determine which
   stewards are capable of enforcing the fence without any new mechanism. The

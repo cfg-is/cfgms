@@ -59,10 +59,6 @@ type Publisher struct {
 	// When nil commands are sent without a signature (unsecured/transitional mode).
 	signer signature.Signer
 
-	// signingCaps selects the signing-payload version per steward (#5174).
-	// When nil every command is signed over the v1 payload.
-	signingCaps *controlplaneTypes.SigningCapabilities
-
 	// termSource stamps the current Raft term onto outbound commands (#3390).
 	// When nil the term field is zero (pre-fencing behaviour).
 	termSource TermSource
@@ -105,11 +101,6 @@ type Config struct {
 	// When nil the term field is zero (pre-fencing behaviour).
 	TermSource TermSource
 
-	// SigningCapabilities records which signing-payload versions each steward
-	// advertised (#5174). Share one instance with the dispatcher and relay handler.
-	// When nil every command is signed over the v1 payload.
-	SigningCapabilities *controlplaneTypes.SigningCapabilities
-
 	// FenceRetryDelay is the delay before a fence-rejected command is re-sent
 	// (Issue #4866). Defaults to 2 seconds when zero.
 	FenceRetryDelay time.Duration
@@ -136,7 +127,6 @@ func New(cfg *Config) (*Publisher, error) {
 		controlPlane:    cfg.ControlPlane,
 		signer:          cfg.Signer,
 		termSource:      cfg.TermSource,
-		signingCaps:     cfg.SigningCapabilities,
 		pending:         make(map[string]*pendingCommand),
 		logger:          cfg.Logger,
 		fenceRetryDelay: delay,
@@ -218,7 +208,7 @@ func (p *Publisher) currentTerm() uint64 {
 // non-nil. The signing-payload version is chosen per steward by
 // controlplaneTypes.SignCommand, the same path the dispatcher and relay handler use.
 func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer) (*controlplaneTypes.SignedCommand, error) {
-	return controlplaneTypes.SignCommand(cmd, signer, p.signingCaps)
+	return controlplaneTypes.SignCommand(cmd, signer)
 }
 
 // signCommand wraps cmd in a SignedCommand using the publisher's configured signer.

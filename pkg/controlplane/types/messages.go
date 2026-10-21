@@ -275,10 +275,6 @@ type Heartbeat struct {
 	// ConnectionState is the steward's current connection state string.
 	// Values: "connected", "disconnected", "connecting", "reconnecting".
 	ConnectionState string `json:"connection_state,omitempty"`
-
-	// SigningPayloadVersions lists the command signing-payload versions the steward
-	// can verify (#5174). Empty means v1 only (a steward predating the field).
-	SigningPayloadVersions []uint32 `json:"signing_payload_versions,omitempty"`
 }
 
 // Response represents a command response/acknowledgment.
@@ -420,19 +416,15 @@ type SignedCommand struct {
 // setting it to MaxUint64 wedges the steward's persisted high-water mark.
 //
 // Version 2 (commandSigningPayloadV2, #5174) closes that: it covers every v1 field,
-// plus Term and an explicit payload-version field. It is negotiated, not assumed:
+// plus Term and an explicit payload-version field. The controller signs every
+// command over v2 (#5285); nothing is negotiated per steward.
 //
-//   - A steward advertises the versions it can verify on its Heartbeat
-//     (SupportedSigningPayloadVersions); the controller records them per steward
-//     (SigningCapabilities, shared cluster-wide through the steward store) and signs
-//     with v2 only for stewards that listed it.
-//     Every other steward keeps receiving v1.
 //   - Command.SigningPayloadVersion carries the version the signer used; the
 //     steward verifies against the version the command names. Absent means v1 and
 //     never selects v2.
-//   - Once a steward has accepted a correctly signed v2 command it persists a
-//     one-way switch and refuses any later stamped v1 command as unauthenticated,
-//     so a downgrade to the unsigned-term form cannot be forced.
+//   - A steward refuses every stamped (Term > 0) command signed over v1, from first
+//     start and before verifying its signature, so a downgrade to the unsigned-term
+//     form cannot be forced.
 //
 // See docs/architecture/controller-operating-model.md — "Outbound Command Contract".
 type commandSigningPayload struct {
@@ -468,12 +460,6 @@ const (
 // ErrUnknownSigningPayloadVersion is returned for a version this build cannot
 // compute signing bytes for.
 var ErrUnknownSigningPayloadVersion = errors.New("unknown command signing payload version")
-
-// SupportedSigningPayloadVersions lists the versions this build can verify. A
-// steward advertises it on every heartbeat.
-func SupportedSigningPayloadVersions() []uint32 {
-	return []uint32{SigningPayloadV1, SigningPayloadV2}
-}
 
 // InterfaceParamsToStringMap converts map[string]interface{} command params to the
 // proto-wire-stable map[string]string form. String values are stored as-is; other

@@ -802,7 +802,4 @@ func TestSigningPayloadVersion_RoundTrip(t *testing.T) {
 
 	absent := signedCommandFromProto(signedCommandToProto(&types.SignedCommand{Command: types.Command{ID: "c2", StewardID: "s1"}}))
 	assert.Zero(t, absent.Command.SigningPayloadVersion)
-
-	hb := heartbeatFromProto(heartbeatToProto(&types.Heartbeat{StewardID: "s1", SigningPayloadVersions: []uint32{1, 2}}))
-	assert.Equal(t, []uint32{1, 2}, hb.SigningPayloadVersions)
 }
