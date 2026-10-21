@@ -100,15 +100,34 @@ func (s *Server) principalMayGrantPayloadSigningMarker(p *Principal) bool {
 //     certificate with no root-scope marker of its own is ImplicitAdmin: true. The
 //     check would silently pass for every platform administrator, not just root-scoped
 //     ones.
-//   - principal.RootScoped alone is wrong: it is always false for a browser caller
-//     today, so the check would look correct and be unexercised — and it would
-//     silently reopen the day a passkey session is amended to carry it.
+//   - principal.RootScoped alone is wrong: an API-key, relay or unbound principal
+//     must not satisfy it, so it is only trusted alongside one of the two evidence
+//     paths below.
 //   - Reading r.TLS.PeerCertificates[0] directly instead of the derived principal is a
 //     revocation bypass: the server accepts a client certificate the TLS handshake did
 //     not require (tls.VerifyClientCertIfGiven, no VerifyPeerCertificate callback), and
 //     revocation is checked in exactly one place — extractAdminPrincipal — which
 //     returns nil (not an error) for a revoked certificate and falls through to the
 //     session/cookie branches rather than rejecting the request outright.
+//
+// Two evidence paths admit a principal that is RootScoped:
+//
+//   - an mTLS admin certificate (CertSerial != ""), as described below; or
+//   - a session principal (cfg Bearer or web cookie) that is AccountBound with
+//     Assurance >= AssuranceStrong and GlobalScope (the live account's RootScope).
+//     RootScoped alone is not trusted here: on the cfg Bearer path it is
+//     sess.RootScoped || rootScopeFromAssertion(...), and sess.RootScoped is a sticky
+//     marker stamped at issuance (IssueRootScoped) that is never re-checked against
+//     the account, so it can outlive a demotion or come from a root-marker cert bound
+//     to a non-root account. Requiring GlobalScope ties the grant to the account
+//     record as it stands now, so the root scope comes from the account and the
+//     passkey, never from ImplicitAdmin. ImplicitAdmin remains insufficient because
+//     it also covers unbound CLI sessions and non-root platform admins, and an admin
+//     who is not root-scoped must not mint a root-scoped credential. A Basic session
+//     is refused, as is a session whose account is no longer root-scoped (GlobalScope
+//     false). Every approval additionally needs a fresh per-action passkey tap
+//     (credential-request:approve requires user presence), which is how a web-only
+//     administrator, without cfg installed, grants the marker.
 //
 // CertSerial is set in exactly two places, both inside extractAdminPrincipal
 // (middleware.go), both after its revocation check and only when the certificate
@@ -118,7 +137,15 @@ func (s *Server) principalMayGrantPayloadSigningMarker(p *Principal) bool {
 // that revocation check; one that has not (session, cookie, or a revoked certificate
 // that fell through to one of those) never has CertSerial set at all.
 func principalHasCertifiedRootScope(p *Principal) bool {
-	return p != nil && p.RootScoped && p.CertSerial != ""
+	if p == nil || !p.RootScoped {
+		return false
+	}
+	if p.CertSerial != "" {
+		return true
+	}
+	// GlobalScope equals the bound account's RootScope, so a Bearer session whose
+	// sticky RootScoped marker outlived a demoted account cannot pass.
+	return p.AccountBound && p.GlobalScope && p.Assurance >= session.AssuranceStrong
 }
 
 // resolveGrantedMarkers validates each requested marker against the approver's own

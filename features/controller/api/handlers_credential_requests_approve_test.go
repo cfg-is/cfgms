@@ -5,8 +5,10 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -474,6 +476,121 @@ func TestApproveCredentialRequest_RootScopeMarker_RequiresCertifiedRootScope(t *
 	})
 }
 
+// [REQUIRED TEST] Issue #5302: a web-only root administrator grants the root-scope
+// marker with a fresh per-action passkey tap, through the real authentication and
+// requirePermission chain. The root scope must come from the account and a
+// phishing-resistant assertion, never from ImplicitAdmin.
+func TestApproveCredentialRequest_RootScopeMarker_WebSession(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+	require.NoError(t, ensureTestRootTenant(context.Background(), srv.tenantManager))
+
+	// strongCookie mints a session elevated with an empty source IP, which reads back
+	// at AssuranceStrong; basic is the default fixture session (IP-change downgrade).
+	strongCookie := func(t *testing.T, principalID string) *http.Cookie {
+		t.Helper()
+		ensureAccountHoldsCredential(srv, principalID, "", []byte("cred-"+principalID))
+		sess, _, err := mgr.Issue(context.Background(), principalID, "web-login", "")
+		require.NoError(t, err)
+		_, tok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-"+principalID), "")
+		require.NoError(t, err)
+		return &http.Cookie{Name: cookieWebSession, Value: tok}
+	}
+
+	approve := func(t *testing.T, cookie *http.Cookie, principalID string, withTap bool) *httptest.ResponseRecorder {
+		t.Helper()
+		lodged := lodgeTestCredentialRequest(t, srv, testRootTenantID)
+		acct := createApprovalTestAccount(t, srv, "owner-"+lodged.RequestID, testRootTenantID)
+		payload, err := json.Marshal(ApproveCredentialRequestBody{
+			Fingerprint:          lodged.PublicKeyFingerprint,
+			AccountID:            acct.ID,
+			GrantRootScopeMarker: true,
+		})
+		require.NoError(t, err)
+		target := "/api/v1/credential-requests/" + lodged.RequestID + "/approve"
+		newReq := func() *http.Request {
+			req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
+			req.AddCookie(cookie)
+			return withVars(req, map[string]string{"id": lodged.RequestID})
+		}
+		req := newReq()
+		if withTap {
+			bound := newReq()
+			bodyHash, err := hashRequestBodyForPresenceBinding(bound)
+			require.NoError(t, err)
+			raw := make([]byte, 32)
+			_, err = rand.Read(raw)
+			require.NoError(t, err)
+			token := base64.RawURLEncoding.EncodeToString(raw)
+			storePresenceTokenForTest(t, srv, hashPresenceToken(token), &presenceTokenRecord{
+				principalID:       principalID,
+				expires:           time.Now().Add(presenceTokenTTL),
+				boundMethod:       bound.Method,
+				boundPath:         canonicalRequestTarget(bound.URL.Path, bound.URL.RawQuery),
+				boundBodyHash:     bodyHash,
+				boundPermissionID: "credential-request:approve",
+			})
+			req.Header.Set(presenceTokenHeader, token)
+		}
+		rec := httptest.NewRecorder()
+		wrapWithAuth(srv, "credential-request", "approve", srv.handleApproveCredentialRequest).ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("root-scope account at Strong with a bound tap is granted", func(t *testing.T) {
+		srv.cacheAccount(&account{ID: "web-root-granter", Username: "web-root-granter", RootScope: true})
+		rec := approve(t, strongCookie(t, "web-root-granter"), "web-root-granter", true)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []string{credentialMarkerRootScope}, decodeApproveResponse(t, rec).GrantedMarkers)
+	})
+
+	t.Run("tenant-scoped Strong account is refused the marker", func(t *testing.T) {
+		srv.cacheAccount(&account{ID: "web-tenant-granter", Username: "web-tenant-granter", TenantID: "tenant-granter"})
+		var captured *Principal
+		authed := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests", nil)
+		req.AddCookie(strongCookie(t, "web-tenant-granter"))
+		authed.ServeHTTP(httptest.NewRecorder(), req)
+		require.NotNil(t, captured)
+		require.True(t, captured.AccountBound)
+		require.GreaterOrEqual(t, captured.Assurance, session.AssuranceStrong)
+		require.False(t, captured.RootScoped)
+
+		// Called past requirePermission so the marker gate itself is what refuses.
+		lodged := lodgeTestCredentialRequest(t, srv, "tenant-granter")
+		acct := createApprovalTestAccount(t, srv, "owner-tenant-granter", "tenant-granter")
+		rec := approveCredentialRequest(t, srv, captured, lodged.RequestID, ApproveCredentialRequestBody{
+			Fingerprint:          lodged.PublicKeyFingerprint,
+			AccountID:            acct.ID,
+			GrantRootScopeMarker: true,
+		})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, "MARKER_NOT_GRANTABLE", errCode(t, rec.Body.Bytes()))
+		assert.Contains(t, rec.Body.String(), credentialMarkerRootScope)
+	})
+
+	t.Run("root-scope account at Basic gets the step-up challenge", func(t *testing.T) {
+		srv.cacheAccount(&account{ID: "web-root-basic", Username: "web-root-basic", RootScope: true})
+		rec := approve(t, issueWebSession(t, srv, mgr, "web-root-basic", ""), "web-root-basic", false)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+	})
+
+	t.Run("ImplicitAdmin without RootScoped is refused", func(t *testing.T) {
+		lodged := lodgeTestCredentialRequest(t, srv, testRootTenantID)
+		acct := createApprovalTestAccount(t, srv, "owner-implicit-web", testRootTenantID)
+		approver := &Principal{ID: "implicit-web", Assurance: session.AssuranceStrong, AccountBound: true, ImplicitAdmin: true, GlobalScope: true}
+		rec := approveCredentialRequest(t, srv, approver, lodged.RequestID, ApproveCredentialRequestBody{
+			Fingerprint:          lodged.PublicKeyFingerprint,
+			AccountID:            acct.ID,
+			GrantRootScopeMarker: true,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "MARKER_NOT_GRANTABLE", errCode(t, rec.Body.Bytes()))
+	})
+}
+
 // [REQUIRED TEST] granting the root-scope marker is refused for a caller authenticated
 // by a session — including a genuinely root-scoped cfg-CLI Bearer session
 // (session.Manager.IssueRootScoped) — proving the gate is certificate-specific, not a
@@ -646,4 +763,77 @@ func TestApproveCredentialRequest_NewAccountCreatedConcurrently_NotOverwritten(t
 	stored := casStoredAccount(t, server, "racing-host")
 	assert.Equal(t, "approve-tenant-race", stored.TenantID)
 	assert.NotEmpty(t, stored.EnrollmentLinkHash, "the concurrently created account must survive, not the approval's")
+}
+
+// A session whose sticky RootScoped marker outlived its account's root scope (demoted
+// account, GlobalScope false) must not satisfy the gate even at AssuranceStrong.
+func TestPrincipalHasCertifiedRootScope_SessionWithDemotedAccountRefused(t *testing.T) {
+	p := &Principal{ID: "demoted", Assurance: session.AssuranceStrong, AccountBound: true, RootScoped: true, GlobalScope: false}
+	assert.False(t, principalHasCertifiedRootScope(p))
+	p.GlobalScope = true
+	assert.True(t, principalHasCertifiedRootScope(p))
+	p.Assurance = session.AssuranceBasic
+	assert.False(t, principalHasCertifiedRootScope(p))
+}
+
+// [REQUIRED TEST] Issue #5302: a cfg Bearer session carrying the sticky
+// sess.RootScoped marker (IssueRootScoped) but bound to an account whose RootScope is
+// false — demoted after issuance, or minted from a root-marker cert bound to a non-root
+// account — must be refused the root-scope marker even after a step-up to Strong and
+// even though the account's own permissions include credential-request:approve.
+func TestApproveCredentialRequest_RootScopeMarker_BearerSessionNonRootAccountRefused(t *testing.T) {
+	srv := setupTestServer(t)
+	bearerCfg := session.DefaultConfig()
+	store := session.NewMemStore(bearerCfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(bearerCfg, store, time.Now)
+	srv.SetSessionManager(mgr)
+
+	const principalID = "demoted-bearer-op"
+	const tenantID = "demoted-bearer-tenant"
+	srv.cacheAccount(&account{
+		ID: principalID, Username: principalID, TenantID: tenantID, RootScope: false,
+		Permissions: []string{"credential-request:approve"},
+	})
+	ensureAccountHoldsCredential(srv, principalID, tenantID, []byte("cred-"+principalID))
+
+	sess, _, err := mgr.IssueRootScoped(context.Background(), principalID, "cfg-cli", testRootTenantID)
+	require.NoError(t, err)
+	require.True(t, sess.RootScoped, "sanity: the session carries the sticky root-scope marker")
+	_, token, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-"+principalID), "")
+	require.NoError(t, err)
+
+	var captured *Principal
+	authed := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	authed.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.Equal(t, AuthChannelCfgBearer, captured.Channel)
+	require.True(t, captured.AccountBound)
+	require.True(t, captured.RootScoped, "sanity: the sticky session marker reaches the principal")
+	require.False(t, captured.GlobalScope, "sanity: GlobalScope follows the account's RootScope")
+	require.False(t, captured.ImplicitAdmin)
+	require.GreaterOrEqual(t, captured.Assurance, session.AssuranceStrong)
+	require.Contains(t, captured.Permissions, "credential-request:approve")
+
+	assert.False(t, principalHasCertifiedRootScope(captured))
+
+	// Called past requirePermission (the account does hold the permission) so the
+	// marker gate itself is what refuses.
+	lodged := lodgeTestCredentialRequest(t, srv, tenantID)
+	acct := createApprovalTestAccount(t, srv, "owner-demoted-bearer", tenantID)
+	approveRec := approveCredentialRequest(t, srv, captured, lodged.RequestID, ApproveCredentialRequestBody{
+		Fingerprint:          lodged.PublicKeyFingerprint,
+		AccountID:            acct.ID,
+		GrantRootScopeMarker: true,
+	})
+	require.Equal(t, http.StatusForbidden, approveRec.Code, approveRec.Body.String())
+	assert.Equal(t, "MARKER_NOT_GRANTABLE", errCode(t, approveRec.Body.Bytes()))
+	assert.Contains(t, approveRec.Body.String(), credentialMarkerRootScope)
 }

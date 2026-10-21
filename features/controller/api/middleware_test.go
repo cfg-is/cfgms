@@ -4224,13 +4224,11 @@ func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testi
 		"clearing the account's RootScope flag must remove the marker on the very next request")
 }
 
-// TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension is the
-// [REQUIRED TEST]: a session-derived root scope (this story's new marker source) must
-// never satisfy principalHasCertifiedRootScope, the sole gate on granting
-// RootScopeMarkerOID to a new credential (ADR-025 Amendment 4 A4.4). Only a principal
-// whose certificate authenticated the request — evidenced by a non-empty CertSerial —
-// may do that; a session, however strongly asserted, never has CertSerial set.
-func TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension(t *testing.T) {
+// TestWebSessionPhishingResistantRootScope_MayGrantCertificateExtension: a root-scope
+// account's web session at AssuranceStrong (Issue #5302) satisfies
+// principalHasCertifiedRootScope, the sole gate on granting RootScopeMarkerOID to a
+// new credential, even though no certificate authenticated it (CertSerial is empty).
+func TestWebSessionPhishingResistantRootScope_MayGrantCertificateExtension(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
 	srv.cacheAccount(&account{
@@ -4260,8 +4258,9 @@ func TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension(t 
 	require.NotNil(t, captured)
 	require.True(t, captured.RootScoped, "sanity: this session must be genuinely root-scoped by Amendment 4")
 	assert.Empty(t, captured.CertSerial)
-	assert.False(t, principalHasCertifiedRootScope(captured),
-		"a session-derived root scope, however phishing-resistant, must never satisfy the certified-root-scope gate")
+	require.True(t, captured.AccountBound)
+	assert.True(t, principalHasCertifiedRootScope(captured),
+		"a root-scope account session at AssuranceStrong must satisfy the root-scope marker gate")
 }
 
 // TestCertificateAuthPath_UnchangedByAmendment4 is the [REQUIRED TEST] pinning that
