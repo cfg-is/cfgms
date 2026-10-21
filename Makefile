@@ -978,9 +978,23 @@ test-scripts:
 # build itself fails closed the same way: a build that reports success but
 # leaves no runnable binary stops the target instead of launching shards that
 # would each exit non-zero for an unrelated reason.
+#
+# Each shard's test names are split into chunks whose -test.run argument
+# ("^(A|B|...)$") is at most API_TEST_RUN_PATTERN_CAP bytes (Issue #5245). One
+# pattern for a whole shard grew past the Windows command-line limit (32,767
+# characters) as the test list grew, and the shard failed to start with
+# "Argument list too long". The chunks of one shard run one after another in
+# that shard's background job; the shard's recorded status is non-zero if any
+# chunk fails, and a shard killed before it records a status still fails
+# closed. The cap stays well under the limit at any shard count, so raising
+# the shard count is not the fix. Plan-only output adds one
+# "chunk <shard> <n> <bytes> <pattern>" line per chunk.
+API_TEST_RUN_PATTERN_CAP ?= 16000
+
 .PHONY: test-framework-api-sharded
 test-framework-api-sharded:
 	@race_flag="-race"; \
+	cap="$(API_TEST_RUN_PATTERN_CAP)"; \
 	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
 	shards="$${CFGMS_API_TEST_SHARDS:-}"; \
 	if [ -z "$$shards" ]; then shards=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); fi; \
@@ -1008,11 +1022,20 @@ test-framework-api-sharded:
 		echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
 		exit 1; \
 	fi; \
-	echo "  Sharding $$total features/controller/api tests across $$shards parallel test processes..."; \
+	chunk_plan() { \
+		echo "$$names" | awk -v s=$$1 -v n=$$shards -v cap=$$cap \
+			'NR % n == s { if (cur != "" && length(cur) + 1 + length($$0) + 4 > cap) { print cur; cur = $$0 } else if (cur == "") { cur = $$0 } else { cur = cur "|" $$0 } } END { if (cur != "") print cur }'; \
+	}; \
+	echo "  Sharding $$total features/controller/api tests across $$shards parallel test processes (-test.run pattern capped at $$cap bytes)..."; \
 	if [ -n "$${CFGMS_API_TEST_SHARD_PLAN_ONLY:-}" ]; then \
 		for i in $$(seq 0 $$((shards - 1))); do \
 			n=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | grep -c .); \
 			echo "shard $$i: $$n tests"; \
+			c=0; \
+			chunk_plan $$i | while IFS= read -r pat; do \
+				echo "chunk $$i $$c $$(($${#pat} + 4)) $$pat"; \
+				c=$$((c + 1)); \
+			done; \
 		done; \
 		exit 0; \
 	fi; \
@@ -1040,10 +1063,13 @@ test-framework-api-sharded:
 	pids=""; \
 	launched=""; \
 	for i in $$(seq 0 $$((shards - 1))); do \
-		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
-		if [ -n "$$pattern" ]; then \
-			( cd ./features/controller/api && "$$tmpdir/api.test" -test.short -test.timeout=10m -test.paniconexit0 -test.run "^($$pattern)$$" > "$$tmpdir/shard-$$i.log" 2>&1; \
-			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
+		chunk_plan $$i > "$$tmpdir/shard-$$i.chunks"; \
+		if [ -s "$$tmpdir/shard-$$i.chunks" ]; then \
+			( cd ./features/controller/api && : > "$$tmpdir/shard-$$i.log" && rc=0 && \
+			  while IFS= read -r pattern; do \
+				"$$tmpdir/api.test" -test.short -test.timeout=10m -test.paniconexit0 -test.run "^($$pattern)$$" >> "$$tmpdir/shard-$$i.log" 2>&1 || rc=$$?; \
+			  done < "$$tmpdir/shard-$$i.chunks"; \
+			  echo $$rc > "$$tmpdir/shard-$$i.exit" ) & \
 			pids="$$pids $$!"; \
 			launched="$$launched $$i"; \
 		fi; \
