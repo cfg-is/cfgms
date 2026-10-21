@@ -710,3 +710,67 @@ func BenchmarkDatabaseConfigStore_ListConfigs(b *testing.B) {
 		}
 	}
 }
+
+// seedUnreadableConfigRow stores a config, then corrupts its metadata to valid
+// JSON that is not an object so getConfigInternal fails with a non-not-found
+// error. It returns the key and the stored version.
+func seedUnreadableConfigRow(t *testing.T, db *sql.DB, store *DatabaseConfigStore, name string) (*cfgconfig.ConfigKey, int64) {
+	t.Helper()
+	ctx := context.Background()
+	key := &cfgconfig.ConfigKey{TenantID: "readfault-tenant", Namespace: "readfault", Name: name}
+	require.NoError(t, store.StoreConfig(ctx, &cfgconfig.ConfigEntry{Key: key, Data: []byte("v1")}))
+	require.NoError(t, store.StoreConfig(ctx, &cfgconfig.ConfigEntry{Key: key, Data: []byte("v2")}))
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM configs WHERE tenant_id = $1 AND namespace = $2 AND name = $3`, key.TenantID, key.Namespace, key.Name)
+	})
+
+	_, err := db.Exec(`UPDATE configs SET metadata = '[]'::jsonb WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4`,
+		key.TenantID, key.Namespace, key.Name, key.Scope)
+	require.NoError(t, err)
+	return key, readStoredConfigVersion(t, db, key)
+}
+
+func readStoredConfigVersion(t *testing.T, db *sql.DB, key *cfgconfig.ConfigKey) int64 {
+	t.Helper()
+	var version int64
+	require.NoError(t, db.QueryRow(`SELECT version FROM configs WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4`,
+		key.TenantID, key.Namespace, key.Name, key.Scope).Scan(&version))
+	return version
+}
+
+func TestDatabaseConfigStore_StoreConfig_ReadFaultDoesNotResetVersion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration tests in short mode")
+	}
+	db := setupTestDatabase(t)
+	defer func() { _ = db.Close() }()
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	key, before := seedUnreadableConfigRow(t, db, store, "single")
+	require.Equal(t, int64(2), before)
+
+	err = store.StoreConfig(context.Background(), &cfgconfig.ConfigEntry{Key: key, Data: []byte("v3")})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, cfgconfig.ErrConfigNotFound)
+	assert.Equal(t, before, readStoredConfigVersion(t, db, key))
+}
+
+func TestDatabaseConfigStore_StoreConfigBatch_ReadFaultDoesNotResetVersion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration tests in short mode")
+	}
+	db := setupTestDatabase(t)
+	defer func() { _ = db.Close() }()
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	key, before := seedUnreadableConfigRow(t, db, store, "batch")
+	require.Equal(t, int64(2), before)
+
+	err = store.StoreConfigBatch(context.Background(), []*cfgconfig.ConfigEntry{{Key: key, Data: []byte("v3")}})
+	require.Error(t, err)
+	assert.Equal(t, before, readStoredConfigVersion(t, db, key))
+}
