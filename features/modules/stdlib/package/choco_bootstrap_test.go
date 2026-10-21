@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -241,15 +242,16 @@ func TestConfigureChocoSource_CommandVectors(t *testing.T) {
 	m := &PackageModule{
 		chocoSource:     `C:\ClusterStorage\CSV01\choco-source`,
 		chocoSourceName: "org",
+		chocoTrust:      func(string) error { return nil },
 		runCommand:      rec.run,
 	}
 
 	require.NoError(t, m.configureChocoSource(context.Background()))
 
 	require.Len(t, rec.calls, 2)
-	assert.Equal(t, "choco", rec.calls[0].name)
+	assert.Equal(t, chocoExePath, rec.calls[0].name)
 	assert.Equal(t, []string{"source", "remove", "-n", "chocolatey"}, rec.calls[0].args)
-	assert.Equal(t, "choco", rec.calls[1].name)
+	assert.Equal(t, chocoExePath, rec.calls[1].name)
 	assert.Equal(t, []string{"source", "add", "-n", "org", "-s", `C:\ClusterStorage\CSV01\choco-source`, "--priority", "1"}, rec.calls[1].args)
 }
 
@@ -259,6 +261,7 @@ func TestConfigureChocoSource_DefaultSourceName(t *testing.T) {
 	rec := &recordingRunner{}
 	m := &PackageModule{
 		chocoSource: "https://feed.internal.example/choco",
+		chocoTrust:  func(string) error { return nil },
 		runCommand:  rec.run,
 	}
 
@@ -328,6 +331,7 @@ func TestBootstrapChocoReal_AlreadyInstalled(t *testing.T) {
 		chocoSource:     "https://feed.internal.example/choco",
 		chocoSourceName: "org",
 		chocoExeExists:  func() bool { return true },
+		chocoTrust:      func(string) error { return nil },
 		runCommand:      rec.run,
 	}
 
@@ -335,7 +339,7 @@ func TestBootstrapChocoReal_AlreadyInstalled(t *testing.T) {
 
 	require.Len(t, rec.calls, 2, "only the two choco source commands, no powershell installer invocation")
 	for _, c := range rec.calls {
-		assert.Equal(t, "choco", c.name)
+		assert.Equal(t, chocoExePath, c.name)
 	}
 }
 
@@ -362,6 +366,7 @@ func TestBootstrapChocoReal_FullBootstrap(t *testing.T) {
 		chocoSourceName:      "org",
 		chocoBootstrapSHA256: sha256Hex(nupkgBytes),
 		chocoExeExists:       func() bool { return false },
+		chocoTrust:           func(string) error { return nil },
 		runCommand:           rec.run,
 	}
 
@@ -384,9 +389,9 @@ func TestBootstrapChocoReal_FullBootstrap(t *testing.T) {
 		assert.NotEqual(t, "-ExecutionPolicy", a)
 	}
 
-	assert.Equal(t, "choco", rec.calls[1].name)
+	assert.Equal(t, chocoExePath, rec.calls[1].name)
 	assert.Equal(t, []string{"source", "remove", "-n", "chocolatey"}, rec.calls[1].args)
-	assert.Equal(t, "choco", rec.calls[2].name)
+	assert.Equal(t, chocoExePath, rec.calls[2].name)
 	assert.Equal(t, []string{"source", "add", "-n", "org", "-s", nupkgDir, "--priority", "1"}, rec.calls[2].args)
 }
 
@@ -412,6 +417,7 @@ func TestBootstrapChocoReal_RejectsUnverifiedPackage(t *testing.T) {
 		chocoSourceName:      "org",
 		chocoBootstrapSHA256: sha256Hex([]byte("not-the-real-package")),
 		chocoExeExists:       func() bool { return false },
+		chocoTrust:           func(string) error { return nil },
 		runCommand:           rec.run,
 	}
 
@@ -444,4 +450,19 @@ func TestBootstrapChocoReal_NonWindows(t *testing.T) {
 	err := m.bootstrapChocoReal(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Windows")
+}
+
+// TestConfigureChocoSource_RefusesUntrustedInstall verifies no choco command
+// runs when the install path fails the trust check.
+func TestConfigureChocoSource_RefusesUntrustedInstall(t *testing.T) {
+	rec := &recordingRunner{}
+	m := &PackageModule{
+		chocoSource: `C:\ClusterStorage\CSV01\choco-source`,
+		chocoTrust:  func(string) error { return fmt.Errorf("writable by users") },
+		runCommand:  rec.run,
+	}
+	err := m.configureChocoSource(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not trusted")
+	assert.Empty(t, rec.calls, "nothing may run from an untrusted install path")
 }

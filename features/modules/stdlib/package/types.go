@@ -327,6 +327,10 @@ type PackageModule struct {
 	// (chocoInstalled's default); tests override it so bootstrap-selection
 	// logic doesn't depend on the test host's real chocolatey state.
 	chocoExeExists func() bool
+	// chocoTrust verifies the chocolatey install path (executable and parent
+	// directory) before it is run. nil means call the real chocoTrusted;
+	// tests that simulate an installed chocolatey must inject a passing one.
+	chocoTrust func(path string) error
 	// chocoBootstrap, when non-nil, entirely replaces the real bootstrap
 	// implementation (bootstrapChocoReal) — used by tests to assert bootstrap
 	// is invoked (and with what host state) without extracting a real nupkg

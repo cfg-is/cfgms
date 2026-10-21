@@ -28,7 +28,7 @@ type providerEntry struct {
 // names providers from this set by name; unknown names are rejected.
 var defaultProviderRegistry = map[string]providerEntry{
 	"winget": {probe: wingetProbe, constructor: newWingetManagerAuto},
-	"choco":  {probe: cmdProbe("choco"), constructor: newChocolateyManager},
+	"choco":  {probe: chocoProbe, constructor: newChocolateyManager},
 	"apt":    {probe: cmdProbe("apt-get"), constructor: newAptManager},
 	"dnf":    {probe: cmdProbe("dnf"), constructor: newDnfManager},
 	"yum":    {probe: cmdProbe("yum"), constructor: newYumManager},
@@ -150,6 +150,9 @@ func (m *PackageModule) selectManager(ctx context.Context, providers []string) (
 // m.mu (same contract as selectManager).
 func (m *PackageModule) chocoAvailable(ctx context.Context) (PackageManager, bool, error) {
 	if m.chocoInstalled() {
+		if err := m.verifyChocoTrusted(); err != nil {
+			return nil, false, fmt.Errorf("chocolatey install path is not trusted: %w", err)
+		}
 		return newChocolateyManagerWithSource(m.effectiveChocoSourceName()), true, nil
 	}
 
@@ -163,6 +166,10 @@ func (m *PackageModule) chocoAvailable(ctx context.Context) (PackageManager, boo
 
 	if err := m.bootstrapChoco(ctx); err != nil {
 		return nil, false, fmt.Errorf("failed to bootstrap chocolatey from %s: %w", m.chocoSource, err)
+	}
+
+	if err := m.verifyChocoTrusted(); err != nil {
+		return nil, false, fmt.Errorf("chocolatey install path is not trusted after bootstrap: %w", err)
 	}
 
 	return newChocolateyManagerWithSource(m.effectiveChocoSourceName()), true, nil
