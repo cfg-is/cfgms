@@ -367,9 +367,9 @@ func (p *SQLiteEntityGraphProvider) GetHistory(ctx context.Context, eid interfac
 		`SELECT l.id, l.source, l.observed_at, l.recorded_at, l.kind, l.confidence, p.payload
 		 FROM eg_observation_log l
 		 JOIN eg_payload_content p ON p.payload_hash = l.payload_hash
-		 WHERE l.subject = ? AND l.observed_at >= ? AND l.observed_at <= ?
-		 ORDER BY l.id ASC`,
-		subject, rfc3339(r.From), rfc3339(r.To),
+		 WHERE l.subject = ? AND l.observed_at >= ? AND l.observed_at <= ? AND l.id > ?
+		 ORDER BY l.id ASC LIMIT ?`,
+		subject, rfc3339(r.From), rfc3339(r.To), r.AfterVersion, interfaces.ClampHistoryLimit(r.Limit),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("entitygraph/sqlite: get history: %w", err)

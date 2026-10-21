@@ -196,6 +196,55 @@ type TimeRange struct {
 	// temporal reads ignore them.
 	TenantFilter     string
 	TenantSubtreeIDs []string
+
+	// Limit and AfterVersion page GetHistory and are ignored by the other temporal
+	// reads. Limit is clamped to [1, MaxHistoryPageSize+1]; 0 means
+	// MaxHistoryPageSize, so no caller can read an unbounded log. The one row above
+	// the maximum lets a caller that asks for limit+1 rows tell a full last page
+	// from a page with more behind it. AfterVersion is the Version of the last record
+	// of the previous page: only records with a greater Version are returned.
+	Limit        int
+	AfterVersion int64
+}
+
+const (
+	// DefaultHistoryPageSize is the page size the REST handler uses when the caller
+	// gives no limit.
+	DefaultHistoryPageSize = 100
+	// MaxHistoryPageSize is the largest page a caller may ask for, and the page a
+	// GetHistory call with Limit 0 returns.
+	MaxHistoryPageSize = 1000
+)
+
+// ClampHistoryLimit returns the effective row count for a TimeRange.Limit.
+func ClampHistoryLimit(limit int) int {
+	if limit <= 0 {
+		return MaxHistoryPageSize
+	}
+	if limit > MaxHistoryPageSize+1 {
+		return MaxHistoryPageSize + 1
+	}
+	return limit
+}
+
+// ReadAllHistory returns every record GetHistory holds for eid over r, reading
+// it MaxHistoryPageSize rows at a time. r.Limit and r.AfterVersion are ignored.
+// Use it only where the whole log is genuinely needed; request handlers page.
+func ReadAllHistory(ctx context.Context, p EntityGraphProvider, eid EIDRef, r TimeRange) ([]*ObservationRecord, error) {
+	var all []*ObservationRecord
+	r.Limit = MaxHistoryPageSize
+	r.AfterVersion = 0
+	for {
+		page, err := p.GetHistory(ctx, eid, r)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < MaxHistoryPageSize {
+			return all, nil
+		}
+		r.AfterVersion = page[len(page)-1].Version
+	}
 }
 
 // ObservationRecord is a historical observation entry returned by GetHistory.

@@ -64,6 +64,9 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("GetEdgesTenantFilter", func(t *testing.T) { testEGGetEdgesTenantFilter(t, factory) })         // AC 5
 	t.Run("GetEdgesPaging", func(t *testing.T) { testEGGetEdgesPaging(t, factory) })
 	t.Run("GetEdgesLimitClamp", func(t *testing.T) { testEGGetEdgesLimitClamp(t, factory) })
+	t.Run("GetHistoryPaging", func(t *testing.T) { testEGGetHistoryPaging(t, factory) })
+	t.Run("GetHistoryLimitClamp", func(t *testing.T) { testEGGetHistoryLimitClamp(t, factory) })
+	t.Run("ReadAllHistory", func(t *testing.T) { testEGReadAllHistory(t, factory) })
 	t.Run("GetEdgesBadCursor", func(t *testing.T) { testEGGetEdgesBadCursor(t, factory) })
 	// Story-4: claim-scoped ingest + source-closure retraction (Issue #2874)
 	t.Run("ClaimScopeEntityReplace", func(t *testing.T) { testEGClaimScopeEntityReplace(t, factory) })     // AC 1
@@ -3378,4 +3381,111 @@ func testEGGetEdgesBadCursor(t *testing.T, factory EntityGraphProviderFactory) {
 	fromRef := egEID(t, "host:bc-auth/from1")
 	_, err := p.GetEdges(context.Background(), interfaces.EdgeFilter{FromEID: &fromRef, After: "!!not base64!!"})
 	assert.ErrorIs(t, err, interfaces.ErrInvalidEdgeCursor)
+}
+
+// egReportHistory appends n observations with distinct payloads for subject.
+func egReportHistory(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, subject string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		egReport(ctx, t, p, "observer:hist", subject, map[string]interface{}{
+			"entity_kind":   "host",
+			"owning_tenant": "hist-auth",
+			"seq":           i,
+		})
+	}
+}
+
+func egWideRange() interfaces.TimeRange {
+	return interfaces.TimeRange{
+		From: time.Now().UTC().Add(-24 * time.Hour),
+		To:   time.Now().UTC().Add(24 * time.Hour),
+	}
+}
+
+// testEGGetHistoryPaging verifies Limit caps the rows returned in version order
+// and AfterVersion continues with no overlap or gap.
+func testEGGetHistoryPaging(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:hist-page")
+	egReportHistory(ctx, t, p, eid.String(), 7)
+
+	full, err := p.GetHistory(ctx, eid, egWideRange())
+	require.NoError(t, err)
+	require.Len(t, full, 7)
+
+	r := egWideRange()
+	r.Limit = 3
+	var got []*interfaces.ObservationRecord
+	for i := 0; i < 5; i++ {
+		page, err := p.GetHistory(ctx, eid, r)
+		require.NoError(t, err)
+		if i == 0 {
+			require.Len(t, page, 3, "first page holds exactly Limit records")
+		}
+		if len(page) == 0 {
+			break
+		}
+		got = append(got, page...)
+		r.AfterVersion = page[len(page)-1].Version
+	}
+	require.Len(t, got, len(full), "paging returns every record once")
+	for i := range full {
+		assert.Equal(t, full[i].Version, got[i].Version, "record %d: no gap or overlap", i)
+		if i > 0 {
+			assert.Greater(t, got[i].Version, got[i-1].Version, "version order")
+		}
+	}
+}
+
+// testEGGetHistoryLimitClamp verifies Limit 0 means MaxHistoryPageSize and a
+// Limit above the maximum clamps to MaxHistoryPageSize+1.
+func testEGGetHistoryLimitClamp(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:hist-clamp")
+	batch := interfaces.ObservationBatch{Source: "observer:hist"}
+	now := time.Now().UTC()
+	for i := 0; i < interfaces.MaxHistoryPageSize+2; i++ {
+		batch.Observations = append(batch.Observations, egObservation(eid.String(), "observer:hist", now, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": "hist-auth", "seq": i,
+		}))
+	}
+	require.NoError(t, p.ReportObservations(ctx, batch))
+
+	r := egWideRange()
+	recs, err := p.GetHistory(ctx, eid, r)
+	require.NoError(t, err)
+	assert.Len(t, recs, interfaces.MaxHistoryPageSize, "Limit 0 means MaxHistoryPageSize")
+
+	r.Limit = interfaces.MaxHistoryPageSize * 10
+	recs, err = p.GetHistory(ctx, eid, r)
+	require.NoError(t, err)
+	assert.Len(t, recs, interfaces.MaxHistoryPageSize+1, "Limit above the maximum clamps to MaxHistoryPageSize+1")
+}
+
+// testEGReadAllHistory verifies ReadAllHistory returns every record across page boundaries.
+func testEGReadAllHistory(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:hist-all")
+	batch := interfaces.ObservationBatch{Source: "observer:hist"}
+	now := time.Now().UTC()
+	total := interfaces.MaxHistoryPageSize + 5
+	for i := 0; i < total; i++ {
+		batch.Observations = append(batch.Observations, egObservation(eid.String(), "observer:hist", now, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": "hist-auth", "seq": i,
+		}))
+	}
+	require.NoError(t, p.ReportObservations(ctx, batch))
+
+	recs, err := interfaces.ReadAllHistory(ctx, p, eid, egWideRange())
+	require.NoError(t, err)
+	require.Len(t, recs, total)
+	for i := 1; i < len(recs); i++ {
+		require.Greater(t, recs[i].Version, recs[i-1].Version)
+	}
 }

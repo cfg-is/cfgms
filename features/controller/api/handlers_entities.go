@@ -786,7 +786,9 @@ func (s *Server) handleGetNeighborhood(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetHistory handles GET /api/v1/entities/{eid:.+}/history.
-// Query params: from, to (RFC 3339, required).
+// Query params: from, to (RFC 3339, required), limit (1-MaxHistoryPageSize,
+// default DefaultHistoryPageSize), page_token (Version of the last record of the
+// previous page).
 // GetHistory has no tenant filter parameter; access is verified via GetEntity first (ADR-022 §7).
 func (s *Server) handleGetHistory(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
@@ -805,6 +807,27 @@ func (s *Server) handleGetHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	q := r.URL.Query()
+	limit := eginterfaces.DefaultHistoryPageSize
+	if limStr := q.Get("limit"); limStr != "" {
+		l, err := strconv.Atoi(limStr)
+		if err != nil || l < 1 || l > eginterfaces.MaxHistoryPageSize {
+			http.Error(w, "limit must be an integer between 1 and 1000", http.StatusBadRequest)
+			return
+		}
+		limit = l
+	}
+	if tok := q.Get("page_token"); tok != "" {
+		v, err := strconv.ParseInt(tok, 10, 64)
+		if err != nil || v < 1 {
+			http.Error(w, "invalid page_token", http.StatusBadRequest)
+			return
+		}
+		tr.AfterVersion = v
+	}
+	// One row more than the page tells a full last page from one with more behind it.
+	tr.Limit = limit + 1
 
 	// GetHistory has no tenant filter parameter — verify access via GetEntity first.
 	if !s.authorizeEntityRead(w, r, eid, "GET /api/v1/entities/{eid}/history") {
@@ -825,7 +848,22 @@ func (s *Server) handleGetHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeEntityJSON(w, records)
+	nextToken := ""
+	if len(records) > limit {
+		records = records[:limit]
+		nextToken = strconv.FormatInt(records[limit-1].Version, 10)
+	}
+	if records == nil {
+		records = []*eginterfaces.ObservationRecord{}
+	}
+	writeEntityJSON(w, historyPage{Records: records, NextToken: nextToken})
+}
+
+// historyPage is the response of GET /api/v1/entities/{eid}/history. NextToken is
+// empty on the last page.
+type historyPage struct {
+	Records   []*eginterfaces.ObservationRecord
+	NextToken string
 }
 
 // handleDiff handles GET /api/v1/entities/{eid:.+}/diff.

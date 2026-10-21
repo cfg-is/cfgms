@@ -538,11 +538,13 @@ func (p *DatabaseEntityGraphProvider) GetHistory(ctx context.Context, eid interf
 		`SELECT l.id, l.source, l.observed_at, l.recorded_at, l.kind, l.confidence, p.payload_json
 		 FROM eg_observation_log l
 		 JOIN eg_payload_content p ON p.content_hash = l.payload_hash
-		 WHERE l.subject = $1 AND l.observed_at >= $2 AND l.observed_at <= $3
-		 ORDER BY l.id ASC`,
+		 WHERE l.subject = $1 AND l.observed_at >= $2 AND l.observed_at <= $3 AND l.id > $4
+		 ORDER BY l.id ASC LIMIT $5`,
 		subject,
 		r.From.UTC().Format(time.RFC3339Nano),
 		r.To.UTC().Format(time.RFC3339Nano),
+		r.AfterVersion,
+		interfaces.ClampHistoryLimit(r.Limit),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("entitygraph/database: get history: %w", err)
