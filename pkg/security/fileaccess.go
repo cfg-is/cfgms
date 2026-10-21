@@ -39,9 +39,42 @@ func SecureReadFile(basePath, userPath string) ([]byte, error) {
 		return nil, fmt.Errorf("path validation failed: %w", err)
 	}
 
-	// #nosec G304 - Secure file access wrapper with comprehensive path validation
-	// This function specifically prevents directory traversal attacks
-	return os.ReadFile(validatedPath)
+	// ValidateAndCleanPath returns the symlink-resolved path, so a link that
+	// exists now would never reach openNoFollow. Refuse it on the caller's
+	// pre-resolution path.
+	rawAbsBasePath, err := filepath.Abs(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve base path: %w", err)
+	}
+	callerPath := filepath.Clean(userPath)
+	if !filepath.IsAbs(callerPath) {
+		callerPath = filepath.Join(rawAbsBasePath, callerPath)
+	}
+	if info, lerr := os.Lstat(callerPath); lerr == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil, fmt.Errorf("refusing to read %q: %w", userPath, ErrSymlinkInPath)
+	}
+
+	return readValidatedFile(validatedPath)
+}
+
+// readValidatedFile opens path without following a link at the final
+// component, requires a regular file on the open handle, and reads from that
+// handle, so a link swapped in after validation is refused.
+func readValidatedFile(path string) ([]byte, error) {
+	f, err := openNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %q", ErrNotRegularFile, path)
+	}
+	return io.ReadAll(f)
 }
 
 // ErrNotRegularFile reports that a path names something other than a regular file.

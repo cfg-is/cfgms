@@ -499,3 +499,53 @@ func TestReadRegularFileNoSymlinks(t *testing.T) {
 	_, _, err = ReadRegularFileNoSymlinks(base, "nope")
 	assert.True(t, os.IsNotExist(err))
 }
+
+func TestSecureReadFileRefusesLeafSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.WriteFile(target, []byte("content"), 0600))
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+		}
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	data, err := SecureReadFile(base, "link")
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	data, err = SecureReadFile(base, "target")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content"), data)
+
+	_, err = SecureReadFile(base, "missing")
+	require.Error(t, err)
+	assert.True(t, os.IsNotExist(err), "got %v", err)
+}
+
+func TestReadValidatedFile(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.WriteFile(target, []byte("content"), 0600))
+
+	data, err := readValidatedFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content"), data)
+
+	data, err = readValidatedFile(base)
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+		}
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+	data, err = readValidatedFile(link)
+	require.Error(t, err)
+	assert.Nil(t, data)
+}
