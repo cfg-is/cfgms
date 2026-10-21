@@ -231,3 +231,16 @@ func TestRolloutStore_Memory_GetIsolatesFromMutation(t *testing.T) {
 	assert.Equal(t, business.RolloutStatusInProgress, got2.Status)
 	assert.Empty(t, got2.DeferredStewards, "DeferredStewards must be deep-copied on get")
 }
+
+func TestRolloutStore_Memory_InitiatedByRoundTrips(t *testing.T) {
+	store := memory.NewRolloutStore()
+	ctx := context.Background()
+
+	rec := newMemTestRollout("r-init", "tenant-1")
+	rec.InitiatedBy = "admin-alice"
+	require.NoError(t, store.CreateRollout(ctx, rec))
+
+	got, err := store.GetRollout(ctx, "r-init")
+	require.NoError(t, err)
+	assert.Equal(t, "admin-alice", got.InitiatedBy)
+}

@@ -15,6 +15,7 @@ import (
 
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -67,6 +68,23 @@ type rolloutStatusResponse struct {
 	Error                  string     `json:"error,omitempty"`
 }
 
+// principalID returns the principal's ID, or "" when there is no principal.
+func principalID(p *Principal) string {
+	if p == nil {
+		return ""
+	}
+	return p.ID
+}
+
+// rolloutAuditTenant returns the tenant to attribute a rollout audit event to,
+// falling back to the system tenant for an unscoped rollout.
+func rolloutAuditTenant(tenantID string) string {
+	if tenantID == "" {
+		return audit.SystemTenantID
+	}
+	return tenantID
+}
+
 // handleStartRollout handles POST /api/v1/rollout.
 //
 // Creates a RolloutRecord in the store and starts a background goroutine that advances
@@ -82,7 +100,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -142,6 +160,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	record := &business.RolloutRecord{
 		ID:             rolloutID,
 		TenantID:       tenantID,
+		InitiatedBy:    principalID(principal),
 		TargetVersion:  req.TargetVersion,
 		CurrentRing:    rings.Rings[0].Name,
 		RingsCompleted: 0,
@@ -157,6 +176,15 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create rollout record", "CREATE_RECORD_ERROR")
 		return
 	}
+
+	s.emitOperatorAudit(r, principal, rolloutAuditTenant(tenantID),
+		business.AuditEventConfiguration, "rollout_started", "rollout", rolloutID,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"rollout_id":     rolloutID,
+			"target_version": req.TargetVersion,
+			"tenant_id":      tenantID,
+		})
 
 	haltCh := make(chan struct{})
 	s.rolloutHaltChans.Store(rolloutID, haltCh)
@@ -278,7 +306,7 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _, ok := s.authRunAccess(w, r)
+	principal, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -354,6 +382,15 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Rollout halted by operator",
 		"rollout_id", logging.SanitizeLogValue(rolloutID),
 		"target_version", logging.SanitizeLogValue(record.TargetVersion))
+
+	s.emitOperatorAudit(r, principal, rolloutAuditTenant(record.TenantID),
+		business.AuditEventConfiguration, "rollout_halted", "rollout", rolloutID,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"rollout_id":     rolloutID,
+			"target_version": record.TargetVersion,
+			"tenant_id":      record.TenantID,
+		})
 
 	s.writeSuccessResponse(w, startRolloutResponse{
 		RolloutID: rolloutID,

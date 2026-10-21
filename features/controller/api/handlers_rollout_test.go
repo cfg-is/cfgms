@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -1234,4 +1235,77 @@ func TestRolloutHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
 	all, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-a")
 	require.NoError(t, err)
 	assert.Len(t, all, 1, "an authoritative node must still create the rollout record")
+}
+
+// attachRolloutAuditManager wires a real audit manager over real test storage.
+func attachRolloutAuditManager(t *testing.T, server *Server) *audit.Manager {
+	t.Helper()
+	mgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
+	server.auditManager = mgr
+	return mgr
+}
+
+func queryRolloutAudit(t *testing.T, mgr *audit.Manager, tenantID, action string) []*business.AuditEntry {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, mgr.Flush(ctx))
+	entries, err := mgr.QueryEntries(ctx, &business.AuditFilter{TenantID: tenantID, Actions: []string{action}})
+	require.NoError(t, err)
+	return entries
+}
+
+// TestRollout_StartIsAuditedAndRecordsInitiator verifies that starting a rollout records
+// one audit entry naming the principal and stores the principal as InitiatedBy.
+func TestRollout_StartIsAuditedAndRecordsInitiator(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	mgr := attachRolloutAuditManager(t, server)
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	rolloutID := parseStartRolloutID(t, rec)
+
+	stored, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, "api-key:"+tenantID, stored.InitiatedBy)
+
+	entries := queryRolloutAudit(t, mgr, tenantID, "rollout_started")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "api-key:"+tenantID, entries[0].UserID)
+	assert.Equal(t, rolloutID, entries[0].ResourceID)
+	assert.Equal(t, business.AuditEventConfiguration, entries[0].EventType)
+	assert.Equal(t, business.AuditSeverityHigh, entries[0].Severity)
+	assert.Equal(t, "v0.5.21", entries[0].Details["target_version"])
+	assert.Equal(t, tenantID, entries[0].Details["tenant_id"])
+}
+
+// TestRollout_HaltIsAuditedOnce verifies that an operator halt records one entry and
+// that halting an already-halted rollout records none.
+func TestRollout_HaltIsAuditedOnce(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(30 * time.Second)
+	server.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(30 * time.Second)
+	mgr := attachRolloutAuditManager(t, server)
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	rolloutID := parseStartRolloutID(t, rec)
+	select {
+	case <-rolloutStore.soakC:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rollout goroutine did not reach soak within 2s")
+	}
+
+	require.Equal(t, http.StatusOK, doHaltRollout(server, tenantID, rolloutID).Code)
+	entries := queryRolloutAudit(t, mgr, tenantID, "rollout_halted")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "api-key:"+tenantID, entries[0].UserID)
+	assert.Equal(t, rolloutID, entries[0].ResourceID)
+
+	require.Equal(t, http.StatusOK, doHaltRollout(server, tenantID, rolloutID).Code)
+	assert.Len(t, queryRolloutAudit(t, mgr, tenantID, "rollout_halted"), 1,
+		"halting an already-halted rollout must not record a second event")
 }
