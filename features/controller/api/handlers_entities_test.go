@@ -1000,9 +1000,59 @@ func TestHandleListDrifted_EmptyResult(t *testing.T) {
 	srv.router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "empty drifted list: %s", rec.Body.String())
-	var states []*eginterfaces.DriftState
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &states))
-	assert.Empty(t, states)
+	var page driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Empty(t, page.Drifted)
+	assert.Empty(t, page.NextToken)
+}
+
+func TestHandleListDrifted_LimitAndPageToken(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:list"})
+
+	get := func(query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/drifted"+query, nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		srv.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, bad := range []string{"limit=1001", "limit=0", "limit=-1", "limit=abc", "page_token=not-an-eid"} {
+		assert.Equal(t, http.StatusBadRequest, get("?"+bad).Code, bad)
+	}
+
+	now := time.Now().UTC()
+	total := eginterfaces.DefaultDriftPageSize + 5
+	for i := 0; i < total; i++ {
+		subject := fmt.Sprintf("host:drift-limit-%03d", i)
+		reportEntity(t, p, subject, "test-tenant", "host")
+		require.NoError(t, p.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+			Source: "test:reporter",
+			Observations: []egtypes.Observation{{
+				Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+				Subject: subject,
+				Kind:    egtypes.ObservationKindDriftDiff, Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{"fields": []map[string]interface{}{{"attribute": "a", "desired": "x", "actual": "y", "matching": false}}},
+			}},
+		}))
+	}
+
+	rec := get("")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Len(t, page.Drifted, eginterfaces.DefaultDriftPageSize, "no limit applies the default")
+	require.NotEmpty(t, page.NextToken)
+	assert.Equal(t, page.Drifted[len(page.Drifted)-1].EID.String(), page.NextToken)
+
+	rec = get("?page_token=" + url.QueryEscape(page.NextToken))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var next driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &next))
+	assert.Len(t, next.Drifted, 5)
+	assert.Empty(t, next.NextToken, "last page has no token")
 }
 
 func TestHandleListDrifted_InvalidLifecycleStatus(t *testing.T) {

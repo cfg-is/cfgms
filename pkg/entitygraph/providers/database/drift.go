@@ -219,6 +219,16 @@ func (p *DatabaseEntityGraphProvider) ListDrifted(ctx context.Context, filter in
 		n++
 	}
 
+	if filter.After != "" {
+		col := "subject"
+		if useEntityJoin {
+			col = "d.subject"
+		}
+		conds = append(conds, fmt.Sprintf("%s > $%d", col, n))
+		args = append(args, filter.After)
+		n++
+	}
+
 	var query string
 	if useEntityJoin {
 		query = `SELECT d.subject, d.detected_at, d.config_revision, d.lifecycle_status, d.fields_json
@@ -230,6 +240,7 @@ func (p *DatabaseEntityGraphProvider) ListDrifted(ctx context.Context, filter in
 		if filter.Kind != "" {
 			conds = append(conds, fmt.Sprintf("i.entity_kind = $%d", n))
 			args = append(args, filter.Kind)
+			n++
 		}
 	} else {
 		query = `SELECT subject, detected_at, config_revision, lifecycle_status, fields_json
@@ -238,6 +249,15 @@ func (p *DatabaseEntityGraphProvider) ListDrifted(ctx context.Context, filter in
 
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	if useEntityJoin {
+		query += " ORDER BY d.subject"
+	} else {
+		query += " ORDER BY subject"
+	}
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", n)
+		args = append(args, filter.Limit)
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)

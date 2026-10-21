@@ -226,6 +226,15 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 		args = append(args, filter.LifecycleStatus)
 	}
 
+	if filter.After != "" {
+		if useEntityJoin {
+			conds = append(conds, "d.subject > ?")
+		} else {
+			conds = append(conds, "subject > ?")
+		}
+		args = append(args, filter.After)
+	}
+
 	var query string
 	if useEntityJoin {
 		query = `SELECT d.subject, d.detected_at, d.config_revision, d.lifecycle_status, d.fields
@@ -245,6 +254,15 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	if useEntityJoin {
+		query += " ORDER BY d.subject"
+	} else {
+		query += " ORDER BY subject"
+	}
+	if filter.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)

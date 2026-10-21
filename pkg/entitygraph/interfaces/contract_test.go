@@ -74,7 +74,8 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("ClaimScopeOverlapRejected", func(t *testing.T) { testEGClaimScopeOverlapRejected(t, factory) }) // AC 3
 	t.Run("SourceClosure", func(t *testing.T) { testEGSourceClosure(t, factory) })                         // AC 4
 	// Story-5: drift, desired-state, drift-lifecycle (Issue #2875)
-	t.Run("DriftNotFoundBehavior", func(t *testing.T) { testEGDriftNotFound(t, factory) })                 // AC 1
+	t.Run("DriftNotFoundBehavior", func(t *testing.T) { testEGDriftNotFound(t, factory) }) // AC 1
+	t.Run("ListDriftedPaging", func(t *testing.T) { testEGListDriftedPaging(t, factory) })
 	t.Run("DriftStateRoundTrip", func(t *testing.T) { testEGDriftStateRoundTrip(t, factory) })             // AC 2+3
 	t.Run("DriftLifecycleTransition", func(t *testing.T) { testEGDriftLifecycle(t, factory) })             // AC 4
 	t.Run("DriftProjectionRebuildRecovery", func(t *testing.T) { testEGDriftRebuildRecovery(t, factory) }) // AC 4 + AC 7
@@ -3488,4 +3489,59 @@ func testEGReadAllHistory(t *testing.T, factory EntityGraphProviderFactory) {
 	for i := 1; i < len(recs); i++ {
 		require.Greater(t, recs[i].Version, recs[i-1].Version)
 	}
+}
+
+// testEGListDriftedPaging verifies ListDrifted orders by subject, honours Limit
+// and the After keyset, and keeps Limit == 0 unbounded.
+func testEGListDriftedPaging(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Reported out of subject order on purpose.
+	names := []string{"e", "b", "d", "a", "c"}
+	for _, n := range names {
+		eid := egEID(t, "host:drift-page/"+n)
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "enforcing-module:drift-reporter",
+			Observations: []types.Observation{{
+				Source: "enforcing-module:drift-reporter", ObservedAt: now, RecordedAt: now,
+				Subject: eid.String(), Kind: types.ObservationKindDriftDiff, Confidence: types.ConfidenceHigh,
+				Payload: map[string]interface{}{"fields": []interface{}{
+					map[string]interface{}{"attribute": "x", "desired": "1", "actual": "2", "matching": false},
+				}},
+			}},
+		}))
+	}
+	subjects := func(states []*interfaces.DriftState) []string {
+		out := []string{}
+		for _, s := range states {
+			out = append(out, s.EID.String())
+		}
+		return out
+	}
+
+	all, err := p.ListDrifted(ctx, interfaces.DriftFilter{})
+	require.NoError(t, err)
+	require.Len(t, all, len(names), "Limit == 0 must return every row")
+	allSubjects := subjects(all)
+	require.True(t, sort.StringsAreSorted(allSubjects), "rows must be ordered by subject: %v", allSubjects)
+
+	var got []string
+	after := ""
+	for i := 0; i < 10; i++ {
+		page, err := p.ListDrifted(ctx, interfaces.DriftFilter{Limit: 2, After: after})
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(page), 2)
+		if len(page) == 0 {
+			break
+		}
+		if i == 0 {
+			require.Len(t, page, 2, "more rows than Limit must return exactly Limit")
+		}
+		got = append(got, subjects(page)...)
+		after = page[len(page)-1].EID.String()
+	}
+	assert.Equal(t, allSubjects, got, "paging must neither overlap nor skip rows")
 }
