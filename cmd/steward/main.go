@@ -525,6 +525,15 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	earlyLog := log.New(os.Stderr, "[cfgms-steward] ", log.Ltime|log.Lmsgprefix)
 	earlyLog.Printf("starting (pid %d)", os.Getpid())
 
+	// ── Data directory lockdown ───────────────────────────────────────────────
+	// Windows only: restrict %ProgramData%\cfgms to SYSTEM and Administrators
+	// before anything is written to it (CFGMS_LOG_DIR may sit below it) and
+	// before the pinned CA, cert store or device key are read from it. Uses a
+	// console logger so its diagnostics never land in the tree being locked.
+	if err := secureStewardDataDir(logging.NewLogger(logLevelFromEnv())); err != nil {
+		return err
+	}
+
 	// ── File logging provider ─────────────────────────────────────────────────
 	// Best-effort: if the file provider fails, fall back to a stdout logger so
 	// the process continues instead of dying with a 0-byte log file. (Issue #2034)
@@ -568,13 +577,6 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		(&logging.TelemetryBridge{}).Initialize()
 		logging.InitializeGlobalLoggerFactory("steward", "main")
 		logger = logging.ForComponent("steward")
-	}
-
-	// ── Data directory lockdown ───────────────────────────────────────────────
-	// Windows only: restrict %ProgramData%\cfgms to SYSTEM and Administrators
-	// before the pinned CA, cert store or device key are read from it.
-	if err := secureStewardDataDir(logger); err != nil {
-		return err
 	}
 
 	// ── gRPC transport registration flow ─────────────────────────────────────
