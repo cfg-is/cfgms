@@ -138,7 +138,7 @@ func (j SingletonJob) RunIfLeader(ctx context.Context, fn func(ctx context.Conte
 // independently of the renewal loop, so fn is cancelled before the store row
 // can expire even while a renewal call is still in flight and has not
 // returned (a store that is merely slow never reports a failure the renewal
-// loop could act on). The wait uses a real timer re-armed from the Clock's
+// loop could act on). The wait uses a timer re-armed from the Clock's
 // view of the remaining time, so a renewal that lands in the meantime pushes
 // the deadline out.
 func (j SingletonJob) cancelAtAuthorityDeadline(ctx context.Context, onLost context.CancelFunc) {
@@ -155,14 +155,24 @@ func (j SingletonJob) cancelAtAuthorityDeadline(ctx context.Context, onLost cont
 			onLost()
 			return
 		}
-		timer := time.NewTimer(remaining)
+		timer := j.newDeadlineTimer(remaining)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C:
+		case <-timer.C():
 		}
 	}
+}
+
+// newDeadlineTimer arms the watchdog's wait on the job's Clock when it can
+// supply timers, so a test that injects a clock controls the deadline too;
+// otherwise it falls back to a real timer.
+func (j SingletonJob) newDeadlineTimer(d time.Duration) Timer {
+	if tc, ok := j.clock().(TimerClock); ok {
+		return tc.NewTimer(d)
+	}
+	return realTimer{time.NewTimer(d)}
 }
 
 var errAuthorityLapsed = errors.New("lease: local authority deadline reached")
