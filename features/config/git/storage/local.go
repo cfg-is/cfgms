@@ -57,6 +57,24 @@ func (s *LocalRepositoryStore) Clone(ctx context.Context, cloneURL, localPath st
 	return nil
 }
 
+// CloneShallow fetches only the tip of the remote's default branch (depth 1, single
+// branch) and does NOT check out the worktree. Callers that must bound the bytes put
+// on disk use it instead of Clone: ctx bounds only the fetch, so the caller sizes the
+// HEAD tree from the object headers and checks it out itself once it fits.
+func (s *LocalRepositoryStore) CloneShallow(ctx context.Context, cloneURL, localPath string) error {
+	_, err := git.PlainCloneContext(ctx, localPath, false, &git.CloneOptions{
+		URL:          cloneURL,
+		Auth:         s.auth,
+		Depth:        1,
+		SingleBranch: true,
+		NoCheckout:   true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to clone repository: %w", err)
+	}
+	return nil
+}
+
 // Pull pulls latest changes from remote
 func (s *LocalRepositoryStore) Pull(ctx context.Context, localPath string) error {
 	repo, err := git.PlainOpen(localPath)

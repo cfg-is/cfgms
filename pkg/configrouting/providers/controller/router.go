@@ -41,6 +41,9 @@ const (
 	// defaultGitOperationTimeout bounds a single git clone or pull so that a remote
 	// that never answers cannot hold a request (or a clone directory) indefinitely.
 	defaultGitOperationTimeout = 2 * time.Minute
+
+	// defaultMaxGitCacheBytes bounds the total on-disk bytes of all cached clones.
+	defaultMaxGitCacheBytes int64 = 4 << 30
 )
 
 // RouterOption configures optional router behaviour.
@@ -52,6 +55,43 @@ func WithGitOperationTimeout(d time.Duration) RouterOption {
 	return func(r *controllerRouter) {
 		if d > 0 {
 			r.gitOpTimeout = d
+		}
+	}
+}
+
+// WithMaxGitCloneBytes sets the per-clone byte limit. Non-positive values keep the default.
+func WithMaxGitCloneBytes(n int64) RouterOption {
+	return func(r *controllerRouter) {
+		if n > 0 {
+			r.maxCloneBytes = n
+		}
+	}
+}
+
+// WithMaxGitCacheBytes sets the total byte budget for all cached clones; least-recently-used
+// clones are evicted when it is exceeded. Non-positive values keep the default.
+func WithMaxGitCacheBytes(n int64) RouterOption {
+	return func(r *controllerRouter) {
+		if n > 0 {
+			r.maxCacheBytes = n
+		}
+	}
+}
+
+// WithMaxGitConfigFileBytes sets the per-file read limit for git-backed config reads.
+func WithMaxGitConfigFileBytes(n int64) RouterOption {
+	return func(r *controllerRouter) {
+		if n > 0 {
+			r.maxFileBytes = n
+		}
+	}
+}
+
+// WithMaxGitListReadBytes sets the total bytes one git-backed config listing may read.
+func WithMaxGitListReadBytes(n int64) RouterOption {
+	return func(r *controllerRouter) {
+		if n > 0 {
+			r.maxListBytes = n
 		}
 	}
 }
@@ -104,6 +144,21 @@ type controllerRouter struct {
 	tenantGitKey    map[string]string // tenantID -> its single live cache key (guarded by gitStoreMu)
 	pendingMu       sync.Mutex
 	pendingRemovals []pendingRemoval
+
+	maxCloneBytes int64
+	maxCacheBytes int64
+	maxFileBytes  int64
+	maxListBytes  int64
+	// gitUsage tracks each live entry's clone bytes and recency for the byte budget
+	// (guarded by gitStoreMu). Stale keys are pruned when the budget is enforced.
+	gitUsage map[string]*gitUsage
+	useSeq   uint64
+}
+
+// gitUsage is the byte-budget bookkeeping for one cached clone.
+type gitUsage struct {
+	bytes   int64
+	lastUse uint64
 }
 
 // NewControllerRouter creates a ConfigSourceRouter that delegates all reads and writes
@@ -150,6 +205,12 @@ func NewControllerRouterWithGit(
 		tenantGitKey: make(map[string]string),
 		inflight:     make(map[string]*gitStoreCall),
 		gitOpTimeout: defaultGitOperationTimeout,
+
+		maxCloneBytes: gitprovider.DefaultMaxCloneBytes,
+		maxCacheBytes: defaultMaxGitCacheBytes,
+		maxFileBytes:  gitprovider.DefaultMaxConfigFileBytes,
+		maxListBytes:  gitprovider.DefaultMaxListReadBytes,
+		gitUsage:      make(map[string]*gitUsage),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -343,6 +404,7 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 	r.drainPendingRemovalsLocked()
 
 	if v, ok := r.gitStoreCache.Get(cacheKey); ok {
+		r.touchUsageLocked(cacheKey)
 		r.unlockAndDrain()
 		return v.(gitStoreEntry).store, nil
 	}
@@ -380,8 +442,16 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 		logger = logging.NewNoopLogger()
 	}
 	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.gitOpTimeout)
-	gs, err := gitprovider.NewGitConfigStore(buildCtx, info, tenantID, r.secretStore, r.gitWorkDir, logger)
+	gs, err := gitprovider.NewGitConfigStore(buildCtx, info, tenantID, r.secretStore, r.gitWorkDir, logger,
+		gitprovider.WithMaxCloneBytes(r.maxCloneBytes),
+		gitprovider.WithMaxConfigFileBytes(r.maxFileBytes),
+		gitprovider.WithMaxListReadBytes(r.maxListBytes),
+	)
 	cancel()
+	var cloneBytes int64
+	if err == nil {
+		cloneBytes = gs.CloneBytes()
+	}
 
 	r.gitStoreMu.Lock()
 	delete(r.inflight, cacheKey)
@@ -402,6 +472,9 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 		}
 		r.tenantGitKey[tenantID] = cacheKey
 		_ = r.gitStoreCache.Set(cacheKey, gitStoreEntry{store: gs, tenantID: tenantID, repoDir: gs.RepoDir()}, gitStoreTTL)
+		r.useSeq++
+		r.gitUsage[cacheKey] = &gitUsage{bytes: cloneBytes, lastUse: r.useSeq}
+		r.enforceByteBudgetLocked(cacheKey)
 		call.store = gs
 	}
 	close(call.done)
@@ -411,6 +484,50 @@ func (r *controllerRouter) storeForSource(ctx context.Context, tenantID string, 
 		return nil, call.err
 	}
 	return call.store, nil
+}
+
+// touchUsageLocked marks key as the most recently used clone. Caller holds gitStoreMu.
+func (r *controllerRouter) touchUsageLocked(key string) {
+	if u, ok := r.gitUsage[key]; ok {
+		r.useSeq++
+		u.lastUse = r.useSeq
+	}
+}
+
+// enforceByteBudgetLocked evicts least-recently-used clones, never keep (the entry just
+// added), until the cached clones fit maxCacheBytes. Eviction goes through the cache so
+// the clone directory is removed by the pending-removal path. Caller holds gitStoreMu.
+func (r *controllerRouter) enforceByteBudgetLocked(keep string) {
+	live := make(map[string]struct{})
+	for _, k := range r.gitStoreCache.Keys() {
+		live[k] = struct{}{}
+	}
+	var total int64
+	for k, u := range r.gitUsage {
+		if _, ok := live[k]; !ok {
+			delete(r.gitUsage, k)
+			continue
+		}
+		total += u.bytes
+	}
+	for total > r.maxCacheBytes {
+		victim := ""
+		var oldest uint64
+		for k, u := range r.gitUsage {
+			if k == keep {
+				continue
+			}
+			if victim == "" || u.lastUse < oldest {
+				victim, oldest = k, u.lastUse
+			}
+		}
+		if victim == "" {
+			return
+		}
+		total -= r.gitUsage[victim].bytes
+		delete(r.gitUsage, victim)
+		r.gitStoreCache.Delete(victim)
+	}
 }
 
 // unlockAndDrain drains queued clone removals, releases gitStoreMu (held by the
@@ -461,7 +578,33 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 	syncCtx, cancel := context.WithTimeout(ctx, r.gitOpTimeout)
 	defer cancel()
 	newSHA, err = gitStore.SyncWithRemote(syncCtx)
-	return prevSHA, newSHA, err
+	if err != nil {
+		return prevSHA, newSHA, err
+	}
+	r.refreshUsageAfterSync(tenantID, info.URL, gitStore)
+	return prevSHA, newSHA, nil
+}
+
+// refreshUsageAfterSync re-measures a synced clone and re-applies the cache byte budget,
+// so a sync that grew the clone is counted against maxCacheBytes. It does nothing when
+// the entry has left the cache (or been replaced) while the sync ran.
+func (r *controllerRouter) refreshUsageAfterSync(tenantID, url string, gs *gitprovider.GitConfigStore) {
+	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(url)))
+	cacheKey := tenantID + ":" + urlHash
+	cloneBytes := gs.CloneBytes()
+
+	r.gitStoreMu.Lock()
+	v, ok := r.gitStoreCache.Get(cacheKey)
+	if entry, isEntry := v.(gitStoreEntry); ok && isEntry && entry.store == gs {
+		if u, tracked := r.gitUsage[cacheKey]; tracked {
+			u.bytes = cloneBytes
+		} else {
+			r.gitUsage[cacheKey] = &gitUsage{bytes: cloneBytes}
+		}
+		r.touchUsageLocked(cacheKey)
+		r.enforceByteBudgetLocked(cacheKey)
+	}
+	r.unlockAndDrain()
 }
 
 // checkCrossTenant returns an error if the context tenant cannot access tenantID's config.

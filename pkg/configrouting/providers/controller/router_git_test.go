@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
@@ -575,15 +576,8 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 	_, _, primeErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	require.NoError(t, primeErr, "initial sync must succeed")
 
-	// Locate the cloned repo directory and corrupt its remote URL so the next pull fails.
-	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(remoteDir)))
-	repoDir := filepath.Join(gitWorkDir, "git-tenant", urlHash)
-	repo, openErr := gogit.PlainOpen(repoDir)
-	require.NoError(t, openErr, "must be able to open the cloned repo")
-	repoCfg, cfgErr := repo.Config()
-	require.NoError(t, cfgErr)
-	repoCfg.Remotes["origin"].URLs = []string{"/nonexistent/broken/remote"}
-	require.NoError(t, repo.SetConfig(repoCfg))
+	// Remove the remote so the next sync fails.
+	require.NoError(t, os.RemoveAll(remoteDir))
 
 	// SyncTenantWithRemote must propagate the pull error — the cached git store is used
 	// directly (no fallback), so the broken remote surfaces as a returned error.
@@ -717,4 +711,110 @@ func TestStoreForSource_CloneDeadlineReturnsErrorAndLeavesNothing(t *testing.T) 
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 10*time.Second, "clone must be bounded by the deadline")
 	assert.Empty(t, dirEntries(t, workDir), "timed-out clone must leave no directory")
+}
+
+// TestStoreForSource_ByteBudgetEvictsLRUAndRemovesClone verifies the total clone byte
+// budget: once exceeded, the least-recently-used clone is evicted and its directory removed.
+func TestStoreForSource_ByteBudgetEvictsLRUAndRemovesClone(t *testing.T) {
+	payload := make([]byte, 64<<10)
+	_, err := rand.Read(payload)
+	require.NoError(t, err)
+
+	tenants := []string{"t1", "t2", "t3"}
+	router, workDir := newGitTestRouter(t, tenants...)
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	urls := map[string]string{}
+	for _, id := range tenants {
+		urls[id] = createBareRepoForRouterTest(t, map[string][]byte{
+			"configs/ns/cfg.yaml": []byte(id + "\n"),
+			"configs/blob.bin":    payload,
+		})
+	}
+
+	// Measure one clone, then budget for two.
+	_, err = router.storeForSource(ctx, "t1", gitInfo(urls["t1"]))
+	require.NoError(t, err)
+	one := router.gitUsage[tenants[0]+":"+fmt.Sprintf("%x", sha256.Sum256([]byte(urls["t1"])))].bytes
+	require.Greater(t, one, int64(64<<10))
+	router.maxCacheBytes = one*2 + one/2
+
+	_, err = router.storeForSource(ctx, "t2", gitInfo(urls["t2"]))
+	require.NoError(t, err)
+	// Touch t1 so t2 is the least recently used.
+	_, err = router.storeForSource(ctx, "t1", gitInfo(urls["t1"]))
+	require.NoError(t, err)
+	_, err = router.storeForSource(ctx, "t3", gitInfo(urls["t3"]))
+	require.NoError(t, err)
+
+	assert.NoDirExists(t, cloneDir(workDir, "t2", urls["t2"]), "LRU clone must be evicted and removed")
+	assert.DirExists(t, cloneDir(workDir, "t1", urls["t1"]))
+	assert.DirExists(t, cloneDir(workDir, "t3", urls["t3"]))
+	assert.Equal(t, 2, router.gitStoreCache.Size())
+}
+
+// pushFileForRouterTest commits content at relPath to the bare remote at remoteDir.
+func pushFileForRouterTest(t *testing.T, remoteDir, relPath string, content []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	work, err := gogit.PlainClone(dir, false, &gogit.CloneOptions{URL: remoteDir})
+	require.NoError(t, err)
+	wt, err := work.Worktree()
+	require.NoError(t, err)
+	full := filepath.Join(dir, filepath.FromSlash(relPath))
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0750))
+	require.NoError(t, os.WriteFile(full, content, 0600))
+	_, err = wt.Add(relPath)
+	require.NoError(t, err)
+	_, err = wt.Commit("update "+relPath, &gogit.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "t@t.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	require.NoError(t, work.Push(&gogit.PushOptions{RemoteName: "origin"}))
+}
+
+// TestSyncTenantWithRemote_SyncGrowthCountsAgainstByteBudget verifies a sync that grows
+// a clone updates its recorded bytes and re-applies the cache byte budget, evicting the
+// least-recently-used other clone.
+func TestSyncTenantWithRemote_SyncGrowthCountsAgainstByteBudget(t *testing.T) {
+	router, workDir := newGitTestRouter(t, "t1", "t2")
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	urls := map[string]string{}
+	for _, id := range []string{"t1", "t2"} {
+		urls[id] = createBareRepoForRouterTest(t, map[string][]byte{"configs/ns/cfg.yaml": []byte(id + "\n")})
+		injectGitSource(router, id, *gitInfo(urls[id]))
+	}
+
+	_, _, err := router.SyncTenantWithRemote(ctx, "t1")
+	require.NoError(t, err)
+	_, _, err = router.SyncTenantWithRemote(ctx, "t2")
+	require.NoError(t, err)
+
+	key2 := "t2:" + fmt.Sprintf("%x", sha256.Sum256([]byte(urls["t2"])))
+	router.gitStoreMu.Lock()
+	before := router.gitUsage[key2].bytes
+	var total int64
+	for _, u := range router.gitUsage {
+		total += u.bytes
+	}
+	router.maxCacheBytes = total + total/2
+	router.gitStoreMu.Unlock()
+
+	payload := make([]byte, 4*int(total))
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+	pushFileForRouterTest(t, urls["t2"], "configs/blob.bin", payload)
+
+	_, _, err = router.SyncTenantWithRemote(ctx, "t2")
+	require.NoError(t, err)
+
+	router.gitStoreMu.Lock()
+	u, ok := router.gitUsage[key2]
+	require.True(t, ok)
+	after := u.bytes
+	router.gitStoreMu.Unlock()
+	assert.Greater(t, after, before+int64(len(payload))/2, "a sync must refresh the clone's recorded bytes")
+	assert.NoDirExists(t, cloneDir(workDir, "t1", urls["t1"]), "the grown clone must push the LRU clone out of the budget")
+	assert.DirExists(t, cloneDir(workDir, "t2", urls["t2"]))
 }
