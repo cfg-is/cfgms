@@ -472,6 +472,17 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 		return fmt.Errorf("gitsync: invalid scope path: %w", err)
 	}
 
+	// ValidateAndCleanPath returns the RESOLVED path, so a link at the scope
+	// directory (e.g. to another scope's checkout inside workDir) is invisible
+	// to an lstat of repoDir. Lstat the unresolved join, and the .git entry,
+	// immediately before the clone/open (Issue #5313).
+	if err := refuseLinkedPath(filepath.Join(s.workDir, sanitizeKey(b.key()))); err != nil {
+		return err
+	}
+	if err := refuseNonDirGitEntry(filepath.Join(repoDir, ".git")); err != nil {
+		return err
+	}
+
 	auth, err := resolveCredentials(ctx, b.CredentialsRef, s.secretStore)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
@@ -764,6 +775,43 @@ func (s *Syncer) AddBinding(b ScopeBinding) error {
 		return err
 	}
 	s.startScope(b)
+	return nil
+}
+
+// refuseLinkedPath fails closed if path is a symlink or reparse point. A
+// non-existent path is allowed so a first clone still works.
+func refuseLinkedPath(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("gitsync: cannot inspect repository path: %w", err)
+	}
+	if fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return fmt.Errorf("gitsync: refusing linked repository path %q", filepath.Base(path))
+	}
+	return nil
+}
+
+// refuseNonDirGitEntry fails closed unless the .git entry is absent or a real
+// directory. A link would point the open at another scope's repository, and so
+// would a regular .git file: go-git follows its "gitdir:" pointer (relative or
+// absolute). Clones made by this package always have a .git directory.
+func refuseNonDirGitEntry(path string) error {
+	if err := refuseLinkedPath(path); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("gitsync: cannot inspect repository path: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("gitsync: refusing non-directory .git entry in repository path")
+	}
 	return nil
 }
 
