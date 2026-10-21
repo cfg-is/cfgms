@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // userConfigDirFn is overridable in tests to avoid touching real user config directories.
@@ -242,12 +243,21 @@ func findBundlePath(bundleEnvVal string) (string, error) {
 	}
 
 	// 4. System path: /etc/cfgms/admin.bundle.yaml (Linux/macOS) or %ProgramData%\cfgms\... (Windows)
-	candidates = append(candidates, systemBundlePathFn())
+	systemPath := systemBundlePathFn()
+	candidates = append(candidates, systemPath)
 
-	for _, p := range candidates {
+	for i, p := range candidates {
 		// #nosec G703 -- candidates are explicit operator CLI/env choices or
 		// platform-owned configuration paths used by this local administrative CLI.
 		if _, statErr := os.Stat(p); statErr == nil {
+			// The system path sits in a location other local users may be able
+			// to write; refuse a bundle that is not owned and guarded by admins
+			// rather than presenting requests to an attacker-chosen controller.
+			if runtime.GOOS == "windows" && i == len(candidates)-1 {
+				if verr := security.VerifyAdminOnlyPath(p); verr != nil {
+					return "", fmt.Errorf("system admin bundle %s is not admin-only: %w", p, verr)
+				}
+			}
 			return p, nil
 		} else if !os.IsNotExist(statErr) {
 			// Surfacing non-NotExist errors (e.g., permission denied) is intentional
