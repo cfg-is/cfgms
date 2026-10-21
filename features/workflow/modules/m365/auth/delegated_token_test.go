@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -267,7 +269,7 @@ func TestGetAccessToken_DelegatedAndDirectBranches(t *testing.T) {
 		assert.Contains(t, err.Error(), "TENANT_MISMATCH")
 	})
 
-	t.Run("opaque token without a tid claim is accepted", func(t *testing.T) {
+	t.Run("opaque token without a tid claim is rejected", func(t *testing.T) {
 		opaque := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"access_token": "opaque-token", "token_type": "Bearer", "expires_in": 3600,
@@ -277,10 +279,30 @@ func TestGetAccessToken_DelegatedAndDirectBranches(t *testing.T) {
 		f.grant("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
 		cfg := f.delegatedConfig("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
 		cfg.AuthorityURL = opaque.URL
+		p.testAuthorityHosts = map[string]bool{hostOf(t, opaque.URL): true}
+		defer func() { p.testAuthorityHosts = nil }()
 		require.NoError(t, store.StoreConfig("cfgms-opaque", cfg))
-		token, err := p.GetAccessToken(ctx, "cfgms-opaque")
-		require.NoError(t, err)
-		assert.Equal(t, "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", token.TenantID)
+		_, err := p.GetAccessToken(ctx, "cfgms-opaque")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TENANT_UNVERIFIABLE")
+	})
+
+	t.Run("non-Microsoft authority host receives no request", func(t *testing.T) {
+		var hits int32
+		evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			http.NotFound(w, r)
+		}))
+		defer evil.Close()
+		f.grant("ffffffff-ffff-ffff-ffff-ffffffffffff")
+		cfg := f.delegatedConfig("ffffffff-ffff-ffff-ffff-ffffffffffff")
+		cfg.AuthorityURL = evil.URL
+		require.NoError(t, store.StoreConfig("cfgms-evil", cfg))
+		_, err := p.GetAccessToken(ctx, "cfgms-evil")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "AUTHORITY_NOT_ALLOWED")
+		assert.NotContains(t, err.Error(), evil.URL)
+		assert.Zero(t, atomic.LoadInt32(&hits))
 	})
 
 	t.Run("incomplete delegated config is refused", func(t *testing.T) {
@@ -486,4 +508,29 @@ func TestPartnerCenterTokenCarriesRequestedScopeWhenResponseOmitsIt(t *testing.T
 	require.NoError(t, err)
 	assert.False(t, storedTokenUsable(&OAuth2Config{}, persisted),
 		"a persisted Partner Center token must never be usable as a Graph token")
+}
+
+func hostOf(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	return u.Hostname()
+}
+
+func TestAuthorityAllowed(t *testing.T) {
+	p := NewOAuth2Provider(newKeyedCredentialStore(), nil, nil)
+	t.Cleanup(p.Close)
+	for authority, want := range map[string]bool{
+		"":                                      true,
+		"https://login.microsoftonline.com/tid": true,
+		"https://login.microsoftonline.us":      true,
+		"https://login.partner.microsoftonline.cn":  true,
+		"http://login.microsoftonline.com/tid":      false,
+		"https://evil.example.com/tid":              false,
+		"https://login.microsoftonline.com.evil.io": false,
+		"https://login.microsoftonline.com@evil.io": false,
+		"not a url": false,
+	} {
+		assert.Equal(t, want, p.authorityAllowed(authority), authority)
+	}
 }
