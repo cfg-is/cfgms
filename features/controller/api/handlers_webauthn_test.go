@@ -1271,6 +1271,8 @@ func TestWebAuthnPresenceFinish_RelayRequestCeremonyMismatch_403(t *testing.T) {
 			count := 0
 			server.presenceTokens.Range(func(_, _ any) bool { count++; return true })
 			assert.Zero(t, count, "a mismatched ceremony must mint no token")
+			_, stillPending := server.webAuthnPresenceSessions.Load(principal.ID)
+			assert.True(t, stillPending, "a refused mismatch must leave the ceremony intact")
 		})
 	}
 }

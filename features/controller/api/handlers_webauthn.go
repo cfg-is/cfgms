@@ -787,6 +787,14 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pending.relayRequestID != r.URL.Query().Get(cliPresenceRequestIDParam) {
+		// The take above is the only read the stores offer, so a refused mismatch puts
+		// the ceremony back: the legitimate finish must still be possible afterwards.
+		if remaining := time.Until(pending.expires); remaining > 0 {
+			if restoreOut := s.putPendingSession(r.Context(), &s.webAuthnPresenceSessions, ceremonyPrefixPresence, principal.ID, pending, remaining); restoreOut != ceremonyOK {
+				s.logger.Warn("Failed to restore presence ceremony after request mismatch",
+					"principal_id", logging.SanitizeLogValue(principal.ID))
+			}
+		}
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"Presence request does not belong to this ceremony", "REQUEST_CEREMONY_MISMATCH")
 		return
