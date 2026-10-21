@@ -538,3 +538,148 @@ func TestSet_AbsentState_NotFound(t *testing.T) {
 		t.Errorf("deleteRule called %d times, want 0", len(exec.deletedRules))
 	}
 }
+
+// mapState is a map-backed ConfigState holding only declared keys, as
+// production configs reach Set.
+type mapState map[string]interface{}
+
+func (m mapState) AsMap() map[string]interface{} { return m }
+func (m mapState) ToYAML() ([]byte, error)       { return yaml.Marshal(map[string]interface{}(m)) }
+func (m mapState) FromYAML(data []byte) error    { return yaml.Unmarshal(data, &m) }
+func (m mapState) Validate() error               { return nil }
+func (m mapState) GetManagedFields() []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func enabledRuleMap(enabled *bool) mapState {
+	m := mapState{
+		"name": "r1", "action": "allow", "direction": "input", "protocol": "tcp",
+		"port": 80, "source": "0.0.0.0/0", "destination": "10.0.0.0/24",
+	}
+	if enabled != nil {
+		m["enabled"] = *enabled
+	}
+	return m
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestSet_EnabledFalse_RemovesInstalledRule(t *testing.T) {
+	exec := newTestExecutor()
+	module := newTestModule(exec)
+	ctx := context.Background()
+
+	if err := module.Set(ctx, "r1", enabledRuleMap(nil)); err != nil {
+		t.Fatalf("Set() apply: %v", err)
+	}
+	applied := len(exec.appliedRules)
+	if err := module.Set(ctx, "r1", enabledRuleMap(boolPtr(false))); err != nil {
+		t.Fatalf("Set() disable: %v", err)
+	}
+	if _, ok := exec.installed["r1"]; ok {
+		t.Error("rule still installed after enabled: false")
+	}
+	if len(exec.deletedRules) != 1 {
+		t.Errorf("deleteRule calls = %d, want 1", len(exec.deletedRules))
+	}
+	if len(exec.appliedRules) != applied {
+		t.Error("applyRule called for a disabled rule")
+	}
+
+	got, err := module.Get(ctx, "r1")
+	if err != nil {
+		t.Fatalf("Get() after disable: %v", err)
+	}
+	cfg := got.(*firewallConfig)
+	if cfg.Enabled == nil || *cfg.Enabled {
+		t.Errorf("Get().Enabled = %v, want false", cfg.Enabled)
+	}
+}
+
+func TestSet_EnabledFalse_NotInstalled_InstallsNothing(t *testing.T) {
+	exec := newTestExecutor()
+	module := newTestModule(exec)
+	if err := module.Set(context.Background(), "r1", enabledRuleMap(boolPtr(false))); err != nil {
+		t.Fatalf("Set(): %v", err)
+	}
+	if len(exec.installed) != 0 || len(exec.appliedRules) != 0 || len(exec.deletedRules) != 0 {
+		t.Errorf("unexpected executor activity: %+v", exec)
+	}
+}
+
+func TestSet_EnabledOmitted_KeepsRuleInstalled(t *testing.T) {
+	exec := newTestExecutor()
+	module := newTestModule(exec)
+	ctx := context.Background()
+	if err := module.Set(ctx, "r1", enabledRuleMap(nil)); err != nil {
+		t.Fatalf("Set(): %v", err)
+	}
+	if _, ok := exec.installed["r1"]; !ok {
+		t.Fatal("rule not installed when enabled omitted")
+	}
+	got, err := module.Get(ctx, "r1")
+	if err != nil {
+		t.Fatalf("Get(): %v", err)
+	}
+	if cfg := got.(*firewallConfig); cfg.Enabled == nil || !*cfg.Enabled {
+		t.Errorf("Get().Enabled = %v, want true", cfg.Enabled)
+	}
+}
+
+func TestSet_FromYAMLWithoutEnabled_ThroughAsMap_KeepsRule(t *testing.T) {
+	exec := newTestExecutor()
+	module := newTestModule(exec)
+	var cfg firewallConfig
+	y := "name: r1\naction: allow\ndirection: input\nprotocol: tcp\nport: 80\nsource: 0.0.0.0/0\ndestination: 10.0.0.0/24\n"
+	if err := cfg.FromYAML([]byte(y)); err != nil {
+		t.Fatalf("FromYAML: %v", err)
+	}
+	if _, has := cfg.AsMap()["enabled"]; has {
+		t.Error("AsMap emitted enabled for an undeclared field")
+	}
+	if err := module.Set(context.Background(), "r1", &cfg); err != nil {
+		t.Fatalf("Set(): %v", err)
+	}
+	if _, ok := exec.installed["r1"]; !ok {
+		t.Error("rule removed although enabled was never declared")
+	}
+}
+
+func TestSet_EnabledFalse_ExecutorErrors_LeaveCacheUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arm  func(e *testFirewallExecutor, err error)
+	}{
+		{"ruleExists", func(e *testFirewallExecutor, err error) { e.existsErr = err }},
+		{"deleteRule", func(e *testFirewallExecutor, err error) { e.deleteErr = err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := newTestExecutor()
+			module := newTestModule(exec)
+			ctx := context.Background()
+			if err := module.Set(ctx, "r1", enabledRuleMap(nil)); err != nil {
+				t.Fatalf("Set() apply: %v", err)
+			}
+			boom := errors.New("boom")
+			tc.arm(exec, boom)
+			if err := module.Set(ctx, "r1", enabledRuleMap(boolPtr(false))); !errors.Is(err, boom) {
+				t.Fatalf("Set() = %v, want boom", err)
+			}
+			exec.existsErr, exec.deleteErr = nil, nil
+			if _, ok := exec.installed["r1"]; !ok {
+				t.Error("rule removed despite error")
+			}
+			got, err := module.Get(ctx, "r1")
+			if err != nil {
+				t.Fatalf("Get(): %v", err)
+			}
+			if cfg := got.(*firewallConfig); cfg.Enabled == nil || !*cfg.Enabled {
+				t.Errorf("Get().Enabled = %v, want true (cache unchanged)", cfg.Enabled)
+			}
+		})
+	}
+}

@@ -42,7 +42,9 @@ type firewallConfig struct {
 	Source      string `yaml:"source"`
 	Destination string `yaml:"destination"`
 	Description string `yaml:"description,omitempty"`
-	Enabled     bool   `yaml:"enabled,omitempty"`
+	// Enabled is nil when the config does not declare it (rule applied); only an
+	// explicit false removes the rule from the host.
+	Enabled *bool `yaml:"enabled,omitempty"`
 	// State signals the desired lifecycle: "present" (default) creates/updates;
 	// "absent" deletes the rule. Not stored in m.rules after application.
 	State string `yaml:"state,omitempty"`
@@ -56,7 +58,10 @@ func (c *firewallConfig) AsMap() map[string]interface{} {
 		"direction":   c.Direction,
 		"source":      c.Source,
 		"destination": c.Destination,
-		"enabled":     c.Enabled,
+	}
+
+	if c.Enabled != nil {
+		result["enabled"] = *c.Enabled
 	}
 
 	if c.Protocol != "" {
@@ -247,7 +252,7 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 		firewallConf.Description = description
 	}
 	if enabled, ok := configMap["enabled"].(bool); ok {
-		firewallConf.Enabled = enabled
+		firewallConf.Enabled = &enabled
 	}
 	if state, ok := configMap["state"].(string); ok {
 		firewallConf.State = state
@@ -274,6 +279,25 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 		return err
 	}
 
+	// Explicit enabled: false — make sure the rule is not active on the host.
+	// Cache is updated only after the host state matches (fail closed).
+	if firewallConf.Enabled != nil && !*firewallConf.Enabled {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		exists, err := m.executor.ruleExists(resourceID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if err := m.executor.deleteRule(*firewallConf); err != nil {
+				return err
+			}
+		}
+		m.rules[resourceID] = *firewallConf
+		return nil
+	}
+
 	// Write-through: apply to OS first, update cache only on success
 	if err := m.executor.applyRule(*firewallConf); err != nil {
 		return err
@@ -287,15 +311,14 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 }
 
 // Get retrieves the current configuration of a firewall rule.
-// It consults the OS executor first: if the rule is absent from the OS,
-// ErrRuleNotFound is returned regardless of m.rules contents.
+// Enabled is reported from the observed host state: true when the rule is
+// installed. An absent rule whose cached config explicitly declares
+// enabled: false is returned with Enabled false; any other absent rule
+// returns ErrRuleNotFound.
 func (m *firewallModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	exists, err := m.executor.ruleExists(resourceID)
 	if err != nil {
 		return nil, err
-	}
-	if !exists {
-		return nil, ErrRuleNotFound
 	}
 
 	m.mu.RLock()
@@ -307,5 +330,15 @@ func (m *firewallModule) Get(ctx context.Context, resourceID string) (modules.Co
 	}
 
 	ruleCopy := rule
-	return &ruleCopy, nil
+	if exists {
+		observed := true
+		ruleCopy.Enabled = &observed
+		return &ruleCopy, nil
+	}
+	if rule.Enabled != nil && !*rule.Enabled {
+		disabled := false
+		ruleCopy.Enabled = &disabled
+		return &ruleCopy, nil
+	}
+	return nil, ErrRuleNotFound
 }
