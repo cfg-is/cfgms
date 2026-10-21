@@ -38,7 +38,7 @@ func TestStewardOperatingModel_CodeDeliveryPermissionsMatchCode(t *testing.T) {
 	required := []string{
 		"config:push", "steward:write-config", "steward:execute-scripts", "script:admin",
 		"module:approve", "terminal:create", "installer:upload", "installer:delete",
-		"installer:publish:steward", "installer:dispatch:steward",
+		"installer:publish:steward", "installer:dispatch:steward", "steward:delete-config", "jobs:write",
 	}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(text[begin+len(codeDeliveryBegin):end], "\n") {

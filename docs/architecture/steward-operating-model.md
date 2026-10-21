@@ -885,6 +885,8 @@ Code-delivery permissions (every `requirePermission` route in `features/controll
 |---|---|---|
 | `config:push` | `routes_config_push.go` | config push |
 | `steward:write-config` | `routes_stewards.go` | steward config update |
+| `steward:delete-config` | `routes_stewards.go` | steward config removal |
+| `jobs:write` | `routes_jobs.go` | rolling config rollout (`CommandSyncConfig` batches) |
 | `steward:execute-scripts` | `routes_runs.go`, `routes_stewards.go` | scripts and commands |
 | `script:admin` | `routes_scripts.go` | script library privilege |
 | `module:approve` | `routes_module_approvals.go` | module bundles |
