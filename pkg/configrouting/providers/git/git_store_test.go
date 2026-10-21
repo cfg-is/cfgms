@@ -20,6 +20,7 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -383,7 +384,7 @@ func TestGitConfigStore_SyncWithRemote(t *testing.T) {
 
 // TestGitConfigStore_PullFailureServesLastGood verifies that a pull error does not
 // evict the last-known-good state — the store must continue serving previously cloned data.
-// The remote origin URL is changed in .git/config to a non-existent path to force failure.
+// The remote is removed after the initial clone to force the sync to fail.
 func TestGitConfigStore_PullFailureServesLastGood(t *testing.T) {
 	const initialContent = "stable: true\n"
 	remoteDir := createBareRemote(t, map[string][]byte{
@@ -395,14 +396,9 @@ func TestGitConfigStore_PullFailureServesLastGood(t *testing.T) {
 	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1", ss, workDir, logging.NewNoopLogger())
 	require.NoError(t, err)
 
-	// Corrupt the origin URL inside .git/config to force a pull failure.
-	// This simulates the remote becoming unreachable after the initial clone.
-	repo, openErr := gogit.PlainOpen(store.repoDir)
-	require.NoError(t, openErr)
-	cfg, cfgErr := repo.Config()
-	require.NoError(t, cfgErr)
-	cfg.Remotes["origin"].URLs = []string{"/nonexistent/broken/remote"}
-	require.NoError(t, repo.SetConfig(cfg))
+	// Remove the remote to force a sync failure: the remote became unreachable after
+	// the initial clone.
+	require.NoError(t, os.RemoveAll(remoteDir))
 
 	_, pullErr := store.SyncWithRemote(context.Background())
 	assert.Error(t, pullErr, "pull to broken remote must fail")
@@ -418,9 +414,9 @@ func TestGitConfigStore_PullFailureServesLastGood(t *testing.T) {
 }
 
 // TestGitConfigStore_NoCredentialLeakedInError asserts that the credential value does
-// not appear in any error returned by SyncWithRemote. The origin URL in .git/config is
-// corrupted to a non-existent path to force a pull failure; the sanitizeCredential
-// function must strip the token from any resulting error message.
+// not appear in any error returned by SyncWithRemote. The remote is removed to force a
+// sync failure; the sanitizeCredential function must strip the token from any
+// resulting error message.
 func TestGitConfigStore_NoCredentialLeakedInError(t *testing.T) {
 	const secretToken = "super-secret-token-12345"
 
@@ -440,15 +436,9 @@ func TestGitConfigStore_NoCredentialLeakedInError(t *testing.T) {
 	store, err := NewGitConfigStore(context.Background(), source, "tenant1", ss, workDir, logging.NewNoopLogger())
 	require.NoError(t, err)
 
-	// Corrupt the origin URL in .git/config to a non-existent path.
-	// The pull will fail; our sanitizeCredential must ensure the error message
-	// does not contain the credential value even if go-git embeds it.
-	repo, openErr := gogit.PlainOpen(store.repoDir)
-	require.NoError(t, openErr)
-	gitCfg, cfgErr := repo.Config()
-	require.NoError(t, cfgErr)
-	gitCfg.Remotes["origin"].URLs = []string{"/nonexistent/broken/" + secretToken + "/path"}
-	require.NoError(t, repo.SetConfig(gitCfg))
+	// Remove the remote so the sync fails; sanitizeCredential must ensure the error
+	// message does not contain the credential value even if go-git embeds it.
+	require.NoError(t, os.RemoveAll(remoteDir))
 
 	_, pullErr := store.SyncWithRemote(context.Background())
 	require.Error(t, pullErr, "SyncWithRemote to a broken origin must return an error")
@@ -1136,4 +1126,120 @@ func TestGitConfigStore_ListTotalReadLimit(t *testing.T) {
 	assert.ErrorIs(t, err, ErrConfigReadTooLarge)
 	assert.Nil(t, entries)
 	assert.NotContains(t, err.Error(), store.RepoDir())
+}
+
+// TestGitConfigStore_SyncOverLimitKeepsLastKnownGood: a remote that grows past the
+// clone limit after the first clone must not be fetched into place by a sync. The
+// sync fails with ErrCloneTooLarge, the previous clone keeps serving, and no staging
+// directory is left behind.
+func TestGitConfigStore_SyncOverLimitKeepsLastKnownGood(t *testing.T) {
+	const limit = 100 << 10
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "incompressible push", payload: randomBytes(t, 600<<10)},
+		{name: "compressible push", payload: make([]byte, 8<<20)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteDir := createBareRemote(t, map[string][]byte{"configs/ns/a.yaml": []byte("v: 1\n")})
+			workDir := t.TempDir()
+			store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+				newMemorySecretStore(nil), workDir, logging.NewNoopLogger(), WithMaxCloneBytes(limit))
+			require.NoError(t, err)
+			before, err := store.GetCurrentSHA()
+			require.NoError(t, err)
+
+			addCommitToRemote(t, remoteDir, "configs/ns/a.yaml", []byte("v: 2\n"))
+			addCommitToRemote(t, remoteDir, "configs/big.bin", tc.payload)
+
+			sha, err := store.SyncWithRemote(context.Background())
+			require.ErrorIs(t, err, ErrCloneTooLarge)
+			assert.Empty(t, sha)
+			assert.NotContains(t, err.Error(), workDir)
+
+			after, err := store.GetCurrentSHA()
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "an over-limit sync must not move HEAD")
+			entry, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{TenantID: "tenant1", Namespace: "ns", Name: "a"})
+			require.NoError(t, err)
+			assert.Equal(t, "v: 1\n", string(entry.Data), "last-known-good content must keep serving")
+			assert.NoFileExists(t, filepath.Join(store.RepoDir(), "configs", "big.bin"))
+			assert.LessOrEqual(t, store.CloneBytes(), int64(limit))
+
+			entries, readErr := os.ReadDir(filepath.Dir(store.RepoDir()))
+			require.NoError(t, readErr)
+			require.Len(t, entries, 1, "the refused sync must leave no staging or retired directory")
+			assert.Equal(t, filepath.Base(store.RepoDir()), entries[0].Name())
+		})
+	}
+}
+
+// TestGitConfigStore_SyncIsShallowAndReplacesClone: a successful sync swaps in a depth-1
+// clone of the new HEAD and leaves no staging or retired directory.
+func TestGitConfigStore_SyncIsShallowAndReplacesClone(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{"configs/ns/a.yaml": []byte("v: 1\n")})
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+		newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	addCommitToRemote(t, remoteDir, "configs/ns/a.yaml", []byte("v: 2\n"))
+	addCommitToRemote(t, remoteDir, "configs/ns/a.yaml", []byte("v: 3\n"))
+	sha, err := store.SyncWithRemote(context.Background())
+	require.NoError(t, err)
+
+	repo, err := gogit.PlainOpen(store.RepoDir())
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(plumbing.NewHash(sha))
+	require.NoError(t, err)
+	_, parentErr := commit.Parent(0)
+	assert.Error(t, parentErr, "a synced clone must be shallow: the parent commit is not fetched")
+
+	entry, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{TenantID: "tenant1", Namespace: "ns", Name: "a"})
+	require.NoError(t, err)
+	assert.Equal(t, "v: 3\n", string(entry.Data))
+
+	entries, err := os.ReadDir(filepath.Dir(store.RepoDir()))
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "a successful sync must leave no staging or retired directory")
+}
+
+// TestGitConfigStore_SyncConcurrentWithReads: reads running while syncs swap the clone
+// in place never observe a missing clone.
+func TestGitConfigStore_SyncConcurrentWithReads(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{"configs/ns/a.yaml": []byte("v: 1\n")})
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1",
+		newMemorySecretStore(nil), t.TempDir(), logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	readErrs := make(chan error, 1)
+	go func() {
+		defer close(readErrs)
+		key := &cfgconfig.ConfigKey{TenantID: "tenant1", Namespace: "ns", Name: "a"}
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if _, err := store.GetConfig(context.Background(), key); err != nil {
+				readErrs <- err
+				return
+			}
+			if _, err := store.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant1"}); err != nil {
+				readErrs <- err
+				return
+			}
+		}
+	}()
+	for i := 0; i < 5; i++ {
+		_, err := store.SyncWithRemote(context.Background())
+		require.NoError(t, err)
+	}
+	close(done)
+	for err := range readErrs {
+		require.NoError(t, err, "reads must not fail while a sync swaps the clone")
+	}
 }

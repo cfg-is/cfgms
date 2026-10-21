@@ -578,7 +578,33 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 	syncCtx, cancel := context.WithTimeout(ctx, r.gitOpTimeout)
 	defer cancel()
 	newSHA, err = gitStore.SyncWithRemote(syncCtx)
-	return prevSHA, newSHA, err
+	if err != nil {
+		return prevSHA, newSHA, err
+	}
+	r.refreshUsageAfterSync(tenantID, info.URL, gitStore)
+	return prevSHA, newSHA, nil
+}
+
+// refreshUsageAfterSync re-measures a synced clone and re-applies the cache byte budget,
+// so a sync that grew the clone is counted against maxCacheBytes. It does nothing when
+// the entry has left the cache (or been replaced) while the sync ran.
+func (r *controllerRouter) refreshUsageAfterSync(tenantID, url string, gs *gitprovider.GitConfigStore) {
+	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(url)))
+	cacheKey := tenantID + ":" + urlHash
+	cloneBytes := gs.CloneBytes()
+
+	r.gitStoreMu.Lock()
+	v, ok := r.gitStoreCache.Get(cacheKey)
+	if entry, isEntry := v.(gitStoreEntry); ok && isEntry && entry.store == gs {
+		if u, tracked := r.gitUsage[cacheKey]; tracked {
+			u.bytes = cloneBytes
+		} else {
+			r.gitUsage[cacheKey] = &gitUsage{bytes: cloneBytes}
+		}
+		r.touchUsageLocked(cacheKey)
+		r.enforceByteBudgetLocked(cacheKey)
+	}
+	r.unlockAndDrain()
 }
 
 // checkCrossTenant returns an error if the context tenant cannot access tenantID's config.

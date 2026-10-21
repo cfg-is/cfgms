@@ -43,6 +43,11 @@ const (
 
 	// cloneWatchInterval is how often the clone directory size is sampled mid-clone.
 	cloneWatchInterval = 20 * time.Millisecond
+
+	// syncStagingSuffix names the sibling directory a sync clones into before swapping.
+	syncStagingSuffix = ".sync"
+	// syncRetiredSuffix names the sibling directory the replaced clone is moved to.
+	syncRetiredSuffix = ".old"
 )
 
 var (
@@ -95,9 +100,16 @@ func WithMaxListReadBytes(n int64) StoreOption {
 type GitConfigStore struct {
 	source      *pkgconfig.ConfigSourceInfo
 	tenantID    string
+	workDir     string
 	repoDir     string
 	secretStore secretsiface.SecretStore
 	logger      logging.Logger
+
+	// dirMu guards the clone directory: readers hold it shared, and SyncWithRemote holds
+	// it exclusively only while swapping a freshly synced clone into repoDir.
+	dirMu sync.RWMutex
+	// syncMu serializes SyncWithRemote calls so they never share a staging directory.
+	syncMu sync.Mutex
 
 	maxCloneBytes int64
 	maxFileBytes  int64
@@ -155,6 +167,7 @@ func NewGitConfigStore(
 	s := &GitConfigStore{
 		source:      source,
 		tenantID:    tenantID,
+		workDir:     workDir,
 		repoDir:     repoDir,
 		secretStore: secretStore,
 		logger:      logger,
@@ -364,7 +377,11 @@ func dirSize(dir string) int64 {
 }
 
 // CloneBytes returns the on-disk size of this store's clone.
-func (s *GitConfigStore) CloneBytes() int64 { return dirSize(s.repoDir) }
+func (s *GitConfigStore) CloneBytes() int64 {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
+	return dirSize(s.repoDir)
+}
 
 // RepoDir returns the clone directory of this store.
 func (s *GitConfigStore) RepoDir() string { return s.repoDir }
@@ -450,11 +467,19 @@ func evalDeepestExisting(p string) string {
 	}
 }
 
-// SyncWithRemote pulls latest changes from the remote. On success it returns the
-// post-pull HEAD SHA. On failure the store continues serving the previously cloned
-// state (last-known-good); the error is logged with sanitized fields and returned.
-// Error messages never contain credential material.
+// SyncWithRemote fetches the remote's current HEAD and, on success, returns its SHA.
+//
+// A sync is held to the same limits as the first clone: it makes a fresh shallow
+// single-branch clone into a staging directory beside the clone (cloneWithLimit: the
+// size watcher cancels the fetch past maxCloneBytes and the HEAD tree is sized before
+// it is checked out), and only a clone that fits is swapped into place. On any failure
+// — including ErrCloneTooLarge — the staging directory is removed and the store keeps
+// serving the previously cloned state (last-known-good); the error is logged with
+// sanitized fields and returned. Error messages never contain credential material.
 func (s *GitConfigStore) SyncWithRemote(ctx context.Context) (string, error) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+
 	username, password, err := s.fetchCredential(ctx)
 	if err != nil {
 		category := categorizeError(err)
@@ -466,35 +491,114 @@ func (s *GitConfigStore) SyncWithRemote(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	staging := s.repoDir + syncStagingSuffix
+	if err := s.removeSibling(staging); err != nil {
+		password = "" //nolint:ineffassign // zeroize before return
+		return "", fmt.Errorf("sync: failed to clear staging directory: %w", err)
+	}
+	if err := os.MkdirAll(staging, 0750); err != nil {
+		password = "" //nolint:ineffassign // zeroize before return
+		return "", fmt.Errorf("sync: failed to create staging directory: %w", err)
+	}
+
 	localStore := gitstorage.NewLocalRepositoryStore(username, password)
-	pullErr := localStore.Pull(ctx, s.repoDir)
-	if pullErr != nil {
-		stripped := sanitizeCredential(pullErr, password)
+	cloneErr := s.cloneWithLimit(ctx, localStore, staging)
+	if cloneErr != nil {
+		stripped := sanitizeCredential(cloneErr, password)
 		password = "" //nolint:ineffassign // zeroize before warn/return
-		category := categorizeError(stripped)
+		if errors.Is(cloneErr, ErrCloneTooLarge) {
+			stripped = ErrCloneTooLarge
+		}
+		s.discardStaging(staging)
 		s.logger.Warn("git-store: sync pull failed",
 			"tenant_id", logging.SanitizeLogValue(s.tenantID),
 			"url", logging.SanitizeLogValue(s.source.URL),
-			"error_category", category,
+			"error_category", categorizeError(stripped),
 		)
 		return "", stripped
 	}
 	password = "" //nolint:ineffassign // zeroize after success
 
-	repo, openErr := gogit.PlainOpen(s.repoDir)
-	if openErr != nil {
-		return "", fmt.Errorf("sync: failed to open repo after pull: %w", openErr)
+	sha, err := headSHA(staging)
+	if err != nil {
+		s.discardStaging(staging)
+		return "", fmt.Errorf("sync: failed to read HEAD of synced clone: %w", err)
 	}
-	head, headErr := repo.Head()
-	if headErr != nil {
-		return "", fmt.Errorf("sync: failed to get HEAD after pull: %w", headErr)
+	if err := s.swapInClone(staging); err != nil {
+		s.discardStaging(staging)
+		return "", fmt.Errorf("sync: failed to replace clone: %w", err)
+	}
+	return sha, nil
+}
+
+// headSHA returns the HEAD commit SHA of the clone in dir.
+func headSHA(dir string) (string, error) {
+	repo, err := gogit.PlainOpen(dir)
+	if err != nil {
+		return "", err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return "", err
 	}
 	return head.Hash().String(), nil
+}
+
+// swapInClone replaces repoDir with the clone in staging. Readers are excluded only for
+// the two renames; when the second rename fails the original clone is restored.
+func (s *GitConfigStore) swapInClone(staging string) error {
+	retired := s.repoDir + syncRetiredSuffix
+	if err := s.removeSibling(retired); err != nil {
+		return err
+	}
+
+	s.dirMu.Lock()
+	if err := os.Rename(s.repoDir, retired); err != nil {
+		s.dirMu.Unlock()
+		return err
+	}
+	if err := os.Rename(staging, s.repoDir); err != nil {
+		restoreErr := os.Rename(retired, s.repoDir)
+		s.dirMu.Unlock()
+		if restoreErr != nil {
+			return errors.Join(err, restoreErr)
+		}
+		return err
+	}
+	s.dirMu.Unlock()
+
+	if err := s.removeSibling(retired); err != nil && s.logger != nil {
+		s.logger.Warn("git-store: failed to remove replaced clone directory",
+			"tenant_id", logging.SanitizeLogValue(s.tenantID),
+			"error_category", categorizeError(err),
+		)
+	}
+	return nil
+}
+
+// removeSibling removes a sync staging or retired directory if it exists.
+func (s *GitConfigStore) removeSibling(dir string) error {
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		return nil
+	}
+	return RemoveCloneDir(s.workDir, dir)
+}
+
+// discardStaging removes a failed sync's staging directory, logging a removal failure.
+func (s *GitConfigStore) discardStaging(staging string) {
+	if err := s.removeSibling(staging); err != nil && s.logger != nil {
+		s.logger.Warn("git-store: failed to remove sync staging directory",
+			"tenant_id", logging.SanitizeLogValue(s.tenantID),
+			"error_category", categorizeError(err),
+		)
+	}
 }
 
 // GetCurrentSHA returns the HEAD commit SHA of the local clone.
 // Returns an empty string (not an error) when the repository has no commits yet.
 func (s *GitConfigStore) GetCurrentSHA() (string, error) {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
 	repo, err := gogit.PlainOpen(s.repoDir)
 	if err != nil {
 		return "", fmt.Errorf("get current SHA: failed to open repo: %w", err)
@@ -513,6 +617,8 @@ func (s *GitConfigStore) GetCurrentSHA() (string, error) {
 
 // GetConfig reads the config file at <repoDir>/<subPath>/<namespace>/<name>.yaml.
 func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
 	relPath, err := s.keyToRelativePath(key)
 	if err != nil {
 		return nil, err
@@ -525,7 +631,7 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 
 	// Refuse an oversized file before reading it.
 	if size, sizeErr := s.lstatSize(relPath); sizeErr == nil && size > s.maxFileBytes {
-		s.logOversize("get", relPath)
+		s.logOversize("get")
 		return nil, ErrConfigFileTooLarge
 	}
 
@@ -537,7 +643,7 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
 	if int64(len(data)) > s.maxFileBytes {
-		s.logOversize("get", relPath)
+		s.logOversize("get")
 		return nil, ErrConfigFileTooLarge
 	}
 
@@ -564,15 +670,15 @@ func (s *GitConfigStore) lstatSize(relPath string) (int64, error) {
 	return info.Size(), nil
 }
 
-// logOversize records a refused read; only the repository-relative name is logged.
-func (s *GitConfigStore) logOversize(op, relPath string) {
+// logOversize records a refused read; only the operation and tenant are logged
+// (no file name, since key-derived paths may name secret entries).
+func (s *GitConfigStore) logOversize(op string) {
 	if s.logger == nil {
 		return
 	}
 	s.logger.Warn("git-store: refused over-limit config file",
 		"tenant_id", logging.SanitizeLogValue(s.tenantID),
 		"operation", op,
-		"file", logging.SanitizeLogValue(relPath),
 	)
 }
 
@@ -581,6 +687,8 @@ func (s *GitConfigStore) logOversize(op, relPath string) {
 // if the filter names a different tenant than this store holds — matching the scoping
 // behaviour of the flatfile and database providers.
 func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
 	base := s.repoDir
 	if s.source.SubPath != "" {
 		var err error
@@ -637,11 +745,11 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 			return nil
 		}
 		if info.Size() > s.maxFileBytes {
-			s.logOversize("list", relativePath)
+			s.logOversize("list")
 			return ErrConfigFileTooLarge
 		}
 		if totalRead+info.Size() > s.maxListBytes {
-			s.logOversize("list", relativePath)
+			s.logOversize("list")
 			return ErrConfigReadTooLarge
 		}
 		data, readErr := configRoot.ReadFile(relativePath)
@@ -650,7 +758,7 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		}
 		totalRead += int64(len(data))
 		if int64(len(data)) > s.maxFileBytes {
-			s.logOversize("list", relativePath)
+			s.logOversize("list")
 			return ErrConfigFileTooLarge
 		}
 		if totalRead > s.maxListBytes {
@@ -716,6 +824,8 @@ func (s *GitConfigStore) headCommitFile(relPath string) (commit *object.Commit, 
 // GetConfigHistory returns the history of the config file. Clones are shallow, so the
 // history holds at most one entry: the HEAD commit, when it contains the file.
 func (s *GitConfigStore) GetConfigHistory(_ context.Context, key *cfgconfig.ConfigKey, limit int) ([]*cfgconfig.ConfigEntry, error) {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
 	relPath, err := s.keyToRelativePath(key)
 	if err != nil {
 		return nil, err
@@ -743,6 +853,8 @@ func (s *GitConfigStore) GetConfigHistory(_ context.Context, key *cfgconfig.Conf
 // GetConfigVersion returns the config file content at a version. version is 1-indexed
 // (1 = HEAD). Clones are shallow, so only version 1 exists.
 func (s *GitConfigStore) GetConfigVersion(_ context.Context, key *cfgconfig.ConfigKey, version int64) (*cfgconfig.ConfigEntry, error) {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
 	if version < 1 {
 		return nil, fmt.Errorf("version must be >= 1, got %d", version)
 	}
@@ -761,7 +873,7 @@ func (s *GitConfigStore) GetConfigVersion(_ context.Context, key *cfgconfig.Conf
 		return nil, cfgconfig.ErrConfigNotFound
 	}
 	if file.Size > s.maxFileBytes {
-		s.logOversize("version", relPath)
+		s.logOversize("version")
 		return nil, ErrConfigFileTooLarge
 	}
 	content, err := file.Contents()
@@ -799,6 +911,8 @@ func (s *GitConfigStore) ValidateConfig(_ context.Context, config *cfgconfig.Con
 
 // GetConfigStats computes basic stats by walking the repo directory.
 func (s *GitConfigStore) GetConfigStats(_ context.Context) (*cfgconfig.ConfigStats, error) {
+	s.dirMu.RLock()
+	defer s.dirMu.RUnlock()
 	stats := &cfgconfig.ConfigStats{
 		ConfigsByTenant:    make(map[string]int64),
 		ConfigsByFormat:    make(map[string]int64),
