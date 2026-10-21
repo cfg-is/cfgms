@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -462,4 +463,39 @@ func TestTenantReadScope_StoreErrorFailsClosed(t *testing.T) {
 	})
 	assert.False(t, ok)
 	assertCrossingChallenge(t, rec, "msp-r")
+}
+
+// TestAuthorizeFleetTargets_RefusesTenantlessTarget guards Issue #5344: one
+// steward with no tenant refuses the whole target set with the unreachable-steward
+// 404 for every caller type, even when the other targets are allowed.
+func TestAuthorizeFleetTargets_RefusesTenantlessTarget(t *testing.T) {
+	logger := &captureAllLogger{}
+	server := readScopeFixture(t, logger)
+
+	cases := []struct {
+		name      string
+		principal *Principal
+		scope     ctxkeys.TenantScope
+		allowed   string
+	}{
+		{"root", &Principal{ID: "bootstrap", GlobalScope: true, CertSerial: "01"}, ctxkeys.NewRootScope(), "msp-r"},
+		{"boundary-subject root", boundRootOperator("fleet-op"), ctxkeys.NewRootScope(), testRootTenantID},
+		{"tenant-scoped", &Principal{ID: "t", TenantID: "msp-r"}, ctxkeys.NewTenantScope("msp-r"), "client-r"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			okTargets := []fleet.StewardResult{{ID: "ok-1", TenantID: tc.allowed}}
+			req := readRequest(tc.principal, tc.scope)
+			require.True(t, server.authorizeFleetTargets(httptest.NewRecorder(), req, okTargets, readRoute),
+				"control: the allowed target alone must pass")
+
+			targets := append(okTargets, fleet.StewardResult{ID: "tenantless-" + tc.name, Hostname: "secret-host"})
+			rec := httptest.NewRecorder()
+			assert.False(t, server.authorizeFleetTargets(rec, req, targets, readRoute))
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+			assert.Contains(t, rec.Body.String(), "STEWARD_NOT_FOUND")
+			assert.Contains(t, logger.captured(), "tenantless-"+tc.name)
+			assert.NotContains(t, logger.captured(), "secret-host")
+		})
+	}
 }

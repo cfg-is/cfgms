@@ -990,3 +990,22 @@ func TestHandleListJobs_PaginationOffsetLimit(t *testing.T) {
 	require.True(t, ok)
 	assert.Len(t, page2, 1, "offset=2 must return the remaining 1 job")
 }
+
+// TestHandleCreateJob_TenantlessSteward_Returns404 guards Issue #5344: a selector
+// that matches a steward with no tenant is refused with 404 and creates no job.
+func TestHandleCreateJob_TenantlessSteward_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+	// Registration requires a tenant; clear it afterwards to model a record that has none.
+	stewardID := registerActiveSteward(t, server.controllerService, "job-tenantless", "client-1")
+	require.NoError(t, server.controllerService.UpdateStewardTenant(stewardID, ""))
+
+	rec := postCreateJob(server, `{"selector":"all","batch_size":3}`)
+	require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "STEWARD_NOT_FOUND")
+
+	jobs, err := store.ListBatchJobs(context.Background(), "", 100, 0)
+	require.NoError(t, err)
+	assert.Empty(t, jobs, "no job may be created")
+}
