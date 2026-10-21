@@ -39,20 +39,6 @@ func (b *blockingFlushBackend) Flush() error {
 	return b.Backend.Flush()
 }
 
-// slowFlushBackend wraps a real Backend and delays every Flush by a fixed
-// duration before delegating, so a maintenance cycle's wall-clock time can be
-// driven past the lease TTL — the condition RunIfLeader's background renewal
-// exists to survive.
-type slowFlushBackend struct {
-	Backend
-	delay time.Duration
-}
-
-func (b *slowFlushBackend) Flush() error {
-	time.Sleep(b.delay)
-	return b.Backend.Flush()
-}
-
 // manualClock is a lease.Clock whose time moves only when the test advances
 // it. It lets a test drive node-a's renewal ticker and retry backoff by
 // explicit events, so the renewal-outage property does not depend on how fast
@@ -368,34 +354,50 @@ func (s *transientErrorLeaseStore) AcquireOrRenew(ctx context.Context, name, hol
 // store on node-a's first mid-cycle renewal call must not cost node-a the
 // lease outright: renewWithRetry (pkg/lease/singleton.go) must retry within
 // Manager's MaxAllowedRenewalLatency budget before giving up. Before that
-// retry existed, renewWhileRunning gave up on the very first error and
-// node-b ran; this reproduces that starvation deterministically, with no
-// dependency on real wall-clock scheduling delays.
+// retry existed, renewWhileRunning gave up on the very first error, cancelled
+// node-a's context and stopped renewing, and node-b ran once the lease lapsed.
+//
+// Time is controlled, not slept (Issue #5228): node-a's lease manager runs on a
+// manualClock and its cycle is held in Flush by a channel, so the renewal tick
+// and the retry backoff fire only when the test advances time, and the cycle
+// ends only when the test releases it. Node-b probes after every renewal call
+// node-a makes. No wall-clock duration decides the verdict, so a slow runner
+// cannot change it.
 func TestManager_MaintenanceLease_TransientRenewalError_DoesNotLoseLease(t *testing.T) {
 	ttl := 2 * time.Second
 	renew := 200 * time.Millisecond
 
+	type renewalEvent struct {
+		n      int32
+		failed bool
+	}
+	events := make(chan renewalEvent, 64)
+
 	realStore := pkgtesting.SetupTestLeaseStore(t)
 	// Fail node-a's second AcquireOrRenew call: call #1 is RunIfLeader's
-	// initial TryAcquire, call #2 is the first mid-cycle renewal tick.
-	flakyStore := &transientErrorLeaseStore{LeaseStore: realStore, holderID: "node-a", callNumber: 2}
+	// initial TryAcquire, call #2 is the first mid-cycle renewal tick, call #3
+	// is its retry and succeeds.
+	flakyStore := &transientErrorLeaseStore{
+		LeaseStore: realStore, holderID: "node-a", callNumber: 2,
+		afterCall: func(n int32, failed bool) { events <- renewalEvent{n: n, failed: failed} },
+	}
 
-	mgrAManager, err := lease.NewManager(flakyStore, ttl, renew, renew)
+	clockA := newManualClock()
+	mgrAManager, err := lease.NewManagerWithClock(flakyStore, ttl, renew, renew, clockA)
 	require.NoError(t, err)
 	mgrBManager, err := lease.NewManager(realStore, ttl, renew, renew)
 	require.NoError(t, err)
 
-	leaseJobA, err := lease.NewSingletonJob(mgrAManager, "dna-storage-maintenance-flaky-test", "node-a", ttl, renew, nil)
+	const name = "dna-storage-maintenance-flaky-test"
+	leaseJobA, err := lease.NewSingletonJob(mgrAManager, name, "node-a", ttl, renew, nil)
 	require.NoError(t, err)
-	leaseJobB, err := lease.NewSingletonJob(mgrBManager, "dna-storage-maintenance-flaky-test", "node-b", ttl, renew, nil)
+	leaseJobB, err := lease.NewSingletonJob(mgrBManager, name, "node-b", ttl, renew, nil)
 	require.NoError(t, err)
 
-	// Same 1.5x-TTL slow cycle as the scheduling-based reproduction above —
-	// the transient error is injected deterministically by call count, not
-	// by timing, so node-a's cycle length only needs to outlast one renewal
-	// tick for the injected failure to land mid-cycle.
+	blocking := &blockingFlushBackend{started: make(chan struct{}), release: make(chan struct{})}
 	mgrA := newMaintenanceLeaseManager(t, func(real Backend) Backend {
-		return &slowFlushBackend{Backend: real, delay: ttl + ttl/2}
+		blocking.Backend = real
+		return blocking
 	})
 	mgrA.SetMaintenanceLease(leaseJobA)
 
@@ -403,32 +405,66 @@ func TestManager_MaintenanceLease_TransientRenewalError_DoesNotLoseLease(t *test
 	mgrB.SetMaintenanceLease(leaseJobB)
 
 	var nodeBAttempts int32
-	stopProbing := make(chan struct{})
-	probeDone := make(chan struct{})
+	probeB := func() {
+		mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+			atomic.AddInt32(&nodeBAttempts, 1)
+			mgrB.runMaintenance()
+		})
+	}
+
+	runCtxCh := make(chan context.Context, 1)
+	var ctxErrAfterCycle error
+	doneA := make(chan bool, 1)
 	go func() {
-		defer close(probeDone)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopProbing:
-				return
-			case <-ticker.C:
-				mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
-					atomic.AddInt32(&nodeBAttempts, 1)
-					mgrB.runMaintenance()
-				})
-			}
-		}
+		doneA <- mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(runCtx context.Context) {
+			runCtxCh <- runCtx
+			mgrA.runMaintenance()
+			ctxErrAfterCycle = runCtx.Err()
+		})
 	}()
 
-	ranA := mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
-		mgrA.runMaintenance()
-	})
-	close(stopProbing)
-	<-probeDone
+	runCtx := <-runCtxCh
+	<-blocking.started
+	<-events // the initial TryAcquire
 
+	// waitRegistered blocks until node-a's renewal goroutine is waiting on the
+	// clock (its ticker, or a retry backoff), or reports false if node-a gave
+	// up and cancelled its run context instead.
+	waitRegistered := func() bool {
+		select {
+		case <-clockA.registered:
+			return true
+		case <-runCtx.Done():
+			return false
+		}
+	}
+
+	// First renewal tick (fails), then the retry backoff (succeeds), then one
+	// further regular tick to show renewal carries on after the error.
+	stillRenewing := waitRegistered()
+	if stillRenewing {
+		clockA.advance(renew)
+		ev := <-events
+		probeB()
+		assert.True(t, ev.failed, "the first mid-cycle renewal is the injected failure")
+		if stillRenewing = waitRegistered(); stillRenewing {
+			clockA.advanceToNextAfter()
+			ev = <-events
+			probeB()
+			assert.False(t, ev.failed, "the retry after the transient error succeeds")
+			clockA.advance(renew)
+			ev = <-events
+			probeB()
+			assert.False(t, ev.failed, "renewal continues after the transient error")
+		}
+	}
+	close(blocking.release)
+	ranA := <-doneA
+
+	assert.True(t, stillRenewing, "node-a must retry rather than give up on a single transient error")
 	assert.True(t, ranA)
+	assert.NoError(t, ctxErrAfterCycle,
+		"node-a's context must not be cancelled by a single transient renewal error")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&nodeBAttempts),
 		"a single transient renewal-store error must not cost node-a the lease")
 }
