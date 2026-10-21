@@ -891,6 +891,13 @@ The controller can send commands to stewards over the gRPC control plane service
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
+**Operator-signed execution of inline commands.** `POST /api/v1/runs/command` runs an inline command only under an operator proof over the envelope (content, shell, targets, nonce, expiry). It accepts exactly one of two proofs; a request with both or neither is refused with `INVALID_SIGNATURE`:
+
+- an **X.509** operator signature (request key `signature`), which `cfg` produces with the operator signing certificate;
+- a **WebAuthn** operator proof (request key `webauthn`), which the web console produces with a fresh, per-action passkey tap: `POST /api/v1/operator-payload/sign/begin` resolves the selector into frozen targets and issues the challenge, and `sign/finish` returns the assertion. The controller verifies it over the envelope for any number of targets, requires the credential to belong to the authenticated principal, bounds the expiry by `operatorpayload.ActionEnvelopeMaxTTL`, and attaches the per-steward roster manifest to each queued command. The assertion is forwarded intact; the controller never re-signs it.
+
+Each steward re-verifies the proof it receives. Under `requireSignedAdhoc` the dispatcher sends a command only when it carries the full `signature_*` set or the full `webauthn_*` set (including `webauthn_manifest`).
+
 #### Steward Actions in the Execution Queue
 
 A steward action (verb, target kind, target name, parameters) travels the same

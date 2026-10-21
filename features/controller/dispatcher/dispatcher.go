@@ -630,6 +630,23 @@ func (d *Dispatcher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneT
 	return controlplaneTypes.SignCommand(cmd, d.signer)
 }
 
+// Operator-credential keys of an inline command: the X.509 set or the WebAuthn set
+// (which includes the per-steward roster manifest the steward verifies it against).
+var (
+	adhocX509Keys     = actionX509Keys
+	adhocWebAuthnKeys = append(append([]string{}, actionWebAuthnKeys...), "webauthn_manifest")
+	adhocEnvelopeKeys = append(append(append([]string{}, adhocX509Keys...), adhocWebAuthnKeys...), "nonce", "expires_at")
+)
+
+func hasParams(params map[string]interface{}, keys []string) bool {
+	for _, key := range keys {
+		if _, ok := params[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // sendCommand builds and transmits a CommandExecuteScript via the control plane.
 func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *script.QueuedExecution, prepared *script.PreparedExecution) error {
 	content := prepared.ScriptContent
@@ -647,7 +664,7 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		"script_content": encodedContent,
 		"shell":          string(exec.Shell),
 	}
-	for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key", "nonce", "expires_at"} {
+	for _, key := range adhocEnvelopeKeys {
 		if value, ok := exec.Metadata[key].(string); ok && value != "" {
 			params[key] = value
 		}
@@ -659,10 +676,11 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		params["targets"] = targets
 	}
 	if d.requireSignedAdhoc && exec.ScriptRef == "" {
-		for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key"} {
-			if _, ok := params[key]; !ok {
-				return fmt.Errorf("signed ad-hoc execution missing %s", key)
-			}
+		// Exactly the credential the operator presented must be complete: the full
+		// X.509 set or the full WebAuthn set (roster manifest included). A partial
+		// set of either is refused.
+		if !hasParams(params, adhocX509Keys) && !hasParams(params, adhocWebAuthnKeys) {
+			return fmt.Errorf("signed ad-hoc execution missing a complete operator credential")
 		}
 	}
 

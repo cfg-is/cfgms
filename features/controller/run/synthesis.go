@@ -45,6 +45,30 @@ func (c *CommandSignature) HasProof() bool {
 	return x509 || webauthn
 }
 
+// validateWebAuthn refuses a signature that carries only part of the WebAuthn set, and
+// a complete WebAuthn signature for which some device has no roster manifest.
+func (c *CommandSignature) validateWebAuthn(devices []fleet.StewardResult, manifests map[string]string) error {
+	fields := []string{c.WebAuthnAuthenticatorData, c.WebAuthnClientDataJSON, c.WebAuthnSignature, c.WebAuthnCredentialID}
+	set := 0
+	for _, f := range fields {
+		if f != "" {
+			set++
+		}
+	}
+	if set == 0 && c.WebAuthnManifest == "" {
+		return nil
+	}
+	if set != len(fields) {
+		return errors.New("incomplete webauthn operator proof")
+	}
+	for _, device := range devices {
+		if manifests[device.ID] == "" {
+			return fmt.Errorf("no webauthn manifest for device %s", device.ID)
+		}
+	}
+	return nil
+}
+
 // SynthesizeScriptRun resolves matching devices from the fleet and creates a
 // RunRecord plus one JobRecord per device, each backed by a QueuedExecution.
 // It returns the new run ID so callers can redirect to GET /runs/{run_id}.
@@ -212,13 +236,18 @@ func SynthesizeCommandRun(
 		return "", fmt.Errorf("synthesize command run: fleet search: %w", err)
 	}
 	return SynthesizeCommandRunForDevices(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
-		inlineContent, shell, params, commandSignature, targets, nonce, expiresAt)
+		inlineContent, shell, params, commandSignature, nil, targets, nonce, expiresAt)
 }
 
 // SynthesizeCommandRunForDevices is SynthesizeCommandRun over an already-resolved
 // device list: the caller that authorized exactly these devices dispatches
 // exactly these devices, with no second fleet search in between (Issue #4554).
 // filter is recorded on the run for display only.
+//
+// manifests maps a device ID to the WebAuthn roster manifest that device verifies a
+// WebAuthn commandSignature against; it is unused for an X.509 signature. A WebAuthn
+// signature with no manifest for some device, or a signature carrying a partial
+// WebAuthn set, is refused before anything is written.
 func SynthesizeCommandRunForDevices(
 	ctx context.Context,
 	manager *Manager,
@@ -230,10 +259,16 @@ func SynthesizeCommandRunForDevices(
 	shell scriptmodule.ShellType,
 	params map[string]string,
 	commandSignature *CommandSignature,
+	manifests map[string]string,
 	targets []string,
 	nonce string,
 	expiresAt time.Time,
 ) (string, error) {
+	if commandSignature != nil {
+		if err := commandSignature.validateWebAuthn(devices, manifests); err != nil {
+			return "", fmt.Errorf("synthesize command run: %w", err)
+		}
+	}
 	filter.TenantID = tenantID
 
 	runID := uuid.New().String()
@@ -286,6 +321,17 @@ func SynthesizeCommandRunForDevices(
 			metadata["signature_algorithm"] = commandSignature.Algorithm
 			metadata["signature_value"] = commandSignature.Value
 			metadata["signature_public_key"] = commandSignature.PublicKey
+			for key, value := range map[string]string{
+				"webauthn_authenticator_data": commandSignature.WebAuthnAuthenticatorData,
+				"webauthn_client_data_json":   commandSignature.WebAuthnClientDataJSON,
+				"webauthn_signature":          commandSignature.WebAuthnSignature,
+				"webauthn_credential_id":      commandSignature.WebAuthnCredentialID,
+				"webauthn_manifest":           manifests[device.ID],
+			} {
+				if value != "" {
+					metadata[key] = value
+				}
+			}
 			metadata["targets"] = targets
 			metadata["nonce"] = nonce
 			metadata["expires_at"] = expiresAt.UTC().Format(time.RFC3339)

@@ -16,10 +16,22 @@
  * Destructive-action confirm gate (AC): the Run button only fires after the
  * user sees the resolved steward count and explicitly clicks "Confirm run" —
  * matching the PushPanel pattern (cfg-overlay/cfg-modal).
+ *
+ * "Run command" mode runs an inline ad-hoc command. The admin's passkey signs the
+ * envelope (content, shell, resolved targets, nonce, expiry) through signContent; the
+ * passkey prompt is the per-action tap, preceded by a confirm step showing the resolved
+ * target count and the content. The proof and begin's envelope fields are posted
+ * unchanged to POST /api/v1/runs/command.
  */
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import SelectorInput from '../shell/SelectorInput.tsx'
+import {
+  ControlHttpError,
+  NoPasskeyError,
+  SignCancelledError,
+  signContent,
+} from '../fleet/signAction.ts'
 import { useRunStatus, useRunJobs, type ScriptMetadata } from './useScripts.ts'
 
 interface RunPanelProps {
@@ -31,6 +43,21 @@ interface ConfirmState {
   targetCount: number
   selector: string
   params: Record<string, string>
+}
+
+interface CommandConfirmState {
+  targetCount: number
+  content: string
+  shell: string
+  decide: (ok: boolean) => void
+}
+
+const COMMAND_SHELLS = ['bash', 'sh', 'powershell', 'pwsh', 'cmd']
+
+function utf8ToBase64(text: string): string {
+  let binary = ''
+  for (const b of new TextEncoder().encode(text)) binary += String.fromCharCode(b)
+  return btoa(binary)
 }
 
 function runStatusTone(status: string): string {
@@ -51,6 +78,10 @@ function runStatusTone(status: string): string {
 const RUN_TERMINAL_SET = new Set(['completed', 'failed', 'cancelled'])
 
 export default function RunPanel({ script, onClose }: RunPanelProps) {
+  const [mode, setMode] = useState<'script' | 'command'>('script')
+  const [commandText, setCommandText] = useState('')
+  const [commandShell, setCommandShell] = useState('bash')
+  const [commandConfirm, setCommandConfirm] = useState<CommandConfirmState | null>(null)
   const [selector, setSelector] = useState('')
   const [params, setParams] = useState<Record<string, string>>(() =>
     Object.fromEntries(script.parameters.map((p) => [p.name, '']))
@@ -151,6 +182,69 @@ export default function RunPanel({ script, onClose }: RunPanelProps) {
     }
   }
 
+  async function handleRunCommand() {
+    const target = selector.trim()
+    if (!target || !commandText.trim()) {
+      setRunError('Selector and command are required')
+      return
+    }
+    setRunning(true)
+    setRunError(null)
+    setActiveRunId(null)
+    try {
+      const content = utf8ToBase64(commandText)
+      const proof = await signContent(
+        target,
+        content,
+        commandShell,
+        (envelope) =>
+          new Promise<boolean>((decide) =>
+            setCommandConfirm({
+              targetCount: envelope.targets.length,
+              content: commandText,
+              shell: commandShell,
+              decide,
+            }),
+          ),
+      )
+      const response = await apiFetch('/api/v1/runs/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target,
+          content,
+          shell: commandShell,
+          targets: proof.targets,
+          nonce: proof.nonce,
+          expires_at: proof.expires_at,
+          webauthn: proof.webauthn,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(`Run failed — ${response.status}`)
+      }
+      const result = (await response.json()) as Record<string, unknown>
+      const data = result?.data as Record<string, unknown> | undefined
+      setActiveRunId((data?.run_id as string) || null)
+    } catch (cause: unknown) {
+      if (cause instanceof SignCancelledError) {
+        setRunError('Passkey prompt cancelled — nothing was run')
+      } else if (cause instanceof NoPasskeyError) {
+        setRunError('No passkey is registered for this account')
+      } else if (cause instanceof ControlHttpError) {
+        setRunError(`Signing failed — ${cause.status}`)
+      } else {
+        setRunError(cause instanceof Error && cause.message ? cause.message : 'Run failed')
+      }
+    } finally {
+      setCommandConfirm(null)
+      setRunning(false)
+    }
+  }
+
+  const canRunCommand =
+    selector.trim().length > 0 && commandText.trim().length > 0 && !running && !activeRunId
+
   const canResolve = selector.trim().length > 0 && !resolving
   const canRequestRun =
     selector.trim().length > 0 &&
@@ -161,6 +255,27 @@ export default function RunPanel({ script, onClose }: RunPanelProps) {
   return (
     <div className="cfg-push-panel" data-testid="run-panel">
       <div className="cfg-push-form">
+        <div className="cfg-push-actions">
+          <button
+            type="button"
+            className={mode === 'script' ? 'cfg-btn' : 'cfg-btn-secondary'}
+            aria-pressed={mode === 'script'}
+            onClick={() => setMode('script')}
+            data-testid="mode-script-btn"
+          >
+            Run script
+          </button>
+          <button
+            type="button"
+            className={mode === 'command' ? 'cfg-btn' : 'cfg-btn-secondary'}
+            aria-pressed={mode === 'command'}
+            onClick={() => setMode('command')}
+            data-testid="mode-command-btn"
+          >
+            Run command
+          </button>
+        </div>
+
         <div className="cfg-push-row">
           <div className="cfg-push-field">
             <span className="cfg-push-label">Target selector</span>
@@ -179,7 +294,38 @@ export default function RunPanel({ script, onClose }: RunPanelProps) {
           </div>
         </div>
 
-        {script.parameters.length > 0 && (
+        {mode === 'command' && (
+          <div className="cfg-push-row">
+            <div className="cfg-push-field">
+              <span className="cfg-push-label">Shell</span>
+              <select
+                aria-label="Shell"
+                value={commandShell}
+                onChange={(e) => setCommandShell(e.target.value)}
+                data-testid="command-shell"
+              >
+                {COMMAND_SHELLS.map((sh) => (
+                  <option key={sh} value={sh}>
+                    {sh}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="cfg-push-field">
+              <span className="cfg-push-label">Command</span>
+              <textarea
+                aria-label="Command"
+                className="wide mono2"
+                rows={4}
+                value={commandText}
+                onChange={(e) => setCommandText(e.target.value)}
+                data-testid="command-content"
+              />
+            </div>
+          </div>
+        )}
+
+        {mode === 'script' && script.parameters.length > 0 && (
           <div className="cfg-push-row">
             {script.parameters.map((p) => (
               <div key={p.name} className="cfg-push-field">
@@ -224,15 +370,27 @@ export default function RunPanel({ script, onClose }: RunPanelProps) {
             </span>
           )}
 
-          <button
-            type="button"
-            className="cfg-btn"
-            disabled={!canRequestRun}
-            onClick={handleRequestRun}
-            data-testid="run-btn"
-          >
-            Run script
-          </button>
+          {mode === 'script' ? (
+            <button
+              type="button"
+              className="cfg-btn"
+              disabled={!canRequestRun}
+              onClick={handleRequestRun}
+              data-testid="run-btn"
+            >
+              Run script
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="cfg-btn"
+              disabled={!canRunCommand}
+              onClick={handleRunCommand}
+              data-testid="run-command-btn"
+            >
+              Sign and run command
+            </button>
+          )}
 
           <button
             type="button"
@@ -295,6 +453,53 @@ export default function RunPanel({ script, onClose }: RunPanelProps) {
           </div>
         )}
       </div>
+
+      {commandConfirm !== null && (
+        <div
+          className="cfg-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="run-command-confirm-title"
+        >
+          <div className="cfg-modal">
+            <h3 id="run-command-confirm-title">Confirm command run</h3>
+            <div className="cfg-modal-count" data-testid="run-command-confirm-count">
+              {commandConfirm.targetCount} steward{commandConfirm.targetCount !== 1 ? 's' : ''} will
+              execute this command
+            </div>
+            <p>
+              Shell: <code>{commandConfirm.shell}</code>
+            </p>
+            <pre className="mono2" data-testid="run-command-confirm-content">
+              {commandConfirm.content}
+            </pre>
+            <p>You will be asked to confirm with your passkey. Proceed?</p>
+            <div className="cfg-modal-actions">
+              <button
+                type="button"
+                className="cfg-btn-secondary"
+                onClick={() => {
+                  commandConfirm.decide(false)
+                  setCommandConfirm(null)
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cfg-btn-danger"
+                onClick={() => {
+                  commandConfirm.decide(true)
+                  setCommandConfirm(null)
+                }}
+                data-testid="run-command-confirm-btn"
+              >
+                Confirm and sign
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirm !== null && (
         <div

@@ -379,6 +379,45 @@ func TestDispatcherPublicBetaContractPreservesBothSignatureLayers(t *testing.T) 
 	assert.Equal(t, "operator-certificate", sent.Command.Params["signature_public_key"])
 }
 
+func TestDispatcherSignedAdhocForwardsWebAuthnSet(t *testing.T) {
+	queue := newTestQueue(t, nil)
+	controlPlane := &testControlPlane{}
+	dispatcher, err := New(&Config{
+		Queue: queue, ControlPlane: controlPlane, Signer: testCommandSigner{},
+		RequireSignedAdhoc: true, Logger: logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	full := map[string]interface{}{
+		"webauthn_authenticator_data": "YXV0aA==",
+		"webauthn_client_data_json":   "Y2xpZW50",
+		"webauthn_signature":          "c2ln",
+		"webauthn_credential_id":      "Y3JlZA==",
+		"webauthn_manifest":           "bWFuaWZlc3Q=",
+		"nonce":                       "n1",
+		"expires_at":                  "2026-10-21T10:00:00Z",
+	}
+	execution := &script.QueuedExecution{ExecutionID: "exec-webauthn", Shell: script.ShellBash, Metadata: full}
+	require.NoError(t, dispatcher.sendCommand(context.Background(), "steward-1", execution, &script.PreparedExecution{ScriptContent: "hostname"}))
+	require.Len(t, controlPlane.sent, 1)
+	for key, want := range full {
+		assert.Equal(t, want, controlPlane.sent[0].Command.Params[key], key)
+	}
+
+	for _, missing := range []string{"webauthn_authenticator_data", "webauthn_client_data_json", "webauthn_signature", "webauthn_credential_id", "webauthn_manifest"} {
+		partial := map[string]interface{}{}
+		for k, v := range full {
+			if k != missing {
+				partial[k] = v
+			}
+		}
+		exec := &script.QueuedExecution{ExecutionID: "exec-partial", Shell: script.ShellBash, Metadata: partial}
+		err := dispatcher.sendCommand(context.Background(), "steward-1", exec, &script.PreparedExecution{ScriptContent: "hostname"})
+		require.Error(t, err, "set missing %s must be refused", missing)
+	}
+	assert.Len(t, controlPlane.sent, 1, "partial sets must not be sent")
+}
+
 // ----------------------------------------------------------------------------
 // Acceptance-criteria tests
 // ----------------------------------------------------------------------------
