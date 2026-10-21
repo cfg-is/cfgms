@@ -762,7 +762,9 @@ func TestGetTimeline_SameAsPeerLookedUpOncePerCall(t *testing.T) {
 	}
 
 	var count atomic.Int64
-	p.db = sql.OpenDB(&entityIndexCounter{inner: p.db.Driver(), dsn: "file:" + path, count: &count})
+	origDB := p.db
+	t.Cleanup(func() { _ = origDB.Close() })
+	p.db = sql.OpenDB(&entityIndexCounter{inner: origDB.Driver(), dsn: "file:" + path, count: &count})
 	t.Cleanup(func() { _ = p.db.Close() })
 
 	r.TenantFilter, r.TenantSubtreeIDs = "msp-a", []string{"client-1"}
