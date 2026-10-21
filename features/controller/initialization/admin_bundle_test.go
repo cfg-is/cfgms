@@ -28,7 +28,7 @@ import (
 // cert.Manager pointing at the same storage path for direct IsRevoked checks.
 func setupInitializedController(t *testing.T) (*testControllerSetup, func()) {
 	t.Helper()
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()

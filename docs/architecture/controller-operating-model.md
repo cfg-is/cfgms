@@ -61,6 +61,20 @@ On normal startup (without `--init`), the server checks for the marker before lo
 - **No marker but CA files exist** — legacy installation from before the init guard was introduced. The server auto-creates a marker with `storage_provider: unknown-legacy` and the existing CA's fingerprint, then proceeds normally
 - **No marker and no CA files** — refuse to start with `ErrNotInitialized`, directing the operator to run `controller --init --config <path>`
 
+### Windows Data Tree Ownership (Issue #5220)
+
+On Windows the CA private key, every issued private key and the root admin bundle live under `%ProgramData%\cfgms`. Unix file modes have no effect there, so the controller locks the tree itself with `security.AdoptAdminOnlyDir`:
+
+- **Required owner:** `BUILTIN\Administrators` (or SYSTEM).
+- **Required DACL:** protected from inheritance, granting access only to `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators`. `BUILTIN\Users` and other principals have no access.
+- **Locked directories:** the fixed base `%ProgramData%\cfgms`, the certificate storage directory, the CA directory and the admin bundle directory.
+- **Confined to the base:** locking rewrites the owner and DACL of every entry below a directory, so `certificate.ca_path`, its parent directory and the directory of `admin_bundle_path` must be absolute paths inside `%ProgramData%\cfgms`. A relative path, or one outside that base (for example a user profile or a shared folder), is refused with `ErrDataDirOutsideBase` before any directory is changed, and the controller does not start. Move such paths under `%ProgramData%\cfgms`.
+- **When:** `%ProgramData%\cfgms` is locked on every controller start before the config file is located or read; the configured directories are locked before anything reads them, by `--init` before any key or bundle is written, and by `bootstrap-admin` before any operation reads the CA.
+- **Adoption:** entries owned by an individual member of local Administrators (what Windows creates for an administrator's own files) are taken over and become owned by `BUILTIN\Administrators`; each adopted path is logged.
+- **Fail closed:** an entry owned by any other principal is refused with `ErrUntrustedDirOwner`, never taken over, and the controller does not start. Linux and macOS are unaffected.
+
+**Operators of existing Windows controllers:** until this change the CA key, issued private keys and the root admin bundle inherited the default `%ProgramData%` ACL and were readable by standard local users. Treat them as exposed: rotate the CA and every admin credential after upgrading.
+
 ### Normal Startup
 
 After initialization, the controller starts normally. If required infrastructure is missing (no CA, no storage, no config), **the controller refuses to start and reports what is wrong** — it does not attempt to regenerate or self-heal.

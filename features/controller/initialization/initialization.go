@@ -11,6 +11,7 @@ package initialization
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -29,6 +30,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/openbao" // register OpenBao provider for cluster CA
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
@@ -40,6 +42,109 @@ type Result struct {
 	CAFingerprint   string
 	StorageProvider string
 	InitializedAt   time.Time
+}
+
+// ErrDataDirOutsideBase is returned by AdoptControllerDataTree when a configured
+// CA, certificate storage or admin bundle directory is not an absolute path
+// inside the fixed controller base directory (ControllerBaseDir). Adoption
+// rewrites the owner and DACL of a whole tree, so it is only ever applied to
+// the directory cfgms owns, never to an arbitrary operator-chosen location.
+var ErrDataDirOutsideBase = errors.New("controller data directory must be an absolute path inside the controller base directory")
+
+// ControllerBaseDir returns the fixed controller base directory on Windows,
+// %ProgramData%\cfgms (C:\ProgramData\cfgms when ProgramData is unset).
+func ControllerBaseDir() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms")
+}
+
+// controllerDataDirs returns the directories AdoptControllerDataTree locks, outer
+// first: the certificate storage directory and the CA directory (derived from
+// certificate.ca_path) and the admin bundle directory (derived from
+// admin_bundle_path, or the default bundle path when unset). Every directory
+// must be absolute and equal to base or inside it; otherwise nothing is
+// returned and the error wraps ErrDataDirOutsideBase. foldCase compares paths
+// case-insensitively, as Windows resolves them.
+func controllerDataDirs(cfg *config.Config, base string, foldCase bool) ([]string, error) {
+	if !filepath.IsAbs(base) {
+		return nil, fmt.Errorf("controller base directory %q: %w", base, ErrDataDirOutsideBase)
+	}
+	type dataDir struct{ setting, path string }
+	var dirs []dataDir
+	if cfg.Certificate != nil && cfg.Certificate.CAPath != "" {
+		caPath := filepath.Clean(cfg.Certificate.CAPath)
+		dirs = append(dirs,
+			dataDir{"certificate.ca_path (parent directory)", filepath.Dir(caPath)},
+			dataDir{"certificate.ca_path", caPath})
+	}
+	bundlePath := cfg.AdminBundlePath
+	if bundlePath == "" {
+		bundlePath = defaultAdminBundlePath()
+	}
+	dirs = append(dirs, dataDir{"admin_bundle_path (directory)", filepath.Dir(filepath.Clean(bundlePath))})
+
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if !filepath.IsAbs(d.path) || !pathWithin(base, d.path, foldCase) {
+			return nil, fmt.Errorf("%s %q is not inside %q: %w", d.setting, d.path, base, ErrDataDirOutsideBase)
+		}
+		out = append(out, d.path)
+	}
+	return out, nil
+}
+
+// pathWithin reports whether path is base or lies below it. Both are cleaned;
+// with foldCase the comparison ignores case.
+func pathWithin(base, path string, foldCase bool) bool {
+	base, path = filepath.Clean(base), filepath.Clean(path)
+	if foldCase {
+		base, path = strings.ToLower(base), strings.ToLower(path)
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// AdoptControllerDataTree locks the controller data tree (certificate storage
+// directory, CA directory and admin bundle directory) to SYSTEM and
+// BUILTIN\Administrators with security.AdoptAdminOnlyDir. Entries owned by a
+// member of local Administrators are adopted; entries owned by any other
+// principal are refused with security.ErrUntrustedDirOwner. The directories are
+// adopted outer first and the first error is returned.
+//
+// Adoption rewrites the owner and DACL of every entry below each directory, so
+// every directory must be an absolute path inside ControllerBaseDir. If any is
+// not, nothing is changed and an error wrapping ErrDataDirOutsideBase is
+// returned. It is a no-op outside Windows.
+func AdoptControllerDataTree(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("configuration is required to secure the controller data directory")
+	}
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	// Validate every directory before mutating any of them.
+	dirs, err := controllerDataDirs(cfg, ControllerBaseDir(), true)
+	if err != nil {
+		return err
+	}
+
+	logger := logging.ForComponent("controller")
+	for _, dir := range dirs {
+		adopted, err := security.AdoptAdminOnlyDir(dir)
+		for _, p := range adopted {
+			logger.Info("Adopted controller data path", "path", logging.SanitizeLogValue(p))
+		}
+		if err != nil {
+			return fmt.Errorf("secure controller data directory %s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 // Run performs first-run initialization of the controller.
@@ -117,6 +222,12 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 
 	// Step 2: Create CA and certificates
 	logger.Info("Creating Certificate Authority...", "ca_path", caPath)
+
+	// Lock the data tree to SYSTEM and Administrators before any key or bundle
+	// is written. Fails closed on an untrusted owner. No-op outside Windows.
+	if err := AdoptControllerDataTree(cfg); err != nil {
+		return nil, fmt.Errorf("failed to secure controller data directory: %w", err)
+	}
 
 	// Ensure CA directory exists
 	if err := os.MkdirAll(caPath, 0700); err != nil {

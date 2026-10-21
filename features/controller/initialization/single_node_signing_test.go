@@ -143,7 +143,7 @@ func TestSingleNodeSigningKeyStore_SOPSFlatfileRoundTrip(t *testing.T) {
 }
 
 func TestRun_SingleNodeCreatesNoSigningCertificate(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	cfg := makeTestConfig(t, tempDir, caDir, filepath.Join(tempDir, "admin.bundle.yaml"))
 
