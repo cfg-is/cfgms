@@ -88,6 +88,31 @@ func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillPushRecords adds the authorized-target column to a pre-existing
+// push_records table. Existing rows read back with no targets, so a pending
+// push written before the column existed is failed on resume. Idempotent.
+func backfillPushRecords(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "push_records")
+	if err != nil {
+		return fmt.Errorf("sqlite: push record back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	present, err := columnExists(ctx, db, "push_records", "target_steward_ids")
+	if err != nil {
+		return fmt.Errorf("sqlite: push record back-fill column probe failed: %w", err)
+	}
+	if present {
+		return nil
+	}
+	const ddl = `ALTER TABLE push_records ADD COLUMN target_steward_ids TEXT NOT NULL DEFAULT ''`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("sqlite: push_records back-fill failed: %w\nSQL: %s", err, ddl)
+	}
+	return nil
+}
+
 // backfillTenantCrossings adds the reason-category and approval columns to a
 // pre-existing tenant_crossings table (existing rows read back as approved with an
 // empty category) and clears the principal on grant rows, which name none. Idempotent.
@@ -654,6 +679,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillTenantCrossings(ctx, db); err != nil {
 		return err
 	}
+	if err := backfillPushRecords(ctx, db); err != nil {
+		return err
+	}
 	if err := backfillNodeRegistryColumns(ctx, db); err != nil {
 		return err
 	}
@@ -986,6 +1014,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			status       TEXT NOT NULL,
 			initiated_by TEXT NOT NULL,
 			data         BLOB NOT NULL,
+			target_steward_ids TEXT NOT NULL DEFAULT '',
 			created_at   TEXT NOT NULL,
 			updated_at   TEXT NOT NULL
 		)`,

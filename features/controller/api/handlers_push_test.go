@@ -788,6 +788,36 @@ func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	assert.Empty(t, pending, "no in_progress records should remain after successful delivery")
 }
 
+// TestHandleConfigPush_RecordCarriesTargetedStewardIDs verifies that the push
+// record persisted by handleConfigPush names exactly the stewards it targeted,
+// so a resumed push can be scoped to them. A steward in another tenant is
+// registered and must not appear.
+func TestHandleConfigPush_RecordCarriesTargetedStewardIDs(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	payload := validPushPayload()
+	targetID := registerActiveSteward(t, server.controllerService, "targets-dna-1", payload.TenantID)
+	otherID := registerActiveSteward(t, server.controllerService, "targets-dna-2", payload.TenantID+"-other")
+	require.NotEqual(t, targetID, otherID)
+	cp.wg.Add(1)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	cp.wg.Wait()
+	pushStore.waitForStatusUpdate(t)
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	record, err := pushStore.GetPush(context.Background(), resp.PushID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{targetID}, record.TargetStewardIDs,
+		"push record must carry exactly the targeted steward IDs")
+}
+
 // TestHandleConfigPush_PersistenceStatusFailed verifies that when the fan-out goroutine
 // fails for all targeted stewards, the push record status is updated to failed.
 func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {

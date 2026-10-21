@@ -391,3 +391,36 @@ func TestDatabaseProvider_CreatePushStore(t *testing.T) {
 		_ = s.Close()
 	}
 }
+
+// TestDatabasePushStore_TargetStewardIDsRoundTrip verifies the authorized target
+// set survives CreatePush and is returned by GetPendingPushes, GetPush and
+// ListPushesByConfigID; a record without targets reads back empty.
+func TestDatabasePushStore_TargetStewardIDsRoundTrip(t *testing.T) {
+	store := newTestPushStore(t)
+	ctx := context.Background()
+
+	rec := testPushRecord("push-tg-1", "cfg-tg", "tenant-tg")
+	rec.TargetStewardIDs = []string{"steward-a", "steward-b"}
+	require.NoError(t, store.CreatePush(ctx, rec))
+	require.NoError(t, store.CreatePush(ctx, testPushRecord("push-tg-2", "cfg-tg-2", "tenant-tg")))
+
+	pending, err := store.GetPendingPushes(ctx)
+	require.NoError(t, err)
+	byID := map[string]*business.PushRecord{}
+	for _, p := range pending {
+		byID[p.ID] = p
+	}
+	require.Contains(t, byID, "push-tg-1")
+	require.Contains(t, byID, "push-tg-2")
+	assert.Equal(t, []string{"steward-a", "steward-b"}, byID["push-tg-1"].TargetStewardIDs)
+	assert.Empty(t, byID["push-tg-2"].TargetStewardIDs)
+
+	got, err := store.GetPush(ctx, "push-tg-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"steward-a", "steward-b"}, got.TargetStewardIDs)
+
+	listed, err := store.ListPushesByConfigID(ctx, "cfg-tg", "tenant-tg")
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, []string{"steward-a", "steward-b"}, listed[0].TargetStewardIDs)
+}

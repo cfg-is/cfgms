@@ -54,6 +54,12 @@ type PushRecord struct {
 	// Data is the full StewardConfiguration JSON blob for replay.
 	Data []byte
 
+	// TargetStewardIDs is the set of steward IDs the push was authorized for
+	// when it was created. A resumed push delivers only to this set; a record
+	// with none stored (including records written before this field existed)
+	// is failed on resume rather than fanned out fleet-wide.
+	TargetStewardIDs []string
+
 	// CreatedAt is the time the push record was created.
 	CreatedAt time.Time
 
