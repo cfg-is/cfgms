@@ -952,3 +952,63 @@ func TestSyncFailsClosedWhenOriginRemoteMissing(t *testing.T) {
 	assert.Error(t, syncer.TriggerSync(ctx, binding))
 	requireNoEntry(t, store, "a")
 }
+
+func TestSyncScopeRefusesLinkedRepoDirAndRecovers(t *testing.T) {
+	bareA, _, _ := newTestRepo(t, map[string]string{"a.yaml": "a: 1\n"})
+	bareB, _, _ := newTestRepo(t, map[string]string{"b.yaml": "b: 1\n"})
+
+	syncer, store, bindings, workDir := newTestSyncerWithWorkDir(t)
+	bindA := gitsync.ScopeBinding{TenantPath: "root/tenant-a", Namespace: "policies", OriginURL: bareA, Branch: "main"}
+	bindB := gitsync.ScopeBinding{TenantPath: "root/tenant-b", Namespace: "policies", OriginURL: bareB, Branch: "main"}
+	require.NoError(t, bindings.Add(bindA))
+	require.NoError(t, bindings.Add(bindB))
+	ctx := context.Background()
+
+	require.NoError(t, syncer.TriggerSync(ctx, bindB))
+	dirA := filepath.Join(workDir, "root_tenant-a_policies")
+	dirB := filepath.Join(workDir, "root_tenant-b_policies")
+	headB := runGit(t, dirB, "rev-parse", "HEAD")
+
+	requireNoImportForA := func() {
+		_, err := store.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root/tenant-a", Namespace: "policies", Name: "b"})
+		assert.Error(t, err, "A must not import B's configs")
+		_, err = store.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root/tenant-a", Namespace: "policies", Name: "a"})
+		assert.Error(t, err, "nothing may be imported for A")
+	}
+
+	// (a) repository directory is a link to B's checkout.
+	require.NoError(t, os.Symlink(dirB, dirA))
+	err := syncer.TriggerSync(ctx, bindA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "linked repository path")
+	requireNoImportForA()
+	assert.Equal(t, headB, runGit(t, dirB, "rev-parse", "HEAD"))
+	require.NoError(t, os.Remove(dirA))
+
+	// (b) only the .git entry is a link to B's .git.
+	require.NoError(t, os.Mkdir(dirA, 0750))
+	require.NoError(t, os.Symlink(filepath.Join(dirB, ".git"), filepath.Join(dirA, ".git")))
+	err = syncer.TriggerSync(ctx, bindA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "linked repository path")
+	requireNoImportForA()
+	assert.Equal(t, headB, runGit(t, dirB, "rev-parse", "HEAD"))
+
+	// (c) .git is a regular file with a gitdir pointer to B's .git.
+	require.NoError(t, os.Remove(filepath.Join(dirA, ".git")))
+	for _, gitdir := range []string{filepath.Join(dirB, ".git"), "../root_tenant-b_policies/.git"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dirA, ".git"), []byte("gitdir: "+gitdir+"\n"), 0600))
+		err = syncer.TriggerSync(ctx, bindA)
+		require.Error(t, err, "gitdir pointer %q must be refused", gitdir)
+		assert.Contains(t, err.Error(), "non-directory .git entry")
+		requireNoImportForA()
+		assert.Equal(t, headB, runGit(t, dirB, "rev-parse", "HEAD"))
+	}
+
+	// Links removed: the scope is not wedged.
+	require.NoError(t, os.Remove(filepath.Join(dirA, ".git")))
+	require.NoError(t, os.Remove(dirA))
+	require.NoError(t, syncer.TriggerSync(ctx, bindA))
+	_, err = store.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root/tenant-a", Namespace: "policies", Name: "a"})
+	require.NoError(t, err)
+}
