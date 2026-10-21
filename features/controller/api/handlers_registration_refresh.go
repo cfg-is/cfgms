@@ -1020,11 +1020,6 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if entry.Status != business.PendingRefreshStatusPending {
-		s.writeStatusError(w, http.StatusConflict, "refresh request is not in pending state")
-		return
-	}
-
 	// Cross-tenant: a scoped caller may only approve refreshes within their tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers only; a root caller passes authorizeTenantAccess below, refused as 404 like every other outcome
@@ -1054,6 +1049,13 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
 			return
 		}
+	}
+
+	// Authorization above runs before the status check so an unauthorized caller
+	// gets the same 404 for an entry in any status (Issue #5315).
+	if entry.Status != business.PendingRefreshStatusPending {
+		s.writeStatusError(w, http.StatusConflict, "refresh request is not in pending state")
+		return
 	}
 
 	if s.stewardStore == nil {
@@ -1188,14 +1190,16 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if entry.Status != business.PendingRefreshStatusPending {
-		s.writeStatusError(w, http.StatusConflict, "refresh request is not in pending state")
-		return
-	}
-
+	// Authorization runs before the status check so an unauthorized caller gets the
+	// same 404 for an entry in any status (Issue #5315).
 	// Cross-tenant: a scoped caller may only reject refreshes within their tenant hierarchy.
 	if !s.isAuthorizedForTenant(r.Context(), callerTenantScope(r), entry.TenantID, "POST /api/v1/stewards/refresh/{pending_id}/reject") {
 		s.writeStatusError(w, http.StatusNotFound, "pending refresh not found")
+		return
+	}
+
+	if entry.Status != business.PendingRefreshStatusPending {
+		s.writeStatusError(w, http.StatusConflict, "refresh request is not in pending state")
 		return
 	}
 

@@ -2166,3 +2166,109 @@ func TestHandleRefreshChallenge_KnownDevice_AuditsUnderStoredTenant(t *testing.T
 	assert.Empty(t, f.auditEntriesFor(t, "victim-tenant"))
 	assert.Empty(t, f.auditEntriesFor(t, audit.SystemTenantID))
 }
+
+// ---- Authorization-before-status ordering and reject boundary tests (Issue #5315) ----
+
+// rejectRefreshRequest builds a handler-level POST request for the reject endpoint
+// with mux vars set and the given principal injected into context.
+func rejectRefreshRequest(pendingID string, principal *Principal) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/reject", nil)
+	req = mux.SetURLVars(req, map[string]string{"pending_id": pendingID})
+	ctx := context.WithValue(withCallerTenant(req.Context(), principal.TenantID), principalContextKey, principal)
+	return req.WithContext(ctx)
+}
+
+// crossingRefreshFixture returns a refresh fixture whose server has a real
+// crossing store and a real "msp-a" tenant under the root tenant.
+func crossingRefreshFixture(t *testing.T) *refreshFixture {
+	t.Helper()
+	f := newRefreshFixture(t, nil)
+	tcs := pkgtesting.SetupTestStorage(t).GetTenantCrossingStore()
+	require.NotNil(t, tcs)
+	f.server.SetTenantCrossingStore(tcs)
+	_, err := f.server.tenantManager.CreateTenant(context.Background(),
+		&tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	return f
+}
+
+func (f *refreshFixture) addRefreshIn(t *testing.T, pendingID, tenantID string, status string) {
+	t.Helper()
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  tenantID,
+		Status:    status,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+}
+
+// [REQUIRED TEST] Unauthorized callers get 404, not 409, for a non-pending entry.
+func TestRefreshApproveReject_UnauthorizedCallerGets404ForNonPendingEntry(t *testing.T) {
+	f := crossingRefreshFixture(t)
+	f.addRefreshIn(t, "refresh-already-rejected", "msp-a", business.PendingRefreshStatusRejected)
+
+	outsider := &Principal{ID: "outsider", TenantID: "other-tenant", Assurance: session.AssuranceStrong}
+	callers := map[string]*Principal{
+		"tenant-scoped outside subtree": outsider,
+		"root-scoped without crossing":  rootScopedPrincipal("root-op-nonpending"),
+	}
+	for name, principal := range callers {
+		for op, handler := range map[string]func(http.ResponseWriter, *http.Request){
+			"approve": f.server.handleApproveRefresh,
+			"reject":  f.server.handleRejectRefresh,
+		} {
+			t.Run(name+"/"+op, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				build := approveRefreshRequest
+				if op == "reject" {
+					build = rejectRefreshRequest
+				}
+				handler(rec, build("refresh-already-rejected", principal))
+				assert.Equal(t, http.StatusNotFound, rec.Code)
+				assert.Contains(t, rec.Body.String(), "pending refresh not found")
+			})
+		}
+	}
+
+	// An authorized caller still sees 409 for the non-pending entry.
+	insider := &Principal{ID: "insider", TenantID: "msp-a", Assurance: session.AssuranceStrong}
+	rec := httptest.NewRecorder()
+	f.server.handleRejectRefresh(rec, rejectRefreshRequest("refresh-already-rejected", insider))
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	rec = httptest.NewRecorder()
+	f.server.handleApproveRefresh(rec, approveRefreshRequest("refresh-already-rejected", insider))
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// [REQUIRED TEST] A root-scoped caller without a crossing cannot reject; the entry
+// stays pending.
+func TestHandleRejectRefresh_RootScoped_NoCrossing_Returns404(t *testing.T) {
+	f := crossingRefreshFixture(t)
+	f.addRefreshIn(t, "refresh-reject-no-crossing", "msp-a", business.PendingRefreshStatusPending)
+
+	rec := httptest.NewRecorder()
+	f.server.handleRejectRefresh(rec, rejectRefreshRequest("refresh-reject-no-crossing", rootScopedPrincipal("root-op-reject")))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "pending refresh not found")
+	entry, err := f.pending.GetPendingRefreshByID(context.Background(), "refresh-reject-no-crossing")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
+}
+
+// [REQUIRED TEST] The same principal with an active crossing can reject.
+func TestHandleRejectRefresh_RootScoped_WithCrossing_Rejects(t *testing.T) {
+	f := crossingRefreshFixture(t)
+	f.addRefreshIn(t, "refresh-reject-crossing", "msp-a", business.PendingRefreshStatusPending)
+	seedCrossing(t, f.server, "crossing-refresh-1", "msp-a", "root-op-reject-ok", "msp-a-admin", business.TenantCrossingKindBreakGlass)
+
+	rec := httptest.NewRecorder()
+	f.server.handleRejectRefresh(rec, rejectRefreshRequest("refresh-reject-crossing", rootScopedPrincipal("root-op-reject-ok")))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	entry, err := f.pending.GetPendingRefreshByID(context.Background(), "refresh-reject-crossing")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusRejected, entry.Status)
+}
