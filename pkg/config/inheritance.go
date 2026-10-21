@@ -277,7 +277,9 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 	// Each role whose selector matches this steward contributes a config fragment.
 	// Fragments are applied in alphabetical role-name order so multiple matching
 	// roles produce a deterministic merge (later name overrides earlier for the same
-	// resource). A provider hiccup must not fail resolution — log and treat as no roles.
+	// resource). A role fragment can carry security posture or required modules, so a
+	// failed role lookup fails closed: resolving without the role layer would silently
+	// serve a steward a config missing them.
 	if ir.roleProvider != nil {
 		fragments, err := ir.roleProvider.MatchingRoleFragments(ctx, stewardID)
 		if err != nil {
@@ -285,14 +287,14 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 			stewardID = strings.ReplaceAll(stewardID, "\r", "_")
 			tenantID = strings.ReplaceAll(tenantID, "\n", "_")
 			tenantID = strings.ReplaceAll(tenantID, "\r", "_")
-			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
+			ir.log().WarnCtx(ctx, "failed to read role-policies; failing resolution",
 				"steward_id", stewardID,
 				"tenant_id", tenantID,
 				"error", logging.SanitizeLogValue(err.Error()))
-		} else {
-			for _, frag := range fragments {
-				ir.applyRoleFragment(ctx, effective, tenantID, frag)
-			}
+			return nil, fmt.Errorf("failed to resolve role-policies for steward: %w", err)
+		}
+		for _, frag := range fragments {
+			ir.applyRoleFragment(ctx, effective, tenantID, frag)
 		}
 	}
 

@@ -866,7 +866,7 @@ func TestResolveConfiguration_RoleCascade_FragmentsApplied(t *testing.T) {
 
 // TestResolveConfiguration_RoleProviderError_LogValueSanitized verifies that
 // stewardID values containing newline/CR injection characters are stripped before
-// they appear in the WarnCtx call at inheritance.go:258 (the role provider error
+// they appear in the WarnCtx call (the role provider error
 // path). Also confirms a clean value (no control chars) passes through unchanged.
 func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) {
 	sm := pkgtesting.SetupTestStorage(t)
@@ -882,7 +882,7 @@ func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) 
 	ir.WithLogger(capture)
 
 	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
-	require.NoError(t, err, "role provider error must not fail ResolveConfiguration")
+	require.Error(t, err, "role provider error must fail ResolveConfiguration")
 	require.Len(t, capture.WarnEntries, 1, "exactly one WarnCtx entry expected for the role provider error")
 
 	entry := capture.WarnEntries[0]
@@ -901,13 +901,62 @@ func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) 
 	irClean.WithLogger(cleanCapture)
 
 	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.Len(t, cleanCapture.WarnEntries, 1, "exactly one WarnCtx entry expected for clean-value test")
 
 	cleanEntry := cleanCapture.WarnEntries[0]
 	cleanVal, ok := cleanEntry["steward_id"].(string)
 	require.True(t, ok, "steward_id must be a string in clean-value log entry")
 	assert.Equal(t, cleanStewardID, cleanVal, "clean value must pass through unchanged")
+}
+
+// TestResolveConfiguration_RoleProviderError_FailsResolution verifies a failed role
+// lookup returns a wrapped error and no effective configuration.
+func TestResolveConfiguration_RoleProviderError_FailsResolution(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
+	cause := errors.New("simulated role provider failure")
+	ir := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, &fixedRoleProvider{err: cause})
+
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.Error(t, err)
+	assert.Nil(t, effective, "no effective configuration may be returned when the role layer cannot be read")
+	assert.ErrorIs(t, err, cause)
+}
+
+// TestResolveConfiguration_RoleProviderMatchingFragment_Merged verifies a single
+// matching fragment is merged and an empty, error-free provider result is unchanged.
+func TestResolveConfiguration_RoleProviderMatchingFragment_Merged(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
+	frags := []RoleFragment{{
+		Name: "only-role",
+		Config: stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "role-only", Module: "file", Config: map[string]interface{}{"value": "from-role"}},
+			},
+		},
+	}}
+	ir := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, &fixedRoleProvider{fragments: frags})
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+	var found bool
+	for _, r := range effective.Config.Resources {
+		if r.Name == "role-only" {
+			found = true
+		}
+	}
+	assert.True(t, found, "matching role fragment must be merged")
+
+	irEmpty := NewInheritanceResolverWithRoles(router, sm.GetTenantStore(), nil, &fixedRoleProvider{})
+	_, err = irEmpty.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err, "no fragments and no error leaves resolution unchanged")
 }
 
 // --- RebootWindow cascade tests (Issue #2976) ---
