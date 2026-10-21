@@ -525,3 +525,244 @@ func ownerIsElevatedCaller(owner *windows.SID) bool {
 	}
 	return user.User.Sid.Equals(owner)
 }
+
+// VerifyAdminOnlyPath reports whether path (a file or a directory, given as an
+// absolute path) can be trusted as data that only administrators may touch.
+// It returns nil only when:
+//
+//   - path is not a link or other reparse point, is owned by SYSTEM,
+//     BUILTIN\Administrators or an account that is a member of local
+//     Administrators (an account whose groups cannot be computed is refused),
+//     and its DACL grants access to SYSTEM and BUILTIN\Administrators only;
+//   - the directories that contain it pass the checks described in
+//     VerifyAdminOnlyWritablePath, so no other principal can replace path or
+//     rename any directory on the way to it.
+//
+// Because no other principal can change what path names, a later open of the
+// same path reaches the object that was checked unless an administrator moves
+// it. The check proves who controls the object, not that it holds the
+// expected content.
+//
+// The parent rule refuses a directory that lies directly in %ProgramData% or
+// at a volume root, since those let users add entries; verify the files inside
+// the data directory instead, after securing it with AdoptAdminOnlyDir or
+// EnsureAdminOnlyDir.
+//
+// An owner that is an Administrators member is accepted because Windows makes
+// the creating administrator's account the owner. A non-elevated process of
+// that account holds the owner's implicit rights too, so writers should hand
+// such files to BUILTIN\Administrators (as AdoptAdminOnlyDir does).
+//
+// It only reads: the owner and DACL of path and of its directories are never
+// changed, and no privilege beyond read access to their security descriptors
+// is needed. A wrong owner wraps ErrUntrustedDirOwner; a reparse point or a
+// grant to another principal wraps ErrUntrustedDirEntry; a relative path or a
+// path that cannot be inspected is an error.
+func VerifyAdminOnlyPath(path string) error {
+	path, err := absoluteForVerify(path)
+	if err != nil {
+		return err
+	}
+	a := &adopter{members: map[string]bool{}}
+	sd, err := inspectNoFollow(path)
+	if err != nil {
+		return err
+	}
+	if err := requireTrustedOwner(sd, path, a); err != nil {
+		return err
+	}
+	ok, err := daclIsAdminOnly(sd)
+	if err != nil {
+		return fmt.Errorf("read DACL of %s: %w", path, err)
+	}
+	if !ok {
+		return fmt.Errorf("%s grants access to a principal other than SYSTEM or BUILTIN\\Administrators: %w", path, ErrUntrustedDirEntry)
+	}
+	return verifyContainers(path, a)
+}
+
+// VerifyAdminOnlyWritablePath reports whether path (an absolute path) can be
+// trusted as an executable: other principals may read and execute it, but only
+// administrators may change it or what it names. The owner and reparse-point
+// rules of VerifyAdminOnlyPath apply to path. In addition:
+//
+//   - on path, a principal other than SYSTEM, BUILTIN\Administrators,
+//     NT SERVICE\TrustedInstaller or a member of local Administrators may hold
+//     read and execute rights only (anything else, such as write, append,
+//     delete, WRITE_DAC, WRITE_OWNER or write-attributes, is refused);
+//   - the parent directory must not be a reparse point, must be owned by one of
+//     those principals, and may grant other principals list and traverse
+//     rights only (add-file, add-subdirectory and delete-child are refused);
+//   - every further directory up to the volume root must not be a reparse
+//     point, must be owned by one of those principals, and must not grant
+//     another principal DELETE, delete-child, WRITE_DAC, WRITE_OWNER or full
+//     control, so no directory on the way to path can be renamed and replaced.
+//
+// ACEs that are inherit-only do not apply to the object and are ignored. The
+// check proves who controls the binary, not that it is the expected binary;
+// callers that launch it should also verify its signature or hash. Like
+// VerifyAdminOnlyPath it only reads and returns the same errors.
+func VerifyAdminOnlyWritablePath(path string) error {
+	path, err := absoluteForVerify(path)
+	if err != nil {
+		return err
+	}
+	a := &adopter{members: map[string]bool{}}
+	sd, err := inspectNoFollow(path)
+	if err != nil {
+		return err
+	}
+	if err := requireTrustedOwner(sd, path, a); err != nil {
+		return err
+	}
+	if err := refuseUntrustedGrants(sd, path, a, outsideReadExecute); err != nil {
+		return err
+	}
+	return verifyContainers(path, a)
+}
+
+// Access rights an untrusted principal may hold on a verified object or its
+// parent directory: read and execute (on a directory, list and traverse),
+// specific or generic.
+const readExecuteMask = windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE |
+	windows.GENERIC_READ | windows.GENERIC_EXECUTE
+
+// fileDeleteChild is FILE_DELETE_CHILD.
+const fileDeleteChild = 0x40
+
+// ancestorReplaceMask is the access rights that let a principal rename or
+// replace a directory above the parent, or grant itself the right to.
+const ancestorReplaceMask = windows.DELETE | fileDeleteChild | windows.WRITE_DAC |
+	windows.WRITE_OWNER | windows.GENERIC_ALL
+
+// outsideReadExecute reports whether mask holds any right beyond read and
+// execute.
+func outsideReadExecute(mask uint32) bool { return mask&^readExecuteMask != 0 }
+
+// replacesAncestor reports whether mask lets the holder rename or replace a
+// directory entry.
+func replacesAncestor(mask uint32) bool { return mask&ancestorReplaceMask != 0 }
+
+// sidTrustedInstaller is NT SERVICE\TrustedInstaller, which owns and has full
+// control of much of the operating system, including %ProgramFiles%.
+const sidTrustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+
+// absoluteForVerify cleans path and refuses a relative one, whose directories
+// would depend on the current directory.
+func absoluteForVerify(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("%s is not an absolute path", path)
+	}
+	return filepath.Clean(path), nil
+}
+
+// verifyContainers checks every directory from path's parent up to the volume
+// root: none may be a reparse point and each must be owned by a trusted
+// principal. The parent may grant other principals read and execute only;
+// every directory above it must not let them rename or replace an entry.
+func verifyContainers(path string, a *adopter) error {
+	refused := outsideReadExecute
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		sd, err := inspectNoFollow(dir)
+		if err != nil {
+			return err
+		}
+		owner, _, err := sd.Owner()
+		if err != nil {
+			return fmt.Errorf("read owner of %s: %w", dir, err)
+		}
+		if owner == nil || !a.isTrustedPrincipal(owner) {
+			return fmt.Errorf("%s is owned by a principal that is not trusted to control %s: %w", dir, path, ErrUntrustedDirOwner)
+		}
+		if err := refuseUntrustedGrants(sd, dir, a, refused); err != nil {
+			return err
+		}
+		if filepath.Dir(dir) == dir {
+			return nil
+		}
+		refused = replacesAncestor
+	}
+}
+
+// inspectNoFollow reads the owner and DACL of path on a handle that does not
+// follow reparse points, and refuses a reparse point.
+func inspectNoFollow(path string) (*windows.SECURITY_DESCRIPTOR, error) {
+	h, err := openHandleNoFollow(path, windows.READ_CONTROL)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	attrs, err := attributesOf(h)
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return nil, fmt.Errorf("%s is a link or reparse point: %w", path, ErrUntrustedDirEntry)
+	}
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, fmt.Errorf("read security descriptor of %s: %w", path, err)
+	}
+	return sd, nil
+}
+
+// requireTrustedOwner refuses sd unless its owner is SYSTEM,
+// BUILTIN\Administrators or a member of local Administrators.
+func requireTrustedOwner(sd *windows.SECURITY_DESCRIPTOR, path string, a *adopter) error {
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("read owner of %s: %w", path, err)
+	}
+	if owner != nil && (owner.IsWellKnown(windows.WinLocalSystemSid) ||
+		owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || a.isMember(owner)) {
+		return nil
+	}
+	return fmt.Errorf("%s is owned by a principal that is not SYSTEM or a member of Administrators: %w", path, ErrUntrustedDirOwner)
+}
+
+// isTrustedPrincipal reports whether sid may control a verified object or the
+// directories that contain it: SYSTEM, BUILTIN\Administrators,
+// NT SERVICE\TrustedInstaller, or an account that is a member of local
+// Administrators.
+func (a *adopter) isTrustedPrincipal(sid *windows.SID) bool {
+	if sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
+		sid.String() == sidTrustedInstaller {
+		return true
+	}
+	return a.isMember(sid)
+}
+
+// refuseUntrustedGrants refuses sd when an allow ACE that applies to the
+// object grants rights that refused reports to a principal that is not
+// trusted. Deny ACEs only remove access and are skipped; a NULL DACL and any
+// ACE type other than a plain allow or deny ACE are refused.
+func refuseUntrustedGrants(sd *windows.SECURITY_DESCRIPTOR, path string, a *adopter, refused func(mask uint32) bool) error {
+	acl, _, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("read DACL of %s: %w", path, err)
+	}
+	if acl == nil {
+		return fmt.Errorf("%s has no DACL and grants everyone full access: %w", path, ErrUntrustedDirEntry)
+	}
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil {
+			return fmt.Errorf("read DACL of %s: %w", path, err)
+		}
+		switch ace.Header.AceType {
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			continue
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		default:
+			return fmt.Errorf("%s has an access control entry of a type that cannot be checked: %w", path, ErrUntrustedDirEntry)
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || !refused(uint32(ace.Mask)) {
+			continue
+		}
+		if !a.isTrustedPrincipal((*windows.SID)(unsafe.Pointer(&ace.SidStart))) {
+			return fmt.Errorf("%s grants write access to a principal other than an administrator: %w", path, ErrUntrustedDirEntry)
+		}
+	}
+	return nil
+}

@@ -369,3 +369,227 @@ func TestAdoptAdminOnlyDir_RefusesRootOwnedByStandardUser(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUntrustedDirOwner)
 	assert.Equal(t, user, ownerSID(t, dir))
 }
+
+// securitySnapshot returns path's owner and DACL as SDDL, to show that a
+// read-only check changed neither.
+func securitySnapshot(t *testing.T, path string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	require.NoError(t, err)
+	return sd.String()
+}
+
+// setProtectedDACL replaces path's DACL with the protected DACL of sddl.
+func setProtectedDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	require.NoError(t, err)
+	acl, _, err := sd.DACL()
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil))
+}
+
+// fileInLockedTree returns a file written inside a directory locked with
+// EnsureAdminOnlyDir.
+func fileInLockedTree(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "cfgms")
+	require.NoError(t, EnsureAdminOnlyDir(dir))
+	file := filepath.Join(dir, "controller.cfg")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0600))
+	return file
+}
+
+// assertVerify runs check on path and asserts its result (nil when want is
+// nil, an error wrapping want otherwise) and that it left the owner and DACL
+// of path and of its parent unchanged.
+func assertVerify(t *testing.T, check func(string) error, path string, want error) {
+	t.Helper()
+	before, parentBefore := securitySnapshot(t, path), securitySnapshot(t, filepath.Dir(path))
+	err := check(path)
+	if want == nil {
+		assert.NoError(t, err)
+	} else {
+		assert.ErrorIs(t, err, want)
+	}
+	assert.Equal(t, before, securitySnapshot(t, path), "the check must not change the owner or DACL")
+	assert.Equal(t, parentBefore, securitySnapshot(t, filepath.Dir(path)), "the check must not change the parent")
+}
+
+func TestVerifyAdminOnlyPath_FileInLockedTreeVerifies(t *testing.T) {
+	file := fileInLockedTree(t)
+	assertVerify(t, VerifyAdminOnlyPath, file, nil)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, nil)
+	assertVerify(t, VerifyAdminOnlyPath, filepath.Dir(file), nil)
+}
+
+func TestVerifyAdminOnlyPath_RefusesUsersACE(t *testing.T) {
+	file := fileInLockedTree(t)
+	setProtectedDACL(t, file, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyPath_RefusesStandardUserOwner(t *testing.T) {
+	file := fileInLockedTree(t)
+	setOwnerWithRestorePrivilege(t, file, winacct.StandardUser(t).String())
+
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirOwner)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirOwner)
+}
+
+func TestVerifyAdminOnlyPath_AcceptsAdministratorsMemberOwner(t *testing.T) {
+	file := fileInLockedTree(t)
+	setOwnerWithRestorePrivilege(t, file, winacct.OtherAdministratorsMember(t).String())
+
+	assertVerify(t, VerifyAdminOnlyPath, file, nil)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, nil)
+}
+
+func TestVerifyAdminOnlyPath_RefusesReparsePoint(t *testing.T) {
+	file := fileInLockedTree(t)
+	link := filepath.Join(filepath.Dir(file), "link.cfg")
+	if err := os.Symlink(file, link); err != nil {
+		t.Skipf("creating a symbolic link needs SeCreateSymbolicLinkPrivilege, which this runner lacks: %v", err)
+	}
+
+	assert.ErrorIs(t, VerifyAdminOnlyPath(link), ErrUntrustedDirEntry)
+	assert.ErrorIs(t, VerifyAdminOnlyWritablePath(link), ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyPath_MissingPathIsError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.cfg")
+
+	assert.Error(t, VerifyAdminOnlyPath(missing))
+	assert.Error(t, VerifyAdminOnlyWritablePath(missing))
+}
+
+func TestVerifyAdminOnlyWritablePath_AllowsUsersReadExecute(t *testing.T) {
+	file := fileInLockedTree(t)
+	setProtectedDACL(t, file, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, nil)
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyWritablePath_RefusesUsersModify(t *testing.T) {
+	file := fileInLockedTree(t)
+	setProtectedDACL(t, file, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyWritablePath_RefusesParentGrantingUsersAddFile(t *testing.T) {
+	file := fileInLockedTree(t)
+	// The Users ACE is not inheritable, so the file itself stays admin-only;
+	// the directory still lets Users add files beside it.
+	setProtectedDACL(t, filepath.Dir(file), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x100002;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirEntry)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyWritablePath_IgnoresInheritOnlyACEs(t *testing.T) {
+	file := fileInLockedTree(t)
+	// An inherit-only Users ACE that applies only to new subdirectories does
+	// not grant anything on the directory itself.
+	setProtectedDACL(t, filepath.Dir(file), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;CIIO;FA;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, nil)
+}
+
+func TestVerifyAdminOnlyWritablePath_RefusesEachModifyRight(t *testing.T) {
+	for name, mask := range map[string]string{
+		"write data":    "0x120002",
+		"append":        "0x120004",
+		"delete":        "0x130000",
+		"write dac":     "0x160000",
+		"write owner":   "0x1a0000",
+		"generic all":   "GA",
+		"generic write": "GW",
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := fileInLockedTree(t)
+			setProtectedDACL(t, file, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;"+mask+";;;BU)")
+
+			assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirEntry)
+		})
+	}
+}
+
+func TestVerifyAdminOnlyWritablePath_RefusesEachParentModifyRight(t *testing.T) {
+	for name, mask := range map[string]string{
+		"add file":         "0x120002",
+		"add subdirectory": "0x120004",
+		"delete child":     "0x120040",
+		"write dac":        "0x160000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := fileInLockedTree(t)
+			setProtectedDACL(t, filepath.Dir(file), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;"+mask+";;;BU)")
+
+			assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirEntry)
+		})
+	}
+}
+
+func TestVerifyAdminOnlyPath_RefusesNullDACL(t *testing.T) {
+	file := fileInLockedTree(t)
+	// A NULL DACL grants everyone full access.
+	require.NoError(t, windows.SetNamedSecurityInfo(file, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, nil, nil))
+
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirEntry)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyPath_AcceptsDenyACE(t *testing.T) {
+	file := fileInLockedTree(t)
+	// A deny ACE only removes access.
+	setProtectedDACL(t, file, "D:P(D;;FA;;;BU)(A;;FA;;;SY)(A;;FA;;;BA)")
+
+	assertVerify(t, VerifyAdminOnlyPath, file, nil)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, nil)
+}
+
+func TestVerifyAdminOnlyWritablePath_RefusesParentOwnedByStandardUser(t *testing.T) {
+	file := fileInLockedTree(t)
+	setOwnerWithRestorePrivilege(t, filepath.Dir(file), winacct.StandardUser(t).String())
+
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirOwner)
+}
+
+func TestVerifyAdminOnlyPath_RefusesGrandparentThatLetsUsersRenameParent(t *testing.T) {
+	file := fileInLockedTree(t)
+	grandparent := filepath.Dir(filepath.Dir(file))
+	// Delete-child on the grandparent lets Users rename the parent and put
+	// another directory in its place.
+	setProtectedDACL(t, grandparent, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120040;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirEntry)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyPath_AcceptsGrandparentGrantingUsersAddFile(t *testing.T) {
+	file := fileInLockedTree(t)
+	grandparent := filepath.Dir(filepath.Dir(file))
+	// Creating new entries in the grandparent cannot replace the parent.
+	setProtectedDACL(t, grandparent, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120006;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyPath, file, nil)
+	assertVerify(t, VerifyAdminOnlyWritablePath, file, nil)
+}
+
+func TestVerifyAdminOnlyPath_RefusesParentGrantingUsersDeleteChild(t *testing.T) {
+	file := fileInLockedTree(t)
+	setProtectedDACL(t, filepath.Dir(file), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120040;;;BU)")
+
+	assertVerify(t, VerifyAdminOnlyPath, file, ErrUntrustedDirEntry)
+}
+
+func TestVerifyAdminOnlyPath_RefusesRelativePath(t *testing.T) {
+	assert.Error(t, VerifyAdminOnlyPath(`cfgms\controller.cfg`))
+	assert.Error(t, VerifyAdminOnlyWritablePath(`cfgms-steward.exe`))
+}
