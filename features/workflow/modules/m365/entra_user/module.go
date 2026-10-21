@@ -127,6 +127,10 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 		result["groups"] = c.Groups
 	}
 
+	if len(c.ManagedFieldsList) > 0 {
+		result["managed_fields"] = c.ManagedFieldsList
+	}
+
 	return result
 }
 
@@ -210,7 +214,7 @@ func (c *EntraUserConfig) GetManagedFields() []string {
 	if len(c.Groups) > 0 {
 		fields = append(fields, "groups")
 	}
-	if c.PasswordProfile != nil {
+	if c.PasswordProfile != nil || c.ForceChangePassword {
 		fields = append(fields, "password_profile")
 	}
 
@@ -269,6 +273,27 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 		if password, ok := passwordProfile["password"].(string); ok {
 			userConfig.PasswordProfile.Password = password
 		}
+	}
+
+	if forceChange, ok := configMap["force_change_password"].(bool); ok {
+		userConfig.ForceChangePassword = forceChange
+	}
+
+	// Handle managed_fields (arrives as []string or []interface{})
+	switch mf := configMap["managed_fields"].(type) {
+	case []string:
+		userConfig.ManagedFieldsList = mf
+	case []interface{}:
+		for _, f := range mf {
+			name, ok := f.(string)
+			if !ok {
+				return fmt.Errorf("invalid configuration: managed_fields entries must be strings")
+			}
+			userConfig.ManagedFieldsList = append(userConfig.ManagedFieldsList, name)
+		}
+	case nil:
+	default:
+		return fmt.Errorf("invalid configuration: managed_fields must be a list of strings")
 	}
 
 	// Handle licenses
@@ -405,6 +430,22 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 	return config, nil
 }
 
+// graphPasswordProfile builds the Graph password profile from password_profile
+// and the top-level force_change_password flag. It returns nil when neither is
+// declared. A flag without a password yields a profile carrying only
+// forceChangePasswordNextSignIn. The password is never logged or put in errors.
+func (c *EntraUserConfig) graphPasswordProfile() *graph.PasswordProfile {
+	if c.PasswordProfile == nil && !c.ForceChangePassword {
+		return nil
+	}
+	pp := &graph.PasswordProfile{ForceChangePasswordNextSignIn: c.ForceChangePassword}
+	if c.PasswordProfile != nil {
+		pp.Password = c.PasswordProfile.Password
+		pp.ForceChangePasswordNextSignIn = pp.ForceChangePasswordNextSignIn || c.PasswordProfile.ForceChangePasswordNextSignIn
+	}
+	return pp
+}
+
 // createUser creates a new Entra ID user
 func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToken, config *EntraUserConfig) error {
 	userRequest := &graph.CreateUserRequest{
@@ -421,12 +462,7 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 	}
 
 	// Set password profile if provided
-	if config.PasswordProfile != nil {
-		userRequest.PasswordProfile = &graph.PasswordProfile{
-			Password:                      config.PasswordProfile.Password,
-			ForceChangePasswordNextSignIn: config.PasswordProfile.ForceChangePasswordNextSignIn,
-		}
-	}
+	userRequest.PasswordProfile = config.graphPasswordProfile()
 
 	// Create the user
 	user, err := m.graphClient.CreateUser(ctx, token, userRequest)
@@ -497,6 +533,12 @@ func (m *entraUserModule) updateUser(ctx context.Context, token *auth.AccessToke
 		case "company_name":
 			if config.CompanyName != existingUser.CompanyName {
 				updateRequest.CompanyName = &config.CompanyName
+			}
+		case "password_profile":
+			// The current password cannot be read back, so there is no diff to
+			// compute: a declared password profile is sent on every apply.
+			if pp := config.graphPasswordProfile(); pp != nil {
+				updateRequest.PasswordProfile = pp
 			}
 		}
 	}

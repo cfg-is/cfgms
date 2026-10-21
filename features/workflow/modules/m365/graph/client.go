@@ -129,6 +129,10 @@ type UpdateUserRequest struct {
 	JobTitle       *string `json:"jobTitle,omitempty"`
 	Department     *string `json:"department,omitempty"`
 	CompanyName    *string `json:"companyName,omitempty"`
+
+	// PasswordProfile resets the user's password and/or forces a password change
+	// at next sign-in. It carries a secret and must never be logged.
+	PasswordProfile *PasswordProfile `json:"passwordProfile,omitempty"`
 }
 
 // HasChanges returns true if the update request contains any changes
@@ -140,7 +144,8 @@ func (r *UpdateUserRequest) HasChanges() bool {
 		r.OfficeLocation != nil ||
 		r.JobTitle != nil ||
 		r.Department != nil ||
-		r.CompanyName != nil
+		r.CompanyName != nil ||
+		r.PasswordProfile != nil
 }
 
 // PasswordProfile represents password configuration for a user
