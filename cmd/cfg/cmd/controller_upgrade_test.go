@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/cutover"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,6 +73,18 @@ func saveRestartGlobals(t *testing.T) {
 	})
 }
 
+// newStateFile writes ps to a state file inside an admin-only directory (so the
+// Windows owner/DACL check passes) and returns its path.
+func newStateFile(t *testing.T, ps cutover.PersistedState) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, security.EnsureAdminOnlyDir(dir))
+	path := filepath.Join(dir, "cutover.state.json")
+	require.NoError(t, cutover.SavePersistedState(path, ps))
+	return path
+}
+
 // TestControllerUpgradeRunCmd_ExperimentalNotice asserts that the upgrade run
 // subcommand's help text contains an experimental/unsupported notice referencing
 // ADR-007, as required by Issue #2019 (freeze the port-swap orchestrator).
@@ -100,18 +113,16 @@ func TestControllerUpgradeStatus_NoStateFile(t *testing.T) {
 // TestControllerUpgradeStatus_WithState verifies the status verb reads
 // canonical + quarantined info from disk correctly.
 func TestControllerUpgradeStatus_WithState(t *testing.T) {
-	dir := t.TempDir()
-	upgradeStatePath = filepath.Join(dir, "cutover.state.json")
 	upgradeStatusJSON = false
 
 	now := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, cutover.SavePersistedState(upgradeStatePath, cutover.PersistedState{
+	upgradeStatePath = newStateFile(t, cutover.PersistedState{
 		CanonicalBinary:      "/opt/cfgms/v0.5.11",
 		CanonicalStartedAt:   now,
 		QuarantinedBinary:    "/opt/cfgms/v0.5.10",
 		QuarantinedStartedAt: now.Add(-time.Hour),
 		QuarantineExpiresAt:  now.Add(time.Hour),
-	}))
+	})
 
 	err := runControllerUpgradeStatus(controllerUpgradeStatusCmd, nil)
 	assert.NoError(t, err)
@@ -119,15 +130,13 @@ func TestControllerUpgradeStatus_WithState(t *testing.T) {
 
 // TestControllerUpgradeStatus_JSONMode verifies --json flag is honoured.
 func TestControllerUpgradeStatus_JSONMode(t *testing.T) {
-	dir := t.TempDir()
-	upgradeStatePath = filepath.Join(dir, "cutover.state.json")
 	upgradeStatusJSON = true
 	t.Cleanup(func() { upgradeStatusJSON = false })
 
-	require.NoError(t, cutover.SavePersistedState(upgradeStatePath, cutover.PersistedState{
+	upgradeStatePath = newStateFile(t, cutover.PersistedState{
 		CanonicalBinary:    "/opt/cfgms/v0.5.11",
 		CanonicalStartedAt: time.Now().UTC().Truncate(time.Second),
-	}))
+	})
 
 	err := runControllerUpgradeStatus(controllerUpgradeStatusCmd, nil)
 	assert.NoError(t, err)
@@ -394,4 +403,74 @@ func TestCheckUnitCredentialsPreflight_Proceeds(t *testing.T) {
 
 	upgradeRestartUnitPath = filepath.Join(dir, "missing.service")
 	assert.NoError(t, checkUnitCredentialsPreflight())
+}
+
+// stateBinaryCases returns state-file binary values that must be refused, keyed
+// by sub-test name. The symlink case is skipped where symlinks cannot be made.
+func stateBinaryCases(t *testing.T) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-binary")
+	require.NoError(t, os.WriteFile(target, []byte("x"), 0o700))
+	cases := map[string]string{
+		"relative":  "relative/cfgms",
+		"missing":   filepath.Join(dir, "missing"),
+		"directory": dir,
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Logf("symlink case skipped: cannot create symlink (needs SeCreateSymbolicLinkPrivilege on Windows): %v", err)
+	} else {
+		cases["symlink"] = link
+	}
+	return cases
+}
+
+func TestControllerUpgradeRun_RejectsBadStateCanonicalBinary(t *testing.T) {
+	for name, bad := range stateBinaryCases(t) {
+		t.Run(name, func(t *testing.T) {
+			saveRestartGlobals(t)
+			bin := filepath.Join(t.TempDir(), "new-binary")
+			require.NoError(t, os.WriteFile(bin, []byte("x"), 0o700))
+			upgradeBinaryPath = bin
+			upgradeConfigPath = filepath.Join(t.TempDir(), "controller.cfg")
+			upgradeStatePath = newStateFile(t, cutover.PersistedState{CanonicalBinary: bad})
+
+			err := runControllerUpgrade(controllerUpgradeRunCmd, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "CanonicalBinary")
+		})
+	}
+}
+
+func TestControllerUpgradeRollback_RejectsBadStateQuarantinedBinary(t *testing.T) {
+	for name, bad := range stateBinaryCases(t) {
+		t.Run(name, func(t *testing.T) {
+			saveRestartGlobals(t)
+			upgradeConfigPath = filepath.Join(t.TempDir(), "controller.cfg")
+			upgradeStatePath = newStateFile(t, cutover.PersistedState{
+				CanonicalBinary:   "/irrelevant",
+				QuarantinedBinary: bad,
+			})
+
+			err := runControllerUpgradeRollback(controllerUpgradeRollbackCmd, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "QuarantinedBinary")
+		})
+	}
+}
+
+func TestControllerUpgradeRollback_RejectsBadStateCanonicalBinary(t *testing.T) {
+	saveRestartGlobals(t)
+	q := filepath.Join(t.TempDir(), "quarantined")
+	require.NoError(t, os.WriteFile(q, []byte("x"), 0o700))
+	upgradeConfigPath = filepath.Join(t.TempDir(), "controller.cfg")
+	upgradeStatePath = newStateFile(t, cutover.PersistedState{
+		CanonicalBinary:   "relative/cfgms",
+		QuarantinedBinary: q,
+	})
+
+	err := runControllerUpgradeRollback(controllerUpgradeRollbackCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CanonicalBinary")
 }
