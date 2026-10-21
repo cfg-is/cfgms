@@ -22,6 +22,7 @@ import (
 	"time"
 
 	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -678,6 +679,14 @@ func generateTestBundleFile(t *testing.T, path, controllerURL string) {
 	require.NoError(t, certbundle.Write(path, b))
 }
 
+// generateSystemTestBundleFile writes the bundle into an admin-only directory so the
+// Windows system-path owner/DACL check accepts it; EnsureAdminOnlyDir is a no-op elsewhere.
+func generateSystemTestBundleFile(t *testing.T, path, controllerURL string) {
+	t.Helper()
+	require.NoError(t, security.EnsureAdminOnlyDir(filepath.Dir(path)))
+	generateTestBundleFile(t, path, controllerURL)
+}
+
 func TestGetAPIClient_BundlePrecedence(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -689,7 +698,7 @@ func TestGetAPIClient_BundlePrecedence(t *testing.T) {
 	generateTestBundleFile(t, bundleFlag, "https://flag-bundle.local:9443")
 	generateTestBundleFile(t, bundleEnvVar, "https://env-bundle.local:9443")
 	generateTestBundleFile(t, bundleUserConfig, "https://userconfig-bundle.local:9443")
-	generateTestBundleFile(t, bundleSystem, "https://system-bundle.local:9443")
+	generateSystemTestBundleFile(t, bundleSystem, "https://system-bundle.local:9443")
 
 	// Override injectable path functions so tests don't touch real system paths
 	origUserConfigDirFn := userConfigDirFn
@@ -783,7 +792,7 @@ func TestGetAPIClient_NoBundleFlag(t *testing.T) {
 	generateTestBundleFile(t, bundleFlagPath, "https://flag-bundle.local:9443")
 	generateTestBundleFile(t, bundleEnvPath, "https://env-bundle.local:9443")
 	generateTestBundleFile(t, bundleUserConfigPath, "https://userconfig-bundle.local:9443")
-	generateTestBundleFile(t, bundleSystemPath, "https://system-bundle.local:9443")
+	generateSystemTestBundleFile(t, bundleSystemPath, "https://system-bundle.local:9443")
 
 	origUserConfigDirFn := userConfigDirFn
 	origSystemBundlePathFn := systemBundlePathFn
@@ -825,7 +834,7 @@ func TestGetAPIClient_EmptyBundleEnvVar(t *testing.T) {
 
 	generateTestBundleFile(t, bundleEnvPath, "https://env-bundle.local:9443")
 	generateTestBundleFile(t, bundleUserConfigPath, "https://userconfig-bundle.local:9443")
-	generateTestBundleFile(t, bundleSystemPath, "https://system-bundle.local:9443")
+	generateSystemTestBundleFile(t, bundleSystemPath, "https://system-bundle.local:9443")
 
 	origUserConfigDirFn := userConfigDirFn
 	origSystemBundlePathFn := systemBundlePathFn
