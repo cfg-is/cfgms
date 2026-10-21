@@ -14,7 +14,7 @@ The user module manages local OS user accounts and group membership on managed e
 | Platform | Create | Modify | Delete | Lock | Groups | Tool used |
 |----------|--------|--------|--------|------|--------|-----------|
 | Linux    | ✓ | ✓ | ✓ | ✓ | ✓ | `useradd`, `usermod`, `userdel` |
-| Windows  | ✓ | ✓ | ✓ | ✓ | ✓ | `net.exe` |
+| Windows  | ✓ | ✓ | ✓ | ✓ | ✓ | `net.exe` (account writes); `NetUserGetInfo`, `NetUserGetLocalGroups`, `NetLocalGroupAddMembers`, `NetLocalGroupDelMembers` (in-process) |
 | macOS    | ✓ | ✓ | ✓ | ✓ | ✓ | `dscl`, `dseditgroup`, `pwpolicy` |
 
 All write operations require the steward to run with Administrator / root privileges.
@@ -27,7 +27,7 @@ The resource ID is the OS-level username (e.g., `alice`, `svc-backup`).
 |-------|------|----------|-------------|
 | `state` | string | **Yes** | `"present"` or `"absent"` |
 | `full_name` | string | No | Display name / GECOS comment |
-| `groups` | list of strings | No | Supplementary groups to assign |
+| `groups` | list of strings | No | Supplementary groups to assign. On Windows a non-empty list is exclusive; see Security Notes. |
 | `locked` | bool | No | Lock/disable the account (default: `false`) |
 | `has_credential` | bool | No | **Observed only** — never accepted by `Set`. Reports whether the OS considers the account to have a password. |
 
@@ -36,7 +36,7 @@ The resource ID is the OS-level username (e.g., `alice`, `svc-backup`).
 `has_credential` is a read-only observed field returned by `Get`. It reports the OS-level password state:
 
 - **Linux**: derived from `/etc/shadow` when readable (requires root); defaults to `false` when shadow is not accessible.
-- **Windows**: `true` when `net user` reports `Password required: Yes`.
+- **Windows**: `true` unless the account carries the "password not required" flag (`UF_PASSWD_NOTREQD`), read with `NetUserGetInfo`.
 - **macOS**: always `false` in this version (shadow password inspection requires root and is out of scope).
 
 `Set` silently ignores `has_credential` if it appears in the config.
@@ -88,7 +88,13 @@ modules:
 - All usernames and group names are validated against a strict pattern (`^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$`) before being passed to OS commands, preventing flag injection and command injection.
 - The module never accepts, logs, stores, or transmits password material. `has_credential` is a read-only observation.
 - On Linux, `userdel -r` removes the user's home directory. Ensure data is backed up before removing accounts.
-- Group removal (removing a user from a group that is no longer in `groups`) is not performed in v1 to avoid disrupting groups managed outside `cfg`.
+- On Linux and macOS, group removal (removing a user from a group that is no longer in `groups`) is not performed in v1 to avoid disrupting groups managed outside `cfg`.
+- On Windows, a non-empty `groups` list is exclusive: the user is added to every declared group and removed from every other group it is a direct member of. Two exceptions apply:
+  - The built-in Users group (SID S-1-5-32-545, whatever its local name) is never removed.
+  - Removal from the built-in Administrators group is refused, with an error, when no other member would keep the host administered (another group, a domain account, or an enabled local account). Deleted or unknown account SIDs left in the group do not count. The check covers group removal only. Deleting (`state: absent`) or disabling (`locked: true`) an account is not checked, because each needs an explicit declaration.
+
+  An omitted or empty `groups` list leaves group membership unchanged. After applying, the account is read again, and a group list, disabled state or full name that still differs is an error. State is read through locale-independent APIs, so non-English systems report groups and the disabled state correctly.
+- On Windows, group names follow the Windows local group naming rules instead of the pattern above. They may be up to 256 characters of any script and may include spaces, but not control characters, leading or trailing spaces, or any of `" / \ [ ] : ; | = , + * ? < > @`. So `Remote Desktop Users`, or a localized `Администраторы`, can be declared. They are passed to the Windows APIs in-process, never as command arguments.
 
 ## Out of Scope
 

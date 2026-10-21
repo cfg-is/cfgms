@@ -314,6 +314,32 @@ func TestUserModule_Set_InvalidGroupName(t *testing.T) {
 	}
 }
 
+// TestValidWindowsGroupName verifies the Windows local group naming rules
+// that validateGroupName applies on Windows.
+func TestValidWindowsGroupName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"Administrators":         true,
+		"Remote Desktop Users":   true,
+		"Администраторы":         true,
+		"cfgms-grün-Ω":           true,
+		"Hyper-V Administrators": true,
+		"":                       false,
+		" leading":               false,
+		"trailing ":              false,
+		"...":                    false,
+		"bad group; rm -rf /":    false,
+		`a\b`:                    false,
+		"a,b":                    false,
+		"a@b":                    false,
+		"tab\tname":              false,
+		strings.Repeat("a", 257): false,
+	} {
+		if got := validWindowsGroupName(name); got != want {
+			t.Errorf("validWindowsGroupName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 // TestValidateUsername verifies the username validation function directly.
 func TestValidateUsername(t *testing.T) {
 	tests := []struct {

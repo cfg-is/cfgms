@@ -21,7 +21,11 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"runtime"
 	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -47,11 +51,45 @@ func validateUsername(username string) error {
 }
 
 // validateGroupName rejects group names that could cause argument injection.
+// On Windows, group names are passed to the netapi32 APIs in-process as
+// UTF-16, never as command arguments, so Windows local group naming rules
+// apply instead (validWindowsGroupName): names such as "Remote Desktop Users"
+// or a localized "Администраторы" can be declared.
 func validateGroupName(group string) error {
+	if runtime.GOOS == "windows" {
+		if !validWindowsGroupName(group) {
+			return fmt.Errorf("%w: group name %q is not a valid Windows local group name", modules.ErrInvalidInput, group)
+		}
+		return nil
+	}
 	if !groupNamePattern.MatchString(group) {
 		return fmt.Errorf("%w: group name %q is invalid (allowed: alphanumeric, '_', '-', '.')", modules.ErrInvalidInput, group)
 	}
 	return nil
+}
+
+// windowsGroupNameForbidden are the characters Windows does not allow in a
+// local group name.
+const windowsGroupNameForbidden = `"/\[]:;|=,+*?<>@`
+
+// validWindowsGroupName reports whether name is a valid Windows local group
+// name: 1 to 256 characters of any script, no control characters, none of
+// windowsGroupNameForbidden, no leading or trailing space, and not made only
+// of periods and spaces.
+func validWindowsGroupName(name string) bool {
+	n := utf8.RuneCountInString(name)
+	if n == 0 || n > 256 || !utf8.ValidString(name) || strings.TrimSpace(name) != name {
+		return false
+	}
+	if strings.Trim(name, ". ") == "" {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || strings.ContainsRune(windowsGroupNameForbidden, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // validateFullName rejects full-name strings that contain control characters
