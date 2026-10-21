@@ -22,8 +22,8 @@ import (
 
 // chocoExePath is the fixed install location chocolatey uses on Windows.
 // bootstrapChoco checks this path for idempotency (skip a redundant install)
-// and the chocolateyManager invokes "choco" on PATH, which the installer
-// places here.
+// and every chocolatey invocation uses this absolute path (never a bare
+// name from PATH) after chocoTrusted has verified it.
 const chocoExePath = `C:\ProgramData\chocolatey\choco.exe`
 
 // chocoDefaultBootstrapFile is the well-known nupkg filename under
@@ -306,6 +306,36 @@ func (m *PackageModule) chocoInstalled() bool {
 	return err == nil
 }
 
+// verifyChocoTrusted runs the trust check (injected seam when set, else the
+// real chocoTrusted) against chocoExePath. Callers must hold m.mu.
+func (m *PackageModule) verifyChocoTrusted() error {
+	if m.chocoTrust != nil {
+		return m.chocoTrust(chocoExePath)
+	}
+	return chocoTrusted(chocoExePath)
+}
+
+// Package-level seams for the registry probe and NewPackageManager, which
+// have no PackageModule receiver. Tests replace them to record invocations.
+var (
+	chocoProbeExists  = func() bool { _, err := os.Stat(chocoExePath); return err == nil }
+	chocoProbeTrusted = chocoTrusted
+	chocoProbeRun     = func(ctx context.Context, exe string, args ...string) error {
+		// #nosec G204 -- exe is chocoExePath, verified by chocoTrusted first.
+		return exec.CommandContext(ctx, exe, args...).Run()
+	}
+)
+
+// chocoProbe reports whether chocolatey is usable: chocoExePath exists and
+// passes chocoTrusted before anything is executed; only then is
+// `chocoExePath --version` run. A failed check runs nothing.
+func chocoProbe(ctx context.Context) bool {
+	if !chocoProbeExists() || chocoProbeTrusted(chocoExePath) != nil {
+		return false
+	}
+	return chocoProbeRun(ctx, chocoExePath, "--version") == nil
+}
+
 // effectiveChocoSourceName returns the local source name chocolatey
 // registers the org feed under: the configured chocoSourceName, else the
 // built-in default "org". Callers must hold m.mu.
@@ -320,6 +350,11 @@ func (m *PackageModule) effectiveChocoSourceName() string {
 // configured org source (idempotent — adding an existing name is fine; see
 // `choco source add` semantics). Callers must hold m.mu.
 func (m *PackageModule) configureChocoSource(ctx context.Context) error {
+	// choco.exe runs as SYSTEM below, so verify it first — this covers both
+	// the already-installed path and a just-bootstrapped install.
+	if err := m.verifyChocoTrusted(); err != nil {
+		return fmt.Errorf("chocolatey install path is not trusted: %w", err)
+	}
 	sourceName := m.effectiveChocoSourceName()
 	run := m.runner()
 
@@ -331,13 +366,13 @@ func (m *PackageModule) configureChocoSource(ctx context.Context) error {
 	// repeated converges — if it was already removed on a prior run, choco
 	// exits non-zero here, but the desired end state (no community source
 	// configured) already holds, so that is not itself a bootstrap failure.
-	if _, err := run(ctx, "choco", []string{"source", "remove", "-n", "chocolatey"}, nil); err != nil {
+	if _, err := run(ctx, chocoExePath, []string{"source", "remove", "-n", "chocolatey"}, nil); err != nil {
 		if logger, ok := m.GetLogger(); ok {
 			logger.Info("chocolatey community source already absent", "error", err.Error())
 		}
 	}
 
-	if _, err := run(ctx, "choco", []string{"source", "add", "-n", sourceName, "-s", m.chocoSource, "--priority", "1"}, nil); err != nil {
+	if _, err := run(ctx, chocoExePath, []string{"source", "add", "-n", sourceName, "-s", m.chocoSource, "--priority", "1"}, nil); err != nil {
 		return fmt.Errorf("failed to configure chocolatey source %s: %w", sourceName, err)
 	}
 	return nil

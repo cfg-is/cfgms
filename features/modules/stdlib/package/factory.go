@@ -28,7 +28,8 @@ func NewPackageManager(ctx context.Context) (PackageManager, error) {
 			return newWingetManagerWithPath(bin), nil
 		}
 		// Check if chocolatey is available
-		if _, err := exec.CommandContext(ctx, "choco", "--version").Output(); err == nil {
+		// Run only the verified absolute path, never a PATH-resolved name.
+		if chocoProbe(ctx) {
 			return newChocolateyManager(), nil
 		}
 		return nil, fmt.Errorf("no supported package manager found on Windows")

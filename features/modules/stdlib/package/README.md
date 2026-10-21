@@ -208,6 +208,8 @@ version: latest
 manager: chocolatey
 ```
 
+Chocolatey is run only from the verified install path `C:\ProgramData\chocolatey\choco.exe`, by absolute path and never by name from `PATH`. Before every selection (and again after a bootstrap) the module checks that `choco.exe` and its directory are owned by SYSTEM or `BUILTIN\Administrators`, are not reparse points, and grant no write-capable access to any other principal (read and execute for Users is allowed). If the check fails, Chocolatey is reported unavailable and nothing is run.
+
 ## Known limitations
 
 1. Platform-specific limitations:

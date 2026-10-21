@@ -227,17 +227,20 @@ func (m *wingetManager) IsValidManager(name string) bool {
 // where chocolatey was pre-installed and pre-configured outside CFGMS.
 type chocolateyManager struct {
 	sourceName string
+	// exePath is the verified absolute chocolatey executable (chocoExePath);
+	// never a bare name resolved from PATH.
+	exePath string
 }
 
 func newChocolateyManager() PackageManager {
-	return &chocolateyManager{}
+	return &chocolateyManager{exePath: chocoExePath}
 }
 
 // newChocolateyManagerWithSource returns a chocolateyManager that passes
 // `--source <sourceName>` on every operation, restricting package resolution
 // to the configured org source.
 func newChocolateyManagerWithSource(sourceName string) PackageManager {
-	return &chocolateyManager{sourceName: sourceName}
+	return &chocolateyManager{sourceName: sourceName, exePath: chocoExePath}
 }
 
 // sourceArgs returns the `--source <sourceName>` argument pair when a source
@@ -256,7 +259,7 @@ func (m *chocolateyManager) Install(ctx context.Context, name, version string) e
 	}
 	// #nosec G204 -- executable is fixed, no shell is used, and package,
 	// version, and configured source name are validated before this call.
-	cmd := exec.CommandContext(ctx, "choco", args...)
+	cmd := exec.CommandContext(ctx, m.exePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -268,7 +271,7 @@ func (m *chocolateyManager) Remove(ctx context.Context, name string) error {
 	args := append([]string{"uninstall", "-y", name}, m.sourceArgs()...)
 	// #nosec G204 -- executable is fixed, no shell is used, and the package
 	// name is validated against option injection before this call.
-	cmd := exec.CommandContext(ctx, "choco", args...)
+	cmd := exec.CommandContext(ctx, m.exePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -284,7 +287,7 @@ func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string
 	// package as present.
 	// #nosec G204 -- executable/options are fixed, name is validated against
 	// leading-option injection, and no shell is used.
-	cmd := exec.CommandContext(ctx, "choco", "list", name, "--exact", "--limit-output")
+	cmd := exec.CommandContext(ctx, m.exePath, "list", name, "--exact", "--limit-output")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
@@ -306,7 +309,7 @@ func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string
 func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]string, error) {
 	// Installed query — no --source (see GetInstalledVersion).
 	// #nosec G204 -- executable and complete argument vector are fixed literals.
-	cmd := exec.CommandContext(ctx, "choco", "list")
+	cmd := exec.CommandContext(ctx, m.exePath, "list")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list installed packages: %w\nOutput: %s", err, string(output))
@@ -332,7 +335,7 @@ func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string
 	args := append([]string{"list", "--exact", name}, m.sourceArgs()...)
 	// #nosec G204 -- executable is fixed, no shell is used, and package/source
 	// inputs are validated before forming this argument vector.
-	cmd := exec.CommandContext(ctx, "choco", args...)
+	cmd := exec.CommandContext(ctx, m.exePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("choco list failed: %v, output: %s", err, string(output))
@@ -356,7 +359,7 @@ func (m *chocolateyManager) IsInstalled(ctx context.Context, name string) (bool,
 	args := append([]string{"list", "--exact", name}, m.sourceArgs()...)
 	// #nosec G204 -- executable is fixed, no shell is used, and package/source
 	// inputs are validated before forming this argument vector.
-	cmd := exec.CommandContext(ctx, "choco", args...)
+	cmd := exec.CommandContext(ctx, m.exePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("choco list failed: %v, output: %s", err, string(output))
@@ -368,7 +371,7 @@ func (m *chocolateyManager) Update(ctx context.Context, name string) error {
 	args := append([]string{"upgrade", "-y", name}, m.sourceArgs()...)
 	// #nosec G204 -- executable is fixed, no shell is used, and package/source
 	// inputs are validated before forming this argument vector.
-	cmd := exec.CommandContext(ctx, "choco", args...)
+	cmd := exec.CommandContext(ctx, m.exePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("choco upgrade failed: %v, output: %s", err, string(output))

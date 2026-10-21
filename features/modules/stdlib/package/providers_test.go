@@ -156,6 +156,7 @@ func TestPackageModule_ChocoSelection(t *testing.T) {
 	t.Run("already installed selects without bootstrapping", func(t *testing.T) {
 		m := &PackageModule{
 			chocoExeExists: func() bool { return true },
+			chocoTrust:     func(string) error { return nil },
 			chocoBootstrap: func(ctx context.Context) error {
 				t.Fatal("must not bootstrap when chocolatey is already installed")
 				return nil
@@ -180,6 +181,7 @@ func TestPackageModule_ChocoSelection(t *testing.T) {
 		m := &PackageModule{
 			chocoSource:    `C:\ClusterStorage\CSV01\choco-source`,
 			chocoExeExists: func() bool { return false },
+			chocoTrust:     func(string) error { return nil },
 			chocoBootstrap: func(ctx context.Context) error {
 				bootstrapCalled = true
 				return nil
@@ -220,6 +222,36 @@ func TestPackageModule_ChocoSelection(t *testing.T) {
 		_, name, err := m.selectManager(context.Background(), []string{"choco"})
 		require.Error(t, err)
 		assert.Empty(t, name)
+	})
+
+	t.Run("untrusted install path is refused and no manager is returned", func(t *testing.T) {
+		m := &PackageModule{
+			chocoExeExists: func() bool { return true },
+			chocoTrust:     func(string) error { return fmt.Errorf("writable by users") },
+		}
+		mgr, name, err := m.selectManager(context.Background(), []string{"choco"})
+		require.Error(t, err)
+		assert.Nil(t, mgr)
+		assert.Empty(t, name)
+		assert.Contains(t, err.Error(), "not trusted")
+	})
+
+	t.Run("untrusted install path after bootstrap is refused", func(t *testing.T) {
+		var checked string
+		m := &PackageModule{
+			chocoSource:    "https://feed.internal.example/choco",
+			chocoExeExists: func() bool { return false },
+			chocoBootstrap: func(ctx context.Context) error { return nil },
+			chocoTrust: func(p string) error {
+				checked = p
+				return fmt.Errorf("planted executable")
+			},
+		}
+		mgr, _, err := m.selectManager(context.Background(), []string{"choco"})
+		require.Error(t, err)
+		assert.Nil(t, mgr)
+		assert.Equal(t, chocoExePath, checked)
+		assert.Contains(t, err.Error(), "not trusted")
 	})
 }
 
