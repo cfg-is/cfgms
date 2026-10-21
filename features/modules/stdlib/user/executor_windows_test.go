@@ -142,6 +142,75 @@ func TestWindowsGetState_InvalidAccountNameIsError(t *testing.T) {
 	assert.False(t, got.Exists)
 }
 
+func TestWindowsSetState_EmptyGroupsLeavesMembershipUnchanged(t *testing.T) {
+	requireElevated(t)
+	e := &windowsExecutor{}
+	g := createLocalGroup(t, "cfgmse"+randomSuffix(t))
+	name := testUser(t, e)
+	require.NoError(t, e.setState(name, userState{Exists: true, Groups: []string{g}}))
+
+	// A config that does not declare groups (absent or empty) manages
+	// nothing about them.
+	require.NoError(t, e.setState(name, userState{Exists: true, Locked: true}))
+
+	got, err := e.getState(name)
+	require.NoError(t, err)
+	assert.Contains(t, got.Groups, g, "undeclared groups are not managed and stay")
+	assert.True(t, got.Locked, "the other fields still converge")
+}
+
+func TestWindowsSetState_RemovesFromAdministratorsWhenOthersRemain(t *testing.T) {
+	requireElevated(t)
+	e := &windowsExecutor{}
+	admins, err := wellKnownGroupName(windows.WinBuiltinAdministratorsSid)
+	require.NoError(t, err)
+	keep := createLocalGroup(t, "cfgmsa"+randomSuffix(t))
+	name := testUser(t, e)
+	require.NoError(t, e.setState(name, userState{Exists: true, Groups: []string{admins, keep}}))
+
+	// The runner's own account keeps Administrators administered.
+	require.NoError(t, e.setState(name, userState{Exists: true, Groups: []string{keep}}))
+
+	got, err := e.getState(name)
+	require.NoError(t, err)
+	assert.NotContains(t, got.Groups, admins)
+}
+
+func TestRequireOtherAdministrator_AcceptsGroupWithOtherMembers(t *testing.T) {
+	admins, err := wellKnownGroupName(windows.WinBuiltinAdministratorsSid)
+	require.NoError(t, err)
+	// A SID that is not a member: every existing member counts as another.
+	notMember, err := windows.CreateWellKnownSid(windows.WinBuiltinGuestsSid)
+	require.NoError(t, err)
+
+	assert.NoError(t, requireOtherAdministrator(admins, notMember))
+}
+
+func TestMemberKeepsAdministered(t *testing.T) {
+	enabled := func(name string) bool { return name == "enabledadmin" }
+	for name, tc := range map[string]struct {
+		usage uint32
+		who   string
+		want  bool
+	}{
+		"local group":            {uint32(windows.SidTypeAlias), `BUILTIN\Backup Operators`, true},
+		"domain group":           {uint32(windows.SidTypeGroup), `LAB\Domain Admins`, true},
+		"well-known group":       {uint32(windows.SidTypeWellKnownGroup), `NT AUTHORITY\INTERACTIVE`, true},
+		"domain user":            {uint32(windows.SidTypeUser), `LAB\alice`, true},
+		"enabled local user":     {uint32(windows.SidTypeUser), `HOST\enabledadmin`, true},
+		"disabled local user":    {uint32(windows.SidTypeUser), `HOST\disabledadmin`, false},
+		"local user other case":  {uint32(windows.SidTypeUser), `host\enabledadmin`, true},
+		"deleted account":        {uint32(windows.SidTypeDeletedAccount), "", false},
+		"unknown SID (orphaned)": {uint32(windows.SidTypeUnknown), "", false},
+		"invalid SID":            {uint32(windows.SidTypeInvalid), "", false},
+		"user without domain":    {uint32(windows.SidTypeUser), "nodomain", false},
+	} {
+		if got := memberKeepsAdministered(tc.usage, tc.who, "HOST", enabled); got != tc.want {
+			t.Errorf("%s: memberKeepsAdministered = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
 func TestGroupChanges(t *testing.T) {
 	add, remove := groupChanges([]string{"Administrators", "Users", "Backup Operators"}, []string{"administrators", "Remote Desktop Users"}, "Users")
 	assert.Equal(t, []string{"Remote Desktop Users"}, add)

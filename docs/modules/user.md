@@ -27,7 +27,7 @@ The resource ID is the OS-level username (e.g., `alice`, `svc-backup`).
 |-------|------|----------|-------------|
 | `state` | string | **Yes** | `"present"` or `"absent"` |
 | `full_name` | string | No | Display name / GECOS comment |
-| `groups` | list of strings | No | Supplementary groups to assign |
+| `groups` | list of strings | No | Supplementary groups to assign. On Windows a non-empty list is exclusive; see Security Notes. |
 | `locked` | bool | No | Lock/disable the account (default: `false`) |
 | `has_credential` | bool | No | **Observed only** — never accepted by `Set`. Reports whether the OS considers the account to have a password. |
 
@@ -89,7 +89,12 @@ modules:
 - The module never accepts, logs, stores, or transmits password material. `has_credential` is a read-only observation.
 - On Linux, `userdel -r` removes the user's home directory. Ensure data is backed up before removing accounts.
 - On Linux and macOS, group removal (removing a user from a group that is no longer in `groups`) is not performed in v1 to avoid disrupting groups managed outside `cfg`.
-- On Windows, direct local group membership converges to `groups`. The user is removed from every group it is a direct member of that is not declared, except the built-in Users group (SID S-1-5-32-545, whatever its local name), which is never removed. `groups` is always a managed field, so an omitted or empty list removes the user from every direct group except Users (for example, an account managed only for `locked` loses Administrators unless `groups` lists it). Group names must match the validation pattern above, so a group whose name has spaces or non-ASCII characters (for example `Remote Desktop Users`) cannot be declared, and a managed user is removed from it. After applying, the groups are read again, and a list that still differs is an error. State is read through locale-independent APIs, so non-English systems report groups and the disabled state correctly.
+- On Windows, a non-empty `groups` list is exclusive: the user is added to every declared group and removed from every other group it is a direct member of. Two exceptions apply:
+  - The built-in Users group (SID S-1-5-32-545, whatever its local name) is never removed.
+  - Removal from the built-in Administrators group is refused, with an error, when no other member would keep the host administered (another group, a domain account, or an enabled local account). Deleted or unknown account SIDs left in the group do not count. The check covers group removal only. Deleting (`state: absent`) or disabling (`locked: true`) an account is not checked, because each needs an explicit declaration.
+
+  An omitted or empty `groups` list leaves group membership unchanged. After applying, the account is read again, and a group list, disabled state or full name that still differs is an error. State is read through locale-independent APIs, so non-English systems report groups and the disabled state correctly.
+- On Windows, group names follow the Windows local group naming rules instead of the pattern above. They may be up to 256 characters of any script and may include spaces, but not control characters, leading or trailing spaces, or any of `" / \ [ ] : ; | = , + * ? < > @`. So `Remote Desktop Users`, or a localized `Администраторы`, can be declared. They are passed to the Windows APIs in-process, never as command arguments.
 
 ## Out of Scope
 

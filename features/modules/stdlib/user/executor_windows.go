@@ -150,12 +150,7 @@ func readLocalGroups(username *uint16) ([]string, error) {
 // builtinUsersGroupName returns the local name of the built-in Users group
 // (S-1-5-32-545), which differs between system languages.
 func builtinUsersGroupName() (string, error) {
-	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
-	if err != nil {
-		return "", err
-	}
-	name, _, _, err := sid.LookupAccount("")
-	return name, err
+	return wellKnownGroupName(windows.WinBuiltinUsersSid)
 }
 
 // setState creates, modifies, or deletes the local user account to match desired.
@@ -210,10 +205,45 @@ func (e *windowsExecutor) setState(username string, desired userState) error {
 		}
 	}
 
-	usersGroup, err := builtinUsersGroupName()
-	if err != nil {
-		return fmt.Errorf("resolve the built-in Users group: %w", err)
+	manageGroups := len(desired.Groups) > 0
+	var usersGroup string
+	if manageGroups {
+		if usersGroup, err = builtinUsersGroupName(); err != nil {
+			return fmt.Errorf("resolve the built-in Users group: %w", err)
+		}
+		if err := convergeGroups(username, desired.Groups, usersGroup); err != nil {
+			return err
+		}
 	}
+
+	// Verify what was applied: a write that reported success but did not
+	// take effect must not read as success.
+	after, err := e.getState(username)
+	if err != nil {
+		return fmt.Errorf("verify local user %s: %w", username, err)
+	}
+	if !after.Exists {
+		return fmt.Errorf("local user %s does not exist after it was applied", username)
+	}
+	if after.Locked != desired.Locked {
+		return fmt.Errorf("local user %s: disabled state did not converge (want %v)", username, desired.Locked)
+	}
+	if after.FullName != desired.FullName {
+		return fmt.Errorf("local user %s: full name did not converge", username)
+	}
+	if manageGroups {
+		if missing, extra := groupChanges(after.Groups, desired.Groups, usersGroup); len(missing) > 0 || len(extra) > 0 {
+			return fmt.Errorf("local groups of %s did not converge: missing %v, not declared %v", username, missing, extra)
+		}
+	}
+	return nil
+}
+
+// convergeGroups adds username to every declared local group and removes it
+// from every other direct group except the built-in Users group. Removal from
+// BUILTIN\Administrators is refused when no other member would keep the group
+// administered (see requireOtherAdministrator).
+func convergeGroups(username string, declared []string, usersGroup string) error {
 	// Read the account again: creation adds it to Users, and its SID is needed.
 	acct, err := readAccount(username)
 	if err != nil {
@@ -222,26 +252,124 @@ func (e *windowsExecutor) setState(username string, desired userState) error {
 	if !acct.state.Exists {
 		return fmt.Errorf("local user %s does not exist after it was created", username)
 	}
-	add, remove := groupChanges(acct.state.Groups, desired.Groups, usersGroup)
+	add, remove := groupChanges(acct.state.Groups, declared, usersGroup)
 	for _, g := range add {
 		if err := changeLocalGroupMember(procNetLocalGroupAddMembers, g, acct.sid, errorMemberInLG); err != nil {
 			return fmt.Errorf("add %s to local group %s: %w", username, g, err)
 		}
 	}
+	if len(remove) == 0 {
+		return nil
+	}
+	adminsGroup, err := wellKnownGroupName(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return fmt.Errorf("resolve the built-in Administrators group: %w", err)
+	}
 	for _, g := range remove {
+		if strings.EqualFold(g, adminsGroup) {
+			if err := requireOtherAdministrator(adminsGroup, acct.sid); err != nil {
+				return fmt.Errorf("remove %s from %s: %w", username, adminsGroup, err)
+			}
+		}
 		if err := changeLocalGroupMember(procNetLocalGroupDelMembers, g, acct.sid, errorMemberNotInLG); err != nil {
 			return fmt.Errorf("remove %s from local group %s: %w", username, g, err)
 		}
 	}
-
-	after, err := e.getState(username)
-	if err != nil {
-		return fmt.Errorf("verify local groups of %s: %w", username, err)
-	}
-	if missing, extra := groupChanges(after.Groups, desired.Groups, usersGroup); len(missing) > 0 || len(extra) > 0 {
-		return fmt.Errorf("local groups of %s did not converge: missing %v, not declared %v", username, missing, extra)
-	}
 	return nil
+}
+
+// localGroupMembersInfo2 is LOCALGROUP_MEMBERS_INFO_2.
+type localGroupMembersInfo2 struct {
+	sid           *windows.SID
+	sidUsage      uint32
+	domainAndName *uint16
+}
+
+var procNetLocalGroupGetMembers = modnetapi32.NewProc("NetLocalGroupGetMembers")
+
+// errLastAdministrator is returned when removing a user from
+// BUILTIN\Administrators would leave the group without another member that
+// can administer the host.
+var errLastAdministrator = errors.New("refusing to remove the last enabled member of the Administrators group")
+
+// requireOtherAdministrator returns errLastAdministrator unless the local
+// Administrators group has a direct member other than user that keeps it
+// administered: a group, a domain account, or an enabled local account.
+func requireOtherAdministrator(adminsGroup string, user *windows.SID) error {
+	g, err := windows.UTF16PtrFromString(adminsGroup)
+	if err != nil {
+		return err
+	}
+	var (
+		buf            *byte
+		entries, total uint32
+	)
+	r, _, _ := procNetLocalGroupGetMembers.Call(0, uintptr(unsafe.Pointer(g)), 2,
+		uintptr(unsafe.Pointer(&buf)), maxPreferredLength,
+		uintptr(unsafe.Pointer(&entries)), uintptr(unsafe.Pointer(&total)), 0)
+	if buf != nil {
+		defer func() { _ = windows.NetApiBufferFree(buf) }()
+	}
+	if r != nerrSuccess {
+		return fmt.Errorf("read members of %s: %w", adminsGroup, windows.Errno(r))
+	}
+	if entries != total {
+		return fmt.Errorf("read %d of %d members of %s", entries, total, adminsGroup)
+	}
+	if entries == 0 {
+		return errLastAdministrator
+	}
+	computer, err := windows.ComputerName()
+	if err != nil {
+		return err
+	}
+	for _, m := range unsafe.Slice((*localGroupMembersInfo2)(unsafe.Pointer(buf)), entries) {
+		if m.sid == nil || m.sid.Equals(user) {
+			continue
+		}
+		if memberKeepsAdministered(m.sidUsage, windows.UTF16PtrToString(m.domainAndName), computer, localAccountEnabled) {
+			return nil
+		}
+	}
+	return errLastAdministrator
+}
+
+// memberKeepsAdministered reports whether a member of the Administrators
+// group, of SID type sidUsage named domainAndName, keeps the host
+// administered: a group, a domain user account, or an enabled local user
+// account (localEnabled). Deleted, invalid and unknown SIDs, which orphaned
+// entries commonly are, do not count.
+func memberKeepsAdministered(sidUsage uint32, domainAndName, computer string, localEnabled func(name string) bool) bool {
+	switch sidUsage {
+	case uint32(windows.SidTypeGroup), uint32(windows.SidTypeWellKnownGroup), uint32(windows.SidTypeAlias):
+		return true
+	case uint32(windows.SidTypeUser):
+		domain, name, found := strings.Cut(domainAndName, `\`)
+		if found && strings.EqualFold(domain, computer) {
+			return localEnabled(name)
+		}
+		return found // a domain account
+	default:
+		return false
+	}
+}
+
+// localAccountEnabled reports whether the local account name exists and is
+// not disabled. A failed read counts as not enabled.
+func localAccountEnabled(name string) bool {
+	acct, err := readAccount(name)
+	return err == nil && acct.state.Exists && !acct.state.Locked
+}
+
+// wellKnownGroupName returns the local name of a well-known group, which
+// differs between system languages.
+func wellKnownGroupName(sidType windows.WELL_KNOWN_SID_TYPE) (string, error) {
+	sid, err := windows.CreateWellKnownSid(sidType)
+	if err != nil {
+		return "", err
+	}
+	name, _, _, err := sid.LookupAccount("")
+	return name, err
 }
 
 // groupChanges compares the direct groups current with the declared groups

@@ -6,10 +6,13 @@ description: >
   lock/disable state, and password presence (observed only) via native OS account
   management tools (net.exe on Windows, useradd/usermod/userdel on Linux, dscl on macOS).
   On Windows, account state and direct local group membership are read with the
-  locale-independent NetUserGetInfo and NetUserGetLocalGroups APIs, and group
-  membership converges to the declared list with NetLocalGroupAddMembers and
-  NetLocalGroupDelMembers: direct groups that are not declared are removed,
-  except the built-in Users group (SID S-1-5-32-545), which is never removed.
+  locale-independent NetUserGetInfo and NetUserGetLocalGroups APIs. A non-empty
+  groups list is exclusive: membership converges to it with
+  NetLocalGroupAddMembers and NetLocalGroupDelMembers, and direct groups that
+  are not declared are removed. The built-in Users group (SID S-1-5-32-545) is
+  never removed. Removing the last member that keeps the Administrators group
+  (S-1-5-32-544) administered is refused. An empty or absent groups list leaves
+  membership unchanged.
   Password setting is intentionally out of scope — the module reports whether an
   account has a password (has_credential, Get-only) but never accepts, stores, or
   transmits password material.
