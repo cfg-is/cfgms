@@ -466,3 +466,12 @@ func (s *Server) emitOperatorAudit(
 			"error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }
+
+// auditTenantOrSystem returns tenantID, or audit.SystemTenantID when the credential
+// has no tenant owner.
+func auditTenantOrSystem(tenantID string) string {
+	if tenantID == "" {
+		return audit.SystemTenantID
+	}
+	return tenantID
+}

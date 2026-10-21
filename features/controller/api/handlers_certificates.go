@@ -838,6 +838,7 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 	// out-of-scope certs so no cross-tenant existence is leaked. Only an
 	// unscoped admin (empty caller tenant) may revoke those.
 	callerTenant := callerTenantFilter(r.Context())
+	ownerTenant := ""
 	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers; a root caller is checked by authorizeRootCertIdentities in the else branch
 		if certData.ClientID == "" {
 			s.logger.Warn("Denied tenant-scoped revoke of unattributable certificate",
@@ -879,12 +880,18 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 			}
 			return
 		}
+		ownerTenant = record.TenantID
 	} else if !s.authorizeRootCertIdentities(w, r, callerTenantScope(r), "POST /api/v1/certificates/{serial}/revoke", func() {
 		s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
 	}, certData.ClientID) {
 		// An explicitly root caller (callerTenantFilter's ""): a certificate issued to
 		// a client tenant's steward needs a crossing (Issue #4665).
 		return
+	}
+	if callerTenant == "" && certData.ClientID != "" && s.stewardStore != nil { //architecture:allow-root-scope -- root caller: resolve the owning steward's tenant for the audit event only
+		if record, gerr := s.stewardStore.GetSteward(r.Context(), certData.ClientID); gerr == nil && record != nil {
+			ownerTenant = record.TenantID
+		}
 	}
 
 	if err := s.certManager.Revoke(serial); err != nil {
@@ -894,6 +901,12 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
 		return
 	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(ownerTenant), business.AuditEventSecurityEvent,
+		"certificate_revoked", "certificate", serial,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{"serial_number": serial})
 
 	s.writeSuccessResponse(w, RevokeCertificateResponse{
 		SerialNumber: serial,
@@ -1004,6 +1017,8 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	// unused steward_id is a free pass through the containment check. New-device
 	// onboarding therefore runs as a root/unscoped operation (or after the steward is
 	// registered to a tenant), not as an unattributable tenant-scoped provision.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	stewardTenant := ""
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if scope.IsUnset() {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
@@ -1077,6 +1092,7 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		}
 		provisionReq.StewardID = record.ID
 		provisionReq.CommonName = record.ID
+		stewardTenant = record.TenantID
 		// Set explicitly rather than left empty: the service's default organization is
 		// deployment-configurable (SetCertificateDefaults), and the steward marker is what
 		// keeps this leaf out of the internal-delivery cluster-node path.
@@ -1157,6 +1173,15 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		SerialNumber:     provisionResp.SerialNumber,
 		ExpiresAt:        provisionResp.ExpiresAt,
 	}
+
+	auditTenant := stewardTenant
+	if principal != nil && auditTenant == "" {
+		auditTenant = principal.TenantID
+	}
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(auditTenant), business.AuditEventSecurityEvent,
+		"certificate_provisioned", "certificate", provisionResp.SerialNumber,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{"serial_number": provisionResp.SerialNumber})
 
 	s.writeResponse(w, http.StatusCreated, result)
 }

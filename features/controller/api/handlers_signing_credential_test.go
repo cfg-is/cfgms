@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // generateSigningCredentialTestKey generates a fresh ECDSA P-256 keypair and returns
@@ -469,4 +470,72 @@ func TestRequestSigningCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	require.True(t, ok, "issued cert public key must be ECDSA")
 	assert.True(t, issuedPub.Equal(&priv.PublicKey),
 		"issued cert public key must equal the caller-supplied public key")
+}
+
+// auditEntriesByAction flushes the server's real audit manager and returns the
+// entries recorded with the given action, across all tenants.
+func auditEntriesByAction(t *testing.T, server *Server, action string) []*business.AuditEntry {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{})
+	require.NoError(t, err)
+	var out []*business.AuditEntry
+	for _, e := range entries {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestHandleRequestSigningCredential_RecordsAuditEvent is a [REQUIRED TEST]: a
+// successful issuance writes one high-severity security audit entry naming the
+// principal and the issued serial, with no PEM material.
+func TestHandleRequestSigningCredential_RecordsAuditEvent(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin")
+	_, pubPEM := generateSigningCredentialTestKey(t)
+
+	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin", req, "signing-credential:request"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var resp struct {
+		Data SigningCredentialResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	entries := auditEntriesByAction(t, server, "signing_credential_issued")
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, business.AuditEventSecurityEvent, e.EventType)
+	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+	assert.Equal(t, "operator-admin", e.UserID)
+	assert.Equal(t, resp.Data.SerialNumber, e.ResourceID)
+	assert.Equal(t, resp.Data.SerialNumber, e.Details["serial_number"])
+	raw, err := json.Marshal(e)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "-----BEGIN")
+}
+
+// TestHandleRequestSigningCredential_Failure_RecordsNoAuditEvent: a refused request
+// produces no audit entry.
+func TestHandleRequestSigningCredential_Failure_RecordsNoAuditEvent(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin")
+
+	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", strings.NewReader(`{"public_key_pem":"not-a-key"}`))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin", req, "signing-credential:request"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	assert.Empty(t, auditEntriesByAction(t, server, "signing_credential_issued"))
 }

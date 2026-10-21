@@ -2661,3 +2661,88 @@ func TestHandleListCertificates_TenantAndIssuedAt_BothBranches(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleProvisionCertificate_RecordsAuditEvent is a [REQUIRED TEST]: a successful
+// provision writes one high-severity security audit entry naming the principal and
+// serial, with no private key or PEM.
+func TestHandleProvisionCertificate_RecordsAuditEvent(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer, `{"steward_id":"steward-audit-01","validity_days":30}`)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp struct {
+		Data CertificateProvisionResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	entries := auditEntriesByAction(t, server, "certificate_provisioned")
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, business.AuditEventSecurityEvent, e.EventType)
+	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+	assert.Equal(t, "operator-admin", e.UserID)
+	assert.Equal(t, resp.Data.SerialNumber, e.ResourceID)
+	assert.Equal(t, resp.Data.SerialNumber, e.Details["serial_number"])
+	raw, err := json.Marshal(e)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "PRIVATE KEY")
+	assert.NotContains(t, string(raw), "-----BEGIN")
+}
+
+// TestHandleProvisionCertificate_Failure_RecordsNoAuditEvent: a refused provision
+// writes no audit entry.
+func TestHandleProvisionCertificate_Failure_RecordsNoAuditEvent(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer, `{"common_name":"x"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, auditEntriesByAction(t, server, "certificate_provisioned"))
+}
+
+// TestHandleRevokeCertificate_RecordsAuditEvent is a [REQUIRED TEST]: a revoke writes
+// one audit entry under the owning steward's tenant naming the principal and serial;
+// a revoke denied by tenant scope writes none.
+func TestHandleRevokeCertificate_RecordsAuditEvent(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+	ctx := context.Background()
+	for id, tenantID := range map[string]string{"steward-audit-c1": "client-1", "steward-audit-c2": "client-2"} {
+		require.NoError(t, stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+			ID: id, TenantID: tenantID, Hostname: id, Platform: "linux", Arch: "amd64",
+		}))
+	}
+	issue := func(id string) *cert.Certificate {
+		c, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName: id, Organization: "Test CFGMS", ClientID: id, ValidityDays: 365,
+		})
+		require.NoError(t, err)
+		return c
+	}
+	own, other := issue("steward-audit-c1"), issue("steward-audit-c2")
+
+	revokeAs := func(serial string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)
+		req = req.WithContext(scopedRevokeContext("client-1"))
+		req = mux.SetURLVars(req, map[string]string{"serial": serial})
+		rec := httptest.NewRecorder()
+		server.handleRevokeCertificate(rec, req)
+		return rec
+	}
+
+	require.Equal(t, http.StatusNotFound, revokeAs(other.SerialNumber).Code)
+	assert.Empty(t, auditEntriesByAction(t, server, "certificate_revoked"))
+
+	require.Equal(t, http.StatusOK, revokeAs(own.SerialNumber).Code)
+	entries := auditEntriesByAction(t, server, "certificate_revoked")
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, business.AuditEventSecurityEvent, e.EventType)
+	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+	assert.Equal(t, "client-1", e.TenantID)
+	assert.Equal(t, "revoke-caller", e.UserID)
+	assert.Equal(t, own.SerialNumber, e.ResourceID)
+	raw, err := json.Marshal(e)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "-----BEGIN")
+}
