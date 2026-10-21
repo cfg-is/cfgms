@@ -425,3 +425,148 @@ describe('RunPanel — structure', () => {
     expect(screen.getByTestId('run-job-row')).toBeInTheDocument()
   })
 })
+
+// ── Run command mode: passkey-signed operator envelope ────────────────────────
+
+function jsonResponse(data: unknown, status = 200) {
+  return new Response(JSON.stringify({ data, timestamp: new Date().toISOString() }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function bytes(text: string): ArrayBuffer {
+  return new TextEncoder().encode(text).buffer as ArrayBuffer
+}
+
+function makeAssertion(): PublicKeyCredential {
+  return {
+    id: 'cred-id',
+    rawId: bytes('cred-id'),
+    type: 'public-key',
+    response: {
+      clientDataJSON: bytes('{"type":"webauthn.get"}'),
+      authenticatorData: bytes('auth-data'),
+      signature: bytes('sig'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({}) as AuthenticationExtensionsClientOutputs,
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
+const BEGIN = {
+  assertion: { publicKey: { challenge: 'Y2hhbGxlbmdl', rpId: 'localhost', userVerification: 'required' } },
+  envelope: { nonce: 'nonce-1', expires_at: '2026-10-21T10:03:00Z', targets: ['steward-1', 'steward-2'] },
+}
+const FINISH = {
+  authenticator_data: 'YXV0aA==',
+  client_data_json: 'Y2xpZW50',
+  signature: 'c2ln',
+  credential_id: 'Y3JlZA==',
+}
+
+function bodyOf(path: string): Record<string, unknown> {
+  const call = callsTo(path)[0]
+  return JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+}
+
+function callsTo(path: string) {
+  return fetchMock.mock.calls.filter((c) => String(c[0]).includes(path))
+}
+
+function installCommandRoutes() {
+  fetchMock.mockImplementation((input) => {
+    const url = String(input)
+    if (url.includes('/operator-payload/sign/begin')) return Promise.resolve(jsonResponse(BEGIN))
+    if (url.includes('/operator-payload/sign/finish')) return Promise.resolve(jsonResponse(FINISH))
+    if (url.includes('/runs/command')) return Promise.resolve(jsonResponse({ run_id: 'run-cmd' }))
+    if (url.includes('/runs/run-cmd/jobs')) return Promise.resolve(jsonResponse([]))
+    if (url.includes('/runs/run-cmd')) return Promise.resolve(jsonResponse({ run_id: 'run-cmd', status: 'running', job_count: 2, completed_jobs: 0, failed_jobs: 0 }))
+    return Promise.resolve(jsonResponse({}))
+  })
+}
+
+function startCommand() {
+  renderRunPanel()
+  fireEvent.click(screen.getByTestId('mode-command-btn'))
+  fireEvent.change(screen.getByRole('textbox', { name: /target selector/i }), {
+    target: { value: 'tag:prod' },
+  })
+  fireEvent.change(screen.getByTestId('command-content'), { target: { value: 'hostname' } })
+  fireEvent.change(screen.getByTestId('command-shell'), { target: { value: 'pwsh' } })
+  fireEvent.click(screen.getByTestId('run-command-btn'))
+}
+
+describe('RunPanel — Run command mode', () => {
+  it('signs via sign/begin then sign/finish and posts the envelope fields from begin', async () => {
+    const get = vi.fn().mockResolvedValue(makeAssertion())
+    vi.stubGlobal('navigator', { credentials: { get } })
+    installCommandRoutes()
+
+    startCommand()
+
+    // The confirm step shows the resolved target count and the content before any tap.
+    await waitFor(() =>
+      expect(screen.getByTestId('run-command-confirm-count')).toHaveTextContent('2 stewards'),
+    )
+    expect(screen.getByTestId('run-command-confirm-content')).toHaveTextContent('hostname')
+    expect(get).not.toHaveBeenCalled()
+    expect(callsTo('/runs/command')).toHaveLength(0)
+
+    fireEvent.click(screen.getByTestId('run-command-confirm-btn'))
+    await waitFor(() => expect(screen.getByTestId('run-status')).toBeInTheDocument())
+
+    const order = fetchMock.mock.calls.map((c) => String(c[0]))
+    const begin = order.findIndex((u) => u.includes('/sign/begin'))
+    const finish = order.findIndex((u) => u.includes('/sign/finish'))
+    const post = order.findIndex((u) => u.includes('/runs/command'))
+    expect(begin).toBeGreaterThanOrEqual(0)
+    expect(finish).toBeGreaterThan(begin)
+    expect(post).toBeGreaterThan(finish)
+
+    const beginBody = bodyOf('/sign/begin')
+    expect(beginBody).toEqual({ selector: 'tag:prod', content: btoa('hostname'), shell: 'pwsh' })
+
+    const posted = bodyOf('/runs/command')
+    expect(posted).toEqual({
+      target: 'tag:prod',
+      content: btoa('hostname'),
+      shell: 'pwsh',
+      targets: BEGIN.envelope.targets,
+      nonce: BEGIN.envelope.nonce,
+      expires_at: BEGIN.envelope.expires_at,
+      webauthn: FINISH,
+    })
+  })
+
+  it('posts nothing when the passkey prompt is cancelled', async () => {
+    const get = vi.fn().mockRejectedValue(new DOMException('cancelled', 'NotAllowedError'))
+    vi.stubGlobal('navigator', { credentials: { get } })
+    installCommandRoutes()
+
+    startCommand()
+    await waitFor(() => expect(screen.getByTestId('run-command-confirm-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('run-command-confirm-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('run-error')).toHaveTextContent(/cancelled/i))
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(callsTo('/sign/finish')).toHaveLength(0)
+    expect(callsTo('/runs/command')).toHaveLength(0)
+  })
+
+  it('declining the confirm step never prompts for the passkey and posts nothing', async () => {
+    const get = vi.fn().mockResolvedValue(makeAssertion())
+    vi.stubGlobal('navigator', { credentials: { get } })
+    installCommandRoutes()
+
+    startCommand()
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.getByTestId('run-error')).toBeInTheDocument())
+    expect(get).not.toHaveBeenCalled()
+    expect(callsTo('/runs/command')).toHaveLength(0)
+  })
+})

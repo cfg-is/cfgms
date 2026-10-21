@@ -251,6 +251,55 @@ func TestSynthesizeCommandRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 	}
 }
 
+func TestSynthesizeCommandRunForDevices_WebAuthnProofAndPerDeviceManifest(t *testing.T) {
+	ctx := context.Background()
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+	devices := []fleet.StewardResult{{ID: "dev-a", TenantID: "t"}, {ID: "dev-b", TenantID: "t"}}
+	sig := &CommandSignature{
+		WebAuthnAuthenticatorData: "YXV0aA==", WebAuthnClientDataJSON: "Y2xpZW50",
+		WebAuthnSignature: "c2ln", WebAuthnCredentialID: "Y3JlZA==",
+	}
+	manifests := map[string]string{"dev-a": "manifest-a", "dev-b": "manifest-b"}
+
+	_, err := SynthesizeCommandRunForDevices(ctx, manager, queue, devices, "t", "u", fleet.Filter{},
+		"echo hi", scriptmodule.ShellBash, nil, sig, manifests, []string{"dev-a", "dev-b"}, "n1", time.Now().Add(time.Minute))
+	require.NoError(t, err)
+
+	for _, id := range []string{"dev-a", "dev-b"} {
+		queued := queue.PeekForDevice(id)
+		require.Len(t, queued, 1)
+		md := queued[0].Metadata
+		assert.Equal(t, sig.WebAuthnAuthenticatorData, md["webauthn_authenticator_data"])
+		assert.Equal(t, sig.WebAuthnClientDataJSON, md["webauthn_client_data_json"])
+		assert.Equal(t, sig.WebAuthnSignature, md["webauthn_signature"])
+		assert.Equal(t, sig.WebAuthnCredentialID, md["webauthn_credential_id"])
+		assert.Equal(t, manifests[id], md["webauthn_manifest"])
+		assert.Equal(t, []string{"dev-a", "dev-b"}, md["targets"])
+	}
+}
+
+func TestSynthesizeCommandRunForDevices_RefusesPartialWebAuthnSet(t *testing.T) {
+	ctx := context.Background()
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+	devices := []fleet.StewardResult{{ID: "dev-a", TenantID: "t"}, {ID: "dev-b", TenantID: "t"}}
+	exp := time.Now().Add(time.Minute)
+
+	partial := &CommandSignature{WebAuthnAuthenticatorData: "YQ==", WebAuthnClientDataJSON: "Yg=="}
+	_, err := SynthesizeCommandRunForDevices(ctx, manager, queue, devices, "t", "u", fleet.Filter{},
+		"echo hi", scriptmodule.ShellBash, nil, partial, map[string]string{"dev-a": "m", "dev-b": "m"}, nil, "n", exp)
+	require.Error(t, err)
+
+	full := &CommandSignature{WebAuthnAuthenticatorData: "YQ==", WebAuthnClientDataJSON: "Yg==", WebAuthnSignature: "Yw==", WebAuthnCredentialID: "ZA=="}
+	_, err = SynthesizeCommandRunForDevices(ctx, manager, queue, devices, "t", "u", fleet.Filter{},
+		"echo hi", scriptmodule.ShellBash, nil, full, map[string]string{"dev-a": "m"}, nil, "n", exp)
+	require.Error(t, err, "a device without a manifest must refuse the whole run")
+
+	assert.Empty(t, queue.PeekForDevice("dev-a"))
+	assert.Empty(t, queue.PeekForDevice("dev-b"))
+}
+
 // TestSynthesizeScriptRun_ResolveParamsPerDevice verifies that when scriptMeta is
 // provided, each device's QueuedExecution.Parameters reflects that device's DNA
 // attributes, with runtime overrides still taking priority.

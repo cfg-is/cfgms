@@ -102,14 +102,15 @@ type postRunScriptRequest struct {
 // ExpiresAt (RFC3339) bounds the envelope's validity. All three are forwarded to the
 // steward unmodified — the controller never re-signs or strips them.
 type postRunCommandRequest struct {
-	Target    string                `json:"target"`     // fleet selector string
-	Content   string                `json:"content"`    // base64-encoded inline script
-	Shell     string                `json:"shell"`      // shell to use (e.g. "bash")
-	Params    map[string]string     `json:"params"`     // script parameters
-	Signature *execCommandSignature `json:"signature"`  // operator signing envelope (mandatory)
-	Targets   []string              `json:"targets"`    // resolved steward IDs the signature binds
-	Nonce     string                `json:"nonce"`      // single-use replay-prevention token
-	ExpiresAt string                `json:"expires_at"` // RFC3339 envelope expiry
+	Target    string                 `json:"target"`     // fleet selector string
+	Content   string                 `json:"content"`    // base64-encoded inline script
+	Shell     string                 `json:"shell"`      // shell to use (e.g. "bash")
+	Params    map[string]string      `json:"params"`     // script parameters
+	Signature *execCommandSignature  `json:"signature"`  // X.509 operator signature (exactly one of signature / webauthn)
+	WebAuthn  *OperatorWebAuthnProof `json:"webauthn"`   // passkey operator proof (exactly one of signature / webauthn)
+	Targets   []string               `json:"targets"`    // resolved steward IDs the signature binds
+	Nonce     string                 `json:"nonce"`      // single-use replay-prevention token
+	ExpiresAt string                 `json:"expires_at"` // RFC3339 envelope expiry
 }
 
 // validatePublicBetaCommandSignature verifies the operator signature over the
@@ -168,6 +169,35 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 	}
 
 	return s.verifyOperatorSigningCertificate(sig.PublicKey)
+}
+
+// verifyCommandWebAuthn verifies a passkey operator proof over an inline command's
+// envelope (content, shell, targets, nonce, expiry). It calls verifyActionWebAuthn
+// directly rather than verifyOperatorEnvelope, which admits only a single target: the
+// sign ceremony freezes however many stewards the selector resolved. The request's
+// targets are the envelope's frozen targets — the challenge hash binds them, so any
+// other set fails the assertion. Admission: expiry must not be past nor later than
+// operatorpayload.ActionEnvelopeMaxTTL from now. The credential must belong to the
+// authenticated principal (checked by verifyActionWebAuthn). It returns the hex
+// credential ID, the form the sign ceremony audits.
+func (s *Server) verifyCommandWebAuthn(ctx context.Context, content []byte, shell string, targets []string, nonce string, expiresAt time.Time, proof *OperatorWebAuthnProof) (string, error) {
+	now := time.Now()
+	if !expiresAt.After(now) {
+		return "", fmt.Errorf("operator envelope has expired")
+	}
+	if expiresAt.After(now.Add(operatorpayload.ActionEnvelopeMaxTTL)) {
+		return "", fmt.Errorf("operator envelope expiry exceeds the %s maximum", operatorpayload.ActionEnvelopeMaxTTL)
+	}
+	if len(targets) == 0 {
+		return "", fmt.Errorf("operator envelope has no targets")
+	}
+	return s.verifyActionWebAuthn(ctx, operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: expiresAt,
+	}, proof)
 }
 
 // verifyOperatorSigningCertificate applies the operator-credential trust checks shared
@@ -495,10 +525,26 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "expires_at must be RFC3339", "INVALID_EXPIRES_AT")
 		return
 	}
-	credentialID, err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
-	if err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+	var credentialID string
+	switch {
+	case req.Signature != nil && req.WebAuthn != nil:
+		s.writeErrorResponse(w, http.StatusBadRequest, "provide exactly one operator proof", "INVALID_SIGNATURE")
 		return
+	case req.WebAuthn != nil:
+		credentialID, err = s.verifyCommandWebAuthn(r.Context(), inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.WebAuthn)
+		if err != nil {
+			s.logger.Warn("Run command refused: operator envelope not verified",
+				"principal_id", logging.SanitizeLogValue(principal.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusBadRequest, "invalid operator signature", "INVALID_SIGNATURE")
+			return
+		}
+	default:
+		credentialID, err = s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
+		if err != nil {
+			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+			return
+		}
 	}
 
 	// Blast-radius bound (Issue #3698): a hard reject at admission, checked against the
@@ -574,11 +620,37 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var commandSignature *controllerrun.CommandSignature
+	var manifests map[string]string
 	if req.Signature != nil {
 		commandSignature = &controllerrun.CommandSignature{
 			Algorithm: req.Signature.Algorithm,
 			Value:     req.Signature.Value,
 			PublicKey: req.Signature.PublicKey,
+		}
+	}
+	if req.WebAuthn != nil {
+		b64 := base64.StdEncoding.EncodeToString
+		commandSignature = &controllerrun.CommandSignature{
+			WebAuthnAuthenticatorData: b64(req.WebAuthn.AuthenticatorData),
+			WebAuthnClientDataJSON:    b64(req.WebAuthn.ClientDataJSON),
+			WebAuthnSignature:         b64(req.WebAuthn.Signature),
+			WebAuthnCredentialID:      b64(req.WebAuthn.CredentialID),
+		}
+		// Each steward verifies the proof against its own roster manifest, so one is
+		// built per device; a device without one is not dispatched to.
+		manifests = make(map[string]string, len(devices))
+		for _, device := range devices {
+			manifest, err := s.buildWebAuthnManifestForSteward(r.Context(), device.ID)
+			if err != nil {
+				s.logger.Error("Run command not queued: WebAuthn manifest unavailable",
+					"steward_id", logging.SanitizeLogValue(device.ID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
+					credentialID, req.Targets, "", business.AuditResultError, "webauthn manifest unavailable")
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Operator credential manifest not available", "MANIFEST_UNAVAILABLE")
+				return
+			}
+			manifests[device.ID] = manifest
 		}
 	}
 
@@ -594,6 +666,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		scriptmodule.ShellType(req.Shell),
 		req.Params,
 		commandSignature,
+		manifests,
 		req.Targets,
 		req.Nonce,
 		expiresAt,

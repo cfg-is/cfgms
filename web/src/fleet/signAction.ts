@@ -175,10 +175,48 @@ export async function signPrepared(
   content: string,
   shell: string,
 ): Promise<SignedProof> {
+  return runCeremony(`id:${stewardId}`, content, shell, (envelope) => {
+    // The envelope is frozen by the controller: refuse to prompt if it names anything
+    // other than the steward the operator confirmed.
+    if (envelope.targets.length !== 1 || envelope.targets[0] !== stewardId) {
+      throw new ContentMismatchError()
+    }
+  })
+}
+
+/** Called between sign/begin and the passkey prompt with the targets the controller froze. */
+export type ConfirmEnvelope = (envelope: { targets: string[] }) => boolean | Promise<boolean>
+
+/**
+ * Signs operator content (base64) for a fleet selector, for any number of targets.
+ * The controller resolves the selector into the frozen target list; `confirm` runs
+ * after sign/begin and before the passkey prompt so the operator can see the resolved
+ * target count and content they are about to sign. Declining throws
+ * SignCancelledError and nothing is signed. Also throws NoPasskeyError and
+ * ControlHttpError like signAction.
+ */
+export async function signContent(
+  selector: string,
+  content: string,
+  shell: string,
+  confirm: ConfirmEnvelope,
+): Promise<SignedProof> {
+  return runCeremony(selector, content, shell, async (envelope) => {
+    if (envelope.targets.length === 0) throw new ContentMismatchError()
+    if (!(await confirm({ targets: envelope.targets }))) throw new SignCancelledError()
+  })
+}
+
+async function runCeremony(
+  selector: string,
+  content: string,
+  shell: string,
+  checkEnvelope: (envelope: BeginResponse['envelope']) => void | Promise<void>,
+): Promise<SignedProof> {
   let begin: BeginResponse
   try {
     begin = await postJson<BeginResponse>('/api/v1/operator-payload/sign/begin', {
-      selector: `id:${stewardId}`,
+      selector,
       content,
       shell,
     })
@@ -187,11 +225,7 @@ export async function signPrepared(
     throw e
   }
 
-  // The envelope is frozen by the controller: refuse to prompt if it names anything
-  // other than the steward the operator confirmed.
-  if (begin.envelope.targets.length !== 1 || begin.envelope.targets[0] !== stewardId) {
-    throw new ContentMismatchError()
-  }
+  await checkEnvelope(begin.envelope)
 
   const pk = begin.assertion.publicKey
   let cred: Credential | null
