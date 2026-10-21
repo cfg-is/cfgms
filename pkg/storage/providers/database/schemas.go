@@ -2002,11 +2002,17 @@ func (s DatabaseSchemas) CreatePushRecordsTable(ctx context.Context, db *sql.DB)
 			status       TEXT NOT NULL DEFAULT 'pending',
 			initiated_by TEXT NOT NULL DEFAULT '',
 			data         BYTEA,
+			target_steward_ids TEXT NOT NULL DEFAULT '',
 			created_at   TIMESTAMPTZ NOT NULL,
 			updated_at   TIMESTAMPTZ NOT NULL
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create cfgms_push_records table: %w", err)
+	}
+	// CREATE TABLE IF NOT EXISTS leaves an existing table untouched; add the
+	// authorized-target column to upgraded databases. Existing rows read as empty.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE cfgms_push_records ADD COLUMN IF NOT EXISTS target_steward_ids TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("failed to add cfgms_push_records.target_steward_ids: %w", err)
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_tenant_id  ON cfgms_push_records(tenant_id);",

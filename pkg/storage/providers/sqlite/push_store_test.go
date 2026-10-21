@@ -4,6 +4,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -273,4 +274,79 @@ func TestPushStore_ListPushesByConfigID(t *testing.T) {
 		assert.Equal(t, "push-tenant-a", results[0].ID)
 		assert.Equal(t, "tenant-a", results[0].TenantID)
 	})
+}
+
+func TestPushStore_TargetStewardIDsRoundTrip(t *testing.T) {
+	store := newTestPushStore(t)
+	ctx := context.Background()
+
+	rec := testPushRecord("push-targets")
+	rec.TargetStewardIDs = []string{"steward-a", "steward-b"}
+	require.NoError(t, store.CreatePush(ctx, rec))
+
+	noTargets := testPushRecord("push-no-targets")
+	require.NoError(t, store.CreatePush(ctx, noTargets))
+
+	pending, err := store.GetPendingPushes(ctx)
+	require.NoError(t, err)
+	require.Len(t, pending, 2)
+	assert.Equal(t, []string{"steward-a", "steward-b"}, pending[0].TargetStewardIDs)
+	assert.Empty(t, pending[1].TargetStewardIDs)
+
+	got, err := store.GetPush(ctx, "push-targets")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"steward-a", "steward-b"}, got.TargetStewardIDs)
+
+	listed, err := store.ListPushesByConfigID(ctx, rec.ConfigID, rec.TenantID)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, []string{"steward-a", "steward-b"}, listed[0].TargetStewardIDs)
+}
+
+// A database created before target_steward_ids existed gains the column on open,
+// its rows read back with no targets (so a pending push is failed on resume), and
+// a second open is a no-op.
+func TestPushStore_BackfillAddsTargetStewardIDsColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	ctx := context.Background()
+
+	legacy, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = legacy.ExecContext(ctx, `CREATE TABLE push_records (
+		id           TEXT PRIMARY KEY,
+		config_id    TEXT NOT NULL,
+		tenant_id    TEXT NOT NULL,
+		version      TEXT NOT NULL,
+		status       TEXT NOT NULL,
+		initiated_by TEXT NOT NULL,
+		data         BLOB NOT NULL,
+		created_at   TEXT NOT NULL,
+		updated_at   TEXT NOT NULL
+	)`)
+	require.NoError(t, err)
+	_, err = legacy.ExecContext(ctx, `INSERT INTO push_records
+		(id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at)
+		VALUES ('legacy-push', 'cfg', 'tenant-1', 'v1', 'pending', 'user', x'7b7d', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	db, err := openAndInit(path)
+	require.NoError(t, err)
+	store := &SQLitePushStore{db: db}
+	got, err := store.GetPush(ctx, "legacy-push")
+	require.NoError(t, err)
+	assert.Empty(t, got.TargetStewardIDs, "pre-existing rows must read back with no targets")
+
+	rec := testPushRecord("new-push")
+	rec.TargetStewardIDs = []string{"steward-a"}
+	require.NoError(t, store.CreatePush(ctx, rec))
+	require.NoError(t, db.Close())
+
+	db2, err := openAndInit(path)
+	require.NoError(t, err, "second open must be a no-op")
+	t.Cleanup(func() { _ = db2.Close() })
+	store2 := &SQLitePushStore{db: db2}
+	again, err := store2.GetPush(ctx, "new-push")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"steward-a"}, again.TargetStewardIDs)
 }

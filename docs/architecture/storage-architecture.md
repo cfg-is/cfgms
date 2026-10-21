@@ -192,7 +192,7 @@ The `cfg migrate --provider storage` pathway covers the following store kinds. E
 | `steward` | ✓ | ✓ | Steward fleet records |
 | `command` | ✓ | ✓ | Command records |
 | `trigger` | ✓ | ✓ | Workflow trigger records; PostgreSQL store added in Issue #3402 |
-| `push` | ✓ | ✓ | Push-state records for failover replay; PostgreSQL store added in Issue #3402 — enables `resumePendingPushes` in cluster mode |
+| `push` | ✓ | ✓ | Push-state records for failover replay; PostgreSQL store added in Issue #3402 — enables `resumePendingPushes` in cluster mode; each record carries the authorized target steward IDs, and a resumed push delivers only to them (a record with none is failed) |
 | `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
 | `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
 | `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |

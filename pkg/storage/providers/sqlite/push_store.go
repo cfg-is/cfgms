@@ -6,6 +6,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -68,10 +69,15 @@ func sqliteInsertPushRecord(ctx context.Context, tx *sql.Tx, record *business.Pu
 		createdAt = now
 	}
 
-	_, err := tx.ExecContext(ctx, `
+	targets, err := encodePushTargets(record.TargetStewardIDs)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to encode push targets for %s: %w", record.ID, err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO push_records
-			(id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.ConfigID,
 		record.TenantID,
@@ -79,6 +85,7 @@ func sqliteInsertPushRecord(ctx context.Context, tx *sql.Tx, record *business.Pu
 		string(status),
 		record.InitiatedBy,
 		record.Data,
+		targets,
 		formatTime(createdAt),
 		formatTime(now),
 	)
@@ -112,7 +119,7 @@ func (s *SQLitePushStore) UpdatePushStatus(ctx context.Context, id string, statu
 // Both states are returned so a new leader can resume all unfinished work.
 func (s *SQLitePushStore) GetPendingPushes(ctx context.Context) ([]*business.PushRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
+		SELECT id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at
 		FROM push_records
 		WHERE status IN ('pending', 'in_progress')
 		ORDER BY created_at ASC, rowid ASC`,
@@ -128,7 +135,7 @@ func (s *SQLitePushStore) GetPendingPushes(ctx context.Context) ([]*business.Pus
 // Returns ErrPushNotFound if no record exists.
 func (s *SQLitePushStore) GetPush(ctx context.Context, id string) (*business.PushRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
+		SELECT id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at
 		FROM push_records WHERE id = ?`, id)
 	return scanPushRow(row)
 }
@@ -141,7 +148,7 @@ func (s *SQLitePushStore) GetPush(ctx context.Context, id string) (*business.Pus
 // tenant isolation.
 func (s *SQLitePushStore) ListPushesByConfigID(ctx context.Context, configID, tenantID string) ([]*business.PushRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
+		SELECT id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at
 		FROM push_records
 		WHERE config_id = ? AND tenant_id = ?
 		ORDER BY created_at DESC, rowid DESC`,
@@ -166,10 +173,10 @@ func (s *SQLitePushStore) ListPushesByConfigID(ctx context.Context, configID, te
 // scanPushRow scans a *sql.Row into a PushRecord.
 func scanPushRow(row *sql.Row) (*business.PushRecord, error) {
 	r := &business.PushRecord{}
-	var statusStr, createdStr, updatedStr string
+	var statusStr, createdStr, updatedStr, targetsStr string
 	err := row.Scan(
 		&r.ID, &r.ConfigID, &r.TenantID, &r.Version,
-		&statusStr, &r.InitiatedBy, &r.Data,
+		&statusStr, &r.InitiatedBy, &r.Data, &targetsStr,
 		&createdStr, &updatedStr,
 	)
 	if err == sql.ErrNoRows {
@@ -177,6 +184,9 @@ func scanPushRow(row *sql.Row) (*business.PushRecord, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan push record: %w", err)
+	}
+	if r.TargetStewardIDs, err = decodePushTargets(targetsStr); err != nil {
+		return nil, err
 	}
 	return populatePush(r, statusStr, createdStr, updatedStr), nil
 }
@@ -186,14 +196,19 @@ func scanPushRows(rows *sql.Rows) ([]*business.PushRecord, error) {
 	var records []*business.PushRecord
 	for rows.Next() {
 		r := &business.PushRecord{}
-		var statusStr, createdStr, updatedStr string
+		var statusStr, createdStr, updatedStr, targetsStr string
 		if err := rows.Scan(
 			&r.ID, &r.ConfigID, &r.TenantID, &r.Version,
-			&statusStr, &r.InitiatedBy, &r.Data,
+			&statusStr, &r.InitiatedBy, &r.Data, &targetsStr,
 			&createdStr, &updatedStr,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: failed to scan push record row: %w", err)
 		}
+		targets, err := decodePushTargets(targetsStr)
+		if err != nil {
+			return nil, err
+		}
+		r.TargetStewardIDs = targets
 		records = append(records, populatePush(r, statusStr, createdStr, updatedStr))
 	}
 	return records, rows.Err()
@@ -205,6 +220,35 @@ func populatePush(r *business.PushRecord, statusStr, createdStr, updatedStr stri
 	r.CreatedAt = parseTime(createdStr)
 	r.UpdatedAt = parseTime(updatedStr)
 	return r
+}
+
+// encodePushTargets serialises the authorized target set as a JSON array. An
+// empty set is stored as ” so rows written before the column existed and rows
+// with no targets read back identically.
+func encodePushTargets(ids []string) (string, error) {
+	if len(ids) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// decodePushTargets reverses encodePushTargets; ” decodes to a nil slice.
+func decodePushTargets(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(s), &ids); err != nil {
+		return nil, fmt.Errorf("sqlite: failed to decode push targets: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
 }
 
 // Compile-time assertion

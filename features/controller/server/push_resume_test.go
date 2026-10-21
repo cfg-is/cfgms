@@ -127,7 +127,13 @@ func makeRecordingPublisher(t *testing.T, cp *recordingControlPlane) *commands.P
 // Returns the controller-assigned steward ID.
 func registerResumeSteward(t *testing.T, srv *Server, dnaID string) string {
 	t.Helper()
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "default")
+	return registerResumeStewardInTenant(t, srv, dnaID, "default")
+}
+
+// registerResumeStewardInTenant registers an active steward under the given tenant.
+func registerResumeStewardInTenant(t *testing.T, srv *Server, dnaID, tenantID string) string {
+	t.Helper()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 	resp, err := srv.controllerService.AcceptRegistration(ctx, &ctrlproto.RegisterRequest{
 		Version:    "1.0.0",
 		InitialDna: &common.DNA{Id: dnaID},
@@ -188,14 +194,15 @@ func TestLeaderResumePendingPushes(t *testing.T) {
 
 	pushID := "push-resume-test-1"
 	require.NoError(t, pushStore.CreatePush(ctx, &business.PushRecord{
-		ID:        pushID,
-		ConfigID:  cfg2.ConfigID,
-		TenantID:  cfg2.TenantID,
-		Version:   cfg2.Version,
-		Status:    business.PushStatusInProgress,
-		Data:      data,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:               pushID,
+		ConfigID:         cfg2.ConfigID,
+		TenantID:         cfg2.TenantID,
+		Version:          cfg2.Version,
+		Status:           business.PushStatusInProgress,
+		Data:             data,
+		TargetStewardIDs: []string{stewardID},
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
 	}))
 
 	// resumePendingPushes delivers to every active steward — expect one SendCommand.
@@ -342,7 +349,7 @@ func TestLeaderResumePendingPushes_DeliveryFailureMarkedFailed(t *testing.T) {
 
 	// Register an active steward so the fanout targets it and fails.
 	ctx := context.Background()
-	registerResumeSteward(t, srv, "resume-fail-dna-1")
+	failStewardID := registerResumeSteward(t, srv, "resume-fail-dna-1")
 
 	pushStore := srv.storageManager.GetPushStore()
 	require.NotNil(t, pushStore)
@@ -357,14 +364,15 @@ func TestLeaderResumePendingPushes_DeliveryFailureMarkedFailed(t *testing.T) {
 
 	pushID := "push-fail-test-1"
 	require.NoError(t, pushStore.CreatePush(ctx, &business.PushRecord{
-		ID:        pushID,
-		ConfigID:  cfg2.ConfigID,
-		TenantID:  cfg2.TenantID,
-		Version:   cfg2.Version,
-		Status:    business.PushStatusInProgress,
-		Data:      data,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:               pushID,
+		ConfigID:         cfg2.ConfigID,
+		TenantID:         cfg2.TenantID,
+		Version:          cfg2.Version,
+		Status:           business.PushStatusInProgress,
+		Data:             data,
+		TargetStewardIDs: []string{failStewardID},
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
 	}))
 
 	// Expect one failed SendCommand attempt for the active steward.
@@ -380,6 +388,94 @@ func TestLeaderResumePendingPushes_DeliveryFailureMarkedFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusFailed, updated.Status,
 		"push record must be marked failed when all stewards fail delivery during resume")
+}
+
+// newResumeTestServer builds a server with a recording publisher for resume tests.
+func newResumeTestServer(t *testing.T) (*Server, *recordingControlPlane) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	tempDir := t.TempDir()
+	srv, err := New(&config.Config{
+		ListenAddr:  "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{EnableCertManagement: false},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+	}, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop() })
+	rcp := &recordingControlPlane{}
+	srv.commandPublisher = makeRecordingPublisher(t, rcp)
+	return srv, rcp
+}
+
+func resumeTestPayload(t *testing.T, configID, tenantID string) (push.StewardConfiguration, []byte) {
+	t.Helper()
+	cfg := push.StewardConfiguration{ConfigID: configID, Version: "1.0.0", TenantID: tenantID}
+	data, err := json.Marshal(&cfg)
+	require.NoError(t, err)
+	return cfg, data
+}
+
+// TestLeaderResumePendingPushes_DeliversOnlyToStoredTargets verifies that with
+// stewards in two tenants, resume delivers only to the steward the record
+// was authorized for, not the whole fleet.
+func TestLeaderResumePendingPushes_DeliversOnlyToStoredTargets(t *testing.T) {
+	srv, rcp := newResumeTestServer(t)
+	ctx := context.Background()
+
+	targetID := registerResumeStewardInTenant(t, srv, "scope-dna-a", "tenant-a")
+	otherID := registerResumeStewardInTenant(t, srv, "scope-dna-b", "tenant-b")
+	require.NotEqual(t, targetID, otherID)
+
+	pushStore := srv.storageManager.GetPushStore()
+	require.NotNil(t, pushStore)
+	cfg, data := resumeTestPayload(t, "cfg-scope", "tenant-a")
+	require.NoError(t, pushStore.CreatePush(ctx, &business.PushRecord{
+		ID: "push-scope-1", ConfigID: cfg.ConfigID, TenantID: cfg.TenantID, Version: cfg.Version,
+		Status: business.PushStatusInProgress, Data: data,
+		TargetStewardIDs: []string{targetID},
+		CreatedAt:        time.Now(), UpdatedAt: time.Now(),
+	}))
+
+	rcp.wg.Add(1)
+	srv.resumePendingPushes(ctx)
+	rcp.wg.Wait()
+
+	assert.Equal(t, []string{targetID}, rcp.ReceivedIDs(),
+		"resume must deliver only to the stored target set")
+	updated, err := pushStore.GetPush(ctx, "push-scope-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.PushStatusCompleted, updated.Status)
+}
+
+// TestLeaderResumePendingPushes_NoStoredTargetsMarkedFailed verifies fail-closed
+// behavior: a pending record with no stored targets (including one written
+// before targets were persisted) is failed and nothing is delivered.
+func TestLeaderResumePendingPushes_NoStoredTargetsMarkedFailed(t *testing.T) {
+	srv, rcp := newResumeTestServer(t)
+	ctx := context.Background()
+
+	registerResumeStewardInTenant(t, srv, "notarget-dna-a", "tenant-a")
+	registerResumeStewardInTenant(t, srv, "notarget-dna-b", "tenant-b")
+
+	pushStore := srv.storageManager.GetPushStore()
+	require.NotNil(t, pushStore)
+	cfg, data := resumeTestPayload(t, "cfg-notarget", "tenant-a")
+	require.NoError(t, pushStore.CreatePush(ctx, &business.PushRecord{
+		ID: "push-notarget-1", ConfigID: cfg.ConfigID, TenantID: cfg.TenantID, Version: cfg.Version,
+		Status: business.PushStatusInProgress, Data: data,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}))
+
+	srv.resumePendingPushes(ctx)
+
+	assert.Empty(t, rcp.ReceivedIDs(), "a record with no stored targets must deliver to nobody")
+	updated, err := pushStore.GetPush(ctx, "push-notarget-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.PushStatusFailed, updated.Status)
 }
 
 // testNoPushStoreProvider is a purpose-built test implementation of

@@ -197,16 +197,22 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		if marshalErr != nil {
 			s.logger.Warn("Failed to marshal push payload for persistence", "error", logging.SanitizeLogValue(marshalErr.Error()), "push_id", pushID)
 		} else {
+			// The authorized, tenant-scoped set: a resumed push delivers only here.
+			targetIDs := make([]string, 0, len(targeted))
+			for _, st := range targeted {
+				targetIDs = append(targetIDs, st.ID)
+			}
 			pushRecord = &business.PushRecord{
-				ID:          pushID,
-				InitiatedBy: principal.ID,
-				ConfigID:    cfg.ConfigID,
-				TenantID:    cfg.TenantID,
-				Version:     cfg.Version,
-				Status:      business.PushStatusInProgress,
-				Data:        pushData,
-				CreatedAt:   queuedAt,
-				UpdatedAt:   queuedAt,
+				ID:               pushID,
+				InitiatedBy:      principal.ID,
+				ConfigID:         cfg.ConfigID,
+				TenantID:         cfg.TenantID,
+				Version:          cfg.Version,
+				Status:           business.PushStatusInProgress,
+				Data:             pushData,
+				TargetStewardIDs: targetIDs,
+				CreatedAt:        queuedAt,
+				UpdatedAt:        queuedAt,
 			}
 		}
 	}

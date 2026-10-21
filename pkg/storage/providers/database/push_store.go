@@ -6,6 +6,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -104,10 +105,15 @@ func dbInsertPushRecord(ctx context.Context, tx *sql.Tx, record *business.PushRe
 		createdAt = now
 	}
 
-	_, err := tx.ExecContext(ctx, `
+	targets, err := encodePushTargets(record.TargetStewardIDs)
+	if err != nil {
+		return fmt.Errorf("database: failed to encode push targets for %s: %w", record.ID, err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cfgms_push_records
-			(id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			(id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		record.ID,
 		record.ConfigID,
 		record.TenantID,
@@ -115,6 +121,7 @@ func dbInsertPushRecord(ctx context.Context, tx *sql.Tx, record *business.PushRe
 		string(status),
 		record.InitiatedBy,
 		nullableBytes(record.Data),
+		targets,
 		createdAt,
 		now,
 	)
@@ -149,7 +156,7 @@ func (s *DatabasePushStore) UpdatePushStatus(ctx context.Context, id string, sta
 // A new leader calls this on startup to resume all unfinished work after failover.
 func (s *DatabasePushStore) GetPendingPushes(ctx context.Context) ([]*business.PushRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
+		SELECT id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at
 		FROM cfgms_push_records
 		WHERE status IN ($1, $2)
 		ORDER BY created_at ASC`,
@@ -166,7 +173,7 @@ func (s *DatabasePushStore) GetPendingPushes(ctx context.Context) ([]*business.P
 // Returns ErrPushNotFound if no record exists.
 func (s *DatabasePushStore) GetPush(ctx context.Context, id string) (*business.PushRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
+		SELECT id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at
 		FROM cfgms_push_records WHERE id = $1`, id)
 	return scanDBPushRow(row)
 }
@@ -177,7 +184,7 @@ func (s *DatabasePushStore) GetPush(ctx context.Context, id string) (*business.P
 // cross-tenant data disclosure.
 func (s *DatabasePushStore) ListPushesByConfigID(ctx context.Context, configID, tenantID string) ([]*business.PushRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at
+		SELECT id, config_id, tenant_id, version, status, initiated_by, data, target_steward_ids, created_at, updated_at
 		FROM cfgms_push_records
 		WHERE config_id = $1 AND tenant_id = $2
 		ORDER BY created_at DESC`,
@@ -202,11 +209,11 @@ func (s *DatabasePushStore) ListPushesByConfigID(ctx context.Context, configID, 
 // scanDBPushRow scans a *sql.Row into a PushRecord.
 func scanDBPushRow(row *sql.Row) (*business.PushRecord, error) {
 	r := &business.PushRecord{}
-	var statusStr string
+	var statusStr, targetsStr string
 	var data []byte
 	err := row.Scan(
 		&r.ID, &r.ConfigID, &r.TenantID, &r.Version,
-		&statusStr, &r.InitiatedBy, &data,
+		&statusStr, &r.InitiatedBy, &data, &targetsStr,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -219,6 +226,9 @@ func scanDBPushRow(row *sql.Row) (*business.PushRecord, error) {
 	r.CreatedAt = r.CreatedAt.UTC()
 	r.UpdatedAt = r.UpdatedAt.UTC()
 	r.Data = data
+	if r.TargetStewardIDs, err = decodePushTargets(targetsStr); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -227,11 +237,11 @@ func scanDBPushRows(rows *sql.Rows) ([]*business.PushRecord, error) {
 	var records []*business.PushRecord
 	for rows.Next() {
 		r := &business.PushRecord{}
-		var statusStr string
+		var statusStr, targetsStr string
 		var data []byte
 		if err := rows.Scan(
 			&r.ID, &r.ConfigID, &r.TenantID, &r.Version,
-			&statusStr, &r.InitiatedBy, &data,
+			&statusStr, &r.InitiatedBy, &data, &targetsStr,
 			&r.CreatedAt, &r.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("database: failed to scan push record row: %w", err)
@@ -240,7 +250,41 @@ func scanDBPushRows(rows *sql.Rows) ([]*business.PushRecord, error) {
 		r.CreatedAt = r.CreatedAt.UTC()
 		r.UpdatedAt = r.UpdatedAt.UTC()
 		r.Data = data
+		targets, err := decodePushTargets(targetsStr)
+		if err != nil {
+			return nil, err
+		}
+		r.TargetStewardIDs = targets
 		records = append(records, r)
 	}
 	return records, rows.Err()
+}
+
+// encodePushTargets serialises the authorized target set as a JSON array. An
+// empty set is stored as ” so rows written before the column existed and rows
+// with no targets read back identically.
+func encodePushTargets(ids []string) (string, error) {
+	if len(ids) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// decodePushTargets reverses encodePushTargets; ” decodes to a nil slice.
+func decodePushTargets(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(s), &ids); err != nil {
+		return nil, fmt.Errorf("database: failed to decode push targets: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
 }

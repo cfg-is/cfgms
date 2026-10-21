@@ -3460,8 +3460,29 @@ func (s *Server) resumePendingPushes(ctx context.Context) {
 			}
 			continue
 		}
-		// Fleet-wide read: a resumed push has no caller of its own (Issue #4665).
-		stewards := s.controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
+		// Fail closed: a record with no stored target set (including one written
+		// before targets were persisted) is never fanned out fleet-wide.
+		if len(record.TargetStewardIDs) == 0 {
+			s.logger.Error("Pending push has no stored target stewards; marking failed without delivery",
+				"push_id", logging.SanitizeLogValue(record.ID))
+			if updateErr := pushStore.UpdatePushStatus(ctx, record.ID, business.PushStatusFailed); updateErr != nil {
+				s.logger.Warn("Failed to mark push as failed after missing targets",
+					"push_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(updateErr.Error()))
+			}
+			continue
+		}
+		allowed := make(map[string]struct{}, len(record.TargetStewardIDs))
+		for _, id := range record.TargetStewardIDs {
+			allowed[id] = struct{}{}
+		}
+		// Fleet-wide read (a resumed push has no caller of its own, Issue #4665),
+		// narrowed to the set the original caller was authorized for.
+		var stewards []*service.StewardInfo
+		for _, st := range s.controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx)) {
+			if _, ok := allowed[st.ID]; ok {
+				stewards = append(stewards, st)
+			}
+		}
 		result := push.Fanout(ctx, &cfg, stewards, s.commandPublisher, s.logger)
 		s.logger.Info("Resumed push fan-out complete",
 			"push_id", record.ID,
