@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,4 +253,43 @@ func TestCancelExecutionOfUnownedRecordIsNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, got.GetStatus())
 	assert.True(t, errors.Is(e.CancelExecution("exec-elsewhere"), ErrExecutionNotFound))
+}
+
+// countingExecutionStore records every Save/Prune against a real store.
+type countingExecutionStore struct {
+	business.WorkflowExecutionStore
+	writes atomic.Int64
+}
+
+func (c *countingExecutionStore) Save(ctx context.Context, r *business.WorkflowExecutionRecord) error {
+	c.writes.Add(1)
+	return c.WorkflowExecutionStore.Save(ctx, r)
+}
+
+func (c *countingExecutionStore) Prune(ctx context.Context, tenant string, keep int) (int, error) {
+	c.writes.Add(1)
+	return c.WorkflowExecutionStore.Prune(ctx, tenant, keep)
+}
+
+// TestExecutionShutdownStopsStoreWrites proves Shutdown cancels in-flight runs and
+// waits for them, so nothing writes to the store (or its file) afterwards.
+func TestExecutionShutdownStopsStoreWrites(t *testing.T) {
+	store := &countingExecutionStore{WorkflowExecutionStore: openSQLiteExecutionStore(t, filepath.Join(t.TempDir(), "cfgms.db"))}
+	e := newExecutionStoreEngine(t, store)
+
+	wf := Workflow{Name: "long-wf", Steps: []Step{
+		{Name: "slow", Type: StepTypeDelay, Delay: &DelayConfig{Duration: time.Minute}},
+	}}
+	exec, err := e.ExecuteWorkflow(execStoreCtx(executionTestTenant), wf, nil)
+	require.NoError(t, err)
+
+	e.Shutdown()
+	select {
+	case <-exec.Done:
+	default:
+		t.Fatal("Shutdown returned while the run was still in flight")
+	}
+	after := store.writes.Load()
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, after, store.writes.Load(), "no store write may happen after Shutdown")
 }

@@ -56,14 +56,19 @@ func (s *SQLiteWorkflowExecutionStore) Save(ctx context.Context, r *business.Wor
 	if payload == nil {
 		payload = []byte{}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO workflow_executions (`+workflowExecutionColumns+`)
+	// A single autocommit upsert is idempotent under BUSY, so retryOnBusy is safe;
+	// without it a contended save on a slow-I/O runner (Windows CI) is lost.
+	err := retryOnBusy(ctx, func() error {
+		_, execErr := s.db.ExecContext(ctx, `INSERT INTO workflow_executions (`+workflowExecutionColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(tenant_id, execution_id) DO UPDATE SET
 			workflow_name = excluded.workflow_name, status = excluded.status,
 			start_time = excluded.start_time, end_time = excluded.end_time, payload = excluded.payload
 		WHERE workflow_executions.status NOT IN `+terminalExecutionStatuses+`
 			OR excluded.status IN `+terminalExecutionStatuses,
-		r.TenantID, r.ExecutionID, r.WorkflowName, r.Status, nanos(r.StartTime), nanos(r.EndTime), payload)
+			r.TenantID, r.ExecutionID, r.WorkflowName, r.Status, nanos(r.StartTime), nanos(r.EndTime), payload)
+		return execErr
+	})
 	if err != nil {
 		return fmt.Errorf("sqlite: failed to save workflow execution: %w", err)
 	}
@@ -121,12 +126,17 @@ func (s *SQLiteWorkflowExecutionStore) Prune(ctx context.Context, tenantID strin
 	if keep < 0 {
 		return 0, nil
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM workflow_executions
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var execErr error
+		res, execErr = s.db.ExecContext(ctx, `DELETE FROM workflow_executions
 		WHERE tenant_id = ? AND status IN `+terminalExecutionStatuses+` AND execution_id NOT IN (
 			SELECT execution_id FROM workflow_executions
 			WHERE tenant_id = ? AND status IN `+terminalExecutionStatuses+`
 			ORDER BY start_time DESC, execution_id DESC LIMIT ?)`,
-		tenantID, tenantID, keep)
+			tenantID, tenantID, keep)
+		return execErr
+	})
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: failed to prune workflow executions: %w", err)
 	}
