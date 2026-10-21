@@ -774,8 +774,8 @@ function Cfgms-GetVSwitch {
 # psRemoveVSwitch here.
 function Cfgms-RemoveVSwitch {
     param([Parameter(Mandatory)][string]$Name)
-    $sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue
-    if ($sw) { Remove-VMSwitch -Name $Name -Force }
+    $sw = Get-VMSwitch | Where-Object { $_.Name -ceq $Name }
+    if ($sw) { Remove-VMSwitch -VMSwitch $sw -Force }
 }
 function Cfgms-CreateVSwitchInternal { param([Parameter(Mandatory)][string]$Name) New-VMSwitch -Name $Name -SwitchType Internal | Out-Null }
 function Cfgms-CreateVSwitchPrivate  { param([Parameter(Mandatory)][string]$Name) New-VMSwitch -Name $Name -SwitchType Private  | Out-Null }

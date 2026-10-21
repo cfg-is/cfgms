@@ -463,3 +463,29 @@ func TestVSwitchExactName_RegardlessOfTenant(t *testing.T) {
 	assert.NotContains(t, callsA[1].scriptBlock, "net")
 	assert.NotContains(t, callsB[1].scriptBlock, "net")
 }
+
+// TestSet_VSwitch_AbsentRejectsWildcardName verifies that the absent path validates
+// the switch name before any transport call (including the getVSwitch snapshot), so a
+// wildcard such as "*" can never reach Get-VMSwitch/Remove-VMSwitch.
+func TestSet_VSwitch_AbsentRejectsWildcardName(t *testing.T) {
+	for _, id := range []string{"vswitch:*", "vswitch:sw*", "vswitch:", "vswitch:a?b"} {
+		transport := &testPSTransport{}
+		m := vswitchModuleWithTransport(transport, "t")
+
+		err := m.Set(context.Background(), id, &VSwitchConfig{State: "absent"})
+		require.Error(t, err, "id %q must be rejected", id)
+		assert.ErrorIs(t, err, ErrInvalidSwitchName)
+
+		transport.mu.Lock()
+		calls := transport.calls
+		transport.mu.Unlock()
+		assert.Empty(t, calls, "id %q: no transport call may precede validation", id)
+	}
+}
+
+// TestPSRemoveVSwitch_ExactMatch verifies the removal script selects the switch by
+// exact, case-sensitive comparison rather than the wildcard-capable -Name parameter.
+func TestPSRemoveVSwitch_ExactMatch(t *testing.T) {
+	assert.NotContains(t, psRemoveVSwitch, "-Name $Name")
+	assert.Contains(t, psRemoveVSwitch, "-ceq $Name")
+}

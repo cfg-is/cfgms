@@ -116,7 +116,7 @@ const psEnumerateVSwitches = `$sw = @(Get-VMSwitch -ErrorAction SilentlyContinue
 // removal of an already-absent switch is a clean no-op rather than an
 // ObjectNotFound error (mirrors psRemoveVM's existence guard — keeps the
 // delete path idempotent under retries/races). $Name travels via ArgumentList.
-const psRemoveVSwitch = `$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue; if ($sw) { Remove-VMSwitch -Name $Name -Force }`
+const psRemoveVSwitch = `$sw = Get-VMSwitch | Where-Object { $_.Name -ceq $Name }; if ($sw) { Remove-VMSwitch -VMSwitch $sw -Force }`
 
 // psCreateVSwitchInternal creates an internal virtual switch.
 // $Name travels via ArgumentList — never interpolated into the script text.
@@ -233,6 +233,11 @@ func (m *hypervModule) setVSwitch(ctx context.Context, resourceID string, config
 	state, _ := configMap["state"].(string)
 
 	if state == "absent" {
+		// Validate before any host call: Get-VMSwitch -Name treats the value as a
+		// wildcard pattern, so an unvalidated name such as "*" would match every switch.
+		if !switchNamePattern.MatchString(switchName) {
+			return ErrInvalidSwitchName
+		}
 		// Snapshot current state for audit before-capture (best-effort).
 		var deleteBefore map[string]interface{}
 		if cur, gErr := m.getVSwitch(ctx, switchName); gErr == nil && cur != nil && cur.State != "absent" {
