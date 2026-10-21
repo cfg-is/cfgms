@@ -404,6 +404,18 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// auditWriteTimeout bounds an audit write made with a context detached from
+// request cancellation.
+const auditWriteTimeout = 5 * time.Second
+
+// detachedAuditContext returns a context that keeps reqCtx's values (tenant,
+// principal, trace) but is not cancelled when the request is, so an audit
+// record for an action that already took effect is not lost to a client abort.
+// The write is bounded by auditWriteTimeout; callers must call the cancel func.
+func detachedAuditContext(reqCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(reqCtx), auditWriteTimeout)
+}
+
 // emitConfigPushAudit records an audit event for a config push initiation.
 // It is a no-op when auditManager is nil and never blocks or fails the caller.
 func (s *Server) emitConfigPushAudit(r *http.Request, principal *Principal, tenantID, configID, pushID string) {
@@ -420,7 +432,9 @@ func (s *Server) emitConfigPushAudit(r *http.Request, principal *Principal, tena
 		Severity(business.AuditSeverityMedium).
 		Detail("push_id", pushID).
 		Detail("config_id", logging.SanitizeLogValue(configID))
-	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+	auditCtx, cancel := detachedAuditContext(r.Context())
+	defer cancel()
+	if err := s.auditManager.RecordEvent(auditCtx, b); err != nil {
 		s.logger.Warn("Failed to emit config push audit event", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
 	}
 }
@@ -461,7 +475,9 @@ func (s *Server) emitOperatorAudit(
 	for k, v := range details {
 		b = b.Detail(k, v)
 	}
-	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+	auditCtx, cancel := detachedAuditContext(r.Context())
+	defer cancel()
+	if err := s.auditManager.RecordEvent(auditCtx, b); err != nil {
 		s.logger.Warn("Failed to emit operator audit event",
 			"error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}

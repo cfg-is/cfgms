@@ -2272,3 +2272,15 @@ func TestHandleRejectRefresh_RootScoped_WithCrossing_Rejects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRefreshStatusRejected, entry.Status)
 }
+
+func TestEmitRefreshAudit_CancelledContext_PersistsAllEvents(t *testing.T) {
+	server := setupTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < cancelledAuditEventCount; i++ {
+		server.emitRefreshAudit(ctx, fmt.Sprintf("dev-%d", i), "tenant-cancel-refresh",
+			business.AuditEventSystemAccess, "registration.refresh.test",
+			business.AuditResultSuccess, business.AuditSeverityLow, nil)
+	}
+	requireAuditPersisted(t, server, "tenant-cancel-refresh", cancelledAuditEventCount)
+}

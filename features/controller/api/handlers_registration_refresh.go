@@ -1371,7 +1371,9 @@ func (s *Server) emitUnauthenticatedRefreshAudit(
 	for k, v := range extras {
 		b = b.Detail(k, v)
 	}
-	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+	auditCtx, cancel := detachedAuditContext(ctx)
+	defer cancel()
+	if err := s.auditManager.RecordEvent(auditCtx, b); err != nil {
 		s.logger.Warn("Failed to emit refresh audit event", "error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }
@@ -1404,7 +1406,9 @@ func (s *Server) emitRefreshAudit(
 	for k, v := range extras {
 		b = b.Detail(k, v)
 	}
-	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+	auditCtx, cancel := detachedAuditContext(ctx)
+	defer cancel()
+	if err := s.auditManager.RecordEvent(auditCtx, b); err != nil {
 		s.logger.Warn("Failed to emit refresh audit event", "error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }

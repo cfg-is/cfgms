@@ -3906,3 +3906,30 @@ func TestHandleRegistrationStatus_ClaimRecordsAuditEvent(t *testing.T) {
 	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
 	assert.NotEmpty(t, entries[0].Details["cert_serial"])
 }
+
+func TestEmitRegistrationAudit_CancelledContext_PersistsAllEvents(t *testing.T) {
+	server := setupTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < cancelledAuditEventCount; i++ {
+		server.emitRegistrationAudit(ctx, "tok-abcdef", "tenant-cancel-reg", fmt.Sprintf("steward-%d", i),
+			business.AuditEventSystemAccess, "registration.test",
+			business.AuditResultSuccess, business.AuditSeverityLow, nil)
+	}
+	requireAuditPersisted(t, server, "tenant-cancel-reg", cancelledAuditEventCount)
+}
+
+func TestEmitRegistrationManagementAudit_CancelledContext_PersistsAllEvents(t *testing.T) {
+	server := setupTestServer(t)
+	// The request carries a tenant value; detaching from cancellation must keep it,
+	// so the events are still stamped with that tenant.
+	ctx, cancel := context.WithCancel(context.WithValue(
+		context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-cancel-mgmt"),
+		principalContextKey, &Principal{ID: "op-cancel"}))
+	cancel()
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/x", nil).WithContext(ctx)
+	for i := 0; i < cancelledAuditEventCount; i++ {
+		server.emitRegistrationManagementAudit(r, fmt.Sprintf("registration.manage.test.%d", i), nil)
+	}
+	requireAuditPersisted(t, server, "tenant-cancel-mgmt", cancelledAuditEventCount)
+}

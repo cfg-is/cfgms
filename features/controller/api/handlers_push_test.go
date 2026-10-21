@@ -1668,3 +1668,59 @@ func TestHandleConfigPush_CommandIDMatchesDeliveryRecord(t *testing.T) {
 			"steward %s must receive the command under its delivery record ID", d.StewardID)
 	}
 }
+
+const cancelledAuditEventCount = 32
+
+// cancelledRequest returns a request whose context is already cancelled, as after
+// a client abort.
+func cancelledRequest(t *testing.T) *http.Request {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return httptest.NewRequest(http.MethodPost, "/api/v1/x", nil).WithContext(ctx)
+}
+
+// requireAuditPersisted flushes the audit manager and asserts n events with the
+// given tenant were stored. audit.Manager.enqueue picks randomly between a free
+// queue slot and ctx.Done(), so many events are needed to catch a regression.
+func requireAuditPersisted(t *testing.T, server *Server, tenantID string, n int) {
+	t.Helper()
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: tenantID})
+	require.NoError(t, err)
+	assert.Len(t, entries, n)
+}
+
+func TestEmitOperatorAudit_CancelledRequestContext_PersistsAllEvents(t *testing.T) {
+	server := setupTestServer(t)
+	r := cancelledRequest(t)
+	principal := &Principal{ID: "op-cancel"}
+	for i := 0; i < cancelledAuditEventCount; i++ {
+		server.emitOperatorAudit(r, principal, "tenant-cancel-op", business.AuditEventConfiguration,
+			"op.test", "thing", fmt.Sprintf("id-%d", i), business.AuditResultSuccess, business.AuditSeverityLow, nil)
+	}
+	requireAuditPersisted(t, server, "tenant-cancel-op", cancelledAuditEventCount)
+}
+
+func TestEmitConfigPushAudit_CancelledRequestContext_PersistsAllEvents(t *testing.T) {
+	server := setupTestServer(t)
+	r := cancelledRequest(t)
+	principal := &Principal{ID: "op-cancel"}
+	for i := 0; i < cancelledAuditEventCount; i++ {
+		server.emitConfigPushAudit(r, principal, "tenant-cancel-push", "cfg-1", fmt.Sprintf("push-%d", i))
+	}
+	requireAuditPersisted(t, server, "tenant-cancel-push", cancelledAuditEventCount)
+}
+
+func TestDetachedAuditContext_KeepsValuesDropsCancellation(t *testing.T) {
+	type key struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "v"))
+	cancel()
+	ctx, release := detachedAuditContext(parent)
+	defer release()
+	require.NoError(t, ctx.Err())
+	assert.Equal(t, "v", ctx.Value(key{}))
+	dl, ok := ctx.Deadline()
+	require.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(auditWriteTimeout), dl, time.Second)
+}
