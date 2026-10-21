@@ -2089,3 +2089,80 @@ func TestRefreshCompleteAndClaim_WellFormedNotRefusedByValidation(t *testing.T) 
 		assert.NotContains(t, rec.Body.String(), "VALIDATION", route)
 	}
 }
+
+// ---- Pre-resolution audit attribution (Issue #5305) -------------------------
+
+// auditEntriesFor flushes the audit manager and returns every entry recorded
+// under the given tenant.
+func (f *refreshFixture) auditEntriesFor(t *testing.T, tenantID string) []*business.AuditEntry {
+	t.Helper()
+	require.NoError(t, f.audit.Flush(context.Background()))
+	entries, err := f.audit.QueryEntries(context.Background(), &business.AuditFilter{TenantID: tenantID})
+	require.NoError(t, err)
+	return entries
+}
+
+func TestHandleRefreshChallenge_UnknownDevice_ForgedTenantNotAudited(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	const victim = "victim-tenant"
+
+	body, _ := json.Marshal(RefreshChallengeRequest{TenantID: victim})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/ghost-device/refresh/challenge", bytes.NewReader(body))
+	r = mux.SetURLVars(r, map[string]string{"device_id": "ghost-device"})
+	rec := httptest.NewRecorder()
+	f.server.handleRefreshChallenge(rec, r)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	assert.Empty(t, f.auditEntriesFor(t, victim), "victim tenant must receive no audit entry")
+
+	sys := f.auditEntriesFor(t, audit.SystemTenantID)
+	require.Len(t, sys, 1)
+	assert.Equal(t, "refresh_challenge_rejected", sys[0].Action)
+	assert.Equal(t, unauthenticatedRefreshActor, sys[0].UserID)
+	assert.Equal(t, "ghost-device", sys[0].Details["asserted_device_id"])
+	assert.Equal(t, victim, sys[0].Details["asserted_tenant_id"])
+}
+
+func TestHandleRefreshComplete_UnknownDevice_ForgedTenantNotAudited(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	const victim = "victim-tenant"
+
+	rec := postComplete(f.server, "ghost-device", RefreshCompleteRequest{TenantID: victim})
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	assert.Empty(t, f.auditEntriesFor(t, victim), "victim tenant must receive no audit entry")
+
+	sys := f.auditEntriesFor(t, audit.SystemTenantID)
+	require.Len(t, sys, 1)
+	assert.Equal(t, "refresh_rejected", sys[0].Action)
+	assert.Equal(t, unauthenticatedRefreshActor, sys[0].UserID)
+	assert.Equal(t, "ghost-device", sys[0].Details["asserted_device_id"])
+	assert.Equal(t, victim, sys[0].Details["asserted_tenant_id"])
+}
+
+func TestHandleRefreshChallenge_KnownDevice_AuditsUnderStoredTenant(t *testing.T) {
+	pub, _ := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, nil)
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "steward-rev-audit",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusRevoked,
+		IdentityKeyPub: []byte(pub),
+	})
+
+	// The caller asserts a different tenant; the stored one must win.
+	body, _ := json.Marshal(RefreshChallengeRequest{TenantID: "victim-tenant"})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+testDeviceID+"/refresh/challenge", bytes.NewReader(body))
+	r = mux.SetURLVars(r, map[string]string{"device_id": testDeviceID})
+	rec := httptest.NewRecorder()
+	f.server.handleRefreshChallenge(rec, r)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	entries := f.auditEntriesFor(t, testTenantID)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "refresh_challenge_rejected", entries[0].Action)
+	assert.Equal(t, testDeviceID, entries[0].UserID)
+	assert.Empty(t, f.auditEntriesFor(t, "victim-tenant"))
+	assert.Empty(t, f.auditEntriesFor(t, audit.SystemTenantID))
+}
