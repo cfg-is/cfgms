@@ -593,6 +593,8 @@ type CreateGroupRequest struct {
 	MailNickname    string   `json:"mailNickname"`
 	Visibility      string   `json:"visibility,omitempty"`
 	MembershipRule  string   `json:"membershipRule,omitempty"`
+
+	MembershipRuleProcessingState string `json:"membershipRuleProcessingState,omitempty"`
 }
 
 // UpdateGroupRequest represents a request to update a group
@@ -605,6 +607,8 @@ type UpdateGroupRequest struct {
 	MailNickname    *string  `json:"mailNickname,omitempty"`
 	Visibility      *string  `json:"visibility,omitempty"`
 	MembershipRule  *string  `json:"membershipRule,omitempty"`
+
+	MembershipRuleProcessingState *string `json:"membershipRuleProcessingState,omitempty"`
 }
 
 // AdminUnitScopedRoleMember represents a scoped role assignment in an administrative unit

@@ -3,6 +3,7 @@
 package entra_group
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -119,6 +120,9 @@ func (c *EntraGroupConfig) AsMap() map[string]interface{} {
 	if c.AutoSubscribeNewMembers {
 		result["auto_subscribe_new_members"] = c.AutoSubscribeNewMembers
 	}
+	if len(c.ManagedFieldsList) > 0 {
+		result["managed_fields"] = c.ManagedFieldsList
+	}
 	if len(c.Members) > 0 {
 		result["members"] = c.Members
 	}
@@ -184,6 +188,20 @@ func (c *EntraGroupConfig) Validate() error {
 		if !validVisibilities[c.Visibility] {
 			return fmt.Errorf("invalid visibility: %s", c.Visibility)
 		}
+	}
+
+	// Graph documents these two group properties as settable only with
+	// delegated permissions; this module runs with app-only/GDAP tokens, so
+	// accepting them would report success while changing nothing.
+	if c.AllowExternalSenders {
+		return fmt.Errorf("allow_external_senders is not supported: Microsoft Graph accepts it only with delegated permissions")
+	}
+	if c.AutoSubscribeNewMembers {
+		return fmt.Errorf("auto_subscribe_new_members is not supported: Microsoft Graph accepts it only with delegated permissions")
+	}
+
+	if c.TeamSettings != nil && !c.IsTeamEnabled {
+		return fmt.Errorf("team_settings requires is_team_enabled to be true")
 	}
 
 	// Validate team channels if team is enabled
@@ -277,6 +295,27 @@ func (m *entraGroupModule) Set(ctx context.Context, resourceID string, config mo
 	}
 	if membershipRuleEnabled, ok := configMap["membership_rule_enabled"].(bool); ok {
 		groupConfig.MembershipRuleEnabled = membershipRuleEnabled
+	}
+
+	if v, ok := configMap["allow_external_senders"].(bool); ok {
+		groupConfig.AllowExternalSenders = v
+	}
+	if v, ok := configMap["auto_subscribe_new_members"].(bool); ok {
+		groupConfig.AutoSubscribeNewMembers = v
+	}
+	if raw, present := configMap["managed_fields"]; present {
+		fields, err := toStringSlice(raw)
+		if err != nil {
+			return fmt.Errorf("invalid configuration: managed_fields: %w", err)
+		}
+		groupConfig.ManagedFieldsList = fields
+	}
+	if raw, present := configMap["team_settings"]; present && raw != nil {
+		ts, err := toTeamSettings(raw)
+		if err != nil {
+			return fmt.Errorf("invalid configuration: team_settings: %w", err)
+		}
+		groupConfig.TeamSettings = ts
 	}
 
 	// Map members and owners
@@ -430,6 +469,11 @@ func (m *entraGroupModule) getGroupByID(ctx context.Context, token *auth.AccessT
 		MailNickname:    group.MailNickname,
 		MailEnabled:     group.MailEnabled,
 		SecurityEnabled: group.SecurityEnabled,
+
+		GroupTypes:                    group.GroupTypes,
+		Visibility:                    group.Visibility,
+		MembershipRule:                group.MembershipRule,
+		MembershipRuleProcessingState: group.MembershipRuleProcessingState,
 	}, nil
 }
 
@@ -448,6 +492,16 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 
 	if config.GroupType == "Unified" {
 		request.GroupTypes = []string{"Unified"}
+	}
+
+	if config.Visibility != "" {
+		request.Visibility = config.Visibility
+	}
+
+	if config.MembershipRule != "" {
+		request.MembershipRule = config.MembershipRule
+		request.MembershipRuleProcessingState = processingState(config.MembershipRuleEnabled)
+		request.GroupTypes = append(request.GroupTypes, "DynamicMembership")
 	}
 
 	// Create group via Graph API
@@ -514,6 +568,18 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 			if config.SecurityEnabled != existingGroup.SecurityEnabled {
 				updates["securityEnabled"] = config.SecurityEnabled
 			}
+		case "visibility":
+			if config.Visibility != existingGroup.Visibility {
+				updates["visibility"] = config.Visibility
+			}
+		case "membership_rule":
+			if config.MembershipRule != existingGroup.MembershipRule {
+				updates["membershipRule"] = config.MembershipRule
+			}
+		case "membership_rule_enabled":
+			if config.MembershipRule != "" && processingState(config.MembershipRuleEnabled) != existingGroup.MembershipRuleProcessingState {
+				updates["membershipRuleProcessingState"] = processingState(config.MembershipRuleEnabled)
+			}
 		}
 	}
 
@@ -534,6 +600,20 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 		}
 		if securityEnabled, ok := updates["securityEnabled"].(bool); ok {
 			updateRequest.SecurityEnabled = &securityEnabled
+		}
+		if visibility, ok := updates["visibility"].(string); ok {
+			updateRequest.Visibility = &visibility
+		}
+		if rule, ok := updates["membershipRule"].(string); ok {
+			updateRequest.MembershipRule = &rule
+		}
+		if state, ok := updates["membershipRuleProcessingState"].(string); ok {
+			updateRequest.MembershipRuleProcessingState = &state
+		}
+		if config.MembershipRule != "" && !contains(existingGroup.GroupTypes, "DynamicMembership") {
+			// A dynamic rule only takes effect on a DynamicMembership group;
+			// groupTypes is replaced wholesale by PATCH, so keep existing types.
+			updateRequest.GroupTypes = append(append([]string{}, existingGroup.GroupTypes...), "DynamicMembership")
 		}
 
 		// Make the Graph API PATCH call
@@ -556,12 +636,12 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	}
 
 	// Handle team settings if managed
-	if contains(managedFields, "is_team_enabled") && config.IsTeamEnabled {
+	if config.IsTeamEnabled && (contains(managedFields, "is_team_enabled") || contains(managedFields, "team_settings")) {
 		if !m.isTeamGroup(ctx, token, existingGroup.ID) {
 			if err := m.createTeam(ctx, token, existingGroup.ID, config.GroupType, config.TeamSettings); err != nil {
 				return fmt.Errorf("failed to create team: %w", err)
 			}
-		} else if contains(managedFields, "team_settings") {
+		} else if contains(managedFields, "team_settings") && config.TeamSettings != nil {
 			if err := m.updateTeamSettings(ctx, token, existingGroup.ID, config.TeamSettings); err != nil {
 				return fmt.Errorf("failed to update team settings: %w", err)
 			}
@@ -715,6 +795,11 @@ type GroupInfo struct {
 	MailNickname    string
 	MailEnabled     bool
 	SecurityEnabled bool
+
+	GroupTypes                    []string
+	Visibility                    string
+	MembershipRule                string
+	MembershipRuleProcessingState string
 }
 
 // requireExecutionTenant reads the CFGMS tenant the current workflow
@@ -869,4 +954,59 @@ func mapTeamSettingsToUpdateRequest(settings *TeamSettings) *graph.UpdateTeamSet
 		req.FunSettings = mapFunSettings(settings.Fun)
 	}
 	return req
+}
+
+// processingState maps the declared membership_rule_enabled flag to Graph's
+// membershipRuleProcessingState values.
+func processingState(enabled bool) string {
+	if enabled {
+		return "On"
+	}
+	return "Paused"
+}
+
+// toStringSlice accepts the list shapes a workflow step can deliver.
+func toStringSlice(raw interface{}) ([]string, error) {
+	switch v := raw.(type) {
+	case []string:
+		return v, nil
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("entries must be strings")
+			}
+			out = append(out, str)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("must be a list of strings")
+	}
+}
+
+// toTeamSettings converts the team_settings value (a *TeamSettings from
+// AsMap, or a map from a workflow step) into TeamSettings. Unknown keys are
+// rejected so a misspelled setting cannot be silently dropped.
+func toTeamSettings(raw interface{}) (*TeamSettings, error) {
+	switch v := raw.(type) {
+	case *TeamSettings:
+		return v, nil
+	case TeamSettings:
+		return &v, nil
+	case map[string]interface{}:
+		data, err := yaml.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
+		ts := &TeamSettings{}
+		if err := dec.Decode(ts); err != nil {
+			return nil, err
+		}
+		return ts, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %T", raw)
+	}
 }
