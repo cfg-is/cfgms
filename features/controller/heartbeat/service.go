@@ -263,7 +263,7 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 			ConnectedSince: time.Now(),
 		}
 		s.stewards[hb.StewardID] = status
-		s.logger.Info("New steward registered", "steward_id", hb.StewardID)
+		s.logger.Info("New steward registered", "steward_id", logging.SanitizeLogValue(hb.StewardID))
 	}
 
 	previouslyHealthy := status.Healthy
@@ -301,17 +301,17 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 
 		if status.expectedDNAHash != "" && hb.DNAHash != status.expectedDNAHash {
 			s.logger.Warn("DNA hash mismatch detected — requesting full sync",
-				"steward_id", hb.StewardID,
-				"heartbeat_hash", hb.DNAHash,
-				"expected_hash", status.expectedDNAHash)
+				"steward_id", logging.SanitizeLogValue(hb.StewardID),
+				"heartbeat_hash", logging.SanitizeLogValue(hb.DNAHash),
+				"expected_hash", logging.SanitizeLogValue(status.expectedDNAHash))
 			if s.onDNAHashMismatch != nil {
 				s.onDNAHashMismatch(hb.StewardID)
 			}
 		} else if prevHash != hb.DNAHash {
 			s.logger.Debug("Steward DNA hash updated",
-				"steward_id", hb.StewardID,
-				"old_hash", prevHash,
-				"new_hash", hb.DNAHash)
+				"steward_id", logging.SanitizeLogValue(hb.StewardID),
+				"old_hash", logging.SanitizeLogValue(prevHash),
+				"new_hash", logging.SanitizeLogValue(hb.DNAHash))
 		}
 	}
 
@@ -334,7 +334,7 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 	if s.trustEvaluator != nil {
 		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
 			s.logger.Warn("Trust evaluator error on healthy heartbeat",
-				"steward_id", hb.StewardID, "error", err)
+				"steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 
@@ -374,7 +374,7 @@ func (s *Service) checkStaleHeartbeats() {
 				status.Status = "timeout"
 
 				s.logger.Warn("Steward heartbeat timeout",
-					"steward_id", stewardID,
+					"steward_id", logging.SanitizeLogValue(stewardID),
 					"last_received", status.receivedAt,
 					"last_heartbeat_reported", status.LastHeartbeat,
 					"timeout", timeSinceLastBeat)
@@ -387,7 +387,7 @@ func (s *Service) checkStaleHeartbeats() {
 				if s.trustEvaluator != nil {
 					if err := s.trustEvaluator.RecordLiveness(context.Background(), stewardID, false); err != nil {
 						s.logger.Warn("Trust evaluator error on stale detection",
-							"steward_id", stewardID, "error", err)
+							"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 					}
 				}
 			}

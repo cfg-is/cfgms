@@ -5,6 +5,8 @@ package heartbeat
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -449,4 +451,137 @@ func TestHeartbeatService_SetOnFragmentRoot_WorksAfterConstruction(t *testing.T)
 	}))
 
 	assert.Equal(t, 1, fired, "late-wired callback must fire on heartbeat with aggregate root")
+}
+
+// debugCapturingLogger extends CapturingLogger with Debug recording, which the
+// stock CapturingLogger discards.
+type debugCapturingLogger struct {
+	*logging.CapturingLogger
+	mu           sync.Mutex
+	debugEntries map[string][]logging.LogEntry
+}
+
+func newDebugCapturingLogger() *debugCapturingLogger {
+	return &debugCapturingLogger{
+		CapturingLogger: logging.NewCapturingLogger(),
+		debugEntries:    map[string][]logging.LogEntry{},
+	}
+}
+
+func (l *debugCapturingLogger) Debug(msg string, kv ...interface{}) {
+	entry := logging.LogEntry{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		if k, ok := kv[i].(string); ok {
+			entry[k] = kv[i+1]
+		}
+	}
+	l.mu.Lock()
+	l.debugEntries[msg] = append(l.debugEntries[msg], entry)
+	l.mu.Unlock()
+}
+
+func (l *debugCapturingLogger) findDebug(msg string) (logging.LogEntry, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entries := l.debugEntries[msg]
+	if len(entries) == 0 {
+		return nil, false
+	}
+	return entries[0], true
+}
+
+// errTrustEvaluator is a TrustEvaluator that always returns a fixed error.
+type errTrustEvaluator struct{ err error }
+
+func (e *errTrustEvaluator) RecordLiveness(_ context.Context, _ string, _ bool) error {
+	return e.err
+}
+
+func requireNoNewline(t *testing.T, entry logging.LogEntry, keys ...string) {
+	t.Helper()
+	for _, k := range keys {
+		v, ok := entry[k]
+		require.True(t, ok, "missing key %q", k)
+		str, isStr := v.(string)
+		require.True(t, isStr, "key %q is not a string", k)
+		assert.False(t, strings.ContainsAny(str, "\r\n"), "key %q contains raw newline: %q", k, str)
+	}
+}
+
+func TestHeartbeatService_LogSanitization_HashMismatchWarn(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	mismatches := make(chan string, 1)
+	svc, cp := newTestService(t, func(cfg *Config) {
+		cfg.Logger = logger
+		cfg.OnDNAHashMismatch = func(id string) { mismatches <- id }
+	})
+	ctx := context.Background()
+	id := "steward\nforged"
+
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: id, Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(), DNAHash: "hash-a",
+	}))
+	svc.SetExpectedDNAHash(id, "hash-expected")
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: id, Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(), DNAHash: "bad\nhash",
+	}))
+
+	entry, ok := logger.FindWarn("DNA hash mismatch detected — requesting full sync")
+	require.True(t, ok)
+	requireNoNewline(t, entry, "heartbeat_hash", "steward_id", "expected_hash")
+	assert.Equal(t, id, <-mismatches, "callback must receive the unsanitized steward ID")
+}
+
+func TestHeartbeatService_LogSanitization_HashUpdatedDebug(t *testing.T) {
+	logger := newDebugCapturingLogger()
+	_, cp := newTestService(t, func(cfg *Config) { cfg.Logger = logger })
+	ctx := context.Background()
+	id := "steward\nforged"
+
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: id, Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(), DNAHash: "old\nhash",
+	}))
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: id, Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(), DNAHash: "new\nhash",
+	}))
+
+	var entries []logging.LogEntry
+	logger.mu.Lock()
+	entries = append(entries, logger.debugEntries["Steward DNA hash updated"]...)
+	logger.mu.Unlock()
+	require.Len(t, entries, 2)
+	for _, e := range entries {
+		requireNoNewline(t, e, "old_hash", "new_hash", "steward_id")
+	}
+	_, ok := logger.findDebug("Steward DNA hash updated")
+	assert.True(t, ok)
+}
+
+func TestHeartbeatService_LogSanitization_NewStewardInfo(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	_, cp := newTestService(t, func(cfg *Config) { cfg.Logger = logger })
+
+	require.NoError(t, cp.sendHeartbeat(context.Background(), &controlplaneTypes.Heartbeat{
+		StewardID: "steward\nforged", Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(),
+	}))
+
+	entry, ok := logger.FindInfo("New steward registered")
+	require.True(t, ok)
+	requireNoNewline(t, entry, "steward_id")
+}
+
+func TestHeartbeatService_LogSanitization_TrustEvaluatorError(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	_, cp := newTestService(t, func(cfg *Config) {
+		cfg.Logger = logger
+		cfg.TrustEvaluator = &errTrustEvaluator{err: errors.New("boom\nforged line")}
+	})
+
+	require.NoError(t, cp.sendHeartbeat(context.Background(), &controlplaneTypes.Heartbeat{
+		StewardID: "steward\nforged", Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(),
+	}))
+
+	entry, ok := logger.FindWarn("Trust evaluator error on healthy heartbeat")
+	require.True(t, ok)
+	requireNoNewline(t, entry, "error", "steward_id")
 }
