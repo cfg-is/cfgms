@@ -1544,19 +1544,28 @@ func (s *Server) emitRegistrationManagementAudit(r *http.Request, action string,
 	if principal != nil {
 		principalID = principal.ID
 	}
+	// audit.Manager rejects an event with no resource: name the pending entry when
+	// the action targets one, otherwise the action itself (bulk approvals).
+	resourceID := action
+	if pendingID, ok := extras["pending_id"].(string); ok && pendingID != "" {
+		resourceID = pendingID
+	}
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
 		Action(action).
 		User(principalID, business.AuditUserTypeHuman).
+		Resource("registration", resourceID, "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)
 	for k, v := range extras {
 		b = b.Detail(k, v)
 	}
-	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+	auditCtx, cancel := detachedAuditContext(r.Context())
+	defer cancel()
+	if err := s.auditManager.RecordEvent(auditCtx, b); err != nil {
 		s.logger.Warn("Failed to emit registration management audit event",
-			"error", err, "action", action)
+			"error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }
 
@@ -1586,7 +1595,9 @@ func (s *Server) emitRegistrationAudit(
 	for k, v := range extras {
 		b = b.Detail(k, v)
 	}
-	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+	auditCtx, cancel := detachedAuditContext(ctx)
+	defer cancel()
+	if err := s.auditManager.RecordEvent(auditCtx, b); err != nil {
 		s.logger.Warn("Failed to emit registration audit event", "error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }
