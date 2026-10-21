@@ -585,6 +585,39 @@ func TestWriteFileInRootSwappedIntermediateStaysInRoot(t *testing.T) {
 	}
 }
 
+// The intermediate directory is a real directory when the path is validated and
+// becomes a link to an outside directory before the write.
+func TestSecureWriteFileIntermediateSwappedAfterValidationRefused(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	sub := filepath.Join(base, "sub")
+	if err := os.Mkdir(sub, 0750); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	afterValidateHook = func() {
+		if err := os.Remove(sub); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, sub); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		swapped = true
+	}
+	t.Cleanup(func() { afterValidateHook = nil })
+
+	if err := SecureWriteFile(base, "sub/new/f.txt", []byte("x")); err == nil {
+		t.Fatal("write through an intermediate directory swapped after validation must fail")
+	}
+	if !swapped {
+		t.Fatal("swap hook did not run")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("outside directory must stay empty, found %d entries", len(entries))
+	}
+}
+
 func TestSecureWriteFileLeafSymlinkInsideBaseRefused(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target.txt")
@@ -602,4 +635,61 @@ func TestSecureWriteFileLeafSymlinkInsideBaseRefused(t *testing.T) {
 	if string(got) != "original" {
 		t.Fatalf("target content changed to %q", got)
 	}
+}
+
+// swapLeafForLinkTest runs SecureWriteFile on base/leaf.txt with the leaf replaced
+// by a link to base/other.txt between the leaf pre-check and the leaf open, and
+// requires the write to fail with other.txt left intact.
+func swapLeafForLinkTest(t *testing.T, leafExists bool) {
+	t.Helper()
+	base := t.TempDir()
+	leaf := filepath.Join(base, "leaf.txt")
+	other := filepath.Join(base, "other.txt")
+	if err := os.WriteFile(other, []byte("other"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if leafExists {
+		if err := os.WriteFile(leaf, []byte("leaf"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swapped := false
+	beforeLeafOpenHook = func() {
+		if leafExists {
+			if err := os.Remove(leaf); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(other, leaf); err != nil {
+			t.Fatalf("creating the leaf symlink: %v", err)
+		}
+		swapped = true
+	}
+	t.Cleanup(func() { beforeLeafOpenHook = nil })
+
+	if err := SecureWriteFile(base, "leaf.txt", []byte("changed")); err == nil {
+		t.Fatal("write through a leaf swapped for a link after the pre-check must fail")
+	}
+	if !swapped {
+		t.Fatal("swap hook did not run")
+	}
+	got, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "other" {
+		t.Fatalf("link target must be untouched, content is %q", got)
+	}
+}
+
+// The leaf did not exist at the pre-check and becomes a link to another file in
+// the base before the open; the write must not land in that file.
+func TestSecureWriteFileNewLeafSwappedForLinkRefused(t *testing.T) {
+	swapLeafForLinkTest(t, false)
+}
+
+// The leaf was a regular file at the pre-check and becomes a link to another file
+// in the base before the open; that file must not be truncated.
+func TestSecureWriteFileExistingLeafSwappedForLinkRefused(t *testing.T) {
+	swapLeafForLinkTest(t, true)
 }

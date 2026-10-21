@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -84,6 +85,49 @@ func TestFileModule_Set_SwappedIntermediateDirRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("Set() through a swapped intermediate directory must fail")
 	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be written outside AllowedBasePath, found %d entries", len(entries))
+	}
+}
+
+// A racing goroutine flips the intermediate directory between a real directory and
+// a link to an outside directory while Set runs, so some writes are validated
+// against the real directory and then hit the link.
+func TestFileModule_Set_RacingIntermediateSwapStaysInBase(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	sub := filepath.Join(base, "sub")
+	if err := os.Symlink(outside, filepath.Join(base, "probe")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.RemoveAll(sub)
+			_ = os.Mkdir(sub, 0750)
+			_ = os.Remove(sub)
+			_ = os.Symlink(outside, sub)
+		}
+	}()
+
+	mod := New()
+	cfg := createConfigFromYAML(testFileConfigYAML("x", "", "", base))
+	for i := 0; i < 300; i++ {
+		_ = mod.Set(context.Background(), filepath.Join(sub, "deep", "f.txt"), cfg)
+	}
+	close(stop)
+	wg.Wait()
+
 	entries, _ := os.ReadDir(outside)
 	if len(entries) != 0 {
 		t.Fatalf("nothing may be written outside AllowedBasePath, found %d entries", len(entries))

@@ -11,11 +11,22 @@ import (
 	"strings"
 )
 
+// afterValidateHook, when set by a test, runs between path validation and the
+// write so a test can swap a path component at the moment an attack would.
+var afterValidateHook func()
+
+// beforeLeafOpenHook, when set by a test, runs between the leaf pre-check and the
+// leaf open so a test can swap the leaf itself at the moment an attack would.
+var beforeLeafOpenHook func()
+
 // writeFileInRoot writes data to validatedPath, creating missing parent
 // directories, with every path component resolved relative to an os.Root opened
 // on basePath. A directory swapped for a link after validation cannot redirect
 // the write outside the base, and a leaf that is a link is refused.
 func writeFileInRoot(basePath, userPath, validatedPath string, data []byte, perm os.FileMode) error {
+	if afterValidateHook != nil {
+		afterValidateHook()
+	}
 	absBase, err := filepath.Abs(basePath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve base path: %w", err)
@@ -66,15 +77,22 @@ func writeFileInRoot(basePath, userPath, validatedPath string, data []byte, perm
 		return err
 	}
 
-	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	// The leaf is opened without O_TRUNC. Before anything is truncated or written,
+	// the handle must be a regular file that is the same file as the leaf named rel
+	// right now (and as before the open, if it existed), so a leaf swapped for a
+	// link during the open is refused with the link target left untouched.
+	if beforeLeafOpenHook != nil {
+		beforeLeafOpenHook()
+	}
+	f, err := openLeafForWrite(root, rel, perm)
 	if err != nil {
 		return err
 	}
-	after, err := f.Stat()
-	if err == nil && (!after.Mode().IsRegular() || (before != nil && !os.SameFile(before, after))) {
-		err = ErrSymlinkInPath
+	if err := verifyOpenedLeaf(root, rel, f, before); err != nil {
+		_ = f.Close()
+		return err
 	}
-	if err != nil {
+	if err := f.Truncate(0); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -83,4 +101,28 @@ func writeFileInRoot(basePath, userPath, validatedPath string, data []byte, perm
 		err = closeErr
 	}
 	return err
+}
+
+// verifyOpenedLeaf checks that f, opened at rel inside root, is a regular file and
+// is the file currently linked at rel and, when before is non-nil, the file that
+// was there before the open.
+func verifyOpenedLeaf(root *os.Root, rel string, f *os.File, before os.FileInfo) error {
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() {
+		return ErrSymlinkInPath
+	}
+	if before != nil && !os.SameFile(before, opened) {
+		return ErrSymlinkInPath
+	}
+	now, err := root.Lstat(rel)
+	if err != nil {
+		return err
+	}
+	if now.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(now, opened) {
+		return ErrSymlinkInPath
+	}
+	return nil
 }
