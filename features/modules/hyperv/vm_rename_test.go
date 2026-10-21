@@ -133,3 +133,24 @@ func TestVMConfig_Validate_InvalidOldName(t *testing.T) {
 	ok := &VMConfig{Name: "lab-lin-01", OldName: "cfgms-ci-lin-01", Generation: 2}
 	assert.NoError(t, ok.Validate())
 }
+
+// TestVMRename_WildcardOldName_RejectedBeforeAnyTransportCall pins that the whole
+// config (including old_name) is validated before the first PowerShell call.
+func TestVMRename_WildcardOldName_RejectedBeforeAnyTransportCall(t *testing.T) {
+	transport := &testPSTransport{}
+	m := vmModuleWithTransport(transport, "t")
+
+	cfg := &VMConfig{Name: "lab-lin-01", OldName: "*", State: "stopped", MemoryMB: 4096, CPUCount: 2, Generation: 2}
+	err := m.Set(context.Background(), "vm:lab-lin-01", cfg)
+	require.Error(t, err)
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Empty(t, transport.calls, "validation failure must make no transport call")
+}
+
+// TestPSRenameVM_ExactNameMatch pins that the rename script selects by exact name.
+func TestPSRenameVM_ExactNameMatch(t *testing.T) {
+	assert.NotContains(t, psRenameVM, "-Name $OldName")
+	assert.Contains(t, psRenameVM, "-ceq $OldName")
+}
