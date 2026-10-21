@@ -4910,6 +4910,53 @@ test_api_shard_partition_covers_all_tests() {
     log_pass "test-framework-api-sharded: ${total} tests partitioned evenly across ${shards} shards (sizes ${min}-${max})"
 }
 
+# Regression guard for the -test.run pattern cap in test-framework-api-sharded
+# (Issue #5245): a shard's single "^(A|B|...)$" argument outgrew the Windows
+# command-line limit (32,767 characters). With one shard at the current test
+# count every test lands in one shard, so unchunked it would be a single
+# pattern far above the cap. Asserts every planned chunk is within the cap and
+# that the chunks together cover the full test list exactly once.
+test_api_shard_chunks_respect_pattern_cap() {
+    log_test "Testing test-framework-api-sharded: -test.run chunks stay under the cap and cover every test once..."
+
+    local list_out list_rc
+    list_out=$(go test -list '.*' ./features/controller/api/... 2>&1)
+    list_rc=$?
+    if [[ $list_rc -ne 0 ]]; then
+        log_fail "go test -list ./features/controller/api/...: exited ${list_rc}"
+        return
+    fi
+
+    local cap=16000 shards plan_out plan_rc
+    for shards in 1 4; do
+        plan_out=$(CFGMS_API_TEST_SHARDS=$shards CFGMS_API_TEST_SHARD_PLAN_ONLY=1 make --no-print-directory test-framework-api-sharded 2>&1)
+        plan_rc=$?
+        if [[ $plan_rc -ne 0 ]]; then
+            log_fail "plan-only run with ${shards} shard(s) exited ${plan_rc}"
+            return
+        fi
+
+        local expected planned over
+        expected=$(echo "$list_out" | grep '^Test' | sort)
+        planned=$(echo "$plan_out" | grep '^chunk ' | awk '{print $5}' | tr '|' '\n' | sort)
+        if [[ -z "$planned" ]]; then
+            log_fail "no chunk lines in plan-only output with ${shards} shard(s)"
+            return
+        fi
+        over=$(echo "$plan_out" | grep '^chunk ' | awk -v cap=$cap '{ if (length($5) + 4 > cap || $4 > cap) print $1, $2, $3, $4 }')
+        if [[ -n "$over" ]]; then
+            log_fail "chunk pattern over ${cap} bytes with ${shards} shard(s): ${over}"
+            return
+        fi
+        if [[ "$expected" != "$planned" ]]; then
+            log_fail "chunks do not cover the test list exactly once with ${shards} shard(s)"
+            return
+        fi
+    done
+
+    log_pass "test-framework-api-sharded: every -test.run chunk is within ${cap} bytes and covers each test exactly once"
+}
+
 # Regression guard for the Makefile's test-go-group-controller-core /
 # test-go-group-heavy-providers / test-go-group-rest split (Issue #4151): the
 # three groups must partition the exact package list the pre-split single
@@ -5812,6 +5859,7 @@ DISPATCH_TABLE=(
     "test_resource_sampler_loop_guard:devinfra"
     "test_resource_sampler_no_placeholder:devinfra"
     "test_api_shard_partition_covers_all_tests:core"
+    "test_api_shard_chunks_respect_pattern_cap:core"
     "test_go_group_split_partition_covers_all_packages:core"
     "test_go_group_rest_propagates_early_failure:core"
     "test_all_modules_covers_module_yaml_tree:core"
