@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -2003,4 +2004,88 @@ func TestHandleSetRefreshPolicy_AuditsPolicyChange(t *testing.T) {
 	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
 	assert.Equal(t, "require_approval", entries[0].Details["old_mode"])
 	assert.Equal(t, "auto_accept", entries[0].Details["new_mode"])
+}
+
+// ---- Router-level validation (Issue #5267) ----------------------------------
+
+// postRefreshViaRouter sends a JSON POST through the real router so the
+// validation middleware wrapping the refresh routes is exercised.
+func postRefreshViaRouter(server *Server, path string, body []byte) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, r)
+	return rec
+}
+
+func TestRefreshRoutes_RejectInvalidDeviceID(t *testing.T) {
+	deviceIDs := map[string]string{
+		"overlong":         strings.Repeat("a", 129),
+		"control_char_soh": "dev%01ice",
+		"control_char_nul": "dev%00ice",
+	}
+	for _, route := range []string{"challenge", "complete", "claim"} {
+		for name, id := range deviceIDs {
+			t.Run(route+"/"+name, func(t *testing.T) {
+				f := newRefreshFixture(t, nil)
+				body := []byte(`{"tenant_id":"` + testTenantID + `"}`)
+				rec := postRefreshViaRouter(f.server, "/api/v1/stewards/"+id+"/refresh/"+route, body)
+				assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				require.NoError(t, f.audit.Flush(context.Background()))
+				entries, err := f.audit.QueryEntries(context.Background(), &business.AuditFilter{})
+				require.NoError(t, err)
+				assert.Empty(t, entries)
+			})
+		}
+	}
+}
+
+func TestRefreshChallenge_RejectsControlCharTenantID(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	body, err := json.Marshal(RefreshChallengeRequest{TenantID: "tenant\x01forged"})
+	require.NoError(t, err)
+	rec := postRefreshViaRouter(f.server, "/api/v1/stewards/"+testDeviceID+"/refresh/challenge", body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.NoError(t, f.audit.Flush(context.Background()))
+	entries, err := f.audit.QueryEntries(context.Background(), &business.AuditFilter{})
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestRefreshChallenge_ValidViaRouter(t *testing.T) {
+	pub, _ := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, nil)
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-1", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	body, err := json.Marshal(RefreshChallengeRequest{TenantID: testTenantID})
+	require.NoError(t, err)
+	rec := postRefreshViaRouter(f.server, "/api/v1/stewards/"+testDeviceID+"/refresh/challenge", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp RefreshChallengeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Nonce)
+}
+
+func TestRefreshCompleteAndClaim_WellFormedNotRefusedByValidation(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	_, priv := newTestEd25519KeyPair(t)
+	challenge := &RefreshChallengeResponse{Nonce: base64.RawURLEncoding.EncodeToString(make([]byte, 32)), ServerTS: uint64(time.Now().UnixNano())}
+	complete := buildValidCompleteRequest(t, testDeviceID, testTenantID, challenge, priv, map[string]string{"hostname": "host-1"})
+	require.Contains(t, complete.CSRPEM, "\n", "csr_pem must be multi-line")
+	cBody, err := json.Marshal(complete)
+	require.NoError(t, err)
+	claim := RefreshClaimRequest{
+		PendingID: "pending-1", Nonce: complete.Nonce, IssuedAt: complete.IssuedAt,
+		Signature: complete.Signature, Provenance: map[string]string{"hostname": "host-1"},
+	}
+	clBody, err := json.Marshal(claim)
+	require.NoError(t, err)
+
+	for route, body := range map[string][]byte{"complete": cBody, "claim": clBody} {
+		rec := postRefreshViaRouter(f.server, "/api/v1/stewards/"+testDeviceID+"/refresh/"+route, body)
+		assert.NotEqual(t, http.StatusBadRequest, rec.Code, "%s: %s", route, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "VALIDATION", route)
+	}
 }

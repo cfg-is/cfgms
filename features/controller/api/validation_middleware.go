@@ -171,6 +171,8 @@ func (s *Server) validateURLParameters(validator *security.EnhancedValidator, re
 		default:
 			// Generic validation for other path parameters
 			validator.ValidateString(result, "path."+param, value, "charset:safe_text", "max_length:128", "no_control_chars")
+			// ValidateString does not enforce max_length:N, so bound the length here.
+			validateMaxBytes(result, "path."+param, value, 128)
 		}
 	}
 }
@@ -358,6 +360,15 @@ func (s *Server) validateJSONBody(validator *security.EnhancedValidator, result 
 	return nil
 }
 
+// validateMaxBytes records a max_length error when value exceeds limit bytes.
+// security.Validator.ValidateString parses "max_length:N" but only enforces its
+// own global cap, so per-field byte limits are checked explicitly.
+func validateMaxBytes(result *security.ValidationResult, field, value string, limit int) {
+	if len(value) > limit {
+		result.AddErrorf(field, "", "max_length", "exceeds maximum length of %d bytes", limit)
+	}
+}
+
 // validateStewardRequest validates steward-specific request fields
 func (s *Server) validateStewardRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
 	if id, ok := data["id"].(string); ok {
@@ -373,6 +384,12 @@ func (s *Server) validateStewardRequest(validator *security.EnhancedValidator, r
 		if !contains(validStatuses, status) {
 			result.AddError("body.status", status, "enum", "invalid status value")
 		}
+	}
+
+	// tenant_id: no charset rule, tenant identifiers may be hierarchical paths.
+	if tenantID, ok := data["tenant_id"].(string); ok {
+		validator.ValidateString(result, "body.tenant_id", tenantID, "no_control_chars", "max_length:256")
+		validateMaxBytes(result, "body.tenant_id", tenantID, 256)
 	}
 
 	// Validate DNA structure if present
