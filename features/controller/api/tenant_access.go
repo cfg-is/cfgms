@@ -107,10 +107,21 @@ func (s *Server) selectListTenant(w http.ResponseWriter, r *http.Request, route 
 // client tenant's stewards through a fleet selector without a crossing (Issue
 // #4665). On refusal it writes the crossing challenge, or 404 for a tenant the
 // caller may not reach at all, and returns false.
+//
+// A target with no tenant is refused for every caller with the same 404: an
+// empty tenant would otherwise resolve to the root's own for a root-scoped
+// caller and be allowed with no crossing check and no record.
 func (s *Server) authorizeFleetTargets(w http.ResponseWriter, r *http.Request, targets []fleet.StewardResult, route string) bool {
 	scope := callerTenantScope(r)
 	seen := make(map[string]bool, len(targets))
 	for _, target := range targets {
+		if target.TenantID == "" {
+			s.logger.Warn("Fleet target has no tenant; refusing request",
+				"steward_id", logging.SanitizeLogValue(target.ID),
+				"route", logging.SanitizeLogValue(route))
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return false
+		}
 		if seen[target.TenantID] {
 			continue
 		}
