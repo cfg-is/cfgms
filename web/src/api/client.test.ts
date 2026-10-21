@@ -1254,6 +1254,7 @@ describe('approveCredentialRequest', () => {
       newAccountUsername: 'host-1',
       grantAdminMarker: true,
       grantPayloadSigningMarker: false,
+      grantRootScopeMarker: false,
     })
 
     expect(result.ok).toBe(true)
@@ -1271,6 +1272,7 @@ describe('approveCredentialRequest', () => {
       new_account_username: 'host-1',
       grant_admin_marker: true,
       grant_payload_signing_marker: false,
+      grant_root_scope_marker: false,
     })
   })
 
@@ -1282,6 +1284,7 @@ describe('approveCredentialRequest', () => {
       newAccountUsername: 'host-1',
       grantAdminMarker: false,
       grantPayloadSigningMarker: false,
+      grantRootScopeMarker: false,
     })
     const call = fetchMock.mock.calls.at(0)
     expect(String(call?.[0])).toBe('/api/v1/credential-requests/has%20space%2Fslash/approve')
@@ -1297,6 +1300,7 @@ describe('approveCredentialRequest', () => {
       newAccountUsername: 'host-1',
       grantAdminMarker: false,
       grantPayloadSigningMarker: false,
+      grantRootScopeMarker: false,
     })
     expect(result.ok).toBe(false)
     expect(result.status).toBe(409)
@@ -1314,40 +1318,38 @@ describe('approveCredentialRequest', () => {
       newAccountUsername: 'host-1',
       grantAdminMarker: true,
       grantPayloadSigningMarker: false,
+      grantRootScopeMarker: false,
     })
     expect(result.ok).toBe(false)
     expect(result.conflict).toBe(false)
     expect(result.errorCode).toBe('MARKER_NOT_GRANTABLE')
   })
 
-  it('never sends a root-scope marker field, for every reachable combination of the admin/payload-signing markers', async () => {
+  it('sends grant_root_scope_marker exactly as requested, for every combination of the three markers', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { data: { id: 'creq-abc123', status: 'approved' } }))
-    const combinations = [
-      [false, false],
-      [true, false],
-      [false, true],
-      [true, true],
-    ] as const
-    for (const [admin, signing] of combinations) {
-      fetchMock.mockClear()
-      await approveCredentialRequest({
-        id: 'creq-abc123',
-        fingerprint: 'x',
-        newAccountUsername: 'host-1',
-        grantAdminMarker: admin,
-        grantPayloadSigningMarker: signing,
-      })
-      const call = fetchMock.mock.calls.at(0)
-      const rawBody = String(call?.[1]?.body)
-      expect(rawBody).not.toContain('root_scope')
-      expect(rawBody).not.toContain('rootScope')
-      const body = JSON.parse(rawBody) as Record<string, unknown>
-      expect(Object.keys(body).sort()).toEqual([
-        'fingerprint',
-        'grant_admin_marker',
-        'grant_payload_signing_marker',
-        'new_account_username',
-      ])
+    for (const admin of [false, true]) {
+      for (const signing of [false, true]) {
+        for (const root of [false, true]) {
+          fetchMock.mockClear()
+          await approveCredentialRequest({
+            id: 'creq-abc123',
+            fingerprint: 'x',
+            newAccountUsername: 'host-1',
+            grantAdminMarker: admin,
+            grantPayloadSigningMarker: signing,
+            grantRootScopeMarker: root,
+          })
+          const call = fetchMock.mock.calls.at(0)
+          const body = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+          expect(body).toEqual({
+            fingerprint: 'x',
+            new_account_username: 'host-1',
+            grant_admin_marker: admin,
+            grant_payload_signing_marker: signing,
+            grant_root_scope_marker: root,
+          })
+        }
+      }
     }
   })
 })
