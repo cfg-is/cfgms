@@ -128,6 +128,7 @@ func (h *RelayHandler) handleRelayEvent(ctx context.Context, event *cpTypes.Even
 	// Assurance >= AssuranceBasic check by construction (ADR-021, Issue #2780).
 	// GlobalScope: false confines the relay principal to its tenant subtree.
 	principal := &Principal{
+		Channel:     AuthChannelRelay,
 		ID:          fmt.Sprintf("relay:%s:%s", deviceID, executionID),
 		Name:        fmt.Sprintf("relay-script:%s", deviceID),
 		Assurance:   session.AssuranceMachine,

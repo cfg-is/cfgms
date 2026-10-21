@@ -97,6 +97,22 @@ Examples:
 	RunE: runTenantGet,
 }
 
+// tenantApproveDeleteCmd approves a pending tenant deletion.
+var tenantApproveDeleteCmd = &cobra.Command{
+	Use:   "approve-delete <tenant-id>",
+	Short: "Approve a pending tenant deletion",
+	Long: `Approve a pending tenant deletion (the dual-control terminal step).
+
+This action requires user presence, and it can only be confirmed through the cfg
+presence relay: cfg prints the exact request in this terminal, and you approve it
+with your passkey on the confirmation page. The browser cannot approve it.
+
+Examples:
+  cfg tenant approve-delete team-root`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTenantApproveDelete,
+}
+
 func init() {
 	tenantCmd.PersistentFlags().StringVar(&tenantAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	tenantCmd.PersistentFlags().BoolVar(&tenantTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
@@ -112,6 +128,7 @@ func init() {
 	tenantCmd.AddCommand(tenantCreateCmd)
 	tenantCmd.AddCommand(tenantListCmd)
 	tenantCmd.AddCommand(tenantGetCmd)
+	tenantCmd.AddCommand(tenantApproveDeleteCmd)
 }
 
 func getTenantAPIClient() (*APIClient, error) {
@@ -232,6 +249,19 @@ func runTenantList(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 	renderTenantList(os.Stdout, tenants)
+	return nil
+}
+
+func runTenantApproveDelete(_ *cobra.Command, args []string) error {
+	client, err := getTenantAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	if _, err := client.ApproveTenantDeletionViaAPI(context.Background(), args[0]); err != nil {
+		return fmt.Errorf("failed to approve tenant deletion: %w", err)
+	}
+	fmt.Printf("tenant deletion approved: %s\n", args[0])
 	return nil
 }
 

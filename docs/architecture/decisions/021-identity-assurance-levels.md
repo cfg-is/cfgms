@@ -1269,3 +1269,24 @@ lookup the session/cookie authentication branches already use
 integration test (`test/integration/controller/module_routes_test.go`), which is the
 first test in the repository to drive a real WebAuthn presence ceremony against a real,
 certificate-bound account over real HTTP.
+
+## Amendment 8 (2026-10-21): Presence-gated permissions require the cfg relay unless they opt in (Issue #5272)
+
+### Context
+
+A WebAuthn prompt shows the site and the account, not the action. In the browser step-up flow the web page names the action at `presence/begin`, so a compromised page (XSS, a malicious extension, a changed web bundle) can show the admin one action and bind the token to another. The cfg presence relay (Amendment 7) does not have this weakness: `cfg` lodges the exact request, prints it in the admin's terminal, and `handlePresenceFinish` copies the binding from the lodged record, not from the page.
+
+### Decision
+
+Founder decision, option 1A: a presence-gated permission is *relay required* by default. A permission accepts a browser-minted presence token only if its static `permissionAssurance` entry sets `BrowserPresenceAllowed: true`; only `module:reject` does. Assurance-policy overrides cannot set it, so a permission that becomes presence-gated through an override is relay required.
+
+- The presence token records the flow that minted it (relay or browser), and carries it across controller nodes. `requirePermission` refuses a browser-minted token for a permission without the opt-in with `401 presence_relay_required`; the challenge keeps `presence="required"` and adds `relay="required"`. The token is consumed.
+- Only a cfg Bearer session or an mTLS admin certificate can lodge a relay request. `Principal` carries an explicit authentication channel, and the zero value is refused, so a web-cookie page cannot lodge its own request and confirm it on the relay page it also controls (`WEB_SESSION_CANNOT_LODGE`).
+- A relay request ID attaches only to the ceremony that named it at `presence/begin`; a missing, extra or different ID at finish is refused with `REQUEST_CEREMONY_MISMATCH`.
+- The web console does not start a WebAuthn ceremony for a relay-required challenge; it tells the admin to run the action with `cfg`. `cfg tenant approve-delete` keeps tenant deletion approval possible.
+
+### Threat covered, and what is out of reach
+
+Covered: a page that lies about the action cannot obtain an approval for a relay-required permission.
+
+Out of reach: actions without a presence requirement (`terminal:create`, `steward:execute-scripts`, `script:admin` and installer writes carry none, so a page cannot misbind a tap for them; whether they should is a separate decision), and a compromised `cfg` host, whose terminal the admin is trusting to show the real action.

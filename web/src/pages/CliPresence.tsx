@@ -32,7 +32,8 @@
  *      very substitution ADR-021 Amendment 7 Decision 1's binding exists to stop.
  *   5. Once confirmed, a "Verify with security key" button (StepUpModal.tsx's own
  *      shape) drives POST presence/begin -> navigator.credentials.get() -> POST
- *      presence/finish?cli_presence_request_id=<id>. The finish call is the ONLY
+ *      presence/finish?cli_presence_request_id=<id> (begin carries the same ID, binding the
+ *      request to this ceremony). The finish call is the ONLY
  *      place the CLI's action binding is attached, and it is attached server-side —
  *      from the durable record the CLI itself lodged, never from anything this page
  *      sends — so this page cannot swap in a different pending action even if it
@@ -236,11 +237,14 @@ export default function CliPresence() {
       const beginHeaders = new Headers()
       if (csrf !== null) beginHeaders.set('X-CSRF-Token', csrf)
 
-      const beginResp = await fetch('/api/v1/webauthn/presence/begin', {
+      const beginResp = await fetch(
+        `/api/v1/webauthn/presence/begin?cli_presence_request_id=${encodeURIComponent(requestId)}`,
+        {
         method: 'POST',
-        headers: beginHeaders,
-        credentials: 'same-origin',
-      })
+          headers: beginHeaders,
+          credentials: 'same-origin',
+        },
+      )
       if (!beginResp.ok) {
         setPhase('error')
         setErrorMsg('Unable to start verification. Sign in again if the issue persists.')

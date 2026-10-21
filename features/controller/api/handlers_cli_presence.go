@@ -355,6 +355,14 @@ func (s *Server) handleLodgeCliPresenceRequest(w http.ResponseWriter, r *http.Re
 			"API-key principals cannot lodge a presence request", "MACHINE_PRINCIPAL_CANNOT_LODGE")
 		return
 	}
+	// Only a cfg Bearer session or an mTLS admin certificate may lodge: a web-cookie
+	// page could otherwise lodge its own request and confirm it on the relay page it
+	// also controls. The zero value (unknown channel) is refused.
+	if principal.Channel != AuthChannelCfgBearer && principal.Channel != AuthChannelMTLS {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Presence requests must be lodged from the cfg CLI", "WEB_SESSION_CANNOT_LODGE")
+		return
+	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Cli presence service not available", "SERVICE_UNAVAILABLE")
 		return

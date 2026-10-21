@@ -111,7 +111,22 @@ func hashRequestBodyForPresenceBinding(r *http.Request) (string, error) {
 // (Assurance=AssuranceStrong, GlobalScope=false) would pass AssuranceStrong-gated routes but
 // still be confined to its tenant. The two signals MUST NOT be collapsed back into one.
 // See ADR-021 Context §"It is load-bearing on an unwritten assumption".
+// AuthChannel records how a Principal was authenticated. The zero value is
+// AuthChannelUnknown and is refused wherever a specific channel is required.
+type AuthChannel int
+
+const (
+	AuthChannelUnknown   AuthChannel = iota
+	AuthChannelWebCookie             // browser session cookie
+	AuthChannelCfgBearer             // cfg CLI Bearer session
+	AuthChannelMTLS                  // mTLS admin certificate
+	AuthChannelAPIKey                // API key
+	AuthChannelRelay                 // steward relay script principal
+)
+
 type Principal struct {
+	// Channel is the authentication channel that produced this principal.
+	Channel      AuthChannel
 	ID           string
 	Name         string
 	Assurance    session.AssuranceLevel
@@ -442,6 +457,7 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 			permissions = append([]string{}, acct.Permissions...)
 		}
 		return &Principal{
+			Channel:         AuthChannelMTLS,
 			ID:              acct.ID,
 			Name:            "mtls-admin:" + acct.Username,
 			Assurance:       session.AssuranceStrong,
@@ -470,8 +486,9 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	s.emitBootstrapFallbackAudit(r.Context(), serial, peerCert.Subject.CommonName)
 
 	return &Principal{
-		ID:   peerCert.Subject.CommonName,
-		Name: "mtls-admin:" + peerCert.Subject.CommonName,
+		Channel: AuthChannelMTLS,
+		ID:      peerCert.Subject.CommonName,
+		Name:    "mtls-admin:" + peerCert.Subject.CommonName,
 		// The bootstrap admin is root: its identity tenant is the deployment's
 		// root tenant and its reach comes from GlobalScope (root TenantScope),
 		// never from an empty tenant (Issue #4665).
@@ -1212,6 +1229,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						return
 					}
 					sessionPrincipal := &Principal{
+						Channel:       AuthChannelCfgBearer,
 						ID:            sess.PrincipalID,
 						Name:          "session:" + logging.SanitizeLogValue(sess.PrincipalID),
 						Assurance:     sess.Assurance,
@@ -1374,6 +1392,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				globalScope := webAcct.RootScope
 				webTenant := s.accountPrincipalTenant(r.Context(), webAcct)
 				webPrincipal := &Principal{
+					Channel:            AuthChannelWebCookie,
 					ID:                 webSess.PrincipalID,
 					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
 					Assurance:          webSess.Assurance,
@@ -1485,6 +1504,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		// Convert API key to Principal for uniform authorization handling.
 		principal := &Principal{
+			Channel:     AuthChannelAPIKey,
 			ID:          keyInfo.ID,
 			Name:        keyInfo.Name,
 			Assurance:   session.AssuranceMachine,
@@ -1986,6 +2006,30 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 						Error:            "presence_token_action_mismatch",
 						PresenceRequired: true,
 					}, "presence_token_action_mismatch")
+					return
+				}
+
+				// Relay-required rule (Issue #5272, ADR-021 Amendment): a browser-minted
+				// token names its action via the page, which cannot be trusted to tell the
+				// admin what is being approved. Only permissions that opt in statically
+				// accept it. The token is already consumed, so this cannot be retried.
+				// Read the opt-in from the static registry, never from overrides.
+				if !record.relayMinted && !permissionAssurance[permissionID].BrowserPresenceAllowed {
+					s.logger.Warn("Browser-minted presence token refused for relay-required permission",
+						"permission_id", logging.SanitizeLogValue(permissionID),
+					)
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", relay="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+						RelayRequired    bool   `json:"relay_required"`
+					}{
+						Error:            "presence_relay_required",
+						PresenceRequired: true,
+						RelayRequired:    true,
+					}, "presence_relay_required")
 					return
 				}
 

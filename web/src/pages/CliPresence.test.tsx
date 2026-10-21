@@ -96,7 +96,7 @@ function mockEndpoints(opts: {
         jsonResponse(200, { data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false } }),
       )
     }
-    if (method === 'POST' && url.endsWith('/api/v1/webauthn/presence/begin')) {
+    if (method === 'POST' && url.includes('/api/v1/webauthn/presence/begin')) {
       return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
     }
     if (method === 'POST' && url.includes('/api/v1/webauthn/presence/finish')) {

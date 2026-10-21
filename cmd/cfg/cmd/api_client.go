@@ -765,6 +765,30 @@ func (c *APIClient) GetTenantRawViaAPI(ctx context.Context, tenantID string) (*A
 	return &tenant, envelope.Data, nil
 }
 
+// ApproveTenantDeletionViaAPI calls POST /api/v1/tenants/{id}/delete/approve, the
+// dual-control terminal step of tenant deletion. The route carries the tenant:approve-delete
+// presence requirement, so doRequest runs the CLI presence relay (stepup.go) on the
+// step-up challenge and retries with the collected token. It returns the response's
+// data payload exactly as the server sent it.
+func (c *APIClient) ApproveTenantDeletionViaAPI(ctx context.Context, tenantID string) (json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/delete/approve", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, c.parseError(resp)
+	}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return envelope.Data, nil
+}
+
 // ListTenantsViaAPI lists the tenants visible to the caller via GET /api/v1/tenants.
 // It returns the decoded tenants and the response's data payload exactly as the
 // server sent it, for --json output.

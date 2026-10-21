@@ -222,6 +222,9 @@ export default function StepUpModal({
   // Routes to the elevation endpoint (Basic→Strong) when presenceRequired is false,
   // or the presence endpoint (per-action assertion) when presenceRequired is true.
   useEffect(() => {
+    // A relay-required action is never confirmed in the browser: the page cannot be
+    // trusted to name the action, so no ceremony is started (Issue #5272).
+    if (request.relayRequired) return
     let aborted = false
 
     async function beginCeremony() {
@@ -403,11 +406,19 @@ export default function StepUpModal({
             Verify it&rsquo;s you
           </h3>
 
-          <p className="step-up-desc">
-            Action requires verification as{' '}
-            <b className="step-up-title">{username}</b>. Use your passkey or
-            security key to continue.
-          </p>
+          {request.relayRequired ? (
+            <p className="step-up-desc" data-testid="step-up-relay-required">
+              This action must be confirmed with the <b>cfg</b> command-line tool,
+              where the exact action is shown in your terminal. Run it with{' '}
+              <code>cfg</code> instead of from the browser.
+            </p>
+          ) : (
+            <p className="step-up-desc">
+              Action requires verification as{' '}
+              <b className="step-up-title">{username}</b>. Use your passkey or
+              security key to continue.
+            </p>
+          )}
 
           {phase === 'error' && errorMsg !== null && (
             <div
@@ -421,14 +432,14 @@ export default function StepUpModal({
           )}
 
           <div className="step-up-actions">
-            {(phase === 'loading') && (
+            {!request.relayRequired && (phase === 'loading') && (
               <button type="button" className="step-up-btn" disabled>
                 <span className="step-up-spin" aria-hidden="true" />
                 <span>Preparing…</span>
               </button>
             )}
 
-            {phase === 'waiting' && (
+            {!request.relayRequired && phase === 'waiting' && (
               <button
                 type="button"
                 className="step-up-btn"
@@ -454,14 +465,14 @@ export default function StepUpModal({
               </button>
             )}
 
-            {phase === 'running' && (
+            {!request.relayRequired && phase === 'running' && (
               <button type="button" className="step-up-btn" disabled>
                 <span className="step-up-spin" aria-hidden="true" />
                 <span>Waiting for gesture…</span>
               </button>
             )}
 
-            {phase === 'error' && (
+            {!request.relayRequired && phase === 'error' && (
               <button
                 type="button"
                 className="step-up-btn"

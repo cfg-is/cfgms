@@ -364,3 +364,33 @@ func TestTenantList_BoundaryRowsMarked(t *testing.T) {
 	assert.NotContains(t, out, "msp-z")
 	assert.Equal(t, 1, strings.Count(out, "not accessible"))
 }
+
+func TestTenantApproveDeleteCommand_Registered(t *testing.T) {
+	found, _, err := tenantCmd.Find([]string{"approve-delete"})
+	require.NoError(t, err)
+	assert.Same(t, tenantApproveDeleteCmd, found)
+	assert.Error(t, tenantApproveDeleteCmd.Args(tenantApproveDeleteCmd, nil), "tenant id is required")
+	assert.NoError(t, tenantApproveDeleteCmd.Args(tenantApproveDeleteCmd, []string{"team-root"}))
+}
+
+func TestTenantApproveDeleteCommand_SendsApproveRequest(t *testing.T) {
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"status":"approved"}}`))
+	}))
+	defer server.Close()
+
+	origAPIURL, origTLS := tenantAPIURL, tenantTLSInsecure
+	t.Cleanup(func() { tenantAPIURL, tenantTLSInsecure = origAPIURL, origTLS })
+	tenantAPIURL = server.URL
+	tenantTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runTenantApproveDelete(tenantApproveDeleteCmd, []string{"team-root"}))
+	})
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/tenants/team-root/delete/approve", gotPath)
+	assert.Contains(t, output, "tenant deletion approved: team-root")
+}
