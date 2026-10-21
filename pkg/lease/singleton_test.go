@@ -345,124 +345,126 @@ func TestSingletonJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	assert.Equal(t, int32(0), atomic.LoadInt32(&node2Ran))
 }
 
-// [REQUIRED TEST] A slow cycle that approaches (and, here, far exceeds) the
-// lease TTL renews successfully via RunIfLeader's background renewal
-// goroutine and does not trigger a duplicate run on another node contending
-// for the same lease throughout.
+// [REQUIRED TEST] A slow cycle that exceeds the lease TTL keeps exclusion
+// through RunIfLeader's background renewal: node-2 probes the lease throughout
+// and never runs.
+//
+// Cause of the recorded failures (Issue #4160, #5323): test timing, not a
+// renewal gap. The previous version ran on wall-clock time (a real 2s TTL, real
+// tickers and time.Sleep), and its fn ignored its context. On a loaded
+// windows-latest runner a renewal that is delayed for longer than the TTL lets
+// the store row expire, node-2 then legitimately acquires it, and the test
+// counts that as a violation — although in production the authority-deadline
+// watchdog cancels fn before the row can expire (see
+// TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderAcquires,
+// #5275, which proved the deadline margin on simulated time). This test now
+// drives the same simulated clock: every renewal is an explicit event, so the
+// outcome depends on no scheduler timing, and removing background renewal still
+// fails it (the row then expires at the simulated TTL and node-2 acquires).
 func TestSingletonJob_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *testing.T) {
-	// Generous margin (ttl-renewInterval=1.8s of scheduling slack per renewal)
-	// so this test does not race itself when the full suite runs packages in
-	// parallel under load — a tight margin here would make an occasional missed
-	// renewal window (goroutine scheduling delay, not a logic bug) look like a
-	// broken renewal loop. See TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL's
-	// comment on the same class of flakiness.
-	//
-	// Issue #4160 investigated widening this margin after a single observed
-	// failure on a GitHub-hosted windows-latest merge-queue runner, but measured
-	// evidence did not support it: instrumenting the renewal loop's actual
-	// inter-renewal gaps (watching the store's ExpiresAt from outside, without
-	// touching production code) under this development host's OWN full
-	// `go test ./pkg/... ./features/...` suite running concurrently under -race
-	// — genuine multi-package compile-and-run contention, not a synthetic
-	// busy-loop — measured a worst-case gap of ~290ms against the 200ms
-	// renewInterval, an order of magnitude below the 1.8s margin already in
-	// place. That does not rule out the one-time GitHub-hosted-runner failure
-	// (a shared, resource-constrained host under real merge-queue load is a
-	// different environment this one cannot faithfully reproduce), but it does
-	// mean there is no measured basis for concluding the existing 1.8s margin
-	// is the wrong number, which is what AC2 requires before a margin change
-	// counts as a fix rather than a bare timeout inflation. Left unchanged;
-	// see the story's PR description for the full investigation.
-	ttl := 2 * time.Second
-	renewInterval := 200 * time.Millisecond
-	runSlowCycleNoDuplicate(t, newTestStore(t), ttl, renewInterval, false)
+	runSlowCycleNoDuplicate(t, 0)
 }
 
-// delayedAcquireStore delegates every call to a real store after sleeping for
-// delay, modelling a slow store write (e.g. the flatfile atomic-rename path on
-// Windows or an antivirus-scanned temp file on a CI runner). The delay is a
-// real sleep in front of the real store's own grant logic; no decision is
-// faked.
-type delayedAcquireStore struct {
+// advancingStore models a slow store write on the simulated clock: each
+// AcquireOrRenew costs delay of simulated time before the real grant logic
+// runs. No decision is faked.
+type advancingStore struct {
 	business.LeaseStore
+	clock *fakeClock
 	delay time.Duration
 }
 
-func (s *delayedAcquireStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
-	time.Sleep(s.delay)
+func (s *advancingStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	if s.delay > 0 {
+		s.clock.Advance(s.delay)
+	}
 	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
 }
 
 // Issue #5028 / #5106: a holder whose every store write (the first acquire and
 // each renewal) takes half the Manager's MaxAllowedRenewalLatency — slow, but
 // inside the configured bound — must keep exclusion across a cycle longer than
-// the TTL. The delay is derived from the Manager's own bound, so the test
-// stays within the margin the Manager was built with; delays beyond it are
-// covered by TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderAcquires.
+// the TTL. The delay is derived from the Manager's own bound; delays beyond it
+// are covered by TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderAcquires.
 func TestSingletonJob_SlowStoreWrites_WithinMargin_NoDuplicateRun(t *testing.T) {
-	ttl := 2 * time.Second
-	renewInterval := 200 * time.Millisecond
-	runSlowCycleNoDuplicate(t, newTestStore(t), ttl, renewInterval, true)
+	runSlowCycleNoDuplicate(t, -1)
 }
 
-// runSlowCycleNoDuplicate runs node-1 through a cycle of 1.25*ttl while node-2
-// probes the same lease every renewInterval/2. Node-2's probe is started from
-// inside node-1's fn, i.e. only once node-1 actually holds the lease: starting
-// it earlier races node-1's first acquire (the probe's first tick is 100ms
-// out, and a runner that delays node-1's acquire by more than that lets node-2
-// take the lease first — a test-setup race, not a lease defect, Issue #5028).
-// When slowWrites is set, node-1's store writes are delayed by half the
-// Manager's MaxAllowedRenewalLatency.
-func runSlowCycleNoDuplicate(t *testing.T, base business.LeaseStore, ttl, renewInterval time.Duration, slowWrites bool) {
+// runSlowCycleNoDuplicate runs node-1 through a cycle of 1.25*ttl on simulated
+// time while node-2 probes the same lease every renewInterval/2. Node-2's
+// probes start from inside node-1's fn, once node-1 holds the lease. Each
+// renewal is delivered as an explicit tick and the test waits for node-1's
+// authority deadline to move before time advances again, so renewal ordering
+// never depends on goroutine scheduling. writeDelay is node-1's simulated store
+// write latency; a negative value means half the Manager's
+// MaxAllowedRenewalLatency.
+func runSlowCycleNoDuplicate(t *testing.T, writeDelay time.Duration) {
 	t.Helper()
-	store1 := &delayedAcquireStore{LeaseStore: base}
-	m1, err := NewManager(store1, ttl, renewInterval, renewInterval)
+	clock := newFakeClock()
+	base := newFakeClockLeaseStore(clock)
+	ttl := 2 * time.Second
+	renewInterval := 200 * time.Millisecond
+
+	store1 := &advancingStore{LeaseStore: base, clock: clock}
+	m1, err := NewManagerWithClock(store1, ttl, renewInterval, renewInterval, clock)
 	require.NoError(t, err)
-	if slowWrites {
-		// Derived from the Manager's own bound; set before any store call.
-		store1.delay = m1.MaxAllowedRenewalLatency() / 2
+	if writeDelay < 0 {
+		writeDelay = m1.MaxAllowedRenewalLatency() / 2
 	}
-	m2, err := NewManager(base, ttl, renewInterval, renewInterval)
+	store1.delay = writeDelay // set before any store call
+	m2, err := NewManagerWithClock(base, ttl, renewInterval, renewInterval, clock)
 	require.NoError(t, err)
 
 	job1, err := NewSingletonJob(m1, "slow-sweep", "node-1", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job1.Clock = clock
 	job2, err := NewSingletonJob(m2, "slow-sweep", "node-2", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job2.Clock = clock
 
 	var node2Attempts int32
-	stopProbing := make(chan struct{})
-	var probeWG sync.WaitGroup
-	startProbe := func() {
-		probeWG.Add(1)
-		go func() {
-			defer probeWG.Done()
-			ticker := time.NewTicker(renewInterval / 2)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stopProbing:
-					return
-				case <-ticker.C:
-					job2.RunIfLeader(context.Background(), func(ctx context.Context) {
-						atomic.AddInt32(&node2Attempts, 1)
-					})
-				}
-			}
-		}()
+	probe := func() {
+		job2.RunIfLeader(context.Background(), func(ctx context.Context) {
+			atomic.AddInt32(&node2Attempts, 1)
+		})
 	}
 
-	// node-1's cycle runs longer than ttl, proving the background renewal
-	// keeps the lease alive rather than losing it partway through.
 	cycleDuration := ttl + ttl/4
+	var renewed, cancelled bool
 	ran1 := job1.RunIfLeader(context.Background(), func(ctx context.Context) {
-		startProbe()
-		time.Sleep(cycleDuration)
+		renewed = true
+		start := clock.Now()
+		for clock.Now().Sub(start) < cycleDuration {
+			before, ok := m1.LocalAuthorityDeadline("slow-sweep", "node-1")
+			if !ok {
+				renewed = false
+				return
+			}
+			clock.Advance(renewInterval / 2)
+			probe()
+			clock.Advance(renewInterval / 2)
+			clock.Tick()
+			// Wait (bounded, real time) for the renewal to complete and push the
+			// authority deadline out before simulated time moves again.
+			waitUntil := time.Now().Add(30 * time.Second) // failure bound only
+			for {
+				if d, ok := m1.LocalAuthorityDeadline("slow-sweep", "node-1"); ok && d.After(before) {
+					break
+				}
+				if time.Now().After(waitUntil) {
+					renewed = false
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			probe()
+		}
+		cancelled = ctx.Err() != nil
 	})
-	close(stopProbing)
-	probeWG.Wait()
 
 	assert.True(t, ran1)
+	assert.True(t, renewed, "node-1's background renewal never extended its authority")
+	assert.False(t, cancelled, "fn's context must stay live while renewals succeed")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&node2Attempts),
 		"node-2 must never run while node-1's slow cycle is still renewing the lease")
 }
