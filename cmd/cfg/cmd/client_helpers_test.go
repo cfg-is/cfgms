@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +30,17 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	// The bundle lives in an admin-only directory so the Windows system-path
+	// owner/DACL check (security.VerifyAdminOnlyPath) accepts it; the call is a
+	// no-op elsewhere.
+	bundleDir := filepath.Join(tmpDir, "cfgms")
+	if err := security.EnsureAdminOnlyDir(bundleDir); err != nil {
+		panic(err)
+	}
+	if err := os.MkdirAll(bundleDir, 0700); err != nil {
+		panic(err)
+	}
+	bundleFilePath := filepath.Join(bundleDir, "admin.bundle.yaml")
 	b, err := buildTestAdminBundle("https://placeholder.local:9443")
 	if err != nil {
 		panic(err)
