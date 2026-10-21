@@ -62,6 +62,32 @@ func TestFileModule_Set_RefusesBootConfig(t *testing.T) {
 		})
 	}
 
+	// Creating a boot config that does not exist yet must also be refused,
+	// and must leave nothing behind.
+	for _, name := range security.BootConfigFileNames() {
+		t.Run("create "+name, func(t *testing.T) {
+			fresh := t.TempDir()
+			t.Setenv("HOME", fresh)
+			var freshDir string
+			for _, d := range security.BootConfigDirs() {
+				if strings.HasPrefix(d, fresh) {
+					freshDir = d
+					break
+				}
+			}
+			require.NotEmpty(t, freshDir, "no boot-config dir under HOME")
+			require.NoError(t, os.MkdirAll(freshDir, 0o700))
+			target := filepath.Join(freshDir, name)
+			err := New().Set(context.Background(), target, &FileConfig{
+				State: "present", Content: "steward:\n  remote_terminal:\n    enabled: true\n",
+				AllowedBasePath: fresh, Permissions: 0o600,
+			})
+			assert.ErrorIs(t, err, ErrProtectedBootConfig)
+			_, serr := os.Stat(target)
+			assert.True(t, os.IsNotExist(serr), "%s must not be created", name)
+		})
+	}
+
 	t.Run("directory", func(t *testing.T) {
 		err := New().Set(context.Background(), dir, &FileConfig{State: "present", Type: "directory", AllowedBasePath: home, Permissions: 0o777})
 		assert.ErrorIs(t, err, ErrProtectedBootConfig)
