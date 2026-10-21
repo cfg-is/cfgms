@@ -5,7 +5,11 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -656,4 +660,127 @@ func TestCollapseAsOfWalkBudget(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 		require.NotErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
 	})
+}
+
+// entityIndexCounter wraps the real SQLite driver and counts statements that
+// read eg_entity_index, on either the query or the prepare path.
+type entityIndexCounter struct {
+	inner driver.Driver
+	dsn   string
+	count *atomic.Int64
+}
+
+func (c *entityIndexCounter) Connect(context.Context) (driver.Conn, error) {
+	conn, err := c.inner.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &entityIndexConn{Conn: conn, count: c.count}, nil
+}
+
+func (c *entityIndexCounter) Driver() driver.Driver { return c.inner }
+
+type entityIndexConn struct {
+	driver.Conn
+	count *atomic.Int64
+}
+
+func (c *entityIndexConn) note(query string) {
+	if strings.Contains(query, "eg_entity_index") {
+		c.count.Add(1)
+	}
+}
+
+func (c *entityIndexConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	q, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	rows, err := q.QueryContext(ctx, query, args)
+	if err != driver.ErrSkip {
+		c.note(query)
+	}
+	return rows, err
+}
+
+func (c *entityIndexConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	c.note(query)
+	if pc, ok := c.Conn.(driver.ConnPrepareContext); ok {
+		return pc.PrepareContext(ctx, query)
+	}
+	return c.Prepare(query)
+}
+
+// TestGetTimeline_SameAsPeerLookedUpOncePerCall verifies the tenant cut looks up
+// each distinct subject once per call, however many same-as observations repeat
+// the same peers, and keeps exactly the events with both ends inside the cut
+// (Issue #5244).
+func TestGetTimeline_SameAsPeerLookedUpOncePerCall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "eg.db")
+	p, err := NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC().Add(-time.Hour)
+
+	self, inPeer, outPeer := "host:memo-self", "host:memo-in", "host:memo-out"
+	for e, tenant := range map[string]string{self: "client-1", inPeer: "client-1", outPeer: "client-2"} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				obs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": tenant,
+				}),
+			},
+		}))
+	}
+	const repeats = 6
+	for i := 0; i < repeats; i++ {
+		at := now.Add(time.Duration(i+1) * time.Minute)
+		for _, peer := range []string{inPeer, outPeer} {
+			require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+				Source: "operator:test",
+				Observations: []types.Observation{
+					obs("same-as|"+self+"|"+peer, "operator:test", types.ObservationKindState, at,
+						map[string]interface{}{"n": i}),
+				},
+			}))
+		}
+	}
+
+	r := interfaces.TimeRange{From: now.Add(-time.Minute), To: now.Add(time.Hour)}
+	eids := []interfaces.EIDRef{mustEID(t, self)}
+
+	// Reference: inactive cut, filtered by hand to events whose peer is in-cut.
+	all, err := p.GetTimeline(ctx, eids, r)
+	require.NoError(t, err)
+	var want []int64
+	for _, ev := range all {
+		if ev.Kind != "same-as-change" || ev.Detail["to"] == inPeer {
+			want = append(want, ev.OccurredAt.UnixNano())
+		}
+	}
+
+	var count atomic.Int64
+	origDB := p.db
+	t.Cleanup(func() { _ = origDB.Close() })
+	p.db = sql.OpenDB(&entityIndexCounter{inner: origDB.Driver(), dsn: "file:" + path, count: &count})
+	t.Cleanup(func() { _ = p.db.Close() })
+
+	r.TenantFilter, r.TenantSubtreeIDs = "msp-a", []string{"client-1"}
+	got, err := p.GetTimeline(ctx, eids, r)
+	require.NoError(t, err)
+
+	var gotTimes []int64
+	same := 0
+	for _, ev := range got {
+		gotTimes = append(gotTimes, ev.OccurredAt.UnixNano())
+		if ev.Kind == "same-as-change" {
+			same++
+			assert.Equal(t, inPeer, ev.Detail["to"])
+		}
+	}
+	assert.Equal(t, repeats, same)
+	assert.Equal(t, want, gotTimes, "events match the unmemoized, hand-filtered result")
+	assert.EqualValues(t, 3, count.Load(), "one eg_entity_index lookup per distinct subject")
 }

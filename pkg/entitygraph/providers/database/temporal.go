@@ -113,6 +113,21 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 	toStr := r.To.UTC().Format(time.RFC3339Nano)
 
 	cut := interfaces.NewTenantCut(r.TenantFilter, r.TenantSubtreeIDs)
+
+	// The cut is constant for the call, so one answer per subject holds for every
+	// matched subject and every repeated same-as peer. Errors are never cached.
+	visibility := make(map[string]bool)
+	visibleOnce := func(subject string) (bool, error) {
+		if v, ok := visibility[subject]; ok {
+			return v, nil
+		}
+		v, err := p.subjectVisible(ctx, cut, subject)
+		if err != nil {
+			return false, err
+		}
+		visibility[subject] = v
+		return v, nil
+	}
 	var events []*interfaces.TimelineEvent
 
 	for _, eid := range eids {
@@ -231,7 +246,7 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 		// carries both ends, so it is dropped unless the matched endpoint and the
 		// peer are both inside the cut. The checks run after the rows are closed so
 		// they never hold a second connection.
-		selfVisible, err := p.subjectVisible(ctx, cut, subject)
+		selfVisible, err := visibleOnce(subject)
 		if err != nil {
 			return nil, err
 		}
@@ -239,7 +254,7 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			if !selfVisible {
 				break
 			}
-			visible, err := p.subjectVisible(ctx, cut, saPeers[i])
+			visible, err := visibleOnce(saPeers[i])
 			if err != nil {
 				return nil, err
 			}
