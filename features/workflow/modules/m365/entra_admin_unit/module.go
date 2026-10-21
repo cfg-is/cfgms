@@ -270,8 +270,23 @@ func (m *entraAdminUnitModule) Set(ctx context.Context, resourceID string, confi
 	if ext, ok := configMap["extension_attributes"].(map[string]interface{}); ok {
 		auConfig.ExtensionAttributes = ext
 	}
-	auConfig.RestrictedManagementUnits = stringList(configMap["restricted_management_units"])
-	auConfig.ManagedFieldsList = stringList(configMap["managed_fields"])
+	for _, f := range []struct {
+		key string
+		dst *[]string
+	}{
+		{"restricted_management_units", &auConfig.RestrictedManagementUnits},
+		{"managed_fields", &auConfig.ManagedFieldsList},
+	} {
+		raw, present := configMap[f.key]
+		if !present {
+			continue
+		}
+		list, ok := stringList(raw)
+		if !ok {
+			return fmt.Errorf("invalid configuration: %s must be a list of strings", f.key)
+		}
+		*f.dst = list
+	}
 
 	// Map members
 	if userMembers, ok := configMap["user_members"].([]string); ok {
@@ -781,22 +796,23 @@ func extractAdminUnitID(resourceID string) string {
 }
 
 // stringList accepts a []string or a []interface{} holding only strings.
-func stringList(v interface{}) []string {
-	switch list := v.(type) {
+// ok is false for any other shape so callers can fail closed.
+func stringList(v interface{}) (list []string, ok bool) {
+	switch l := v.(type) {
 	case []string:
-		return list
+		return l, true
 	case []interface{}:
-		out := make([]string, 0, len(list))
-		for _, item := range list {
-			str, ok := item.(string)
-			if !ok {
-				return nil
+		out := make([]string, 0, len(l))
+		for _, item := range l {
+			str, isStr := item.(string)
+			if !isStr {
+				return nil, false
 			}
 			out = append(out, str)
 		}
-		return out
+		return out, true
 	}
-	return nil
+	return nil, false
 }
 
 func contains(slice []string, item string) bool {

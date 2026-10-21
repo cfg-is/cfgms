@@ -1202,3 +1202,15 @@ func (s stateMap) ToYAML() ([]byte, error)       { return yaml.Marshal(map[strin
 func (s stateMap) FromYAML(b []byte) error       { return yaml.Unmarshal(b, &s) }
 func (s stateMap) Validate() error               { return nil }
 func (s stateMap) GetManagedFields() []string    { return nil }
+
+func TestSet_MalformedManagedFieldsFailsClosed(t *testing.T) {
+	m, ctx, sent := setupSetTest(t, existingAU())
+	cfg := stateMap{
+		"display_name": "Changed", "visibility": "Public", "tenant_id": "test-tenant-id",
+		"managed_fields": []interface{}{"display_name", 7},
+	}
+	err := m.Set(ctx, "test-tenant-id:au-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "managed_fields")
+	assert.Nil(t, sent(), "no update may reach Graph")
+}
