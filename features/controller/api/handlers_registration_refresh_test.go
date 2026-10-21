@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -2283,4 +2284,71 @@ func TestEmitRefreshAudit_CancelledContext_PersistsAllEvents(t *testing.T) {
 			business.AuditResultSuccess, business.AuditSeverityLow, nil)
 	}
 	requireAuditPersisted(t, server, "tenant-cancel-refresh", cancelledAuditEventCount)
+}
+
+// failingClaimBundleStore wraps a real PendingRefreshStore and fails the claim
+// bundle write, to exercise the failure path after a certificate is signed.
+type failingClaimBundleStore struct {
+	business.PendingRefreshStore
+}
+
+func (failingClaimBundleStore) StoreClaimBundle(context.Context, string, []byte) error {
+	return errors.New("claim bundle store unavailable")
+}
+
+func approveRefreshFixture(t *testing.T, f *refreshFixture, pendingID string) (*httptest.ResponseRecorder, *http.Request) {
+	t.Helper()
+	pub, _ := newTestEd25519KeyPair(t)
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-issued", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID, DeviceID: testDeviceID, TenantID: testTenantID,
+		CSRPEM: testValidCSRPEM, Status: business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
+	rec := httptest.NewRecorder()
+	f.server.router.ServeHTTP(rec, req)
+	return rec, req
+}
+
+func countAuditAction(t *testing.T, f *refreshFixture, action string) int {
+	t.Helper()
+	require.NoError(t, f.audit.Flush(context.Background()))
+	entries, err := f.audit.QueryEntries(context.Background(), &business.AuditFilter{Actions: []string{action}})
+	require.NoError(t, err)
+	return len(entries)
+}
+
+func TestHandleRefreshApprove_StoreFailureStillAuditsIssuance(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.server.SetPendingRefreshStore(failingClaimBundleStore{f.pending})
+
+	rec, _ := approveRefreshFixture(t, f, "refresh-issued-storefail")
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	entry := f.findAuditAction(t, "refresh_admin_cert_issued")
+	require.NotNil(t, entry, "refresh_admin_cert_issued must be recorded before the store write")
+	assert.NotEmpty(t, entry.Details["cert_serial"])
+	assert.Equal(t, "refresh-issued-storefail", entry.Details["pending_id"])
+	assert.Equal(t, testDeviceID, entry.Details["device_id"])
+	assert.Equal(t, testTenantID, entry.Details["tenant_id"])
+	assert.NotContains(t, fmt.Sprint(entry.Details), "PRIVATE KEY")
+	assert.NotContains(t, fmt.Sprint(entry.Details), "BEGIN CERTIFICATE")
+	assert.Zero(t, countAuditAction(t, f, "refresh_admin_approved"))
+}
+
+func TestHandleRefreshApprove_SuccessAuditsIssuanceOnce(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+
+	rec, _ := approveRefreshFixture(t, f, "refresh-issued-ok")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Equal(t, 1, countAuditAction(t, f, "refresh_admin_cert_issued"))
+	assert.Equal(t, 1, countAuditAction(t, f, "refresh_admin_approved"))
+	entry := f.findAuditAction(t, "refresh_admin_cert_issued")
+	require.NotNil(t, entry)
+	assert.NotEmpty(t, entry.Details["cert_serial"])
 }
