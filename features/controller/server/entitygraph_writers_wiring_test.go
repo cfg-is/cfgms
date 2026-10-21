@@ -101,7 +101,7 @@ func newWiredEntityGraphTestServer(t *testing.T, logger logging.Logger) *Server 
 func newStartableWiredEntityGraphTestServer(t *testing.T, logger logging.Logger) *Server {
 	t.Helper()
 
-	root := t.TempDir()
+	root := controllerDataRootForTest(t)
 	certPath := root + "/certs"
 	// Port 0 lets the OS pick the public port at Start; the private metrics
 	// listener is bound here and handed to the API server still open, so no

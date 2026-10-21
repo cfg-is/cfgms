@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	certpkg "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/version"
 
 	// Import logging providers to register them
@@ -98,9 +100,20 @@ Blue/green operation:
 // "use what config + env produced," preserving legacy single-controller
 // startup exactly.
 func runController(configPath string, initMode bool, listenAPIAddr, listenTransportAddr string) error {
+	// Lock the fixed base before the config file is located or read.
+	if err := adoptControllerBaseDir(); err != nil {
+		return err
+	}
+
 	cfg, err := config.LoadWithPath(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Lock the configured CA, certificate and admin bundle directories before
+	// anything reads them. --init does this itself in initialization.Run.
+	if err := initialization.AdoptControllerDataTree(cfg); err != nil {
+		return fmt.Errorf("failed to secure controller data directory: %w", err)
 	}
 
 	applyListenOverrides(cfg, listenAPIAddr, listenTransportAddr)
@@ -575,9 +588,17 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 		return fmt.Errorf("--root-scoped is only valid with --name")
 	}
 
+	if err := adoptControllerBaseDir(); err != nil {
+		return err
+	}
+
 	cfg, err := config.LoadWithPath(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	if err := initialization.AdoptControllerDataTree(cfg); err != nil {
+		return fmt.Errorf("failed to secure controller data directory: %w", err)
 	}
 
 	logger := logging.NewNoopLogger()
@@ -698,4 +719,23 @@ func getLogProvider(cfg *config.Config) string { return server.LogProvider(cfg) 
 // server.LogProviderConfig.
 func getLogProviderConfig(cfg *config.Config, store secretsif.SecretStore) (map[string]interface{}, error) {
 	return server.LogProviderConfig(cfg, store)
+}
+
+// adoptControllerBaseDir locks the fixed controller base directory
+// (%ProgramData%\cfgms) to SYSTEM and Administrators before the controller
+// config file is located or read. It is a no-op outside Windows, and any error,
+// including security.ErrUntrustedDirOwner, aborts start-up.
+func adoptControllerBaseDir() error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	base := initialization.ControllerBaseDir()
+	adopted, err := security.AdoptAdminOnlyDir(base)
+	for _, p := range adopted {
+		logging.ForComponent("controller").Info("Adopted controller data path", "path", logging.SanitizeLogValue(p))
+	}
+	if err != nil {
+		return fmt.Errorf("failed to secure controller data directory: %w", err)
+	}
+	return nil
 }

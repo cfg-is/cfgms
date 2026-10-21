@@ -195,7 +195,7 @@ func TestRollbackTracker_Empty(t *testing.T) {
 }
 
 func TestRun_FullInitialization(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -244,7 +244,7 @@ func TestRun_FullInitialization(t *testing.T) {
 }
 
 func TestRun_AlreadyInitialized(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -303,7 +303,7 @@ func TestRun_CertManagementDisabled(t *testing.T) {
 // TestInit_ProducesAdminBundle verifies that Run writes an admin bundle with a valid
 // admin-marked certificate, 365-day validity, and the correct subject.
 func TestInit_ProducesAdminBundle(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -343,7 +343,7 @@ func TestInit_ProducesAdminBundle(t *testing.T) {
 // TestInit_BundleSerialMatchesMarker verifies that the idempotency marker's serial= line
 // matches the serial in the bundle file.
 func TestInit_BundleSerialMatchesMarker(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -366,7 +366,7 @@ func TestInit_BundleSerialMatchesMarker(t *testing.T) {
 // TestInit_Idempotent_BundleNotOverwritten verifies that if the bundle file already
 // exists when Run is called, it is left untouched.
 func TestInit_Idempotent_BundleNotOverwritten(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -390,7 +390,7 @@ func TestInit_Idempotent_BundleNotOverwritten(t *testing.T) {
 // marker is present but the bundle file has been externally deleted, Run returns
 // the operator recovery error pointing at bootstrap-admin --regenerate.
 func TestInit_MarkerPresent_BundleMissing_Errors(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -416,7 +416,7 @@ func TestInit_MarkerPresent_BundleMissing_Errors(t *testing.T) {
 // when external_url is not configured, and that no CA material or init marker is
 // written (the check fires before any side-effecting initialization step).
 func TestRun_RejectsUnsetExternalURL(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -437,7 +437,7 @@ func TestRun_RejectsUnsetExternalURL(t *testing.T) {
 // TestRun_BundleHonoursExternalURL verifies that the ControllerURL in the system
 // admin bundle matches the configured external_url after initialization.
 func TestRun_BundleHonoursExternalURL(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -466,7 +466,7 @@ func TestRun_BundleHonoursExternalURL(t *testing.T) {
 func TestRun_TransportCertHonorsExternalHostname(t *testing.T) {
 	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "fleet-controller")
 
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -518,6 +518,69 @@ func TestRun_TransportCertHonorsExternalHostname(t *testing.T) {
 		"transport cert SAN list must include CFGMS_EXTERNAL_HOSTNAME and certificate.server.dns_names; missing fleet-controller is the fleet-e2e regression")
 	assert.Contains(t, x509Cert.DNSNames, "localhost", "loopback SAN must be preserved")
 	assert.Contains(t, x509Cert.DNSNames, "controller-standalone", "transport default SAN must be preserved")
+}
+
+// controllerDataRoot returns a fresh directory that AdoptControllerDataTree
+// accepts as the controller base directory: it points ProgramData at a temp
+// directory, so ControllerBaseDir() is <temp>\cfgms, and returns that path.
+// Tests that call Run place their CA, storage and bundle paths below it.
+func controllerDataRoot(t *testing.T) string {
+	t.Helper()
+	programData := t.TempDir()
+	t.Setenv("ProgramData", programData)
+	root := ControllerBaseDir()
+	require.NoError(t, os.MkdirAll(root, 0700))
+	return root
+}
+
+func TestControllerDataDirs_InsideBase(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cfgms")
+	caDir := filepath.Join(base, "certs", "ca")
+	cfg := makeTestConfig(t, base, caDir, filepath.Join(base, "admin.bundle.yaml"))
+
+	dirs, err := controllerDataDirs(cfg, base, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(base, "certs"), caDir, base}, dirs)
+}
+
+func TestControllerDataDirs_RefusesPathsOutsideBase(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "cfgms")
+	caDir := filepath.Join(base, "ca")
+	bundle := filepath.Join(base, "admin.bundle.yaml")
+
+	cases := map[string]*config.Config{
+		"bundle in an unrelated directory":            makeTestConfig(t, base, caDir, filepath.Join(tmp, "Desktop", "admin.bundle.yaml")),
+		"bundle in a sibling with the base as prefix": makeTestConfig(t, base, caDir, filepath.Join(tmp, "cfgms-other", "admin.bundle.yaml")),
+		"bundle escaping the base with ..":            makeTestConfig(t, base, caDir, filepath.Join(base, "..", "admin.bundle.yaml")),
+		"relative bundle path":                        makeTestConfig(t, base, caDir, "admin.bundle.yaml"),
+		"CA directory outside the base":               makeTestConfig(t, base, filepath.Join(tmp, "elsewhere", "ca"), bundle),
+		"CA directory directly under base parent":     makeTestConfig(t, base, filepath.Join(tmp, "ca"), bundle),
+		"relative CA directory":                       makeTestConfig(t, base, filepath.Join("certs", "ca"), bundle),
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			dirs, err := controllerDataDirs(cfg, base, false)
+			require.ErrorIs(t, err, ErrDataDirOutsideBase)
+			assert.Nil(t, dirs)
+		})
+	}
+
+	t.Run("relative base", func(t *testing.T) {
+		_, err := controllerDataDirs(makeTestConfig(t, base, caDir, bundle), "cfgms", false)
+		require.ErrorIs(t, err, ErrDataDirOutsideBase)
+	})
+}
+
+func TestControllerDataDirs_FoldCase(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cfgms")
+	upper := filepath.Join(filepath.Dir(base), "CFGMS")
+	cfg := makeTestConfig(t, base, filepath.Join(upper, "ca"), filepath.Join(upper, "admin.bundle.yaml"))
+
+	_, err := controllerDataDirs(cfg, base, true)
+	require.NoError(t, err)
+	_, err = controllerDataDirs(cfg, base, false)
+	require.ErrorIs(t, err, ErrDataDirOutsideBase)
 }
 
 func makeTestConfig(t *testing.T, tempDir, caDir, bundlePath string) *config.Config {
@@ -591,7 +654,7 @@ func skipInitTestIfNoPostgres(t *testing.T) string {
 func TestRun_ClusterMode_VaultKeyPathValidation(t *testing.T) {
 	pgDSN := skipInitTestIfNoPostgres(t)
 
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -635,7 +698,7 @@ func TestRun_ClusterMode_VaultKeyPathValidation(t *testing.T) {
 func TestRun_ClusterMode_UsesDatabaseProvider(t *testing.T) {
 	pgDSN := skipInitTestIfNoPostgres(t)
 
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -687,7 +750,7 @@ func TestRun_ClusterMode_UsesDatabaseProvider(t *testing.T) {
 // where cfg.CertPath (a non-empty compiled relative default) shadowed CAPath and caused
 // CA files to land under <CWD>/certs/ca/ instead of the configured absolute location.
 func TestRun_HonorsAbsoluteCAPath(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	// Use a nested directory to make the absolute path unambiguous.
 	caDir := filepath.Join(tempDir, "certs", "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
@@ -743,7 +806,7 @@ func TestRun_HonorsAbsoluteCAPath(t *testing.T) {
 // certificate.ca_path is handled correctly by filepath.Clean — the CA must still land
 // at the configured directory, not at a wrong nested path.
 func TestRun_HonorsTrailingSlashCAPath(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "certs", "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()
@@ -788,7 +851,7 @@ func TestRun_HonorsTrailingSlashCAPath(t *testing.T) {
 }
 
 func TestRun_AdminBundleControllerURLMatchesTier1BootstrapTemplate(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := controllerDataRoot(t)
 	caDir := filepath.Join(tempDir, "ca")
 	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
 	logger := logging.NewNoopLogger()

@@ -1738,8 +1738,20 @@ func TestInstallerS3Config_YAMLWithEnvOverrides(t *testing.T) {
 	})
 }
 
+// controllerDataRootForTest points ProgramData at a temp directory and returns
+// initialization.ControllerBaseDir() below it, created. On Windows,
+// initialization.Run only locks CA and bundle directories inside that base, so
+// tests that call it keep their controller paths below the returned root.
+func controllerDataRootForTest(t *testing.T) string {
+	t.Helper()
+	t.Setenv("ProgramData", t.TempDir())
+	root := initialization.ControllerBaseDir()
+	require.NoError(t, os.MkdirAll(root, 0700))
+	return root
+}
+
 func TestLoadExistingCertificateManager_SingleNodeSigningKeyInSecretStore(t *testing.T) {
-	root := t.TempDir()
+	root := controllerDataRootForTest(t)
 	keyPath := filepath.Join(root, "secrets.key")
 	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
 	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
@@ -1812,7 +1824,7 @@ func TestLoadExistingCertificateManager_SingleNodeSigningKeyInSecretStore(t *tes
 // directory. It returns the config and the pre-upgrade signing certificate.
 func preUpgradeSigningCfg(t *testing.T) (*config.Config, *cert.Certificate) {
 	t.Helper()
-	root := t.TempDir()
+	root := controllerDataRootForTest(t)
 	keyPath := filepath.Join(root, "secrets.key")
 	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
 	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
