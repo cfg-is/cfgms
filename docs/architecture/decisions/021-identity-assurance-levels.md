@@ -1106,6 +1106,23 @@ TLS handshake did not require (`tls.VerifyClientCertIfGiven`, no `VerifyPeerCert
 callback), and revocation is checked in exactly one place — `extractAdminPrincipal` — which
 a direct read of the raw certificate skips entirely.
 
+**Note (2026-10-21, Issue #5302): the statement above about browser callers is stale, and
+the rule now also admits a web session.** The middleware has since derived `RootScoped`
+from the account record and an AssuranceStrong assertion (`rootScopeFromAssertion`) on both
+the web-cookie and Bearer paths, so `Principal.RootScoped` is not false for every
+browser-authenticated caller. `principalHasCertifiedRootScope` now passes for a
+certificate-authenticated principal (`CertSerial` set) **or** a session principal that is
+`RootScoped`, `AccountBound` and at `Assurance >= AssuranceStrong`: a root-scope account
+holder who signed in with a passkey. Every approval additionally needs a fresh per-action
+passkey tap bound to the exact request (`credential-request:approve` requires user
+presence), so a web-only root administrator, who may not have `cfg` installed, can grant the
+marker. `ImplicitAdmin` stays insufficient: it also covers unbound CLI sessions and platform
+administrators who are not root-scoped, and the escalation this rule prevents is a
+non-root-scoped administrator minting a root-scoped credential. The root scope must come
+from the approver's own account and a phishing-resistant assertion. API-key, relay and
+unbound principals, and Basic sessions, still fail. Signing-CA rotate, revoke and elect
+remain bundle-only (#4665).
+
 **Implementation reference (Issue #3718):** the three gates are named predicates —
 `principalMayAdministerController`, `principalMayGrantPayloadSigningMarker`, and
 `principalHasCertifiedRootScope` — each with a single call site in

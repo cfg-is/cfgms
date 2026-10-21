@@ -14,10 +14,11 @@
  * "compare the fingerprint again" prompt with a fresh row fetch, never retried
  * silently with the stale fingerprint.
  *
- * Root-scope marker: never offered. The epic's amendment to this issue requires
- * it — principalHasCertifiedRootScope can never pass for a cookie-authenticated
- * caller, so offering the control here would let an operator press "approve" on a
- * grant the server always refuses, unable to tell "not allowed" from "not working".
+ * Root-scope marker: offered only to a root-scoped principal (principal.rootScope).
+ * The server grants it when the approver's own root scope comes from the account
+ * and a phishing-resistant assertion (AssuranceStrong), and the approval itself
+ * carries a fresh per-action passkey tap, so a web-only root administrator can grant
+ * it without cfg installed. A tenant-scoped operator never sees the control.
  *
  * Admin / payload-signing marker availability is gated on principal.rootScope, the
  * only entitlement signal this cookie session exposes to the browser. That exactly
@@ -128,6 +129,7 @@ function ApproveModal({ entry, rootScope, onCancel, onApproved, onConflict }: Ap
   const [username, setUsername] = useState('')
   const [grantAdmin, setGrantAdmin] = useState(false)
   const [grantSigning, setGrantSigning] = useState(false)
+  const [grantRootScope, setGrantRootScope] = useState(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -147,6 +149,7 @@ function ApproveModal({ entry, rootScope, onCancel, onApproved, onConflict }: Ap
         newAccountUsername: username.trim(),
         grantAdminMarker: grantAdmin,
         grantPayloadSigningMarker: grantSigning,
+        grantRootScopeMarker: rootScope && grantRootScope,
       })
       if (result.conflict) {
         onConflict()
@@ -233,13 +236,17 @@ function ApproveModal({ entry, rootScope, onCancel, onApproved, onConflict }: Ap
               </p>
             )}
 
-            <div data-testid="marker-root-scope-unavailable">
-              <span className="field-label">Root scope — not offered here</span>
-              <p className="mut">
-                A root-scope grant requires a certificate-authenticated approval and cannot be
-                granted from this screen.
-              </p>
-            </div>
+            {rootScope && (
+              <label className="field-label">
+                <input
+                  type="checkbox"
+                  data-testid="marker-root-scope"
+                  checked={grantRootScope}
+                  onChange={(e) => setGrantRootScope(e.target.checked)}
+                />
+                Root scope
+              </label>
+            )}
           </fieldset>
 
           {error !== null && (

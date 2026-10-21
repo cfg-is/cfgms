@@ -9,9 +9,8 @@
  *    (409) is surfaced as a request to re-compare, never silently retried.
  *  - No requester-supplied value is rendered as raw HTML or placed into a link
  *    target; the panel uses no raw HTML rendering at all.
- *  - The panel never sends a root-scope marker in an approve request, for every
- *    reachable combination of the marker controls, and offers no root-scope
- *    control at all.
+ *  - The root-scope marker control shows only for a root-scoped principal, and
+ *    selecting it sends grant_root_scope_marker: true (Issue #5302).
  *
  * Also covers: loading/empty/error/pending/approved/denied/expired states, deny,
  * and marker-unavailable-with-reason for a non-root-scope session.
@@ -369,7 +368,7 @@ describe('CredentialRequestsTab — approve marker entitlement (non-root-scope s
     expect(screen.getByTestId('marker-payload-signing-reason')).toBeInTheDocument()
   })
 
-  it('offers no root-scope marker control, and states a certificate-authenticated approval is required', async () => {
+  it('hides the root-scope marker control for a non-root-scope session', async () => {
     fetchMock.mockResolvedValue(makeListResponse([makeEntry()]))
     renderTab()
     await waitFor(() => expect(screen.getByTestId('credential-requests-table')).toBeInTheDocument())
@@ -377,7 +376,6 @@ describe('CredentialRequestsTab — approve marker entitlement (non-root-scope s
 
     expect(screen.queryByTestId('marker-root-scope')).toBeNull()
     expect(screen.queryByRole('checkbox', { name: /root.?scope/i })).toBeNull()
-    expect(screen.getByText(/root-scope grant requires a certificate-authenticated approval/i)).toBeInTheDocument()
   })
 
   it('cancel closes the modal without approving', async () => {
@@ -491,36 +489,32 @@ describe('CredentialRequestsTab — approve as a root-scope admin session', () =
     expect(screen.queryByTestId('marker-admin-reason')).toBeNull()
   })
 
-  it('still offers no root-scope control even for a root-scope session', async () => {
+  it('[REQUIRED] offers the root-scope control, unchecked by default, for a root-scope session', async () => {
     mockRootScopeSession({})
     renderAsRootScopeAdmin()
     await waitFor(() => expect(screen.getByTestId('credential-requests-table')).toBeInTheDocument())
 
     fireEvent.click(screen.getByTestId('approve-btn-creq-abc123'))
 
-    expect(screen.queryByTestId('marker-root-scope')).toBeNull()
-    expect(screen.queryByRole('checkbox', { name: /root.?scope/i })).toBeNull()
+    expect(screen.getByTestId('marker-root-scope')).not.toBeChecked()
   })
 
-  it('[REQUIRED] never sends a root-scope marker for every reachable combination of the marker controls', async () => {
-    const combinations: Array<[string, boolean, boolean]> = [
-      ['creq-1', false, false],
-      ['creq-2', true, false],
-      ['creq-3', false, true],
-      ['creq-4', true, true],
+  it('[REQUIRED] sends grant_root_scope_marker true only when the control is selected', async () => {
+    const cases: Array<[string, boolean]> = [
+      ['creq-1', false],
+      ['creq-2', true],
     ]
     mockRootScopeSession({
       listResponse: () =>
-        makeListResponse(combinations.map(([id]) => makeEntry({ id, public_key_fingerprint_short: `FP-${id}` }))),
+        makeListResponse(cases.map(([id]) => makeEntry({ id, public_key_fingerprint_short: `FP-${id}` }))),
     })
     renderAsRootScopeAdmin()
     await waitFor(() => expect(screen.getByTestId('credential-requests-table')).toBeInTheDocument())
 
-    for (const [id, admin, signing] of combinations) {
+    for (const [id, grant] of cases) {
       fireEvent.click(screen.getByTestId(`approve-btn-${id}`))
       fireEvent.change(screen.getByTestId('approve-username'), { target: { value: 'host-1' } })
-      if (admin) fireEvent.click(screen.getByTestId('marker-admin'))
-      if (signing) fireEvent.click(screen.getByTestId('marker-payload-signing'))
+      if (grant) fireEvent.click(screen.getByTestId('marker-root-scope'))
 
       const before = fetchMock.mock.calls.length
       fireEvent.click(screen.getByTestId('approve-submit-btn'))
@@ -530,11 +524,8 @@ describe('CredentialRequestsTab — approve as a root-scope admin session', () =
         .slice(before)
         .find((c) => String(c[0]).includes('/approve'))
       if (!approveCall) throw new Error('approve POST was never made')
-      const rawBody = String((approveCall[1] as RequestInit).body)
-      expect(rawBody).not.toContain('root_scope')
-      expect(rawBody).not.toContain('rootScope')
-      const parsedBody = JSON.parse(rawBody) as Record<string, unknown>
-      expect(Object.keys(parsedBody)).not.toContain('grant_root_scope_marker')
+      const parsedBody = JSON.parse(String((approveCall[1] as RequestInit).body)) as Record<string, unknown>
+      expect(parsedBody.grant_root_scope_marker).toBe(grant)
     }
   })
 })

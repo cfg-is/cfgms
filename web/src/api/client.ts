@@ -798,6 +798,7 @@ export interface ApproveCredentialRequestParams {
   newAccountUsername: string
   grantAdminMarker: boolean
   grantPayloadSigningMarker: boolean
+  grantRootScopeMarker: boolean
 }
 
 export interface ApproveCredentialRequestResult {
@@ -823,6 +824,7 @@ export async function approveCredentialRequest(
         new_account_username: params.newAccountUsername,
         grant_admin_marker: params.grantAdminMarker,
         grant_payload_signing_marker: params.grantPayloadSigningMarker,
+        grant_root_scope_marker: params.grantRootScopeMarker,
       }),
     },
   )
