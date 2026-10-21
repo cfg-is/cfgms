@@ -1075,3 +1075,142 @@ func TestSetGet_FailClosedWithoutExecutionTenant(t *testing.T) {
 
 	assert.Empty(t, ap.requestedTenants(), "no token may be requested without an execution tenant")
 }
+
+// setupSetTest serves an existing admin unit and records the PATCH body.
+func setupSetTest(t *testing.T, existing map[string]interface{}) (*entraAdminUnitModule, context.Context, func() map[string]interface{}) {
+	t.Helper()
+	var mu sync.Mutex
+	var body map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /administrativeUnits/au-1", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(existing)
+	})
+	mux.HandleFunc("PATCH /administrativeUnits/au-1", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body = map[string]interface{}{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	m := &entraAdminUnitModule{
+		authProvider: &testHTTPAuthProvider{token: newTestToken()},
+		graphClient:  graph.NewHTTPClient(graph.WithBaseURL(server.URL)),
+	}
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "cfgms-tenant")
+	return m, ctx, func() map[string]interface{} {
+		mu.Lock()
+		defer mu.Unlock()
+		return body
+	}
+}
+
+func existingAU() map[string]interface{} {
+	return map[string]interface{}{
+		"id": "au-1", "displayName": "AU", "visibility": "Public",
+		"membershipType": "Assigned",
+	}
+}
+
+func TestSet_SendsRestrictionAndMembershipTypeToGraph(t *testing.T) {
+	m, ctx, sent := setupSetTest(t, existingAU())
+	cfg := &EntraAdminUnitConfig{
+		DisplayName: "AU", Visibility: "Public", TenantID: "test-tenant-id",
+		MembershipType: "Dynamic", MembershipRule: "user.department -eq \"IT\"",
+		IsMemberManagementRestricted: true,
+		ExtensionAttributes:          map[string]interface{}{"extensionAttribute1": "x"},
+	}
+	require.NoError(t, m.Set(ctx, "test-tenant-id:au-1", cfg))
+
+	body := sent()
+	require.NotNil(t, body, "Set must send a Graph update")
+	assert.Equal(t, true, body["isMemberManagementRestricted"])
+	assert.Equal(t, "Dynamic", body["membershipType"])
+	assert.Equal(t, map[string]interface{}{"extensionAttribute1": "x"}, body["extensionAttributes"])
+}
+
+func TestSet_ManagedFieldsRestrictsUpdate(t *testing.T) {
+	m, ctx, sent := setupSetTest(t, existingAU())
+	cfg := &EntraAdminUnitConfig{
+		DisplayName: "Changed", Visibility: "HiddenMembership", TenantID: "test-tenant-id",
+		IsMemberManagementRestricted: true,
+		ManagedFieldsList:            []string{"is_member_management_restricted"},
+	}
+	require.NoError(t, m.Set(ctx, "test-tenant-id:au-1", cfg))
+
+	assert.Equal(t, map[string]interface{}{"isMemberManagementRestricted": true}, sent())
+}
+
+func TestSet_ManagedFieldsAcceptsInterfaceSlice(t *testing.T) {
+	m, ctx, sent := setupSetTest(t, existingAU())
+	cfg := stateMap{
+		"display_name": "Changed", "visibility": "HiddenMembership", "tenant_id": "test-tenant-id",
+		"managed_fields": []interface{}{"display_name"},
+	}
+	require.NoError(t, m.Set(ctx, "test-tenant-id:au-1", cfg))
+	assert.Equal(t, map[string]interface{}{"displayName": "Changed"}, sent())
+}
+
+func TestSet_RejectsRestrictedManagementUnits(t *testing.T) {
+	m, ctx, sent := setupSetTest(t, existingAU())
+	cfg := &EntraAdminUnitConfig{
+		DisplayName: "AU", Visibility: "Public", TenantID: "test-tenant-id",
+		RestrictedManagementUnits: []string{"au-2"},
+	}
+	err := m.Set(ctx, "test-tenant-id:au-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "restricted_management_units")
+	assert.Nil(t, sent())
+}
+
+func TestSet_CreateSendsRestrictionToGraph(t *testing.T) {
+	var body map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /administrativeUnits/au-new", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("POST /administrativeUnits", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": "au-new"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	m := &entraAdminUnitModule{
+		authProvider: &testHTTPAuthProvider{token: newTestToken()},
+		graphClient: graph.NewHTTPClient(graph.WithBaseURL(server.URL),
+			graph.WithRetryConfig(&graph.RetryConfig{MaxRetries: 0})),
+	}
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "cfgms-tenant")
+	cfg := &EntraAdminUnitConfig{
+		DisplayName: "AU", Visibility: "Public", TenantID: "test-tenant-id",
+		IsMemberManagementRestricted: true,
+	}
+	require.NoError(t, m.Set(ctx, "test-tenant-id:au-new", cfg))
+	assert.Equal(t, true, body["isMemberManagementRestricted"])
+}
+
+// stateMap is a map-backed ConfigState carrying raw []interface{} values.
+type stateMap map[string]interface{}
+
+func (s stateMap) AsMap() map[string]interface{} { return s }
+func (s stateMap) ToYAML() ([]byte, error)       { return yaml.Marshal(map[string]interface{}(s)) }
+func (s stateMap) FromYAML(b []byte) error       { return yaml.Unmarshal(b, &s) }
+func (s stateMap) Validate() error               { return nil }
+func (s stateMap) GetManagedFields() []string    { return nil }
+
+func TestSet_MalformedManagedFieldsFailsClosed(t *testing.T) {
+	m, ctx, sent := setupSetTest(t, existingAU())
+	cfg := stateMap{
+		"display_name": "Changed", "visibility": "Public", "tenant_id": "test-tenant-id",
+		"managed_fields": []interface{}{"display_name", 7},
+	}
+	err := m.Set(ctx, "test-tenant-id:au-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "managed_fields")
+	assert.Nil(t, sent(), "no update may reach Graph")
+}

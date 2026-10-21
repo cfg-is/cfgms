@@ -540,6 +540,7 @@ type AdministrativeUnit struct {
 	MembershipType                string                 `json:"membershipType,omitempty"`
 	MembershipRule                string                 `json:"membershipRule,omitempty"`
 	MembershipRuleProcessingState string                 `json:"membershipRuleProcessingState,omitempty"`
+	IsMemberManagementRestricted  bool                   `json:"isMemberManagementRestricted,omitempty"`
 	ExtensionAttributes           map[string]interface{} `json:"extensionAttributes,omitempty"`
 }
 
@@ -551,6 +552,7 @@ type CreateAdministrativeUnitRequest struct {
 	MembershipType                string                 `json:"membershipType,omitempty"`
 	MembershipRule                string                 `json:"membershipRule,omitempty"`
 	MembershipRuleProcessingState string                 `json:"membershipRuleProcessingState,omitempty"`
+	IsMemberManagementRestricted  *bool                  `json:"isMemberManagementRestricted,omitempty"`
 	ExtensionAttributes           map[string]interface{} `json:"extensionAttributes,omitempty"`
 }
 
@@ -562,6 +564,7 @@ type UpdateAdministrativeUnitRequest struct {
 	MembershipType                *string                `json:"membershipType,omitempty"`
 	MembershipRule                *string                `json:"membershipRule,omitempty"`
 	MembershipRuleProcessingState *string                `json:"membershipRuleProcessingState,omitempty"`
+	IsMemberManagementRestricted  *bool                  `json:"isMemberManagementRestricted,omitempty"`
 	ExtensionAttributes           map[string]interface{} `json:"extensionAttributes,omitempty"`
 }
 
