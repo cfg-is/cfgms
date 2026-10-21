@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -104,8 +103,13 @@ type Syncer struct {
 	// because its config file was removed at the origin.
 	auditManager *audit.Manager
 
-	webhookPending    sync.Map // scope key -> *atomic.Bool; a webhook sync is waiting for the lease
+	webhookPending    sync.Map // scope key -> *webhookWaiter; a webhook sync is waiting for the lease
 	webhookLeaseRetry time.Duration
+
+	// webhookCoalesced, when non-nil, is called each time a webhook trigger is
+	// coalesced into an already-waiting sync, before it blocks on that sync's
+	// outcome. Test-only observation point; nil in production.
+	webhookCoalesced func()
 }
 
 // Option is a functional option for NewSyncer.
@@ -356,27 +360,44 @@ func (s *Syncer) TriggerSync(ctx context.Context, b ScopeBinding) error {
 	return err
 }
 
+// webhookWaiter records the outcome of the webhook call waiting for a scope's
+// lease. done is closed exactly once, after err is set, on every exit path.
+type webhookWaiter struct {
+	done chan struct{}
+	err  error
+}
+
 // TriggerWebhookSync syncs b like TriggerSync, but only while holding the
 // scope's cluster lease (the one polling uses), so syncs of one scope never run
 // on two nodes at once. If the lease is held elsewhere the call keeps
 // contending until it is free or webhookLeaseMaxWait elapses. Webhooks for a
 // scope that arrive while one is already waiting are coalesced into it: the
-// waiting sync pulls the latest head when it runs.
-func (s *Syncer) TriggerWebhookSync(ctx context.Context, b ScopeBinding) error {
+// waiting sync pulls the latest head when it runs. A coalesced call blocks until
+// the waiter finishes and returns its outcome, including a failure to sync.
+func (s *Syncer) TriggerWebhookSync(ctx context.Context, b ScopeBinding) (err error) {
 	key := b.key()
-	pendingV, _ := s.webhookPending.LoadOrStore(key, &atomic.Bool{})
-	pending := pendingV.(*atomic.Bool)
-	if !pending.CompareAndSwap(false, true) {
-		return nil // coalesced into the waiting sync
-	}
-	claimed := true
-	release := func() {
-		if claimed {
-			claimed = false
-			pending.Store(false)
+	rec := &webhookWaiter{done: make(chan struct{})}
+	if actual, loaded := s.webhookPending.LoadOrStore(key, rec); loaded {
+		// Coalesced into the waiting sync: report its outcome, so a waiter that
+		// exits without syncing never leaves an acknowledged-but-lost trigger.
+		w := actual.(*webhookWaiter)
+		if s.webhookCoalesced != nil {
+			s.webhookCoalesced()
+		}
+		select {
+		case <-w.done:
+			return w.err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
-	defer release()
+	// release clears the claim so later triggers start a fresh sync.
+	release := func() { s.webhookPending.CompareAndDelete(key, rec) }
+	defer func() {
+		release()
+		rec.err = err // written before done is closed
+		close(rec.done)
+	}()
 
 	leaseJob := lease.SingletonJob{}
 	if s.leaseJobFactory != nil {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -140,4 +141,154 @@ func TestPruneRecordsAuditEvent(t *testing.T) {
 		names[e.ResourceID] = true
 	}
 	assert.Equal(t, map[string]bool{"b": true, "c": true}, names)
+}
+
+// coalesceFixture builds a syncer whose scope lease is held by another node
+// until release is closed. claimed receives one value each time a webhook call
+// claims the scope (the syncer constructs the per-scope lease job only after
+// claiming); coalesced receives one value each time a call is coalesced into
+// the waiting one.
+type coalesceFixture struct {
+	syncer    *gitsync.Syncer
+	bindings  *gitsync.BindingStore
+	binding   gitsync.ScopeBinding
+	workDir   string
+	release   chan struct{}
+	claimed   chan struct{}
+	coalesced chan struct{}
+}
+
+func newCoalesceFixture(t *testing.T) *coalesceFixture {
+	t.Helper()
+	bareDir, workDir, _ := newTestRepo(t, map[string]string{"a.yaml": "a: 1\n"})
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
+	leaseStore := pkgtesting.SetupTestLeaseStore(t)
+	renew := 200 * time.Millisecond
+	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+
+	newJob := func(holder, name string) lease.SingletonJob {
+		m, err := lease.NewManager(leaseStore, 3*time.Second, renew, renew)
+		require.NoError(t, err)
+		job, err := lease.NewSingletonJob(m, name, holder, m.LeaseTTL(), renew, nil)
+		require.NoError(t, err)
+		return job
+	}
+	f := &coalesceFixture{
+		binding:   binding,
+		workDir:   workDir,
+		release:   make(chan struct{}),
+		claimed:   make(chan struct{}, 8),
+		coalesced: make(chan struct{}, 8),
+	}
+	root := t.TempDir()
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+	require.NoError(t, bindings.Add(binding))
+	syncer, err := gitsync.NewSyncer(store, bindings, filepath.Join(root, "repos"), logging.ForComponent("gitsync-test"),
+		gitsync.WithWebhookLeaseRetry(50*time.Millisecond),
+		gitsync.WithLeaseJobFactory(func(name string) (lease.SingletonJob, error) {
+			f.claimed <- struct{}{}
+			return newJob("node-a", name), nil
+		}),
+		gitsync.WithWebhookCoalescedHook(func() { f.coalesced <- struct{}{} }))
+	require.NoError(t, err)
+	t.Cleanup(syncer.Stop)
+	f.syncer = syncer
+	f.bindings = bindings
+
+	held := make(chan struct{})
+	holderDone := make(chan struct{})
+	holder := newJob("node-b", "controller-gitsync-scope-"+binding.TenantPath+"/"+binding.Namespace)
+	go func() {
+		defer close(holderDone)
+		holder.RunIfLeader(context.Background(), func(context.Context) {
+			close(held)
+			<-f.release
+		})
+	}()
+	<-held
+	t.Cleanup(func() {
+		select {
+		case <-f.release:
+		default:
+			close(f.release)
+		}
+		<-holderDone
+	})
+	return f
+}
+
+// await blocks until ch delivers or a generous deadline passes.
+func await(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// A call coalesced into a waiter that then exits without syncing must report
+// the failure instead of acknowledging a trigger that was dropped.
+func TestCoalescedWebhookFailsWhenWaiterExitsEarly(t *testing.T) {
+	f := newCoalesceFixture(t)
+
+	waiterCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waiterErr := make(chan error, 1)
+	go func() { waiterErr <- f.syncer.TriggerWebhookSync(waiterCtx, f.binding) }()
+	await(t, f.claimed, "the first call to claim the scope")
+
+	coalescedErr := make(chan error, 1)
+	go func() { coalescedErr <- f.syncer.TriggerWebhookSync(context.Background(), f.binding) }()
+	await(t, f.coalesced, "the second call to coalesce into the waiter")
+	select {
+	case err := <-coalescedErr:
+		t.Fatalf("coalesced call returned before the waiter finished: %v", err)
+	case err := <-waiterErr:
+		t.Fatalf("waiter returned while the lease was held elsewhere: %v", err)
+	default:
+	}
+
+	cancel()
+	require.ErrorIs(t, <-waiterErr, context.Canceled)
+	select {
+	case err := <-coalescedErr:
+		assert.Error(t, err, "a coalesced trigger must not be acknowledged when the waiter never synced")
+	case <-time.After(5 * time.Second):
+		t.Fatal("coalesced call did not return after the waiter exited")
+	}
+	assert.Empty(t, f.claimed, "only the first call may claim the scope")
+}
+
+// A coalesced trigger whose waiter does run its sync succeeds, and that single
+// sync covers the newest commit pushed before it began.
+func TestCoalescedWebhookCoveredByWaitersSync(t *testing.T) {
+	f := newCoalesceFixture(t)
+
+	errs := make(chan error, 2)
+	go func() { errs <- f.syncer.TriggerWebhookSync(context.Background(), f.binding) }()
+	await(t, f.claimed, "the first call to claim the scope")
+	go func() { errs <- f.syncer.TriggerWebhookSync(context.Background(), f.binding) }()
+	await(t, f.coalesced, "the second call to coalesce into the waiter")
+
+	require.NoError(t, os.WriteFile(filepath.Join(f.workDir, "c.yaml"), []byte("c: 1\n"), 0640))
+	runGit(t, f.workDir, "add", ".")
+	runGit(t, f.workDir, "commit", "-m", "newest")
+	runGit(t, f.workDir, "push", "origin", "main")
+	head := runGit(t, f.workDir, "rev-parse", "HEAD")
+
+	close(f.release)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			assert.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("webhook call did not return")
+		}
+	}
+	assert.Empty(t, f.claimed, "only the first call may claim the scope")
+	got, ok := f.bindings.Get(f.binding.TenantPath, f.binding.Namespace)
+	require.True(t, ok)
+	assert.Equal(t, head, got.LastSyncedSHA, "the one sync must cover the newest pushed commit")
 }
