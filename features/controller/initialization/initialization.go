@@ -103,11 +103,16 @@ func pathWithin(base, path string, foldCase bool) bool {
 	if foldCase {
 		base, path = strings.ToLower(base), strings.ToLower(path)
 	}
-	rel, err := filepath.Rel(base, path)
-	if err != nil {
-		return false
+	// Compare textually: filepath.Rel folds case on Windows, which would
+	// defeat the case-sensitive mode.
+	if path == base {
+		return true
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	prefix := base
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(path, prefix)
 }
 
 // AdoptControllerDataTree locks the controller data tree (certificate storage
