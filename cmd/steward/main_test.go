@@ -1801,7 +1801,7 @@ func runRootWithSeam(t *testing.T, args ...string) (gotToken string, started boo
 
 func TestRegTokenFileStartsStewardWithToken(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("--regtoken-file is not available on Windows yet")
+		t.Skip("a Windows token file must carry an admin-only DACL rather than mode 0600; covered by TestRegTokenFile_WindowsAdminOnlyFile")
 	}
 	path := filepath.Join(t.TempDir(), "registration-token")
 	require.NoError(t, os.WriteFile(path, []byte("tok_from_file_123\n"), 0o600))
@@ -1824,9 +1824,9 @@ func TestRegTokenAndRegTokenFileTogetherIsError(t *testing.T) {
 }
 
 func TestRegTokenFileUnreadableIsErrorWithoutToken(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission semantics differ on Windows; the flag is rejected there")
-	}
+	// On Windows the file under t.TempDir() inherits an ACE for the test user,
+	// so ReadTokenFile refuses it as it refuses a group- or other-readable
+	// file elsewhere.
 	dir := t.TempDir()
 	wide := filepath.Join(dir, "wide")
 	require.NoError(t, os.WriteFile(wide, []byte("tok_secret_789\n"), 0o600))
