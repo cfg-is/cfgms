@@ -17,3 +17,15 @@ func EnsureAdminOnlyDir(path string) error {
 func AdoptAdminOnlyDir(path string) (adopted []string, err error) {
 	return nil, nil
 }
+
+// VerifyAdminOnlyPath is a no-op outside Windows: it returns nil without
+// touching path.
+func VerifyAdminOnlyPath(path string) error {
+	return nil
+}
+
+// VerifyAdminOnlyWritablePath is a no-op outside Windows: it returns nil
+// without touching path.
+func VerifyAdminOnlyWritablePath(path string) error {
+	return nil
+}
