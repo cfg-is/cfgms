@@ -128,7 +128,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewDecoder(r.Body).Decode(&req) // body is optional; TenantID defaults to "" if absent or malformed
 
 	if s.stewardStore == nil {
-		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
+		s.emitUnauthenticatedRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "steward_store_unavailable"})
@@ -139,7 +139,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), deviceID)
 	if err != nil {
 		if err == business.ErrStewardNotFound {
-			s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
+			s.emitUnauthenticatedRefreshAudit(r.Context(), deviceID, req.TenantID,
 				business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
 				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
@@ -147,7 +147,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
-		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
+		s.emitUnauthenticatedRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_error"})
@@ -274,7 +274,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), deviceID)
 	if err != nil {
 		if err == business.ErrStewardNotFound {
-			s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
+			s.emitUnauthenticatedRefreshAudit(r.Context(), deviceID, req.TenantID,
 				business.AuditEventSecurityEvent, "refresh_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
 				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
@@ -282,7 +282,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
-		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
+		s.emitUnauthenticatedRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_error"})
@@ -1331,6 +1331,44 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 		MaxDormancyDays: req.MaxDormancyDays,
 	}); err != nil {
 		s.logger.Error("Failed to encode refresh policy response", "error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// unauthenticatedRefreshActor is the fixed audit actor for refresh events
+// emitted before the steward record is resolved.
+const unauthenticatedRefreshActor = "unauthenticated-refresh"
+
+// emitUnauthenticatedRefreshAudit records a refresh audit event for a request
+// whose device could not be resolved. Nothing the caller supplied is trusted
+// as identity: the event lands in the system tenant under a fixed actor, and the
+// asserted device ID and tenant are carried only as sanitized detail fields.
+func (s *Server) emitUnauthenticatedRefreshAudit(
+	ctx context.Context,
+	assertedDeviceID, assertedTenantID string,
+	eventType business.AuditEventType,
+	action string,
+	result business.AuditResult,
+	severity business.AuditSeverity,
+	extras map[string]interface{},
+) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(eventType).
+		Action(action).
+		User(unauthenticatedRefreshActor, business.AuditUserTypeSystem).
+		Resource("steward", "unresolved", "").
+		Result(result).
+		Severity(severity).
+		Detail("asserted_device_id", logging.SanitizeLogValue(assertedDeviceID)).
+		Detail("asserted_tenant_id", logging.SanitizeLogValue(assertedTenantID))
+	for k, v := range extras {
+		b = b.Detail(k, v)
+	}
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit refresh audit event", "error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }
 
