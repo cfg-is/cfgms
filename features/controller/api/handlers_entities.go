@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -209,38 +210,56 @@ func (s *Server) queryEntitiesInReadScope(r *http.Request, route string, filter 
 	}
 }
 
-// listDriftedInReadScope runs ListDrifted. Drift rows carry no owning tenant, so a
-// boundary-subject root caller is served by asking the provider once for the root
-// tenant on its own and once per crossing-covered tenant, and merging the results.
-func (s *Server) listDriftedInReadScope(r *http.Request, route string, filter eginterfaces.DriftFilter) ([]*eginterfaces.DriftState, error) {
+// listDriftedInReadScope runs ListDrifted for one page of at most limit states
+// and returns the token for the next page ("" on the last one). Drift rows carry
+// no owning tenant, so a boundary-subject root caller is served by asking the
+// provider once for the root tenant on its own and once per crossing-covered
+// tenant (each for limit+1 rows after the same cursor), then merging, sorting by
+// subject and truncating to limit, so the limit bounds the whole response. The
+// token names the last returned subject, which the caller was allowed to see.
+func (s *Server) listDriftedInReadScope(r *http.Request, route string, filter eginterfaces.DriftFilter, limit int) ([]*eginterfaces.DriftState, string, error) {
 	scope := s.tenantReadScope(r, route)
+	filter.Limit = limit + 1
+	var merged []*eginterfaces.DriftState
 	if !scope.boundarySubject() {
-		return s.egProvider.ListDrifted(r.Context(), filter)
-	}
-	defer scope.LogSummary()
-	merged := []*eginterfaces.DriftState{}
-	seen := make(map[string]struct{})
-	for _, cut := range s.boundaryReadCuts(r, scope) {
-		f := filter
-		f.TenantFilter = cut.tenant
-		f.TenantSubtreeIDs = cut.ids
-		states, err := s.egProvider.ListDrifted(r.Context(), f)
+		states, err := s.egProvider.ListDrifted(r.Context(), filter)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		for _, st := range states {
-			if st == nil {
-				continue
+		merged = states
+	} else {
+		defer scope.LogSummary()
+		seen := make(map[string]struct{})
+		for _, cut := range s.boundaryReadCuts(r, scope) {
+			f := filter
+			f.TenantFilter = cut.tenant
+			f.TenantSubtreeIDs = cut.ids
+			states, err := s.egProvider.ListDrifted(r.Context(), f)
+			if err != nil {
+				return nil, "", err
 			}
-			key := st.EID.String()
-			if _, dup := seen[key]; dup {
-				continue
+			for _, st := range states {
+				if st == nil {
+					continue
+				}
+				key := st.EID.String()
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				merged = append(merged, st)
 			}
-			seen[key] = struct{}{}
-			merged = append(merged, st)
 		}
+		sort.Slice(merged, func(i, j int) bool { return merged[i].EID.String() < merged[j].EID.String() })
 	}
-	return merged, nil
+	if len(merged) <= limit {
+		if merged == nil {
+			merged = []*eginterfaces.DriftState{}
+		}
+		return merged, "", nil
+	}
+	merged = merged[:limit]
+	return merged, merged[limit-1].EID.String(), nil
 }
 
 // filterReadableEdges keeps the edges both of whose ends are entities the caller
@@ -1418,7 +1437,8 @@ func (s *Server) auditEdgeAssertion(r *http.Request, callerID, fromEID, toEID, e
 }
 
 // handleListDrifted handles GET /api/v1/entities/drifted.
-// Query params: lifecycle_status (detected|acknowledged|resolved|ignored), kind.
+// Query params: lifecycle_status (detected|acknowledged|resolved|ignored), kind,
+// limit (1-MaxDriftPageSize, default DefaultDriftPageSize), page_token.
 func (s *Server) handleListDrifted(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
 		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
@@ -1440,15 +1460,33 @@ func (s *Server) handleListDrifted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit := eginterfaces.DefaultDriftPageSize
+	if limStr := q.Get("limit"); limStr != "" {
+		l, err := strconv.Atoi(limStr)
+		if err != nil || l < 1 || l > eginterfaces.MaxDriftPageSize {
+			http.Error(w, "limit must be an integer between 1 and 1000", http.StatusBadRequest)
+			return
+		}
+		limit = l
+	}
+	after := q.Get("page_token")
+	if after != "" {
+		if _, err := egtypes.ParseEID(after); err != nil {
+			http.Error(w, "invalid page_token", http.StatusBadRequest)
+			return
+		}
+	}
+
 	tenant, ids := s.entityCut(r)
 	filter := eginterfaces.DriftFilter{
 		TenantFilter:     tenant,
 		TenantSubtreeIDs: ids,
 		LifecycleStatus:  lifecycleStatus,
 		Kind:             q.Get("kind"),
+		After:            after,
 	}
 
-	states, err := s.listDriftedInReadScope(r, "GET /api/v1/entities/drifted", filter)
+	states, nextToken, err := s.listDriftedInReadScope(r, "GET /api/v1/entities/drifted", filter, limit)
 	if err != nil {
 		s.logger.Error("handleListDrifted: query failed",
 			"error", logging.SanitizeLogValue(err.Error()),
@@ -1457,5 +1495,12 @@ func (s *Server) handleListDrifted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeEntityJSON(w, states)
+	writeEntityJSON(w, driftPage{Drifted: states, NextToken: nextToken})
+}
+
+// driftPage is the response of GET /api/v1/entities/drifted. NextToken is empty
+// on the last page.
+type driftPage struct {
+	Drifted   []*eginterfaces.DriftState
+	NextToken string
 }

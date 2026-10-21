@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -97,10 +98,10 @@ func rgEntityEIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
 func rgDriftEIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var states []*eginterfaces.DriftState
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &states))
+	var page driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
 	out := []string{}
-	for _, s := range states {
+	for _, s := range page.Drifted {
 		out = append(out, s.EID.String())
 	}
 	return out
@@ -541,4 +542,85 @@ func TestRootTimeline_SameAsPeerCrossing(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "same-as-change")
 	assert.Contains(t, rec.Body.String(), "rg-client-host")
+}
+
+// rgReportDrift reports an entity owned by tenant with a drift row.
+func rgReportDrift(t *testing.T, prov *sqlite.SQLiteEntityGraphProvider, subject, tenantID string) {
+	t.Helper()
+	reportEntity(t, prov, subject, tenantID, "host")
+	now := time.Now().UTC()
+	require.NoError(t, prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:reporter",
+		Observations: []egtypes.Observation{{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now, Subject: subject,
+			Kind: egtypes.ObservationKindDriftDiff, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"fields": []map[string]interface{}{{"attribute": "a", "desired": "x", "actual": "y", "matching": false}},
+			},
+		}},
+	}))
+}
+
+func rgDriftPage(t *testing.T, rec *httptest.ResponseRecorder) driftPage {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	return page
+}
+
+// TestListDrifted_BoundaryRootPaging: a boundary-subject root caller paging with
+// limit=1 sees each readable row exactly once and never a token naming an
+// uncrossed client entity.
+func TestListDrifted_BoundaryRootPaging(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-page-op")
+	const otherTenant = "client-uncrossed"
+	const otherEID = "host:rg-uncrossed-host"
+	_, err := f.server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: otherTenant, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	rgReportDrift(t, f.prov, otherEID, otherTenant)
+	grantCrossing(t, f.server, op.ID, rgMSP)
+
+	var seen []string
+	token := ""
+	for i := 0; i < 5; i++ {
+		path := "/api/v1/entities/drifted?limit=1"
+		if token != "" {
+			path += "&page_token=" + url.QueryEscape(token)
+		}
+		page := rgDriftPage(t, f.get(t, f.server.handleListDrifted, path, op, nil))
+		require.LessOrEqual(t, len(page.Drifted), 1)
+		for _, d := range page.Drifted {
+			seen = append(seen, d.EID.String())
+		}
+		assert.NotEqual(t, otherEID, page.NextToken, "token must not name an uncrossed entity")
+		if page.NextToken == "" {
+			break
+		}
+		token = page.NextToken
+	}
+	assert.ElementsMatch(t, []string{rgRootEID, rgClientEID}, seen, "each readable row exactly once")
+}
+
+// TestListDrifted_BoundaryRootLimitBoundsAllCuts: with crossings into two client
+// tenants each holding more rows than limit, one response holds at most limit rows.
+func TestListDrifted_BoundaryRootLimitBoundsAllCuts(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-cap-op")
+	const secondTenant = "client-second"
+	_, err := f.server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: secondTenant, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	for i := 0; i < 4; i++ {
+		rgReportDrift(t, f.prov, fmt.Sprintf("host:rg-a-%d", i), rgMSP)
+		rgReportDrift(t, f.prov, fmt.Sprintf("host:rg-b-%d", i), secondTenant)
+	}
+	grantCrossing(t, f.server, op.ID, rgMSP)
+	grantCrossing(t, f.server, op.ID, secondTenant)
+
+	page := rgDriftPage(t, f.get(t, f.server.handleListDrifted, "/api/v1/entities/drifted?limit=3", op, nil))
+	require.Len(t, page.Drifted, 3, "limit bounds the whole response")
+	assert.Equal(t, page.Drifted[2].EID.String(), page.NextToken)
+	ids := rgDriftEIDs(t, f.get(t, f.server.handleListDrifted, "/api/v1/entities/drifted?limit=3", op, nil))
+	assert.True(t, sort.StringsAreSorted(ids), "merged result is ordered by subject: %v", ids)
 }

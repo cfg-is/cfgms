@@ -300,7 +300,21 @@ type DriftFilter struct {
 	TenantSubtreeIDs []string // descendant tenant IDs of TenantFilter, resolved by the caller (fail closed when absent)
 	LifecycleStatus  string
 	Kind             string
+
+	// Limit is the page size. 0 returns every matching row (in-process callers);
+	// the HTTP handler always sets it. Rows are ordered by subject ascending.
+	Limit int
+	// After is the subject (EID string) of the last state of the previous page;
+	// only subjects greater than it are returned.
+	After string
 }
+
+const (
+	// DefaultDriftPageSize is the drifted-entities page size when a caller names none.
+	DefaultDriftPageSize = 100
+	// MaxDriftPageSize is the largest drifted-entities page a caller may ask for.
+	MaxDriftPageSize = 1000
+)
 
 // WatchFilter selects the subjects for a Watch subscription.
 type WatchFilter struct {

@@ -3786,8 +3786,13 @@ List entities with active drift matching a filter.
 |-----------|------|-------------|
 | `lifecycle_status` | `detected` \| `acknowledged` \| `resolved` \| `ignored` | 400 if any other value |
 | `kind` | string | Filter by entity kind |
+| `limit` | integer | Page size, 1..1000, default 100; 400 otherwise |
+| `page_token` | string | `NextToken` of the previous page; 400 if it is not an entity ID |
 
-**Response (200):** `[]DriftState` (see `/drift` example above for shape)
+**Response (200):** `{"Drifted": [DriftState, ...], "NextToken": "<subject>"}` ordered by subject
+(see `/drift` example above for the `DriftState` shape). `NextToken` is empty on the last page.
+For a root caller subject to the tenant-crossing boundary, `limit` bounds the whole response
+across all the caller's crossings, and `NextToken` only ever names a drift state the caller may read.
 
 Tenant scoping: only drift records for entities in the caller's tenant subtree
 are returned.
