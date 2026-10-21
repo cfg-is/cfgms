@@ -21,6 +21,7 @@ import (
 	moduleGitSource "github.com/cfgis/cfgms/features/controller/modules/sources/git"
 	loggingPkg "github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // envVarPattern matches ${VAR} patterns without defaults
@@ -1189,6 +1190,10 @@ func DefaultConfig() *Config {
 	return cfg
 }
 
+// windowsProductionConfigPath is the Windows production config location. It is a
+// variable so tests can point it at a temp tree instead of the real %ProgramData%.
+var windowsProductionConfigPath = `C:\ProgramData\cfgms\controller.cfg`
+
 // findConfigFile searches for the controller configuration file using the following priority:
 // 1. Explicit path (if provided and not empty)
 // 2. CFGMS_CONTROLLER_CONFIG environment variable
@@ -1218,13 +1223,18 @@ func findConfigFile(explicitPath string) (string, error) {
 	}
 
 	// Priority 3: Production paths (platform-specific)
-	var productionPath string
+	productionPath := "/etc/cfgms/controller.cfg"
 	if isWindows() {
-		productionPath = `C:\ProgramData\cfgms\controller.cfg`
-	} else {
-		productionPath = "/etc/cfgms/controller.cfg"
+		productionPath = windowsProductionConfigPath
 	}
 	if _, err := os.Stat(productionPath); err == nil {
+		if isWindows() {
+			// A local standard user can plant a file here when the directory is
+			// not locked, so refuse it rather than fall through to the dev path.
+			if verr := security.VerifyAdminOnlyPath(productionPath); verr != nil {
+				return "", fmt.Errorf("controller config %s failed the owner/ACL check (restrict the directory to SYSTEM and Administrators): %w", productionPath, verr)
+			}
+		}
 		return productionPath, nil
 	}
 
