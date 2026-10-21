@@ -71,3 +71,21 @@ func TestNoFollowMetadataHelpers_RejectSymlinkLeaf(t *testing.T) {
 		})
 	}
 }
+
+func TestFileModule_Set_SwappedIntermediateDirRejected(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, "sub")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	path := filepath.Join(base, "sub", "deep", "f.txt")
+
+	err := New().Set(context.Background(), path, createConfigFromYAML(testFileConfigYAML("x", "", "", base)))
+	if err == nil {
+		t.Fatal("Set() through a swapped intermediate directory must fail")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be written outside AllowedBasePath, found %d entries", len(entries))
+	}
+}

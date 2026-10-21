@@ -549,3 +549,57 @@ func TestReadValidatedFile(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, data)
 }
+
+func TestSecureWriteFileIntermediateSymlinkRefused(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, "sub")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if err := SecureWriteFile(base, "sub/new/f.txt", []byte("x")); err == nil {
+		t.Fatal("write through a symlinked intermediate directory must fail")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("outside directory must stay empty, found %d entries", len(entries))
+	}
+}
+
+// A swap after validation is simulated by calling the root writer directly with a
+// path that was valid before the intermediate directory became a link.
+func TestWriteFileInRootSwappedIntermediateStaysInRoot(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	validated := filepath.Join(base, "sub", "f.txt")
+	if err := os.Symlink(outside, filepath.Join(base, "sub")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if err := writeFileInRoot(base, "sub/f.txt", validated, []byte("x"), 0600); err == nil {
+		t.Fatal("write through a swapped intermediate directory must fail")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("outside directory must stay empty, found %d entries", len(entries))
+	}
+}
+
+func TestSecureWriteFileLeafSymlinkInsideBaseRefused(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target.txt")
+	if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(base, "link.txt")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if err := SecureWriteFile(base, "link.txt", []byte("changed")); err == nil {
+		t.Fatal("write through a leaf symlink must fail")
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "original" {
+		t.Fatalf("target content changed to %q", got)
+	}
+}
