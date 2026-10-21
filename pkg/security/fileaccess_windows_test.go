@@ -138,3 +138,139 @@ func TestLiveJunctionInsideBaseAllowed(t *testing.T) {
 		t.Fatalf("in-base write not at the junction target: %q, %v", data, err)
 	}
 }
+
+func TestOpenNoFollowSymlinkLeafTruncateRefusedSentinelIntact(t *testing.T) {
+	base := t.TempDir()
+	sentinel := filepath.Join(t.TempDir(), "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(sentinel, link); err != nil {
+		t.Skipf("creating a symlink needs SeCreateSymbolicLinkPrivilege: %v", err)
+	}
+	if f, err := openNoFollow(link, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600); err == nil {
+		_ = f.Close()
+		t.Fatal("openNoFollow must refuse a symlink leaf")
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "sentinel" {
+		t.Fatalf("sentinel changed: %q, %v", data, err)
+	}
+	if dest, err := os.Readlink(link); err != nil || dest != sentinel {
+		t.Fatalf("link changed: %q, %v", dest, err)
+	}
+}
+
+func TestOpenNoFollowRaceNeverTruncatesSentinel(t *testing.T) {
+	base := t.TempDir()
+	sentinel := filepath.Join(t.TempDir(), "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(base, "leaf")
+	if err := os.Symlink(sentinel, leaf); err != nil {
+		t.Skipf("creating a symlink needs SeCreateSymbolicLinkPrivilege: %v", err)
+	}
+	_ = os.Remove(leaf)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1500; i++ {
+			_ = os.Remove(leaf)
+			if i%2 == 0 {
+				_ = os.WriteFile(leaf, []byte("plain"), 0600)
+			} else {
+				_ = os.Symlink(sentinel, leaf)
+			}
+		}
+	}()
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		if f, err := openNoFollow(leaf, os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
+			_ = f.Close()
+		}
+		if data, err := os.ReadFile(sentinel); err != nil || string(data) != "sentinel" {
+			t.Fatalf("sentinel was truncated or changed: %q, %v", data, err)
+		}
+	}
+}
+
+func TestOpenNoFollowPlainFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plain.txt")
+
+	f, err := openNoFollow(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := f.WriteString("hello world"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	if f, err := openNoFollow(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600); err == nil {
+		_ = f.Close()
+		t.Fatal("O_EXCL on an existing file must fail")
+	}
+
+	f, err = openNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("read open: %v", err)
+	}
+	buf := make([]byte, 32)
+	n, _ := f.Read(buf)
+	_ = f.Close()
+	if string(buf[:n]) != "hello world" {
+		t.Fatalf("read %q", buf[:n])
+	}
+
+	f, err = openNoFollow(path, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatalf("append open: %v", err)
+	}
+	_, _ = f.WriteString("!")
+	_ = f.Close()
+	if data, _ := os.ReadFile(path); string(data) != "hello world!" {
+		t.Fatalf("after append: %q", data)
+	}
+
+	f, err = openNoFollow(path, os.O_RDWR|os.O_TRUNC, 0600)
+	if err != nil {
+		t.Fatalf("truncate open: %v", err)
+	}
+	_ = f.Close()
+	if data, _ := os.ReadFile(path); len(data) != 0 {
+		t.Fatalf("file not truncated: %q", data)
+	}
+
+	if f, err := openNoFollow(filepath.Join(t.TempDir(), "missing"), os.O_RDONLY, 0); err == nil {
+		_ = f.Close()
+		t.Fatal("missing file without O_CREATE must fail")
+	}
+}
+
+func TestOpenNoFollowRejectsJunctionLeaf(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "dir")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(base, "junc")
+	mklinkJunction(t, junction, target)
+	if f, err := openNoFollow(junction, os.O_RDONLY, 0); err == nil {
+		_ = f.Close()
+		t.Fatal("openNoFollow must refuse a live junction leaf")
+	}
+
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openNoFollow(junction, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600); err == nil {
+		_ = f.Close()
+		t.Fatal("openNoFollow must refuse a dangling junction leaf")
+	}
+}
