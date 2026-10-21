@@ -65,8 +65,9 @@ properties:
 
   enabled:
     type: boolean
-    description: Whether the rule is enabled
-    default: true
+    description: >-
+      Explicit false removes the rule from the host (nothing is installed);
+      omitted means the rule is applied
 
 oneOf:
   - required:

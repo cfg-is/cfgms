@@ -30,7 +30,7 @@ The module accepts the following configuration options in YAML format:
 | source | string | Yes | Source IP address or CIDR range |
 | destination | string | Yes | Destination IP address or CIDR range |
 | description | string | No | Rule description (max 256 chars) |
-| enabled | boolean | No | Whether the rule is enabled (default: true) |
+| enabled | boolean | No | Explicit `false` removes the rule from the host; omitted means the rule is applied |
 
 \* Either protocol or service must be specified
 \** Required if protocol is specified and service is not
