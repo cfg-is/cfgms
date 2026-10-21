@@ -130,6 +130,17 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 	// Convert ConfigState to Config
 	configMap := config.AsMap()
 
+	// An include or exclude entry that cannot be read is a config error, not
+	// a silently dropped entry: a dropped exclude entry would install the patch.
+	includePatches, err := patchListFromConfig("include_patches", configMap["include_patches"])
+	if err != nil {
+		return err
+	}
+	excludePatches, err := patchListFromConfig("exclude_patches", configMap["exclude_patches"])
+	if err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	// Note: We manually unlock before refreshStatus call at the end
 	cfg := &Config{}
@@ -160,26 +171,8 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 		cfg.PostPatchScript = postPatchScript
 	}
 
-	// Handle include/exclude patches
-	if includePatches, ok := configMap["include_patches"].([]string); ok {
-		cfg.IncludePatches = includePatches
-	} else if includePatchesInterface, ok := configMap["include_patches"].([]interface{}); ok {
-		for _, p := range includePatchesInterface {
-			if patchStr, ok := p.(string); ok {
-				cfg.IncludePatches = append(cfg.IncludePatches, patchStr)
-			}
-		}
-	}
-
-	if excludePatches, ok := configMap["exclude_patches"].([]string); ok {
-		cfg.ExcludePatches = excludePatches
-	} else if excludePatchesInterface, ok := configMap["exclude_patches"].([]interface{}); ok {
-		for _, p := range excludePatchesInterface {
-			if patchStr, ok := p.(string); ok {
-				cfg.ExcludePatches = append(cfg.ExcludePatches, patchStr)
-			}
-		}
-	}
+	cfg.IncludePatches = includePatches
+	cfg.ExcludePatches = excludePatches
 
 	// Handle maintenance window
 	if maintenanceData, ok := configMap["maintenance"].(map[string]interface{}); ok {
@@ -242,7 +235,11 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 		}
 	}
 
-	// Install patches
+	// Install patches. A manager that reports filter decisions gets the
+	// module's logger first.
+	if l, ok := m.patchManager.(interface{ SetLogger(logging.Logger) }); ok {
+		l.SetLogger(m.GetEffectiveLogger(logging.NewNoopLogger()))
+	}
 	if err := m.patchManager.InstallPatches(ctx, cfg); err != nil {
 		m.mu.Unlock()
 		return fmt.Errorf("patch installation failed: %w", err)
