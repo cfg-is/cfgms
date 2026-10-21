@@ -45,10 +45,33 @@ type fakeClock struct {
 	mu     sync.Mutex
 	now    time.Time
 	ticker *fakeTicker
+	timers []*fakeTimer
+	// timerArmed receives one value per NewTimer call, so a test can wait for
+	// the watchdog to be parked on the clock before advancing it. Without
+	// that, Advance can land between the watchdog reading the remaining time
+	// and arming its timer, and the timer is then set relative to the
+	// already-advanced clock and never fires.
+	timerArmed chan struct{}
+}
+
+// fakeTimer fires once the clock has been advanced to or past at.
+type fakeTimer struct {
+	clock   *fakeClock
+	at      time.Time
+	c       chan time.Time
+	stopped bool
+}
+
+func (t *fakeTimer) C() <-chan time.Time { return t.c }
+func (t *fakeTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	t.stopped = true
+	return true
 }
 
 func newFakeClock() *fakeClock {
-	return &fakeClock{now: time.Now(), ticker: &fakeTicker{c: make(chan time.Time, 1)}}
+	return &fakeClock{now: time.Now(), ticker: &fakeTicker{c: make(chan time.Time, 1)}, timerArmed: make(chan struct{}, 16)}
 }
 
 func (c *fakeClock) Now() time.Time {
@@ -59,8 +82,34 @@ func (c *fakeClock) Now() time.Time {
 
 func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
-	c.mu.Unlock()
+	pending := c.timers[:0]
+	for _, t := range c.timers {
+		switch {
+		case t.stopped:
+		case !t.at.After(c.now):
+			t.c <- c.now
+		default:
+			pending = append(pending, t)
+		}
+	}
+	c.timers = pending
+}
+
+// NewTimer fires when the test advances the clock to or past now+d, so the
+// authority-deadline watchdog is driven by explicit events, not timer
+// scheduling.
+func (c *fakeClock) NewTimer(d time.Duration) Timer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t := &fakeTimer{clock: c, at: c.now.Add(d), c: make(chan time.Time, 1)}
+	c.timers = append(c.timers, t)
+	select {
+	case c.timerArmed <- struct{}{}:
+	default:
+	}
+	return t
 }
 
 func (c *fakeClock) Until(t time.Time) time.Duration { return t.Sub(c.Now()) }
@@ -666,53 +715,98 @@ func TestSingletonJob_LogsSanitizedLeaseName(t *testing.T) {
 	assert.NotContains(t, logged, "\r")
 }
 
-// stallingRenewStore lets the first AcquireOrRenew through, then blocks every
-// later call for stall, ignoring ctx — a store write that is slow rather than
-// failed, so the renewal call never returns an error.
-type stallingRenewStore struct {
+// blockedRenewStore lets the first AcquireOrRenew through, then parks every
+// later call — ignoring ctx — until release is closed: a store write that is
+// slow rather than failed, so the renewal call never returns an error.
+// entered is closed when the first parked call arrives.
+type blockedRenewStore struct {
 	business.LeaseStore
-	stall time.Duration
-	calls int32
+	entered chan struct{}
+	release chan struct{}
+	calls   int32
+	once    sync.Once
 }
 
-func (s *stallingRenewStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+func (s *blockedRenewStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
 	if atomic.AddInt32(&s.calls, 1) > 1 {
-		time.Sleep(s.stall)
+		s.once.Do(func() { close(s.entered) })
+		<-s.release
 	}
 	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
 }
 
-// [REQUIRED TEST] (Issue #5106) A renewal call that is still in flight when
-// the local-authority deadline passes must not let fn outlive its lease: fn's
-// context is cancelled by the deadline, and at that instant another holder
-// still cannot acquire the lease (the store row has not expired).
+// [REQUIRED TEST] (Issue #5106, #5275) A renewal call that is still in flight
+// when the local-authority deadline passes must not let fn outlive its lease:
+// fn's context is cancelled by the deadline, and at that instant another
+// holder still cannot acquire the lease (the store row has not expired).
+//
+// Time is simulated and the stall is an event, so the verdict depends on no
+// sleep or timer scheduling. The clock is advanced to exactly the deadline —
+// the latest instant at which cancellation is still guaranteed — and the
+// competing acquire runs at that simulated instant. Without the watchdog fn's
+// context is never cancelled and the test fails on its bound.
 func TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderAcquires(t *testing.T) {
-	base := newTestStore(t)
+	clock := newFakeClock()
+	base := newFakeClockLeaseStore(clock)
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
-	store := &stallingRenewStore{LeaseStore: base, stall: ttl + renewInterval}
-	m1, err := NewManager(store, ttl, renewInterval, renewInterval)
+	store := &blockedRenewStore{LeaseStore: base, entered: make(chan struct{}), release: make(chan struct{})}
+	m1, err := NewManagerWithClock(store, ttl, renewInterval, renewInterval, clock)
 	require.NoError(t, err)
-	m2, err := NewManager(base, ttl, renewInterval, renewInterval)
+	m2, err := NewManagerWithClock(base, ttl, renewInterval, renewInterval, clock)
 	require.NoError(t, err)
 	job1, err := NewSingletonJob(m1, "stall", "node-1", ttl, renewInterval, nil)
 	require.NoError(t, err)
+	job1.Clock = clock
 
-	start := time.Now()
-	var cancelledAfter time.Duration
 	var acquiredAtCancel bool
 	var acquireErr error
-	ran := job1.RunIfLeader(context.Background(), func(ctx context.Context) {
-		select {
-		case <-ctx.Done():
-			cancelledAfter = time.Since(start)
-			_, acquiredAtCancel, acquireErr = m2.TryAcquire(context.Background(), "stall", "node-2", ttl)
-		case <-time.After(ttl + ttl/2):
-		}
-	})
-	assert.True(t, ran)
-	require.NotZero(t, cancelledAfter, "fn's context was never cancelled while a renewal was stalled")
+	var cancelled bool
+	var gapToExpiry time.Duration
+	ran := make(chan bool, 1)
+	go func() {
+		ran <- job1.RunIfLeader(context.Background(), func(ctx context.Context) {
+			deadline, ok := m1.LocalAuthorityDeadline("stall", "node-1")
+			assert.True(t, ok)
+			row, gerr := base.GetLease(context.Background(), "stall")
+			assert.NoError(t, gerr)
+			gapToExpiry = row.ExpiresAt.Sub(deadline)
+
+			// Free the parked renewal only after the verdict is taken:
+			// RunIfLeader waits for it before returning, and freeing it
+			// earlier would let it complete and extend the deadline.
+			defer close(store.release)
+
+			clock.Tick() // renewal starts and parks in the store
+			select {
+			case <-store.entered:
+			case <-time.After(30 * time.Second): // failure bound only
+				return
+			}
+			select {
+			case <-clock.timerArmed: // watchdog is parked on the clock
+			case <-time.After(30 * time.Second): // failure bound only
+				return
+			}
+			clock.Advance(clock.Until(deadline)) // reach the authority deadline
+			select {
+			case <-ctx.Done():
+				cancelled = true
+				_, acquiredAtCancel, acquireErr = m2.TryAcquire(context.Background(), "stall", "node-2", ttl)
+			case <-time.After(30 * time.Second): // failure bound only
+			}
+		})
+	}()
+
+	select {
+	case didRun := <-ran:
+		assert.True(t, didRun)
+	case <-time.After(60 * time.Second): // failure bound only
+		t.Fatal("RunIfLeader never returned")
+	}
+	require.True(t, cancelled, "fn's context was never cancelled while a renewal was stalled")
 	require.NoError(t, acquireErr, "the competing acquire must reach the store for its result to prove exclusion")
-	assert.Less(t, cancelledAfter, ttl, "fn must be cancelled before the store row can expire")
 	assert.False(t, acquiredAtCancel, "another holder must not be able to acquire when fn is cancelled")
+	assert.GreaterOrEqual(t, gapToExpiry, renewInterval+renewInterval,
+		"the deadline must precede the store row's expiry by at least renewalInterval + maxAllowedRenewalLatency")
 }
