@@ -111,9 +111,12 @@ func (c *EntraAdminUnitConfig) AsMap() map[string]interface{} {
 	}
 	if c.IsMemberManagementRestricted {
 		result["is_member_management_restricted"] = c.IsMemberManagementRestricted
-		if len(c.RestrictedManagementUnits) > 0 {
-			result["restricted_management_units"] = c.RestrictedManagementUnits
-		}
+	}
+	if len(c.RestrictedManagementUnits) > 0 {
+		result["restricted_management_units"] = c.RestrictedManagementUnits
+	}
+	if len(c.ManagedFieldsList) > 0 {
+		result["managed_fields"] = c.ManagedFieldsList
 	}
 
 	return result
@@ -164,6 +167,12 @@ func (c *EntraAdminUnitConfig) Validate() error {
 	// If membership type is dynamic, a rule is required
 	if c.MembershipType == "Dynamic" && c.MembershipRule == "" {
 		return fmt.Errorf("membership_rule is required when membership_type is Dynamic")
+	}
+
+	// restricted_management_units is not a Graph administrative-unit property;
+	// accepting it would report success without changing Graph.
+	if len(c.RestrictedManagementUnits) > 0 {
+		return fmt.Errorf("restricted_management_units is not supported: Microsoft Graph has no such administrative unit property")
 	}
 
 	// Validate scoped role members
@@ -253,6 +262,16 @@ func (m *entraAdminUnitModule) Set(ctx context.Context, resourceID string, confi
 	if membershipRule, ok := configMap["membership_rule"].(string); ok {
 		auConfig.MembershipRule = membershipRule
 	}
+
+	// Map restriction, extension and managed-field settings
+	if restricted, ok := configMap["is_member_management_restricted"].(bool); ok {
+		auConfig.IsMemberManagementRestricted = restricted
+	}
+	if ext, ok := configMap["extension_attributes"].(map[string]interface{}); ok {
+		auConfig.ExtensionAttributes = ext
+	}
+	auConfig.RestrictedManagementUnits = stringList(configMap["restricted_management_units"])
+	auConfig.ManagedFieldsList = stringList(configMap["managed_fields"])
 
 	// Map members
 	if userMembers, ok := configMap["user_members"].([]string); ok {
@@ -409,6 +428,7 @@ func (m *entraAdminUnitModule) getAdminUnitByID(ctx context.Context, token *auth
 		MembershipType:                au.MembershipType,
 		MembershipRule:                au.MembershipRule,
 		MembershipRuleProcessingState: au.MembershipRuleProcessingState,
+		IsMemberManagementRestricted:  au.IsMemberManagementRestricted,
 	}, nil
 }
 
@@ -427,6 +447,15 @@ func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.
 		request.MembershipType = "Dynamic"
 		request.MembershipRule = config.MembershipRule
 		request.MembershipRuleProcessingState = "On"
+	}
+
+	if config.IsMemberManagementRestricted {
+		restricted := true
+		request.IsMemberManagementRestricted = &restricted
+	}
+
+	if len(config.ExtensionAttributes) > 0 {
+		request.ExtensionAttributes = config.ExtensionAttributes
 	}
 
 	// Create administrative unit via Graph API
@@ -488,6 +517,20 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 			if config.MembershipRule != existingAU.MembershipRule {
 				updates["membershipRule"] = config.MembershipRule
 			}
+		case "membership_type":
+			if config.MembershipType != "" && config.MembershipType != existingAU.MembershipType {
+				updates["membershipType"] = config.MembershipType
+			}
+		case "is_member_management_restricted":
+			if config.IsMemberManagementRestricted != existingAU.IsMemberManagementRestricted {
+				updates["isMemberManagementRestricted"] = config.IsMemberManagementRestricted
+			}
+		case "extension_attributes":
+			// Graph does not return extension values on the read used here,
+			// so the declared attributes are always sent.
+			if len(config.ExtensionAttributes) > 0 {
+				updates["extensionAttributes"] = config.ExtensionAttributes
+			}
 		}
 	}
 
@@ -507,6 +550,15 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 		}
 		if membershipRule, ok := updates["membershipRule"].(string); ok {
 			updateRequest.MembershipRule = &membershipRule
+		}
+		if membershipType, ok := updates["membershipType"].(string); ok {
+			updateRequest.MembershipType = &membershipType
+		}
+		if restricted, ok := updates["isMemberManagementRestricted"].(bool); ok {
+			updateRequest.IsMemberManagementRestricted = &restricted
+		}
+		if ext, ok := updates["extensionAttributes"].(map[string]interface{}); ok {
+			updateRequest.ExtensionAttributes = ext
 		}
 
 		// Update administrative unit via Graph API
@@ -712,6 +764,7 @@ type AdminUnitInfo struct {
 	MembershipType                string
 	MembershipRule                string
 	MembershipRuleProcessingState string
+	IsMemberManagementRestricted  bool
 }
 
 func parseEntraAdminUnitResourceID(resourceID string) (tenantID, auID string, err error) {
@@ -725,6 +778,25 @@ func parseEntraAdminUnitResourceID(resourceID string) (tenantID, auID string, er
 func extractAdminUnitID(resourceID string) string {
 	_, auID, _ := parseEntraAdminUnitResourceID(resourceID)
 	return auID
+}
+
+// stringList accepts a []string or a []interface{} holding only strings.
+func stringList(v interface{}) []string {
+	switch list := v.(type) {
+	case []string:
+		return list
+	case []interface{}:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			str, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			out = append(out, str)
+		}
+		return out
+	}
+	return nil
 }
 
 func contains(slice []string, item string) bool {
