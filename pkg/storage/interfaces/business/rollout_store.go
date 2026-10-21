@@ -42,6 +42,9 @@ type RolloutRecord struct {
 	// TenantID scopes this rollout to a single tenant.
 	TenantID string
 
+	// InitiatedBy is the ID of the authenticated principal that started the rollout.
+	InitiatedBy string
+
 	// TargetVersion is the steward binary version this rollout is promoting.
 	TargetVersion string
 
