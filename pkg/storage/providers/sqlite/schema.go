@@ -201,7 +201,6 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 		{"last_provenance_json", `ALTER TABLE stewards ADD COLUMN last_provenance_json TEXT NOT NULL DEFAULT ''`},
 		{"tenant_id", `ALTER TABLE stewards ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''`},
 		{"hidden", `ALTER TABLE stewards ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`},
-		{"signing_payload_version", `ALTER TABLE stewards ADD COLUMN signing_payload_version INTEGER NOT NULL DEFAULT 0`},
 	} {
 		present, err := columnExists(ctx, db, "stewards", c.name)
 		if err != nil {
@@ -899,8 +898,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			key_algorithm        TEXT NOT NULL DEFAULT '',
 			last_provenance_json TEXT NOT NULL DEFAULT '',
 			tenant_id            TEXT NOT NULL DEFAULT '',
-			hidden               INTEGER NOT NULL DEFAULT 0,
-			signing_payload_version INTEGER NOT NULL DEFAULT 0
+			hidden               INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,

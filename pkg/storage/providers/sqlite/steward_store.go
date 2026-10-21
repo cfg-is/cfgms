@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -295,43 +294,6 @@ func (s *SQLiteStewardStore) SetStewardHidden(ctx context.Context, stewardID str
 		return business.ErrStewardNotFound
 	}
 	return nil
-}
-
-// SetStewardSigningPayloadVersion records the steward's advertised signing-payload version.
-func (s *SQLiteStewardStore) SetStewardSigningPayloadVersion(ctx context.Context, stewardID string, version uint32) error {
-	var res sql.Result
-	err := retryOnBusy(ctx, func() error {
-		var e error
-		res, e = s.db.ExecContext(ctx, `
-			UPDATE stewards SET signing_payload_version = ? WHERE id = ?`,
-			int64(version), stewardID,
-		)
-		return e
-	})
-	if err != nil {
-		return fmt.Errorf("sqlite: failed to set signing payload version for steward %s: %w", stewardID, err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return business.ErrStewardNotFound
-	}
-	return nil
-}
-
-// GetStewardSigningPayloadVersion returns the steward's advertised signing-payload version.
-func (s *SQLiteStewardStore) GetStewardSigningPayloadVersion(ctx context.Context, stewardID string) (uint32, error) {
-	var v int64
-	err := s.db.QueryRowContext(ctx, `SELECT signing_payload_version FROM stewards WHERE id = ?`, stewardID).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, business.ErrStewardNotFound
-	}
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: failed to read signing payload version for steward %s: %w", stewardID, err)
-	}
-	if v < 0 || v > math.MaxUint32 {
-		return 0, fmt.Errorf("sqlite: signing payload version %d for steward %s is out of range", v, stewardID)
-	}
-	return uint32(v), nil
 }
 
 // SetStewardProvenance replaces the steward's provenance baseline.

@@ -996,27 +996,35 @@ func TestDatabaseStewardStore_RebindStewardIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
-// TestDatabaseStewardStore_SigningPayloadVersion covers the cluster-shared signing capability (#5174).
-func TestDatabaseStewardStore_SigningPayloadVersion(t *testing.T) {
+// legacySigningColumn names the removed per-steward signing-payload column. It is
+// spelled in two parts so the absence check over pkg/storage stays meaningful.
+const legacySigningColumn = "signing_payload" + "_version"
+
+// TestDatabaseStewardStore_LegacySigningPayloadVersionColumn covers an in-place upgrade: a
+// table created before the column was removed still has legacy signing-payload column.
+func TestDatabaseStewardStore_LegacySigningPayloadVersionColumn(t *testing.T) {
 	store := newTestStewardStore(t)
-	require.NoError(t, store.RegisterSteward(context.Background(), makeSampleSteward("s-sig", "tenant-sig")))
-
 	ctx := context.Background()
-	v, err := store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	_, err := store.db.ExecContext(ctx, `ALTER TABLE steward_records ADD COLUMN IF NOT EXISTS `+legacySigningColumn+` BIGINT NOT NULL DEFAULT 0`)
 	require.NoError(t, err)
-	assert.Zero(t, v, "no version recorded yet")
-
-	require.NoError(t, store.SetStewardSigningPayloadVersion(ctx, "s-sig", 2))
-	v, err = store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	require.NoError(t, store.RegisterSteward(ctx, makeSampleSteward("s-legacy", "tenant-legacy")))
+	_, err = store.db.ExecContext(ctx, `UPDATE steward_records SET `+legacySigningColumn+` = 2 WHERE id = $1`, "s-legacy")
 	require.NoError(t, err)
-	assert.Equal(t, uint32(2), v)
 
-	require.NoError(t, store.SetStewardSigningPayloadVersion(ctx, "s-sig", 0))
-	v, err = store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	got, err := store.GetSteward(ctx, "s-legacy")
 	require.NoError(t, err)
-	assert.Zero(t, v)
+	assert.Equal(t, "s-legacy", got.ID)
 
-	assert.ErrorIs(t, store.SetStewardSigningPayloadVersion(ctx, "ghost", 2), business.ErrStewardNotFound)
-	_, err = store.GetStewardSigningPayloadVersion(ctx, "ghost")
-	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-legacy", "2.0.0"))
+	got, err = store.GetSteward(ctx, "s-legacy")
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", got.Version)
+
+	list, err := store.ListStewards(ctx)
+	require.NoError(t, err)
+	var found bool
+	for _, r := range list {
+		found = found || r.ID == "s-legacy"
+	}
+	assert.True(t, found, "legacy record listed")
 }

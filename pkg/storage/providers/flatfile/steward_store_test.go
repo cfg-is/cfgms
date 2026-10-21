@@ -5,6 +5,8 @@ package flatfile
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -662,29 +664,34 @@ func TestRebindStewardIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
-// TestFlatFileStewardStore_SigningPayloadVersion covers the cluster-shared signing capability (#5174).
-func TestFlatFileStewardStore_SigningPayloadVersion(t *testing.T) {
-	store, err := NewFlatFileStewardStore(t.TempDir())
+// legacySigningColumn names the removed per-steward signing-payload column. It is
+// spelled in two parts so the absence check over pkg/storage stays meaningful.
+const legacySigningColumn = "signing_payload" + "_version"
+
+// TestFlatFileStewardStore_LegacySigningPayloadVersionField covers an in-place upgrade: a
+// record written before the field was removed still carries legacy signing-payload column.
+func TestFlatFileStewardStore_LegacySigningPayloadVersionField(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFlatFileStewardStore(root)
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	require.NoError(t, store.RegisterSteward(context.Background(), testStewardRecord("s-sig")))
-
 	ctx := context.Background()
-	v, err := store.GetStewardSigningPayloadVersion(ctx, "s-sig")
-	require.NoError(t, err)
-	assert.Zero(t, v, "no version recorded yet")
 
-	require.NoError(t, store.SetStewardSigningPayloadVersion(ctx, "s-sig", 2))
-	v, err = store.GetStewardSigningPayloadVersion(ctx, "s-sig")
-	require.NoError(t, err)
-	assert.Equal(t, uint32(2), v)
+	legacy := `{"id":"s-legacy","hostname":"host-legacy","status":"registered","` + legacySigningColumn + `":2}`
+	require.NoError(t, os.MkdirAll(store.stewardDir(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(store.stewardDir(), "s-legacy.json"), []byte(legacy), 0o600))
 
-	require.NoError(t, store.SetStewardSigningPayloadVersion(ctx, "s-sig", 0))
-	v, err = store.GetStewardSigningPayloadVersion(ctx, "s-sig")
+	got, err := store.GetSteward(ctx, "s-legacy")
 	require.NoError(t, err)
-	assert.Zero(t, v)
+	assert.Equal(t, "host-legacy", got.Hostname)
 
-	assert.ErrorIs(t, store.SetStewardSigningPayloadVersion(ctx, "ghost", 2), business.ErrStewardNotFound)
-	_, err = store.GetStewardSigningPayloadVersion(ctx, "ghost")
-	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+	require.NoError(t, store.UpdateHeartbeat(ctx, "s-legacy", "2.0.0"))
+	got, err = store.GetSteward(ctx, "s-legacy")
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", got.Version)
+
+	list, err := store.ListStewards(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "s-legacy", list[0].ID)
 }

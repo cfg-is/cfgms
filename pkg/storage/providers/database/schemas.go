@@ -1560,8 +1560,7 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 			key_protection_level TEXT NOT NULL DEFAULT '',
 			key_algorithm        TEXT NOT NULL DEFAULT '',
 			last_provenance_json TEXT NOT NULL DEFAULT '',
-			hidden               BOOLEAN NOT NULL DEFAULT FALSE,
-			signing_payload_version BIGINT NOT NULL DEFAULT 0
+			hidden               BOOLEAN NOT NULL DEFAULT FALSE
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create steward_records table: %w", err)
@@ -1575,11 +1574,6 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		`ALTER TABLE steward_records ADD COLUMN IF NOT EXISTS key_algorithm TEXT NOT NULL DEFAULT '';`,
 	); err != nil {
 		return fmt.Errorf("failed to add key_algorithm column to steward_records: %w", err)
-	}
-	if _, err := db.ExecContext(ctx,
-		`ALTER TABLE steward_records ADD COLUMN IF NOT EXISTS signing_payload_version BIGINT NOT NULL DEFAULT 0;`,
-	); err != nil {
-		return fmt.Errorf("failed to add signing_payload_version column to steward_records: %w", err)
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_steward_records_tenant_id   ON steward_records(tenant_id);",
