@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,4 +76,19 @@ func TestSecureStewardDataDir_RefusesEntryOwnedByStandardUser(t *testing.T) {
 	err := secureStewardDataDir(logging.NewCapturingLogger())
 	assert.ErrorIs(t, err, security.ErrUntrustedDirOwner, "the steward must refuse to start")
 	assert.Equal(t, guest.String(), winacct.Owner(t, file), "a standard user's entry must never be adopted")
+}
+
+func TestRunStewardInternal_LocksDataDirBeforeCreatingLogFiles(t *testing.T) {
+	guest := winacct.StandardUser(t)
+	dir, _, file := useStewardDataDir(t)
+	winacct.SetOwner(t, file, guest)
+	logDir := filepath.Join(dir, "logs")
+	t.Setenv("CFGMS_LOG_DIR", logDir)
+
+	err := runStewardInternal(context.Background(), "", "", "", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, security.ErrUntrustedDirOwner, "the steward must refuse to start")
+
+	_, statErr := os.Stat(logDir)
+	assert.True(t, os.IsNotExist(statErr), "no log directory may be created in the tree before the lockdown")
 }
