@@ -15,12 +15,6 @@ import "github.com/cfgis/cfgms/pkg/session"
 type Requirement struct {
 	Min                 session.AssuranceLevel
 	RequireUserPresence bool
-	// BrowserPresenceAllowed opts a presence-gated permission into the browser step-up
-	// flow. The default (false) means the permission needs a relay-minted presence token:
-	// the admin reads the action in their own terminal via `cfg`, because a WebAuthn
-	// prompt shows the site and account, not the action. Set only in code on the static
-	// permissionAssurance entry; assurance-policy overrides cannot set it.
-	BrowserPresenceAllowed bool
 }
 
 // permissionAssurance is the authoritative registry of permission IDs that require
@@ -140,7 +134,7 @@ var permissionAssurance = map[string]Requirement{
 
 	// Module bundle approval (Issue #2728/#2732) — code that runs on every managed endpoint.
 	"module:approve":      {Min: session.AssuranceStrong, RequireUserPresence: true},
-	"module:reject":       {Min: session.AssuranceStrong, RequireUserPresence: true, BrowserPresenceAllowed: true},
+	"module:reject":       {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"publisher-trust:add": {Min: session.AssuranceStrong, RequireUserPresence: true},
 
 	// Per-tenant assurance-policy admin (Issue #2839).

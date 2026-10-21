@@ -59,7 +59,6 @@ const defaultRequest: StepUpRequest = {
   path: '/api/v1/modules/approvals/cfgms:test:1.0.0:AAAA/approve',
   init: { method: 'POST', body: JSON.stringify({ note: 'lgtm' }) },
   presenceRequired: true,
-  relayRequired: false,
   permission: 'module:approve',
 }
 
@@ -438,7 +437,6 @@ const elevationRequest: StepUpRequest = {
   path: '/api/v1/accounts/admin/delete',
   init: { method: 'DELETE' },
   presenceRequired: false,
-  relayRequired: false,
   permission: '',
 }
 
@@ -682,27 +680,5 @@ describe('StepUpModal — security constraints', () => {
     )
     await waitFor(() => screen.getByRole('dialog'))
     expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true')
-  })
-})
-
-// ── Relay-required challenge (Issue #5272) ────────────────────────────────────
-
-describe('StepUpModal — relay-required challenge', () => {
-  it('starts no WebAuthn ceremony and tells the admin to use cfg', async () => {
-    const credentialsGet = vi.fn()
-    vi.stubGlobal('navigator', { ...navigator, credentials: { get: credentialsGet } })
-    render(
-      <StepUpModal
-        request={{ ...defaultRequest, relayRequired: true, permission: 'tenant:approve-delete' }}
-        principalUsername="alice"
-        onSuccess={vi.fn()}
-        onCancel={vi.fn()}
-      />,
-    )
-    expect(await screen.findByTestId('step-up-relay-required')).toHaveTextContent(/cfg/)
-    expect(screen.queryByTestId('step-up-verify-btn')).toBeNull()
-    expect(fetchMock.mock.calls.find((c) => String(c[0]).includes('/webauthn/presence/begin'))).toBeUndefined()
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(credentialsGet).not.toHaveBeenCalled()
   })
 })

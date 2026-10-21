@@ -2288,7 +2288,6 @@ func mintBoundPresenceToken(t *testing.T, s *Server, principalID, method, path, 
 		boundPath:         path,
 		boundBodyHash:     bodyHash,
 		boundPermissionID: permissionID,
-		relayMinted:       true,
 	})
 	return token
 }

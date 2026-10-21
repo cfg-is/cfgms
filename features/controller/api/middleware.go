@@ -2009,30 +2009,6 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					return
 				}
 
-				// Relay-required rule (Issue #5272, ADR-021 Amendment): a browser-minted
-				// token names its action via the page, which cannot be trusted to tell the
-				// admin what is being approved. Only permissions that opt in statically
-				// accept it. The token is already consumed, so this cannot be retried.
-				// Read the opt-in from the static registry, never from overrides.
-				if !record.relayMinted && !permissionAssurance[permissionID].BrowserPresenceAllowed {
-					s.logger.Warn("Browser-minted presence token refused for relay-required permission",
-						"permission_id", logging.SanitizeLogValue(permissionID),
-					)
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", relay="required", permission="%s"`, levelName, permissionID))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					s.encodeJSONBody(w, struct {
-						Error            string `json:"error"`
-						PresenceRequired bool   `json:"presence_required"`
-						RelayRequired    bool   `json:"relay_required"`
-					}{
-						Error:            "presence_relay_required",
-						PresenceRequired: true,
-						RelayRequired:    true,
-					}, "presence_relay_required")
-					return
-				}
-
 				s.logger.Debug("Presence token accepted",
 					"principal_id", logging.SanitizeLogValue(principal.ID),
 					"permission_id", permissionID,

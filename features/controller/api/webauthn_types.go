@@ -120,11 +120,6 @@ type presenceTokenRecord struct {
 	boundPath         string
 	boundBodyHash     string
 	boundPermissionID string
-
-	// relayMinted is true only when the token was minted on the cfg presence-relay path
-	// (handlePresenceFinish's cli_presence_request_id path), where the admin read the
-	// action in their own terminal. Browser step-up tokens leave it false.
-	relayMinted bool
 }
 
 // WebAuthnPresenceFinishResponse is returned by POST /api/v1/webauthn/presence/finish
