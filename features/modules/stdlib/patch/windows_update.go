@@ -15,6 +15,8 @@ import (
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // COM IDispatch.Clear() and VARIANT.Clear() calls throughout this file drop
@@ -27,6 +29,7 @@ import (
 type WindowsUpdateManager struct {
 	session  *ole.IDispatch
 	comOwner bool // true only when this instance called CoInitializeEx and got S_OK
+	logger   logging.Logger
 }
 
 // NewWindowsUpdateManager creates a new Windows Update manager using COM API
@@ -70,6 +73,7 @@ func NewWindowsUpdateManager() (*WindowsUpdateManager, error) {
 	return &WindowsUpdateManager{
 		session:  session,
 		comOwner: comOwner,
+		logger:   logging.NewNoopLogger(),
 	}, nil
 }
 
@@ -443,10 +447,19 @@ func (w *WindowsUpdateManager) filterUpdates(updatesCollection *ole.IDispatch, c
 		// Get update ID
 		kbArticleIDsVariant, err := oleutil.GetProperty(update, "KBArticleIDs")
 		if err != nil {
+			// Fails closed: an update whose KB IDs cannot be read is skipped.
+			_, reason := decideKBInclusion(nil, err, config.IncludePatches, config.ExcludePatches)
+			w.log().Warn("windows update excluded by patch filter", "reason", logging.SanitizeLogValue(reason))
 			update.Release()
 			continue
 		}
 		kbArticleIDs := kbArticleIDsVariant.ToIDispatch()
+		if kbArticleIDs == nil {
+			_, reason := decideKBInclusion(nil, fmt.Errorf("KBArticleIDs is not a collection"), config.IncludePatches, config.ExcludePatches)
+			w.log().Warn("windows update excluded by patch filter", "reason", logging.SanitizeLogValue(reason))
+			update.Release()
+			continue
+		}
 
 		// Check if update should be included
 		shouldInclude := w.shouldIncludeUpdate(kbArticleIDs, config)
@@ -466,43 +479,59 @@ func (w *WindowsUpdateManager) filterUpdates(updatesCollection *ole.IDispatch, c
 	return filteredColl, nil
 }
 
-// shouldIncludeUpdate checks if an update should be included based on include/exclude lists
+// shouldIncludeUpdate reads every KB article ID of an update and decides
+// against the include and exclude lists with decideKBInclusion, which fails
+// closed. An exclusion is logged with its reason.
 func (w *WindowsUpdateManager) shouldIncludeUpdate(kbArticleIDs *ole.IDispatch, config *Config) bool {
+	kbIDs, readErr := readKBArticleIDs(kbArticleIDs)
+	include, reason := decideKBInclusion(kbIDs, readErr, config.IncludePatches, config.ExcludePatches)
+	if reason != "" {
+		w.log().Warn("windows update excluded by patch filter", "reason", logging.SanitizeLogValue(reason))
+	}
+	return include
+}
+
+// readKBArticleIDs reads every entry of an update's KBArticleIDs string
+// collection, formatted as "KB<number>". Any failed read is an error.
+func readKBArticleIDs(kbArticleIDs *ole.IDispatch) ([]string, error) {
 	countVariant, err := oleutil.GetProperty(kbArticleIDs, "Count")
 	if err != nil {
-		return true // Include by default if we can't check
+		return nil, fmt.Errorf("read KB article ID count: %w", err)
 	}
 	count := int(countVariant.Val)
+	_ = countVariant.Clear()
 
-	if count == 0 {
-		return true
-	}
-
-	// Get first KB article ID
-	kbVariant, err := oleutil.GetProperty(kbArticleIDs, "Item", 0)
-	if err != nil {
-		return true
-	}
-	kbID := fmt.Sprintf("KB%v", kbVariant.Val)
-
-	// Check exclude list first
-	for _, excludeID := range config.ExcludePatches {
-		if excludeID == kbID {
-			return false
+	ids := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		kbVariant, err := oleutil.GetProperty(kbArticleIDs, "Item", i)
+		if err != nil {
+			return nil, fmt.Errorf("read KB article ID %d: %w", i, err)
 		}
-	}
-
-	// If include list is specified, only include if in list
-	if len(config.IncludePatches) > 0 {
-		for _, includeID := range config.IncludePatches {
-			if includeID == kbID {
-				return true
-			}
+		// The collection holds strings; Val would be the BSTR pointer.
+		raw, ok := kbVariant.Value().(string)
+		_ = kbVariant.Clear()
+		if !ok {
+			return nil, fmt.Errorf("KB article ID %d is not a string", i)
 		}
-		return false
+		ids = append(ids, kbArticleID(raw))
 	}
+	return ids, nil
+}
 
-	return true
+// PatchModule.Set hands its logger to a manager with this method.
+var _ interface{ SetLogger(logging.Logger) } = (*WindowsUpdateManager)(nil)
+
+// SetLogger sets the logger that patch filter decisions are reported to.
+func (w *WindowsUpdateManager) SetLogger(logger logging.Logger) {
+	w.logger = logger
+}
+
+// log returns the configured logger, or a no-op logger when none is set.
+func (w *WindowsUpdateManager) log() logging.Logger {
+	if w.logger == nil {
+		return logging.NewNoopLogger()
+	}
+	return w.logger
 }
 
 // extractPatchInfo extracts patch information from an IUpdate COM object
