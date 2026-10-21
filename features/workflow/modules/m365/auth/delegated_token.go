@@ -4,8 +4,42 @@ package auth
 
 import (
 	"context"
+	"net/url"
 	"strings"
 )
+
+// microsoftAuthorityHosts are the identity hosts that may receive partner client
+// credentials: the public, US government and China sovereign-cloud authorities.
+var microsoftAuthorityHosts = map[string]bool{
+	"login.microsoftonline.com":        true,
+	"login.microsoftonline.us":         true,
+	"login.partner.microsoftonline.cn": true,
+}
+
+// authorityAllowed reports whether authorityURL may receive partner credentials.
+// An empty URL selects the default public authority. Hosts beyond the Microsoft
+// allowlist are accepted (over any scheme) only when they are the token host of an
+// explicitly installed GDAP resolver or listed in the unexported testAuthorityHosts
+// field; production code sets neither, so a tenant's stored AuthorityURL cannot.
+func (p *OAuth2Provider) authorityAllowed(authorityURL string) bool {
+	if authorityURL == "" {
+		return true
+	}
+	u, err := url.Parse(authorityURL)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if p.testAuthorityHosts[host] {
+		return true
+	}
+	if p.gdapResolver != nil && p.gdapResolver.gdapClient != nil {
+		if r, rerr := url.Parse(p.gdapResolver.gdapClient.tokenBaseURL); rerr == nil && r.Host != "" && strings.EqualFold(r.Host, u.Host) {
+			return true
+		}
+	}
+	return u.Scheme == "https" && microsoftAuthorityHosts[host]
+}
 
 // SetGDAPResolver sets a resolver whose Partner Center endpoints (see
 // GDAPRelationshipResolver.SetEndpoints) are used for partner-delegated token
@@ -65,6 +99,13 @@ func (p *OAuth2Provider) getPartnerDelegatedToken(ctx context.Context, cfgmsTena
 			"Partner-delegated configuration has no partner client credentials", nil)
 	}
 
+	// Partner credentials go only to Microsoft identity hosts; checked before any
+	// request is sent. The URL is deliberately not echoed.
+	if !p.authorityAllowed(config.AuthorityURL) {
+		return nil, NewAuthenticationError(cfgmsTenantID, "AUTHORITY_NOT_ALLOWED",
+			"Configured authority is not a permitted Microsoft identity endpoint", nil)
+	}
+
 	// Validate the relationship before any request reaches the customer tenant.
 	if _, err := p.partnerResolver(cfgmsTenantID, config).ValidateGDAPAccess(ctx, config.CustomerTenantID, config.GDAPRequiredRoles); err != nil {
 		return nil, NewAuthenticationError(cfgmsTenantID, "GDAP_ACCESS_REFUSED",
@@ -84,10 +125,14 @@ func (p *OAuth2Provider) getPartnerDelegatedToken(ctx context.Context, cfgmsTena
 		return nil, err
 	}
 
-	// The token's tid must be the intended customer tenant. A non-JWT or a token
-	// without a tid claim (opaque tokens) is accepted: the claim cannot be read, and
-	// the token endpoint was already addressed by the customer tenant ID.
-	if tid, tidErr := extractJWTTenantID(token.Token); tidErr == nil && !strings.EqualFold(tid, config.CustomerTenantID) {
+	// The token's tid must be readable and equal the intended customer tenant; a
+	// token whose tenant cannot be verified is refused.
+	tid, tidErr := extractJWTTenantID(token.Token)
+	if tidErr != nil {
+		return nil, NewAuthenticationError(cfgmsTenantID, "TENANT_UNVERIFIABLE",
+			"Delegated token tenant claim could not be read", nil)
+	}
+	if !strings.EqualFold(tid, config.CustomerTenantID) {
 		return nil, NewAuthenticationError(cfgmsTenantID, "TENANT_MISMATCH",
 			"Delegated token was issued for a different tenant than the configured customer tenant", nil)
 	}

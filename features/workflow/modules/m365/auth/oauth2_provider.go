@@ -38,6 +38,10 @@ type OAuth2Provider struct {
 	// credentials always come from the CFGMS tenant's stored config at call time.
 	gdapResolver *GDAPRelationshipResolver
 
+	// testAuthorityHosts lists extra authority hosts accepted for partner-delegated
+	// minting. Test-only: production code never sets it.
+	testAuthorityHosts map[string]bool
+
 	logger logging.Logger
 }
 
