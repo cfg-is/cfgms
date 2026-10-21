@@ -27,13 +27,15 @@ No private key material is handled. Trust-store entries are public certificates 
 
 ### Certificate staging
 
-`security add-trusted-cert` reads the certificate from a file, so the macOS executor stages the PEM first. Staging uses one shared helper: the base directory is created with mode 0700 if missing and is refused if it is a symlink, is not owned by the current effective user, or is group- or other-writable. Each install gets a fresh private subdirectory (mode 0700) holding a file created exclusively (mode 0600), and both are removed when the command returns, on success and on failure. No predictable file name is used.
+`security add-trusted-cert` and `certutil -addstore` read the certificate from a file, so the macOS and Windows executors stage the PEM first. Staging uses one shared helper: the base directory is created with mode 0700 if missing and is refused if it is a symlink, is not owned by the current effective user, or is group- or other-writable. Each install gets a fresh private subdirectory (mode 0700) holding a file created exclusively (mode 0600), and both are removed when the command returns, on success and on failure. No predictable file name is used.
 
 | Platform | Staging directory |
 |----------|-------------------|
 | Linux | None. Certificates are written directly under the root-only `/usr/local/share/ca-certificates/`. |
 | macOS | `/var/lib/cfgms/staging` |
-| Windows | The system temporary directory (`os.TempDir()`); it moves to a dedicated directory in a follow-up change. |
+| Windows | `%ProgramData%\cfgms\staging` (`C:\ProgramData\cfgms\staging` when the `ProgramData` environment variable is unset). |
+
+On Windows the mode checks above do not apply. Instead, before every install the base directory is secured so that only SYSTEM and BUILTIN\Administrators can read or write it, the same lockdown the steward applies to `%ProgramData%\cfgms`. If the directory cannot be secured, for example because another principal owns it or it contains a link, nothing is staged and `certutil` does not run.
 
 ## Configuration
 
