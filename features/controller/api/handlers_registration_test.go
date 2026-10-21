@@ -3933,3 +3933,47 @@ func TestEmitRegistrationManagementAudit_CancelledContext_PersistsAllEvents(t *t
 	}
 	requireAuditPersisted(t, server, "tenant-cancel-mgmt", cancelledAuditEventCount)
 }
+
+// TestHandleRegistrationStatus_ClaimAuditedWhenStepAfterSigningFails verifies the
+// registration_claimed event, carrying the issued serial, is recorded even when a
+// step that follows signing (here the transport address lookup) fails.
+func TestHandleRegistrationStatus_ClaimAuditedWhenStepAfterSigningFails(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	const regToken = "cfgms_reg_claim_postsign_tok"
+	const tenantID = "test-tenant"
+	const pendingID = "pending-claim-postsign-1"
+	const stewardID = "steward-claim-postsign-1"
+
+	tokenStore := newTestRegistrationStore(t)
+	server, auditMgr := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+	// Misconfigured bind address: getTransportAddress fails after signing.
+	server.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+
+	ctx := context.Background()
+	require.NoError(t, tokenStore.SaveToken(ctx, &registration.Token{
+		Token: regToken, TenantID: tenantID, ControllerURL: "grpc://controller:7443", Group: "prod",
+	}))
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(ctx, &business.PendingRegistrationEntry{
+		PendingID: pendingID, StewardID: stewardID, TenantID: tenantID, TokenStr: regToken,
+		SourceIP: "10.0.0.1", RegisteredAt: now, ExpiresAt: now.Add(24 * time.Hour),
+		Status: business.PendingRegistrationStatusPending, CSRPEM: testValidCSRPEM,
+	}))
+	require.NoError(t, pendingStore.UpdateStatus(ctx, pendingID, business.PendingRegistrationStatusApproved))
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/registration/status/"+pendingID, nil)
+	r.Header.Set("Authorization", "Bearer "+regToken)
+	r = mux.SetURLVars(r, map[string]string{"pending_id": pendingID})
+	rec := httptest.NewRecorder()
+	server.handleRegistrationStatus(rec, r)
+	require.NotEqual(t, http.StatusOK, rec.Code, "claim must fail after signing")
+
+	require.NoError(t, auditMgr.Flush(ctx))
+	entries, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"registration_claimed"}})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.NotEmpty(t, entries[0].Details["cert_serial"])
+}

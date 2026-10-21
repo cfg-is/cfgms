@@ -674,7 +674,7 @@ func (s *Server) handleRefreshByPolicy(
 			}
 		}
 		// No stored provenance baseline, or sufficient provenance match: issue cert immediately.
-		resp, err := s.buildRefreshClaimResponse(r.Context(), record, csrPEM)
+		resp, _, err := s.buildRefreshClaimResponse(r.Context(), record, csrPEM)
 		if err != nil {
 			s.logger.Error("Failed to issue refresh certificate", "steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 			s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
@@ -789,9 +789,11 @@ func (s *Server) supersedeOpenRefreshes(ctx context.Context, deviceID, tenantID 
 // certificate for a steward that has passed the registration-refresh gate
 // (Issue #3781). Mirrors the cert issuance in buildClaimResponse — the
 // controller never generates or sees a private key for this credential.
-func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business.StewardRecord, csrPEM string) (*RefreshCompleteResponse, error) {
+// The returned serial is non-empty whenever signing succeeded, even if a later
+// step returned an error, so callers can audit the issuance regardless.
+func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business.StewardRecord, csrPEM string) (*RefreshCompleteResponse, string, error) {
 	if s.certManager == nil {
-		return nil, fmt.Errorf("certificate manager not initialized")
+		return nil, "", fmt.Errorf("certificate manager not initialized")
 	}
 
 	validityDays := 365
@@ -801,7 +803,7 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 
 	csr, err := parseAndVerifyCSR(csrPEM)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse refresh certificate signing request: %w", err)
+		return nil, "", fmt.Errorf("failed to parse refresh certificate signing request: %w", err)
 	}
 
 	clientCert, err := s.certManager.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
@@ -811,12 +813,13 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		ValidityDays: validityDays,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign client certificate: %w", err)
+		return nil, "", fmt.Errorf("failed to sign client certificate: %w", err)
 	}
+	serial := clientCert.SerialNumber
 
 	caCert, err := s.certManager.GetCACertificate()
 	if err != nil || len(caCert) == 0 {
-		return nil, fmt.Errorf("CA certificate unavailable: %w", err)
+		return nil, serial, fmt.Errorf("CA certificate unavailable: %w", err)
 	}
 
 	resp := &RefreshCompleteResponse{
@@ -866,7 +869,7 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		"steward_id", logging.SanitizeLogValue(record.ID),
 		"validity_days", validityDays)
 
-	return resp, nil
+	return resp, serial, nil
 }
 
 // ---- Admin request / response types -----------------------------------------
@@ -1100,7 +1103,25 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certResp, err := s.buildRefreshClaimResponse(r.Context(), record, entry.CSRPEM)
+	certResp, certSerial, err := s.buildRefreshClaimResponse(r.Context(), record, entry.CSRPEM)
+	if certSerial != "" {
+		// Audit the issuance before any fallible step that follows signing.
+		issuedDetails := map[string]interface{}{
+			"pending_id":  logging.SanitizeLogValue(pendingID),
+			"device_id":   logging.SanitizeLogValue(entry.DeviceID),
+			"tenant_id":   logging.SanitizeLogValue(entry.TenantID),
+			"cert_serial": logging.SanitizeLogValue(certSerial),
+		}
+		if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil {
+			s.emitOperatorAudit(r, principal, entry.TenantID, business.AuditEventAuthentication,
+				"refresh_admin_cert_issued", "steward", entry.DeviceID,
+				business.AuditResultSuccess, business.AuditSeverityHigh, issuedDetails)
+		} else {
+			s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+				business.AuditEventAuthentication, "refresh_admin_cert_issued",
+				business.AuditResultSuccess, business.AuditSeverityHigh, issuedDetails)
+		}
+	}
 	if err != nil {
 		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
