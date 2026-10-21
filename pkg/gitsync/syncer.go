@@ -415,6 +415,20 @@ func (s *Syncer) TriggerWebhookSync(ctx context.Context, b ScopeBinding) error {
 	}
 }
 
+// cloneOrigin clones a single branch of originURL into repoDir.
+func cloneOrigin(ctx context.Context, repoDir, originURL, branch string, auth *gogithttp.BasicAuth) (*gogit.Repository, error) {
+	repo, err := gogit.PlainCloneContext(ctx, repoDir, false, &gogit.CloneOptions{
+		URL:           originURL,
+		Auth:          auth,
+		ReferenceName: plumbing.NewBranchReferenceName(branch),
+		SingleBranch:  true,
+	})
+	if err != nil {
+		return nil, classifyGitError(err)
+	}
+	return repo, nil
+}
+
 // syncScope performs the actual git clone/pull and config import for one
 // binding.
 //
@@ -450,21 +464,39 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 	var repo *gogit.Repository
 	if _, statErr := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(statErr) {
 		// Initial clone.
-		cloneOpts := &gogit.CloneOptions{
-			URL:           b.OriginURL,
-			Auth:          auth,
-			ReferenceName: plumbing.NewBranchReferenceName(branch),
-			SingleBranch:  true,
-		}
-		repo, err = gogit.PlainCloneContext(ctx, repoDir, false, cloneOpts)
+		repo, err = cloneOrigin(ctx, repoDir, b.OriginURL, branch, auth)
 		if err != nil {
-			return classifyGitError(err)
+			return err
 		}
 	} else {
 		// Incremental pull.
 		repo, err = gogit.PlainOpen(repoDir)
 		if err != nil {
 			return fmt.Errorf("gitsync: failed to open local repo: %w", err)
+		}
+		// The checkout keeps pulling from the remote recorded when it was
+		// cloned. If the binding's OriginURL has changed since, replace the
+		// checkout so nothing is imported from the previous origin.
+		remote, err := repo.Remote("origin")
+		if err != nil {
+			return fmt.Errorf("gitsync: failed to read origin remote: %w", err)
+		}
+		urls := remote.Config().URLs
+		if len(urls) == 0 {
+			return fmt.Errorf("gitsync: origin remote has no URL")
+		}
+		if urls[0] != b.OriginURL {
+			s.logger.Info("gitsync: origin URL changed, re-cloning",
+				"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+				"namespace", logging.SanitizeLogValue(b.Namespace))
+			// repoDir was bounded inside workDir by ValidateAndCleanPath.
+			if err := os.RemoveAll(repoDir); err != nil {
+				return fmt.Errorf("gitsync: failed to remove stale checkout: %w", err)
+			}
+			repo, err = cloneOrigin(ctx, repoDir, b.OriginURL, branch, auth)
+			if err != nil {
+				return err
+			}
 		}
 		worktree, err := repo.Worktree()
 		if err != nil {
