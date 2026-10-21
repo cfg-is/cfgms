@@ -123,6 +123,34 @@ func TestHandleLodgeCliPresenceRequest_Success(t *testing.T) {
 	assert.Equal(t, cliPresenceRequestStatusPending, stored.Status)
 }
 
+// [REQUIRED TEST] Issue #5272: a web-cookie session cannot lodge a relay request (a
+// page could otherwise lodge and confirm its own), an unknown channel fails closed, and
+// a cfg Bearer session still lodges.
+func TestHandleLodgeCliPresenceRequest_ChannelGate(t *testing.T) {
+	server := setupTestServer(t)
+	for _, tc := range []struct {
+		name    string
+		channel AuthChannel
+		want    int
+	}{
+		{"web cookie refused", AuthChannelWebCookie, http.StatusForbidden},
+		{"unknown channel refused", AuthChannelUnknown, http.StatusForbidden},
+		{"api key channel refused", AuthChannelAPIKey, http.StatusForbidden},
+		{"cfg bearer allowed", AuthChannelCfgBearer, http.StatusCreated},
+		{"mtls allowed", AuthChannelMTLS, http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testAdminPrincipal()
+			p.Channel = tc.channel
+			rec := doLodgeCliPresence(t, server, p, validLodgeBody())
+			assert.Equal(t, tc.want, rec.Code, "body: %s", rec.Body.String())
+			if tc.want == http.StatusForbidden {
+				assert.Equal(t, "WEB_SESSION_CANNOT_LODGE", errCode(t, rec.Body.Bytes()))
+			}
+		})
+	}
+}
+
 func TestHandleLodgeCliPresenceRequest_NoPrincipal_401(t *testing.T) {
 	server := setupTestServer(t)
 	rec := doLodgeCliPresence(t, server, nil, validLodgeBody())

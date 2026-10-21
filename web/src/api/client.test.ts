@@ -192,6 +192,24 @@ describe('apiFetch', () => {
     )
   })
 
+  it('CFGMS-StepUp with relay="required" sets relayRequired=true, and presenceRequired stays true', async () => {
+    const stepUp = vi.fn(async () => null)
+    onStepUpRequired(stepUp)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate':
+            'CFGMS-StepUp realm="cfgms", required="strong", presence="required", relay="required", permission="module:approve"',
+        },
+      }),
+    )
+    await apiFetch('/api/v1/modules/approvals/x/approve', { method: 'POST' })
+    expect(stepUp).toHaveBeenCalledWith(
+      expect.objectContaining({ presenceRequired: true, relayRequired: true }),
+    )
+  })
+
   it('CFGMS-StepUp without presence="required" sets presenceRequired=false', async () => {
     const stepUp = vi.fn(async () => null)
     onStepUpRequired(stepUp)

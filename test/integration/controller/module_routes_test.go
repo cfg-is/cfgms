@@ -305,7 +305,7 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 		// the registered credential's private key, finish bound to the lodged
 		// request — mints an action-bound presence token and hands it to the
 		// durable request record.
-		beginResp, err := approver.Post(base+"/api/v1/webauthn/presence/begin", "application/json", nil)
+		beginResp, err := approver.Post(base+"/api/v1/webauthn/presence/begin?cli_presence_request_id="+lodged.Data.RequestID, "application/json", nil)
 		require.NoError(t, err)
 		beginRespBody, err := io.ReadAll(beginResp.Body)
 		require.NoError(t, err)

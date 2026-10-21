@@ -92,6 +92,11 @@ type webAuthnPendingSession struct {
 	// ADR-021 Amendment 7). Set only by handlePresenceBegin; handlePresenceFinish
 	// copies it onto the minted presenceTokenRecord.
 	action *presenceActionBinding
+
+	// relayRequestID is the CLI presence-relay request ID named at begin. Finish
+	// refuses a different (or missing/extra) ID so a relay request attaches only to
+	// the ceremony the relay started.
+	relayRequestID string
 }
 
 // presenceActionBinding names the one guarded request a presence token may satisfy.
@@ -660,6 +665,8 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 		expires: time.Now().Add(webAuthnSessionTTL),
 		binding: principal.ID,
 		action:  action,
+
+		relayRequestID: r.URL.Query().Get(cliPresenceRequestIDParam),
 	}, webAuthnSessionTTL); out != ceremonyOK {
 		s.writeCeremonyUnavailable(w)
 		return
@@ -779,6 +786,12 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if pending.relayRequestID != r.URL.Query().Get(cliPresenceRequestIDParam) {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Presence request does not belong to this ceremony", "REQUEST_CEREMONY_MISMATCH")
+		return
+	}
+
 	if time.Now().After(pending.expires) {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Presence session expired — restart with begin", "SESSION_EXPIRED")
@@ -829,6 +842,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		record.boundPath = cliPresenceReq.Path
 		record.boundBodyHash = cliPresenceReq.BodyHash
 		record.boundPermissionID = cliPresenceReq.PermissionID
+		record.relayMinted = true
 	} else {
 		// Issue #5142: the browser step-up flow binds the token to the action named at
 		// begin. No unbound token is ever minted.
@@ -870,7 +884,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("Presence token minted",
 		"principal_id", logging.SanitizeLogValue(principal.ID),
-		"permission_surface", "module:approve,module:reject,publisher-trust:add")
+		"permission_id", logging.SanitizeLogValue(record.boundPermissionID))
 
 	s.writeResponse(w, http.StatusOK, WebAuthnPresenceFinishResponse{
 		PresenceToken: token,

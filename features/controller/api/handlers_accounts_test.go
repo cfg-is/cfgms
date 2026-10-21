@@ -64,7 +64,7 @@ func testAdminPrincipal() *Principal {
 	// what lets it grant any permission (Issue #4334) — this test helper's callers
 	// request specific permissions without a matching Principal.Permissions entry,
 	// so it must not be a permission-limited principal.
-	return &Principal{ID: "test-mtls-admin", Name: "mtls-admin:test", Assurance: session.AssuranceBasic, ImplicitAdmin: true}
+	return &Principal{Channel: AuthChannelMTLS, ID: "test-mtls-admin", Name: "mtls-admin:test", Assurance: session.AssuranceBasic, ImplicitAdmin: true}
 }
 
 // dropAccountCache clears the in-memory web-account cache so the next lookup

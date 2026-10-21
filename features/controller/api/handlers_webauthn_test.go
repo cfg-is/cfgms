@@ -851,6 +851,18 @@ func doPresenceBegin(t *testing.T, server *Server, principal *Principal) *httpte
 	return rec
 }
 
+// doPresenceBeginForRelay calls handlePresenceBegin the way the relay page does:
+// with the cli_presence_request_id query parameter and no body (Issue #5272).
+func doPresenceBeginForRelay(t *testing.T, server *Server, principal *Principal, relayRequestID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/webauthn/presence/begin?"+cliPresenceRequestIDParam+"="+relayRequestID, nil)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handlePresenceBegin(rec, req)
+	return rec
+}
+
 // doPresenceBeginWithAction calls handlePresenceBegin with the action binding the
 // browser step-up flow names (Issue #5142).
 func doPresenceBeginWithAction(t *testing.T, server *Server, principal *Principal, action presenceActionBinding) *httptest.ResponseRecorder {
@@ -1049,6 +1061,7 @@ func TestWebAuthnPresenceFinish_CliRelay_AccountMismatch_403(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 	lodger := principalForAccount(t, server, username)
 	lodger.Assurance = session.AssuranceStrong
+	lodger.Channel = AuthChannelCfgBearer
 
 	lodged := lodgeAndDecode(t, server, lodger, LodgeCliPresenceRequestBody{
 		Method:     http.MethodPost,
@@ -1081,6 +1094,7 @@ func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
 
 	principal := principalForAccount(t, server, username)
 	principal.Assurance = session.AssuranceStrong
+	principal.Channel = AuthChannelCfgBearer
 
 	lodged := lodgeAndDecode(t, server, principal, LodgeCliPresenceRequestBody{
 		Method:     http.MethodPost,
@@ -1089,7 +1103,7 @@ func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
 		Permission: "module:approve",
 	})
 
-	beginRec := doPresenceBegin(t, server, principal)
+	beginRec := doPresenceBeginForRelay(t, server, principal, lodged.RequestID)
 	require.Equal(t, http.StatusOK, beginRec.Code, "body: %s", beginRec.Body.String())
 	var beginResp APIResponse
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &beginResp))
@@ -1124,6 +1138,7 @@ func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
 	assert.Equal(t, "/api/v1/modules/approvals/test-address/approve", record.boundPath)
 	assert.Equal(t, emptyBodyHashHex, record.boundBodyHash)
 	assert.Equal(t, "module:approve", record.boundPermissionID)
+	assert.True(t, record.relayMinted, "the relay path must mark the token relay-minted")
 
 	// The durable cli-presence request must now be "approved" and carry the same
 	// token, ready for the CLI's collect poll.
@@ -1198,6 +1213,66 @@ func TestWebAuthnPresenceFinish_Browser_BindsActionFromBegin(t *testing.T) {
 	assert.Equal(t, action.Path, record.boundPath)
 	assert.Equal(t, action.BodyHash, record.boundBodyHash)
 	assert.Equal(t, action.PermissionID, record.boundPermissionID)
+	assert.False(t, record.relayMinted, "the browser path must not mark the token relay-minted")
+}
+
+// lodgeModuleApprove lodges a module:approve relay request as a cfg Bearer principal.
+func lodgeModuleApprove(t *testing.T, server *Server, principal *Principal) string {
+	t.Helper()
+	return lodgeAndDecode(t, server, principal, LodgeCliPresenceRequestBody{
+		Method:     http.MethodPost,
+		Path:       "/api/v1/modules/approvals/test-address/approve",
+		BodyHash:   emptyBodyHashHex,
+		Permission: "module:approve",
+	}).RequestID
+}
+
+// [REQUIRED TEST] Issue #5272: a relay request ID attaches only to the ceremony the
+// relay started. Each mismatch is refused with REQUEST_CEREMONY_MISMATCH and no token
+// is minted.
+func TestWebAuthnPresenceFinish_RelayRequestCeremonyMismatch_403(t *testing.T) {
+	cases := []struct {
+		name     string
+		beginID  func(a, b string) string
+		finishID func(a, b string) string
+	}{
+		{"begin without id, finish with id", func(a, b string) string { return "" }, func(a, b string) string { return a }},
+		{"begin with id, finish without id", func(a, b string) string { return a }, func(a, b string) string { return "" }},
+		{"two different ids", func(a, b string) string { return a }, func(a, b string) string { return b }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+			_, pubKey := generateSyntheticCredential(t)
+			injectSignCredential(t, server, username, []byte("mismatch-cred"), pubKey, 0)
+			principal := principalForAccount(t, server, username)
+			principal.Assurance = session.AssuranceStrong
+			principal.Channel = AuthChannelCfgBearer
+
+			idA := lodgeModuleApprove(t, server, principal)
+			idB := lodgeModuleApprove(t, server, principal)
+
+			var beginRec *httptest.ResponseRecorder
+			if id := tc.beginID(idA, idB); id != "" {
+				beginRec = doPresenceBeginForRelay(t, server, principal, id)
+			} else {
+				beginRec = doPresenceBegin(t, server, principal)
+			}
+			require.Equal(t, http.StatusOK, beginRec.Code, "body: %s", beginRec.Body.String())
+
+			var rec *httptest.ResponseRecorder
+			if id := tc.finishID(idA, idB); id != "" {
+				rec = doPresenceFinishWithCliRequest(t, server, principal, id, nil)
+			} else {
+				rec = doPresenceFinish(t, server, principal)
+			}
+			assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+			assert.Equal(t, "REQUEST_CEREMONY_MISMATCH", errCode(t, rec.Body.Bytes()))
+			count := 0
+			server.presenceTokens.Range(func(_, _ any) bool { count++; return true })
+			assert.Zero(t, count, "a mismatched ceremony must mint no token")
+		})
+	}
 }
 
 // A ceremony begun without a binding mints no token at all.

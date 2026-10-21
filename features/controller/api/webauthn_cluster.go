@@ -69,6 +69,9 @@ type webAuthnPendingWire struct {
 	Expires time.Time              `json:"expires"`
 	Binding string                 `json:"binding"`
 	Action  *presenceActionBinding `json:"action,omitempty"`
+	// RelayRequestID is the cli_presence_request_id named at presence/begin (empty for
+	// the browser step-up flow).
+	RelayRequestID string `json:"relay_request_id,omitempty"`
 }
 
 type passkeyLoginWire struct {
@@ -86,6 +89,7 @@ type presenceTokenWire struct {
 	BoundPath         string    `json:"bound_path"`
 	BoundBodyHash     string    `json:"bound_body_hash"`
 	BoundPermissionID string    `json:"bound_permission_id"`
+	RelayMinted       bool      `json:"relay_minted"`
 }
 
 type webAuthnElevateWire struct {
@@ -103,11 +107,11 @@ type operatorPayloadSignWire struct {
 }
 
 func (p *webAuthnPendingSession) toWire() webAuthnPendingWire {
-	return webAuthnPendingWire{Data: p.data, Expires: p.expires, Binding: p.binding, Action: p.action}
+	return webAuthnPendingWire{Data: p.data, Expires: p.expires, Binding: p.binding, Action: p.action, RelayRequestID: p.relayRequestID}
 }
 
 func (w webAuthnPendingWire) toSession() *webAuthnPendingSession {
-	return &webAuthnPendingSession{data: w.Data, expires: w.Expires, binding: w.Binding, action: w.Action}
+	return &webAuthnPendingSession{data: w.Data, expires: w.Expires, binding: w.Binding, action: w.Action, relayRequestID: w.RelayRequestID}
 }
 
 func (p *passkeyLoginSession) toWire() passkeyLoginWire {
@@ -123,13 +127,13 @@ func (w passkeyLoginWire) toSession() *passkeyLoginSession {
 func (p *presenceTokenRecord) toWire() presenceTokenWire {
 	return presenceTokenWire{PrincipalID: p.principalID, Expires: p.expires,
 		BoundMethod: p.boundMethod, BoundPath: p.boundPath, BoundBodyHash: p.boundBodyHash,
-		BoundPermissionID: p.boundPermissionID}
+		BoundPermissionID: p.boundPermissionID, RelayMinted: p.relayMinted}
 }
 
 func (w presenceTokenWire) toRecord() *presenceTokenRecord {
 	return &presenceTokenRecord{principalID: w.PrincipalID, expires: w.Expires,
 		boundMethod: w.BoundMethod, boundPath: w.BoundPath, boundBodyHash: w.BoundBodyHash,
-		boundPermissionID: w.BoundPermissionID}
+		boundPermissionID: w.BoundPermissionID, relayMinted: w.RelayMinted}
 }
 
 // ceremonyOutcome is the result of taking a ceremony from the cluster store.
