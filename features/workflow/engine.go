@@ -233,8 +233,15 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 		"workflow", workflow.Name,
 		"step_count", len(workflow.Steps))
 
-	// Start execution in goroutine
-	go e.executeWorkflowAsync(execution, workflow)
+	// Start execution in goroutine. Shutdown cancels the run and waits for it, so
+	// no store write happens after Shutdown returns.
+	stop := context.AfterFunc(e.baseCtx, cancel)
+	e.background.Add(1)
+	go func() {
+		defer e.background.Done()
+		defer stop()
+		e.executeWorkflowAsync(execution, workflow)
+	}()
 
 	return execution, nil
 }
