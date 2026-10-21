@@ -179,7 +179,13 @@ func TestOpenNoFollowRaceNeverTruncatesSentinel(t *testing.T) {
 		for i := 0; i < 1500; i++ {
 			_ = os.Remove(leaf)
 			if i%2 == 0 {
-				_ = os.WriteFile(leaf, []byte("plain"), 0600)
+				// O_EXCL: if Remove failed because the opener holds the leaf, a plain
+				// WriteFile would follow a leftover symlink and truncate the sentinel
+				// itself, which is the test's own write, not openNoFollow's.
+				if w, err := os.OpenFile(leaf, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600); err == nil {
+					_, _ = w.WriteString("plain")
+					_ = w.Close()
+				}
 			} else {
 				_ = os.Symlink(sentinel, leaf)
 			}
