@@ -162,19 +162,29 @@ func (s *LocalRepositoryStore) ReadFile(ctx context.Context, localPath, filePath
 
 // WriteFile writes a file to the repository
 func (s *LocalRepositoryStore) WriteFile(ctx context.Context, localPath, filePath string, content []byte) error {
-	fullPath, err := security.ValidateAndCleanPath(localPath, filePath)
-	if err != nil {
+	if _, err := security.ValidateAndCleanPath(localPath, filePath); err != nil {
 		return fmt.Errorf("invalid file path: %w", err)
 	}
 
-	// Create directory if needed
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+	// ValidateAndCleanPath returns the resolved path, so a link at the leaf
+	// would be written through silently. Refuse it on the unresolved path.
+	leaf := filepath.Clean(filePath)
+	if !filepath.IsAbs(leaf) {
+		leaf = filepath.Join(localPath, leaf)
+	}
+	info, err := os.Lstat(leaf)
+	switch {
+	case err == nil:
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return fmt.Errorf("refusing to write through link or irregular file: %s", filePath)
+		}
+	case !os.IsNotExist(err):
+		return fmt.Errorf("failed to inspect file: %w", err)
 	}
 
-	// Write file
-	if err := os.WriteFile(fullPath, content, 0600); err != nil {
+	// Write via the no-follow open; a swap to an in-repository link between the
+	// check above and this call is a residual race (SecureWriteFile re-resolves)
+	if err := security.SecureWriteFile(localPath, filePath, content); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 

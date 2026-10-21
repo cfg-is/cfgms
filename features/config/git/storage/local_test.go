@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -128,4 +129,71 @@ func TestLocalRepositoryStore_ReadFile_RefusesInCheckoutSymlinks(t *testing.T) {
 	data, err = store.ReadFile(ctx, repo, "inldir/config.yaml")
 	require.Error(t, err)
 	assert.Nil(t, data)
+}
+
+func TestLocalRepositoryStore_WriteFile_RefusesLeafSymlinkInsideRepo(t *testing.T) {
+	repo := newSeededRepository(t)
+	sentinel := filepath.Join(repo, "other.yaml")
+	require.NoError(t, os.WriteFile(sentinel, []byte("sentinel\n"), 0o600))
+	leaf := filepath.Join(repo, "a.yaml")
+	require.NoError(t, os.Symlink("other.yaml", leaf))
+
+	store := gitstorage.NewLocalRepositoryStore("", "")
+	err := store.WriteFile(context.Background(), repo, "a.yaml", []byte("pwned\n"))
+	require.Error(t, err)
+
+	got, rerr := os.ReadFile(sentinel) // #nosec G304 -- test path
+	require.NoError(t, rerr)
+	assert.Equal(t, "sentinel\n", string(got))
+	fi, lerr := os.Lstat(leaf)
+	require.NoError(t, lerr)
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink)
+}
+
+func TestLocalRepositoryStore_WriteFile_RefusesLeafSymlinkOutsideRepo(t *testing.T) {
+	repo := newSeededRepository(t)
+	sentinel := filepath.Join(t.TempDir(), "secret.txt")
+	require.NoError(t, os.WriteFile(sentinel, []byte("secret"), 0o600))
+	leaf := filepath.Join(repo, "leak.yaml")
+	require.NoError(t, os.Symlink(sentinel, leaf))
+
+	store := gitstorage.NewLocalRepositoryStore("", "")
+	err := store.WriteFile(context.Background(), repo, "leak.yaml", []byte("pwned"))
+	require.Error(t, err)
+
+	got, rerr := os.ReadFile(sentinel) // #nosec G304 -- test path
+	require.NoError(t, rerr)
+	assert.Equal(t, "secret", string(got))
+}
+
+func TestLocalRepositoryStore_WriteFile_WritesAndStages(t *testing.T) {
+	repo := newSeededRepository(t)
+	store := gitstorage.NewLocalRepositoryStore("", "")
+	ctx := context.Background()
+
+	require.NoError(t, store.WriteFile(ctx, repo, "plain.yaml", []byte("one\n")))
+	require.NoError(t, store.WriteFile(ctx, repo, "new/nested/dir/f.yaml", []byte("two\n")))
+	// Overwrite of an existing regular file.
+	require.NoError(t, store.WriteFile(ctx, repo, "plain.yaml", []byte("three\n")))
+
+	for path, want := range map[string]string{"plain.yaml": "three\n", "new/nested/dir/f.yaml": "two\n"} {
+		full := filepath.Join(repo, filepath.FromSlash(path))
+		got, err := os.ReadFile(full) // #nosec G304 -- test path
+		require.NoError(t, err)
+		assert.Equal(t, want, string(got))
+		fi, err := os.Stat(full)
+		require.NoError(t, err)
+		if runtime.GOOS != "windows" { // Windows does not report POSIX permission bits
+			assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+		}
+	}
+
+	r, err := gogit.PlainOpen(repo)
+	require.NoError(t, err)
+	w, err := r.Worktree()
+	require.NoError(t, err)
+	st, err := w.Status()
+	require.NoError(t, err)
+	assert.Equal(t, gogit.Added, st.File("plain.yaml").Staging)
+	assert.Equal(t, gogit.Added, st.File("new/nested/dir/f.yaml").Staging)
 }
