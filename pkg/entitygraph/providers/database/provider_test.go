@@ -218,3 +218,60 @@ func TestCollapseAsOfWalkBudget(t *testing.T) {
 		require.NotErrorIs(t, err, interfaces.ErrCollapseGroupTooLarge)
 	})
 }
+
+// TestGetTimeline_SameAsTenantCutRepeatedPeers verifies the same-as tenant cut
+// keeps an event only when both ends are inside the cut, with the same peers
+// repeated across many observations (Issue #5244).
+func TestGetTimeline_SameAsTenantCutRepeatedPeers(t *testing.T) {
+	p := newTestDBProvider(t, skipIfNoPostgres(t))
+	ctx := context.Background()
+	now := time.Now().UTC().Add(-time.Hour)
+
+	self, inPeer, outPeer := "host:memo-self", "host:memo-in", "host:memo-out"
+	for e, tenant := range map[string]string{self: "client-1", inPeer: "client-1", outPeer: "client-2"} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				dbObs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": tenant,
+				}),
+			},
+		}))
+	}
+	const repeats = 6
+	for i := 0; i < repeats; i++ {
+		at := now.Add(time.Duration(i+1) * time.Minute)
+		for _, peer := range []string{inPeer, outPeer} {
+			require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+				Source: "operator:test",
+				Observations: []types.Observation{
+					dbObs("same-as|"+self+"|"+peer, "operator:test", types.ObservationKindState, at,
+						map[string]interface{}{"n": i}),
+				},
+			}))
+		}
+	}
+
+	r := interfaces.TimeRange{
+		From: now.Add(-time.Minute), To: now.Add(time.Hour),
+		TenantFilter: "msp-a", TenantSubtreeIDs: []string{"client-1"},
+	}
+	got, err := p.GetTimeline(ctx, []interfaces.EIDRef{dbMustEID(t, self)}, r)
+	require.NoError(t, err)
+	same := 0
+	for _, ev := range got {
+		if ev.Kind == "same-as-change" {
+			same++
+			require.Equal(t, inPeer, ev.Detail["to"])
+		}
+	}
+	require.Equal(t, repeats, same)
+
+	// An out-of-cut matched subject keeps nothing.
+	r.TenantSubtreeIDs = []string{"client-2"}
+	got, err = p.GetTimeline(ctx, []interfaces.EIDRef{dbMustEID(t, self)}, r)
+	require.NoError(t, err)
+	for _, ev := range got {
+		require.NotEqual(t, "same-as-change", ev.Kind)
+	}
+}
