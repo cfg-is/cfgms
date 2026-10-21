@@ -46,6 +46,12 @@ type fakeClock struct {
 	now    time.Time
 	ticker *fakeTicker
 	timers []*fakeTimer
+	// timerArmed receives one value per NewTimer call, so a test can wait for
+	// the watchdog to be parked on the clock before advancing it. Without
+	// that, Advance can land between the watchdog reading the remaining time
+	// and arming its timer, and the timer is then set relative to the
+	// already-advanced clock and never fires.
+	timerArmed chan struct{}
 }
 
 // fakeTimer fires once the clock has been advanced to or past at.
@@ -65,7 +71,7 @@ func (t *fakeTimer) Stop() bool {
 }
 
 func newFakeClock() *fakeClock {
-	return &fakeClock{now: time.Now(), ticker: &fakeTicker{c: make(chan time.Time, 1)}}
+	return &fakeClock{now: time.Now(), ticker: &fakeTicker{c: make(chan time.Time, 1)}, timerArmed: make(chan struct{}, 16)}
 }
 
 func (c *fakeClock) Now() time.Time {
@@ -99,6 +105,10 @@ func (c *fakeClock) NewTimer(d time.Duration) Timer {
 	defer c.mu.Unlock()
 	t := &fakeTimer{clock: c, at: c.now.Add(d), c: make(chan time.Time, 1)}
 	c.timers = append(c.timers, t)
+	select {
+	case c.timerArmed <- struct{}{}:
+	default:
+	}
 	return t
 }
 
@@ -770,6 +780,11 @@ func TestSingletonJob_RenewalStallBeyondLatencyBound_CancelsBeforeAnotherHolderA
 			clock.Tick() // renewal starts and parks in the store
 			select {
 			case <-store.entered:
+			case <-time.After(30 * time.Second): // failure bound only
+				return
+			}
+			select {
+			case <-clock.timerArmed: // watchdog is parked on the clock
 			case <-time.After(30 * time.Second): // failure bound only
 				return
 			}
