@@ -850,7 +850,6 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		record.boundPath = cliPresenceReq.Path
 		record.boundBodyHash = cliPresenceReq.BodyHash
 		record.boundPermissionID = cliPresenceReq.PermissionID
-		record.relayMinted = true
 	} else {
 		// Issue #5142: the browser step-up flow binds the token to the action named at
 		// begin. No unbound token is ever minted.

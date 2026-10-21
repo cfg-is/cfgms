@@ -89,7 +89,6 @@ type presenceTokenWire struct {
 	BoundPath         string    `json:"bound_path"`
 	BoundBodyHash     string    `json:"bound_body_hash"`
 	BoundPermissionID string    `json:"bound_permission_id"`
-	RelayMinted       bool      `json:"relay_minted"`
 }
 
 type webAuthnElevateWire struct {
@@ -127,13 +126,13 @@ func (w passkeyLoginWire) toSession() *passkeyLoginSession {
 func (p *presenceTokenRecord) toWire() presenceTokenWire {
 	return presenceTokenWire{PrincipalID: p.principalID, Expires: p.expires,
 		BoundMethod: p.boundMethod, BoundPath: p.boundPath, BoundBodyHash: p.boundBodyHash,
-		BoundPermissionID: p.boundPermissionID, RelayMinted: p.relayMinted}
+		BoundPermissionID: p.boundPermissionID}
 }
 
 func (w presenceTokenWire) toRecord() *presenceTokenRecord {
 	return &presenceTokenRecord{principalID: w.PrincipalID, expires: w.Expires,
 		boundMethod: w.BoundMethod, boundPath: w.BoundPath, boundBodyHash: w.BoundBodyHash,
-		boundPermissionID: w.BoundPermissionID, relayMinted: w.RelayMinted}
+		boundPermissionID: w.BoundPermissionID}
 }
 
 // ceremonyOutcome is the result of taking a ceremony from the cluster store.

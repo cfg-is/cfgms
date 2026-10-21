@@ -1138,7 +1138,6 @@ func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
 	assert.Equal(t, "/api/v1/modules/approvals/test-address/approve", record.boundPath)
 	assert.Equal(t, emptyBodyHashHex, record.boundBodyHash)
 	assert.Equal(t, "module:approve", record.boundPermissionID)
-	assert.True(t, record.relayMinted, "the relay path must mark the token relay-minted")
 
 	// The durable cli-presence request must now be "approved" and carry the same
 	// token, ready for the CLI's collect poll.
@@ -1213,7 +1212,6 @@ func TestWebAuthnPresenceFinish_Browser_BindsActionFromBegin(t *testing.T) {
 	assert.Equal(t, action.Path, record.boundPath)
 	assert.Equal(t, action.BodyHash, record.boundBodyHash)
 	assert.Equal(t, action.PermissionID, record.boundPermissionID)
-	assert.False(t, record.relayMinted, "the browser path must not mark the token relay-minted")
 }
 
 // lodgeModuleApprove lodges a module:approve relay request as a cfg Bearer principal.

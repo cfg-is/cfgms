@@ -414,7 +414,6 @@ func TestWebAuthnCluster_PresenceTokenMintedOnAConsumedOnceOnB(t *testing.T) {
 		principalID: "test-admin", expires: time.Now().Add(presenceTokenTTL),
 		boundMethod: http.MethodPost, boundPath: "/api/v1/test/presence-action",
 		boundBodyHash: emptyBodyHashHex, boundPermissionID: "test:presence-required",
-		relayMinted: true,
 	}))
 
 	handler := wrapWithAuth(b, "test", "presence-required",
@@ -671,13 +670,9 @@ func shareAccount(t *testing.T, a, b *Server, username string) {
 	b.cacheAccount(acct)
 }
 
-// [REQUIRED TEST] Issue #5272: the minted-by flag and the relay request ID survive the
+// [REQUIRED TEST] Issue #5272: the relay request ID survives the
 // cluster wire round trip, so a different node enforces the same rule.
 func TestWebAuthnCluster_RelayFieldsRoundTrip(t *testing.T) {
-	for _, relay := range []bool{true, false} {
-		rec := &presenceTokenRecord{principalID: "p", expires: time.Now().Add(time.Minute), boundPermissionID: "module:approve", relayMinted: relay}
-		assert.Equal(t, relay, rec.toWire().toRecord().relayMinted)
-	}
 	sess := &webAuthnPendingSession{expires: time.Now().Add(time.Minute), binding: "p", relayRequestID: "cli-presence-123"}
 	assert.Equal(t, "cli-presence-123", sess.toWire().toSession().relayRequestID)
 	assert.Empty(t, (&webAuthnPendingSession{}).toWire().toSession().relayRequestID)

@@ -1272,6 +1272,8 @@ certificate-bound account over real HTTP.
 
 ## Amendment 8 (2026-10-21): Presence-gated permissions require the cfg relay unless they opt in (Issue #5272)
 
+> **Superseded by Amendment 9 (2026-10-21):** the relay-required decision below was reversed; it is kept as history.
+
 ### Context
 
 A WebAuthn prompt shows the site and the account, not the action. In the browser step-up flow the web page names the action at `presence/begin`, so a compromised page (XSS, a malicious extension, a changed web bundle) can show the admin one action and bind the token to another. The cfg presence relay (Amendment 7) does not have this weakness: `cfg` lodges the exact request, prints it in the admin's terminal, and `handlePresenceFinish` copies the binding from the lodged record, not from the page.
@@ -1290,3 +1292,22 @@ Founder decision, option 1A: a presence-gated permission is *relay required* by 
 Covered: a page that lies about the action cannot obtain an approval for a relay-required permission.
 
 Out of reach: actions without a presence requirement (`terminal:create`, `steward:execute-scripts`, `script:admin` and installer writes carry none, so a page cannot misbind a tap for them; whether they should is a separate decision), and a compromised `cfg` host, whose terminal the admin is trusting to show the real action.
+
+## Amendment 9 (2026-10-21): In-browser per-action passkey tap restored; the cfg relay is an equal alternative (Issue #5297)
+
+### Context
+
+Amendment 8 made ten presence-gated permissions relay-only (`tenant:approve-delete`, `tenant:crossing-approve-break-glass`, `module:approve`, `publisher-trust:add`, `registration:approve-by-cidr`, `osquery:execute`, `signing-credential:request`, `credential-request:approve`, `hyperv-profile:create`, `hyperv-profile:delete`). A web-only admin who has no `cfg` installed could then not run any of them.
+
+### Decision
+
+Founder decision, 2026-10-21, superseding Amendment 8's relay-required decision: the web admin experience must be self-contained, so the `cfg` relay is not required for any action. A high-risk action requires a fresh, per-action passkey tap in the browser; the `cfg` relay stays as an equal alternative path for CLI users.
+
+- `Requirement.BrowserPresenceAllowed`, the token's relay-minted flag, the `presence_relay_required` refusal and the `relay="required"` challenge parameter are removed. The web console runs the in-browser WebAuthn ceremony for every presence challenge.
+- Accepted residual risk: a compromised page (XSS, a malicious extension, a changed web bundle) can show the admin one action and bind the tap to another, because a WebAuthn prompt shows the site and the account, not the action. The founder accepts this risk for the browser path.
+
+### Rules kept from Amendment 8
+
+- Only a cfg Bearer session or an mTLS admin certificate can lodge a relay request; a web-cookie session is refused with `WEB_SESSION_CANNOT_LODGE`.
+- A relay request ID attaches only to the ceremony that named it at `presence/begin`; a missing, extra or different ID at finish is refused with `REQUEST_CEREMONY_MISMATCH`.
+- The server-side, single-use, short-lived action binding (method, canonical path with query, body hash, permission) is enforced for every presence token, and `cfg tenant approve-delete` remains available.

@@ -78,11 +78,6 @@ export interface StepUpRequest {
   init: RequestInit
   /** True when WWW-Authenticate: CFGMS-StepUp includes presence="required". */
   presenceRequired: boolean
-  /**
-   * True when the challenge includes relay="required": the permission must be confirmed
-   * through the cfg CLI presence relay, so the browser starts no WebAuthn ceremony.
-   */
-  relayRequired: boolean
   /** Permission ID from the challenge's permission="..." parameter; '' when absent. */
   permission: string
 }
@@ -259,7 +254,6 @@ export async function apiFetch(
             path,
             init,
             presenceRequired: wwwAuth.includes('presence="required"'),
-            relayRequired: wwwAuth.includes('relay="required"'),
             permission: /permission="([^"]*)"/.exec(wwwAuth)?.[1] ?? '',
           })
           // Cap: return whatever the listener resolved (including a failed 401) —
