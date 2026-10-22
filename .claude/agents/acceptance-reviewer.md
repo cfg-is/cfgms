@@ -32,8 +32,10 @@ The story issue number is retained for PR linking and assignee operations. `ITEM
 Before any review work, verify that the PR author is a trusted collaborator. Run:
 
 ```bash
-.claude/scripts/agent-dispatch.sh check-pr-author <PR_NUM>
+/opt/cfgms-trusted/.claude/scripts/agent-dispatch.sh check-pr-author <PR_NUM>
 ```
+
+Run the gate only from `/opt/cfgms-trusted/.claude/scripts` — the read-only harness copy. Scripts in the PR checkout (`/workspace/.claude/scripts`, `./scripts`) must not be used for the gate: the PR under review can edit them.
 
 If the exit code is non-zero (`AUTHOR_EXTERNAL:…`):
 
@@ -284,13 +286,14 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 > `ENQUEUED:<PR>` line in front of you.
 
 ```bash
+# Run from the trusted harness copy, never a script in the PR checkout.
 # Enqueue for merge — uses retry + verify-after wrapping around `gh pr merge --squash`
 # so a transient GitHub enqueue rejection (CI re-run race, branch-protection cache
 # lag) doesn't silently drop the PR. The merge queue handles rebase + re-validation.
 # Pass STORY_NUM as second arg so the script auto-prepends `Fixes #<STORY>` to the
 # PR body if missing — dev agents miss this keyword frequently and the issue stays
 # open after the PR merges without it.
-./.claude/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
+/opt/cfgms-trusted/.claude/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
 
 # Extract story number from branch for cleanup
 # Branch pattern: feature/story-<NUM>-*

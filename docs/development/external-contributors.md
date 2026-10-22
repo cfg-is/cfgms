@@ -20,6 +20,8 @@ Quarantine is enforced **before any `git fetch`, `git checkout`, container launc
 - `po-act.sh dispatch-fix` — refused before worktree creation
 - `po-act.sh enqueue` — TOCTOU re-check before `gh pr merge --squash`
 
+The acceptance-review container runs the trust gate (`check-pr-author` and `po-act.sh enqueue`) from the harness copy of the scripts, not from the PR under review. The harness checkout's `.claude/scripts`, `scripts` and `acceptance-reviewer.md` are mounted read-only at `/opt/cfgms-trusted`, outside `/workspace`, so a PR that edits `po-act.sh` or `agent-dispatch.sh` cannot change the gate that judges it. A review launch is refused if any of those sources is missing, and the gate refuses rather than fall back to the PR checkout if a helper is missing under `/opt/cfgms-trusted`. This closes script substitution only; the review container's `GH_TOKEN` can still call `gh pr merge` directly.
+
 A quarantine comment is posted on the PR explaining the hold and linking to this document.
 
 ## Releasing a quarantined PR

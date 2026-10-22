@@ -3494,7 +3494,8 @@ test_review_pr_item_branch() {
 
     # Fake repo root with a scripts/project-queue.sh that records calls and returns empty
     local fake_repo="${tmp_dir}/repo"
-    mkdir -p "${fake_repo}/scripts"
+    mkdir -p "${fake_repo}/scripts" "${fake_repo}/.claude/scripts" "${fake_repo}/.claude/agents"
+    : > "${fake_repo}/.claude/agents/acceptance-reviewer.md"
     cat > "${fake_repo}/scripts/project-queue.sh" << PQEOF
 #!/usr/bin/env bash
 echo "\$@" >> "${pq_calls_file}"
