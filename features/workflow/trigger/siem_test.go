@@ -4,6 +4,7 @@ package trigger
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -1185,4 +1186,119 @@ func TestSIEMProcessor_ProcessLogEntry_EmptyTriggerTenantMatchesNothing(t *testi
 	assert.Equal(t, 0, count)
 	assert.True(t, lastUpdated.Equal(after), "a trigger with no tenant must match nothing")
 	assert.Equal(t, 0, siemExecutionsFor(wf, trigger.WorkflowName))
+}
+
+// panicOnceWorkflowTrigger is a WorkflowTrigger whose first TriggerWorkflow call panics.
+type panicOnceWorkflowTrigger struct {
+	*TestWorkflowTrigger
+	mu       sync.Mutex
+	panicked bool
+}
+
+func (p *panicOnceWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
+	p.mu.Lock()
+	first := !p.panicked
+	p.panicked = true
+	p.mu.Unlock()
+	if first {
+		panic("simulated workflow trigger panic")
+	}
+	return p.TestWorkflowTrigger.TriggerWorkflow(ctx, trigger, data)
+}
+
+func TestSIEMProcessor_FireTrigger_RemovedEntryDoesNotFire(t *testing.T) {
+	wf := NewTestWorkflowTrigger()
+	sp := NewSIEMProcessor(NewTriggerManager(nil, nil, nil, nil, wf, nil), wf)
+	trigger := &Trigger{ID: "gone", WorkflowName: "gone-workflow", TenantID: "t1"}
+
+	require.NotPanics(t, func() {
+		sp.fireTrigger(context.Background(), "gone", trigger)
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, siemExecutionsFor(wf, "gone-workflow"))
+}
+
+func TestSIEMProcessor_FireTrigger_PayloadIsDeepCopy(t *testing.T) {
+	wf := NewTestWorkflowTrigger()
+	sp := NewSIEMProcessor(NewTriggerManager(nil, nil, nil, nil, wf, nil), wf)
+	trigger := &Trigger{ID: "copy", WorkflowName: "copy-workflow", TenantID: "t1"}
+	sp.aggregationData["copy"] = &AggregationData{
+		Count:         3,
+		WindowStart:   time.Now().Add(-time.Minute),
+		Entries:       []LogEntry{{Message: "a"}, {Message: "b"}},
+		GroupedCounts: map[string]int{"level:error": 2},
+		Sum:           map[string]float64{"bytes": 10},
+		Average:       map[string]float64{"latency": 1.5},
+		TriggerID:     "copy",
+	}
+
+	sp.fireTrigger(context.Background(), "copy", trigger)
+
+	require.Eventually(t, func() bool { return siemExecutionsFor(wf, "copy-workflow") == 1 },
+		2*time.Second, 5*time.Millisecond)
+	agg := sp.aggregationData["copy"]
+	assert.Equal(t, 0, agg.Count)
+	assert.Empty(t, agg.Entries)
+}
+
+func TestSIEMProcessor_UnregisterConcurrentWithThresholdEntries(t *testing.T) {
+	processor, _, trigger := newTenantScopedSIEMFixture(t, "tenant-b")
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-b")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_ = processor.ProcessLogEntry(ctx, siemTestPayload("tenant-b"))
+		}
+	}()
+	time.Sleep(time.Millisecond)
+	require.NoError(t, processor.UnregisterSIEMTrigger(context.Background(), trigger.ID))
+	wg.Wait()
+}
+
+func TestSIEMProcessor_WorkflowTriggerPanicIsRecovered(t *testing.T) {
+	inner := NewTestWorkflowTrigger()
+	wf := &panicOnceWorkflowTrigger{TestWorkflowTrigger: inner}
+	processor := NewSIEMProcessor(NewTriggerManager(nil, nil, nil, nil, wf, nil), wf)
+	require.NoError(t, processor.Start(context.Background()))
+	t.Cleanup(func() { _ = processor.Stop(context.Background()) })
+
+	require.NoError(t, processor.RegisterSIEMTrigger(context.Background(), &Trigger{
+		ID: "panic-trig", Name: "panic", Type: TriggerTypeSIEM, Status: TriggerStatusActive,
+		TenantID: "tenant-b", WorkflowName: "panic-workflow",
+		SIEM: &SIEMConfig{
+			EventTypes: []string{"error"}, Threshold: &SIEMThreshold{Count: 1},
+			WindowSize: time.Minute, Enabled: true,
+		},
+	}))
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-b")
+
+	require.NoError(t, processor.ProcessLogEntry(ctx, siemTestPayload("tenant-b")))
+	require.Eventually(t, func() bool {
+		wf.mu.Lock()
+		defer wf.mu.Unlock()
+		return wf.panicked
+	}, 2*time.Second, 5*time.Millisecond)
+
+	require.NoError(t, processor.ProcessLogEntry(ctx, siemTestPayload("tenant-b")))
+	require.Eventually(t, func() bool { return siemExecutionsFor(inner, "panic-workflow") == 1 },
+		2*time.Second, 5*time.Millisecond, "entry after the panic was not processed")
+}
+
+func TestSIEMProcessor_ProcessLogEntryPanicIsRecovered(t *testing.T) {
+	processor, wf, _ := newTenantScopedSIEMFixture(t, "tenant-b")
+
+	// A trigger with a nil SIEM config makes processLogEntry panic on SIEM.Enabled.
+	processor.mutex.Lock()
+	processor.siemTriggers["broken"] = &Trigger{ID: "broken", TenantID: "tenant-bad"}
+	processor.mutex.Unlock()
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-bad")
+	require.NoError(t, processor.ProcessLogEntry(ctx, siemTestPayload("tenant-bad")))
+
+	// The loop must survive: a following entry is still processed.
+	awaitSIEMSentinel(t, processor, wf)
 }
