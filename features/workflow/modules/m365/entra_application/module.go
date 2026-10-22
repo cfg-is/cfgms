@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -214,9 +213,30 @@ func (c *EntraApplicationConfig) AsMap() map[string]interface{} {
 	}
 	if c.CreateServicePrincipal {
 		result["create_service_principal"] = c.CreateServicePrincipal
-		if c.ServicePrincipalSettings != nil {
-			result["service_principal_settings"] = c.ServicePrincipalSettings
-		}
+	}
+	if c.ServicePrincipalSettings != nil {
+		result["service_principal_settings"] = c.ServicePrincipalSettings
+	}
+	if len(c.Tags) > 0 {
+		result["tags"] = c.Tags
+	}
+	if len(c.ManagedFieldsList) > 0 {
+		result["managed_fields"] = c.ManagedFieldsList
+	}
+	if c.AcceptMappedClaims {
+		result["accept_mapped_claims"] = c.AcceptMappedClaims
+	}
+	if len(c.KnownClientApplications) > 0 {
+		result["known_client_applications"] = c.KnownClientApplications
+	}
+	if len(c.PreAuthorizedApplications) > 0 {
+		result["pre_authorized_applications"] = c.PreAuthorizedApplications
+	}
+	if c.RequestedAccessTokenVersion != 0 {
+		result["requested_access_token_version"] = c.RequestedAccessTokenVersion
+	}
+	if c.PublisherDomain != "" {
+		result["publisher_domain"] = c.PublisherDomain
 	}
 
 	return result
@@ -315,6 +335,12 @@ func (c *EntraApplicationConfig) GetManagedFields() []string {
 	if c.RedirectUris != nil {
 		fields = append(fields, "redirect_uris")
 	}
+	if c.LogoutURL != "" {
+		fields = append(fields, "logout_url")
+	}
+	if len(c.Tags) > 0 {
+		fields = append(fields, "tags")
+	}
 	if len(c.RequiredResourceAccess) > 0 {
 		fields = append(fields, "required_resource_access")
 	}
@@ -340,33 +366,20 @@ func (c *EntraApplicationConfig) GetManagedFields() []string {
 // Set creates or updates an Entra ID application according to the configuration
 func (m *entraApplicationModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	// Convert ConfigState to EntraApplicationConfig
-	configMap := config.AsMap()
-	appConfig := &EntraApplicationConfig{}
-
-	// Map basic fields
-	if displayName, ok := configMap["display_name"].(string); ok {
-		appConfig.DisplayName = displayName
-	}
-	if description, ok := configMap["description"].(string); ok {
-		appConfig.Description = description
-	}
-	if signInAudience, ok := configMap["sign_in_audience"].(string); ok {
-		appConfig.SignInAudience = signInAudience
-	}
-	if tenantID, ok := configMap["tenant_id"].(string); ok {
-		appConfig.TenantID = tenantID
-	}
-
-	// Map complex fields using existing graph.Application struct field types
-	if identifierUris, ok := configMap["identifier_uris"].([]string); ok {
-		appConfig.IdentifierUris = identifierUris
-	}
-	if createServicePrincipal, ok := configMap["create_service_principal"].(bool); ok {
-		appConfig.CreateServicePrincipal = createServicePrincipal
+	appConfig, err := configFromMap(config.AsMap())
+	if err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	// Validate configuration
 	if err := appConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Refuse every declared field this module cannot apply, before any
+	// authentication or Graph call, so a step never reports success while the
+	// tenant differs from what was declared.
+	if err := appConfig.checkApplicable(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
@@ -469,13 +482,22 @@ func (m *entraApplicationModule) getApplicationByID(ctx context.Context, token *
 	}
 
 	// Convert Graph API response to our internal format
-	return &ApplicationInfo{
+	info := &ApplicationInfo{
 		ID:             app.ID,
 		DisplayName:    app.DisplayName,
 		Description:    app.Description,
 		SignInAudience: app.SignInAudience,
 		IdentifierUris: app.IdentifierUris,
-	}, nil
+		Tags:           app.Tags,
+	}
+	if app.Web != nil {
+		info.WebRedirectUris = app.Web.RedirectUris
+		info.LogoutURL = app.Web.LogoutURL
+	}
+	if app.Spa != nil {
+		info.SpaRedirectUris = app.Spa.RedirectUris
+	}
+	return info, nil
 }
 
 func (m *entraApplicationModule) createApplication(ctx context.Context, token *auth.AccessToken, config *EntraApplicationConfig) error {
@@ -491,39 +513,24 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 	if len(config.IdentifierUris) > 0 {
 		request.IdentifierUris = config.IdentifierUris
 	}
+	if len(config.Tags) > 0 {
+		request.Tags = config.Tags
+	}
+	if (config.RedirectUris != nil && len(config.RedirectUris.Web) > 0) || config.LogoutURL != "" {
+		request.Web = &graph.ApplicationWeb{LogoutURL: config.LogoutURL}
+		if config.RedirectUris != nil {
+			request.Web.RedirectUris = config.RedirectUris.Web
+		}
+	}
+	if config.RedirectUris != nil && len(config.RedirectUris.Spa) > 0 {
+		request.Spa = &graph.ApplicationSpa{RedirectUris: config.RedirectUris.Spa}
+	}
 
-	// Create application via Graph API
-	app, err := m.graphClient.CreateApplication(ctx, token, request)
-	if err != nil {
+	// Create application via Graph API. Service principal creation and
+	// password/key credentials are refused by checkApplicable before any Graph
+	// call, so the created application is the complete declared state.
+	if _, err := m.graphClient.CreateApplication(ctx, token, request); err != nil {
 		return fmt.Errorf("failed to create application via Graph API: %w", err)
-	}
-
-	// Wait for application creation to propagate
-	time.Sleep(2 * time.Second)
-
-	// Create service principal if requested
-	if config.CreateServicePrincipal {
-		if err := m.createServicePrincipal(ctx, token, app.AppID, config.ServicePrincipalSettings); err != nil {
-			return fmt.Errorf("failed to create service principal: %w", err)
-		}
-	}
-
-	// Add password credentials (client secrets) if specified
-	if len(config.PasswordCredentials) > 0 {
-		for _, cred := range config.PasswordCredentials {
-			if err := m.addPasswordCredential(ctx, token, app.ID, &cred); err != nil {
-				return fmt.Errorf("failed to add password credential: %w", err)
-			}
-		}
-	}
-
-	// Add certificate credentials if specified
-	if len(config.KeyCredentials) > 0 {
-		for _, cred := range config.KeyCredentials {
-			if err := m.addKeyCredential(ctx, token, app.ID, &cred); err != nil {
-				return fmt.Errorf("failed to add key credential: %w", err)
-			}
-		}
 	}
 
 	return nil
@@ -531,95 +538,121 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 
 func (m *entraApplicationModule) updateApplication(ctx context.Context, token *auth.AccessToken, config *EntraApplicationConfig, existingApp *ApplicationInfo) error {
 	managedFields := config.GetManagedFields()
-	updates := make(map[string]interface{})
+	updateRequest := &graph.UpdateApplicationRequest{}
+	changed := false
+
+	var declaredWeb, declaredSpa []string
+	if config.RedirectUris != nil {
+		declaredWeb = config.RedirectUris.Web
+		declaredSpa = config.RedirectUris.Spa
+	}
+	webManaged := contains(managedFields, "redirect_uris")
+	webChanged := webManaged && !stringSlicesEqual(declaredWeb, existingApp.WebRedirectUris)
+	logoutChanged := contains(managedFields, "logout_url") && config.LogoutURL != existingApp.LogoutURL
 
 	// Only update managed fields
 	for _, field := range managedFields {
 		switch field {
 		case "display_name":
 			if config.DisplayName != existingApp.DisplayName {
-				updates["displayName"] = config.DisplayName
+				displayName := config.DisplayName
+				updateRequest.DisplayName = &displayName
+				changed = true
 			}
 		case "description":
 			if config.Description != existingApp.Description {
-				updates["description"] = config.Description
+				description := config.Description
+				updateRequest.Description = &description
+				changed = true
 			}
 		case "sign_in_audience":
 			if config.SignInAudience != existingApp.SignInAudience {
-				updates["signInAudience"] = config.SignInAudience
+				signInAudience := config.SignInAudience
+				updateRequest.SignInAudience = &signInAudience
+				changed = true
+			}
+		case "identifier_uris":
+			if !stringSlicesEqual(config.IdentifierUris, existingApp.IdentifierUris) {
+				updateRequest.IdentifierUris = config.IdentifierUris
+				changed = true
+			}
+		case "tags":
+			if !stringSlicesEqual(config.Tags, existingApp.Tags) {
+				updateRequest.Tags = config.Tags
+				changed = true
+			}
+		case "redirect_uris":
+			if !stringSlicesEqual(declaredSpa, existingApp.SpaRedirectUris) {
+				updateRequest.Spa = &graph.ApplicationSpa{RedirectUris: nonNil(declaredSpa)}
+				changed = true
 			}
 		}
 	}
 
-	// Update the application if there are changes
-	if len(updates) > 0 {
-		// Build the update request
-		updateRequest := &graph.UpdateApplicationRequest{}
+	// Graph replaces the web object as a unit, so send the unmanaged half
+	// (redirect URIs or logout URL) at its existing value.
+	if webChanged || logoutChanged {
+		web := &graph.ApplicationWeb{
+			RedirectUris: nonNil(existingApp.WebRedirectUris),
+			LogoutURL:    existingApp.LogoutURL,
+		}
+		if webChanged {
+			web.RedirectUris = nonNil(declaredWeb)
+		}
+		if logoutChanged {
+			web.LogoutURL = config.LogoutURL
+		}
+		updateRequest.Web = web
+		changed = true
+	}
 
-		if displayName, ok := updates["displayName"].(string); ok {
-			updateRequest.DisplayName = &displayName
-		}
-		if description, ok := updates["description"].(string); ok {
-			updateRequest.Description = &description
-		}
-		if signInAudience, ok := updates["signInAudience"].(string); ok {
-			updateRequest.SignInAudience = &signInAudience
-		}
-
-		// Update application via Graph API
+	// Update the application if there are changes. Managed password and key
+	// credentials are refused by checkApplicable before any Graph call.
+	if changed {
 		if err := m.graphClient.UpdateApplication(ctx, token, existingApp.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update application via Graph API: %w", err)
 		}
 	}
 
-	// Handle credentials if managed
-	if contains(managedFields, "password_credentials") {
-		if err := m.syncPasswordCredentials(ctx, token, existingApp.ID, config.PasswordCredentials); err != nil {
-			return fmt.Errorf("failed to sync password credentials: %w", err)
-		}
-	}
-
-	if contains(managedFields, "key_credentials") {
-		if err := m.syncKeyCredentials(ctx, token, existingApp.ID, config.KeyCredentials); err != nil {
-			return fmt.Errorf("failed to sync key credentials: %w", err)
-		}
-	}
-
 	return nil
 }
 
-// Additional helper methods
+// The helpers below are not implemented. They fail closed so a caller can never
+// report success for a service principal or credential change that was not made.
+// Error text deliberately carries no credential or key material.
 
 func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, token *auth.AccessToken, appID string, settings *ServicePrincipalConfig) error {
-	return nil
+	return fmt.Errorf("creating a service principal is unsupported")
 }
 
 func (m *entraApplicationModule) addPasswordCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *PasswordCredential) error {
-	return nil
+	return fmt.Errorf("adding a password credential is unsupported")
 }
 
 func (m *entraApplicationModule) addKeyCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *KeyCredential) error {
-	return nil
+	return fmt.Errorf("adding a key credential is unsupported")
 }
 
 func (m *entraApplicationModule) syncPasswordCredentials(ctx context.Context, token *auth.AccessToken, appID string, credentials []PasswordCredential) error {
-	// Would implement credential synchronization logic
-	return nil
+	return fmt.Errorf("synchronizing password credentials is unsupported")
 }
 
 func (m *entraApplicationModule) syncKeyCredentials(ctx context.Context, token *auth.AccessToken, appID string, credentials []KeyCredential) error {
-	// Would implement credential synchronization logic
-	return nil
+	return fmt.Errorf("synchronizing key credentials is unsupported")
 }
 
 // Utility types and functions
 
 type ApplicationInfo struct {
-	ID             string
-	DisplayName    string
-	Description    string
-	SignInAudience string
-	IdentifierUris []string
+	ID              string
+	DisplayName     string
+	Description     string
+	SignInAudience  string
+	IdentifierUris  []string
+	WebRedirectUris []string
+	SpaRedirectUris []string
+	LogoutURL       string
+	Tags            []string
 }
 
 func parseEntraApplicationResourceID(resourceID string) (tenantID, appID string, err error) {
@@ -655,4 +688,214 @@ func requireExecutionTenant(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("entra_application: tenant context required")
 	}
 	return tenantID, nil
+}
+
+// stringSlicesEqual compares two string slices, treating nil and empty alike.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// nonNil returns an empty, non-nil slice for nil input so it serializes as [].
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// unsupportedManagedFields are managed_fields entries this module cannot apply.
+var unsupportedManagedFields = map[string]bool{
+	"redirect_uris.mobile": true, "redirect_uris.desktop": true,
+	"required_resource_access": true, "oauth2_permissions": true, "app_roles": true,
+	"optional_claims": true, "accept_mapped_claims": true, "known_client_applications": true,
+	"pre_authorized_applications": true, "requested_access_token_version": true,
+	"publisher_domain": true, "create_service_principal": true,
+	"service_principal_settings": true, "password_credentials": true, "key_credentials": true,
+}
+
+// checkApplicable returns an error naming the first declared field this module
+// cannot apply to Graph. It fails closed so that a step never succeeds while
+// silently dropping part of what it declared.
+func (c *EntraApplicationConfig) checkApplicable() error {
+	reject := func(field string) error {
+		return fmt.Errorf("%s is declared but cannot be applied by this module", field)
+	}
+	if c.RedirectUris != nil {
+		if len(c.RedirectUris.Mobile) > 0 {
+			return reject("redirect_uris.mobile")
+		}
+		if len(c.RedirectUris.Desktop) > 0 {
+			return reject("redirect_uris.desktop")
+		}
+	}
+	declared := []struct {
+		name string
+		set  bool
+	}{
+		{"required_resource_access", len(c.RequiredResourceAccess) > 0},
+		{"oauth2_permissions", len(c.OAuth2Permissions) > 0},
+		{"app_roles", len(c.AppRoles) > 0},
+		{"optional_claims", c.OptionalClaims != nil},
+		{"accept_mapped_claims", c.AcceptMappedClaims},
+		{"known_client_applications", len(c.KnownClientApplications) > 0},
+		{"pre_authorized_applications", len(c.PreAuthorizedApplications) > 0},
+		{"requested_access_token_version", c.RequestedAccessTokenVersion != 0},
+		{"publisher_domain", c.PublisherDomain != ""},
+		{"create_service_principal", c.CreateServicePrincipal},
+		{"service_principal_settings", c.ServicePrincipalSettings != nil},
+		{"password_credentials", len(c.PasswordCredentials) > 0},
+		{"key_credentials", len(c.KeyCredentials) > 0},
+	}
+	for _, d := range declared {
+		if d.set {
+			return reject(d.name)
+		}
+	}
+
+	// A managed field is declared even when its value is empty. Fields this
+	// module cannot apply are rejected outright; fields it can apply but whose
+	// empty value cannot be sent as a clear (omitted by omitempty) likewise.
+	for _, field := range c.ManagedFieldsList {
+		if unsupportedManagedFields[field] {
+			return reject(field)
+		}
+		switch field {
+		case "identifier_uris":
+			if len(c.IdentifierUris) == 0 {
+				return fmt.Errorf("managed field identifier_uris is empty and cannot be cleared by this module")
+			}
+		case "tags":
+			if len(c.Tags) == 0 {
+				return fmt.Errorf("managed field tags is empty and cannot be cleared by this module")
+			}
+		case "logout_url":
+			if c.LogoutURL == "" {
+				return fmt.Errorf("managed field logout_url is empty and cannot be cleared by this module")
+			}
+		}
+	}
+	return nil
+}
+
+// configFromMap maps every key of a step configuration onto an
+// EntraApplicationConfig. A key that is present with an unexpected type is an
+// error naming the key; unknown keys are ignored.
+func configFromMap(m map[string]interface{}) (*EntraApplicationConfig, error) {
+	c := &EntraApplicationConfig{}
+	var err error
+	strField := func(key string, dst *string) {
+		if err != nil {
+			return
+		}
+		if v, ok := m[key]; ok && v != nil {
+			s, isStr := v.(string)
+			if !isStr {
+				err = fmt.Errorf("%s must be a string", key)
+				return
+			}
+			*dst = s
+		}
+	}
+	listField := func(key string, dst *[]string) {
+		if err != nil {
+			return
+		}
+		if v, ok := m[key]; ok && v != nil {
+			*dst, err = toStringSlice(key, v)
+		}
+	}
+	// yamlField decodes structured values (typed or generic maps) via YAML so
+	// the struct tags define the accepted keys.
+	yamlField := func(key string, dst interface{}) {
+		if err != nil {
+			return
+		}
+		v, ok := m[key]
+		if !ok || v == nil {
+			return
+		}
+		raw, mErr := yaml.Marshal(v)
+		if mErr == nil {
+			mErr = yaml.Unmarshal(raw, dst)
+		}
+		if mErr != nil {
+			err = fmt.Errorf("%s has an unexpected type", key)
+		}
+	}
+
+	strField("display_name", &c.DisplayName)
+	strField("description", &c.Description)
+	strField("sign_in_audience", &c.SignInAudience)
+	strField("tenant_id", &c.TenantID)
+	strField("logout_url", &c.LogoutURL)
+	strField("publisher_domain", &c.PublisherDomain)
+	listField("identifier_uris", &c.IdentifierUris)
+	listField("tags", &c.Tags)
+	listField("managed_fields", &c.ManagedFieldsList)
+	listField("known_client_applications", &c.KnownClientApplications)
+	listField("pre_authorized_applications", &c.PreAuthorizedApplications)
+	yamlField("redirect_uris", &c.RedirectUris)
+	yamlField("required_resource_access", &c.RequiredResourceAccess)
+	yamlField("oauth2_permissions", &c.OAuth2Permissions)
+	yamlField("app_roles", &c.AppRoles)
+	yamlField("password_credentials", &c.PasswordCredentials)
+	yamlField("key_credentials", &c.KeyCredentials)
+	yamlField("optional_claims", &c.OptionalClaims)
+	yamlField("service_principal_settings", &c.ServicePrincipalSettings)
+	for _, b := range []struct {
+		key string
+		dst *bool
+	}{{"accept_mapped_claims", &c.AcceptMappedClaims}, {"create_service_principal", &c.CreateServicePrincipal}} {
+		if v, ok := m[b.key]; ok && v != nil && err == nil {
+			bv, isBool := v.(bool)
+			if !isBool {
+				err = fmt.Errorf("%s must be a boolean", b.key)
+			}
+			*b.dst = bv
+		}
+	}
+	if v, ok := m["requested_access_token_version"]; ok && v != nil && err == nil {
+		switch n := v.(type) {
+		case int:
+			c.RequestedAccessTokenVersion = n
+		case int64:
+			c.RequestedAccessTokenVersion = int(n)
+		case float64:
+			c.RequestedAccessTokenVersion = int(n)
+		default:
+			err = fmt.Errorf("requested_access_token_version must be an integer")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// toStringSlice accepts []string and []interface{} of strings.
+func toStringSlice(key string, v interface{}) ([]string, error) {
+	switch t := v.(type) {
+	case []string:
+		return t, nil
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must be a list of strings", key)
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s must be a list of strings", key)
+	}
 }
