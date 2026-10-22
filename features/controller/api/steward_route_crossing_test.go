@@ -238,6 +238,7 @@ func TestStewardRoutes_CrossingBoundaryTable(t *testing.T) {
 
 	// session returns a bearer token for account, elevated to AssuranceStrong so every
 	// route clears its assurance floor and only the tenant decision is in play.
+	tokenAccount := map[string]string{}
 	session := func(t *testing.T, acct *account) string {
 		t.Helper()
 		server.cacheAccount(acct)
@@ -245,6 +246,7 @@ func TestStewardRoutes_CrossingBoundaryTable(t *testing.T) {
 		require.NoError(t, err)
 		_, token, err := sessMgr.Elevate(ctx, sess.ID, []byte("route-credential"), "192.0.2.1")
 		require.NoError(t, err)
+		tokenAccount[token] = acct.ID
 		return token
 	}
 	send := func(t *testing.T, token, method string, row stewardCrossingRoute, stewardID string) *httptest.ResponseRecorder {
@@ -258,6 +260,11 @@ func TestStewardRoutes_CrossingBoundaryTable(t *testing.T) {
 		req := httptest.NewRequest(method, row.path(stewardID), bytes.NewReader(raw))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
+		// A presence-gated permission also needs a fresh tap bound to this exact
+		// request (Issue #5416); the crossing decision is what this table probes.
+		if permissionAssurance[row.permission].RequireUserPresence {
+			req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, tokenAccount[token], req, row.permission))
+		}
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
 		return rec

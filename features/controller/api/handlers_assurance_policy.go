@@ -234,6 +234,7 @@ func (s *Server) resolveAssuranceRequirementForPath(ctx context.Context, path []
 			}
 			if ov.RequireUserPresence {
 				result.RequireUserPresence = true
+				result.PresenceExemptRoutes = nil
 			}
 		}
 	}

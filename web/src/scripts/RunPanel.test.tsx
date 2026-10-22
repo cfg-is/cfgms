@@ -570,3 +570,93 @@ describe('RunPanel — Run command mode', () => {
     expect(callsTo('/runs/command')).toHaveLength(0)
   })
 })
+
+// ── Per-action passkey tap (Issue #5416) [REQUIRED] ──────────────────────────
+
+describe('RunPanel — presence step-up on POST /api/v1/runs/script [REQUIRED]', () => {
+  it('opens the step-up modal on a presence="required" challenge and retries with the minted token', async () => {
+    const credential = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: new TextEncoder().encode('cred-id').buffer,
+      response: {
+        clientDataJSON: new TextEncoder().encode('{"type":"webauthn.get"}').buffer,
+        authenticatorData: new TextEncoder().encode('authenticator-data').buffer,
+        signature: new TextEncoder().encode('signature').buffer,
+        userHandle: null,
+      },
+      getClientExtensionResults: () => ({}),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    }
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential) } })
+
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'Content-Type': 'application/json', ...headers },
+      })
+    const envelope = (data: unknown) => ({ data, timestamp: new Date().toISOString() })
+
+    let runPosts = 0
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url.includes('/api/v1/fleet') || url.includes('stewards')) {
+        return Promise.resolve(makeFleetResponse(2))
+      }
+      if (url.includes('presence/begin')) {
+        return Promise.resolve(
+          json(
+            200,
+            envelope({
+              publicKey: {
+                challenge: 'Y2hhbGxlbmdl',
+                timeout: 60000,
+                rpId: 'localhost',
+                allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+                userVerification: 'required',
+              },
+            }),
+          ),
+        )
+      }
+      if (url.includes('presence/finish')) {
+        return Promise.resolve(json(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 })))
+      }
+      if (url === '/api/v1/runs/script') {
+        runPosts++
+        const token = new Headers(init?.headers).get('X-Presence-Token')
+        if (token === 'tap-token-1') return Promise.resolve(makeRunScriptResponse('run-tap'))
+        return Promise.resolve(
+          json(
+            401,
+            { error: 'step_up_required', required_assurance: 'strong', presence_required: true },
+            {
+              'WWW-Authenticate':
+                'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="steward:execute-scripts"',
+            },
+          ),
+        )
+      }
+      return Promise.resolve(makeRunStatusResponse('run-tap', 'completed'))
+    })
+
+    renderRunPanel()
+    fireEvent.change(screen.getByRole('textbox', { name: /target selector/i }), {
+      target: { value: 'id:steward-1' },
+    })
+    fireEvent.click(screen.getByTestId('resolve-btn'))
+    await waitFor(() => expect(screen.getByTestId('run-target-count')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('run-btn'))
+    fireEvent.click(screen.getByTestId('run-confirm-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(runPosts).toBe(1)
+
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(runPosts).toBe(2))
+    await waitFor(() => expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument())
+  })
+})

@@ -517,6 +517,11 @@ func New(
 	// Initialize router with middleware
 	server.setupRouter()
 
+	// Issue #5416: a stale presence exemption must fail construction.
+	if err := server.validatePresenceExemptRoutes(); err != nil {
+		return nil, err
+	}
+
 	// M-AUTH-1: Load existing API keys from secret store
 	if err := server.loadAPIKeysFromStore(); err != nil {
 		logger.Warn("Failed to load API keys from store", "error", logging.SanitizeLogValue(err.Error()))

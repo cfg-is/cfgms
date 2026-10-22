@@ -5,7 +5,15 @@ package api
 // Note: auth_tiers.go was replaced by this file (Issue #2780). The filename
 // assurance.go was chosen for clarity; the PR description documents this choice.
 
-import "github.com/cfgis/cfgms/pkg/session"
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/session"
+)
 
 // Requirement declares the minimum assurance level a permission needs and
 // whether a fresh user-presence proof is required for catastrophic operations.
@@ -15,6 +23,13 @@ import "github.com/cfgis/cfgms/pkg/session"
 type Requirement struct {
 	Min                 session.AssuranceLevel
 	RequireUserPresence bool
+
+	// PresenceExemptRoutes lists routes under this permission that skip the presence
+	// check while still passing every other check. Each entry is
+	// "<METHOD> <mux path template>", e.g. "DELETE /api/v1/runs/{run_id}". The
+	// default is a tap: a route not listed is gated. validatePresenceExemptRoutes
+	// fails construction when an entry matches no registered route.
+	PresenceExemptRoutes []string
 }
 
 // permissionAssurance is the authoritative registry of permission IDs that require
@@ -165,9 +180,25 @@ var permissionAssurance = map[string]Requirement{
 	// registry (Issue #3687, Epic #3665). Before this entry, resolveAssuranceRequirement
 	// returned found=false for steward:execute-scripts and script:admin, so any
 	// AssuranceMachine (API-key) principal holding either permission could reach code
-	// execution or script-library administration. Neither carries RequireUserPresence.
-	"steward:execute-scripts": {Min: session.AssuranceStrong}, // POST /runs/script, /runs/command; DELETE /runs/{run_id}
-	"script:admin":            {Min: session.AssuranceStrong}, // GET/PUT /scripts, /scripts/{id}, /scripts/{id}/privilege
+	// execution or script-library administration. Issue #5416 adds a per-action
+	// presence tap to every route under both, except the listed exemptions.
+	//
+	// steward:execute-scripts (POST /runs/script, /runs/command; DELETE /runs/{run_id}):
+	//   - DELETE /runs/{run_id} cancels a run: it stops work rather than starting it.
+	//   - POST /runs/command already carries a per-action X.509 operator signature
+	//     over the command envelope, so a passkey tap would be a second proof.
+	"steward:execute-scripts": {
+		Min:                  session.AssuranceStrong,
+		RequireUserPresence:  true,
+		PresenceExemptRoutes: []string{"DELETE /api/v1/runs/{run_id}", "POST /api/v1/runs/command"},
+	},
+	// script:admin: PUT /scripts/{id}/privilege is gated; the two reads are exempt
+	// because they change nothing.
+	"script:admin": {
+		Min:                  session.AssuranceStrong,
+		RequireUserPresence:  true,
+		PresenceExemptRoutes: []string{"GET /api/v1/scripts", "GET /api/v1/scripts/{id}"},
+	},
 
 	// Steward config push (Issue #3792): PUT /stewards/{id}/config applies the
 	// submitted resources as declared state on the target host — root-equivalent,
@@ -272,4 +303,40 @@ func overrideAppliesTo(storedID, permissionID string) bool {
 		}
 	}
 	return false
+}
+
+// validatePresenceExemptRoutes walks the router and returns an error naming every
+// PresenceExemptRoutes entry that matches no registered route, so a renamed route
+// cannot leave a stale exemption behind.
+func (s *Server) validatePresenceExemptRoutes() error {
+	registered := map[string]bool{}
+	if s.router != nil {
+		_ = s.router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+			tmpl, err := route.GetPathTemplate()
+			if err != nil {
+				return nil
+			}
+			methods, err := route.GetMethods()
+			if err != nil {
+				return nil
+			}
+			for _, m := range methods {
+				registered[m+" "+tmpl] = true
+			}
+			return nil
+		})
+	}
+	var missing []string
+	for perm, req := range permissionAssurance {
+		for _, e := range req.PresenceExemptRoutes {
+			if !registered[e] {
+				missing = append(missing, fmt.Sprintf("%s: %q", perm, e))
+			}
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("presence-exempt routes match no registered route: %s", strings.Join(missing, "; "))
+	}
+	return nil
 }

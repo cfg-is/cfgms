@@ -1908,7 +1908,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
 			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
 			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
-			if assuranceFound && assuranceReq.RequireUserPresence {
+			if assuranceFound && assuranceReq.RequireUserPresence && !presenceExemptForRequest(r, assuranceReq) {
 				levelName := assuranceReq.Min.String()
 
 				presenceToken := r.Header.Get(presenceTokenHeader)
@@ -2537,6 +2537,8 @@ func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, perm
 			}
 			if ov.RequireUserPresence {
 				result.RequireUserPresence = true
+				// A tenant that demands presence withdraws the built-in exemptions.
+				result.PresenceExemptRoutes = nil
 			}
 		}
 	}
@@ -2594,4 +2596,28 @@ func (s *Server) adminCertRecheck(peerCert *x509.Certificate) authRecheck {
 		}
 		return acct == nil || !acct.Disabled
 	}
+}
+
+// presenceExemptForRequest reports whether the matched route is listed in
+// req.PresenceExemptRoutes. It fails closed: with no current route (a wrapper
+// called without a router) or an unreadable template, nothing is exempt.
+func presenceExemptForRequest(r *http.Request, req Requirement) bool {
+	if len(req.PresenceExemptRoutes) == 0 {
+		return false
+	}
+	route := mux.CurrentRoute(r)
+	if route == nil {
+		return false
+	}
+	tmpl, err := route.GetPathTemplate()
+	if err != nil || tmpl == "" {
+		return false
+	}
+	key := r.Method + " " + tmpl
+	for _, e := range req.PresenceExemptRoutes {
+		if e == key {
+			return true
+		}
+	}
+	return false
 }
