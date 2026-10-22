@@ -4,7 +4,12 @@ package entra_application
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
@@ -1082,4 +1088,212 @@ func TestSetGet_FailClosedWithoutExecutionTenant(t *testing.T) {
 	assert.Contains(t, err.Error(), "tenant context required")
 
 	assert.Empty(t, ap.requestedTenants(), "no token may be requested without an execution tenant")
+}
+
+// mapState is a ConfigState backed by a raw step-configuration map.
+type mapState map[string]interface{}
+
+func (s mapState) AsMap() map[string]interface{} { return s }
+func (s mapState) ToYAML() ([]byte, error)       { return yaml.Marshal(map[string]interface{}(s)) }
+func (s mapState) FromYAML(data []byte) error    { return yaml.Unmarshal(data, &s) }
+func (s mapState) GetManagedFields() []string {
+	out := make([]string, 0, len(s))
+	for k := range s {
+		out = append(out, k)
+	}
+	return out
+}
+func (s mapState) Validate() error { return nil }
+
+// graphRequest is one request received by fakeGraphServer.
+type graphRequest struct {
+	Method string
+	Path   string
+	Body   []byte
+}
+
+// fakeGraphServer is a real HTTP server standing in for Microsoft Graph. It
+// serves at most one existing application and records every request it
+// receives, so tests drive the module through the real graph.HTTPClient.
+type fakeGraphServer struct {
+	mu       sync.Mutex
+	existing map[string]interface{}
+	requests []graphRequest
+}
+
+func (f *fakeGraphServer) handler(t *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		f.mu.Lock()
+		f.requests = append(f.requests, graphRequest{Method: r.Method, Path: r.URL.Path, Body: raw})
+		existing := f.existing
+		f.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		existingPath := ""
+		if existing != nil {
+			existingPath = "/applications/" + existing["id"].(string)
+		}
+		switch {
+		case r.Method == http.MethodGet && existingPath != "" && r.URL.Path == existingPath:
+			assert.NoError(t, json.NewEncoder(w).Encode(existing))
+		case r.Method == http.MethodPatch && existingPath != "" && r.URL.Path == existingPath:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/applications":
+			w.WriteHeader(http.StatusCreated)
+			_, werr := w.Write([]byte(`{"id":"obj-2","appId":"app-2"}`))
+			assert.NoError(t, werr)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, werr := w.Write([]byte(`{"error":{"code":"Request_ResourceNotFound","message":"not found"}}`))
+			assert.NoError(t, werr)
+		}
+	})
+}
+
+func (f *fakeGraphServer) recorded() []graphRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]graphRequest(nil), f.requests...)
+}
+
+// only returns the single request with the given method, failing otherwise.
+func (f *fakeGraphServer) only(t *testing.T, method string) graphRequest {
+	t.Helper()
+	var found []graphRequest
+	for _, r := range f.recorded() {
+		if r.Method == method {
+			found = append(found, r)
+		}
+	}
+	require.Len(t, found, 1, "expected exactly one %s request to Graph", method)
+	return found[0]
+}
+
+func setupSetModule(t *testing.T, existing map[string]interface{}) (*entraApplicationModule, *fakeGraphServer, *tenantIsolationAuthProvider, context.Context) {
+	t.Helper()
+	fg := &fakeGraphServer{existing: existing}
+	srv := httptest.NewServer(fg.handler(t))
+	t.Cleanup(srv.Close)
+	ap := &tenantIsolationAuthProvider{m365ByCFGMS: map[string]string{"cfgms-t": "m365-t"}}
+	gc := graph.NewHTTPClient(graph.WithBaseURL(srv.URL), graph.WithHTTPClient(srv.Client()))
+	return &entraApplicationModule{authProvider: ap, graphClient: gc}, fg, ap, isolationCtx("cfgms-t")
+}
+
+func baseStep(extra map[string]interface{}) mapState {
+	s := mapState{"display_name": "App", "sign_in_audience": "AzureADMyOrg", "tenant_id": "m365-t"}
+	for k, v := range extra {
+		s[k] = v
+	}
+	return s
+}
+
+func TestSet_UpdateSendsMappedFields(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, map[string]interface{}{
+		"id": "obj-1", "displayName": "App", "signInAudience": "AzureADMyOrg",
+		"identifierUris": []string{"api://old"}, "tags": []string{"old"},
+		"web": map[string]interface{}{"redirectUris": []string{"https://old/cb"}, "logoutUrl": "https://old/logout"},
+	})
+
+	err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"identifier_uris": []interface{}{"api://new"},
+		"redirect_uris":   map[string]interface{}{"web": []interface{}{"https://new/cb"}},
+		"tags":            []string{"new"},
+		"managed_fields":  []interface{}{"identifier_uris", "redirect_uris", "tags"},
+	}))
+	require.NoError(t, err)
+
+	patch := fg.only(t, http.MethodPatch)
+	assert.Equal(t, "/applications/obj-1", patch.Path)
+	var got graph.UpdateApplicationRequest
+	require.NoError(t, json.Unmarshal(patch.Body, &got))
+	assert.Equal(t, []string{"api://new"}, got.IdentifierUris)
+	assert.Equal(t, []string{"new"}, got.Tags)
+	require.NotNil(t, got.Web)
+	assert.Equal(t, []string{"https://new/cb"}, got.Web.RedirectUris)
+	assert.Equal(t, "https://old/logout", got.Web.LogoutURL, "unmanaged logout URL must be preserved")
+	assert.Nil(t, got.Spa, "unchanged spa redirect URIs must not be sent")
+	assert.Nil(t, got.DisplayName, "unmanaged display_name must not be sent")
+}
+
+func TestSet_CreateSendsMappedFields(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, nil)
+
+	err := m.Set(ctx, "m365-t:obj-2", baseStep(map[string]interface{}{
+		"identifier_uris": []string{"api://new"},
+		"redirect_uris":   &RedirectUris{Web: []string{"https://new/cb"}, Spa: []string{"https://spa/cb"}},
+		"logout_url":      "https://new/logout",
+		"tags":            []string{"t1"},
+	}))
+	require.NoError(t, err)
+
+	post := fg.only(t, http.MethodPost)
+	assert.Equal(t, "/applications", post.Path)
+	var got graph.CreateApplicationRequest
+	require.NoError(t, json.Unmarshal(post.Body, &got))
+	assert.Equal(t, []string{"api://new"}, got.IdentifierUris)
+	assert.Equal(t, []string{"t1"}, got.Tags)
+	require.NotNil(t, got.Web)
+	assert.Equal(t, []string{"https://new/cb"}, got.Web.RedirectUris)
+	assert.Equal(t, "https://new/logout", got.Web.LogoutURL)
+	require.NotNil(t, got.Spa)
+	assert.Equal(t, []string{"https://spa/cb"}, got.Spa.RedirectUris)
+}
+
+func TestSet_RejectsUnapplicableFieldsWithoutGraphCalls(t *testing.T) {
+	cases := map[string]map[string]interface{}{
+		"redirect_uris.mobile":            {"redirect_uris": map[string]interface{}{"mobile": []interface{}{"x://cb"}}},
+		"redirect_uris.desktop":           {"redirect_uris": map[string]interface{}{"desktop": []interface{}{"x://cb"}}},
+		"required_resource_access":        {"required_resource_access": []interface{}{map[string]interface{}{"resource_app_id": "r"}}},
+		"oauth2_permissions":              {"oauth2_permissions": []interface{}{map[string]interface{}{"id": "1", "admin_consent_display_name": "a", "value": "v"}}},
+		"app_roles":                       {"app_roles": []interface{}{map[string]interface{}{"display_name": "a", "value": "v", "allowed_member_types": []interface{}{"User"}}}},
+		"optional_claims":                 {"optional_claims": map[string]interface{}{"id_token": []interface{}{map[string]interface{}{"name": "email"}}}},
+		"accept_mapped_claims":            {"accept_mapped_claims": true},
+		"known_client_applications":       {"known_client_applications": []interface{}{"a"}},
+		"pre_authorized_applications":     {"pre_authorized_applications": []interface{}{"a"}},
+		"requested_access_token_version":  {"requested_access_token_version": 2},
+		"publisher_domain":                {"publisher_domain": "example.com"},
+		"create_service_principal":        {"create_service_principal": true},
+		"service_principal_settings":      {"service_principal_settings": map[string]interface{}{"account_enabled": true}},
+		"password_credentials":            {"password_credentials": []interface{}{map[string]interface{}{"display_name": "s", "secret_text": "hunter2-secret"}}},
+		"key_credentials":                 {"key_credentials": []interface{}{map[string]interface{}{"display_name": "k", "key": "KEYMATERIAL"}}},
+		"managed app_roles (empty)":       {"managed_fields": []interface{}{"app_roles"}},
+		"managed password_credentials":    {"managed_fields": []interface{}{"password_credentials"}},
+		"managed key_credentials":         {"managed_fields": []interface{}{"key_credentials"}},
+		"managed tags (empty)":            {"managed_fields": []string{"tags"}},
+		"managed identifier_uris (empty)": {"managed_fields": []string{"identifier_uris"}},
+		"managed logout_url (empty)":      {"managed_fields": []string{"logout_url"}},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			m, fg, ap, ctx := setupSetModule(t, map[string]interface{}{
+				"id": "obj-1", "displayName": "App", "signInAudience": "AzureADMyOrg",
+			})
+			err := m.Set(ctx, "m365-t:obj-1", baseStep(extra))
+			require.Error(t, err)
+			field := strings.Fields(strings.TrimPrefix(name, "managed "))[0]
+			assert.Contains(t, err.Error(), field)
+			assert.NotContains(t, err.Error(), "hunter2-secret")
+			assert.NotContains(t, err.Error(), "KEYMATERIAL")
+			assert.Empty(t, fg.recorded(), "no Graph call may be made")
+			assert.Empty(t, ap.requestedTenants(), "no token may be requested")
+		})
+	}
+}
+
+func TestSet_WrongTypeNamesKey(t *testing.T) {
+	for key, val := range map[string]interface{}{
+		"tags": "not-a-list", "identifier_uris": 5, "managed_fields": []interface{}{1},
+		"logout_url": 3, "redirect_uris": "x", "accept_mapped_claims": "yes",
+	} {
+		t.Run(key, func(t *testing.T) {
+			m, fg, ap, ctx := setupSetModule(t, nil)
+			err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{key: val}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+			assert.Empty(t, fg.recorded(), "no Graph call may be made")
+			assert.Empty(t, ap.requestedTenants(), "no token may be requested")
+		})
+	}
 }
