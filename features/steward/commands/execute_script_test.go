@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -1170,6 +1171,46 @@ func TestExecuteScriptHandler_InlineScript_NoCARoots_Refused(t *testing.T) {
 			_, statErr := os.Stat(marker)
 			require.True(t, os.IsNotExist(statErr), "script must not run without controller CA roots")
 			require.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
+		})
+	}
+}
+
+// TestExecuteScriptHandler_InlineScript_ExecutionContextBoundToSignature proves the
+// delivered execution_context must match the one the operator signed.
+func TestExecuteScriptHandler_InlineScript_ExecutionContextBoundToSignature(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	content := []byte(echoScriptBody("ctx"))
+
+	tests := []struct {
+		name      string
+		signed    string
+		delivered interface{} // nil = absent
+		wantErr   bool
+	}{
+		{"match", "logged_in_user", "logged_in_user", false},
+		{"delivered system", "logged_in_user", "system", true},
+		{"delivered absent", "logged_in_user", nil, true},
+		{"delivered other", "logged_in_user", "root", true},
+		{"signed empty delivered system", "", "system", true},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandlerWithSigning(t, nil, true, caPool)
+			h.RegisterExecuteScriptHandler()
+			params := signedContextParams(t, signer, content, platformShell(), tc.signed)
+			id := fmt.Sprintf("sig-exec-ctx-%d", i)
+			params["execution_id"] = id
+			if tc.delivered != nil {
+				params["execution_context"] = tc.delivered
+			}
+			err := h.HandleCommand(context.Background(), testSignedCommandWithParams(id, cpTypes.CommandExecuteScript, params))
+			h.Wait()
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }
