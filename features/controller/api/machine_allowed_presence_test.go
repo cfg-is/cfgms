@@ -100,10 +100,11 @@ func TestMachineAllowed_APIKeyWithoutPermissionForbidden(t *testing.T) {
 }
 
 // AllowMachine is a code-only opt-in: a permission without it still refuses API keys.
-func TestMachineAllowed_OnlyTheFourInstallerPermissions(t *testing.T) {
+func TestMachineAllowed_OnlyTheInstallerPermissionsAndConfigPush(t *testing.T) {
 	want := map[string]bool{
 		"installer:upload": true, "installer:delete": true,
 		"installer:publish:steward": true, "installer:dispatch:steward": true,
+		"config:push": true, // Issue #5419: scoped API keys keep pushing config
 	}
 	for perm, req := range permissionAssurance {
 		assert.Equal(t, want[perm], req.AllowMachine, "AllowMachine on %q", perm)

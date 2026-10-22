@@ -78,7 +78,7 @@ var permissionAssurance = map[string]Requirement{
 	"tenant:crossing-break-glass":         {Min: session.AssuranceStrong},                            // POST /tenants/{id}/break-glass
 	"tenant:crossing-approve-break-glass": {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/break-glass/{crossing_id}/approve
 	"refresh:approve":                     {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/approve
-	"refresh:set-policy":                  {Min: session.AssuranceStrong},                            // PUT /tenants/{tenant_path}/refresh-policy
+	"refresh:set-policy":                  {Min: session.AssuranceStrong, RequireUserPresence: true}, // PUT /tenants/{tenant_path}/refresh-policy
 	"steward:move":                        {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
 	"steward:decommission":                {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
 	"steward:rotate-credentials":          {Min: session.AssuranceStrong},                            // POST /stewards/{id}/credentials/rotate (ADR-034 §5)
@@ -270,6 +270,11 @@ var permissionAssurance = map[string]Requirement{
 
 	// Installer and upgrade actions (Issue #5298): a human session needs a per-action passkey
 	// tap; scoped API keys keep working for automation (AllowMachine).
+	// config:push (Issue #5419) gates POST /api/v1/config/push and GET /api/v1/config/push/{id};
+	// both routes share the permission, so a human session needs Strong on both. Scoped API
+	// keys keep working for automation (AllowMachine), with no presence tap.
+	"config:push": {Min: session.AssuranceStrong, AllowMachine: true},
+
 	"installer:upload":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // PUT /installer/artifacts/{platform}/{arch}
 	"installer:delete":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // DELETE /installer/artifacts/{platform}/{arch}
 	"installer:publish:steward": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // steward binary publish (routes_steward_binaries.go)

@@ -982,6 +982,7 @@ func TestHandleSetRefreshPolicy_SetsMode(t *testing.T) {
 	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "auto_accept"})
 	req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, f.server, "test-admin", req, "refresh:set-policy"))
 	rec := httptest.NewRecorder()
 	f.server.router.ServeHTTP(rec, req)
 
@@ -999,6 +1000,7 @@ func TestHandleSetRefreshPolicy_InvalidMode_Returns400(t *testing.T) {
 	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "invalid_mode"})
 	req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, f.server, "test-admin", req, "refresh:set-policy"))
 	rec := httptest.NewRecorder()
 	f.server.router.ServeHTTP(rec, req)
 
