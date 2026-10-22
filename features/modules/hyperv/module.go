@@ -162,6 +162,10 @@ type hypervModule struct {
 	clusterOwnersAt  time.Time
 	clusterOwnersTTL time.Duration
 
+	// storageMoveLocks serialises convergeStorageLocation per VM name so the
+	// move-record check and the dispatch+mark are one atomic step (#5365).
+	storageMoveLocks keyedMutex
+
 	// checkpointDesired maps a VM name to the authored `checkpoints` block last
 	// seen for it, so getVM's compliance echo is policy-aware (#2627). It is
 	// keyed by VM name and mutex-guarded because the factory caches ONE module

@@ -4,6 +4,7 @@ package hyperv
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -536,4 +537,98 @@ func TestNoLocationDrift_NoMoveMachinery(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 	require.Len(t, calls, 1, "converged VM: getVM only — no storage-location machinery")
+}
+
+// blockingMoveTransport answers like a fresh-drift host and blocks inside the
+// psMoveVMStorage dispatch until released, so a concurrent caller provably
+// starts while the first holds the per-VM lock.
+type blockingMoveTransport struct {
+	mu       sync.Mutex
+	moves    int
+	entered  chan struct{}
+	release  chan struct{}
+	enterOne sync.Once
+}
+
+func (b *blockingMoveTransport) ExecutePS(_ context.Context, psCommand string, _ map[string]string) (string, error) {
+	switch psCommand {
+	case psGetVMMoveError:
+		return `{"error":""}`, nil
+	case psVMStorageMovePreflight:
+		return `{"required_bytes":1073741824,"free_bytes":269386489856}`, nil
+	case psMoveVMStorage:
+		b.mu.Lock()
+		b.moves++
+		b.mu.Unlock()
+		b.enterOne.Do(func() { close(b.entered) })
+		<-b.release
+	}
+	return "", nil
+}
+
+// TestConvergeStorageLocation_ConcurrentCallsDispatchOnce is the [REQUIRED TEST]
+// for the per-VM check-and-mark atomicity (#5365): N concurrent callers for the
+// same drifted VM produce exactly one Move-VMStorage dispatch; the rest see
+// the moving record and return proceed=false.
+func TestConvergeStorageLocation_ConcurrentCallsDispatchOnce(t *testing.T) {
+	const home = `C:\ClusterStorage\CSV01\mv9`
+	const n = 8
+	transport := &blockingMoveTransport{entered: make(chan struct{}), release: make(chan struct{})}
+	m := vmModuleWithTransport(transport, "t")
+
+	desired := &VMConfig{VHDPath: home + `\mv9.vhdx`}
+	current := &VMConfig{VHDPath: `C:\VMs\mv9.vhdx`, ConfigLocation: `C:\VMs\mv9`}
+
+	type result struct {
+		proceed bool
+		err     error
+	}
+	results := make(chan result, n)
+	var started sync.WaitGroup
+	started.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			started.Done()
+			p, err := m.convergeStorageLocation(context.Background(), "mv9", "mv9", desired, current)
+			results <- result{p, err}
+		}()
+	}
+
+	<-transport.entered // first caller is inside the dispatch, holding the lock
+	started.Wait()      // every other goroutine has been launched
+	time.Sleep(50 * time.Millisecond)
+	close(transport.release)
+
+	for i := 0; i < n; i++ {
+		r := <-results
+		require.NoError(t, r.err)
+		assert.False(t, r.proceed, "a drifted VM defers the rest of the cycle")
+	}
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Equal(t, 1, transport.moves, "exactly one Move-VMStorage dispatch")
+
+	rec, err := m.moveStore().GetMove(context.Background(), "mv9")
+	require.NoError(t, err)
+	assert.Equal(t, MoveStateMoving, rec.State)
+}
+
+func TestKeyedMutex_DifferentKeysDoNotBlock(t *testing.T) {
+	var k keyedMutex
+	unlockA := k.lock("a")
+	done := make(chan struct{})
+	go func() {
+		k.lock("b")()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock for a different key blocked")
+	}
+	unlockA()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	assert.Empty(t, k.locks, "entries are released when unused")
 }
