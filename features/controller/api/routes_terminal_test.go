@@ -294,6 +294,9 @@ type wsNode struct {
 	// credRecheck, when set, is carried in the request context as the re-check of an
 	// API-key or admin-certificate principal.
 	credRecheck authRecheck
+	// refresh, when set, replaces the default principal refresh (which returns the
+	// connecting principal unchanged).
+	refresh principalRefresh
 }
 
 func newWSNode(t *testing.T) *wsNode {
@@ -341,6 +344,11 @@ func (n *wsNode) connect(p *Principal, stewardID, webSession, protocols string, 
 	if n.credRecheck != nil {
 		req = req.WithContext(context.WithValue(req.Context(), authRecheckContextKey, n.credRecheck))
 	}
+	refresh := n.refresh
+	if refresh == nil {
+		refresh = func(context.Context) (*Principal, bool) { cp := *p; return &cp, true }
+	}
+	req = req.WithContext(context.WithValue(req.Context(), principalRefreshContextKey, refresh))
 	rec := httptest.NewRecorder()
 	n.router.ServeHTTP(rec, req)
 	return rec
@@ -516,4 +524,46 @@ func TestTerminalWS_NoRecheckRefused(t *testing.T) {
 	assert.Equal(t, "TERMINAL_RECHECK_UNAVAILABLE", errorCode(t, rec))
 	assert.Equal(t, 1, ticketCount(n.server), "a refused request must not burn the ticket")
 	assert.Zero(t, n.reached, "the handler must not run without a re-check")
+}
+
+// Ending the ADR-025 crossing that admitted a root caller to a client tenant's steward
+// ends an open relay on the next re-check, and so does removing terminal:create.
+func TestTerminalWS_RecheckFollowsCrossingAndPermission(t *testing.T) {
+	t.Run("crossing ended", func(t *testing.T) {
+		n := newWSNode(t)
+		wireCrossingStore(t, n.server)
+		require.NoError(t, ensureTestRootTenant(context.Background(), n.server.tenantManager))
+		now := time.Now().UTC()
+		require.NoError(t, n.server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+			ID: "grant-terminal-recheck", TenantID: saTenant, Kind: business.TenantCrossingKindGrant,
+			GrantedBy: "msp-a-admin", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}))
+
+		tk := n.seed("root-op", ttSteward, "")
+		require.Equal(t, http.StatusSwitchingProtocols, n.connect(rootScopedPrincipal("root-op"), ttSteward, "", ticketProtocols(tk), "").Code)
+		require.NotNil(t, n.recheck)
+		assert.True(t, n.recheck(context.Background()), "an active crossing keeps the relay open")
+
+		require.NoError(t, n.server.tenantCrossingStore.RevokeTenantCrossing(context.Background(), "grant-terminal-recheck"))
+		assert.False(t, n.recheck(context.Background()), "an ended crossing must end the relay")
+	})
+
+	t.Run("terminal:create removed", func(t *testing.T) {
+		n := newWSNode(t)
+		perm := true
+		n.refresh = func(context.Context) (*Principal, bool) {
+			p := &Principal{ID: "op-1", TenantID: saTenant, Assurance: session.AssuranceStrong}
+			if perm {
+				p.Permissions = []string{"terminal:create"}
+			}
+			return p, true
+		}
+		tk := n.seed("op-1", ttSteward, "")
+		require.Equal(t, http.StatusSwitchingProtocols, n.connect(actionPrincipal("op-1"), ttSteward, "", ticketProtocols(tk), "").Code)
+		require.NotNil(t, n.recheck)
+		assert.True(t, n.recheck(context.Background()))
+
+		perm = false
+		assert.False(t, n.recheck(context.Background()), "removing terminal:create must end the relay")
+	})
 }
