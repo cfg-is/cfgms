@@ -674,7 +674,7 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 	// are gated by the writer's ClusterMembership verifier (SE threat #1, see
 	// WithEntityGraph).
 	if h.egWriter != nil && h.egTaxonomy != nil {
-		if egErr := h.egWriter.WriteFragmentDelta(ctx, peerID, receivedFragments, nil, h.egTaxonomy); egErr != nil {
+		if egErr := h.egWriter.WriteFragmentsPartial(ctx, peerID, receivedFragments, nil, h.egTaxonomy); egErr != nil {
 			h.logger.Warn("entity-graph write failed for delta; manifest committed, graph may lag",
 				"peer_id", safePeerID, "error", logging.SanitizeLogValue(egErr.Error()))
 		}

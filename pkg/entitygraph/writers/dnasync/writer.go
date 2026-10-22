@@ -30,13 +30,16 @@
 //
 // # Entry points
 //
-// The package has two write entry points, and the difference between them is what
+// The package has three write entry points, and the difference between them is what
 // each one claims about completeness:
 //
 //   - WriteFragmentDelta (writer.go) ingests a steward's fragment set as
-//     ObservationKindState. A fragment set is a COMPLETE statement of what the peer
-//     currently reports, so the batch carries a host-scoped ClaimScope and any prior
-//     subject missing from it is retracted.
+//     ObservationKindState. The caller asserts the set is COMPLETE, so the batch
+//     carries a host-scoped ClaimScope (plus edge scopes) and any prior subject or
+//     edge missing from it is retracted.
+//   - WriteFragmentsPartial (writer.go) ingests the same observations for a SUBSET
+//     of the peer's fragments, such as a partial delta sync. It carries NO
+//     ClaimScope and is additive only, so unchanged fragments are not retracted.
 //   - WriteDriftDiffs (driftdiff.go) ingests managed-resource drift-diff records as
 //     ObservationKindDriftDiff (ADR-022 §6). A drift-diff batch is a PARTIAL statement
 //     covering only the resources that drifted this cycle, so it carries NO ClaimScope
@@ -132,12 +135,47 @@ func New(provider interfaces.EntityGraphProvider, opts ...Option) (*Writer, erro
 // The envelopes map is keyed by fragment_id and carries per-fragment provenance
 // metadata (confidence, observed_at). It may be nil when the caller has no
 // envelope data (e.g., the partial-sync delta path).
+//
+// WriteFragmentDelta is the COMPLETE-set entry point: the caller asserts that
+// fragments is every fragment the peer currently reports, so the batch carries a
+// host-scoped ClaimScope (and per-(source, edge type) scopes for edge declarations)
+// and anything previously written under those scopes but absent here is retracted.
+// Callers that hold only a subset must use WriteFragmentsPartial.
 func (w *Writer) WriteFragmentDelta(
 	ctx context.Context,
 	peerHostAuthority string,
 	fragments []*commonpb.Fragment,
 	envelopes map[string]*commonpb.FragmentEnvelope,
 	taxonomy *types.Taxonomy,
+) error {
+	return w.writeFragments(ctx, peerHostAuthority, fragments, envelopes, taxonomy, true)
+}
+
+// WriteFragmentsPartial ingests a subset of a peer's fragments, such as the
+// fragments a partial delta sync asked for while every other stored fragment is
+// unchanged. It builds observations, EIDs, tenant binding and edge caps exactly as
+// WriteFragmentDelta does, but the batch carries NO ClaimScope: it is additive only
+// and makes no statement about fragments or edges absent from it, so nothing
+// unchanged is retracted.
+func (w *Writer) WriteFragmentsPartial(
+	ctx context.Context,
+	peerHostAuthority string,
+	fragments []*commonpb.Fragment,
+	envelopes map[string]*commonpb.FragmentEnvelope,
+	taxonomy *types.Taxonomy,
+) error {
+	return w.writeFragments(ctx, peerHostAuthority, fragments, envelopes, taxonomy, false)
+}
+
+// writeFragments is the shared implementation. complete reports whether fragments
+// is the peer's complete current set; only then are claim scopes attached.
+func (w *Writer) writeFragments(
+	ctx context.Context,
+	peerHostAuthority string,
+	fragments []*commonpb.Fragment,
+	envelopes map[string]*commonpb.FragmentEnvelope,
+	taxonomy *types.Taxonomy,
+	complete bool,
 ) error {
 	if len(fragments) == 0 {
 		return nil
@@ -277,19 +315,24 @@ func (w *Writer) WriteFragmentDelta(
 		AuthenticatedPeer: peerHostAuthority,
 	}
 
-	// Host-scoped fragments get a ClaimScope: "peerHostAuthority has reported
-	// its complete current fragment set under host:<peerHostAuthority>". This
-	// lets #2874's retraction logic drop fragments this steward no longer reports.
+	// A complete write (WriteFragmentDelta) gives host-scoped fragments a
+	// ClaimScope: "peerHostAuthority has reported its complete current fragment set
+	// under host:<peerHostAuthority>". This lets #2874's retraction logic drop
+	// fragments this steward no longer reports. A partial write
+	// (WriteFragmentsPartial) claims nothing about completeness and attaches no
+	// scope, host or edge, so unchanged fragments are never retracted.
 	// Cluster-scoped fragments (bare cluster-kind and cluster-scoped VMs) deliberately
 	// omit a ClaimScope: a single node's view is not the complete picture for a
 	// shared multi-observer entity.
-	if hostClaimScope != nil {
-		hostClaimScope.AsOf = now
-		batch.ClaimScopes = []types.ClaimScope{*hostClaimScope}
-	}
-	for i := range edgeClaimScopes {
-		edgeClaimScopes[i].AsOf = now
-		batch.ClaimScopes = append(batch.ClaimScopes, edgeClaimScopes[i])
+	if complete {
+		if hostClaimScope != nil {
+			hostClaimScope.AsOf = now
+			batch.ClaimScopes = []types.ClaimScope{*hostClaimScope}
+		}
+		for i := range edgeClaimScopes {
+			edgeClaimScopes[i].AsOf = now
+			batch.ClaimScopes = append(batch.ClaimScopes, edgeClaimScopes[i])
+		}
 	}
 
 	return w.provider.ReportObservations(ctx, batch)

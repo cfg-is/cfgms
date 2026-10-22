@@ -1107,3 +1107,48 @@ func TestEdgeCap_ResendOfSameTypeNotCountedAgainstSubjectTotal(t *testing.T) {
 	require.Len(t, edges, dnasync.MaxEdgesPerFragmentForTest)
 	assert.Contains(t, edges[0].Edge.To.String(), "cluster:r7-")
 }
+
+// TestWriteFragmentsPartial_EdgesOfAbsentFragmentRetained verifies that edges
+// declared by a fragment absent from a later partial write survive, while a later
+// complete write that omits an edge still retracts it.
+func TestWriteFragmentsPartial_EdgesOfAbsentFragmentRetained(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+	const peer = "partial-edge-node"
+
+	vmA := makeFragWithEdges("vm:vm-a", "observer:hyperv",
+		map[string]string{"state": "running"},
+		[]interface{}{
+			map[string]interface{}{"type": "connects-to", "to": "vswitch:sw1"},
+			map[string]interface{}{"type": "connects-to", "to": "vswitch:sw2"},
+		})
+	vmB := makeFragWithEdges("vm:vm-b", "observer:hyperv",
+		map[string]string{"state": "running"},
+		[]interface{}{
+			map[string]interface{}{"type": "connects-to", "to": "vswitch:sw3"},
+		})
+	require.NoError(t, w.WriteFragmentDelta(ctx, peer,
+		[]*commonpb.Fragment{vmA, vmB}, nil, types.DefaultTaxonomy()))
+
+	fromA := "host:" + peer + "/vm:vm-a"
+	fromB := "host:" + peer + "/vm:vm-b"
+	require.Len(t, outboundEdges(t, p, fromA), 2)
+	require.Len(t, outboundEdges(t, p, fromB), 1)
+
+	// Partial write with only vm-a: vm-b's edge must remain.
+	require.NoError(t, w.WriteFragmentsPartial(ctx, peer,
+		[]*commonpb.Fragment{vmA}, nil, types.DefaultTaxonomy()))
+	require.Len(t, outboundEdges(t, p, fromA), 2)
+	require.Len(t, outboundEdges(t, p, fromB), 1, "edge of absent fragment must survive a partial write")
+
+	// Complete write omitting sw2: that edge is retracted.
+	vmA2 := makeFragWithEdges("vm:vm-a", "observer:hyperv",
+		map[string]string{"state": "running"},
+		[]interface{}{
+			map[string]interface{}{"type": "connects-to", "to": "vswitch:sw1"},
+		})
+	require.NoError(t, w.WriteFragmentDelta(ctx, peer,
+		[]*commonpb.Fragment{vmA2}, nil, types.DefaultTaxonomy()))
+	require.Len(t, outboundEdges(t, p, fromA), 1, "complete write must retract the omitted edge")
+}
