@@ -3,6 +3,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -168,9 +169,14 @@ func (m *manager) loadFromStore(ctx context.Context, hash string) *managedSessio
 // The check fails closed: a store error is never proof the session is still live.
 // The caller must hold ms.mu.
 func (m *manager) verifyInStore(ctx context.Context, hash string, ms *managedSession) error {
-	_, err := m.store.Get(ctx, hash)
+	stored, err := m.store.Get(ctx, hash)
 	if err == nil {
-		return nil
+		if hash == ms.prevHash {
+			// A grace-window token's row predates the rotation; it holds older
+			// values for mutable and set-once fields, so nothing is merged from it.
+			return nil
+		}
+		return mergeStored(ms, stored)
 	}
 	if !errors.Is(err, ErrSessionNotFound) && !errors.Is(err, ErrSessionRevoked) {
 		return fmt.Errorf("session: verify store record: %w", err)
@@ -182,6 +188,35 @@ func (m *manager) verifyInStore(ctx context.Context, hash string, ms *managedSes
 	}
 	ms.revoked = true
 	return ErrSessionRevoked
+}
+
+// mergeStored folds the mutable fields another node may have committed under the
+// same token into ms's cached session, so a later decision or write-back never
+// overwrites them with a stale copy. Immutable fields are never merged; a stored row
+// whose immutable fields differ from the cached ones fails with ErrSessionNotFound.
+// Assurance, CredentialID, BoundIP and LastProvenAt are taken from the store as a
+// unit and LastActivity as the later of the two.
+// The caller must hold ms.mu.
+func mergeStored(ms *managedSession, stored *Session) error {
+	cur := ms.session
+	if stored == nil {
+		return nil
+	}
+	if stored.ID != cur.ID || stored.PrincipalID != cur.PrincipalID ||
+		stored.TenantID != cur.TenantID || !stored.IssuedAt.Equal(cur.IssuedAt) ||
+		!stored.AbsoluteExpiresAt.Equal(cur.AbsoluteExpiresAt) ||
+		!bytes.Equal(stored.LoginCredentialID, cur.LoginCredentialID) ||
+		stored.RootScoped != cur.RootScoped || stored.Channel != cur.Channel {
+		return ErrSessionNotFound
+	}
+	cur.Assurance = stored.Assurance
+	cur.CredentialID = append([]byte(nil), stored.CredentialID...)
+	cur.BoundIP = stored.BoundIP
+	cur.LastProvenAt = stored.LastProvenAt
+	if stored.LastActivity.After(cur.LastActivity) {
+		cur.LastActivity = stored.LastActivity
+	}
+	return nil
 }
 
 // updateStore writes ms's session under hash to an existing store record. When the

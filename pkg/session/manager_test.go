@@ -1484,3 +1484,141 @@ func TestManagerGetByIDCacheHitFailClosedOnStoreError(t *testing.T) {
 		t.Fatalf("GetByID after recovery: %v", err)
 	}
 }
+
+// twoNodeStrongSession sets up two managers sharing one store, with a strong session
+// issued and elevated on node A and cached on node B, then downgraded by node A via a
+// source-IP change. It returns the managers, store, the current token and the clock.
+func twoNodeStrongSession(t *testing.T) (a, b session.Manager, store *session.MemStore, token string) {
+	t.Helper()
+	cfg := session.DefaultConfig()
+	clock := &fakeClock{t: time.Now()}
+	store = session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(store.Close)
+	a = session.NewManager(cfg, store, clock.Now)
+	b = session.NewManager(cfg, store, clock.Now)
+	ctx := context.Background()
+
+	sess, tok, err := a.Issue(ctx, "alice", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_, token, err = a.Elevate(ctx, sess.ID, []byte("cred-1"), "10.0.0.1")
+	if err != nil {
+		t.Fatalf("Elevate: %v", err)
+	}
+	_ = tok
+	if _, err := b.Validate(session.WithSourceIP(ctx, "10.0.0.1"), token); err != nil {
+		t.Fatalf("B Validate (populate cache): %v", err)
+	}
+	got, err := a.Validate(session.WithSourceIP(ctx, "10.9.9.9"), token)
+	if err != nil {
+		t.Fatalf("A Validate from new IP: %v", err)
+	}
+	if got.Assurance != session.AssuranceBasic {
+		t.Fatalf("A session assurance = %v, want Basic", got.Assurance)
+	}
+	return a, b, store, token
+}
+
+func TestValidateCacheHitMergesStoredDowngrade(t *testing.T) {
+	_, b, store, token := twoNodeStrongSession(t)
+	ctx := session.WithSourceIP(context.Background(), "10.0.0.1")
+
+	got, err := b.Validate(ctx, token)
+	if err != nil {
+		t.Fatalf("B Validate: %v", err)
+	}
+	if got.Assurance != session.AssuranceBasic {
+		t.Errorf("B returned assurance = %v, want Basic", got.Assurance)
+	}
+	row, err := store.Get(ctx, session.HashToken(token))
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if row.Assurance != session.AssuranceBasic || !row.LastProvenAt.IsZero() {
+		t.Errorf("stored row assurance=%v LastProvenAt=%v, want Basic and zero", row.Assurance, row.LastProvenAt)
+	}
+}
+
+func TestRenewCacheHitMergesStoredDowngrade(t *testing.T) {
+	_, b, store, token := twoNodeStrongSession(t)
+	ctx := session.WithSourceIP(context.Background(), "10.0.0.1")
+
+	got, newToken, err := b.Renew(ctx, token)
+	if err != nil {
+		t.Fatalf("B Renew: %v", err)
+	}
+	if newToken == "" {
+		t.Fatal("Renew returned no new token")
+	}
+	if got.Assurance != session.AssuranceBasic {
+		t.Errorf("B returned assurance = %v, want Basic", got.Assurance)
+	}
+	row, err := store.Get(ctx, session.HashToken(newToken))
+	if err != nil {
+		t.Fatalf("store.Get new token: %v", err)
+	}
+	if row.Assurance != session.AssuranceBasic || !row.LastProvenAt.IsZero() {
+		t.Errorf("rotated row assurance=%v LastProvenAt=%v, want Basic and zero", row.Assurance, row.LastProvenAt)
+	}
+}
+
+// TestCacheHitRejectsStoredImmutableMismatch covers the mergeStored error path: when
+// the durable row under the presented token carries immutable fields that differ from
+// the cached session, Validate and Renew must refuse it with ErrSessionNotFound and
+// must not fold any of the row's fields into the cached session.
+func TestCacheHitRejectsStoredImmutableMismatch(t *testing.T) {
+	mutations := map[string]func(s *session.Session){
+		"ID":                func(s *session.Session) { s.ID = "other-session-id" },
+		"PrincipalID":       func(s *session.Session) { s.PrincipalID = "mallory" },
+		"TenantID":          func(s *session.Session) { s.TenantID = "other-tenant" },
+		"IssuedAt":          func(s *session.Session) { s.IssuedAt = s.IssuedAt.Add(-time.Hour) },
+		"AbsoluteExpiresAt": func(s *session.Session) { s.AbsoluteExpiresAt = s.AbsoluteExpiresAt.Add(time.Hour) },
+		"LoginCredentialID": func(s *session.Session) { s.LoginCredentialID = []byte("cred-other") },
+		"RootScoped":        func(s *session.Session) { s.RootScoped = !s.RootScoped },
+		"Channel":           func(s *session.Session) { s.Channel = s.Channel + "-other" },
+	}
+	ops := map[string]func(m session.Manager, ctx context.Context, token string) error{
+		"Validate": func(m session.Manager, ctx context.Context, token string) error {
+			_, err := m.Validate(ctx, token)
+			return err
+		},
+		"Renew": func(m session.Manager, ctx context.Context, token string) error {
+			_, _, err := m.Renew(ctx, token)
+			return err
+		},
+	}
+	for opName, op := range ops {
+		for field, mutate := range mutations {
+			t.Run(opName+"/"+field, func(t *testing.T) {
+				_, b, store, token := twoNodeStrongSession(t)
+				ctx := session.WithSourceIP(context.Background(), "10.0.0.1")
+				hash := session.HashToken(token)
+
+				row, err := store.Get(ctx, hash)
+				if err != nil {
+					t.Fatalf("store.Get: %v", err)
+				}
+				// Change a mutable field alongside the immutable one so a partial
+				// merge into the cache would be observable afterwards.
+				row.BoundIP = "10.7.7.7"
+				mutate(row)
+				if err := store.Set(ctx, hash, row); err != nil {
+					t.Fatalf("store.Set: %v", err)
+				}
+
+				if err := op(b, ctx, token); !errors.Is(err, session.ErrSessionNotFound) {
+					t.Fatalf("%s with mismatched %s = %v, want ErrSessionNotFound", opName, field, err)
+				}
+
+				after, err := store.Get(ctx, hash)
+				if err != nil {
+					t.Fatalf("store.Get after %s: %v", opName, err)
+				}
+				if after.BoundIP != "10.7.7.7" {
+					t.Errorf("stored row BoundIP = %q after rejected %s, want untouched 10.7.7.7", after.BoundIP, opName)
+				}
+			})
+		}
+	}
+}
