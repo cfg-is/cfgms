@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -200,6 +201,12 @@ func (m *hypervModule) convergeStorageLocation(ctx context.Context, vmName, host
 	if home == "" {
 		return true, nil
 	}
+
+	// Hold the per-VM lock from the record read until the moving record is
+	// persisted (or the attempt fails), so concurrent callers for the same VM
+	// (monitor reconcile and setVM) cannot both dispatch Move-VMStorage.
+	unlock := m.storageMoveLocks.lock(vmName)
+	defer unlock()
 
 	store := m.moveStore()
 	record, err := store.GetMove(ctx, vmName)
@@ -489,3 +496,42 @@ var (
 	_ MoveStore = (*memProvisionStore)(nil)
 	_ MoveStore = (*ConfigBackedProvisionStore)(nil)
 )
+
+// keyedMutex is a set of mutexes keyed by name; the zero value is ready to use.
+// Locks for different keys never block each other. Entries are reference
+// counted and removed when unused, so the map does not grow with VM churn.
+type keyedMutex struct {
+	mu    sync.Mutex
+	locks map[string]*keyedMutexEntry
+}
+
+type keyedMutexEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lock acquires the mutex for key and returns the function that releases it.
+func (k *keyedMutex) lock(key string) func() {
+	k.mu.Lock()
+	if k.locks == nil {
+		k.locks = make(map[string]*keyedMutexEntry)
+	}
+	e, ok := k.locks[key]
+	if !ok {
+		e = &keyedMutexEntry{}
+		k.locks[key] = e
+	}
+	e.refs++
+	k.mu.Unlock()
+
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		k.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(k.locks, key)
+		}
+		k.mu.Unlock()
+	}
+}
