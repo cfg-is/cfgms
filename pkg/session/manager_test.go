@@ -1388,3 +1388,99 @@ func TestRevokeAllForPrincipal_DeleteError(t *testing.T) {
 		t.Errorf("s1 after failed delete: GetByID = %v, want nil (session still present)", gotErr)
 	}
 }
+
+// failingStore wraps a real Store and returns injected errors from Get / GetByID
+// while the matching flag is set.
+type failingStore struct {
+	session.Store
+	mu         sync.Mutex
+	getErr     error
+	getByIDErr error
+}
+
+func (f *failingStore) setErrors(get, byID error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getErr, f.getByIDErr = get, byID
+}
+
+func (f *failingStore) Get(ctx context.Context, hash string) (*session.Session, error) {
+	f.mu.Lock()
+	err := f.getErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.Store.Get(ctx, hash)
+}
+
+func (f *failingStore) GetByID(ctx context.Context, id string) (*session.Session, error) {
+	f.mu.Lock()
+	err := f.getByIDErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.Store.GetByID(ctx, id)
+}
+
+func newFailingManager(t *testing.T) (session.Manager, *failingStore) {
+	t.Helper()
+	cfg := session.Config{IdleTimeout: 5 * time.Minute, AbsoluteTimeout: time.Hour, GraceWindow: 30 * time.Second}
+	clock := &fakeClock{t: time.Now()}
+	mem := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(mem.Close)
+	fs := &failingStore{Store: mem}
+	return session.NewManager(cfg, fs, clock.Now), fs
+}
+
+func TestManagerValidateRenewFailClosedOnStoreError(t *testing.T) {
+	mgr, fs := newFailingManager(t)
+	ctx := context.Background()
+	_, token, err := mgr.Issue(ctx, "alice", "my-ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := mgr.Validate(ctx, token); err != nil {
+		t.Fatalf("Validate (cached): %v", err)
+	}
+
+	injected := errors.New("store unreachable")
+	fs.setErrors(injected, nil)
+	if _, err := mgr.Validate(ctx, token); !errors.Is(err, injected) {
+		t.Fatalf("Validate err = %v, want injected store error", err)
+	}
+	if _, _, err := mgr.Renew(ctx, token); !errors.Is(err, injected) {
+		t.Fatalf("Renew err = %v, want injected store error", err)
+	}
+
+	// A transient error must not have revoked the session in memory.
+	fs.setErrors(nil, nil)
+	if _, err := mgr.Validate(ctx, token); err != nil {
+		t.Fatalf("Validate after recovery: %v", err)
+	}
+}
+
+func TestManagerGetByIDCacheHitFailClosedOnStoreError(t *testing.T) {
+	mgr, fs := newFailingManager(t)
+	ctx := context.Background()
+	sess, token, err := mgr.Issue(ctx, "alice", "my-ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := mgr.Validate(ctx, token); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	injected := errors.New("store unreachable")
+	fs.setErrors(nil, injected)
+	got, err := mgr.GetByID(ctx, sess.ID)
+	if !errors.Is(err, injected) || got != nil {
+		t.Fatalf("GetByID = (%v, %v), want (nil, injected store error)", got, err)
+	}
+
+	fs.setErrors(nil, nil)
+	if _, err := mgr.GetByID(ctx, sess.ID); err != nil {
+		t.Fatalf("GetByID after recovery: %v", err)
+	}
+}
