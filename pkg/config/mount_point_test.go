@@ -3,6 +3,10 @@
 package config
 
 import (
+	"context"
+	"errors"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,4 +234,101 @@ func TestCheckCredentialBinding(t *testing.T) {
 		require.Error(t, err, name)
 		assert.NotContains(t, err.Error(), tokenValue, name)
 	}
+}
+
+// fakeResolver is a network-free HostResolver for tests.
+type fakeResolver struct {
+	addrs []net.IPAddr
+	err   error
+	block bool
+}
+
+func (f *fakeResolver) LookupIPAddr(ctx context.Context, _ string) ([]net.IPAddr, error) {
+	if f.block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return f.addrs, f.err
+}
+
+func ipAddrs(ips ...string) []net.IPAddr {
+	out := make([]net.IPAddr, 0, len(ips))
+	for _, s := range ips {
+		out = append(out, net.IPAddr{IP: net.ParseIP(s)})
+	}
+	return out
+}
+
+// publicTestResolver answers a public documentation address for every name.
+func publicTestResolver() HostResolver {
+	return &fakeResolver{addrs: ipAddrs("203.0.113.10")}
+}
+
+func TestValidateSourceURLWithResolver_BlockedAnswers(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1", "169.254.169.254", "10.1.2.3", "::1",
+		"100.100.100.200", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "255.255.255.255",
+		"::ffff:127.0.0.1", "224.0.0.1", "ff02::1", "198.18.0.1", "192.0.0.8", "::7f00:1",
+	}
+	for _, ip := range blocked {
+		t.Run(ip, func(t *testing.T) {
+			err := ValidateSourceURLWithResolver(context.Background(), "https://git.acme-corp.example/r", &fakeResolver{addrs: ipAddrs(ip)})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), ip)
+		})
+	}
+	t.Run("mixed public and blocked", func(t *testing.T) {
+		err := ValidateSourceURLWithResolver(context.Background(), "https://git.acme-corp.example/r",
+			&fakeResolver{addrs: ipAddrs("203.0.113.10", "169.254.169.254")})
+		require.Error(t, err)
+	})
+}
+
+func TestValidateSourceURLWithResolver_PublicAdmitted(t *testing.T) {
+	for _, ip := range []string{"203.0.113.10", "2606:4700:4700::1111"} {
+		require.NoError(t, ValidateSourceURLWithResolver(context.Background(), "https://git.acme-corp.example/r", &fakeResolver{addrs: ipAddrs(ip)}), ip)
+	}
+	require.NoError(t, ValidateSourceURLWithResolver(context.Background(), "https://cafe.example/r", publicTestResolver()))
+}
+
+func TestValidateSourceURLWithResolver_FailsClosed(t *testing.T) {
+	const raw = "https://git.acme-corp.example/r"
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadline, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	cases := map[string]struct {
+		ctx context.Context
+		r   HostResolver
+	}{
+		"error":     {context.Background(), &fakeResolver{err: errors.New("lookup failed for 203.0.113.99")}},
+		"empty":     {context.Background(), &fakeResolver{}},
+		"timeout":   {deadline, &fakeResolver{block: true}},
+		"cancelled": {cancelled, &fakeResolver{block: true}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateSourceURLWithResolver(tc.ctx, raw, tc.r)
+			require.Error(t, err)
+			assert.False(t, strings.Contains(err.Error(), "203.0.113"), "no address in error: %v", err)
+		})
+	}
+}
+
+func TestValidateSourceURL_NonCanonicalNumericHosts(t *testing.T) {
+	restore := UseHostResolverForTesting(publicTestResolver())
+	defer restore()
+	for _, h := range []string{"2130706433", "0177.0.0.1", "0x7f.1", "127.000.000.001", "0x7f.0x0.0x0.0x1"} {
+		require.Error(t, ValidateSourceURL("https://"+h+"/r"), h)
+		_, err := ParseConfigSource(map[string]string{MetaKeyConfigSourceType: "git", MetaKeyConfigSourceURL: "https://" + h + "/r"})
+		require.Error(t, err, h)
+	}
+	require.Error(t, ValidateSourceURL("https://[::ffff:127.0.0.1]/r"))
+}
+
+func TestParseConfigSource_DoesNotResolve(t *testing.T) {
+	restore := UseHostResolverForTesting(&fakeResolver{err: errors.New("must not be called")})
+	defer restore()
+	_, err := ParseConfigSource(map[string]string{MetaKeyConfigSourceType: "git", MetaKeyConfigSourceURL: "https://git.acme-corp.example/r"})
+	require.NoError(t, err)
 }

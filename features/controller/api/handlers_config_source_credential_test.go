@@ -26,8 +26,22 @@ const ccTestToken = "ghp_Qx7-credential-token-9921"
 var ccRoutePut = m365Route{http.MethodPut, "/config-source/credential", "tenant", "manage",
 	func(s *Server) http.HandlerFunc { return s.handlePutTenantConfigSourceCredential }}
 
+// ccUsePublicResolver makes every host name resolve to a public documentation address,
+// so admission performs no real DNS lookup.
+func ccUsePublicResolver(t *testing.T) {
+	t.Helper()
+	t.Cleanup(cfgpkg.UseHostResolverForTesting(ccPublicResolver{}))
+}
+
+type ccPublicResolver struct{}
+
+func (ccPublicResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}}, nil
+}
+
 func ccPut(t *testing.T, env *m365Env, id, url, token string) *httptest.ResponseRecorder {
 	t.Helper()
+	ccUsePublicResolver(t)
 	return m365Do(t, env.server, m365AdminPrincipal(), ccRoutePut, id, map[string]interface{}{"url": url, "token": token})
 }
 
@@ -42,6 +56,7 @@ func ccStored(t *testing.T, env *m365Env, id string) *secretsif.Secret {
 // a caller presenting wantToken as the basic-auth password.
 func ccGitServer(t *testing.T, wantToken string) string {
 	t.Helper()
+	ccUsePublicResolver(t)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pw, ok := r.BasicAuth(); !ok || pw != wantToken {
 			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)

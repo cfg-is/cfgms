@@ -143,6 +143,7 @@ func newInMemoryBareRepo(t *testing.T) *memory.Storage {
 // An empty bare repository (no commits) is treated as connectivity success —
 // the remote responded, so the mount point is reachable.
 func TestValidateMountPoint_Reachable(t *testing.T) {
+	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
 	store := newInMemoryBareRepo(t)
 	restore := installTestTransport(t, store)
 	defer restore()
@@ -158,6 +159,7 @@ func TestValidateMountPoint_Reachable(t *testing.T) {
 // TestValidateMountPoint_Unreachable verifies that ValidateMountPoint returns an error
 // when no repository exists at the given URL.
 func TestValidateMountPoint_Unreachable(t *testing.T) {
+	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
 	restore := installEmptyTransport(t) // no repos registered
 	defer restore()
 
@@ -174,6 +176,7 @@ func TestValidateMountPoint_Unreachable(t *testing.T) {
 // TestValidateMountPoint_CredentialFailure verifies that ValidateMountPoint returns an
 // error when the remote rejects authentication, and that the error contains no credential.
 func TestValidateMountPoint_CredentialFailure(t *testing.T) {
+	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -199,6 +202,7 @@ func TestValidateMountPoint_CredentialFailure(t *testing.T) {
 // TestValidateMountPoint_Timeout verifies that ValidateMountPoint returns an error when
 // the caller's context deadline expires before the remote responds.
 func TestValidateMountPoint_Timeout(t *testing.T) {
+	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done() // block until client disconnects
 	}))
@@ -234,6 +238,7 @@ func TestValidateMountPoint_Timeout(t *testing.T) {
 // TestValidateMountPoint_NoCredentialLeakedInError verifies that error messages from
 // ValidateMountPoint never contain credential bytes even when the connection fails.
 func TestValidateMountPoint_NoCredentialLeakedInError(t *testing.T) {
+	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
 	const sensitiveToken = "ultra-sensitive-token-abc123"
 
 	restore := installEmptyTransport(t) // always fails
@@ -349,6 +354,7 @@ func bindingTestServer(t *testing.T) (repoURL string, sawAuth func() bool) {
 // TestValidateMountPoint_CredentialBinding covers the binding check: a credential
 // bound to another repository, or to none, is refused before any network call.
 func TestValidateMountPoint_CredentialBinding(t *testing.T) {
+	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
 	const token = "binding-secret-token-xyz"
 	const fix = "cfg tenant config-source set-credential"
 
@@ -420,4 +426,41 @@ func TestCheckCredentialBinding_RealSopsStore(t *testing.T) {
 	require.NoError(t, CheckCredentialBinding(got, repo))
 	require.NoError(t, CheckCredentialBinding(got, "https://GIT.cfgms.local/acme/configs/"))
 	require.Error(t, CheckCredentialBinding(got, "https://evil.cfgms.local/acme/configs"))
+}
+
+// TestValidateMountPoint_ResolvedBlockedAddressRejectedBeforeConnect verifies that a
+// name resolving to a blocked address fails URL validation with no request sent.
+func TestValidateMountPoint_ResolvedBlockedAddressRejectedBeforeConnect(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		http.Error(w, "no", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	repoURL := fmt.Sprintf("https://git.cfgms.local:%d/repo", port)
+
+	v := NewDefaultMountPointValidator(WithInsecureSkipTLS(),
+		WithHostResolver(&fakeResolver{addrs: ipAddrs("169.254.169.254")}))
+	err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: repoURL}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "URL validation failed")
+	assert.NotContains(t, err.Error(), "169.254.169.254")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, requests, "no connection may be attempted")
+}
+
+func TestValidateMountPoint_RejectsNonCanonicalNumericHosts(t *testing.T) {
+	for _, h := range []string{"2130706433", "0177.0.0.1", "0x7f.1", "127.000.000.001"} {
+		t.Run(h, func(t *testing.T) {
+			v := NewDefaultMountPointValidator(WithHostResolver(&fakeResolver{addrs: ipAddrs("203.0.113.10")}))
+			err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: "https://" + h + "/repo"}, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "URL validation failed")
+		})
+	}
 }
