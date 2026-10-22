@@ -4,6 +4,8 @@ package templates
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -79,82 +82,68 @@ func TestValidateTemplate_UnknownTemplate(t *testing.T) {
 	assert.Contains(t, err.Error(), "template not found")
 }
 
-// --- stub generators: verify section structure ---
+// --- withdrawn templates ---
 
-// Each stub generator must return a non-nil report with at least one section of the
-// expected type. The exact KPI values are representative defaults (see design-decision
-// comments in processor.go) and are not asserted here.
-
-func TestGenerateSecurityAssessment_Structure(t *testing.T) {
-	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "security-assessment", emptyData(), nil)
-	require.NoError(t, err)
-	require.NotNil(t, report)
-	assert.Equal(t, interfaces.ReportTypeSecurity, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "security-overview", report.Sections[0].ID)
+// These templates returned fixed values with no data source in ReportData and
+// were withdrawn. Fails if any of them is registered again.
+var withdrawnTemplates = []string{
+	"security-assessment",
+	"operational-health",
+	"cis-compliance",
+	"hipaa-compliance",
+	"multi-tenant-summary",
+	"change-management",
+	"audit-trail",
+	"resource-utilization",
 }
 
-func TestGenerateOperationalHealth_Structure(t *testing.T) {
+func TestWithdrawnTemplates_NotRegistered(t *testing.T) {
 	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "operational-health", emptyData(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeOperational, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "health-overview", report.Sections[0].ID)
+	for _, name := range withdrawnTemplates {
+		t.Run(name, func(t *testing.T) {
+			_, err := p.ProcessTemplate(context.Background(), name, emptyData(), nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "template not found")
+
+			_, err = p.GetTemplateInfo(name)
+			require.Error(t, err)
+
+			require.Error(t, p.ValidateTemplate(name))
+		})
+	}
 }
 
-func TestGenerateCISCompliance_Structure(t *testing.T) {
-	p := newTestProcessor()
-	params := map[string]any{"cis_version": "v8"}
-	report, err := p.ProcessTemplate(context.Background(), "cis-compliance", emptyData(), params)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeCompliance, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "cis-compliance", report.Sections[0].ID)
+// --- remaining templates compute from ReportData ---
+
+func driftData(events int) interfaces.ReportData {
+	d := emptyData()
+	for i := 0; i < events; i++ {
+		d.DriftEvents = append(d.DriftEvents, drift.DriftEvent{
+			ID:       fmt.Sprintf("evt-%d", i),
+			DeviceID: fmt.Sprintf("device-%d", i),
+			Severity: drift.SeverityCritical,
+		})
+	}
+	return d
 }
 
-func TestGenerateHIPAACompliance_Structure(t *testing.T) {
+func TestRemainingTemplates_ReflectInput(t *testing.T) {
 	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "hipaa-compliance", emptyData(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeCompliance, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "hipaa-compliance", report.Sections[0].ID)
-}
+	for _, name := range []string{"compliance-summary", "executive-dashboard"} {
+		t.Run(name, func(t *testing.T) {
+			small, err := p.ProcessTemplate(context.Background(), name, driftData(1), nil)
+			require.NoError(t, err)
+			require.NotEmpty(t, small.Sections)
 
-func TestGenerateMultiTenantSummary_Structure(t *testing.T) {
-	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "multi-tenant-summary", emptyData(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeMultiTenant, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "multi-tenant-overview", report.Sections[0].ID)
-}
+			large, err := p.ProcessTemplate(context.Background(), name, driftData(5), nil)
+			require.NoError(t, err)
+			require.NotEmpty(t, large.Sections)
 
-func TestGenerateChangeManagement_Structure(t *testing.T) {
-	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "change-management", emptyData(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeOperational, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "change-management", report.Sections[0].ID)
-}
-
-func TestGenerateAuditTrail_Structure(t *testing.T) {
-	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "audit-trail", emptyData(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeAudit, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "audit-overview", report.Sections[0].ID)
-}
-
-func TestGenerateResourceUtilization_Structure(t *testing.T) {
-	p := newTestProcessor()
-	report, err := p.ProcessTemplate(context.Background(), "resource-utilization", emptyData(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, interfaces.ReportTypeOperational, report.Type)
-	require.NotEmpty(t, report.Sections)
-	assert.Equal(t, "resource-utilization", report.Sections[0].ID)
+			a, err := json.Marshal(small.Sections)
+			require.NoError(t, err)
+			b, err := json.Marshal(large.Sections)
+			require.NoError(t, err)
+			assert.NotEqual(t, string(a), string(b))
+		})
+	}
 }
