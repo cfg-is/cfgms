@@ -436,13 +436,16 @@ func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing
 
 func TestManager_LocalAuthorityDeadline(t *testing.T) {
 	ttl := time.Second
-	m, err := NewManager(newTestStore(t), ttl, 100*time.Millisecond, 100*time.Millisecond)
+	// Simulated clock (Issue #5411): the clock does not advance, so the
+	// deadline arithmetic is exact and immune to scheduling delay.
+	clock := newFakeClock()
+	m, err := NewManagerWithClock(newFakeClockLeaseStore(clock), ttl, 100*time.Millisecond, 100*time.Millisecond, clock)
 	require.NoError(t, err)
 
 	_, ok := m.LocalAuthorityDeadline("x", "node-1")
 	assert.False(t, ok, "no authority before any acquire")
 
-	before := time.Now()
+	before := clock.Now()
 	_, acquired, err := m.TryAcquire(context.Background(), "x", "node-1", ttl)
 	require.NoError(t, err)
 	require.True(t, acquired)
