@@ -4,7 +4,16 @@ package hyperv
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -386,9 +395,7 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 	m := provisionModuleWithTransport(t, transport)
 	// The linux steward + launcher binaries + CA host paths the seed stages (ADR-010).
 	// The launcher is required for a launcher-managed (push-upgradeable) install.
-	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
-	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
-	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+	setEnrollAssets(t, m)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -494,9 +501,7 @@ func TestProvisionVM_SecureBootEnforce_BlocksOnFirmwareFailure(t *testing.T) {
 		firmwareErr:     fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
 	}
 	m := provisionModuleWithTransport(t, transport)
-	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
-	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
-	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+	setEnrollAssets(t, m)
 
 	// No secure_boot field at all — must default to enforce.
 	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
@@ -525,9 +530,7 @@ func TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure(t *testing
 		firmwareErr:     fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
 	}
 	m := provisionModuleWithTransport(t, transport)
-	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
-	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
-	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+	setEnrollAssets(t, m)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMapWithSecureBoot(2, "best-effort")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg),
@@ -555,9 +558,7 @@ func TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure(t *testing
 func TestProvisionVM_SecureBootDisabled_NeverAttemptsTemplate(t *testing.T) {
 	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
-	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
-	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
-	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+	setEnrollAssets(t, m)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMapWithSecureBoot(2, "disabled")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -1157,9 +1158,7 @@ func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
 func TestProvisionVM_CloudInitSeedAttachToVMStartTimingLogged(t *testing.T) {
 	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(t, transport)
-	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
-	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
-	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+	setEnrollAssets(t, m)
 
 	capLog := logging.NewCapturingLogger()
 	require.NoError(t, m.SetLogger(capLog))
@@ -1262,4 +1261,90 @@ func TestValidateSeedMediaPath(t *testing.T) {
 	assert.Error(t, validateSeedMediaPath(`C:\s\sub\cfgms-seed-a.vhdx`, "", `C:\s`))
 	assert.Error(t, validateSeedMediaPath(`C:\elsewhere\cfgms-seed-a.vhdx`, "", `C:\s`))
 	assert.Error(t, validateSeedMediaPath(`C:\s\cfgms-seed-..\..\a.vhdx`, "", `C:\s`))
+}
+
+// setEnrollAssets points the module at real enrollment source files (valid
+// executable headers and a PEM certificate) under t.TempDir().
+func setEnrollAssets(t *testing.T, m *hypervModule) {
+	t.Helper()
+	dir := t.TempDir()
+	m.enrollStewardPath = filepath.Join(dir, "cfgms-steward-linux")
+	m.enrollLauncherPath = filepath.Join(dir, "cfgms-steward-launcher-linux")
+	m.enrollCAPath = filepath.Join(dir, "controller-ca.crt")
+	require.NoError(t, os.WriteFile(m.enrollStewardPath, []byte("\x7fELF-steward"), 0o600))
+	require.NoError(t, os.WriteFile(m.enrollLauncherPath, []byte("MZ-launcher"), 0o600))
+	require.NoError(t, os.WriteFile(m.enrollCAPath, testCertPEM(t), 0o600))
+}
+
+func testCertPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-ca"}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func requireNoSeedCopy(t *testing.T, transport *testPSTransport) {
+	t.Helper()
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	assert.Empty(t, callsContaining(calls, psBuildAnswerIso))
+	assert.Empty(t, callsContaining(calls, psCopyToSeedVHD))
+}
+
+func TestProvisionVM_EnrollSource_SymlinkRejected(t *testing.T) {
+	transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(t, transport)
+	setEnrollAssets(t, m)
+	target := m.enrollStewardPath
+	link := filepath.Join(t.TempDir(), "steward-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation unsupported on this host (needs privilege on Windows): %v", err)
+	}
+	m.enrollStewardPath = link
+
+	err := m.Set(context.Background(), "vm:stw-01", rawConfigState{m: cloudInitVMConfigMap(2)})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "enroll_steward_path")
+	assert.NotContains(t, err.Error(), link)
+	requireNoSeedCopy(t, transport)
+}
+
+func TestProvisionVM_EnrollSource_ContentRejected(t *testing.T) {
+	cases := map[string]func(t *testing.T, m *hypervModule){
+		"enroll_ca_path": func(t *testing.T, m *hypervModule) {
+			key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret")})
+			require.NoError(t, os.WriteFile(m.enrollCAPath, key, 0o600))
+		},
+		"enroll_ca_path mixed": func(t *testing.T, m *hypervModule) {
+			key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret")})
+			require.NoError(t, os.WriteFile(m.enrollCAPath, append(testCertPEM(t), key...), 0o600))
+		},
+		"enroll_steward_path": func(t *testing.T, m *hypervModule) {
+			require.NoError(t, os.WriteFile(m.enrollStewardPath, []byte("just text"), 0o600))
+		},
+		"enroll_launcher_path": func(t *testing.T, m *hypervModule) {
+			require.NoError(t, os.WriteFile(m.enrollLauncherPath, []byte("x"), 0o600))
+		},
+		"enroll_steward_path missing": func(t *testing.T, m *hypervModule) {
+			require.NoError(t, os.Remove(m.enrollStewardPath))
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
+			m := provisionModuleWithTransport(t, transport)
+			setEnrollAssets(t, m)
+			mutate(t, m)
+
+			err := m.Set(context.Background(), "vm:stw-01", rawConfigState{m: cloudInitVMConfigMap(2)})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), strings.Fields(name)[0])
+			assert.NotContains(t, err.Error(), "secret")
+			requireNoSeedCopy(t, transport)
+		})
+	}
 }

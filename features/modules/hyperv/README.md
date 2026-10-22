@@ -552,6 +552,8 @@ guest steward, also set `enroll_launcher_path` to the host path of
 `cfgms-steward-launcher` — it is staged alongside the steward and the guest install
 requires it. See [ADR-009](../../../docs/architecture/decisions/009-hyperv-vm-provisioning-from-install-media.md).
 
+Enrollment source paths (`enroll_steward_path`, `enroll_launcher_path`, `enroll_ca_path`) must be local absolute drive-letter paths (`X:\...`); UNC paths, relative paths, `..` segments and the wildcard characters `* ? [ ]` are rejected at config-apply. Immediately before staging, each must be a regular file (not a symlink or reparse point) of the expected type: the CA file must contain only PEM `CERTIFICATE` blocks, and the steward and launcher files must begin with a PE (`MZ`) or ELF header. A failed check fails provisioning without copying anything; the error names the config key only.
+
 Optional provisioning-debug config:
 
 | Key | Purpose |

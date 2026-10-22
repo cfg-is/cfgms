@@ -45,6 +45,15 @@ var (
 	// contains a newline, quote, or shell metacharacter (Issue #3788). Same
 	// injection-prone sinks as enroll_token.
 	errInvalidEnrollCAFingerprint = errors.New("hyperv: invalid enroll_ca_fingerprint: must be a hex digest, optionally colon-separated")
+
+	// errInvalidEnrollStewardPath, errInvalidEnrollLauncherPath and
+	// errInvalidEnrollCAPath are returned when the matching enroll_*_path is not
+	// a local absolute drive-letter path free of UNC prefixes, ".." segments and
+	// wildcard characters (Issue #5347). The values become Copy-Item sources run
+	// as LocalSystem, so a UNC or traversing path could stage an unintended file.
+	errInvalidEnrollStewardPath  = errors.New("hyperv: invalid enroll_steward_path: must be a local absolute path (X:\\...) without UNC prefix, '..' segments or wildcards")
+	errInvalidEnrollLauncherPath = errors.New("hyperv: invalid enroll_launcher_path: must be a local absolute path (X:\\...) without UNC prefix, '..' segments or wildcards")
+	errInvalidEnrollCAPath       = errors.New("hyperv: invalid enroll_ca_path: must be a local absolute path (X:\\...) without UNC prefix, '..' segments or wildcards")
 )
 
 // debugSSHKeyPattern is the allowlist for debug_ssh_authorized_key: a
@@ -61,6 +70,23 @@ var debugSSHKeyPattern = regexp.MustCompile(`^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa
 // newline, quote, or shell metacharacter — the value is interpolated unquoted
 // into a preseed late_command shell line and a cmd.exe command line.
 var enrollTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,512}$`)
+
+// validEnrollSourcePath reports whether p is an absolute local drive-letter
+// path with no UNC prefix, no ".." segment and no wildcard characters.
+func validEnrollSourcePath(p string) bool {
+	if strings.HasPrefix(p, `\\`) || !vhdPathPattern.MatchString(p) {
+		return false
+	}
+	if strings.ContainsAny(p, "*?[]") || strings.Contains(p[2:], ":") {
+		return false
+	}
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '\\' || r == '/' }) {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
 
 // enrollCAFingerprintPattern is the allowlist for enroll_ca_fingerprint: hex
 // digest characters with optional colon separators (the conventional SHA-256
@@ -437,8 +463,17 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 		return errInvalidEnrollCAFingerprint
 	}
 	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
+	if m.enrollStewardPath != "" && !validEnrollSourcePath(m.enrollStewardPath) {
+		return errInvalidEnrollStewardPath
+	}
 	m.enrollLauncherPath, _ = configMap["enroll_launcher_path"].(string)
+	if m.enrollLauncherPath != "" && !validEnrollSourcePath(m.enrollLauncherPath) {
+		return errInvalidEnrollLauncherPath
+	}
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
+	if m.enrollCAPath != "" && !validEnrollSourcePath(m.enrollCAPath) {
+		return errInvalidEnrollCAPath
+	}
 	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
 	if m.debugSSHAuthorizedKey != "" && !debugSSHKeyPattern.MatchString(m.debugSSHAuthorizedKey) {
 		return errInvalidDebugSSHKey
