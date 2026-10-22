@@ -484,6 +484,7 @@ func (m *entraApplicationModule) getApplicationByID(ctx context.Context, token *
 	// Convert Graph API response to our internal format
 	info := &ApplicationInfo{
 		ID:             app.ID,
+		AppID:          app.AppID,
 		DisplayName:    app.DisplayName,
 		Description:    app.Description,
 		SignInAudience: app.SignInAudience,
@@ -526,11 +527,18 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 		request.Spa = &graph.ApplicationSpa{RedirectUris: config.RedirectUris.Spa}
 	}
 
-	// Create application via Graph API. Service principal creation and
-	// password/key credentials are refused by checkApplicable before any Graph
-	// call, so the created application is the complete declared state.
-	if _, err := m.graphClient.CreateApplication(ctx, token, request); err != nil {
+	// Create application via Graph API. Password/key credentials are refused by
+	// checkApplicable before any Graph call.
+	app, err := m.graphClient.CreateApplication(ctx, token, request)
+	if err != nil {
 		return fmt.Errorf("failed to create application via Graph API: %w", err)
+	}
+
+	if config.CreateServicePrincipal {
+		if app == nil || app.AppID == "" {
+			return fmt.Errorf("failed to create service principal: Graph returned no appId for the created application")
+		}
+		return m.createServicePrincipal(ctx, token, app.AppID, config.ServicePrincipalSettings)
 	}
 
 	return nil
@@ -614,16 +622,55 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 		}
 	}
 
+	if contains(managedFields, "create_service_principal") && config.CreateServicePrincipal {
+		if existingApp.AppID == "" {
+			return fmt.Errorf("failed to create service principal: Graph returned no appId for the application")
+		}
+		return m.createServicePrincipal(ctx, token, existingApp.AppID, config.ServicePrincipalSettings)
+	}
+
+	return nil
+}
+
+// createServicePrincipal ensures a service principal exists for the application
+// identified by appID (the application's appId, not its object id). It creates
+// one only when none exists, so repeated calls are idempotent. Settings are
+// applied at creation; an existing service principal is left as it is. Without
+// declared settings the service principal is created enabled.
+func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, token *auth.AccessToken, appID string, settings *ServicePrincipalConfig) error {
+	if appID == "" {
+		return fmt.Errorf("failed to create service principal: application appId is empty")
+	}
+	filter := fmt.Sprintf("appId eq '%s'", strings.ReplaceAll(appID, "'", "''"))
+	existing, err := m.graphClient.ListServicePrincipals(ctx, token, filter)
+	if err != nil {
+		return fmt.Errorf("failed to list service principals via Graph API: %w", err)
+	}
+	for _, sp := range existing {
+		if sp.AppID == appID {
+			return nil
+		}
+	}
+
+	request := &graph.CreateServicePrincipalRequest{AppID: appID, AccountEnabled: true}
+	if settings != nil {
+		request.AccountEnabled = settings.AccountEnabled
+		request.AppRoleAssignmentRequired = settings.AppRoleAssignmentRequired
+		request.ServicePrincipalType = settings.ServicePrincipalType
+		request.Tags = settings.Tags
+		request.PreferredSingleSignOnMode = settings.PreferredSingleSignOnMode
+		request.ReplyUrls = settings.ReplyUrls
+		request.NotificationEmailAddresses = settings.NotificationEmailAddresses
+	}
+	if _, err := m.graphClient.CreateServicePrincipal(ctx, token, request); err != nil {
+		return fmt.Errorf("failed to create service principal via Graph API: %w", err)
+	}
 	return nil
 }
 
 // The helpers below are not implemented. They fail closed so a caller can never
-// report success for a service principal or credential change that was not made.
+// report success for a credential change that was not made.
 // Error text deliberately carries no credential or key material.
-
-func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, token *auth.AccessToken, appID string, settings *ServicePrincipalConfig) error {
-	return fmt.Errorf("creating a service principal is unsupported")
-}
 
 func (m *entraApplicationModule) addPasswordCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *PasswordCredential) error {
 	return fmt.Errorf("adding a password credential is unsupported")
@@ -645,6 +692,7 @@ func (m *entraApplicationModule) syncKeyCredentials(ctx context.Context, token *
 
 type ApplicationInfo struct {
 	ID              string
+	AppID           string
 	DisplayName     string
 	Description     string
 	SignInAudience  string
@@ -717,8 +765,7 @@ var unsupportedManagedFields = map[string]bool{
 	"required_resource_access": true, "oauth2_permissions": true, "app_roles": true,
 	"optional_claims": true, "accept_mapped_claims": true, "known_client_applications": true,
 	"pre_authorized_applications": true, "requested_access_token_version": true,
-	"publisher_domain": true, "create_service_principal": true,
-	"service_principal_settings": true, "password_credentials": true, "key_credentials": true,
+	"publisher_domain": true, "password_credentials": true, "key_credentials": true,
 }
 
 // checkApplicable returns an error naming the first declared field this module
@@ -749,8 +796,6 @@ func (c *EntraApplicationConfig) checkApplicable() error {
 		{"pre_authorized_applications", len(c.PreAuthorizedApplications) > 0},
 		{"requested_access_token_version", c.RequestedAccessTokenVersion != 0},
 		{"publisher_domain", c.PublisherDomain != ""},
-		{"create_service_principal", c.CreateServicePrincipal},
-		{"service_principal_settings", c.ServicePrincipalSettings != nil},
 		{"password_credentials", len(c.PasswordCredentials) > 0},
 		{"key_credentials", len(c.KeyCredentials) > 0},
 	}
@@ -775,6 +820,10 @@ func (c *EntraApplicationConfig) checkApplicable() error {
 		case "tags":
 			if len(c.Tags) == 0 {
 				return fmt.Errorf("managed field tags is empty and cannot be cleared by this module")
+			}
+		case "create_service_principal":
+			if !c.CreateServicePrincipal {
+				return fmt.Errorf("managed field create_service_principal is false and an existing service principal cannot be removed by this module")
 			}
 		case "logout_url":
 			if c.LogoutURL == "" {

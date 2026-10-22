@@ -40,6 +40,8 @@ applied_fields:
   - redirect_uris.spa
   - logout_url
   - tags
+  - create_service_principal   # created for the application's appId when none exists
+  - service_principal_settings # applied when the service principal is created
   - managed_fields   # selects which of the above an update touches
 
 rejected_fields:     # declaring any of these (or listing them in managed_fields) fails Set
@@ -54,8 +56,6 @@ rejected_fields:     # declaring any of these (or listing them in managed_fields
   - pre_authorized_applications
   - requested_access_token_version
   - publisher_domain
-  - create_service_principal
-  - service_principal_settings
   - password_credentials
   - key_credentials
 # A managed identifier_uris, tags or logout_url whose declared value is empty is
