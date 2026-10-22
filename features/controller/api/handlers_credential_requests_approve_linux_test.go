@@ -76,7 +76,9 @@ func TestCertSerial_OnlySetByExtractAdminPrincipal(t *testing.T) {
 				if !ok || ident.Name != "CertSerial" {
 					return true
 				}
-				if fn.Name.Name != "extractAdminPrincipal" {
+				// principalFromAdminCert is the body extractAdminPrincipal delegates to after its
+				// TLS peer checks; it is the only constructor of a certificate principal.
+				if fn.Name.Name != "principalFromAdminCert" {
 					violations = append(violations, fmt.Sprintf("%s:%d sets CertSerial in func %s",
 						name, fset.Position(kv.Pos()).Line, fn.Name.Name))
 				}
@@ -87,7 +89,7 @@ func TestCertSerial_OnlySetByExtractAdminPrincipal(t *testing.T) {
 	}
 
 	assert.Empty(t, violations,
-		"CertSerial must be set only inside extractAdminPrincipal: %v", violations)
+		"CertSerial must be set only inside principalFromAdminCert: %v", violations)
 }
 
 // TestPrincipalHasCertifiedRootScope_SingleCallSite is the structural lock for the AC

@@ -59,6 +59,10 @@ const (
 	// authenticate without a session (admin mTLS certificate, API key), so long-lived
 	// handlers can end a stream whose credential was revoked, disabled or expired.
 	authRecheckContextKey contextKey = "auth_recheck"
+	// principalRefreshContextKey carries the principalRefresh that re-derives the
+	// request's principal from its credential's source of truth, so long-lived
+	// handlers can re-run the route's permission and tenant decision (authzRecheck).
+	principalRefreshContextKey contextKey = "principal_refresh"
 
 	// presenceTokenHeader is the HTTP request header that carries a short-lived,
 	// single-use presence token minted by POST /api/v1/webauthn/presence/finish.
@@ -396,6 +400,15 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	if !cert.HasAdminMarker(peerCert) {
 		return nil
 	}
+	return s.principalFromAdminCert(r.Context(), peerCert, true)
+}
+
+// principalFromAdminCert resolves the principal for an admin-marked peer certificate
+// (everything extractAdminPrincipal does after its TLS peer checks). recordUse is true
+// only for a request that authenticates with the certificate: it records the binding's
+// last use and emits the bootstrap-fallback audit. A keepalive re-check passes false so
+// a tick never writes either.
+func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Certificate, recordUse bool) *Principal {
 	serial := peerCert.SerialNumber.String()
 	// Story D: C2 fix — check revocation on every cert-auth request.
 	// certManager may be nil in OSS deployments that haven't initialised cert management.
@@ -420,7 +433,7 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	// ADR-025 Amendment 3: resolve the principal from the account bound to this serial.
 	// Fail-closed default: non-nil empty slice as working permissions value, matching
 	// the web-session branch's documented fail-closed default.
-	acct, err := s.getAccountByCertSerial(r.Context(), serial)
+	acct, err := s.getAccountByCertSerial(ctx, serial)
 	if err != nil {
 		// Fail closed: a store outage must not fall through to the bootstrap fallback
 		// and grant unscoped root to a cert whose account scope cannot be verified.
@@ -444,7 +457,9 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// Issue #3715: the certificate has now fully passed authentication (revoked and
 		// disabled-account rejections are both behind us) — record the use. Every earlier
 		// return in this function is a rejection and must not reach this line.
-		s.recordCertBindingUse(acct.Username, acct.TenantID, serial)
+		if recordUse {
+			s.recordCertBindingUse(acct.Username, acct.TenantID, serial)
+		}
 
 		var permissions []string
 		implicitAdmin := false
@@ -462,7 +477,7 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 			Name:            "mtls-admin:" + acct.Username,
 			Assurance:       session.AssuranceStrong,
 			GlobalScope:     acct.RootScope,
-			TenantID:        s.accountPrincipalTenant(r.Context(), acct),
+			TenantID:        s.accountPrincipalTenant(ctx, acct),
 			CertSerial:      serial,
 			CertFingerprint: fp,
 			CertNotAfter:    peerCert.NotAfter,
@@ -483,7 +498,9 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	// An admin-marked certificate with no bound account keeps implicit root indefinitely.
 	// Every use of this path is audited; the combination with accounts_in_cache > 0
 	// is anomalous and separately detectable in monitoring.
-	s.emitBootstrapFallbackAudit(r.Context(), serial, peerCert.Subject.CommonName)
+	if recordUse {
+		s.emitBootstrapFallbackAudit(ctx, serial, peerCert.Subject.CommonName)
+	}
 
 	return &Principal{
 		Channel: AuthChannelMTLS,
@@ -494,7 +511,7 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// never from an empty tenant (Issue #4665).
 		Assurance:       session.AssuranceStrong,
 		GlobalScope:     true,
-		TenantID:        s.rootTenantID(r.Context()),
+		TenantID:        s.rootTenantID(ctx),
 		CertSerial:      serial,
 		CertFingerprint: fp,
 		CertNotAfter:    peerCert.NotAfter,
@@ -1076,6 +1093,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			// enforced by ctxkeys' restricted-caller architecture test (Issue #4316).
 			ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(adminPrincipal))
 			ctx = context.WithValue(ctx, authRecheckContextKey, s.adminCertRecheck(r.TLS.PeerCertificates[0]))
+			ctx = context.WithValue(ctx, principalRefreshContextKey, s.adminCertRefresh(r.TLS.PeerCertificates[0]))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -1260,6 +1278,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 					ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(sessionPrincipal))
 					ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.sessionManager, id: sess.ID})
+					ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(sessionPrincipal, sess.RootScoped))
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -1426,6 +1445,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, cookieAuthContextKey, true)
 				ctx = context.WithValue(ctx, webSessionIDContextKey, webSess.ID)
 				ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.webSessionManager, id: webSess.ID})
+				ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(webPrincipal, false))
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -1503,15 +1523,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Convert API key to Principal for uniform authorization handling.
-		principal := &Principal{
-			Channel:     AuthChannelAPIKey,
-			ID:          keyInfo.ID,
-			Name:        keyInfo.Name,
-			Assurance:   session.AssuranceMachine,
-			GlobalScope: false,
-			Permissions: keyInfo.Permissions,
-			TenantID:    keyInfo.TenantID,
-		}
+		principal := apiKeyPrincipal(keyInfo)
 
 		if s.refuseUnscopedPrincipal(w, principal) {
 			return
@@ -1525,7 +1537,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		// API-key principals are never root-scoped (Issue #4316): NewRootScope is
 		// reserved for a verified mTLS admin certificate.
 		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(keyInfo.TenantID))
-		ctx = context.WithValue(ctx, authRecheckContextKey, s.apiKeyRecheck(keyInfo))
+		tracker := s.newAPIKeyTracker(keyInfo)
+		ctx = context.WithValue(ctx, authRecheckContextKey, authRecheck(tracker.live))
+		ctx = context.WithValue(ctx, principalRefreshContextKey, tracker.refresh())
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -2579,40 +2593,5 @@ func (s *Server) adminCertRecheck(peerCert *x509.Certificate) authRecheck {
 			return false
 		}
 		return acct == nil || !acct.Disabled
-	}
-}
-
-// apiKeyRecheck re-validates an API key against the secret store. A key deleted
-// (on any node) or expired is invalid; a store outage keeps the key valid only
-// within apiKeyMaxStaleness of the last successful confirmation, matching the
-// per-request policy in authenticationMiddleware.
-func (s *Server) apiKeyRecheck(keyInfo *APIKey) authRecheck {
-	current := keyInfo
-	lastOK := keyInfo.validatedAt
-	if lastOK.IsZero() {
-		lastOK = s.apiKeyNow()
-	}
-	return func(ctx context.Context) bool {
-		now := s.apiKeyNow()
-		if current.ExpiresAt != nil && now.After(*current.ExpiresAt) {
-			return false
-		}
-		if current.recordRef == "" {
-			// Env-gated test keys have no durable record: valid while still cached.
-			s.mu.RLock()
-			_, ok := s.apiKeys[current.Key]
-			s.mu.RUnlock()
-			return ok
-		}
-		refreshed, err := s.revalidateCachedAPIKey(ctx, current.Key, current, now)
-		switch {
-		case err == nil:
-			current, lastOK = refreshed, now
-			return true
-		case errors.Is(err, errAPIKeyRevoked):
-			return false
-		default:
-			return now.Sub(lastOK) < apiKeyMaxStaleness
-		}
 	}
 }

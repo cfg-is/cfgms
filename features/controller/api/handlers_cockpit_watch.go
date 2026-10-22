@@ -246,8 +246,10 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 
 	// The credential (session, API key or mTLS certificate) that authenticated this
 	// upgrade; re-checked once per keepalive interval below. Captured before the
-	// upgrade, while r is still valid.
-	recheck := requestAuthRecheck(r)
+	// upgrade, while r is still valid. It also re-derives the principal and re-runs the
+	// case:read permission and case-tenant decision, so a removed permission or an
+	// ended tenant crossing closes the stream.
+	recheck := s.authzRecheck(r, "case:read", c.TenantID, "GET /api/v1/cases/{id}/watch")
 
 	// Upgrade the HTTP connection to a WebSocket before starting the provider
 	// subscription, so connection failures are cleanly reported.
@@ -334,7 +336,7 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 		case <-pingTicker.C:
 			// Revocation/expiry must end the stream: re-check the authenticating
 			// credential against its shared store on every keepalive tick.
-			if recheck != nil && !recheck(ctx) {
+			if !recheck(ctx) {
 				_ = cw.writeClose(websocket.ClosePolicyViolation, "credential no longer valid")
 				return
 			}
