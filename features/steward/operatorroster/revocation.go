@@ -272,10 +272,8 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 // decimal string form as (*big.Int).String() — the form
 // pkg/cert.Manager.Revoke/ListRevoked and x509.Certificate.SerialNumber both
 // produce) appears in the last manifest this verifier successfully verified. It
-// answers false, not an error, when no manifest has been verified yet — the same
-// graceful-degradation choice execute_script.go's x509OperatorCredentialVerifier
-// already makes when no CA roots are configured at all: this is an additional,
-// defense-in-depth check layered onto verification that already independently
+// answers false, not an error, when no manifest has been verified yet: this is an
+// additional, defense-in-depth check layered onto verification that already independently
 // confirms the certificate's chain, EKU, expiry, and payload-signing marker, not
 // the only check standing between an attacker and execution.
 func (v *RevocationVerifier) IsRevoked(serial string) bool {

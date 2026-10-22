@@ -988,9 +988,10 @@ func fixedSizeStdoutScriptBody(totalBytes int) string {
 func TestExecuteScriptHandler_Success(t *testing.T) {
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  cb,
-		Logger:    newTestLogger(t),
+		StewardID:         "steward-test",
+		OnStatus:          cb,
+		Logger:            newTestLogger(t),
+		ControllerCARoots: inlineTestCARoots(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1021,9 +1022,10 @@ func TestExecuteScriptHandler_Success(t *testing.T) {
 func TestExecuteScriptHandler_NonZeroExitCode(t *testing.T) {
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  cb,
-		Logger:    newTestLogger(t),
+		StewardID:         "steward-test",
+		OnStatus:          cb,
+		Logger:            newTestLogger(t),
+		ControllerCARoots: inlineTestCARoots(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1055,9 +1057,10 @@ func TestExecuteScriptHandler_NonZeroExitCode(t *testing.T) {
 func TestExecuteScriptHandler_StdoutTruncated(t *testing.T) {
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  cb,
-		Logger:    newTestLogger(t),
+		StewardID:         "steward-test",
+		OnStatus:          cb,
+		Logger:            newTestLogger(t),
+		ControllerCARoots: inlineTestCARoots(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1089,9 +1092,10 @@ func TestExecuteScriptHandler_NoContentLogged(t *testing.T) {
 	cb, _ := collectEvents()
 
 	h, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  cb,
-		Logger:    capLog,
+		StewardID:         "steward-test",
+		OnStatus:          cb,
+		Logger:            capLog,
+		ControllerCARoots: inlineTestCARoots(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1181,51 +1185,65 @@ func sigTestNonce(t *testing.T) string {
 // signedInlineEnvelopeParams returns the cmd.Params entries preflightScriptSignature
 // requires for an inline (ad-hoc) command as of Issue #3694: script_content, shell,
 // plus a valid operator envelope — targeted at stewardID, a fresh nonce, and a
-// 5-minute expiry — signed with a freshly generated (untrusted-CA) RSA key. It exists
-// for execution-behavior tests that don't care about signing specifics but must
-// supply a valid envelope now that inline verification is mandatory; tests that
-// actually exercise signature/cert/target/expiry/nonce rejection build their params
-// by hand instead.
+// 5-minute expiry — signed by the shared test operator certificate (see
+// sharedInlineOperator). It exists for execution-behavior tests that don't care about
+// signing specifics but must supply a valid envelope now that inline verification is
+// mandatory; the handler under test must be built with inlineTestCARoots(t), because
+// a steward without controller CA roots refuses every inline command (Issue #5356).
+// Tests that actually exercise signature/cert/target/expiry/nonce rejection build
+// their params by hand instead.
 func signedInlineEnvelopeParams(t *testing.T, content []byte, shell, stewardID string) map[string]interface{} {
 	t.Helper()
-	return signedInlineEnvelopeParamsWithKey(t, sigTestRSAKey(t), content, shell, stewardID)
+	return signedInlineEnvelopeParamsFull(t, content, shell,
+		[]string{stewardID}, sigTestNonce(t), time.Now().Add(5*time.Minute))
 }
 
-// signedInlineEnvelopeParamsWithKey is signedInlineEnvelopeParams for a caller-supplied
-// RSA key, so a test can sign an envelope built from one content value and later swap
-// in different delivered params (e.g. tampered content) while keeping the same key.
-func signedInlineEnvelopeParamsWithKey(t *testing.T, key *rsa.PrivateKey, content []byte, shell, stewardID string) map[string]interface{} {
+// sharedInlineOperatorFixture is a test CA, the pool of its certificate, and one
+// payload-signing operator certificate issued by it.
+type sharedInlineOperatorFixture struct {
+	roots   *x509.CertPool
+	keyPEM  []byte
+	certPEM string
+}
+
+var (
+	sharedInlineOperatorOnce sync.Once
+	sharedInlineOperatorFx   sharedInlineOperatorFixture
+)
+
+// sharedInlineOperator lazily builds one CA and operator certificate for the whole
+// package, so the many execution-behavior tests do not each pay for RSA keygen.
+func sharedInlineOperator(t *testing.T) sharedInlineOperatorFixture {
 	t.Helper()
-	return signedInlineEnvelopeParamsFull(t, key, content, shell,
-		[]string{stewardID}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+	sharedInlineOperatorOnce.Do(func() {
+		ca, pool := sigTestCA(t)
+		op := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+		sharedInlineOperatorFx = sharedInlineOperatorFixture{
+			roots:   pool,
+			keyPEM:  op.PrivateKeyPEM,
+			certPEM: string(op.CertificatePEM),
+		}
+	})
+	require.NotNil(t, sharedInlineOperatorFx.roots, "shared inline operator fixture failed to build")
+	return sharedInlineOperatorFx
+}
+
+// inlineTestCARoots returns the controller CA pool a handler needs to accept
+// envelopes built by signedInlineEnvelopeParams*.
+func inlineTestCARoots(t *testing.T) *x509.CertPool {
+	t.Helper()
+	return sharedInlineOperator(t).roots
 }
 
 // signedInlineEnvelopeParamsFull is the fully-parameterized envelope builder every
 // other signedInlineEnvelopeParams* helper delegates to. It exists directly for tests
 // that must control targets, nonce, or expiry precisely — target mismatch, expiry,
 // and nonce-replay coverage (Issue #3694).
-func signedInlineEnvelopeParamsFull(t *testing.T, key *rsa.PrivateKey, content []byte, shell string, targets []string, nonce string, expiresAt time.Time) map[string]interface{} {
+func signedInlineEnvelopeParamsFull(t *testing.T, content []byte, shell string, targets []string, nonce string, expiresAt time.Time) map[string]interface{} {
 	t.Helper()
-	env := operatorpayload.Envelope{
-		Content:   content,
-		Shell:     shell,
-		Targets:   targets,
-		Nonce:     nonce,
-		ExpiresAt: expiresAt,
-	}
-	canonical, err := operatorpayload.CanonicalBytes(env)
-	require.NoError(t, err)
-	sigValue := sigTestSignRSASHA256(t, key, canonical)
-	return map[string]interface{}{
-		"script_content":       base64.StdEncoding.EncodeToString(content),
-		"shell":                shell,
-		"signature_algorithm":  "rsa-sha256",
-		"signature_value":      sigValue,
-		"signature_public_key": sigTestPubKeyPEM(key),
-		"targets":              env.Targets,
-		"nonce":                env.Nonce,
-		"expires_at":           env.ExpiresAt.UTC().Format(time.RFC3339),
-	}
+	op := sharedInlineOperator(t)
+	params := sigTestOperatorEnvelopeParamsFull(t, op.keyPEM, op.certPEM, content, shell, targets, nonce, expiresAt)
+	return params
 }
 
 // testSignedCommandForSteward is testSignedCommandWithParams for an outer
@@ -1396,12 +1414,20 @@ func sigTestSignRevocationManifest(t *testing.T, signingCert *cert.Certificate, 
 // key, or intentionally mismatched material for negative tests).
 func sigTestOperatorEnvelopeParams(t *testing.T, keyPEM []byte, publicKeyPEM string, content []byte, shell, stewardID string) map[string]interface{} {
 	t.Helper()
+	return sigTestOperatorEnvelopeParamsFull(t, keyPEM, publicKeyPEM, content, shell,
+		[]string{stewardID}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+}
+
+// sigTestOperatorEnvelopeParamsFull is sigTestOperatorEnvelopeParams with caller-
+// controlled targets, nonce, and expiry.
+func sigTestOperatorEnvelopeParamsFull(t *testing.T, keyPEM []byte, publicKeyPEM string, content []byte, shell string, targets []string, nonce string, expiresAt time.Time) map[string]interface{} {
+	t.Helper()
 	env := operatorpayload.Envelope{
 		Content:   content,
 		Shell:     shell,
-		Targets:   []string{stewardID},
-		Nonce:     sigTestNonce(t),
-		ExpiresAt: time.Now().Add(5 * time.Minute),
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: expiresAt,
 	}
 	canonical, err := operatorpayload.CanonicalBytes(env)
 	require.NoError(t, err)
@@ -1557,13 +1583,12 @@ func TestExecuteScriptHandler_LibraryScript_UntrustedKey_Rejected(t *testing.T) 
 // tampering with the delivered script_content changes the reconstructed envelope's
 // canonical bytes and the signature no longer verifies.
 func TestExecuteScriptHandler_TamperedContent_Rejected(t *testing.T) {
-	key := sigTestRSAKey(t)
-	h := newHandlerWithSigning(t, nil, true, nil)
+	h := newHandlerWithSigning(t, nil, true, inlineTestCARoots(t))
 
 	// Sign an envelope built from the original content, but deliver tampered content.
 	original := []byte("#!/bin/bash\necho hello")
 	tampered := []byte("#!/bin/bash\nrm -rf /")
-	params := signedInlineEnvelopeParamsWithKey(t, key, original, platformShell(), "steward-test")
+	params := signedInlineEnvelopeParams(t, original, platformShell(), "steward-test")
 	params["script_content"] = base64.StdEncoding.EncodeToString(tampered) // different content than what was signed
 	params["execution_id"] = "sig-tamper-001"
 
@@ -1800,13 +1825,12 @@ func TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch(t *testin
 // cryptographically valid.
 func TestExecuteScriptHandler_TargetMismatch_Rejected(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "host-B", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "host-B", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	key := sigTestRSAKey(t)
 	content := []byte(echoScriptBody("hello"))
-	params := signedInlineEnvelopeParamsFull(t, key, content, platformShell(),
+	params := signedInlineEnvelopeParamsFull(t, content, platformShell(),
 		[]string{"host-A"}, sigTestNonce(t), time.Now().Add(5*time.Minute))
 	params["execution_id"] = "sig-targetmismatch-001"
 
@@ -1824,13 +1848,12 @@ func TestExecuteScriptHandler_TargetMismatch_Rejected(t *testing.T) {
 // AC): an envelope whose ExpiresAt is in the past is rejected even though the
 // signature is cryptographically valid and the steward is a correct target.
 func TestExecuteScriptHandler_ExpiredEnvelope_Rejected(t *testing.T) {
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	key := sigTestRSAKey(t)
 	content := []byte(echoScriptBody("hello"))
-	params := signedInlineEnvelopeParamsFull(t, key, content, platformShell(),
+	params := signedInlineEnvelopeParamsFull(t, content, platformShell(),
 		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(-1*time.Minute))
 	params["execution_id"] = "sig-expiredenv-001"
 
@@ -1850,15 +1873,14 @@ func TestExecuteScriptHandler_ExpiredEnvelope_Rejected(t *testing.T) {
 // produces: the outer envelope is fresh, but the inner operator-signed nonce is not.
 func TestExecuteScriptHandler_EnvelopeNonceReplay_RejectedIndependentlyOfOuterReplayCache(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	key := sigTestRSAKey(t)
 	content := []byte(echoScriptBody("hello"))
 	nonce := sigTestNonce(t)
 	expiresAt := time.Now().Add(5 * time.Minute)
-	params := signedInlineEnvelopeParamsFull(t, key, content, platformShell(),
+	params := signedInlineEnvelopeParamsFull(t, content, platformShell(),
 		[]string{"steward-test"}, nonce, expiresAt)
 
 	// First delivery: distinct outer command ID/timestamp, succeeds.
@@ -1896,7 +1918,7 @@ func TestExecuteScriptHandler_EnvelopeNonceReplay_RejectedIndependentlyOfOuterRe
 // present and well-formed. This confirms no remaining code path in
 // preflightScriptSignature accepts a content-only digest.
 func TestExecuteScriptHandler_LegacyContentOnlySignature_Rejected(t *testing.T) {
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 

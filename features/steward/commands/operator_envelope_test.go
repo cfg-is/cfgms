@@ -5,6 +5,7 @@ package commands
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"testing"
 	"time"
@@ -135,6 +136,30 @@ func TestVerifyOperatorEnvelope_NoCredentialRejected(t *testing.T) {
 	h := newHandlerWithSigning(t, nil, true, nil)
 	err := h.verifyOperatorEnvelope(envelopeCmd(map[string]interface{}{}), []byte("x"), operatorpayload.ActionShell)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+}
+
+// TestVerifyOperatorEnvelope_StewardActionNoCARootsRefused is a [REQUIRED TEST] for
+// Issue #5356: a steward_action envelope is refused under nil roots and under an empty
+// pool, even though its signature verifies, and the refusal leaves the nonce unconsumed
+// (the same envelope is accepted once the CA is configured).
+func TestVerifyOperatorEnvelope_StewardActionNoCARootsRefused(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	content := testActionContent(t, testAction())
+
+	for name, roots := range map[string]*x509.CertPool{"nil roots": nil, "empty pool": x509.NewCertPool()} {
+		t.Run(name, func(t *testing.T) {
+			h := newHandlerWithSigning(t, nil, true, roots)
+			params := signedActionParams(t, signer, content, []string{"steward-test"}, sigTestNonce(t), time.Now().Add(time.Minute))
+
+			err := h.verifyOperatorEnvelope(envelopeCmd(params), content, operatorpayload.ActionShell)
+			require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+
+			// Nonce not consumed: with roots configured the same envelope verifies.
+			h.controllerCARoots = caPool
+			require.NoError(t, h.verifyOperatorEnvelope(envelopeCmd(params), content, operatorpayload.ActionShell))
+		})
+	}
 }
 
 func TestVerifyOperatorEnvelope_WebAuthnActionAccepted(t *testing.T) {

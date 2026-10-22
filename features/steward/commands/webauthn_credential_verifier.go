@@ -154,9 +154,9 @@ func (f *manifestFreshnessFloor) admit(issuedAt time.Time) bool {
 }
 
 // webauthnOperatorCredentialVerifier is the OperatorCredentialVerifier implementation
-// (execute_script.go) for a WebAuthn-signed operator envelope. Unlike
-// x509OperatorCredentialVerifier, there is no "any_valid, no CA roots configured"
-// relaxation: a WebAuthn credential's public key has no source other than the
+// (execute_script.go) for a WebAuthn-signed operator envelope. Like
+// x509OperatorCredentialVerifier, it is never reached without CA roots:
+// a WebAuthn credential's public key has no source other than the
 // CA-verified manifest, so verification fails closed when caRoots is nil — the caller
 // (preflightScriptSignature) enforces this before ever constructing this verifier.
 //

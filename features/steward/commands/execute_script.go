@@ -428,6 +428,13 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 // (Issue #3694/#3696): a raw signature over the canonical envelope bytes, then CA-chain
 // and payload-signing-marker verification of the operator certificate.
 func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope, shellStr, sigAlgorithm, sigValue, sigPublicKey string) error {
+	// Fail closed without usable CA roots: TrustModeAnyValid below accepts any key, so
+	// the CA chain check is the only thing that authenticates the operator. Same
+	// condition as open_terminal.
+	if h.controllerCARoots == nil || h.controllerCARoots.Equal(x509.NewCertPool()) {
+		return fmt.Errorf("%w: operator verification requires a configured controller CA", ErrUnauthenticatedCommand)
+	}
+
 	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
 	if err != nil {
 		return fmt.Errorf("%w: invalid operator envelope: %v", ErrUnauthenticatedCommand, err)
@@ -452,29 +459,25 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 	}
 
 	// Operator credential verification: the signing credential must be trusted and
-	// carry payload-signing authority. Skipped when no CA roots are configured (e.g.
-	// standalone mode or tests without a controller CA) — same as before #3694.
-	// Routed through OperatorCredentialVerifier (Issue #3694 Implementation Notes):
-	// x509OperatorCredentialVerifier and webauthnOperatorCredentialVerifier
-	// (webauthn_credential_verifier.go, Issue #3697) are its two implementations.
-	if h.controllerCARoots != nil {
-		credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{
-			caRoots:            h.controllerCARoots,
-			revocationVerifier: h.revocationVerifier,
-		})
-		if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
-			return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
-		}
+	// carry payload-signing authority. Routed through OperatorCredentialVerifier
+	// (Issue #3694 Implementation Notes): x509OperatorCredentialVerifier and
+	// webauthnOperatorCredentialVerifier (webauthn_credential_verifier.go, Issue #3697)
+	// are its two implementations.
+	credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{
+		caRoots:            h.controllerCARoots,
+		revocationVerifier: h.revocationVerifier,
+	})
+	if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
+		return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
 	}
 	return nil
 }
 
 // verifyWebAuthnOperatorSignature verifies a WebAuthn-signed operator envelope (Issue
 // #3697) via webauthnOperatorCredentialVerifier (webauthn_credential_verifier.go).
-// Unlike verifyX509OperatorSignature, there is no "any_valid, no CA roots configured"
-// relaxation: a WebAuthn credential's public key has no source other than the
-// CA-verified manifest carried in webauthnManifestJSON, so this fails closed when no CA
-// roots are configured rather than silently skipping verification
+// Like verifyX509OperatorSignature, this fails closed when no CA roots are configured:
+// a WebAuthn credential's public key has no source other than the CA-verified manifest
+// carried in webauthnManifestJSON, so verification is refused rather than silently skipped
 // (TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected asserts that
 // branch directly, so a regression back to fail-open cannot ship unnoticed).
 //
@@ -483,7 +486,7 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 // and a manifest older than one already accepted here must not resurrect a credential
 // that has since been removed from the roster.
 func (h *Handler) verifyWebAuthnOperatorSignature(envelope operatorpayload.Envelope, authDataB64, clientDataB64, sigB64, credIDB64, manifestJSON string) error {
-	if h.controllerCARoots == nil {
+	if h.controllerCARoots == nil || h.controllerCARoots.Equal(x509.NewCertPool()) {
 		return fmt.Errorf("%w: webauthn verification requires a configured controller CA", ErrUnauthenticatedCommand)
 	}
 

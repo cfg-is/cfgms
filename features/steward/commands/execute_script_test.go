@@ -7,8 +7,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"runtime"
 	"strings"
@@ -149,7 +151,7 @@ func TestApplyOutputCap_EmptyInputs_NoChange(t *testing.T) {
 // truncation marker. Verified via the full stdout field in EventScriptCompleted.
 func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -178,7 +180,7 @@ func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
 // an exec command producing under 1 MB of output must be captured fully without a truncation marker.
 func TestExecuteScriptHandler_OutputUnderCap_CapturedFully(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -236,7 +238,7 @@ func TestExecuteScriptHandler_WindowsPowerShell51_ExplicitShell(t *testing.T) {
 	}
 
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -268,7 +270,7 @@ func TestExecuteScriptHandler_WindowsCmd_ExplicitShell(t *testing.T) {
 	}
 
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -300,7 +302,7 @@ func TestExecuteScriptHandler_WindowsCmd_ExplicitShell(t *testing.T) {
 // TestDispatcher_CommandFailedMarksRunFailedAndReleasesLock in dispatcher_test.go.
 func TestExecuteScriptHandler_UnsupportedShell_SurfacesClearError(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -430,7 +432,7 @@ func runScriptProbe(t *testing.T, h *Handler, getEvents func() []*cpTypes.Event,
 // relay socket — i.e. the relay IS created.
 func TestExecuteScriptHandler_LibraryScriptWithScope_CreatesRelaySocket(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -449,7 +451,7 @@ func TestExecuteScriptHandler_LibraryScriptWithScope_CreatesRelaySocket(t *testi
 // library script with an EMPTY required_api_scope does NOT get a relay socket.
 func TestExecuteScriptHandler_LibraryScriptNoScope_NoRelaySocket(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -1125,4 +1127,49 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_StaleManifest_Rejected(t *te
 	err = h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand, "a stale manifest must not authorize execution")
 	assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
+}
+
+// TestExecuteScriptHandler_InlineScript_NoCARoots_Refused is a [REQUIRED TEST] for
+// Issue #5356: a steward with no usable controller CA roots (nil, or an empty pool)
+// refuses an inline-script envelope signed by an arbitrary random key with
+// ErrUnauthenticatedCommand, and the script never runs. The signature itself is
+// cryptographically valid — only the CA-chain requirement stands between that key and
+// execution — so restoring the "skip operator verification when roots are nil" branch
+// makes this test fail.
+func TestExecuteScriptHandler_InlineScript_NoCARoots_Refused(t *testing.T) {
+	cases := []struct {
+		name  string
+		roots *x509.CertPool
+	}{
+		{"nil roots", nil},
+		{"empty pool", x509.NewCertPool()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cb, getEvents := collectEvents()
+			h, err := New(&Config{
+				StewardID:         "steward-test",
+				OnStatus:          cb,
+				Logger:            newTestLogger(t),
+				ControllerCARoots: tc.roots,
+			})
+			require.NoError(t, err)
+			h.RegisterExecuteScriptHandler()
+
+			key := sigTestRSAKey(t)
+			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+			body, marker := createMarkerScript(t)
+			params := sigTestOperatorEnvelopeParams(t, keyPEM, sigTestPubKeyPEM(key), []byte(body), platformShell(), "steward-test")
+			params["execution_id"] = "noroots-001"
+			sc := testSignedCommandWithParams("noroots-001", cpTypes.CommandExecuteScript, params)
+
+			err = h.HandleCommand(context.Background(), sc)
+			require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+			h.Wait()
+
+			_, statErr := os.Stat(marker)
+			require.True(t, os.IsNotExist(statErr), "script must not run without controller CA roots")
+			require.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
+		})
+	}
 }
