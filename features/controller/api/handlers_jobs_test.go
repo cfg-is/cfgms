@@ -16,10 +16,13 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1008,4 +1011,60 @@ func TestHandleCreateJob_TenantlessSteward_Returns404(t *testing.T) {
 	jobs, err := store.ListBatchJobs(context.Background(), "", 100, 0)
 	require.NoError(t, err)
 	assert.Empty(t, jobs, "no job may be created")
+}
+
+func TestHandleCreateJob_RecordsInitiatedBy(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+
+	principal := tenantPrincipal("")
+	principal.Assurance = session.AssuranceBasic
+	principal.ID = "admin-alice"
+	rec := postCreateJobAs(server, principal, `{"selector":"all"}`)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var apiResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
+	jobID := apiResp.Data.(map[string]interface{})["job_id"].(string)
+
+	job, err := store.GetBatchJob(context.Background(), jobID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin-alice", job.InitiatedBy)
+}
+
+func TestHandleCreateJob_AuditsCreationOnlyWhenAccepted(t *testing.T) {
+	server := setupTestServer(t)
+	server.batchJobStore = newTestBatchJobStoreForAPI()
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	principal := &Principal{ID: "admin-alice", Assurance: session.AssuranceBasic, GlobalScope: true}
+	query := func() []*business.AuditEntry {
+		ctx := context.Background()
+		require.NoError(t, auditMgr.Flush(ctx))
+		entries, qerr := auditMgr.QueryEntries(ctx, &business.AuditFilter{Actions: []string{"batch_job.created"}})
+		require.NoError(t, qerr)
+		return entries
+	}
+
+	rejected := postCreateJobAs(server, principal, `{"selector":"typo:value"}`)
+	require.Equal(t, http.StatusBadRequest, rejected.Code)
+	assert.Empty(t, query(), "a rejected request must record no event")
+
+	rec := postCreateJobAs(server, principal, `{"selector":"all"}`)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var apiResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
+	jobID := apiResp.Data.(map[string]interface{})["job_id"].(string)
+
+	entries := query()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "admin-alice", entries[0].UserID)
+	assert.Equal(t, jobID, entries[0].ResourceID)
+	assert.Equal(t, jobID, entries[0].Details["job_id"])
+	assert.Equal(t, "all", entries[0].Details["selector"])
+	assert.Equal(t, audit.SystemTenantID, entries[0].TenantID)
 }
