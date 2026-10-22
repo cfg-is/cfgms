@@ -1265,3 +1265,56 @@ func TestEdgeCap_BatchLimitDropsLaterFragmentDeclarations(t *testing.T) {
 		}
 	}
 }
+
+// entityRetracted reports whether the provider no longer holds a live entity for eid.
+func entityRetracted(t *testing.T, p *sqliteprovider.SQLiteEntityGraphProvider, eid types.EID) bool {
+	t.Helper()
+	view, err := p.GetEntity(context.Background(), eid, interfaces.GetEntityOpts{})
+	return view == nil || errors.Is(err, sqliteprovider.ErrNotFound)
+}
+
+// TestWriteFragmentsPartial_DoesNotRetractUnchangedFragments verifies that a
+// partial write carries no ClaimScope: a fragment absent from it keeps its entity.
+func TestWriteFragmentsPartial_DoesNotRetractUnchangedFragments(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	fragFile := makeHostFrag("file:/etc/hosts", "enforcing-module:file")
+	fragSSHD := makeHostFrag("service:sshd", "enforcing-module:service")
+	require.NoError(t, w.WriteFragmentDelta(ctx, "steward-part",
+		[]*commonpb.Fragment{fragFile, fragSSHD}, nil, types.DefaultTaxonomy()))
+
+	require.NoError(t, w.WriteFragmentsPartial(ctx, "steward-part",
+		[]*commonpb.Fragment{fragSSHD}, nil, types.DefaultTaxonomy()))
+
+	eidFile := mustParseEID(t, "host:steward-part/file:/etc/hosts")
+	eidSSHD := mustParseEID(t, "host:steward-part/service:sshd")
+	require.False(t, entityRetracted(t, p, eidFile), "unchanged fragment must not be retracted by a partial write")
+	require.False(t, entityRetracted(t, p, eidSSHD))
+	require.Len(t, stateHistory(t, p, eidFile), 1)
+}
+
+// TestWriteFragmentDelta_CompleteSetStillRetractsOmittedFragment verifies the
+// complete-set contract is unchanged after a partial write in the sequence.
+func TestWriteFragmentDelta_CompleteSetStillRetractsOmittedFragment(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	fragFile := makeHostFrag("file:/etc/hosts", "enforcing-module:file")
+	fragSSHD := makeHostFrag("service:sshd", "enforcing-module:service")
+	require.NoError(t, w.WriteFragmentDelta(ctx, "steward-comp",
+		[]*commonpb.Fragment{fragFile, fragSSHD}, nil, types.DefaultTaxonomy()))
+	require.NoError(t, w.WriteFragmentsPartial(ctx, "steward-comp",
+		[]*commonpb.Fragment{fragFile}, nil, types.DefaultTaxonomy()))
+
+	eidFile := mustParseEID(t, "host:steward-comp/file:/etc/hosts")
+	eidSSHD := mustParseEID(t, "host:steward-comp/service:sshd")
+	require.False(t, entityRetracted(t, p, eidSSHD), "partial write must not retract")
+
+	require.NoError(t, w.WriteFragmentDelta(ctx, "steward-comp",
+		[]*commonpb.Fragment{fragFile}, nil, types.DefaultTaxonomy()))
+	require.False(t, entityRetracted(t, p, eidFile))
+	require.True(t, entityRetracted(t, p, eidSSHD), "complete write must retract the omitted fragment")
+}

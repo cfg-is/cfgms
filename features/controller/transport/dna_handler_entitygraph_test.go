@@ -729,3 +729,44 @@ func mustParseEGEID(t *testing.T, s string) egtypes.EID {
 	require.NoError(t, err)
 	return eid
 }
+
+// TestDNAHandler_DeltaGRPC_EntityGraph_PartialDeltaKeepsUnchangedFragments verifies
+// that a delta carrying only fragment A does not retract fragment B's entity-graph
+// facts, which an earlier delta wrote and which the steward has not changed.
+func TestDNAHandler_DeltaGRPC_EntityGraph_PartialDeltaKeepsUnchangedFragments(t *testing.T) {
+	ca := newTestCA(t)
+	p := newTestEGProvider(t)
+	egWriter, err := dnasync.New(p)
+	require.NoError(t, err)
+
+	fragA := adversarialFrag("file:/etc/hosts", "enforcing-module:file")
+	fragB := adversarialFrag("service:sshd", "enforcing-module:service")
+	manifest := fragmentsToManifest([]*common.Fragment{fragA, fragB})
+	claimedRoot, err := sdna.AggregateRoot(manifest)
+	require.NoError(t, err)
+
+	store := NewInMemoryFragmentDeltaStore()
+	store.SetManifest("steward-P", manifest)
+
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+		WithPartialSync(store, nil).
+		WithEntityGraph(egWriter, egtypes.DefaultTaxonomy())
+	ctx := peerContextWithCA(t, ca, "steward-P")
+
+	h.recordDeltaRequest("steward-P", claimedRoot, manifestIDs(manifest))
+	first := newTestDNAStream(ctx, deltaChunksFor(t, "steward-P", []*common.Fragment{fragA, fragB})...)
+	require.NoError(t, h.HandleGRPC(first))
+	require.True(t, first.resp.GetAccepted())
+
+	h.recordDeltaRequest("steward-P", claimedRoot, []string{fragA.GetFragmentId()})
+	second := newTestDNAStream(ctx, deltaChunksFor(t, "steward-P", []*common.Fragment{fragA})...)
+	require.NoError(t, h.HandleGRPC(second))
+	require.True(t, second.resp.GetAccepted())
+
+	eidB, err := egtypes.ParseEID("host:steward-P/" + fragB.GetFragmentId())
+	require.NoError(t, err)
+	view, getErr := p.GetEntity(context.Background(), eidB, interfaces.GetEntityOpts{})
+	require.NoError(t, getErr, "unchanged fragment B must still be present after a delta carrying only A")
+	require.NotNil(t, view)
+	require.Len(t, egStateHistory(t, p, eidB), 1)
+}
