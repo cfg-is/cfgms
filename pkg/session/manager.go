@@ -165,12 +165,15 @@ func (m *manager) loadFromStore(ctx context.Context, hash string) *managedSessio
 // returned. A miss for a hash while the session still has a live row means that hash
 // was rotated away and its recorded grace expiry has elapsed: ErrSessionExpired, with
 // ms left live. A store error while checking is returned without marking ms revoked.
-// Non-fatal store errors on the hash lookup fall through to the in-memory state.
+// The check fails closed: a store error is never proof the session is still live.
 // The caller must hold ms.mu.
 func (m *manager) verifyInStore(ctx context.Context, hash string, ms *managedSession) error {
 	_, err := m.store.Get(ctx, hash)
-	if err == nil || (!errors.Is(err, ErrSessionNotFound) && !errors.Is(err, ErrSessionRevoked)) {
+	if err == nil {
 		return nil
+	}
+	if !errors.Is(err, ErrSessionNotFound) && !errors.Is(err, ErrSessionRevoked) {
+		return fmt.Errorf("session: verify store record: %w", err)
 	}
 	if _, idErr := m.store.GetByID(ctx, ms.session.ID); idErr == nil {
 		return ErrSessionExpired
@@ -553,9 +556,12 @@ func (m *manager) GetByID(ctx context.Context, id string) (*Session, error) {
 		}
 		// A cache hit alone cannot see a revocation made on another node: confirm the
 		// session still has a live row in the shared store.
-		if _, storeErr := m.store.GetByID(ctx, id); errors.Is(storeErr, ErrSessionNotFound) {
-			ms.revoked = true
-			return nil, ErrSessionNotFound
+		if _, storeErr := m.store.GetByID(ctx, id); storeErr != nil {
+			if errors.Is(storeErr, ErrSessionNotFound) {
+				ms.revoked = true
+				return nil, ErrSessionNotFound
+			}
+			return nil, fmt.Errorf("session: verify store record: %w", storeErr)
 		}
 		out := *ms.session
 		return &out, nil

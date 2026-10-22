@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1855,6 +1856,55 @@ func TestWebSessionCookie_InvalidToken_Returns401(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "unknown cookie token must return 401")
 	assert.Contains(t, rec.Body.String(), "INVALID_SESSION_TOKEN")
+}
+
+// errInjectingSessionStore wraps a real session store and fails Get while err is set.
+type errInjectingSessionStore struct {
+	session.Store
+	err atomic.Pointer[error]
+}
+
+func (e *errInjectingSessionStore) Get(ctx context.Context, hash string) (*session.Session, error) {
+	if v := e.err.Load(); v != nil {
+		return nil, *v
+	}
+	return e.Store.Get(ctx, hash)
+}
+
+// TestWebSessionCookie_StoreError_Returns401 verifies the middleware refuses a session
+// token while the session store errors, and accepts it again once the store recovers.
+func TestWebSessionCookie_StoreError_Returns401(t *testing.T) {
+	srv := setupTestServer(t)
+	webCfg := session.Config{IdleTimeout: 60 * time.Minute, AbsoluteTimeout: 12 * time.Hour, GraceWindow: 30 * time.Second}
+	mem := session.NewMemStore(webCfg, time.Now)
+	t.Cleanup(mem.Close)
+	store := &errInjectingSessionStore{Store: mem}
+	mgr := session.NewManager(webCfg, store, time.Now)
+	srv.SetWebSessionManager(mgr)
+
+	cookie := issueWebSession(t, srv, mgr, "alice", "tenant-a")
+	_, err := mgr.Validate(context.Background(), cookie.Value)
+	require.NoError(t, err)
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	serve := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	injected := errors.New("store unreachable")
+	store.err.Store(&injected)
+	rec := serve()
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "store error must refuse the session")
+	assert.Contains(t, rec.Body.String(), "INVALID_SESSION_TOKEN")
+
+	store.err.Store(nil)
+	assert.Equal(t, http.StatusOK, serve().Code, "session must validate again once the store recovers")
 }
 
 // --- Session assurance propagation tests (ADR-021 Decision 3/5, Issue #2788) ---
