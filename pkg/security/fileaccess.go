@@ -135,19 +135,6 @@ func ReadRegularFileNoSymlinks(baseDir, relPath string) ([]byte, os.FileInfo, er
 	return data, info, nil
 }
 
-// writeFileNoFollow writes data like os.WriteFile but never follows a link at the leaf.
-func writeFileNoFollow(path string, data []byte, perm os.FileMode) error {
-	f, err := openNoFollow(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	return err
-}
-
 // SecureWriteFile safely writes a file with path validation and secure permissions.
 //
 // Files are written with 0600 permissions (owner read/write only) by default.
@@ -158,13 +145,7 @@ func SecureWriteFile(basePath, userPath string, data []byte) error {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 
-	// Ensure parent directory exists with secure permissions
-	dir := filepath.Dir(validatedPath)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	return writeFileNoFollow(validatedPath, data, 0600)
+	return writeFileInRoot(basePath, userPath, validatedPath, data, 0600)
 }
 
 // SecureWriteFileWithPerms writes a file with custom permissions after path validation.
@@ -176,13 +157,7 @@ func SecureWriteFileWithPerms(basePath, userPath string, data []byte, perm os.Fi
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 
-	// Ensure parent directory exists with secure permissions
-	dir := filepath.Dir(validatedPath)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	return writeFileNoFollow(validatedPath, data, perm)
+	return writeFileInRoot(basePath, userPath, validatedPath, data, perm)
 }
 
 // SecureOpenFile safely opens a file with path validation.
