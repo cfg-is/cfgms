@@ -814,6 +814,27 @@ func TestHandleCockpitWatch_ClosesWhenSessionRevoked(t *testing.T) {
 	assert.Equal(t, websocket.ClosePolicyViolation, closeErr.Code)
 }
 
+// TestHandleCockpitWatch_ClosesWhenPermissionRemoved proves an open watch is closed on
+// the next tick once the account's case:read permission is removed in the real account
+// store, although the session and the account are both still valid.
+func TestHandleCockpitWatch_ClosesWhenPermissionRemoved(t *testing.T) {
+	probe := newWatchProbe(t)
+	srv := setupCockpitWatchServer(t, probe)
+	srv.setWatchKeepalive(2*time.Second, 100*time.Millisecond)
+	token, acct := newBearerSessionForAccount(t, srv, "watch-perm-removed", []string{"case:read"})
+	c, _ := seedWatchCase(t, srv.CasesStore(), acct.TenantID)
+
+	conn, teardown := dialWatchWSWithAuth(t, srv, c.ID, func(h http.Header) {
+		h.Set("Authorization", "Bearer "+token)
+	})
+	defer teardown()
+	probe.waitSubscribed(t)
+
+	updateTestAccount(t, srv, "watch-perm-removed", func(a *account) { a.Permissions = []string{"steward:read"} })
+
+	requirePolicyViolationClose(t, conn)
+}
+
 // ── Keepalive window is per-Server, with package defaults ──────────────────
 
 // TestWatchKeepalive_DefaultsAndOverride pins the keepalive knob's contract: an
