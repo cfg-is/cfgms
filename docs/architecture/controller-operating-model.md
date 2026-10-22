@@ -623,6 +623,8 @@ The security invariant is unchanged by the backing store: `session.Manager` alwa
 
 Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
 
+Every other steward stream on the shared gRPC server (SyncConfig, FetchModuleBundle, SyncDNA, BulkTransfer, LogStream, TelemetryStream, Terminal, OsqueryQuery) is covered by a stream interceptor installed in `Server.Start` (Issue #5370). It checks the peer certificate serial through `cert.Manager.IsRevoked` at admission: a revoked serial is refused with `codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed), and a stream with no peer certificate with `codes.Unauthenticated`. While the stream is open the interceptor re-checks the serial every 30 seconds and cancels the stream context once it is revoked, so the handler returns and the client sees `PermissionDenied`. A transient lookup error during a re-check keeps the stream open and is retried on the next tick. ControlChannel is skipped by the interceptor because the provider already checks it.
+
 ### Host Provenance at Admission (Issue #4949, ADR-034 §2)
 
 The admission pipeline order is: **revocation, approval, provenance**. Provenance runs only for a connection the first two gates already admitted, and is demote-only (ADR-011 §7): it classifies the connection and can never admit one they refused.
