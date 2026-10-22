@@ -33,6 +33,12 @@ func ccUsePublicResolver(t *testing.T) {
 	t.Cleanup(cfgpkg.UseHostResolverForTesting(ccPublicResolver{}))
 }
 
+type ccLoopbackResolver struct{}
+
+func (ccLoopbackResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+}
+
 type ccPublicResolver struct{}
 
 func (ccPublicResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
@@ -95,8 +101,15 @@ func TestConfigSourceCredential_StoresBoundSecret(t *testing.T) {
 	// The git router and ValidateMountPoint read this same store: the stored credential
 	// authenticates against a remote that accepts only the token.
 	info := &cfgpkg.ConfigSourceInfo{Type: cfgpkg.ConfigSourceTypeGit, URL: repo, CredentialRef: body.Data.CredentialRef}
-	v := cfgpkg.NewDefaultMountPointValidator(cfgpkg.WithInsecureSkipTLS())
+	// Admission still answers a public address; the connect-time check reaches the
+	// loopback httptest server.
+	restoreResolver := cfgpkg.UseHostResolverForTesting(ccLoopbackResolver{})
+	restoreLoopback := cfgpkg.AllowLoopbackForTesting()
+	v := cfgpkg.NewDefaultMountPointValidator(cfgpkg.WithInsecureSkipTLS(), cfgpkg.WithHostResolver(ccPublicResolver{}))
 	require.NoError(t, v.ValidateMountPoint(context.Background(), info, env.server.secretStore))
+	restoreLoopback()
+	restoreResolver()
+	ccUsePublicResolver(t)
 
 	// The credential_ref is accepted for a tenant that has a parent (flat tenant ID).
 	_, err := env.server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{

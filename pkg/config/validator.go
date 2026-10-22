@@ -61,6 +61,7 @@ func WithInsecureSkipTLS() MountPointValidatorOption {
 
 // NewDefaultMountPointValidator creates a production-ready DefaultMountPointValidator.
 func NewDefaultMountPointValidator(opts ...MountPointValidatorOption) *DefaultMountPointValidator {
+	EnsureGuardedGitTransport()
 	v := &DefaultMountPointValidator{}
 	for _, opt := range opts {
 		opt(v)
