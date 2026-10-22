@@ -13,14 +13,11 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 func newDeclaredTestStore(t *testing.T) cfgconfig.ConfigStore {
 	t.Helper()
-	cs, err := flatfile.NewFlatFileConfigStore(t.TempDir())
-	require.NoError(t, err)
-	return cs
+	return newFlatFileConfigStore(t)
 }
 
 func declare(t *testing.T, cs cfgconfig.ConfigStore, tenant, cluster string, members ...string) {
