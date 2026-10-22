@@ -3918,9 +3918,9 @@ func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplan
 	default:
 		// Log unhandled event types for debugging
 		s.logger.Debug("Received event from steward",
-			"steward_id", event.StewardID,
-			"event_type", event.Type,
-			"event_id", event.ID)
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
+			"event_type", logging.SanitizeLogValue(string(event.Type)),
+			"event_id", logging.SanitizeLogValue(event.ID))
 	}
 	return nil
 }
@@ -3930,8 +3930,8 @@ func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplan
 // Issue #3330: re-homed from flat attribute delta to fragment-based payload.
 func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Event) error {
 	s.logger.Info("Received DNA change event",
-		"steward_id", event.StewardID,
-		"event_id", event.ID)
+		"steward_id", logging.SanitizeLogValue(event.StewardID),
+		"event_id", logging.SanitizeLogValue(event.ID))
 
 	// Extract DNA data from event details
 	dna := &common.DNA{
@@ -3948,7 +3948,7 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 			frags, fragErr := extractFragmentsFromDetails(rawDNA)
 			if fragErr != nil {
 				s.logger.Warn("Failed to extract fragment list from DNA event; skipping DNA field",
-					"steward_id", event.StewardID,
+					"steward_id", logging.SanitizeLogValue(event.StewardID),
 					"error", logging.SanitizeLogValue(fragErr.Error()))
 			} else {
 				dna.Fragments = frags
@@ -3979,19 +3979,19 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 	status, err := s.controllerService.SyncDNA(ctx, dna)
 	if err != nil {
 		s.logger.Error("Failed to sync DNA",
-			"steward_id", event.StewardID,
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to sync DNA: %w", err)
 	}
 
 	if status.Code != common.Status_OK {
 		s.logger.Warn("DNA sync returned non-OK status",
-			"steward_id", event.StewardID,
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
 			"status_code", status.Code,
 			"message", status.Message)
 	} else {
 		s.logger.Info("DNA synced successfully",
-			"steward_id", event.StewardID)
+			"steward_id", logging.SanitizeLogValue(event.StewardID))
 	}
 
 	return nil
@@ -4031,8 +4031,8 @@ func extractFragmentsFromDetails(raw interface{}) ([]*common.Fragment, error) {
 // Issue #3375: adds entity-graph ingestion of apply-outcome records via ReportObservations.
 func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlplaneTypes.Event) error {
 	s.logger.Info("Received config applied event",
-		"steward_id", event.StewardID,
-		"event_id", event.ID)
+		"steward_id", logging.SanitizeLogValue(event.StewardID),
+		"event_id", logging.SanitizeLogValue(event.ID))
 
 	// Extract config status details from event
 	if details := event.Details; details != nil {
@@ -4040,7 +4040,7 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 		overallStatus, _ := details["status"].(string)
 
 		s.logger.Info("Configuration status report",
-			"steward_id", event.StewardID,
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
 			"config_version", logging.SanitizeLogValue(configVersion),
 			"overall_status", logging.SanitizeLogValue(overallStatus))
 
@@ -4051,7 +4051,7 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 					moduleStatus, _ := moduleMap["status"].(string)
 					moduleMessage, _ := moduleMap["message"].(string)
 					s.logger.Info("Module status",
-						"steward_id", event.StewardID,
+						"steward_id", logging.SanitizeLogValue(event.StewardID),
 						"module", logging.SanitizeLogValue(moduleName),
 						"status", logging.SanitizeLogValue(moduleStatus),
 						"message", logging.SanitizeLogValue(moduleMessage))
@@ -4068,7 +4068,7 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 				// Log and continue: a write failure here must not prevent the event from
 				// being acknowledged. The next apply cycle will produce fresh records.
 				s.logger.Error("Failed to ingest apply-outcome records",
-					"steward_id", event.StewardID,
+					"steward_id", logging.SanitizeLogValue(event.StewardID),
 					"error", logging.SanitizeLogValue(err.Error()))
 			}
 		}
