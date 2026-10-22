@@ -175,6 +175,10 @@ func (sp *SIEMProcessor) RegisterSIEMTrigger(ctx context.Context, trigger *Trigg
 	}
 
 	// Store trigger configuration
+	// Keep a private copy so Status is not read racily against the manager's
+	// trigger; status changes take effect through re-registration.
+	registered := *trigger
+	trigger = &registered
 	sp.siemTriggers[trigger.ID] = trigger
 	sp.triggerConditions[trigger.ID] = trigger.SIEM.Conditions
 
@@ -317,7 +321,7 @@ func (sp *SIEMProcessor) processLogEntry(ctx context.Context, entry LogEntry) {
 			continue
 		}
 
-		if !trigger.SIEM.Enabled {
+		if trigger.Status != TriggerStatusActive || !trigger.SIEM.Enabled {
 			continue
 		}
 

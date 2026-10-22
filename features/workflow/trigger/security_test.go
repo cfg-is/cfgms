@@ -627,8 +627,9 @@ func TestSecurityEdgeCases_RateLimitBypass(t *testing.T) {
 
 	// Create a severely rate-limited webhook
 	trigger := &Trigger{
-		ID:   "rate-limited-webhook",
-		Type: TriggerTypeWebhook,
+		ID:     "rate-limited-webhook",
+		Type:   TriggerTypeWebhook,
+		Status: TriggerStatusActive,
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/ratelimited",
 			Enabled: true,

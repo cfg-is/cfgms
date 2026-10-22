@@ -869,8 +869,8 @@ func (tm *TriggerManagerImpl) setTriggerStatus(ctx context.Context, triggerID st
 		return fmt.Errorf("failed to update trigger status: %w", err)
 	}
 
-	// Handle scheduler registration/unregistration for schedule triggers
-	if trigger.Type == TriggerTypeSchedule {
+	// Handle handler registration/unregistration for every handler-backed trigger type
+	if trigger.Type == TriggerTypeSchedule || trigger.Type == TriggerTypeWebhook || trigger.Type == TriggerTypeSIEM {
 		if status == TriggerStatusActive && oldStatus != TriggerStatusActive {
 			// Register with scheduler when activating
 			if err := tm.registerTriggerWithHandler(ctx, trigger); err != nil {
