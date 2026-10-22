@@ -8,8 +8,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1509,4 +1512,83 @@ func TestStoreRequirements_TriggerStoreDeclined_FailsStartup(t *testing.T) {
 		"error must name the declaring subsystem")
 	assert.Contains(t, err.Error(), string(interfaces.StoreNameTrigger),
 		"error must name the missing store")
+}
+
+// TestTriggerManagerImpl_DisableEnable_SIEMAndWebhook proves that a disabled SIEM or
+// webhook trigger stops launching workflows and fires again once re-enabled.
+func TestTriggerManagerImpl_DisableEnable_SIEMAndWebhook(t *testing.T) {
+	h := newTriggerHarness(t)
+	const tenantID = "tenant-test"
+	ctx := contextWithTenant(tenantID)
+
+	siemTrigger := &Trigger{
+		ID:           "siem-toggle",
+		Name:         "SIEM Toggle",
+		Type:         TriggerTypeSIEM,
+		Status:       TriggerStatusActive,
+		WorkflowName: "siem-workflow",
+		SIEM: &SIEMConfig{
+			EventTypes: []string{"error"},
+			Threshold:  &SIEMThreshold{Count: 1},
+			WindowSize: time.Minute,
+			Enabled:    true,
+		},
+	}
+	webhookTrigger := &Trigger{
+		ID:           "webhook-toggle",
+		Name:         "Webhook Toggle",
+		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
+		WorkflowName: "webhook-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/toggle",
+			Method:  []string{"POST"},
+			Enabled: true,
+			Authentication: &WebhookAuth{
+				Type:   WebhookAuthAPIKey,
+				APIKey: "toggle-api-key",
+			},
+		},
+	}
+	require.NoError(t, h.manager.CreateTrigger(ctx, siemTrigger))
+	require.NoError(t, h.manager.CreateTrigger(ctx, webhookTrigger))
+
+	entry := LogEntry{Timestamp: time.Now(), Level: "error", Message: "boom", Source: "svc", TenantID: tenantID}
+	postWebhook := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/toggle", strings.NewReader(`{"a":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "toggle-api-key")
+		rec := httptest.NewRecorder()
+		h.webhookHandler.handleWebhookRequest(rec, req)
+		return rec.Code
+	}
+	executionsFor := func(workflowName string) int {
+		n := 0
+		for _, e := range h.workflowTrigger.GetExecutions() {
+			if e.WorkflowName == workflowName {
+				n++
+			}
+		}
+		return n
+	}
+
+	require.NoError(t, h.manager.DisableTrigger(ctx, "siem-toggle"))
+	require.NoError(t, h.manager.DisableTrigger(ctx, "webhook-toggle"))
+
+	h.siemProcessor.processLogEntry(ctx, entry)
+	// Unregistration drops the route, so the request is refused before the
+	// handler's 503 status check (covered directly in webhook_test.go).
+	assert.GreaterOrEqual(t, postWebhook(), http.StatusBadRequest, "disabled webhook must refuse requests")
+	time.Sleep(100 * time.Millisecond)
+	assert.Zero(t, executionsFor("siem-workflow"), "disabled SIEM trigger must not start a workflow")
+	assert.Zero(t, executionsFor("webhook-workflow"), "disabled webhook trigger must not start a workflow")
+
+	require.NoError(t, h.manager.EnableTrigger(ctx, "siem-toggle"))
+	require.NoError(t, h.manager.EnableTrigger(ctx, "webhook-toggle"))
+
+	h.siemProcessor.processLogEntry(ctx, entry)
+	assert.Equal(t, http.StatusAccepted, postWebhook())
+	assert.Eventually(t, func() bool {
+		return executionsFor("siem-workflow") > 0 && executionsFor("webhook-workflow") > 0
+	}, 5*time.Second, 10*time.Millisecond, "re-enabled triggers must start workflows again")
 }

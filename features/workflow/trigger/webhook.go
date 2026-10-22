@@ -174,6 +174,10 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 		"methods", logging.SanitizeLogValue(strings.Join(trigger.Webhook.Method, ",")))
 
 	// Store webhook configuration
+	// Keep a private copy so Status is not read racily against the manager's
+	// trigger; status changes take effect through re-registration.
+	registered := *trigger
+	trigger = &registered
 	wh.webhooks[trigger.ID] = trigger
 
 	// Store path-to-trigger mapping
@@ -442,8 +446,8 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Check if webhook is enabled
-	if !trigger.Webhook.Enabled {
+	// Check if webhook is enabled and the trigger is active
+	if trigger.Status != TriggerStatusActive || !trigger.Webhook.Enabled {
 		logger.WarnCtx(ctx, "Webhook request for disabled trigger",
 			"trigger_id", logging.SanitizeLogValue(triggerID))
 		http.Error(w, "Webhook trigger is disabled", http.StatusServiceUnavailable)

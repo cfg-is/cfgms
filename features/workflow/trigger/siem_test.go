@@ -1302,3 +1302,29 @@ func TestSIEMProcessor_ProcessLogEntryPanicIsRecovered(t *testing.T) {
 	// The loop must survive: a following entry is still processed.
 	awaitSIEMSentinel(t, processor, wf)
 }
+
+func TestSIEMProcessor_ProcessLogEntry_InactiveStatusSkipped(t *testing.T) {
+	h := newTriggerHarness(t)
+	workflowTrigger := h.workflowTrigger
+	processor := h.siemProcessor
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-123")
+
+	trigger := &Trigger{
+		ID:           "siem-inactive",
+		Type:         TriggerTypeSIEM,
+		Status:       TriggerStatusInactive,
+		TenantID:     "tenant-123",
+		WorkflowName: "inactive-workflow",
+		SIEM: &SIEMConfig{
+			Threshold:  &SIEMThreshold{Count: 1},
+			WindowSize: time.Minute,
+			Enabled:    true,
+		},
+	}
+	require.NoError(t, processor.RegisterSIEMTrigger(ctx, trigger))
+
+	processor.processLogEntry(ctx, LogEntry{Timestamp: time.Now(), Level: "error", Message: "x", TenantID: "tenant-123"})
+	time.Sleep(100 * time.Millisecond)
+
+	assert.Empty(t, workflowTrigger.GetExecutions(), "inactive SIEM trigger must not start a workflow")
+}

@@ -58,8 +58,9 @@ func TestHTTPWebhookHandler_RegisterWebhook(t *testing.T) {
 		{
 			name: "valid webhook trigger",
 			trigger: &Trigger{
-				ID:   "webhook-1",
-				Type: TriggerTypeWebhook,
+				ID:     "webhook-1",
+				Type:   TriggerTypeWebhook,
+				Status: TriggerStatusActive,
 				Webhook: &WebhookConfig{
 					Path:    "/webhook/test",
 					Method:  []string{"POST"},
@@ -71,8 +72,9 @@ func TestHTTPWebhookHandler_RegisterWebhook(t *testing.T) {
 		{
 			name: "webhook trigger with rate limit",
 			trigger: &Trigger{
-				ID:   "webhook-2",
-				Type: TriggerTypeWebhook,
+				ID:     "webhook-2",
+				Type:   TriggerTypeWebhook,
+				Status: TriggerStatusActive,
 				Webhook: &WebhookConfig{
 					Path:    "/webhook/ratelimited",
 					Method:  []string{"POST"},
@@ -99,6 +101,7 @@ func TestHTTPWebhookHandler_RegisterWebhook(t *testing.T) {
 			trigger: &Trigger{
 				ID:      "webhook-3",
 				Type:    TriggerTypeWebhook,
+				Status:  TriggerStatusActive,
 				Webhook: nil,
 			},
 			expectError: true,
@@ -132,8 +135,9 @@ func TestHTTPWebhookHandler_UnregisterWebhook(t *testing.T) {
 
 	// Register a webhook first
 	trigger := &Trigger{
-		ID:   "webhook-1",
-		Type: TriggerTypeWebhook,
+		ID:     "webhook-1",
+		Type:   TriggerTypeWebhook,
+		Status: TriggerStatusActive,
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/test",
 			Enabled: true,
@@ -660,6 +664,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 	trigger := &Trigger{
 		ID:           "webhook-1",
 		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
 		WorkflowName: "test-workflow",
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/test",
@@ -944,8 +949,9 @@ func TestHTTPWebhookHandler_RateLimit(t *testing.T) {
 
 	// Register a rate-limited webhook
 	trigger := &Trigger{
-		ID:   "webhook-ratelimited",
-		Type: TriggerTypeWebhook,
+		ID:     "webhook-ratelimited",
+		Type:   TriggerTypeWebhook,
+		Status: TriggerStatusActive,
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/ratelimited",
 			Method:  []string{"POST"},
@@ -1016,8 +1022,9 @@ func TestAuthFailureRateLimit(t *testing.T) {
 	handler := NewHTTPWebhookHandler(mockTriggerManager, mockWorkflowTrigger, "localhost", 0)
 
 	trigger := &Trigger{
-		ID:   "rate-limit-trigger",
-		Type: TriggerTypeWebhook,
+		ID:     "rate-limit-trigger",
+		Type:   TriggerTypeWebhook,
+		Status: TriggerStatusActive,
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/rate-limit-trigger",
 			Method:  []string{"POST"},
@@ -1103,6 +1110,7 @@ func TestHandleWebhookNoAuthHeadersInWorkflowVariables(t *testing.T) {
 	trigger := &Trigger{
 		ID:           "sanitize-e2e",
 		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
 		WorkflowName: "test-workflow",
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/sanitize-e2e",
@@ -1371,6 +1379,7 @@ func TestWebhookBasicAuthHTTP(t *testing.T) {
 	trigger := &Trigger{
 		ID:           "webhook-basic",
 		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
 		WorkflowName: "test-workflow",
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/basic-auth-test",
@@ -1452,6 +1461,7 @@ func TestWebhookPayloadSchemaValidationHTTP(t *testing.T) {
 	trigger := &Trigger{
 		ID:           "webhook-schema",
 		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusActive,
 		WorkflowName: "test-workflow",
 		Webhook: &WebhookConfig{
 			Path:    "/webhook/schema-test",
@@ -1517,4 +1527,33 @@ func generateHMACSignature(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestHTTPWebhookHandler_InactiveStatusReturns503(t *testing.T) {
+	h := newTriggerHarness(t)
+	workflowTrigger := h.workflowTrigger
+	handler := h.webhookHandler
+
+	trigger := &Trigger{
+		ID:           "webhook-inactive",
+		Type:         TriggerTypeWebhook,
+		Status:       TriggerStatusInactive,
+		WorkflowName: "inactive-workflow",
+		Webhook: &WebhookConfig{
+			Path:    "/webhook/inactive",
+			Method:  []string{"POST"},
+			Enabled: true,
+		},
+	}
+	require.NoError(t, handler.RegisterWebhook(context.Background(), trigger))
+
+	// A disallowed method must still yield 503: the status check precedes method handling.
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		req := httptest.NewRequest(method, "/webhook/inactive", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		handler.handleWebhookRequest(rec, req)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, method)
+		assert.Contains(t, rec.Body.String(), "Webhook trigger is disabled")
+	}
+	assert.Empty(t, workflowTrigger.GetExecutions())
 }
