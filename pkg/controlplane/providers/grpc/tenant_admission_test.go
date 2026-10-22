@@ -402,9 +402,11 @@ type admissionEnv struct {
 	queue   *controllerTransport.TenantQueue
 	// eventQueue is the events-only gate, a different instance from queue.
 	eventQueue *controllerTransport.TenantQueue
-	logger     *verbatimLogger
-	reg        *registry.InMemoryRegistry
-	tc         *testCA
+	// responseQueue is the responses-only gate.
+	responseQueue *controllerTransport.TenantQueue
+	logger        *verbatimLogger
+	reg           *registry.InMemoryRegistry
+	tc            *testCA
 }
 
 const (
@@ -424,9 +426,10 @@ func newAdmissionEnv(t *testing.T) *admissionEnv {
 		"steward-adm-c": admissionTenantA,
 	})
 	eventQueue := controllerTransport.NewTenantQueue()
+	responseQueue := controllerTransport.NewTenantQueue()
 	vl := &verbatimLogger{Logger: logging.NewNoopLogger()}
 
-	server := New(ModeServer, WithTenantAdmission(queue), WithEventAdmission(eventQueue), WithStewardTenantResolver(resolver))
+	server := New(ModeServer, WithTenantAdmission(queue), WithEventAdmission(eventQueue), WithResponseAdmission(responseQueue), WithStewardTenantResolver(resolver))
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
 		"logger":     vl,
 		"mode":       "server",
@@ -463,7 +466,7 @@ func newAdmissionEnv(t *testing.T) *admissionEnv {
 		return reg.Count() == 2
 	}, 5*time.Second, 10*time.Millisecond, "both stewards should register")
 
-	return &admissionEnv{server: server, clientA: clientA, clientB: clientB, queue: queue, eventQueue: eventQueue, logger: vl, reg: reg, tc: tc}
+	return &admissionEnv{server: server, clientA: clientA, clientB: clientB, queue: queue, eventQueue: eventQueue, responseQueue: responseQueue, logger: vl, reg: reg, tc: tc}
 }
 
 // TestControlChannel_Heartbeat_TenantAdmissionQueueFull_DroppedWithoutStarvingOtherTenants

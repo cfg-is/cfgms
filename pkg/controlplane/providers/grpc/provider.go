@@ -162,6 +162,11 @@ type Provider struct {
 	// WithEventAdmission (Issue #5120).
 	eventAdmission TenantAdmission
 
+	// responseAdmission gates steward responses on the ControlChannel with its
+	// own per-tenant queue. Nil disables the tenant gate; the per-stream limit
+	// applies regardless. Injected via WithResponseAdmission.
+	responseAdmission TenantAdmission
+
 	// stewardTenantResolver maps an mTLS-verified steward identity to its tenant
 	// using server-side fleet records, so admission buckets are never keyed on a
 	// caller-supplied tenant field. Nil falls back to per-steward buckets.
@@ -219,6 +224,7 @@ type Provider struct {
 	// gate or the per-stream in-flight limit (Issue #5120).
 	eventsDropped     atomic.Int64
 	heartbeatsDropped atomic.Int64
+	responsesDropped  atomic.Int64
 
 	// Connection timestamps (protected by mu)
 	lastConnectedAt    time.Time
@@ -1237,9 +1243,10 @@ func (p *Provider) SubscribeResponses(ctx context.Context, handler interfaces.Re
 	return nil
 }
 
-// dispatchResponse runs every subscribed response handler synchronously. A
-// handler error is logged and never ends the stream.
-func (p *Provider) dispatchResponse(resp *types.Response) {
+// dispatchResponse runs every subscribed response handler through runHandlers.
+// A handler error is logged and never ends the stream. release runs once after
+// every started handler has returned, or immediately when there are none.
+func (p *Provider) dispatchResponse(resp *types.Response, release func()) {
 	p.mu.RLock()
 	handlers := make([]interfaces.ResponseHandler, len(p.responseHandlers))
 	copy(handlers, p.responseHandlers)
@@ -1249,14 +1256,14 @@ func (p *Provider) dispatchResponse(resp *types.Response) {
 		ctx = context.Background()
 	}
 
-	for _, handler := range handlers {
-		if err := handler(ctx, resp); err != nil {
+	p.runHandlers(len(handlers), "response", func(i int) {
+		if err := handlers[i](ctx, resp); err != nil {
 			p.logger.Error("response handler error",
 				"command_id", logging.SanitizeLogValue(resp.CommandID),
 				"steward_id", logging.SanitizeLogValue(resp.StewardID),
 				"error", logging.SanitizeLogValue(err.Error()))
 		}
-	}
+	}, release)
 }
 
 func (p *Provider) SendResponse(ctx context.Context, response *types.Response) error {
@@ -1373,6 +1380,7 @@ func (p *Provider) GetStats(ctx context.Context) (*types.ControlPlaneStats, erro
 		DeliveryFailures:   p.deliveryFailures.Load(),
 		EventsDropped:      p.eventsDropped.Load(),
 		HeartbeatsDropped:  p.heartbeatsDropped.Load(),
+		ResponsesDropped:   p.responsesDropped.Load(),
 		IdentityMismatches: p.identityMismatches.Load(),
 		ProviderMetrics:    make(map[string]interface{}),
 	}
@@ -1631,7 +1639,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// steward use to silently drop an entire victim tenant's liveness traffic.
 	// Resolving once also keeps the per-heartbeat path free of store lookups.
 	var heartbeatBucket string
-	if s.provider.tenantAdmission != nil || s.provider.eventAdmission != nil {
+	if s.provider.tenantAdmission != nil || s.provider.eventAdmission != nil || s.provider.responseAdmission != nil {
 		heartbeatBucket = s.provider.admissionBucket(stream.Context(), stewardID, "")
 	}
 
@@ -1855,7 +1863,27 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 			s.provider.logger.Debug("controlchannel response received",
 				"command_id", logging.SanitizeLogValue(resp.CommandID),
 				"steward_id", logging.SanitizeLogValue(resp.StewardID))
-			s.provider.dispatchResponse(resp)
+
+			// Responses use their own tenant queue and a per-stream in-flight
+			// cap, like events; the receive loop never blocks on a handler.
+			// The bucket is the server-resolved heartbeatBucket, never resp data.
+			if !ingest.tryResponse() {
+				s.provider.dropMessage(ingest.responseDrops, &s.provider.responsesDropped, "response", "stream in-flight limit reached", stewardID, heartbeatBucket)
+				continue
+			}
+			release := ingest.releaseResponse
+			if ra := s.provider.responseAdmission; ra != nil {
+				if aErr := ra.Acquire(heartbeatBucket); aErr != nil {
+					ingest.releaseResponse()
+					s.provider.dropMessage(ingest.responseDrops, &s.provider.responsesDropped, "response", "tenant admission queue full", stewardID, heartbeatBucket)
+					continue
+				}
+				release = func() {
+					ingest.releaseResponse()
+					ra.Release(heartbeatBucket)
+				}
+			}
+			s.provider.dispatchResponse(resp, release)
 		}
 	}
 }

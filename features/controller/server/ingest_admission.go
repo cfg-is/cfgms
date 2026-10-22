@@ -10,7 +10,7 @@ import (
 // ingestAdmissionQueues holds the per-tenant admission gates for the steward
 // ingest paths (Issue #3759, ADR-031 Decision 6).
 //
-// There are deliberately THREE TenantQueue instances. Two are split by how much
+// There are deliberately FOUR TenantQueue instances. Two are split by how much
 // the controller trusts the bucket key each path uses, the third by workload:
 //
 //   - connectHeartbeat gates Register (connect) and the ControlChannel heartbeat
@@ -29,6 +29,11 @@ import (
 //     handlers that can be slow, so they get their own queue: a flood of slow
 //     event handlers from one tenant must never use up that tenant's connect or
 //     heartbeat slots (Issue #5120).
+//
+//   - responses gates steward responses on the ControlChannel with the same
+//     server-verified key. Response subscribers read stores, so they get their
+//     own queue: slow response handlers must never use up event or heartbeat
+//     slots.
 //
 //   - dnaBulk gates SyncDNA and BulkTransfer. The DNA handler keys its bucket on
 //     the first chunk's tenant_id — unverified wire data (BulkHandler keys on
@@ -49,6 +54,7 @@ import (
 type ingestAdmissionQueues struct {
 	connectHeartbeat *controllerTransport.TenantQueue
 	events           *controllerTransport.TenantQueue
+	responses        *controllerTransport.TenantQueue
 	dnaBulk          *controllerTransport.TenantQueue
 }
 
@@ -59,6 +65,7 @@ func newIngestAdmissionQueues() *ingestAdmissionQueues {
 	return &ingestAdmissionQueues{
 		connectHeartbeat: controllerTransport.NewTenantQueue(),
 		events:           controllerTransport.NewTenantQueue(),
+		responses:        controllerTransport.NewTenantQueue(),
 		dnaBulk:          controllerTransport.NewTenantQueue(),
 	}
 }
@@ -88,4 +95,13 @@ func (q *ingestAdmissionQueues) eventsQueue() *controllerTransport.TenantQueue {
 		return controllerTransport.NewTenantQueue()
 	}
 	return q.events
+}
+
+// responsesQueue returns the gate for steward responses, tolerating a Server
+// assembled without New (queues absent).
+func (q *ingestAdmissionQueues) responsesQueue() *controllerTransport.TenantQueue {
+	if q == nil {
+		return controllerTransport.NewTenantQueue()
+	}
+	return q.responses
 }

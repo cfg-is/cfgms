@@ -67,11 +67,27 @@ func WithEventAdmission(admission TenantAdmission) option {
 	}
 }
 
+// WithResponseAdmission injects the per-tenant admission gate for steward
+// responses on the ControlChannel. It must be a different instance from the
+// connect/heartbeat and event gates so slow response handlers cannot use up
+// their slots. Optional — nil disables the tenant gate; the per-stream
+// in-flight limit still applies.
+func WithResponseAdmission(admission TenantAdmission) option {
+	return func(p *Provider) {
+		p.responseAdmission = admission
+	}
+}
+
 // maxInFlightEventsPerStream bounds event handlers in flight at the same time
 // for one ControlChannel stream: a quarter of the per-tenant limit (32), so one
 // steward cannot fill its tenant's event slots. It bounds concurrency, not the
 // event rate. Events past the cap are dropped and counted, never queued.
 const maxInFlightEventsPerStream = 8
+
+// maxInFlightResponsesPerStream bounds response handlers in flight at the same
+// time for one ControlChannel stream, with the same value and meaning as
+// maxInFlightEventsPerStream. Responses past the cap are dropped and counted.
+const maxInFlightResponsesPerStream = 8
 
 // maxInFlightHeartbeatsPerStream is the number of heartbeats a stream may have
 // being handled at once.
@@ -108,12 +124,14 @@ func (d *dropLogLimiter) record(now time.Time) (bool, int64) {
 type streamIngest struct {
 	events         atomic.Int32
 	heartbeats     atomic.Int32
+	responses      atomic.Int32
 	eventDrops     *dropLogLimiter
 	heartbeatDrops *dropLogLimiter
+	responseDrops  *dropLogLimiter
 }
 
 func newStreamIngest() *streamIngest {
-	return &streamIngest{eventDrops: &dropLogLimiter{}, heartbeatDrops: &dropLogLimiter{}}
+	return &streamIngest{eventDrops: &dropLogLimiter{}, heartbeatDrops: &dropLogLimiter{}, responseDrops: &dropLogLimiter{}}
 }
 
 func tryAcquireCounter(c *atomic.Int32, limit int32) bool {
@@ -132,6 +150,10 @@ func (s *streamIngest) tryHeartbeat() bool {
 	return tryAcquireCounter(&s.heartbeats, maxInFlightHeartbeatsPerStream)
 }
 func (s *streamIngest) releaseHeartbeat() { s.heartbeats.Add(-1) }
+func (s *streamIngest) tryResponse() bool {
+	return tryAcquireCounter(&s.responses, maxInFlightResponsesPerStream)
+}
+func (s *streamIngest) releaseResponse() { s.responses.Add(-1) }
 
 // dropMessage counts a shed steward message and logs it, rate-limited per
 // stream.
@@ -157,6 +179,12 @@ func (p *Provider) TenantAdmission() TenantAdmission {
 // provider, or nil when the tenant event gate is disabled.
 func (p *Provider) EventAdmission() TenantAdmission {
 	return p.eventAdmission
+}
+
+// ResponseAdmission returns the steward-response admission gate wired into this
+// provider, or nil when the tenant response gate is disabled.
+func (p *Provider) ResponseAdmission() TenantAdmission {
+	return p.responseAdmission
 }
 
 // StewardTenantResolver maps an mTLS-verified steward identity to the tenant

@@ -191,3 +191,94 @@ func TestDispatchEvent_HandlerErrorLogNeutralizesControlCharacters(t *testing.T)
 		}
 	}
 }
+
+func sendTestResponses(t *testing.T, c *Provider, stewardID string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		require.NoError(t, c.SendResponse(context.Background(), &types.Response{
+			CommandID: fmt.Sprintf("cmd-%d", i), StewardID: stewardID,
+			Success: false, Timestamp: time.Now().Truncate(time.Microsecond),
+		}))
+	}
+}
+
+// TestControlChannel_Response_FloodDoesNotStallReceiveLoop: a blocked response
+// handler holds at most maxInFlightResponsesPerStream responses; the rest are
+// dropped and counted, and a following heartbeat is still dispatched.
+func TestControlChannel_Response_FloodDoesNotStallReceiveLoop(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	probe := newConcurrencyProbe()
+	released := false
+	releaseProbe := func() {
+		if !released {
+			released = true
+			close(probe.release)
+		}
+	}
+	t.Cleanup(releaseProbe)
+	require.NoError(t, env.server.SubscribeResponses(context.Background(), func(context.Context, *types.Response) error {
+		probe.enter()
+		return nil
+	}))
+	beats := make(chan *types.Heartbeat, 4)
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
+		beats <- hb
+		return nil
+	}))
+
+	const extra = 12
+	sendTestResponses(t, env.clientA, "steward-adm-a", maxInFlightResponsesPerStream+extra)
+
+	require.Eventually(t, func() bool { return env.stats(t).ResponsesDropped >= extra },
+		5*time.Second, 10*time.Millisecond, "responses past the stream cap must be dropped")
+	require.Eventually(t, func() bool { return probe.started.Load() >= maxInFlightResponsesPerStream },
+		5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, env.clientA.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-a", admissionTenantA)))
+	select {
+	case got := <-beats:
+		assert.Equal(t, "steward-adm-a", got.StewardID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("receive loop stalled behind blocked response handlers")
+	}
+	assert.EqualValues(t, maxInFlightResponsesPerStream, probe.max.Load(), "concurrency must never exceed the stream cap")
+	assert.EqualValues(t, extra, env.stats(t).ResponsesDropped)
+	assert.EqualValues(t, maxInFlightResponsesPerStream+extra, env.stats(t).ResponsesReceived)
+}
+
+// TestControlChannel_Response_AdmittedDeliveredExactlyOnce: once the handler is
+// released every admitted response was delivered once and all slots are free.
+func TestControlChannel_Response_AdmittedDeliveredExactlyOnce(t *testing.T) {
+	t.Parallel()
+	env := newAdmissionEnv(t)
+	probe := newConcurrencyProbe()
+	var mu sync.Mutex
+	seen := map[string]int{}
+	require.NoError(t, env.server.SubscribeResponses(context.Background(), func(_ context.Context, r *types.Response) error {
+		probe.enter()
+		mu.Lock()
+		seen[r.CommandID]++
+		mu.Unlock()
+		return nil
+	}))
+
+	sendTestResponses(t, env.clientA, "steward-adm-a", maxInFlightResponsesPerStream)
+	require.Eventually(t, func() bool { return probe.cur.Load() == maxInFlightResponsesPerStream },
+		5*time.Second, 10*time.Millisecond)
+	close(probe.release)
+	require.Eventually(t, func() bool { return probe.cur.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen) == maxInFlightResponsesPerStream
+	}, 5*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	for id, n := range seen {
+		assert.Equal(t, 1, n, "response %s must be delivered exactly once", id)
+	}
+	mu.Unlock()
+	assert.EqualValues(t, 0, env.stats(t).ResponsesDropped)
+	requireTenantSlotsFree(t, env.responseQueue, admissionTenantA, "response slots must be released after handlers return")
+}
