@@ -9,3 +9,11 @@ func WithWebhookCoalescedHook(fn func()) Option {
 		s.webhookCoalesced = fn
 	}
 }
+
+// WithWebhookSyncStartedHook registers fn to be called when a webhook sync
+// holds the lease and is about to sync. Test-only.
+func WithWebhookSyncStartedHook(fn func()) Option {
+	return func(s *Syncer) {
+		s.webhookSyncStarted = fn
+	}
+}

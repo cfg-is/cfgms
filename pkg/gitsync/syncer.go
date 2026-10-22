@@ -110,6 +110,11 @@ type Syncer struct {
 	// coalesced into an already-waiting sync, before it blocks on that sync's
 	// outcome. Test-only observation point; nil in production.
 	webhookCoalesced func()
+
+	// webhookSyncStarted, when non-nil, is called once a webhook sync holds the
+	// lease and has stopped accepting coalesced triggers, just before it syncs.
+	// Test-only observation point; nil in production.
+	webhookSyncStarted func()
 }
 
 // Option is a functional option for NewSyncer.
@@ -410,11 +415,25 @@ func (s *Syncer) TriggerWebhookSync(ctx context.Context, b ScopeBinding) (err er
 
 	deadline := time.NewTimer(webhookLeaseMaxWait)
 	defer deadline.Stop()
+	// Triggers coalesced into this call depend on its sync, so the sync must not
+	// die with this caller's context. It is detached from ctx's cancellation and
+	// still ends when the Syncer stops or the lease is lost.
+	syncCtx, cancelSync := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelSync()
+	stopOnClose := context.AfterFunc(s.ctx, cancelSync)
+	defer stopOnClose()
+
 	var syncErr error
 	for {
-		ran := leaseJob.RunIfLeader(ctx, func(runCtx context.Context) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ran := leaseJob.RunIfLeader(syncCtx, func(runCtx context.Context) {
 			// Triggers arriving from here on start a fresh sync.
 			release()
+			if s.webhookSyncStarted != nil {
+				s.webhookSyncStarted()
+			}
 			syncErr = s.TriggerSync(runCtx, b)
 		})
 		if ran {

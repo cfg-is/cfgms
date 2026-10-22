@@ -156,6 +156,9 @@ type coalesceFixture struct {
 	release   chan struct{}
 	claimed   chan struct{}
 	coalesced chan struct{}
+	// started and proceed gate the sync: it signals started, then waits on proceed.
+	started chan struct{}
+	proceed chan struct{}
 }
 
 func newCoalesceFixture(t *testing.T) *coalesceFixture {
@@ -165,9 +168,12 @@ func newCoalesceFixture(t *testing.T) *coalesceFixture {
 	leaseStore := pkgtesting.SetupTestLeaseStore(t)
 	renew := 200 * time.Millisecond
 	binding := gitsync.ScopeBinding{TenantPath: "root/test-tenant", Namespace: "policies", OriginURL: bareDir, Branch: "main"}
+	// The syncing node's TTL is far beyond any git operation: a lease lapsing on a slow runner would
+	// cancel the sync and make the verdict depend on git speed.
+	leaseTTL := 10 * time.Minute
 
-	newJob := func(holder, name string) lease.SingletonJob {
-		m, err := lease.NewManager(leaseStore, 3*time.Second, renew, renew)
+	newJob := func(holder, name string, ttl time.Duration) lease.SingletonJob {
+		m, err := lease.NewManager(leaseStore, ttl, renew, renew)
 		require.NoError(t, err)
 		job, err := lease.NewSingletonJob(m, name, holder, m.LeaseTTL(), renew, nil)
 		require.NoError(t, err)
@@ -179,6 +185,8 @@ func newCoalesceFixture(t *testing.T) *coalesceFixture {
 		release:   make(chan struct{}),
 		claimed:   make(chan struct{}, 8),
 		coalesced: make(chan struct{}, 8),
+		started:   make(chan struct{}, 8),
+		proceed:   make(chan struct{}),
 	}
 	root := t.TempDir()
 	bindings, err := gitsync.NewBindingStore(root)
@@ -188,17 +196,29 @@ func newCoalesceFixture(t *testing.T) *coalesceFixture {
 		gitsync.WithWebhookLeaseRetry(50*time.Millisecond),
 		gitsync.WithLeaseJobFactory(func(name string) (lease.SingletonJob, error) {
 			f.claimed <- struct{}{}
-			return newJob("node-a", name), nil
+			return newJob("node-a", name, leaseTTL), nil
 		}),
-		gitsync.WithWebhookCoalescedHook(func() { f.coalesced <- struct{}{} }))
+		gitsync.WithWebhookCoalescedHook(func() { f.coalesced <- struct{}{} }),
+		gitsync.WithWebhookSyncStartedHook(func() {
+			f.started <- struct{}{}
+			<-f.proceed
+		}))
 	require.NoError(t, err)
 	t.Cleanup(syncer.Stop)
+	t.Cleanup(func() {
+		select {
+		case <-f.proceed:
+		default:
+			close(f.proceed)
+		}
+	})
 	f.syncer = syncer
 	f.bindings = bindings
 
 	held := make(chan struct{})
 	holderDone := make(chan struct{})
-	holder := newJob("node-b", "controller-gitsync-scope-"+binding.TenantPath+"/"+binding.Namespace)
+	// The remote holder's lease lapses on its own soon after release.
+	holder := newJob("node-b", "controller-gitsync-scope-"+binding.TenantPath+"/"+binding.Namespace, 3*time.Second)
 	go func() {
 		defer close(holderDone)
 		holder.RunIfLeader(context.Background(), func(context.Context) {
@@ -279,16 +299,39 @@ func TestCoalescedWebhookCoveredByWaitersSync(t *testing.T) {
 	head := runGit(t, f.workDir, "rev-parse", "HEAD")
 
 	close(f.release)
+	close(f.proceed)
 	for i := 0; i < 2; i++ {
-		select {
-		case err := <-errs:
-			assert.NoError(t, err)
-		case <-time.After(30 * time.Second):
-			t.Fatal("webhook call did not return")
-		}
+		// No wall-clock bound: the package test timeout is the only deadline.
+		assert.NoError(t, <-errs)
 	}
 	assert.Empty(t, f.claimed, "only the first call may claim the scope")
 	got, ok := f.bindings.Get(f.binding.TenantPath, f.binding.Namespace)
 	require.True(t, ok)
 	assert.Equal(t, head, got.LastSyncedSHA, "the one sync must cover the newest pushed commit")
+}
+
+// The waiter that runs the sync being cancelled mid-sync must not cancel the
+// sync a coalesced trigger depends on.
+func TestCoalescedWebhookSurvivesWaiterCancelMidSync(t *testing.T) {
+	f := newCoalesceFixture(t)
+
+	waiterCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waiterErr := make(chan error, 1)
+	go func() { waiterErr <- f.syncer.TriggerWebhookSync(waiterCtx, f.binding) }()
+	await(t, f.claimed, "the first call to claim the scope")
+	coalescedErr := make(chan error, 1)
+	go func() { coalescedErr <- f.syncer.TriggerWebhookSync(context.Background(), f.binding) }()
+	await(t, f.coalesced, "the second call to coalesce into the waiter")
+
+	close(f.release)
+	await(t, f.started, "the waiter's sync to start")
+	cancel()
+	close(f.proceed)
+
+	require.NoError(t, <-coalescedErr, "the coalesced trigger's sync must complete despite the waiter cancelling")
+	<-waiterErr
+	got, ok := f.bindings.Get(f.binding.TenantPath, f.binding.Namespace)
+	require.True(t, ok)
+	assert.NotEmpty(t, got.LastSyncedSHA, "the shared sync must have completed")
 }
