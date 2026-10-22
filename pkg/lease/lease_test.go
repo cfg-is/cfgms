@@ -389,22 +389,18 @@ func TestManager_HasLocalAuthority_WindowAnchoredAtCallStartNotCallReturn(t *tes
 // until it does — so at every sampled instant, at most one holder reports
 // valid local authority.
 func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing.T) {
-	store := newTestStore(t)
-	// Same Windows-latency headroom rationale as
-	// TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL above, which
-	// this test's own doc comment references (Issue #3819): ttl=3s,
-	// renewalInterval=800ms, maxRenewalLatency=800ms derives a margin of
-	// 3s-800ms-800ms = 1.4s, well clear of a single ~1s slow store
-	// round-trip. The polling deadline extends 2s past the nominal ttl so
-	// holder-2's post-expiry TryAcquire has room to complete even if that
-	// single round-trip is slow, rather than racing the deadline.
+	// Time is simulated (Issue #5411): the store's expiry and both managers'
+	// authority arithmetic run on one fakeClock that the loop advances, so the
+	// verdict depends on no sleep or scheduling delay.
+	clock := newFakeClock()
+	store := newFakeClockLeaseStore(clock)
 	ttl := 3 * time.Second
 	renewalInterval := 800 * time.Millisecond
 	maxRenewalLatency := 800 * time.Millisecond // safetyMargin = 1.4s
 
-	mHolder1, err := NewManager(store, ttl, renewalInterval, maxRenewalLatency)
+	mHolder1, err := NewManagerWithClock(store, ttl, renewalInterval, maxRenewalLatency, clock)
 	require.NoError(t, err)
-	mHolder2, err := NewManager(store, ttl, renewalInterval, maxRenewalLatency)
+	mHolder2, err := NewManagerWithClock(store, ttl, renewalInterval, maxRenewalLatency, clock)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -415,11 +411,11 @@ func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing
 	_, acquired, err := mHolder1.TryAcquire(ctx, name, holder1, ttl)
 	require.NoError(t, err)
 	require.True(t, acquired)
-	acquireTime := time.Now()
+	acquireTime := clock.Now()
 
 	var holder2EverAcquired bool
 	deadline := acquireTime.Add(ttl + 2*time.Second)
-	for time.Now().Before(deadline) {
+	for clock.Now().Before(deadline) {
 		_, holder1HasAuthority := mHolder1.HasLocalAuthority(name, holder1)
 
 		_, holder2Acquired, err := mHolder2.TryAcquire(ctx, name, holder2, ttl)
@@ -432,7 +428,7 @@ func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing
 		require.False(t, holder1HasAuthority && holder2HasAuthority,
 			"both holders reported valid local authority for the same lease simultaneously")
 
-		time.Sleep(10 * time.Millisecond)
+		clock.Advance(10 * time.Millisecond)
 	}
 
 	assert.True(t, holder2EverAcquired, "holder-2 must eventually acquire the lease once holder-1's stopped renewing")
@@ -440,13 +436,16 @@ func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing
 
 func TestManager_LocalAuthorityDeadline(t *testing.T) {
 	ttl := time.Second
-	m, err := NewManager(newTestStore(t), ttl, 100*time.Millisecond, 100*time.Millisecond)
+	// Simulated clock (Issue #5411): the clock does not advance, so the
+	// deadline arithmetic is exact and immune to scheduling delay.
+	clock := newFakeClock()
+	m, err := NewManagerWithClock(newFakeClockLeaseStore(clock), ttl, 100*time.Millisecond, 100*time.Millisecond, clock)
 	require.NoError(t, err)
 
 	_, ok := m.LocalAuthorityDeadline("x", "node-1")
 	assert.False(t, ok, "no authority before any acquire")
 
-	before := time.Now()
+	before := clock.Now()
 	_, acquired, err := m.TryAcquire(context.Background(), "x", "node-1", ttl)
 	require.NoError(t, err)
 	require.True(t, acquired)
