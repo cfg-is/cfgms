@@ -33,7 +33,13 @@ import (
 // unconditional for CommandExecuteScript type, independent of which handler
 // function is registered), so it carries a validly signed inline envelope.
 func TestExecuteCommand_CommandExecuteScript_Default30sDeadline(t *testing.T) {
-	h := newTestHandler(t, nil)
+	h, err := New(&Config{
+		StewardID:         "steward-test",
+		OnStatus:          noopStatus,
+		Logger:            newTestLogger(t),
+		ControllerCARoots: inlineTestCARoots(t),
+	})
+	require.NoError(t, err)
 
 	deadlineCh := make(chan time.Time, 1)
 	hasDeadlineCh := make(chan bool, 1)
@@ -86,7 +92,13 @@ func assertDeadlineWithin(t *testing.T, deadline, before, after time.Time, want 
 // verifies that the existing per-command timeout_seconds override still works
 // for CommandExecuteScript, unaffected by the CommandSyncConfig-specific fix.
 func TestExecuteCommand_CommandExecuteScript_TimeoutSecondsOverrideUnaffected(t *testing.T) {
-	h := newTestHandler(t, nil)
+	h, err := New(&Config{
+		StewardID:         "steward-test",
+		OnStatus:          noopStatus,
+		Logger:            newTestLogger(t),
+		ControllerCARoots: inlineTestCARoots(t),
+	})
+	require.NoError(t, err)
 
 	deadlineCh := make(chan time.Time, 1)
 	h.RegisterHandler(cpTypes.CommandExecuteScript, func(ctx context.Context, cmd *cpTypes.Command) error {

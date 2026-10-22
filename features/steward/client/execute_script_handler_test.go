@@ -24,7 +24,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
@@ -51,14 +53,54 @@ func echoScriptBody(s string) string {
 // signedInlineExecuteScriptParams builds the cmd.Params entries
 // preflightScriptSignature requires for an inline (ad-hoc) command as of Issue
 // #3694: script_content, shell, execution_id, plus a valid operator envelope —
-// targeted at stewardID, a fresh nonce, and a 5-minute expiry — signed with a
-// freshly generated (untrusted-CA) RSA key. This package tests dispatch through
-// setupCommandHandler, not signature-rejection specifics, so an ad-hoc, valid
-// signature is sufficient (no controllerCARoots are wired here, so cert-chain
-// verification does not apply).
-func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewardID, executionID string) map[string]interface{} {
+// targeted at stewardID, a fresh nonce, and a 5-minute expiry — signed by an
+// operator certificate (payload-signing marker) issued by a test CA. The handler
+// refuses inline commands when it has no controller CA roots (Issue #5356), so the
+// result also carries the CA PEM the steward must trust, plus a controller signing
+// certificate and signer: once a CA is configured the steward verifies the outer
+// command signature too.
+type inlineExecuteScriptFixture struct {
+	params         map[string]interface{}
+	caPEM          string
+	signingCertPEM string
+	signer         signature.Signer
+}
+
+func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewardID, executionID string) inlineExecuteScriptFixture {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	ca, err := cert.NewCA(&cert.CAConfig{
+		Organization: "Test Controller CA",
+		Country:      "US",
+		ValidityDays: 365,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+	caPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+
+	signingCert, err := ca.GenerateSigningCertificate(&cert.SigningCertConfig{
+		CommonName:   "controller-signing-test",
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	signer, err := signature.NewSigner(&signature.SignerConfig{
+		PrivateKeyPEM:  signingCert.PrivateKeyPEM,
+		CertificatePEM: signingCert.CertificatePEM,
+	})
+	require.NoError(t, err)
+
+	operator, err := ca.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator.test",
+		ValidityDays:     365,
+		KeySize:          2048,
+		TemplateModifier: cert.SetPayloadSigningMarker,
+	})
+	require.NoError(t, err)
+	keyBlock, _ := pem.Decode(operator.PrivateKeyPEM)
+	require.NotNil(t, keyBlock)
+	key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 	require.NoError(t, err)
 
 	nonceBytes := make([]byte, 16)
@@ -79,20 +121,22 @@ func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewar
 	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
 	require.NoError(t, err)
 
-	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	require.NoError(t, err)
-	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-
-	return map[string]interface{}{
+	params := map[string]interface{}{
 		"script_content":       base64.StdEncoding.EncodeToString(content),
 		"shell":                shell,
 		"execution_id":         executionID,
 		"signature_algorithm":  "rsa-sha256",
 		"signature_value":      base64.StdEncoding.EncodeToString(sigBytes),
-		"signature_public_key": string(pubPEM),
+		"signature_public_key": string(operator.CertificatePEM),
 		"targets":              env.Targets,
 		"nonce":                env.Nonce,
 		"expires_at":           env.ExpiresAt.UTC().Format(time.RFC3339),
+	}
+	return inlineExecuteScriptFixture{
+		params:         params,
+		caPEM:          string(caPEM),
+		signingCertPEM: string(signingCert.CertificatePEM),
+		signer:         signer,
 	}
 }
 
@@ -104,22 +148,34 @@ func TestSetupCommandHandler_RegistersExecuteScript(t *testing.T) {
 	exec, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: newTestLogger(t)})
 	require.NoError(t, err)
 
+	fx := signedInlineExecuteScriptParams(t, []byte(echoScriptBody("hello")), platformShell(),
+		"steward-exec-script", "exec-1669-test")
+
 	capture := newEventCapture()
 	c := newMinimalClientWithCP(t, newTestSession(), exec, capture, "steward-exec-script", "tenant-exec-script")
+	c.mu.Lock()
+	c.caCertPEM = fx.caPEM
+	c.signingCertPEMs = []string{fx.signingCertPEM}
+	c.mu.Unlock()
 
 	handler, err := c.setupCommandHandler(context.Background(), "steward-exec-script")
 	require.NoError(t, err)
 
-	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+	cmd := &cpTypes.Command{
 		ID:        "cmd-exec-script-1",
 		Type:      cpTypes.CommandExecuteScript,
 		StewardID: "steward-exec-script",
 		TenantID:  "tenant-exec-script",
 		Timestamp: time.Now(),
-		Params: signedInlineExecuteScriptParams(t, []byte(echoScriptBody("hello")), platformShell(),
-			"steward-exec-script", "exec-1669-test"),
-	}}
-	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+		Params:    fx.params,
+	}
+	cmd.SigningPayloadVersion = cpTypes.SigningPayloadV2
+	signingBytes, err := cpTypes.CommandSigningBytesVersion(cmd, cpTypes.InterfaceParamsToStringMap(cmd.Params), cpTypes.SigningPayloadV2)
+	require.NoError(t, err)
+	sig, err := fx.signer.Sign(signingBytes)
+	require.NoError(t, err)
+	signed := &cpTypes.SignedCommand{Command: *cmd, Signature: sig}
+	require.NoError(t, handler.HandleCommand(context.Background(), signed))
 	handler.Wait()
 
 	events := drainEvents(capture.events)
