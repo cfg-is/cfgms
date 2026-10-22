@@ -160,14 +160,17 @@ type RunStore interface {
 	UpdateJobStatus(jobID string, status JobStatus, executionID string) error
 	// UpdateJobResult sets the terminal status, executionID, and captured execution
 	// result (stdout/stderr/exit code) for a job (Issue #1995, root cause D).
-	UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error
+	// It is a compare-and-set on a non-terminal job and reports whether the row
+	// changed; a job already terminal (cancelled, expired, ...) is left untouched.
+	UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) (changed bool, err error)
 	UpdateRunStatus(runID string, status RunStatus) error
 	UpdateRunCounts(runID string, completedJobs, failedJobs int) error
 
 	// Steward-action jobs (Issue #4625).
 
 	// UpdateJobResultCode records a steward-action result code on a job.
-	UpdateJobResultCode(jobID, code string) error
+	// Like UpdateJobResult it only changes a non-terminal job.
+	UpdateJobResultCode(jobID, code string) (changed bool, err error)
 	// MarkJobDispatched is a compare-and-set from pending to dispatched that
 	// stamps DispatchedAt; it reports whether the job changed.
 	MarkJobDispatched(jobID string, at time.Time) (changed bool, err error)
@@ -601,10 +604,18 @@ ORDER BY created_at ASC`, runID)
 }
 
 // UpdateJobResultCode records a steward-action result code on a job.
-func (s *RunStoreSQL) UpdateJobResultCode(jobID, code string) error {
-	_, err := s.db.Exec(`UPDATE script_run_jobs SET result_code = ? WHERE job_id = ?`, nullableStr(code), jobID)
-	return err
+func (s *RunStoreSQL) UpdateJobResultCode(jobID, code string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE script_run_jobs SET result_code = ?
+WHERE job_id = ? AND status NOT IN `+terminalJobStatusesSQL, nullableStr(code), jobID)
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res)
 }
+
+// terminalJobStatusesSQL lists the statuses JobStatus.IsTerminal reports as
+// terminal; a result write never changes a job in one of them.
+const terminalJobStatusesSQL = `('completed', 'failed', 'cancelled', 'expired', 'no_result')`
 
 // MarkJobDispatched moves a pending job to dispatched and stamps dispatched_at.
 // The WHERE clause makes it a compare-and-set: a job that is no longer pending
@@ -694,7 +705,7 @@ WHERE job_id = ?`
 // UpdateJobResult sets the terminal status, executionID, and captured execution
 // result (stdout/stderr/exit code) for a job (Issue #1995, root cause D).
 // When status is terminal, completed_at is set to the current UTC time.
-func (s *RunStoreSQL) UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error {
+func (s *RunStoreSQL) UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) (bool, error) {
 	var completedAt interface{}
 	if status.IsTerminal() {
 		completedAt = time.Now().UTC()
@@ -707,10 +718,13 @@ SET status       = ?,
     output       = ?,
     stderr       = ?,
     exit_code    = ?
-WHERE job_id = ?`
-	_, err := s.db.Exec(q, string(status), executionID, executionID, completedAt,
+WHERE job_id = ? AND status NOT IN ` + terminalJobStatusesSQL
+	res, err := s.db.Exec(q, string(status), executionID, executionID, completedAt,
 		nullableStr(output), nullableStr(stderr), exitCode, jobID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res)
 }
 
 // UpdateRunStatus updates the top-level status for a run.
@@ -906,10 +920,34 @@ func (m *Manager) RecordJobResult(_ context.Context, runID, jobID, executionID s
 	if failed {
 		jobStatus = JobStatusFailed
 	}
-	if err := m.store.UpdateJobResult(jobID, jobStatus, executionID, output, stderr, exitCode); err != nil {
+	changed, err := m.store.UpdateJobResult(jobID, jobStatus, executionID, output, stderr, exitCode)
+	if err != nil {
 		return fmt.Errorf("record job completion: update job %s: %w", jobID, err)
 	}
+	if !changed {
+		return m.alreadyTerminal(runID, jobID)
+	}
 	return m.refreshRun(runID)
+}
+
+// ErrJobAlreadyTerminal is returned by RecordJobResult and RecordActionResult
+// when the job was already terminal, so the late result was ignored.
+var ErrJobAlreadyTerminal = scriptmodule.ErrJobAlreadyTerminal
+
+// alreadyTerminal builds the late-result error, reading the status the job row
+// holds so the caller can audit what the result was ignored against. The run
+// counts are not touched.
+func (m *Manager) alreadyTerminal(runID, jobID string) error {
+	status := ""
+	if jobs, err := m.store.ListRunJobs(runID); err == nil {
+		for _, j := range jobs {
+			if j.JobID == jobID {
+				status = string(j.Status)
+				break
+			}
+		}
+	}
+	return fmt.Errorf("record job result: %w", &scriptmodule.JobAlreadyTerminalError{JobID: jobID, Status: status})
 }
 
 // refreshRun recomputes a run's job counts from its jobs and, once every job is
@@ -994,8 +1032,12 @@ func (m *Manager) ClaimActionDispatch(_ context.Context, runID, jobID string, at
 // write arbitrary text into the run record. The run advances as for scripts.
 func (m *Manager) RecordActionResult(ctx context.Context, runID, jobID, executionID, resultCode string) error {
 	code := NormalizeResultCode(resultCode)
-	if err := m.store.UpdateJobResultCode(jobID, code); err != nil {
+	changed, err := m.store.UpdateJobResultCode(jobID, code)
+	if err != nil {
 		return fmt.Errorf("record action result: update job %s: %w", jobID, err)
+	}
+	if !changed {
+		return m.alreadyTerminal(runID, jobID)
 	}
 	exitCode := 0
 	if code != ResultCodeOK {

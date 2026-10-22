@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -141,6 +142,29 @@ type RunCompletionSink interface {
 // ExpiredActionJob describes a steward action closed without a steward result.
 type ExpiredActionJob = script.ExpiredActionJob
 
+// LateResultIgnored describes a result that arrived for a job the run store
+// already held in a terminal status. It carries identifiers and codes only: no
+// script output and no stderr, since the result was not accepted.
+type LateResultIgnored struct {
+	RunID       string
+	JobID       string
+	ExecutionID string
+	DeviceID    string
+	TenantID    string
+	CreatedBy   string
+	// Kind is "script" or "steward_action".
+	Kind string
+	// RecordedStatus is the terminal status the job row holds.
+	RecordedStatus string
+	// ReportedStatus is the outcome the late result reported: completed or failed.
+	ReportedStatus string
+	// ReportedExitCode is the exit code the late result reported.
+	ReportedExitCode int
+	// ReportedResultCode is the steward-action result code; empty for scripts.
+	ReportedResultCode string
+	At                 time.Time
+}
+
 // ActionAuditSink is the dispatcher's narrow handle on the audit log. The expiry
 // sweep passes it every action it closed as "expired" (never delivered) or
 // "no_result" (sent, never reported) so neither outcome disappears (Issue #4625).
@@ -149,6 +173,10 @@ type ActionAuditSink interface {
 	// RecordActionCompleted records a steward action that reported a result. The
 	// job carries the result code the run store recorded (Issue #4628).
 	RecordActionCompleted(ctx context.Context, job ExpiredActionJob)
+	// RecordLateResultIgnored records a result that arrived after the job was
+	// already terminal (for instance cancelled while dispatched, so the work may
+	// have run). The job row stays unchanged; this keeps the audit trail honest.
+	RecordLateResultIgnored(ctx context.Context, late LateResultIgnored)
 }
 
 // GrantManager creates and consumes per-execution relay grants (Issue #1675).
@@ -934,11 +962,23 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	// even when AcknowledgeCompletion failed so the job cannot be stuck pending.
 	if isAction && d.runSink != nil && runID != "" && jobID != "" {
 		if err := d.runSink.RecordActionResult(ctx, runID, jobID, executionID, actionResultCode); err != nil {
-			d.logger.Error("Failed to record steward action result in run store",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(executionID),
-				"run_id", logging.SanitizeLogValue(runID),
-				"error", logging.SanitizeLogValue(err.Error()))
+			code := script.NormalizeActionResultCode(actionResultCode)
+			exitCode := 0
+			if code != "ok" {
+				exitCode = 1
+			}
+			late := LateResultIgnored{
+				RunID: runID, JobID: jobID, ExecutionID: executionID, DeviceID: deviceID,
+				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Kind: "steward_action",
+				ReportedStatus: reportedStatus(code != "ok"), ReportedExitCode: exitCode, ReportedResultCode: code,
+			}
+			if !d.handleLateResult(ctx, err, late) {
+				d.logger.Error("Failed to record steward action result in run store",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(executionID),
+					"run_id", logging.SanitizeLogValue(runID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
 		} else if d.actionAudit != nil && origQE != nil && origQE.Action != nil {
 			d.actionAudit.RecordActionCompleted(ctx, ExpiredActionJob{
 				RunID: runID, JobID: jobID, DeviceID: deviceID, ExecutionID: executionID,
@@ -956,11 +996,18 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		}
 		if err := d.runSink.RecordJobResult(ctx, runID, jobID, executionID,
 			state == script.QueueStateFailed, output, stderr, exitCode); err != nil {
-			d.logger.Error("Failed to record job completion in run store",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(executionID),
-				"run_id", logging.SanitizeLogValue(runID),
-				"error", logging.SanitizeLogValue(err.Error()))
+			late := LateResultIgnored{
+				RunID: runID, JobID: jobID, ExecutionID: executionID, DeviceID: deviceID,
+				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Kind: "script",
+				ReportedStatus: reportedStatus(state == script.QueueStateFailed), ReportedExitCode: exitCode,
+			}
+			if !d.handleLateResult(ctx, err, late) {
+				d.logger.Error("Failed to record job completion in run store",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(executionID),
+					"run_id", logging.SanitizeLogValue(runID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
 		}
 	}
 
@@ -1109,6 +1156,38 @@ func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string,
 	}
 }
 
+// reportedStatus names the outcome a result reported.
+func reportedStatus(failed bool) string {
+	if failed {
+		return "failed"
+	}
+	return "completed"
+}
+
+// handleLateResult logs and audits a result the run store refused because the job
+// was already terminal. It reports whether err was that case; the caller must not
+// treat it as a dispatch failure.
+func (d *Dispatcher) handleLateResult(ctx context.Context, err error, late LateResultIgnored) bool {
+	if !errors.Is(err, script.ErrJobAlreadyTerminal) {
+		return false
+	}
+	var terminal *script.JobAlreadyTerminalError
+	if errors.As(err, &terminal) {
+		late.RecordedStatus = terminal.Status
+	}
+	d.logger.Warn("Ignoring late result for a job that is already terminal",
+		"device_id", logging.SanitizeLogValue(late.DeviceID),
+		"execution_id", logging.SanitizeLogValue(late.ExecutionID),
+		"job_id", logging.SanitizeLogValue(late.JobID),
+		"run_id", logging.SanitizeLogValue(late.RunID),
+		"recorded_status", logging.SanitizeLogValue(late.RecordedStatus))
+	if d.actionAudit != nil {
+		late.At = time.Now().UTC()
+		d.actionAudit.RecordLateResultIgnored(ctx, late)
+	}
+	return true
+}
+
 // failStewardAction ends an action that cannot be delivered: the job records
 // result "failed" and the queue entry is acknowledged failed.
 func (d *Dispatcher) failStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution, tracked bool, reason string) {
@@ -1120,9 +1199,18 @@ func (d *Dispatcher) failStewardAction(ctx context.Context, deviceID string, exe
 		runID, _ := exec.Metadata["workflow_run_id"].(string)
 		jobID, _ := exec.Metadata["job_id"].(string)
 		if err := d.runSink.RecordActionResult(ctx, runID, jobID, exec.ExecutionID, "failed"); err != nil {
-			d.logger.Error("Failed to record undelivered steward action",
-				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
-				"error", logging.SanitizeLogValue(err.Error()))
+			tenantID, _ := exec.Metadata["tenant_id"].(string)
+			createdBy, _ := exec.Metadata["created_by"].(string)
+			late := LateResultIgnored{
+				RunID: runID, JobID: jobID, ExecutionID: exec.ExecutionID, DeviceID: deviceID,
+				TenantID: tenantID, CreatedBy: createdBy, Kind: "steward_action",
+				ReportedStatus: reportedStatus(true), ReportedExitCode: 1, ReportedResultCode: "failed",
+			}
+			if !d.handleLateResult(ctx, err, late) {
+				d.logger.Error("Failed to record undelivered steward action",
+					"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
 		}
 	}
 	if err := d.queue.AcknowledgeCompletion(exec.ExecutionID, deviceID, script.QueueStateFailed,

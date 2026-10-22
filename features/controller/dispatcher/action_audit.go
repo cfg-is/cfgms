@@ -13,6 +13,9 @@ import (
 // auditResourceStewardAction is the audit resource type for steward actions.
 const auditResourceStewardAction = "steward_action"
 
+// auditResourceScriptJob is the audit resource type for script run jobs.
+const auditResourceScriptJob = "script_job"
+
 // AuditManagerSink is the production ActionAuditSink: it writes each steward
 // action the expiry sweep closed without a result to the controller's durable
 // audit log (Issue #4625).
@@ -42,6 +45,56 @@ func (s *AuditManagerSink) RecordActionCompleted(ctx context.Context, job Expire
 	s.record(ctx, job, auditResourceStewardAction+"_completed", result, severity, map[string]interface{}{
 		"completed_at": job.At,
 	})
+}
+
+// RecordLateResultIgnored records a result that arrived after its job was already
+// terminal. The job row is unchanged; the event keeps the trail from saying the
+// work never ran when it may have. It carries identifiers and codes only: no
+// script output and no stderr.
+func (s *AuditManagerSink) RecordLateResultIgnored(ctx context.Context, late LateResultIgnored) {
+	tenantID := late.TenantID
+	if tenantID == "" {
+		tenantID = audit.SystemTenantID
+	}
+	userID, userType := late.CreatedBy, business.AuditUserTypeHuman
+	if userID == "" {
+		userID, userType = audit.SystemUserID, business.AuditUserTypeSystem
+	}
+	resourceID := late.ExecutionID
+	if resourceID == "" {
+		resourceID = late.JobID
+	}
+	resourceType := auditResourceScriptJob
+	if late.Kind == "steward_action" {
+		resourceType = auditResourceStewardAction
+	}
+
+	event := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventSystemAccess).
+		Action(resourceType+"_late_result_ignored").
+		User(userID, userType).
+		Resource(resourceType, resourceID, late.Kind).
+		Result(business.AuditResultFailure).
+		Severity(business.AuditSeverityMedium).
+		Details(map[string]interface{}{
+			"run_id":               late.RunID,
+			"job_id":               late.JobID,
+			"execution_id":         late.ExecutionID,
+			"device_id":            late.DeviceID,
+			"recorded_status":      late.RecordedStatus,
+			"reported_status":      late.ReportedStatus,
+			"reported_exit_code":   late.ReportedExitCode,
+			"reported_result_code": late.ReportedResultCode,
+			"ignored_at":           late.At,
+		})
+
+	if err := s.manager.RecordEvent(ctx, event); err != nil && s.logger != nil {
+		s.logger.Error("Failed to audit ignored late result",
+			"run_id", logging.SanitizeLogValue(late.RunID),
+			"execution_id", logging.SanitizeLogValue(late.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // RecordActionExpired records one closed action. The operator who issued the
