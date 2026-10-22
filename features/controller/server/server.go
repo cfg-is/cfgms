@@ -158,71 +158,72 @@ func (p *moduleManifestAdapter) ListObservableManifests() ([]*modules.ModuleMeta
 
 // Server represents the controller server component (gRPC-over-QUIC based)
 type Server struct {
-	mu                      sync.RWMutex
-	cfg                     *config.Config
-	logger                  logging.Logger
-	httpServer              *api.Server
-	controllerService       *service.ControllerService
-	configService           *service.ConfigurationServiceV2
-	rbacService             *service.RBACService
-	certProvisioningService *service.CertificateProvisioningService
-	certManager             *cert.Manager
-	signingRetirementSvc    *service.SigningRetirementService       // Issue #4795: retires superseded signing certs at overlap end
-	signingMigrationSvc     *service.SigningMigrationService        // Issue #4796: moves node-local signing keys to the shared identity
-	stewardMigrationSvc     *service.StewardSigningMigrationService // Issue #4797: moves connected stewards to the shared signing certificate
-	tenantManager           *tenant.Manager
-	rbacManager             *rbac.Manager
-	auditManager            *audit.Manager
-	wormAuditStore          *auditsink.WORMAuditStore // Issue #4039: nil unless audit.sink is "worm"; owns the buffer-then-flush reconciliation loop
-	haManager               *ha.Manager
-	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
-	connRegistry            registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
-	clusterAwareSender      *internaldelivery.ClusterAwareSender        // ADR-031 Decision 3, Issue #3764: dispatch-path cluster fallback; nil outside cluster mode
-	admissionQueues         *ingestAdmissionQueues                      // Issue #3759: per-tenant ingest admission gates, split by bucket-key trust level
-	heartbeatService        *heartbeat.Service
-	commandPublisher        *commands.Publisher
-	registrationTokenStore  pkgRegistration.Store
-	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
-	configHandler           *controllerTransport.ConfigHandler
-	logStreamHandler        *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
-	grpcServer              *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
-	quicListener            *quictransport.Listener               // Shared QUIC listener (Story #515)
-	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
-	healthCollector         *health.Collector
-	systemMonitor           *monitoring.SystemMonitor
-	alertManager            *health.DefaultAlertManager
-	healthTraceManager      *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
-	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
-	triggerManager          *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
-	workflowEngine          *workflow.Engine                         // Issue #4609: owns approval-gate recovery; shut down on Stop
-	gitSyncer               *gitsync.Syncer                          // Issue #666: git-sync write-through component
-	webhookHandler          *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
-	storageManager          *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
-	manualReviewHook        *api.ManualReviewApprovalHook            // Issue #1599: manual-review approval hook (nil if not in use)
-	executionQueue          *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
-	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
-	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
-	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
-	tagStore                *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
-	sessionStore            session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
-	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
-	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
-	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
-	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
-	moduleCache             *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
-	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
-	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
-	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
-	egDNAWriter             *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
-	configSyncService       *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
-	configSyncCancel        context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
-	routerSecretStore       secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
-	egTenantSyncWriter      *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
-	egCorrelatorWriter      *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
-	egTenantSyncSweeper     *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
-	egCorrelatorSweeper     *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
-	egTenantSyncLeaseJob    lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
-	egCorrelatorLeaseJob    lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
+	mu                              sync.RWMutex
+	cfg                             *config.Config
+	logger                          logging.Logger
+	httpServer                      *api.Server
+	controllerService               *service.ControllerService
+	configService                   *service.ConfigurationServiceV2
+	rbacService                     *service.RBACService
+	certProvisioningService         *service.CertificateProvisioningService
+	certManager                     *cert.Manager
+	streamRevocationRecheckInterval time.Duration                           // zero uses the 30s default
+	signingRetirementSvc            *service.SigningRetirementService       // Issue #4795: retires superseded signing certs at overlap end
+	signingMigrationSvc             *service.SigningMigrationService        // Issue #4796: moves node-local signing keys to the shared identity
+	stewardMigrationSvc             *service.StewardSigningMigrationService // Issue #4797: moves connected stewards to the shared signing certificate
+	tenantManager                   *tenant.Manager
+	rbacManager                     *rbac.Manager
+	auditManager                    *audit.Manager
+	wormAuditStore                  *auditsink.WORMAuditStore // Issue #4039: nil unless audit.sink is "worm"; owns the buffer-then-flush reconciliation loop
+	haManager                       *ha.Manager
+	controlPlane                    controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
+	connRegistry                    registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
+	clusterAwareSender              *internaldelivery.ClusterAwareSender        // ADR-031 Decision 3, Issue #3764: dispatch-path cluster fallback; nil outside cluster mode
+	admissionQueues                 *ingestAdmissionQueues                      // Issue #3759: per-tenant ingest admission gates, split by bucket-key trust level
+	heartbeatService                *heartbeat.Service
+	commandPublisher                *commands.Publisher
+	registrationTokenStore          pkgRegistration.Store
+	dataPlaneProvider               dataplaneInterfaces.DataPlaneProvider
+	configHandler                   *controllerTransport.ConfigHandler
+	logStreamHandler                *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
+	grpcServer                      *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
+	quicListener                    *quictransport.Listener               // Shared QUIC listener (Story #515)
+	signerCertSerial                string                                // Serial number of server cert used for config signing (Story #378)
+	healthCollector                 *health.Collector
+	systemMonitor                   *monitoring.SystemMonitor
+	alertManager                    *health.DefaultAlertManager
+	healthTraceManager              *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
+	dnaStorageManager               *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
+	triggerManager                  *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
+	workflowEngine                  *workflow.Engine                         // Issue #4609: owns approval-gate recovery; shut down on Stop
+	gitSyncer                       *gitsync.Syncer                          // Issue #666: git-sync write-through component
+	webhookHandler                  *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
+	storageManager                  *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
+	manualReviewHook                *api.ManualReviewApprovalHook            // Issue #1599: manual-review approval hook (nil if not in use)
+	executionQueue                  *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
+	jobDispatcher                   *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
+	runManager                      *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	upgradeStore                    business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
+	tagStore                        *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
+	sessionStore                    session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
+	ipTrustExpiryJob                *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
+	pendingExpiryJob                *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
+	stewardEventManager             *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
+	observeManifestProvider         ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
+	moduleCache                     *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
+	terminalSessionMgr              terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
+	egProvider                      egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
+	egClusterMembership             dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
+	egDNAWriter                     *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
+	configSyncService               *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
+	configSyncCancel                context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
+	routerSecretStore               secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
+	egTenantSyncWriter              *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
+	egCorrelatorWriter              *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
+	egTenantSyncSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egCorrelatorSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egTenantSyncLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
+	egCorrelatorLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -2706,9 +2707,14 @@ func (s *Server) Start() error {
 
 		// Create fresh shared gRPC server + QUIC listener per Start() cycle.
 		// grpc.Server is not reusable after Stop(), so we create a new one each time.
-		s.grpcServer = grpc.NewServer(
-			append([]grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}, dataplaneGRPC.ServerOptions()...)...,
-		)
+		grpcOpts := []grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}
+		if s.certManager != nil {
+			grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(
+				newStreamRevocationInterceptor(s.certManager, s.logger, s.streamRevocationRecheckInterval)))
+		} else {
+			s.logger.Warn("no certificate manager; steward stream revocation checks are not installed")
+		}
+		s.grpcServer = grpc.NewServer(append(grpcOpts, dataplaneGRPC.ServerOptions()...)...)
 		ql, err := quictransport.ListenWithLimits(
 			s.cfg.Transport.ListenAddr,
 			grpcTLSConfig,
