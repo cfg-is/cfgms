@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // jobExecutor is the minimal interface satisfied by *batchjob.RollingBatchExecutor.
@@ -53,7 +54,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
-	_, tenantID, ok := s.authRunAccess(w, r)
+	principal, tenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -133,9 +134,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	jobID := uuid.New().String()
 	now := time.Now().UTC()
 	job := &batchjob.BatchJob{
-		ID:       jobID,
-		TenantID: tenantID,
-		Selector: req.Selector,
+		ID:          jobID,
+		TenantID:    tenantID,
+		Selector:    req.Selector,
+		InitiatedBy: principal.ID,
 		Config: batchjob.BatchJobConfig{
 			BatchSize:         batchSize,
 			PreviousConfigRef: req.PreviousConfigRef,
@@ -157,6 +159,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		"selector", safeSelector,
 		"target_count", len(targetIDs),
 		"batch_size", strings.ReplaceAll(strconv.Itoa(batchSize), "\n", ""))
+
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(tenantID), business.AuditEventConfiguration,
+		"batch_job.created", "batch_job", jobID,
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"job_id":       jobID,
+			"selector":     safeSelector,
+			"target_count": len(targetIDs),
+		})
 
 	// Build the response from the job as persisted, before the executor goroutine
 	// takes ownership of job. Execute mutates job (e.g. job.Status) concurrently,
