@@ -550,6 +550,65 @@ func TestManager_RecordJobCompletion_CancelledJobIsTerminal(t *testing.T) {
 	assert.Equal(t, 0, got.FailedJobs)
 }
 
+// TestManager_RecordJobResult_CancelledJobIsNotOverwritten: a late result for a
+// cancelled job returns ErrJobAlreadyTerminal and leaves every field alone.
+func TestManager_RecordJobResult_CancelledJobIsNotOverwritten(t *testing.T) {
+	manager, store := newTestManager(t)
+	run := sampleRun("run-late-1", "tenant-abc")
+	run.Status = RunStatusCancelled
+	run.JobCount = 1
+	require.NoError(t, store.CreateRun(run))
+	job := sampleJob("job-late-1", "run-late-1", "dev-a")
+	job.Status = JobStatusCancelled
+	require.NoError(t, store.CreateJob(job))
+
+	err := manager.RecordJobResult(context.Background(), "run-late-1", "job-late-1", "exec-late", false, "late out", "late err", 7)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrJobAlreadyTerminal)
+	var terminal *scriptmodule.JobAlreadyTerminalError
+	require.ErrorAs(t, err, &terminal)
+	assert.Equal(t, "cancelled", terminal.Status)
+
+	jobs, err := store.ListRunJobs("run-late-1")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, JobStatusCancelled, jobs[0].Status)
+	assert.Empty(t, jobs[0].Output)
+	assert.Empty(t, jobs[0].Stderr)
+	assert.Equal(t, 0, jobs[0].ExitCode)
+	assert.Empty(t, jobs[0].ExecutionID)
+
+	got, err := store.GetRun("run-late-1")
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.CompletedJobs, "run counts are not touched")
+	assert.Equal(t, 0, got.FailedJobs)
+}
+
+// TestManager_RecordActionResult_ExpiredJobKeepsResultCode: a late action result
+// for an expired job leaves its result code unchanged.
+func TestManager_RecordActionResult_ExpiredJobKeepsResultCode(t *testing.T) {
+	manager, store := newTestManager(t)
+	run := sampleRun("run-late-2", "tenant-abc")
+	run.Status = RunStatusFailed
+	run.JobCount = 1
+	require.NoError(t, store.CreateRun(run))
+	job := sampleJob("job-late-2", "run-late-2", "dev-a")
+	job.Status = JobStatusPending
+	require.NoError(t, store.CreateJob(job))
+	changed, err := store.ExpireJobIfStatus("job-late-2", JobStatusPending, ResultCodeExpired, time.Now().UTC())
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	err = manager.RecordActionResult(context.Background(), "run-late-2", "job-late-2", "exec-late", "ok")
+	assert.ErrorIs(t, err, ErrJobAlreadyTerminal)
+
+	jobs, err := store.ListRunJobs("run-late-2")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, ResultCodeExpired, jobs[0].ResultCode)
+	assert.Equal(t, JobStatusExpired, jobs[0].Status)
+}
+
 // ---- Close tests ------------------------------------------------------------
 
 // TestRunStoreSQL_Close_ReleasesDBHandle verifies that Close releases the
@@ -670,7 +729,9 @@ CREATE TABLE script_run_jobs (
 		JobID: "job-mig", RunID: "run-mig", DeviceID: "dev-mig",
 		Status: JobStatusPending, CreatedAt: time.Now().UTC(),
 	}))
-	require.NoError(t, store.UpdateJobResult("job-mig", JobStatusCompleted, "exec-mig", "hello\n", "", 0))
+	changed, err := store.UpdateJobResult("job-mig", JobStatusCompleted, "exec-mig", "hello\n", "", 0)
+	require.NoError(t, err)
+	require.True(t, changed)
 
 	jobs, err := store.ListRunJobs("run-mig")
 	require.NoError(t, err)

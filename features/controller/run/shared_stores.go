@@ -132,11 +132,11 @@ func (s *sharedRunStore) UpdateJobStatus(jobID string, status JobStatus, executi
 	return s.store.UpdateJobStatus(context.Background(), jobID, string(status), executionID, completedAtFor(status))
 }
 
-func (s *sharedRunStore) UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error {
+func (s *sharedRunStore) UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) (bool, error) {
 	return s.store.UpdateJobResult(context.Background(), jobID, string(status), executionID, output, stderr, exitCode, completedAtFor(status))
 }
 
-func (s *sharedRunStore) UpdateJobResultCode(jobID, code string) error {
+func (s *sharedRunStore) UpdateJobResultCode(jobID, code string) (bool, error) {
 	return s.store.UpdateJobResultCode(context.Background(), jobID, code)
 }
 

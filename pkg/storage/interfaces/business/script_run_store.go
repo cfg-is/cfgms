@@ -96,11 +96,15 @@ type ScriptRunStore interface {
 	// UpdateJobStatus sets status, sets executionID when non-empty, and sets
 	// completed_at when completedAt is non-nil.
 	UpdateJobStatus(ctx context.Context, jobID, status, executionID string, completedAt *time.Time) error
-	// UpdateJobResult is UpdateJobStatus plus the captured execution result.
-	UpdateJobResult(ctx context.Context, jobID, status, executionID, output, stderr string, exitCode int, completedAt *time.Time) error
+	// UpdateJobResult is UpdateJobStatus plus the captured execution result. It
+	// is a compare-and-set on a non-terminal job (anything but completed, failed,
+	// cancelled, expired or no_result) and reports whether the row changed; a
+	// result arriving for a job already closed is left untouched.
+	UpdateJobResult(ctx context.Context, jobID, status, executionID, output, stderr string, exitCode int, completedAt *time.Time) (changed bool, err error)
 	// UpdateJobResultCode records a steward-action result code on a job without
-	// touching the job's status or captured output.
-	UpdateJobResultCode(ctx context.Context, jobID, code string) error
+	// touching the job's status or captured output. Like UpdateJobResult it only
+	// changes a non-terminal job and reports whether the row changed.
+	UpdateJobResultCode(ctx context.Context, jobID, code string) (changed bool, err error)
 	// MarkJobDispatched is a compare-and-set from "pending" to "dispatched" that
 	// stamps dispatched_at. It reports whether the row changed; a job that is no
 	// longer pending (e.g. already expired by a sweep) is left untouched.

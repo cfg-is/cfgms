@@ -161,3 +161,37 @@ func TestAuditManagerSink_CompletionIsAuditedAttributedToOperator(t *testing.T) 
 	}
 	assert.Equal(t, "self_protect", byExec["exec-self_protect"].Details["result_code"])
 }
+
+// TestAuditManagerSink_RecordLateResultIgnored writes through a real
+// audit.Manager and checks the event carries the identifiers and codes and none
+// of the output or stderr.
+func TestAuditManagerSink_RecordLateResultIgnored(t *testing.T) {
+	mgr, store := newFlatfileAuditManager(t)
+	sink := NewAuditManagerSink(mgr, logging.NewNoopLogger())
+
+	sink.RecordLateResultIgnored(context.Background(), LateResultIgnored{
+		RunID: "run-l", JobID: "job-l", ExecutionID: "exec-l", DeviceID: "device-l",
+		TenantID: "tenant-l", CreatedBy: "operator-l", Kind: "script",
+		RecordedStatus: "cancelled", ReportedStatus: "failed", ReportedExitCode: 3,
+		At: time.Now().UTC(),
+	})
+	require.NoError(t, mgr.Flush(context.Background()))
+
+	entries, err := store.GetAuditsByAction(context.Background(), "script_job_late_result_ignored", nil)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "exactly one event")
+	e := entries[0]
+	assert.Equal(t, "tenant-l", e.TenantID)
+	assert.Equal(t, "operator-l", e.UserID)
+	assert.Equal(t, "exec-l", e.ResourceID)
+	assert.Equal(t, "run-l", e.Details["run_id"])
+	assert.Equal(t, "job-l", e.Details["job_id"])
+	assert.Equal(t, "exec-l", e.Details["execution_id"])
+	assert.Equal(t, "device-l", e.Details["device_id"])
+	assert.Equal(t, "cancelled", e.Details["recorded_status"])
+	assert.Equal(t, "failed", e.Details["reported_status"])
+	assert.EqualValues(t, 3, e.Details["reported_exit_code"])
+	for _, banned := range []string{"output", "stdout", "stderr"} {
+		assert.NotContains(t, e.Details, banned)
+	}
+}

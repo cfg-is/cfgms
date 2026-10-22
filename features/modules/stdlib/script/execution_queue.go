@@ -4,10 +4,31 @@ package script
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
+
+// ErrJobAlreadyTerminal reports that a result arrived for a job the run store
+// already holds in a terminal status (cancelled, expired, ...). The late result
+// is ignored; the job record is unchanged.
+var ErrJobAlreadyTerminal = errors.New("job already terminal")
+
+// JobAlreadyTerminalError is the typed form of ErrJobAlreadyTerminal. It carries
+// the status the run store recorded for the job, so the caller can audit what the
+// late result was ignored against. errors.Is matches ErrJobAlreadyTerminal.
+type JobAlreadyTerminalError struct {
+	JobID  string
+	Status string
+}
+
+func (e *JobAlreadyTerminalError) Error() string {
+	return fmt.Sprintf("%s: job %s is %s", ErrJobAlreadyTerminal.Error(), e.JobID, e.Status)
+}
+
+// Is reports a match with ErrJobAlreadyTerminal.
+func (e *JobAlreadyTerminalError) Is(target error) bool { return target == ErrJobAlreadyTerminal }
 
 // ExecutionQueue manages pending script executions for offline devices.
 // All state is persisted through a QueueStore, so executions survive controller

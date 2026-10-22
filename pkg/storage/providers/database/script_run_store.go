@@ -217,26 +217,32 @@ func (s *DatabaseScriptRunStore) UpdateJobStatus(ctx context.Context, jobID, sta
 	return nil
 }
 
+// terminalJobStatusesSQL lists the job statuses run.JobStatus.IsTerminal
+// reports as terminal; a result write never changes a job in one of them.
+const terminalJobStatusesSQL = `('completed', 'failed', 'cancelled', 'expired', 'no_result')`
+
 // UpdateJobResult implements business.ScriptRunStore.
-func (s *DatabaseScriptRunStore) UpdateJobResult(ctx context.Context, jobID, status, executionID, output, stderr string, exitCode int, completedAt *time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs
+func (s *DatabaseScriptRunStore) UpdateJobResult(ctx context.Context, jobID, status, executionID, output, stderr string, exitCode int, completedAt *time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs
 		SET status = $1,
 		    execution_id = CASE WHEN $2::text <> '' THEN $2::text ELSE execution_id END,
 		    completed_at = COALESCE($3::timestamptz, completed_at),
 		    output = $4, stderr = $5, exit_code = $6
-		WHERE job_id = $7`, status, executionID, nullTime(completedAt), output, stderr, exitCode, jobID)
+		WHERE job_id = $7 AND status NOT IN `+terminalJobStatusesSQL, status, executionID, nullTime(completedAt), output, stderr, exitCode, jobID)
 	if err != nil {
-		return fmt.Errorf("database: update script run job result: %w", err)
+		return false, fmt.Errorf("database: update script run job result: %w", err)
 	}
-	return nil
+	return rowsChanged(res)
 }
 
 // UpdateJobResultCode implements business.ScriptRunStore.
-func (s *DatabaseScriptRunStore) UpdateJobResultCode(ctx context.Context, jobID, code string) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs SET result_code = $1 WHERE job_id = $2`, code, jobID); err != nil {
-		return fmt.Errorf("database: update script run job result code: %w", err)
+func (s *DatabaseScriptRunStore) UpdateJobResultCode(ctx context.Context, jobID, code string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE cfgms_script_run_jobs SET result_code = $1
+		WHERE job_id = $2 AND status NOT IN `+terminalJobStatusesSQL, code, jobID)
+	if err != nil {
+		return false, fmt.Errorf("database: update script run job result code: %w", err)
 	}
-	return nil
+	return rowsChanged(res)
 }
 
 // MarkJobDispatched implements business.ScriptRunStore.

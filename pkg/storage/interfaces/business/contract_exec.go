@@ -59,8 +59,12 @@ func ScriptRunStoreContract(t *testing.T, store ScriptRunStore) {
 	}
 	done := time.Now().UTC().Truncate(time.Millisecond)
 	require.NoError(t, store.UpdateJobStatus(ctx, "job-a-"+suffix, "running", "exec-a", nil))
-	require.NoError(t, store.UpdateJobResult(ctx, "job-a-"+suffix, "completed", "", "out", "err", 0, &done))
-	require.NoError(t, store.UpdateJobResult(ctx, "job-b-"+suffix, "failed", "exec-b", "", "boom", 3, &done))
+	changedA, err := store.UpdateJobResult(ctx, "job-a-"+suffix, "completed", "", "out", "err", 0, &done)
+	require.NoError(t, err)
+	assert.True(t, changedA)
+	changedB, err := store.UpdateJobResult(ctx, "job-b-"+suffix, "failed", "exec-b", "", "boom", 3, &done)
+	require.NoError(t, err)
+	assert.True(t, changedB)
 
 	jobs, err := store.ListRunJobs(ctx, runID)
 	require.NoError(t, err)
@@ -104,6 +108,67 @@ func ScriptRunStoreContract(t *testing.T, store ScriptRunStore) {
 	assert.ErrorIs(t, err, ErrExecutionGrantNotFound, "an expired grant is not found")
 
 	t.Run("steward action kind", func(t *testing.T) { stewardActionContract(t, store) })
+	t.Run("terminal job is not rewritten", func(t *testing.T) { terminalJobContract(t, store) })
+}
+
+// terminalJobContract proves a result write is a compare-and-set on a
+// non-terminal job: a job already completed, failed, cancelled, expired or
+// no_result reports changed == false and its row is left untouched, while a
+// pending or dispatched job is updated.
+func terminalJobContract(t *testing.T, store ScriptRunStore) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	runID := "term-run-" + suffix
+	require.NoError(t, store.CreateRun(ctx, &ScriptRun{
+		RunID: runID, TenantID: "tenant-term-" + suffix, CreatedAt: now, Status: "running",
+		Kind: ScriptRunKindScript, JobCount: 7,
+	}))
+
+	terminal := []string{"completed", "failed", "cancelled", "expired", "no_result"}
+	open := []string{"pending", "dispatched"}
+	for i, status := range append(append([]string{}, terminal...), open...) {
+		require.NoError(t, store.CreateJob(ctx, &ScriptRunJob{
+			JobID: "term-" + status + "-" + suffix, RunID: runID, DeviceID: fmt.Sprintf("steward-%d", i),
+			Status: status, CreatedAt: now.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	before, err := store.ListRunJobs(ctx, runID)
+	require.NoError(t, err)
+	snapshot := map[string]ScriptRunJob{}
+	for _, j := range before {
+		snapshot[j.JobID] = *j
+	}
+
+	done := now.Add(time.Minute)
+	for _, status := range terminal {
+		id := "term-" + status + "-" + suffix
+		changed, err := store.UpdateJobResult(ctx, id, "completed", "late-exec", "late out", "late err", 9, &done)
+		require.NoError(t, err)
+		assert.False(t, changed, "UpdateJobResult must not change a %s job", status)
+		changed, err = store.UpdateJobResultCode(ctx, id, "ok")
+		require.NoError(t, err)
+		assert.False(t, changed, "UpdateJobResultCode must not change a %s job", status)
+	}
+	after, err := store.ListRunJobs(ctx, runID)
+	require.NoError(t, err)
+	for _, j := range after {
+		if snap := snapshot[j.JobID]; snap.Status == "pending" || snap.Status == "dispatched" {
+			continue
+		}
+		assert.Equal(t, snapshot[j.JobID], *j, "terminal job %s must be untouched", j.JobID)
+	}
+
+	for _, status := range open {
+		id := "term-" + status + "-" + suffix
+		changed, err := store.UpdateJobResultCode(ctx, id, "ok")
+		require.NoError(t, err)
+		assert.True(t, changed, "UpdateJobResultCode updates a %s job", status)
+		changed, err = store.UpdateJobResult(ctx, id, "completed", "", "out", "", 0, &done)
+		require.NoError(t, err)
+		assert.True(t, changed, "UpdateJobResult updates a %s job", status)
+	}
 }
 
 // stewardActionContract covers the steward-action fields, the stale-job
@@ -159,8 +224,12 @@ func stewardActionContract(t *testing.T, store ScriptRunStore) {
 	assert.True(t, changed)
 
 	completed := now
-	require.NoError(t, store.UpdateJobResult(ctx, "done-"+suffix, "completed", "", "", "", 0, &completed))
-	require.NoError(t, store.UpdateJobResultCode(ctx, "done-"+suffix, "ok"))
+	changed, err = store.UpdateJobResultCode(ctx, "done-"+suffix, "ok")
+	require.NoError(t, err)
+	assert.True(t, changed, "a pending job takes a result code")
+	changed, err = store.UpdateJobResult(ctx, "done-"+suffix, "completed", "", "", "", 0, &completed)
+	require.NoError(t, err)
+	assert.True(t, changed, "a pending job takes a result")
 
 	jobs, err := store.ListRunJobs(ctx, "arun-"+suffix)
 	require.NoError(t, err)

@@ -1752,6 +1752,19 @@ type recordingActionAudit struct {
 	mu        sync.Mutex
 	jobs      []ExpiredActionJob
 	completed []ExpiredActionJob
+	late      []LateResultIgnored
+}
+
+func (a *recordingActionAudit) RecordLateResultIgnored(_ context.Context, late LateResultIgnored) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.late = append(a.late, late)
+}
+
+func (a *recordingActionAudit) lateResults() []LateResultIgnored {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]LateResultIgnored(nil), a.late...)
 }
 
 func (a *recordingActionAudit) RecordActionExpired(_ context.Context, job ExpiredActionJob) {
@@ -2355,3 +2368,91 @@ func TestDispatcher_SignsEveryCommandOverV2(t *testing.T) {
 type fixedTermSource uint64
 
 func (f fixedTermSource) GetTerm() uint64 { return uint64(f) }
+
+// TestDispatcher_LateResultForCancelledJobIsIgnored: a script job cancelled while
+// dispatched receives a completion afterwards. The job record is unchanged, the
+// result is not treated as a dispatch failure, and the late result is audited
+// exactly once with the recorded and reported outcome and no output.
+func TestDispatcher_LateResultForCancelledJobIsIgnored(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-late-script"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-late", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-late", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+	audit := &recordingActionAudit{}
+	d.SetActionAuditSink(audit)
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-late", "script-abc", runID, "job-late")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	// The job is cancelled while the script is already on the endpoint.
+	require.NoError(t, store.UpdateJobStatus("job-late", run.JobStatusCancelled, ""))
+	before, err := store.ListRunJobs(runID)
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-late", 3))
+	require.Eventually(t, func() bool { return len(audit.lateResults()) == 1 },
+		2*time.Second, 10*time.Millisecond, "the late result must be audited")
+
+	after, err := store.ListRunJobs(runID)
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	assert.Equal(t, before[0], after[0], "the cancelled job record must be unchanged")
+	assert.Equal(t, run.JobStatusCancelled, after[0].Status)
+
+	late := audit.lateResults()
+	require.Len(t, late, 1, "exactly one audit record per late result")
+	assert.Equal(t, "job-late", late[0].JobID)
+	assert.Equal(t, "exec-late", late[0].ExecutionID)
+	assert.Equal(t, runID, late[0].RunID)
+	assert.Equal(t, "device-1", late[0].DeviceID)
+	assert.Equal(t, "cancelled", late[0].RecordedStatus)
+	assert.Equal(t, "failed", late[0].ReportedStatus)
+	assert.Equal(t, 3, late[0].ReportedExitCode)
+	assert.Equal(t, "script", late[0].Kind)
+}
+
+// TestDispatcher_LateResultForCancelledStewardActionIsAudited is the steward-action
+// twin: the action was sent, the job is cancelled, then the steward reports ok.
+func TestDispatcher_LateResultForCancelledStewardActionIsAudited(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-late"
+	runID, job := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+	require.Equal(t, 1, h.cp.sentCount())
+
+	require.NoError(t, h.store.UpdateJobStatus(job.JobID, run.JobStatusCancelled, ""))
+	before := h.onlyJob(t, runID)
+
+	h.completeAction(t, device, job.ExecutionID, map[string]interface{}{"result_code": "ok", "exit_code": float64(0)})
+
+	assert.Equal(t, before, h.onlyJob(t, runID), "the cancelled job record must be unchanged")
+	assert.Empty(t, h.audit.completed, "a refused result is not audited as a completed action")
+	late := h.audit.lateResults()
+	require.Len(t, late, 1, "exactly one audit record per late result")
+	assert.Equal(t, job.JobID, late[0].JobID)
+	assert.Equal(t, job.ExecutionID, late[0].ExecutionID)
+	assert.Equal(t, "cancelled", late[0].RecordedStatus)
+	assert.Equal(t, "completed", late[0].ReportedStatus)
+	assert.Equal(t, 0, late[0].ReportedExitCode)
+	assert.Equal(t, "ok", late[0].ReportedResultCode)
+	assert.Equal(t, "steward_action", late[0].Kind)
+	assert.False(t, h.lockHeld(device), "a late result still releases the device slot")
+}

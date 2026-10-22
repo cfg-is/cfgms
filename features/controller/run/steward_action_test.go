@@ -95,11 +95,11 @@ func (a sqliteScriptRunStore) UpdateJobStatus(_ context.Context, jobID, status, 
 	return a.s.UpdateJobStatus(jobID, JobStatus(status), executionID)
 }
 
-func (a sqliteScriptRunStore) UpdateJobResult(_ context.Context, jobID, status, executionID, output, stderr string, exitCode int, _ *time.Time) error {
+func (a sqliteScriptRunStore) UpdateJobResult(_ context.Context, jobID, status, executionID, output, stderr string, exitCode int, _ *time.Time) (bool, error) {
 	return a.s.UpdateJobResult(jobID, JobStatus(status), executionID, output, stderr, exitCode)
 }
 
-func (a sqliteScriptRunStore) UpdateJobResultCode(_ context.Context, jobID, code string) error {
+func (a sqliteScriptRunStore) UpdateJobResultCode(_ context.Context, jobID, code string) (bool, error) {
 	return a.s.UpdateJobResultCode(jobID, code)
 }
 
