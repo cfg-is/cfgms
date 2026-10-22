@@ -625,8 +625,8 @@ describe('RunPanel — presence step-up on POST /api/v1/runs/script [REQUIRED]',
       }
       if (url === '/api/v1/runs/script') {
         runPosts++
-        const token = new Headers(init?.headers).get('X-Presence-Token')
-        if (token === 'tap-token-1') return Promise.resolve(makeRunScriptResponse('run-tap'))
+        const minted = ['tap-token-1'].includes(new Headers(init?.headers).get('X-Presence-Token') ?? '')
+        if (minted) return Promise.resolve(makeRunScriptResponse('run-tap'))
         return Promise.resolve(
           json(
             401,
