@@ -475,10 +475,9 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 
 // verifyWebAuthnOperatorSignature verifies a WebAuthn-signed operator envelope (Issue
 // #3697) via webauthnOperatorCredentialVerifier (webauthn_credential_verifier.go).
-// Unlike verifyX509OperatorSignature, there is no "any_valid, no CA roots configured"
-// relaxation: a WebAuthn credential's public key has no source other than the
-// CA-verified manifest carried in webauthnManifestJSON, so this fails closed when no CA
-// roots are configured rather than silently skipping verification
+// Like verifyX509OperatorSignature, this fails closed when no CA roots are configured:
+// a WebAuthn credential's public key has no source other than the CA-verified manifest
+// carried in webauthnManifestJSON, so verification is refused rather than silently skipped
 // (TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected asserts that
 // branch directly, so a regression back to fail-open cannot ship unnoticed).
 //
