@@ -238,7 +238,7 @@ func TestExecuteScriptHandler_WindowsPowerShell51_ExplicitShell(t *testing.T) {
 	}
 
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -270,7 +270,7 @@ func TestExecuteScriptHandler_WindowsCmd_ExplicitShell(t *testing.T) {
 	}
 
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -432,7 +432,7 @@ func runScriptProbe(t *testing.T, h *Handler, getEvents func() []*cpTypes.Event,
 // relay socket — i.e. the relay IS created.
 func TestExecuteScriptHandler_LibraryScriptWithScope_CreatesRelaySocket(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -451,7 +451,7 @@ func TestExecuteScriptHandler_LibraryScriptWithScope_CreatesRelaySocket(t *testi
 // library script with an EMPTY required_api_scope does NOT get a relay socket.
 func TestExecuteScriptHandler_LibraryScriptNoScope_NoRelaySocket(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
