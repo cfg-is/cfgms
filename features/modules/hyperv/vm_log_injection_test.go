@@ -164,3 +164,30 @@ func TestApplyVMState_OwnerProbeFailure_LogsSanitizedError(t *testing.T) {
 	assert.NotContains(t, errVal, "\r", "sanitized error must not carry a raw CR")
 	assert.NotContains(t, errVal, "\n", "sanitized error must not carry a raw LF")
 }
+
+// TestSetSecureBoot_BestEffortFailure_LogsSanitizedError covers
+// vm_provision.go's setSecureBoot Warn call ("hyperv: secure boot template
+// failed, proceeding without secure boot (secure_boot: best-effort)"), which
+// previously logged the raw PowerShell error via psErr.Error().
+func TestSetSecureBoot_BestEffortFailure_LogsSanitizedError(t *testing.T) {
+	const vmName = "sb-vm"
+	transport := &testPSTransport{
+		perCallOutputs: []string{``, ``},
+		perCallErrors:  []error{errors.New(injectedLogError), nil},
+	}
+	m := vmModuleWithTransport(transport, "t-logsan-secureboot")
+	capLog := logging.NewCapturingLogger()
+	require.NoError(t, m.SetLogger(capLog))
+
+	cfg := &VMConfig{Name: vmName, Source: &SourceConfig{SecureBoot: "best-effort"}}
+	err := m.setSecureBoot(context.Background(), "res-1", vmName, vmName, cfg, &ProvisionRecord{VMName: vmName})
+	require.NoError(t, err, "best-effort mode must proceed after a template failure")
+
+	entry, found := capLog.FindWarn("hyperv: secure boot template failed, proceeding without secure boot (secure_boot: best-effort)")
+	require.True(t, found)
+
+	errVal, ok := entry["error"].(string)
+	require.True(t, ok, "error field must be a sanitized string, not a raw error value")
+	assert.NotContains(t, errVal, "\r", "sanitized error must not carry a raw CR")
+	assert.NotContains(t, errVal, "\n", "sanitized error must not carry a raw LF")
+}

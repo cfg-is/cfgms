@@ -639,7 +639,7 @@ func (m *hypervModule) setSecureBoot(ctx context.Context, cfgResourceID, hostNam
 	// convergence forever every 5-minute cycle.
 	if logger, ok := m.GetLogger(); ok {
 		logger.Warn("hyperv: secure boot template failed, proceeding without secure boot (secure_boot: best-effort)",
-			"vm_name", logging.SanitizeLogValue(vmName), "error", psErr.Error())
+			"vm_name", logging.SanitizeLogValue(vmName), "error", logging.SanitizeLogValue(psErr.Error()))
 	}
 	if _, offErr := m.transport.ExecutePS(ctx, psDisableVMFirmwareSecureBoot, map[string]string{"Name": hostName}); offErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Set-VMFirmware", cfgResourceID, nil, nil, offErr)
