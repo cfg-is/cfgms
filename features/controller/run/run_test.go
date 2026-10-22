@@ -755,3 +755,110 @@ func TestRunStore_Init_AlreadyMigrated_NoOp(t *testing.T) {
 	require.NoError(t, store.migrateJobColumns(), "migrate must be a no-op when columns already exist")
 	require.NoError(t, store.migrateJobColumns(), "migrate must remain idempotent")
 }
+
+// failingCancelStore embeds the real in-memory queue store and overrides only
+// Cancel to return a non-not-found error. Closing a sqlite-backed store cannot
+// fail Cancel deterministically across providers, so the failure is injected
+// at this single method; every other behaviour is the real store's.
+type failingCancelStore struct {
+	scriptmodule.QueueStore
+	err error
+}
+
+func (f *failingCancelStore) Cancel(deviceID, executionID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	return f.QueueStore.Cancel(deviceID, executionID)
+}
+
+func newQueueManager(t *testing.T, qs scriptmodule.QueueStore) (*Manager, *RunStoreSQL, *scriptmodule.ExecutionQueue) {
+	t.Helper()
+	store := newTestRunStore(t)
+	keys := scriptmodule.NewEphemeralKeyManager()
+	t.Cleanup(keys.Stop)
+	queue := scriptmodule.NewExecutionQueue(scriptmodule.NewExecutionMonitor(), keys, time.Hour, "https://localhost:8080", qs, nil, 0)
+	t.Cleanup(queue.Stop)
+	return NewManager(store, queue), store, queue
+}
+
+func queuedExec(id string) *scriptmodule.QueuedExecution {
+	return &scriptmodule.QueuedExecution{ExecutionID: id, ScriptID: "script-" + id}
+}
+
+func TestManager_CancelRun_QueueCancelFailureIsReturned(t *testing.T) {
+	boom := errors.New("queue store unavailable")
+	real := scriptmodule.NewInMemoryQueueStore()
+	manager, store, queue := newQueueManager(t, &failingCancelStore{QueueStore: real, err: boom})
+
+	run := sampleRun("run-qfail", "tenant-abc")
+	run.Status = RunStatusRunning
+	require.NoError(t, store.CreateRun(run))
+	job := sampleJob("job-qfail", "run-qfail", "dev-alpha")
+	job.Status = JobStatusRunning
+	job.ExecutionID = "exec-qfail"
+	require.NoError(t, store.CreateJob(job))
+	require.NoError(t, queue.QueueExecution("dev-alpha", queuedExec("exec-qfail")))
+
+	err := manager.CancelRun(context.Background(), "run-qfail")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, boom)
+
+	jobs, err := store.ListRunJobs("run-qfail")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, JobStatusRunning, jobs[0].Status, "job must stay non-terminal when the queue cancel fails")
+	got, err := store.GetRun("run-qfail")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusRunning, got.Status, "run must stay non-terminal when the queue cancel fails")
+}
+
+func TestManager_CancelRun_RetryAfterQueueFailureCompletes(t *testing.T) {
+	boom := errors.New("queue store unavailable")
+	fs := &failingCancelStore{QueueStore: scriptmodule.NewInMemoryQueueStore(), err: boom}
+	manager, store, queue := newQueueManager(t, fs)
+
+	run := sampleRun("run-retry", "tenant-abc")
+	run.Status = RunStatusRunning
+	require.NoError(t, store.CreateRun(run))
+	j1 := sampleJob("job-r1", "run-retry", "dev-alpha")
+	j1.Status = JobStatusRunning
+	j1.ExecutionID = "exec-r1"
+	require.NoError(t, store.CreateJob(j1))
+	require.NoError(t, queue.QueueExecution("dev-alpha", queuedExec("exec-r1")))
+
+	require.Error(t, manager.CancelRun(context.Background(), "run-retry"))
+
+	fs.err = nil // store recovers; Cancel now reaches the real in-memory store
+
+	require.NoError(t, manager.CancelRun(context.Background(), "run-retry"))
+	got, err := store.GetRun("run-retry")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusCancelled, got.Status)
+	jobs, err := store.ListRunJobs("run-retry")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, JobStatusCancelled, jobs[0].Status)
+}
+
+func TestManager_CancelRun_QueueEntryAlreadyAbsent(t *testing.T) {
+	manager, store, _ := newQueueManager(t, scriptmodule.NewInMemoryQueueStore())
+
+	run := sampleRun("run-absent", "tenant-abc")
+	run.Status = RunStatusRunning
+	require.NoError(t, store.CreateRun(run))
+	job := sampleJob("job-absent", "run-absent", "dev-alpha")
+	job.Status = JobStatusRunning
+	job.ExecutionID = "exec-absent" // never queued
+	require.NoError(t, store.CreateJob(job))
+
+	require.NoError(t, manager.CancelRun(context.Background(), "run-absent"))
+
+	jobs, err := store.ListRunJobs("run-absent")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, JobStatusCancelled, jobs[0].Status)
+	got, err := store.GetRun("run-absent")
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusCancelled, got.Status)
+}

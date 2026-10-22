@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "modernc.org/sqlite"
 )
 
@@ -868,6 +869,9 @@ func (m *Manager) ListRunJobs(_ context.Context, runID string) ([]*JobRecord, er
 //
 // Returns ErrNotFound if the run does not exist.
 // Returns ErrAlreadyTerminal if the run is already completed, failed, or cancelled.
+// Returns a wrapped error, leaving the failed job and the run non-terminal, when
+// the queue cancel fails for any reason other than the entry being absent; a retry
+// skips jobs already cancelled and retries the rest.
 func (m *Manager) CancelRun(_ context.Context, runID string) error {
 	run, err := m.store.GetRun(runID)
 	if err != nil {
@@ -887,7 +891,12 @@ func (m *Manager) CancelRun(_ context.Context, runID string) error {
 			continue
 		}
 		if m.executionQueue != nil && job.ExecutionID != "" {
-			_ = m.executionQueue.CancelExecution(job.DeviceID, job.ExecutionID)
+			// A missing entry is already gone; any other failure leaves the
+			// execution dispatchable, so the job must not be marked cancelled.
+			if cancelErr := m.executionQueue.CancelExecution(job.DeviceID, job.ExecutionID); cancelErr != nil &&
+				!errors.Is(cancelErr, business.ErrExecutionQueueEntryNotFound) {
+				return fmt.Errorf("cancel run: cancel queued execution for job %s: %w", job.JobID, cancelErr)
+			}
 		}
 		if m.lockReleaser != nil && job.ExecutionID != "" {
 			m.lockReleaser.ReleaseDeviceForCancelledExecution(job.DeviceID, job.ExecutionID)

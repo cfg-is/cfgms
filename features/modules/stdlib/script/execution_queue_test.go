@@ -4,12 +4,15 @@ package script
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // ----------------------------------------------------------------------------
@@ -1078,4 +1081,41 @@ func TestParamHashSeparatesStewardActions(t *testing.T) {
 		ComputeParamHash("ref", "d", nil, "", nil),
 		ComputeParamHash("ref", "d", map[string]string{}, QueueKindScript, stop),
 		"a script hash ignores the action, and nil parameters hash like empty ones")
+}
+
+// TestInMemoryQueueStoreCancel_NotFoundSentinel verifies every "no such entry"
+// outcome of Cancel satisfies business.ErrExecutionQueueEntryNotFound.
+func TestInMemoryQueueStoreCancel_NotFoundSentinel(t *testing.T) {
+	monitor := NewExecutionMonitor()
+	keyManager := NewEphemeralKeyManager()
+	defer keyManager.Stop()
+
+	queue := NewExecutionQueue(monitor, keyManager, time.Hour, "https://localhost:8080", NewInMemoryQueueStore(), nil, 0)
+	defer queue.Stop()
+
+	// No entries at all for the device.
+	err := queue.CancelExecution("device-001", "exec-unknown")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, business.ErrExecutionQueueEntryNotFound))
+
+	// Device has an active entry but the execution is unknown.
+	require.NoError(t, queue.QueueExecution("device-001", newQueuedExec("exec-001", "script-sentinel")))
+	err = queue.CancelExecution("device-001", "exec-unknown")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, business.ErrExecutionQueueEntryNotFound))
+
+	// Completed execution (device also has another active entry, so the entry is found but not cancellable).
+	require.NoError(t, queue.QueueExecution("device-001", newQueuedExec("exec-002", "script-sentinel-2")))
+	_, err = queue.DequeueForDevice("device-001")
+	require.NoError(t, err)
+	require.NoError(t, queue.AcknowledgeCompletion("exec-001", "device-001", QueueStateCompleted, nil))
+	err = queue.CancelExecution("device-001", "exec-001")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, business.ErrExecutionQueueEntryNotFound))
+
+	// Completed execution with no remaining active entries.
+	require.NoError(t, queue.AcknowledgeCompletion("exec-002", "device-001", QueueStateCompleted, nil))
+	err = queue.CancelExecution("device-001", "exec-002")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, business.ErrExecutionQueueEntryNotFound))
 }

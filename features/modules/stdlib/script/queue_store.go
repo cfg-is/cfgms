@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // QueueState represents the lifecycle state of a queued execution.
@@ -260,12 +262,12 @@ func (s *InMemoryQueueStore) Cancel(deviceID, executionID string) error {
 	}
 
 	if !deviceHasEntries {
-		return fmt.Errorf("no queued executions for device %s", deviceID)
+		return fmt.Errorf("no queued executions for device %s: %w", deviceID, business.ErrExecutionQueueEntryNotFound)
 	}
 
 	entry, exists := s.entries[executionID]
 	if !exists || entry.DeviceID != deviceID {
-		return fmt.Errorf("execution %s not found in queue for device %s", executionID, deviceID)
+		return fmt.Errorf("execution %s not found in queue for device %s: %w", executionID, deviceID, business.ErrExecutionQueueEntryNotFound)
 	}
 
 	switch entry.State {
@@ -273,7 +275,7 @@ func (s *InMemoryQueueStore) Cancel(deviceID, executionID string) error {
 		entry.State = QueueStateCancelled
 		return nil
 	default:
-		return fmt.Errorf("execution %s not found in queue for device %s", executionID, deviceID)
+		return fmt.Errorf("execution %s not found in queue for device %s: %w", executionID, deviceID, business.ErrExecutionQueueEntryNotFound)
 	}
 }
 
