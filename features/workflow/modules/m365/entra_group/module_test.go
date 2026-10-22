@@ -213,6 +213,32 @@ func (m *MockGraphClient) DeleteApplication(ctx context.Context, token *auth.Acc
 	return args.Error(0)
 }
 
+func (m *MockGraphClient) AddApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, request *graph.AddApplicationPasswordRequest) (*graph.ApplicationPasswordCredential, error) {
+	args := m.Called(ctx, token, applicationID, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.ApplicationPasswordCredential), args.Error(1)
+}
+
+func (m *MockGraphClient) RemoveApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error {
+	args := m.Called(ctx, token, applicationID, keyID)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) AddApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, request *graph.AddApplicationKeyRequest) (*graph.ApplicationKeyCredential, error) {
+	args := m.Called(ctx, token, applicationID, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.ApplicationKeyCredential), args.Error(1)
+}
+
+func (m *MockGraphClient) RemoveApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error {
+	args := m.Called(ctx, token, applicationID, keyID)
+	return args.Error(0)
+}
+
 // Administrative Unit operations
 func (m *MockGraphClient) ListServicePrincipals(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.ServicePrincipal, error) {
 	args := m.Called(ctx, token, filter)
@@ -1207,6 +1233,18 @@ func (s *stubEntraGroupGC) UpdateApplication(_ context.Context, _ *auth.AccessTo
 	return nil
 }
 func (s *stubEntraGroupGC) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) AddApplicationPassword(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddApplicationPasswordRequest) (*graph.ApplicationPasswordCredential, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) RemoveApplicationPassword(_ context.Context, _ *auth.AccessToken, _ string, _ string) error {
+	return nil
+}
+func (s *stubEntraGroupGC) AddApplicationKey(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddApplicationKeyRequest) (*graph.ApplicationKeyCredential, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) RemoveApplicationKey(_ context.Context, _ *auth.AccessToken, _ string, _ string) error {
 	return nil
 }
 func (s *stubEntraGroupGC) ListServicePrincipals(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.ServicePrincipal, error) {

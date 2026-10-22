@@ -127,6 +127,18 @@ func (s *stubIntuneGraphClient) UpdateApplication(_ context.Context, _ *auth.Acc
 func (s *stubIntuneGraphClient) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
 	return nil
 }
+func (s *stubIntuneGraphClient) AddApplicationPassword(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddApplicationPasswordRequest) (*graph.ApplicationPasswordCredential, error) {
+	return nil, nil
+}
+func (s *stubIntuneGraphClient) RemoveApplicationPassword(_ context.Context, _ *auth.AccessToken, _ string, _ string) error {
+	return nil
+}
+func (s *stubIntuneGraphClient) AddApplicationKey(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddApplicationKeyRequest) (*graph.ApplicationKeyCredential, error) {
+	return nil, nil
+}
+func (s *stubIntuneGraphClient) RemoveApplicationKey(_ context.Context, _ *auth.AccessToken, _ string, _ string) error {
+	return nil
+}
 func (s *stubIntuneGraphClient) ListServicePrincipals(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.ServicePrincipal, error) {
 	return nil, nil
 }

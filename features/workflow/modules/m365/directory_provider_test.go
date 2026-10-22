@@ -468,6 +468,18 @@ func (s *stubGraphClient) UpdateApplication(_ context.Context, _ *auth.AccessTok
 func (s *stubGraphClient) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
 	return nil
 }
+func (s *stubGraphClient) AddApplicationPassword(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddApplicationPasswordRequest) (*graph.ApplicationPasswordCredential, error) {
+	return nil, nil
+}
+func (s *stubGraphClient) RemoveApplicationPassword(_ context.Context, _ *auth.AccessToken, _ string, _ string) error {
+	return nil
+}
+func (s *stubGraphClient) AddApplicationKey(_ context.Context, _ *auth.AccessToken, _ string, _ *graph.AddApplicationKeyRequest) (*graph.ApplicationKeyCredential, error) {
+	return nil, nil
+}
+func (s *stubGraphClient) RemoveApplicationKey(_ context.Context, _ *auth.AccessToken, _ string, _ string) error {
+	return nil
+}
 func (s *stubGraphClient) ListServicePrincipals(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.ServicePrincipal, error) {
 	return nil, nil
 }

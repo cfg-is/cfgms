@@ -4,8 +4,10 @@ package entra_application
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -527,11 +529,26 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 		request.Spa = &graph.ApplicationSpa{RedirectUris: config.RedirectUris.Spa}
 	}
 
-	// Create application via Graph API. Password/key credentials are refused by
-	// checkApplicable before any Graph call.
+	// Create application via Graph API.
 	app, err := m.graphClient.CreateApplication(ctx, token, request)
 	if err != nil {
 		return fmt.Errorf("failed to create application via Graph API: %w", err)
+	}
+
+	if len(config.PasswordCredentials) > 0 || len(config.KeyCredentials) > 0 {
+		if app == nil || app.ID == "" {
+			return fmt.Errorf("failed to add credentials: Graph returned no id for the created application")
+		}
+		for i := range config.PasswordCredentials {
+			if err := m.addPasswordCredential(ctx, token, app.ID, &config.PasswordCredentials[i]); err != nil {
+				return err
+			}
+		}
+		for i := range config.KeyCredentials {
+			if err := m.addKeyCredential(ctx, token, app.ID, &config.KeyCredentials[i]); err != nil {
+				return err
+			}
+		}
 	}
 
 	if config.CreateServicePrincipal {
@@ -614,11 +631,21 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 		changed = true
 	}
 
-	// Update the application if there are changes. Managed password and key
-	// credentials are refused by checkApplicable before any Graph call.
+	// Update the application if there are changes.
 	if changed {
 		if err := m.graphClient.UpdateApplication(ctx, token, existingApp.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update application via Graph API: %w", err)
+		}
+	}
+
+	if contains(managedFields, "password_credentials") {
+		if err := m.syncPasswordCredentials(ctx, token, existingApp.ID, config.PasswordCredentials); err != nil {
+			return err
+		}
+	}
+	if contains(managedFields, "key_credentials") {
+		if err := m.syncKeyCredentials(ctx, token, existingApp.ID, config.KeyCredentials); err != nil {
+			return err
 		}
 	}
 
@@ -668,24 +695,190 @@ func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, tok
 	return nil
 }
 
-// The helpers below are not implemented. They fail closed so a caller can never
-// report success for a credential change that was not made.
-// Error text deliberately carries no credential or key material.
+// parseCredentialEnd parses a declared end date. An empty value is "not declared".
+func parseCredentialEnd(field, value string) (*time.Time, error) {
+	if value == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, fmt.Errorf("%s end_date_time must be an RFC 3339 timestamp", field)
+	}
+	return &t, nil
+}
 
+// endDateDiffers reports whether a declared end date disagrees with the current one.
+// An undeclared end date never differs.
+func endDateDiffers(declared *time.Time, current time.Time) bool {
+	return declared != nil && !declared.Equal(current)
+}
+
+// addPasswordCredential asks Graph to generate a new password credential. The
+// generated secret is discarded: it is never logged, returned or placed in an error.
 func (m *entraApplicationModule) addPasswordCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *PasswordCredential) error {
-	return fmt.Errorf("adding a password credential is unsupported")
+	if credential.SecretText != "" {
+		return fmt.Errorf("password credential %q declares secret_text, which is not supported: Graph generates the secret", credential.DisplayName)
+	}
+	end, err := parseCredentialEnd("password credential", credential.EndDateTime)
+	if err != nil {
+		return err
+	}
+	request := &graph.AddApplicationPasswordRequest{
+		PasswordCredential: graph.ApplicationPasswordCredentialInput{DisplayName: credential.DisplayName, EndDate: end},
+	}
+	if _, err := m.graphClient.AddApplicationPassword(ctx, token, appID, request); err != nil {
+		return fmt.Errorf("failed to add password credential %q via Graph API: %w", credential.DisplayName, err)
+	}
+	return nil
 }
 
+// addKeyCredential adds a certificate credential. Graph refuses addKey without a
+// proof of possession this module cannot supply; that refusal is returned.
 func (m *entraApplicationModule) addKeyCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *KeyCredential) error {
-	return fmt.Errorf("adding a key credential is unsupported")
+	end, err := parseCredentialEnd("key credential", credential.EndDateTime)
+	if err != nil {
+		return err
+	}
+	key, err := base64.StdEncoding.DecodeString(credential.Key)
+	if err != nil || len(key) == 0 {
+		return fmt.Errorf("key credential %q key must be non-empty base64", credential.DisplayName)
+	}
+	request := &graph.AddApplicationKeyRequest{
+		KeyCredential: graph.ApplicationKeyCredentialInput{
+			DisplayName: credential.DisplayName,
+			Type:        credential.Type,
+			Usage:       credential.Usage,
+			Key:         key,
+			EndDate:     end,
+		},
+	}
+	if _, err := m.graphClient.AddApplicationKey(ctx, token, appID, request); err != nil {
+		return fmt.Errorf("failed to add key credential %q via Graph API: %w", credential.DisplayName, err)
+	}
+	return nil
 }
 
+// syncPasswordCredentials converges the application's password credentials to the
+// declared list, matching by display name. Any Graph error stops the sync.
 func (m *entraApplicationModule) syncPasswordCredentials(ctx context.Context, token *auth.AccessToken, appID string, credentials []PasswordCredential) error {
-	return fmt.Errorf("synchronizing password credentials is unsupported")
+	ends := make([]*time.Time, len(credentials))
+	for i := range credentials {
+		if credentials[i].SecretText != "" {
+			return fmt.Errorf("password credential %q declares secret_text, which is not supported: Graph generates the secret", credentials[i].DisplayName)
+		}
+		end, err := parseCredentialEnd("password credential", credentials[i].EndDateTime)
+		if err != nil {
+			return err
+		}
+		ends[i] = end
+	}
+	app, err := m.graphClient.GetApplication(ctx, token, appID)
+	if err != nil {
+		return fmt.Errorf("failed to get application from Graph API: %w", err)
+	}
+
+	matched := make(map[string]bool)
+	var toRemove []string
+	var toAdd []int
+	for i, declared := range credentials {
+		found := false
+		for _, current := range app.PasswordCredentials {
+			if matched[current.KeyID] || current.DisplayName != declared.DisplayName {
+				continue
+			}
+			matched[current.KeyID] = true
+			found = true
+			if endDateDiffers(ends[i], current.EndDate) {
+				toRemove = append(toRemove, current.KeyID)
+				toAdd = append(toAdd, i)
+			}
+			break
+		}
+		if !found {
+			toAdd = append(toAdd, i)
+		}
+	}
+	for _, current := range app.PasswordCredentials {
+		if !matched[current.KeyID] {
+			toRemove = append(toRemove, current.KeyID)
+		}
+	}
+
+	// Add before removing so a failed add never leaves the application without a credential.
+	for _, i := range toAdd {
+		if err := m.addPasswordCredential(ctx, token, appID, &credentials[i]); err != nil {
+			return err
+		}
+	}
+	for _, keyID := range toRemove {
+		if err := m.graphClient.RemoveApplicationPassword(ctx, token, appID, keyID); err != nil {
+			return fmt.Errorf("failed to remove password credential via Graph API: %w", err)
+		}
+	}
+	return nil
 }
 
+// syncKeyCredentials converges the application's key credentials to the declared
+// list, matching by key_id or, when none is declared, by display name.
 func (m *entraApplicationModule) syncKeyCredentials(ctx context.Context, token *auth.AccessToken, appID string, credentials []KeyCredential) error {
-	return fmt.Errorf("synchronizing key credentials is unsupported")
+	ends := make([]*time.Time, len(credentials))
+	for i := range credentials {
+		end, err := parseCredentialEnd("key credential", credentials[i].EndDateTime)
+		if err != nil {
+			return err
+		}
+		ends[i] = end
+	}
+	app, err := m.graphClient.GetApplication(ctx, token, appID)
+	if err != nil {
+		return fmt.Errorf("failed to get application from Graph API: %w", err)
+	}
+
+	matched := make(map[string]bool)
+	var toRemove []string
+	var toAdd []int
+	for i, declared := range credentials {
+		found := false
+		for _, current := range app.KeyCredentials {
+			if matched[current.KeyID] {
+				continue
+			}
+			if declared.KeyID != "" {
+				if current.KeyID != declared.KeyID {
+					continue
+				}
+			} else if current.DisplayName != declared.DisplayName {
+				continue
+			}
+			matched[current.KeyID] = true
+			found = true
+			if endDateDiffers(ends[i], current.EndDate) {
+				toRemove = append(toRemove, current.KeyID)
+				toAdd = append(toAdd, i)
+			}
+			break
+		}
+		if !found {
+			toAdd = append(toAdd, i)
+		}
+	}
+	for _, current := range app.KeyCredentials {
+		if !matched[current.KeyID] {
+			toRemove = append(toRemove, current.KeyID)
+		}
+	}
+
+	for _, i := range toAdd {
+		if err := m.addKeyCredential(ctx, token, appID, &credentials[i]); err != nil {
+			return err
+		}
+	}
+	for _, keyID := range toRemove {
+		if err := m.graphClient.RemoveApplicationKey(ctx, token, appID, keyID); err != nil {
+			return fmt.Errorf("failed to remove key credential via Graph API: %w", err)
+		}
+	}
+	return nil
 }
 
 // Utility types and functions
@@ -765,7 +958,7 @@ var unsupportedManagedFields = map[string]bool{
 	"required_resource_access": true, "oauth2_permissions": true, "app_roles": true,
 	"optional_claims": true, "accept_mapped_claims": true, "known_client_applications": true,
 	"pre_authorized_applications": true, "requested_access_token_version": true,
-	"publisher_domain": true, "password_credentials": true, "key_credentials": true,
+	"publisher_domain": true,
 }
 
 // checkApplicable returns an error naming the first declared field this module
@@ -796,12 +989,17 @@ func (c *EntraApplicationConfig) checkApplicable() error {
 		{"pre_authorized_applications", len(c.PreAuthorizedApplications) > 0},
 		{"requested_access_token_version", c.RequestedAccessTokenVersion != 0},
 		{"publisher_domain", c.PublisherDomain != ""},
-		{"password_credentials", len(c.PasswordCredentials) > 0},
-		{"key_credentials", len(c.KeyCredentials) > 0},
 	}
 	for _, d := range declared {
 		if d.set {
 			return reject(d.name)
+		}
+	}
+	// Graph generates password secrets; a client-supplied value is never sent.
+	// The error names the field only, never the value.
+	for _, cred := range c.PasswordCredentials {
+		if cred.SecretText != "" {
+			return fmt.Errorf("password_credentials secret_text is declared but cannot be applied: Graph generates the secret")
 		}
 	}
 

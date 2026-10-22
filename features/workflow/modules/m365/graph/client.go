@@ -51,6 +51,13 @@ type Client interface {
 	UpdateApplication(ctx context.Context, token *auth.AccessToken, applicationID string, request *UpdateApplicationRequest) error
 	DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error
 
+	// Application credential operations. Graph generates password secrets; keyId
+	// identifies a credential for removal.
+	AddApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, request *AddApplicationPasswordRequest) (*ApplicationPasswordCredential, error)
+	RemoveApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error
+	AddApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, request *AddApplicationKeyRequest) (*ApplicationKeyCredential, error)
+	RemoveApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error
+
 	// Service principal operations
 	ListServicePrincipals(ctx context.Context, token *auth.AccessToken, filter string) ([]ServicePrincipal, error)
 	CreateServicePrincipal(ctx context.Context, token *auth.AccessToken, request *CreateServicePrincipalRequest) (*ServicePrincipal, error)
@@ -520,6 +527,34 @@ type ApplicationPasswordCredential struct {
 	StartDate   time.Time `json:"startDateTime"`
 	EndDate     time.Time `json:"endDateTime"`
 	SecretText  string    `json:"secretText,omitempty"`
+}
+
+// AddApplicationPasswordRequest is the body of an application addPassword action.
+// It carries no secret: Graph generates the secret value.
+type AddApplicationPasswordRequest struct {
+	PasswordCredential ApplicationPasswordCredentialInput `json:"passwordCredential"`
+}
+
+// ApplicationPasswordCredentialInput holds the client-settable fields of a new password credential.
+type ApplicationPasswordCredentialInput struct {
+	DisplayName string     `json:"displayName,omitempty"`
+	EndDate     *time.Time `json:"endDateTime,omitempty"`
+}
+
+// AddApplicationKeyRequest is the body of an application addKey action.
+// Graph requires a proof-of-possession token (Proof) signed with an existing key.
+type AddApplicationKeyRequest struct {
+	KeyCredential ApplicationKeyCredentialInput `json:"keyCredential"`
+	Proof         string                        `json:"proof,omitempty"`
+}
+
+// ApplicationKeyCredentialInput holds the client-settable fields of a new key credential.
+type ApplicationKeyCredentialInput struct {
+	DisplayName string     `json:"displayName,omitempty"`
+	Type        string     `json:"type"`
+	Usage       string     `json:"usage"`
+	Key         []byte     `json:"key"`
+	EndDate     *time.Time `json:"endDateTime,omitempty"`
 }
 
 // ApplicationOptionalClaims represents optional claims configuration
