@@ -42,6 +42,8 @@ applied_fields:
   - tags
   - create_service_principal   # created for the application's appId when none exists
   - service_principal_settings # applied when the service principal is created
+  - password_credentials  # client secrets, matched by display_name; Graph generates the secret value
+  - key_credentials       # certificates, matched by key_id or display_name; Graph requires a proof of possession
   - managed_fields   # selects which of the above an update touches
 
 rejected_fields:     # declaring any of these (or listing them in managed_fields) fails Set
@@ -56,7 +58,11 @@ rejected_fields:     # declaring any of these (or listing them in managed_fields
   - pre_authorized_applications
   - requested_access_token_version
   - publisher_domain
-  - password_credentials
-  - key_credentials
+# secret_text inside password_credentials is also rejected (see below).
 # A managed identifier_uris, tags or logout_url whose declared value is empty is
 # also rejected: Graph clears are omitted from the request, so it cannot be applied.
+# Credentials: a declared credential with no current match is added, one whose
+# end_date_time differs is replaced, and a current credential that is not declared
+# is removed. Graph generates every client secret; a declared secret_text is
+# rejected, and the generated value is never logged, returned or exposed. Graph's
+# refusal of a key operation (addKey needs a proof of possession) is returned as an error.

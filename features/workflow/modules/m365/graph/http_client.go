@@ -769,6 +769,46 @@ func (c *HTTPClient) DeleteApplication(ctx context.Context, token *auth.AccessTo
 	return nil
 }
 
+// AddApplicationPassword adds a password credential; Graph generates the secret.
+func (c *HTTPClient) AddApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, request *AddApplicationPasswordRequest) (*ApplicationPasswordCredential, error) {
+	endpoint := fmt.Sprintf("/applications/%s/addPassword", url.PathEscape(applicationID))
+	var credential ApplicationPasswordCredential
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &credential); err != nil {
+		return nil, fmt.Errorf("failed to add application password: %w", err)
+	}
+	return &credential, nil
+}
+
+// RemoveApplicationPassword removes a password credential by keyId.
+func (c *HTTPClient) RemoveApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error {
+	endpoint := fmt.Sprintf("/applications/%s/removePassword", url.PathEscape(applicationID))
+	body := map[string]string{"keyId": keyID}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, body, nil); err != nil {
+		return fmt.Errorf("failed to remove application password: %w", err)
+	}
+	return nil
+}
+
+// AddApplicationKey adds a key credential. Graph refuses it without a valid proof of possession.
+func (c *HTTPClient) AddApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, request *AddApplicationKeyRequest) (*ApplicationKeyCredential, error) {
+	endpoint := fmt.Sprintf("/applications/%s/addKey", url.PathEscape(applicationID))
+	var credential ApplicationKeyCredential
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &credential); err != nil {
+		return nil, fmt.Errorf("failed to add application key: %w", err)
+	}
+	return &credential, nil
+}
+
+// RemoveApplicationKey removes a key credential by keyId.
+func (c *HTTPClient) RemoveApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error {
+	endpoint := fmt.Sprintf("/applications/%s/removeKey", url.PathEscape(applicationID))
+	body := map[string]string{"keyId": keyID}
+	if err := c.makeRequest(ctx, token, "POST", endpoint, body, nil); err != nil {
+		return fmt.Errorf("failed to remove application key: %w", err)
+	}
+	return nil
+}
+
 // ListApplications retrieves applications with optional OData filter
 func (c *HTTPClient) ListApplications(ctx context.Context, token *auth.AccessToken, filter string) ([]Application, error) {
 	endpoint := "/applications"

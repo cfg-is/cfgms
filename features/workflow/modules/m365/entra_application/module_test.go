@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,6 +201,32 @@ func (m *MockGraphClient) UpdateApplication(ctx context.Context, token *auth.Acc
 
 func (m *MockGraphClient) DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error {
 	args := m.Called(ctx, token, applicationID)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) AddApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, request *graph.AddApplicationPasswordRequest) (*graph.ApplicationPasswordCredential, error) {
+	args := m.Called(ctx, token, applicationID, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.ApplicationPasswordCredential), args.Error(1)
+}
+
+func (m *MockGraphClient) RemoveApplicationPassword(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error {
+	args := m.Called(ctx, token, applicationID, keyID)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) AddApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, request *graph.AddApplicationKeyRequest) (*graph.ApplicationKeyCredential, error) {
+	args := m.Called(ctx, token, applicationID, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.ApplicationKeyCredential), args.Error(1)
+}
+
+func (m *MockGraphClient) RemoveApplicationKey(ctx context.Context, token *auth.AccessToken, applicationID string, keyID string) error {
+	args := m.Called(ctx, token, applicationID, keyID)
 	return args.Error(0)
 }
 
@@ -1140,6 +1167,11 @@ type fakeGraphServer struct {
 	// non-zero, is the status returned for POST /servicePrincipals.
 	existingSPs    []map[string]interface{}
 	spCreateStatus int
+
+	// credFailAction, when set (for example "addPassword"), makes POSTs to that
+	// application action return 403 with credError as the response body.
+	credFailAction string
+	credError      string
 }
 
 func (f *fakeGraphServer) handler(t *testing.T) http.Handler {
@@ -1173,6 +1205,13 @@ func (f *fakeGraphServer) handler(t *testing.T) http.Handler {
 			w.WriteHeader(http.StatusCreated)
 			_, werr := w.Write([]byte(`{"id":"sp-1","appId":"app-2"}`))
 			assert.NoError(t, werr)
+		case r.Method == http.MethodPost && existingPath != "" && strings.HasPrefix(r.URL.Path, existingPath+"/"):
+			action := strings.TrimPrefix(r.URL.Path, existingPath+"/")
+			f.serveCredentialAction(t, w, action)
+		case r.Method == http.MethodPost && r.URL.Path == "/applications/obj-2/addPassword":
+			f.serveCredentialAction(t, w, "addPassword")
+		case r.Method == http.MethodPost && r.URL.Path == "/applications/obj-2/addKey":
+			f.serveCredentialAction(t, w, "addKey")
 		case r.Method == http.MethodPost && r.URL.Path == "/applications":
 			w.WriteHeader(http.StatusCreated)
 			_, werr := w.Write([]byte(`{"id":"obj-2","appId":"app-2"}`))
@@ -1183,6 +1222,21 @@ func (f *fakeGraphServer) handler(t *testing.T) http.Handler {
 			assert.NoError(t, werr)
 		}
 	})
+}
+
+func (f *fakeGraphServer) serveCredentialAction(t *testing.T, w http.ResponseWriter, action string) {
+	if f.credFailAction == action {
+		w.WriteHeader(http.StatusForbidden)
+		_, werr := w.Write([]byte(f.credError))
+		assert.NoError(t, werr)
+		return
+	}
+	if action == "addPassword" {
+		_, werr := w.Write([]byte(`{"keyId":"new-key","secretText":"graph-generated-secret"}`))
+		assert.NoError(t, werr)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (f *fakeGraphServer) recorded() []graphRequest {
@@ -1288,10 +1342,7 @@ func TestSet_RejectsUnapplicableFieldsWithoutGraphCalls(t *testing.T) {
 		"requested_access_token_version":  {"requested_access_token_version": 2},
 		"publisher_domain":                {"publisher_domain": "example.com"},
 		"password_credentials":            {"password_credentials": []interface{}{map[string]interface{}{"display_name": "s", "secret_text": "hunter2-secret"}}},
-		"key_credentials":                 {"key_credentials": []interface{}{map[string]interface{}{"display_name": "k", "key": "KEYMATERIAL"}}},
 		"managed app_roles (empty)":       {"managed_fields": []interface{}{"app_roles"}},
-		"managed password_credentials":    {"managed_fields": []interface{}{"password_credentials"}},
-		"managed key_credentials":         {"managed_fields": []interface{}{"key_credentials"}},
 		"managed tags (empty)":            {"managed_fields": []string{"tags"}},
 		"managed identifier_uris (empty)": {"managed_fields": []string{"identifier_uris"}},
 		"managed logout_url (empty)":      {"managed_fields": []string{"logout_url"}},
@@ -1329,23 +1380,145 @@ func TestSet_WrongTypeNamesKey(t *testing.T) {
 	}
 }
 
-func TestUnsupportedHelpersFailClosed(t *testing.T) {
-	m := &entraApplicationModule{}
-	ctx := context.Background()
-	calls := map[string]error{
-		"addPasswordCredential":   m.addPasswordCredential(ctx, nil, "obj", &PasswordCredential{}),
-		"addKeyCredential":        m.addKeyCredential(ctx, nil, "obj", &KeyCredential{Key: "KEYMATERIAL"}),
-		"syncPasswordCredentials": m.syncPasswordCredentials(ctx, nil, "obj", []PasswordCredential{{}}),
-		"syncKeyCredentials":      m.syncKeyCredentials(ctx, nil, "obj", []KeyCredential{{Key: "KEYMATERIAL"}}),
+func credApp(pw []map[string]interface{}, keys []map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"id": "obj-1", "displayName": "App", "signInAudience": "AzureADMyOrg",
+		"passwordCredentials": pw, "keyCredentials": keys,
 	}
-	for name, err := range calls {
-		t.Run(name, func(t *testing.T) {
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "unsupported")
-			assert.NotContains(t, err.Error(), "SecretText")
-			assert.NotContains(t, err.Error(), "KEYMATERIAL")
-		})
+}
+
+func (f *fakeGraphServer) paths(method string) []string {
+	var out []string
+	for _, r := range f.recorded() {
+		if r.Method == method {
+			out = append(out, r.Path)
+		}
 	}
+	return out
+}
+
+func TestSet_RemovesUndeclaredPasswordCredential(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, credApp([]map[string]interface{}{
+		{"keyId": "old-key", "displayName": "stale", "endDateTime": "2030-01-01T00:00:00Z"},
+		{"keyId": "keep-key", "displayName": "keep", "endDateTime": "2030-01-01T00:00:00Z"},
+	}, nil))
+	err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"managed_fields": []interface{}{"password_credentials"},
+		"password_credentials": []interface{}{
+			map[string]interface{}{"display_name": "keep", "end_date_time": "2030-01-01T00:00:00Z"},
+		},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/applications/obj-1/removePassword"}, fg.paths(http.MethodPost))
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(fg.only(t, http.MethodPost).Body, &body))
+	assert.Equal(t, "old-key", body["keyId"])
+}
+
+func TestSet_AddsMissingPasswordCredentialAndReplacesChangedEnd(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, credApp([]map[string]interface{}{
+		{"keyId": "k1", "displayName": "rotate", "endDateTime": "2030-01-01T00:00:00Z"},
+	}, nil))
+	err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"managed_fields": []interface{}{"password_credentials"},
+		"password_credentials": []interface{}{
+			map[string]interface{}{"display_name": "rotate", "end_date_time": "2031-01-01T00:00:00Z"},
+			map[string]interface{}{"display_name": "new"},
+		},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"/applications/obj-1/addPassword", "/applications/obj-1/addPassword", "/applications/obj-1/removePassword",
+	}, fg.paths(http.MethodPost))
+}
+
+func TestSet_PasswordRemovalErrorIsReturned(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, credApp([]map[string]interface{}{
+		{"keyId": "old-key", "displayName": "stale"},
+	}, nil))
+	fg.credFailAction, fg.credError = "removePassword", `{"error":{"code":"Forbidden","message":"denied"}}`
+	err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"managed_fields": []interface{}{"password_credentials"},
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remove password credential")
+}
+
+func TestSet_KeyCredentialsRemoveAndAddFailClosed(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, credApp(nil, []map[string]interface{}{
+		{"keyId": "old-cert", "displayName": "stale"},
+	}))
+	err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"managed_fields": []interface{}{"key_credentials"},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/applications/obj-1/removeKey"}, fg.paths(http.MethodPost))
+
+	m, fg, _, ctx = setupSetModule(t, credApp(nil, nil))
+	fg.credFailAction, fg.credError = "addKey", `{"error":{"code":"Request_BadRequest","message":"proof of possession required"}}`
+	err = m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"key_credentials": []interface{}{map[string]interface{}{
+			"display_name": "cert", "type": "AsymmetricX509Cert", "usage": "Verify", "key": "AQID",
+		}},
+		"managed_fields": []interface{}{"key_credentials"},
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "add key credential")
+}
+
+func TestSet_CreateAddsEveryDeclaredCredential(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, nil)
+	err := m.Set(ctx, "m365-t:obj-2", baseStep(map[string]interface{}{
+		"password_credentials": []interface{}{map[string]interface{}{"display_name": "a"}, map[string]interface{}{"display_name": "b"}},
+		"key_credentials": []interface{}{map[string]interface{}{
+			"display_name": "cert", "type": "AsymmetricX509Cert", "usage": "Verify", "key": "AQID",
+		}},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"/applications", "/applications/obj-2/addPassword", "/applications/obj-2/addPassword", "/applications/obj-2/addKey",
+	}, fg.paths(http.MethodPost))
+}
+
+func TestAddCredentialErrorLeaksNoSecret(t *testing.T) {
+	const declared = "declared-secret-9f3a"
+	const returned = "returned-secret-7c1b"
+	var logs strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	m, fg, _, ctx := setupSetModule(t, credApp(nil, nil))
+	fg.credFailAction = "addPassword"
+	fg.credError = `{"error":{"code":"Forbidden","message":"denied"}}`
+
+	// A declared secret_text is rejected before any Graph call.
+	err := m.Set(ctx, "m365-t:obj-1", baseStep(map[string]interface{}{
+		"managed_fields":       []interface{}{"password_credentials"},
+		"password_credentials": []interface{}{map[string]interface{}{"display_name": "s", "secret_text": declared}},
+	}))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), declared)
+	assert.Empty(t, fg.recorded())
+
+	// A Graph add error carries neither the declared nor a returned secret.
+	token := &auth.AccessToken{TenantID: "m365-t"}
+	err = m.addPasswordCredential(ctx, token, "obj-1", &PasswordCredential{DisplayName: "s"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), declared)
+	assert.NotContains(t, err.Error(), returned)
+
+	// A failing addPassword response that still carries a generated secret
+	// must not surface it, through the real HTTP client.
+	fg.credError = `{"error":{"code":"Forbidden","message":"denied"},"keyId":"k","secretText":"` + returned + `"}`
+	err = m.addPasswordCredential(ctx, token, "obj-1", &PasswordCredential{DisplayName: "s"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), returned)
+	err = m.addPasswordCredential(ctx, token, "obj-1", &PasswordCredential{DisplayName: "s", SecretText: declared})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), declared)
+	assert.NotContains(t, logs.String(), declared)
+	assert.NotContains(t, logs.String(), returned)
 }
 
 func spStep(extra map[string]interface{}) mapState {
