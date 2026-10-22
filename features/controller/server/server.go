@@ -1183,6 +1183,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				// Issue #5120: steward events get their own queue so slow handlers
 				// cannot use up connect or heartbeat slots.
 				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
+				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
@@ -1201,6 +1202,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				// Issue #5120: steward events get their own queue so slow handlers
 				// cannot use up connect or heartbeat slots.
 				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
+				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),

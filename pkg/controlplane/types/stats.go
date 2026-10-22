@@ -56,6 +56,10 @@ type ControlPlaneStats struct {
 	// per-stream in-flight limit.
 	HeartbeatsDropped int64 `json:"heartbeats_dropped"`
 
+	// ResponsesDropped counts steward responses shed by the tenant response gate
+	// or the per-stream in-flight limit.
+	ResponsesDropped int64 `json:"responses_dropped"`
+
 	// Average message latency (if measurable)
 	AvgLatency time.Duration `json:"avg_latency,omitempty"`
 

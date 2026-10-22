@@ -146,6 +146,16 @@ func TestServer_New_ConnectAdmissionGateIsNotTheWireKeyedQueue(t *testing.T) {
 		"events must not share the connect/heartbeat gate")
 	assert.NotSame(t, srv.admissionQueues.dnaBulkQueue(), cpProvider.EventAdmission(),
 		"events must not share the DNA/bulk gate")
+
+	require.NotNil(t, cpProvider.ResponseAdmission(), "steward responses must be gated by an admission queue")
+	assert.Same(t, srv.admissionQueues.responsesQueue(), cpProvider.ResponseAdmission(),
+		"the CP provider must hold the responses gate")
+	assert.NotSame(t, srv.admissionQueues.connectHeartbeatQueue(), cpProvider.ResponseAdmission(),
+		"responses must not share the connect/heartbeat gate")
+	assert.NotSame(t, srv.admissionQueues.eventsQueue(), cpProvider.ResponseAdmission(),
+		"responses must not share the events gate")
+	assert.NotSame(t, srv.admissionQueues.dnaBulkQueue(), cpProvider.ResponseAdmission(),
+		"responses must not share the DNA/bulk gate")
 }
 
 // TestIngestAdmissionQueues_EventsQueueIsolatedFromConnectHeartbeat: a flood of
