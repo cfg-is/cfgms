@@ -317,8 +317,16 @@ func TestPermissionAssurance_TenantDeletionPipelineStrong(t *testing.T) {
 // tenant:manage.
 func TestPermissionAssurance_Issue3687_StrongCredentialFloor(t *testing.T) {
 	want := map[string]Requirement{
-		"steward:execute-scripts":    {Min: session.AssuranceStrong},
-		"script:admin":               {Min: session.AssuranceStrong},
+		"steward:execute-scripts": {
+			Min:                  session.AssuranceStrong,
+			RequireUserPresence:  true,
+			PresenceExemptRoutes: []string{"DELETE /api/v1/runs/{run_id}", "POST /api/v1/runs/command"},
+		},
+		"script:admin": {
+			Min:                  session.AssuranceStrong,
+			RequireUserPresence:  true,
+			PresenceExemptRoutes: []string{"GET /api/v1/scripts", "GET /api/v1/scripts/{id}"},
+		},
 		"operator-payload:sign":      {Min: session.AssuranceStrong},
 		"signing-credential:request": {Min: session.AssuranceStrong, RequireUserPresence: true},
 	}
@@ -372,6 +380,8 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"credential-request:approve":          true, // Issue #3718: decides the marker set/account binding for a credential
 		"hyperv-profile:create":               true, // Issue #3785: rendered and executed as root at guest first boot
 		"hyperv-profile:delete":               true, // Issue #3785: mirrors module:approve/module:reject
+		"steward:execute-scripts":             true, // Issue #5416: per-action tap, cancel and inline command exempt
+		"script:admin":                        true, // Issue #5416: per-action tap, reads exempt
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {

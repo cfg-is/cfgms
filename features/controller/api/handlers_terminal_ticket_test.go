@@ -423,3 +423,42 @@ func TestTerminalRoutes_UseTerminalCreatePermission(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, n.do("/terminal/tickets/"+ttSteward, p, n.signedTicketBody(ttSteward, "bash")).Code)
 	assert.Zero(t, ticketCount(n.server))
 }
+
+// Issue #5416: the browser Shell tab's per-action proof is a WebAuthn assertion over the
+// terminal-open envelope. A proof signed for another steward or shell is refused with
+// INVALID_SIGNATURE and mints nothing; the matching proof mints a ticket (see
+// TestTerminalTicket_WebAuthnMintsTicketWithManifest). No proof at all is covered by
+// TestTerminalTicket_NoProofAndWrongShellRefused.
+func TestTerminalTicket_WebAuthnProofForOtherStewardOrShellRefused(t *testing.T) {
+	f := newWebAuthnActionFixture(t)
+	server := f.server
+	server.certManager = newTLSTestCertManager(t)
+	ensureSharedSigningCertificate(t, server.certManager)
+	acct, err := server.getAccount(context.Background(), f.username)
+	require.NoError(t, err)
+	acct.RootScope = true
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+	server.cacheAccount(acct)
+	n := newTicketNode(t, server)
+	require.NoError(t, server.controllerService.RegisterSteward("steward-2", saTenant, "addr", "active"))
+	p := &Principal{ID: f.principal.ID, Name: f.username, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true}
+
+	exp := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
+
+	t.Run("other steward", func(t *testing.T) {
+		env := terminalEnvelope(t, ttSteward, "bash", []string{ttSteward}, "n-os", exp)
+		proof := f.proofFor(t, env)
+		rec := n.do("/terminal/tickets/steward-2", p, ticketBody("bash", "n-os", exp, []string{ttSteward}, &proof))
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
+		assert.Zero(t, ticketCount(server))
+	})
+	t.Run("other shell", func(t *testing.T) {
+		env := terminalEnvelope(t, ttSteward, "bash", []string{ttSteward}, "n-sh", exp)
+		proof := f.proofFor(t, env)
+		rec := n.do("/terminal/tickets/"+ttSteward, p, ticketBody("sh", "n-sh", exp, []string{ttSteward}, &proof))
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
+		assert.Zero(t, ticketCount(server))
+	})
+}

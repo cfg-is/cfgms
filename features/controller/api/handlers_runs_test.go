@@ -266,10 +266,8 @@ func postRunScript(t *testing.T, server *Server, principal *Principal, body inte
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/script", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req = withPrincipal(req, principal)
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostRunScript))
-	handler.ServeHTTP(rec, req)
-	return rec
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, principal.ID, req, "steward:execute-scripts"))
+	return serveOnRoute(server, http.MethodPost, "/api/v1/runs/script", "steward", "execute-scripts", http.HandlerFunc(server.handlePostRunScript), req)
 }
 
 // postRunCommand sends POST /api/v1/runs/command through the same
@@ -281,10 +279,7 @@ func postRunCommand(t *testing.T, server *Server, principal *Principal, body int
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/command", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req = withPrincipal(req, principal)
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostRunCommand))
-	handler.ServeHTTP(rec, req)
-	return rec
+	return serveOnRoute(server, http.MethodPost, "/api/v1/runs/command", "steward", "execute-scripts", http.HandlerFunc(server.handlePostRunCommand), req)
 }
 
 // getRun sends GET /api/v1/runs/{runID}. steward:read-scripts is unaffected by
@@ -316,11 +311,7 @@ func deleteRun(t *testing.T, server *Server, principal *Principal, runID string)
 	t.Helper()
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/runs/"+runID, nil)
 	req = withPrincipal(req, principal)
-	req = withVars(req, map[string]string{"run_id": runID})
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handleDeleteRun))
-	handler.ServeHTTP(rec, req)
-	return rec
+	return serveOnRoute(server, http.MethodDelete, "/api/v1/runs/{run_id}", "steward", "execute-scripts", http.HandlerFunc(server.handleDeleteRun), req)
 }
 
 // ---- [REQUIRED TEST] POST /api/v1/runs/script fan-out ----------------------

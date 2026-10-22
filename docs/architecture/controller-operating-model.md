@@ -2092,6 +2092,16 @@ An expired or unknown request, a code mismatch, a ceremony failure, an unconfigu
 
 **Fresh passkey tap for every presence-gated action (Issue #5297, ADR-021 Amendment 9).** Every presence-gated action is confirmed by a fresh passkey tap, either in the browser step-up flow or through the `cfg` relay; both are equal paths, so a web-only admin without `cfg` installed can run every action. The presence token is bound server-side to one exact action (method, canonical path with query, body hash and permission), is single-use and short-lived; `requirePermission` refuses a token presented for any other action with `presence_token_action_mismatch`. Two relay rules stay in force: only a cfg Bearer session or an mTLS admin certificate can lodge a relay request (`WEB_SESSION_CANNOT_LODGE` for a web-cookie session; the principal carries an explicit authentication channel, and an unknown channel is refused), and a relay request ID attaches only to the ceremony that named it at `presence/begin` (`REQUEST_CEREMONY_MISMATCH` otherwise). Tenant deletion approval can also be run with `cfg tenant approve-delete <tenant-id>`.
 
+**Script runs and script privilege changes (Issue #5416).** `steward:execute-scripts` and `script:admin` carry `RequireUserPresence: true` on top of `AssuranceStrong`, so every route they gate needs a fresh, action-bound passkey tap (browser step-up or `cfg` relay) unless the route is listed in the requirement's `PresenceExemptRoutes`. The default is a tap: a new route under either permission is gated without anyone remembering to add it. Each exemption is `"<METHOD> <mux path template>"`, matched against `mux.CurrentRoute(r).GetPathTemplate()`; a request with no readable current route is never exempt. The exempt routes skip only the presence check and still pass every other check:
+
+| Permission | Exempt route | Reason |
+|------------|--------------|--------|
+| `steward:execute-scripts` | `DELETE /api/v1/runs/{run_id}` | Cancelling a run stops work rather than starting it |
+| `steward:execute-scripts` | `POST /api/v1/runs/command` | An inline command already carries a per-action X.509 operator signature over the command envelope |
+| `script:admin` | `GET /api/v1/scripts`, `GET /api/v1/scripts/{id}` | Read-only |
+
+A per-tenant assurance override that sets `RequireUserPresence` clears the exemptions for that permission; an override that sets only a higher `MinOverride` leaves them in place. At construction the server walks the router and fails if any `PresenceExemptRoutes` entry matches no registered route, so a renamed route cannot leave a stale exemption. Opening a remote terminal (`POST /api/v1/terminal/tickets/{steward_id}`) is confirmed by its per-action operator passkey proof over the terminal-open envelope (steward, shell, nonce, expiry), and an inline command by its per-action X.509 operator signature; neither takes a second tap. No REST route schedules a script today.
+
 ## Observe-Resolution: DNA-driven Module Activation
 
 `ResolveObserveModules` (`features/controller/modules/resolution/observe.go`) computes the set of modules a steward should observe based on its baseline DNA attributes and the registered module manifests.

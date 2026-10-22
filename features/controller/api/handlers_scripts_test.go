@@ -26,10 +26,7 @@ import (
 func listScripts(server *Server, principal *Principal) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts", nil)
 	req = withPrincipal(req, principal)
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("script", "admin")(http.HandlerFunc(server.handleListScripts))
-	handler.ServeHTTP(rec, req)
-	return rec
+	return serveOnRoute(server, http.MethodGet, "/api/v1/scripts", "script", "admin", http.HandlerFunc(server.handleListScripts), req)
 }
 
 // getScriptLibraryItem sends GET /api/v1/scripts/{id} through the same
@@ -37,38 +34,28 @@ func listScripts(server *Server, principal *Principal) *httptest.ResponseRecorde
 func getScriptLibraryItem(server *Server, principal *Principal, id string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/scripts/"+id, nil)
 	req = withPrincipal(req, principal)
-	req = withVars(req, map[string]string{"id": id})
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("script", "admin")(http.HandlerFunc(server.handleGetScriptLibraryItem))
-	handler.ServeHTTP(rec, req)
-	return rec
+	return serveOnRoute(server, http.MethodGet, "/api/v1/scripts/{id}", "script", "admin", http.HandlerFunc(server.handleGetScriptLibraryItem), req)
 }
 
 // putScriptPrivilege sends PUT /api/v1/scripts/{id}/privilege through the same
 // requirePermission("script","admin") gate routes_scripts.go registers.
-func putScriptPrivilege(server *Server, principal *Principal, id, body string) *httptest.ResponseRecorder {
+func putScriptPrivilege(t *testing.T, server *Server, principal *Principal, id, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/scripts/"+id+"/privilege", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = withPrincipal(req, principal)
-	req = withVars(req, map[string]string{"id": id})
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("script", "admin")(http.HandlerFunc(server.handlePutScriptPrivilege))
-	handler.ServeHTTP(rec, req)
-	return rec
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, principal.ID, req, "script:admin"))
+	return serveOnRoute(server, http.MethodPut, "/api/v1/scripts/{id}/privilege", "script", "admin", http.HandlerFunc(server.handlePutScriptPrivilege), req)
 }
 
 // postScriptRetry sends POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry
 // through the same requirePermission("steward","execute-scripts") gate
 // routes_stewards.go registers. steward:execute-scripts requires AssuranceStrong
 // (Issue #3687), so a Machine-assurance API-key credential can no longer reach it.
-func postScriptRetry(server *Server, principal *Principal, stewardID, executionID string) *httptest.ResponseRecorder {
+func postScriptRetry(t *testing.T, server *Server, principal *Principal, stewardID, executionID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+stewardID+"/scripts/executions/"+executionID+"/retry", nil)
 	req = withPrincipal(req, principal)
-	req = withVars(req, map[string]string{"id": stewardID, "execution_id": executionID})
-	rec := httptest.NewRecorder()
-	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostScriptRetry))
-	handler.ServeHTTP(rec, req)
-	return rec
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, principal.ID, req, "steward:execute-scripts"))
+	return serveOnRoute(server, http.MethodPost, "/api/v1/stewards/{id}/scripts/executions/{execution_id}/retry", "steward", "execute-scripts", http.HandlerFunc(server.handlePostScriptRetry), req)
 }
 
 // newTestScriptTracker opens an in-memory SQLite database and returns a ready
@@ -396,7 +383,7 @@ func TestHandlePostScriptRetry_NotImplemented(t *testing.T) {
 	server, _ := setupScriptServer(t)
 	principal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postScriptRetry(server, principal, "steward-1", "exec-1")
+	rec := postScriptRetry(t, server, principal, "steward-1", "exec-1")
 
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 
@@ -415,7 +402,7 @@ func TestHandlePostScriptRetry_CrossTenant_NotFound(t *testing.T) {
 		map[string]string{"hostname": "retry-cross-tenant-host", "os": "linux"})
 
 	principal := runPrincipal("exec-caller-a", []string{"steward:execute-scripts"}, "tenant-a")
-	rec := postScriptRetry(server, principal, stewardID, "exec-1")
+	rec := postScriptRetry(t, server, principal, stewardID, "exec-1")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"tenant-a caller must not be able to retry a script on tenant-b's steward: %s", rec.Body.String())
@@ -535,7 +522,7 @@ func TestHandlePutScriptPrivilege_ScopeNotHeldByCallerReturns403(t *testing.T) {
 	seedLibraryScript(t, repo, "priv-test", "Priv Test")
 
 	body := `{"required_api_scope": ["config:push"]}`
-	rec := putScriptPrivilege(server, principal, "priv-test", body)
+	rec := putScriptPrivilege(t, server, principal, "priv-test", body)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "must return 403 when granting scope caller does not hold")
 }
@@ -550,7 +537,7 @@ func TestHandlePutScriptPrivilege_DNAPathWithoutReadDNAReturns403(t *testing.T) 
 	seedLibraryScript(t, repo, "dna-priv-test", "DNA Priv Test")
 
 	body := `{"param_platform_bindings": {"os_version": "OS.Version"}}`
-	rec := putScriptPrivilege(server, principal, "dna-priv-test", body)
+	rec := putScriptPrivilege(t, server, principal, "dna-priv-test", body)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "must return 403 when binding DNA paths without steward:read-dna")
 }
@@ -564,7 +551,7 @@ func TestHandlePutScriptPrivilege_AllowedWhenCallerHoldsScopes(t *testing.T) {
 	seedLibraryScript(t, repo, "ok-priv", "OK Priv")
 
 	body := `{"required_api_scope": ["steward:read-scripts"]}`
-	rec := putScriptPrivilege(server, principal, "ok-priv", body)
+	rec := putScriptPrivilege(t, server, principal, "ok-priv", body)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -583,7 +570,7 @@ func TestHandlePutScriptPrivilege_DNAPathAllowedWithReadDNA(t *testing.T) {
 	seedLibraryScript(t, repo, "dna-ok", "DNA OK")
 
 	body := `{"param_platform_bindings": {"os_version": "OS.Version"}}`
-	rec := putScriptPrivilege(server, principal, "dna-ok", body)
+	rec := putScriptPrivilege(t, server, principal, "dna-ok", body)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 }
@@ -598,11 +585,11 @@ func TestHandlePutScriptPrivilege_TenantIsolation(t *testing.T) {
 	seedLibraryScript(t, repo, "shared-id", "Shared Script")
 
 	// Tenant A sets privilege (no required scopes so no scope ceiling issue).
-	recA := putScriptPrivilege(server, principalA, "shared-id", `{}`)
+	recA := putScriptPrivilege(t, server, principalA, "shared-id", `{}`)
 	require.Equal(t, http.StatusOK, recA.Code)
 
 	// Tenant B sets privilege with different data.
-	recB := putScriptPrivilege(server, principalB, "shared-id", `{"required_api_scope": []}`)
+	recB := putScriptPrivilege(t, server, principalB, "shared-id", `{"required_api_scope": []}`)
 	require.Equal(t, http.StatusOK, recB.Code)
 }
 
@@ -617,7 +604,7 @@ func TestHandlePutScriptPrivilege_ServiceUnavailable(t *testing.T) {
 
 	principal := runPrincipal("admin-caller", []string{"script:admin"}, "test-tenant")
 
-	rec := putScriptPrivilege(server, principal, "any-id", `{}`)
+	rec := putScriptPrivilege(t, server, principal, "any-id", `{}`)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
