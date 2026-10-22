@@ -38,6 +38,20 @@ func writeAdminOnlyTokenFile(t *testing.T, path, token string) {
 	require.NoError(t, f.Close())
 }
 
+// makeReadableByOthers gives BUILTIN\Users read access to path through an
+// explicit, protected DACL. Inheritance cannot be relied on for this: under
+// SYSTEM, t.TempDir() is in C:\Windows\Temp, whose inheritable ACEs name only
+// SYSTEM and Administrators, so a file created there is already admin-only.
+func makeReadableByOthers(t *testing.T, path string) {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)")
+	require.NoError(t, err)
+	acl, _, err := sd.DACL()
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil))
+}
+
 func TestServiceRegToken_RegTokenFlag(t *testing.T) {
 	token, err := serviceRegToken("tok_flag_only", "")
 	require.NoError(t, err)
@@ -56,9 +70,9 @@ func TestServiceRegToken_BothFlagsIsError(t *testing.T) {
 }
 
 func TestServiceRegToken_RefusesFileOtherPrincipalsCanRead(t *testing.T) {
-	// A file under t.TempDir() inherits an ACE for the test user.
 	path := filepath.Join(t.TempDir(), "registration-token")
 	require.NoError(t, os.WriteFile(path, []byte("tok_user_readable\n"), 0o600))
+	makeReadableByOthers(t, path)
 
 	_, err := serviceRegToken("", path)
 	require.Error(t, err)

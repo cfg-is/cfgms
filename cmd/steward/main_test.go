@@ -1824,13 +1824,10 @@ func TestRegTokenAndRegTokenFileTogetherIsError(t *testing.T) {
 }
 
 func TestRegTokenFileUnreadableIsErrorWithoutToken(t *testing.T) {
-	// On Windows the file under t.TempDir() inherits an ACE for the test user,
-	// so ReadTokenFile refuses it as it refuses a group- or other-readable
-	// file elsewhere.
 	dir := t.TempDir()
 	wide := filepath.Join(dir, "wide")
 	require.NoError(t, os.WriteFile(wide, []byte("tok_secret_789\n"), 0o600))
-	require.NoError(t, os.Chmod(wide, 0o644))
+	makeReadableByOthers(t, wide)
 
 	for _, path := range []string{wide, filepath.Join(dir, "missing")} {
 		_, started, err := runRootWithSeam(t, "--regtoken-file", path)
