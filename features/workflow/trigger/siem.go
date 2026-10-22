@@ -281,8 +281,23 @@ func (sp *SIEMProcessor) processLogEntries(ctx context.Context, logBuffer <-chan
 				logger.InfoCtx(ctx, "Log buffer closed, stopping processing")
 				return
 			}
-			sp.processLogEntry(ctx, entry)
+			sp.safeProcessLogEntry(ctx, logger, entry)
 		}
+	}
+}
+
+// safeProcessLogEntry handles one entry and recovers from a panic so a single bad
+// entry or trigger cannot end the processing goroutine (and with it the controller).
+func (sp *SIEMProcessor) safeProcessLogEntry(ctx context.Context, logger *logging.ModuleLogger, entry LogEntry) {
+	defer recoverSIEMPanic(ctx, logger, "Recovered from panic processing SIEM log entry")
+	sp.processLogEntry(ctx, entry)
+}
+
+// recoverSIEMPanic must be deferred directly. It logs the panic message only; stack
+// contents and log entry data are deliberately not logged.
+func recoverSIEMPanic(ctx context.Context, logger *logging.ModuleLogger, msg string) {
+	if r := recover(); r != nil {
+		logger.ErrorCtx(ctx, msg, "panic", logging.SanitizeLogValue(fmt.Sprint(r)))
 	}
 }
 
@@ -699,26 +714,48 @@ func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trig
 	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
+	// Copy the aggregation data under the lock: the entry can be removed by
+	// UnregisterSIEMTrigger, and addToAggregation / window resets write these fields.
+	sp.mutex.RLock()
+	aggData, exists := sp.aggregationData[triggerID]
+	if !exists {
+		sp.mutex.RUnlock()
+		logger.DebugCtx(ctx, "SIEM trigger removed before firing, skipping",
+			"trigger_id", logging.SanitizeLogValue(triggerID))
+		return
+	}
+	count := aggData.Count
+	windowStart := aggData.WindowStart
+	entries := append([]LogEntry(nil), aggData.Entries...)
+	groupedCounts := make(map[string]int, len(aggData.GroupedCounts))
+	for k, v := range aggData.GroupedCounts {
+		groupedCounts[k] = v
+	}
+	sums := make(map[string]float64, len(aggData.Sum))
+	for k, v := range aggData.Sum {
+		sums[k] = v
+	}
+	averages := make(map[string]float64, len(aggData.Average))
+	for k, v := range aggData.Average {
+		averages[k] = v
+	}
+	sp.mutex.RUnlock()
+
 	logger.InfoCtx(ctx, "Firing SIEM trigger",
 		"trigger_id", triggerID,
 		"workflow_name", trigger.WorkflowName)
-
-	// Get aggregation data
-	sp.mutex.RLock()
-	aggData := sp.aggregationData[triggerID]
-	sp.mutex.RUnlock()
 
 	// Prepare trigger data
 	triggerData := map[string]interface{}{
 		"trigger_type":      "siem",
 		"trigger_id":        triggerID,
-		"aggregation_count": aggData.Count,
-		"window_start":      aggData.WindowStart,
+		"aggregation_count": count,
+		"window_start":      windowStart,
 		"window_end":        time.Now(),
-		"log_entries":       aggData.Entries,
-		"grouped_counts":    aggData.GroupedCounts,
-		"sum_values":        aggData.Sum,
-		"average_values":    aggData.Average,
+		"log_entries":       entries,
+		"grouped_counts":    groupedCounts,
+		"sum_values":        sums,
+		"average_values":    averages,
 	}
 
 	// Merge with trigger variables
@@ -730,6 +767,7 @@ func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trig
 	// #nosec G118 -- SIEM-triggered execution intentionally outlives event
 	// ingestion and applies the trigger's configured timeout when present.
 	go func() {
+		defer recoverSIEMPanic(ctx, logger, "Recovered from panic triggering workflow from SIEM")
 		// The triggered execution belongs to the trigger's own tenant, not whatever
 		// (usually absent) tenant the SIEM ingestion request carried — the caller
 		// who owns this trigger is who debug_engine.StartDebugSession must match
