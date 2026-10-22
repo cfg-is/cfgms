@@ -4,6 +4,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -468,4 +469,102 @@ func TestSynthesizeCommandRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 	assert.Equal(t, jobs[0].ExecutionID, queued[0].ExecutionID,
 		"execution_id in queue must match the job record")
 	assert.Equal(t, jobs[0].JobID, queued[0].Metadata["job_id"])
+}
+
+// ---- rollback tests ----------------------------------------------------------
+
+// failingEnqueueStore embeds the real in-memory queue store and fails Enqueue on
+// its failOn-th call (1-based).
+type failingEnqueueStore struct {
+	scriptmodule.QueueStore
+	failOn int
+	calls  int
+}
+
+func (s *failingEnqueueStore) Enqueue(entry *scriptmodule.QueueEntry) error {
+	s.calls++
+	if s.calls == s.failOn {
+		return errors.New("injected enqueue failure")
+	}
+	return s.QueueStore.Enqueue(entry)
+}
+
+func newFailingQueue(failOn int) *scriptmodule.ExecutionQueue {
+	store := &failingEnqueueStore{QueueStore: scriptmodule.NewInMemoryQueueStore(), failOn: failOn}
+	return scriptmodule.NewExecutionQueue(scriptmodule.NewExecutionMonitor(), scriptmodule.NewEphemeralKeyManager(), 0, "", store, nil, 0)
+}
+
+func rollbackDevices() []fleet.StewardResult {
+	return []fleet.StewardResult{
+		{ID: "device-001", TenantID: "t", DNAAttributes: map[string]string{"os.name": "linux"}},
+		{ID: "device-002", TenantID: "t"},
+	}
+}
+
+func assertRolledBack(t *testing.T, manager *Manager, queue *scriptmodule.ExecutionQueue, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected enqueue failure")
+
+	runs, lerr := manager.store.ListRuns("t", 10, 0)
+	require.NoError(t, lerr)
+	require.Len(t, runs, 1)
+	assert.Equal(t, RunStatusFailed, runs[0].Status)
+
+	jobs, lerr := manager.ListRunJobs(context.Background(), runs[0].RunID)
+	require.NoError(t, lerr)
+	require.Len(t, jobs, 2)
+	for _, j := range jobs {
+		assert.Equal(t, JobStatusCancelled, j.Status)
+	}
+	assert.Empty(t, queue.PeekForDevice("device-001"), "first device's execution must be cancelled")
+	assert.Empty(t, queue.PeekForDevice("device-002"))
+}
+
+func TestSynthesizeScriptRunForDevices_ResolveFailure_CreatesNothing(t *testing.T) {
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+	meta := &scriptmodule.ScriptMetadata{Parameters: []scriptmodule.ScriptParameter{
+		{Name: "os", Required: true, DNAPath: "os.name"},
+	}}
+
+	_, err := SynthesizeScriptRunForDevices(context.Background(), manager, queue, rollbackDevices(), "t", "u",
+		fleet.Filter{}, "scripts/a.sh", "v1", scriptmodule.ShellBash, nil, meta, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "device-002")
+
+	runs, lerr := manager.store.ListRuns("t", 10, 0)
+	require.NoError(t, lerr)
+	assert.Empty(t, runs, "no run may be created")
+	assert.Empty(t, queue.PeekForDevice("device-001"), "nothing may be queued for the first device")
+	assert.Empty(t, queue.PeekForDevice("device-002"))
+}
+
+func TestSynthesizeScriptRunForDevices_EnqueueFailure_RollsBack(t *testing.T) {
+	manager := newTestSynthesisManager(t)
+	queue := newFailingQueue(2)
+
+	_, err := SynthesizeScriptRunForDevices(context.Background(), manager, queue, rollbackDevices(), "t", "u",
+		fleet.Filter{}, "scripts/a.sh", "v1", scriptmodule.ShellBash, nil, nil, nil, nil)
+	assertRolledBack(t, manager, queue, err)
+}
+
+func TestSynthesizeCommandRunForDevices_EnqueueFailure_RollsBack(t *testing.T) {
+	manager := newTestSynthesisManager(t)
+	queue := newFailingQueue(2)
+
+	_, err := SynthesizeCommandRunForDevices(context.Background(), manager, queue, rollbackDevices(), "t", "u",
+		fleet.Filter{}, "echo hi", scriptmodule.ShellBash, nil, nil, nil, nil, "", time.Time{})
+	assertRolledBack(t, manager, queue, err)
+}
+
+func TestSynthesizeActionRunForDevices_EnqueueFailure_RollsBack(t *testing.T) {
+	manager := newTestSynthesisManager(t)
+	queue := newFailingQueue(2)
+	sig := &CommandSignature{Algorithm: "ed25519", Value: "v", PublicKey: "k"}
+
+	_, err := SynthesizeActionRunForDevices(context.Background(), manager, queue, rollbackDevices(), "t", "u",
+		fleet.Filter{}, scriptmodule.StewardActionSpec{Verb: "stop", TargetKind: "service", TargetName: "svc"},
+		sig, nil, "nonce", time.Now().Add(time.Hour))
+	assertRolledBack(t, manager, queue, err)
 }
