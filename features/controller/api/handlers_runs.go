@@ -1109,6 +1109,9 @@ func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string
 	return result
 }
 
+// auditDetail is an extra key/value detail appended to the operator_payload.dispatch event.
+type auditDetail struct{ Key, Value string }
+
 // emitOperatorPayloadDispatchAudit records an operator payload dispatch attempt —
 // accepted or rejected, either credential path — via audit.NewEventBuilder, mirroring
 // emitOsqueryAudit's field shape (handlers_osquery.go). It is a no-op when auditManager
@@ -1129,7 +1132,7 @@ func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string
 // never a live hostname. Target entries beyond the first 10 are counted but not
 // individually recorded, to keep audit record size bounded — the same cap
 // emitOsqueryAudit applies.
-func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID, callerID, payloadText, credentialID string, targets []string, runID string, result business.AuditResult, rejectionReason string) {
+func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID, callerID, payloadText, credentialID string, targets []string, runID string, result business.AuditResult, rejectionReason string, extra ...auditDetail) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1177,6 +1180,10 @@ func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID,
 		Detail("run_id", runID)
 	if rejectionReason != "" {
 		b = b.Detail("rejection_reason", rejectionReason)
+	}
+
+	for _, d := range extra {
+		b = b.Detail(d.Key, logging.SanitizeLogValue(d.Value))
 	}
 
 	for i, target := range targets {
