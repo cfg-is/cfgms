@@ -69,6 +69,37 @@ func (c *CommandSignature) validateWebAuthn(devices []fleet.StewardResult, manif
 	return nil
 }
 
+// queuedRef identifies one execution a synthesis queued, so a rollback can cancel it.
+type queuedRef struct{ deviceID, executionID string }
+
+// synthesisProgress records what a synthesis has created so far for a run.
+type synthesisProgress struct {
+	jobIDs []string
+	queued []queuedRef
+}
+
+// rollbackSynthesis undoes a partly queued run: it cancels every execution queued
+// for the run, marks every job created for it cancelled and marks the run failed.
+// Every step is attempted even when an earlier one fails; the returned error is
+// cause joined with each rollback failure.
+func rollbackSynthesis(manager *Manager, executionQueue *scriptmodule.ExecutionQueue, runID string, progress *synthesisProgress, cause error) error {
+	errs := []error{cause}
+	for _, q := range progress.queued {
+		if err := executionQueue.CancelExecution(q.deviceID, q.executionID); err != nil {
+			errs = append(errs, fmt.Errorf("rollback: cancel execution %s for device %s: %w", q.executionID, q.deviceID, err))
+		}
+	}
+	for _, jobID := range progress.jobIDs {
+		if err := manager.store.UpdateJobStatus(jobID, JobStatusCancelled, ""); err != nil {
+			errs = append(errs, fmt.Errorf("rollback: cancel job %s: %w", jobID, err))
+		}
+	}
+	if err := manager.store.UpdateRunStatus(runID, RunStatusFailed); err != nil {
+		errs = append(errs, fmt.Errorf("rollback: mark run %s failed: %w", runID, err))
+	}
+	return errors.Join(errs...)
+}
+
 // SynthesizeScriptRun resolves matching devices from the fleet and creates a
 // RunRecord plus one JobRecord per device, each backed by a QueuedExecution.
 // It returns the new run ID so callers can redirect to GET /runs/{run_id}.
@@ -126,6 +157,17 @@ func SynthesizeScriptRunForDevices(
 ) (string, error) {
 	filter.TenantID = tenantID
 
+	// Resolve every device's parameters before creating anything, so a resolution
+	// failure leaves no run, job or queued execution behind.
+	resolvedByDevice := make(map[string]map[string]string, len(devices))
+	for _, device := range devices {
+		resolved, err := ResolveParams(nil, scriptMeta, paramPlatformBindings, runtimeParams, device.DNAAttributes)
+		if err != nil {
+			return "", fmt.Errorf("synthesize script run: resolve params for device %s: %w", device.ID, err)
+		}
+		resolvedByDevice[device.ID] = resolved
+	}
+
 	runID := uuid.New().String()
 	now := time.Now().UTC()
 
@@ -146,6 +188,7 @@ func SynthesizeScriptRunForDevices(
 
 	idempotent := scriptMeta != nil && scriptMeta.Idempotent
 
+	progress := &synthesisProgress{}
 	for _, device := range devices {
 		jobID := uuid.New().String()
 		executionID := uuid.New().String()
@@ -158,14 +201,12 @@ func SynthesizeScriptRunForDevices(
 			Status:      JobStatusPending,
 			CreatedAt:   now,
 		}
+		progress.jobIDs = append(progress.jobIDs, jobID)
 		if err := manager.store.CreateJob(job); err != nil {
-			return "", fmt.Errorf("synthesize script run: create job for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize script run: create job for device %s: %w", device.ID, err))
 		}
 
-		resolved, err := ResolveParams(nil, scriptMeta, paramPlatformBindings, runtimeParams, device.DNAAttributes)
-		if err != nil {
-			return "", fmt.Errorf("synthesize script run: resolve params for device %s: %w", device.ID, err)
-		}
+		resolved := resolvedByDevice[device.ID]
 
 		meta := map[string]interface{}{
 			"workflow_run_id": runID,
@@ -191,12 +232,13 @@ func SynthesizeScriptRunForDevices(
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
 				continue
 			}
-			return "", fmt.Errorf("synthesize script run: enqueue for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize script run: enqueue for device %s: %w", device.ID, err))
 		}
+		progress.queued = append(progress.queued, queuedRef{deviceID: device.ID, executionID: executionID})
 	}
 
 	if err := manager.store.UpdateRunStatus(runID, RunStatusRunning); err != nil {
-		return "", fmt.Errorf("synthesize script run: update run status: %w", err)
+		return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize script run: update run status: %w", err))
 	}
 
 	return runID, nil
@@ -289,6 +331,7 @@ func SynthesizeCommandRunForDevices(
 		return "", fmt.Errorf("synthesize command run: create run: %w", err)
 	}
 
+	progress := &synthesisProgress{}
 	for _, device := range devices {
 		jobID := uuid.New().String()
 		executionID := uuid.New().String()
@@ -301,15 +344,16 @@ func SynthesizeCommandRunForDevices(
 			Status:      JobStatusPending,
 			CreatedAt:   now,
 		}
+		progress.jobIDs = append(progress.jobIDs, jobID)
 		if err := manager.store.CreateJob(job); err != nil {
-			return "", fmt.Errorf("synthesize command run: create job for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize command run: create job for device %s: %w", device.ID, err))
 		}
 
 		// Inline scripts have no declared parameters; nil metadata means ResolveParams
 		// passes runtime params through unchanged.
 		resolved, err := ResolveParams(nil, nil, nil, params, device.DNAAttributes)
 		if err != nil {
-			return "", fmt.Errorf("synthesize command run: resolve params for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize command run: resolve params for device %s: %w", device.ID, err))
 		}
 
 		metadata := map[string]interface{}{
@@ -347,12 +391,13 @@ func SynthesizeCommandRunForDevices(
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
 				continue
 			}
-			return "", fmt.Errorf("synthesize command run: enqueue for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize command run: enqueue for device %s: %w", device.ID, err))
 		}
+		progress.queued = append(progress.queued, queuedRef{deviceID: device.ID, executionID: executionID})
 	}
 
 	if err := manager.store.UpdateRunStatus(runID, RunStatusRunning); err != nil {
-		return "", fmt.Errorf("synthesize command run: update run status: %w", err)
+		return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize command run: update run status: %w", err))
 	}
 
 	return runID, nil
@@ -410,6 +455,7 @@ func SynthesizeActionRunForDevices(
 		return "", fmt.Errorf("synthesize action run: create run: %w", err)
 	}
 
+	progress := &synthesisProgress{}
 	for _, device := range devices {
 		jobID := uuid.New().String()
 		executionID := uuid.New().String()
@@ -422,8 +468,9 @@ func SynthesizeActionRunForDevices(
 			Status:      JobStatusPending,
 			CreatedAt:   now,
 		}
+		progress.jobIDs = append(progress.jobIDs, jobID)
 		if err := manager.store.CreateJob(job); err != nil {
-			return "", fmt.Errorf("synthesize action run: create job for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize action run: create job for device %s: %w", device.ID, err))
 		}
 
 		metadata := map[string]interface{}{
@@ -464,12 +511,13 @@ func SynthesizeActionRunForDevices(
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
 				continue
 			}
-			return "", fmt.Errorf("synthesize action run: enqueue for device %s: %w", device.ID, err)
+			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize action run: enqueue for device %s: %w", device.ID, err))
 		}
+		progress.queued = append(progress.queued, queuedRef{deviceID: device.ID, executionID: executionID})
 	}
 
 	if err := manager.store.UpdateRunStatus(runID, RunStatusRunning); err != nil {
-		return "", fmt.Errorf("synthesize action run: update run status: %w", err)
+		return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize action run: update run status: %w", err))
 	}
 
 	return runID, nil
