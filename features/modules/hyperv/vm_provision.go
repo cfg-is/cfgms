@@ -3,8 +3,12 @@
 package hyperv
 
 import (
+	"bytes"
 	"context"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -476,6 +480,9 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		if err := validateSeedPath(isoPath); err != nil {
 			return m.failProvision(ctx, cfg, vmName, record, err)
 		}
+		if err := m.checkEnrollSources(); err != nil {
+			return m.failProvision(ctx, cfg, vmName, record, err)
+		}
 		if _, psErr := m.transport.ExecutePS(ctx, psBuildAnswerIso, map[string]string{
 			"IsoPath":    isoPath,
 			"FileName":   seedAnswerFileName("windows"),
@@ -700,6 +707,9 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: format CIDATA seed VHDX for VM %q: %w", vmName, psErr))
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Format-Volume", cfgResourceID, nil, nil, nil)
+	if err := m.checkEnrollSources(); err != nil {
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, err)
+	}
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
 		"SeedPath":     seedPath,
 		"Label":        cidataVolumeLabel,
@@ -1054,4 +1064,72 @@ func (m *hypervModule) provisionRecordsForSweep(ctx context.Context) []*Provisio
 		}
 	}
 	return out
+}
+
+// enrollSourceMaxBytes bounds how much of an enrollment source file is read
+// for content validation.
+const enrollSourceMaxBytes = 1 << 20
+
+// checkEnrollSources verifies, immediately before the seed copy, that each
+// configured enrollment source is a regular file (not a symlink or reparse
+// point) of the expected content type: CA = PEM certificates only, steward and
+// launcher = PE or ELF executables. Empty paths are skipped. Errors name the
+// config key only — never the path or file contents (Issue #5347).
+func (m *hypervModule) checkEnrollSources() error {
+	if err := checkEnrollSource("enroll_steward_path", m.enrollStewardPath, checkExecutableHeader); err != nil {
+		return err
+	}
+	if err := checkEnrollSource("enroll_launcher_path", m.enrollLauncherPath, checkExecutableHeader); err != nil {
+		return err
+	}
+	return checkEnrollSource("enroll_ca_path", m.enrollCAPath, checkCertificatePEM)
+}
+
+func checkEnrollSource(key, path string, content func(io.Reader) bool) error {
+	if path == "" {
+		return nil
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("hyperv: %s does not name an accessible file", key)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("hyperv: %s must be a regular file, not a symlink or reparse point", key)
+	}
+	f, err := os.Open(path) // #nosec G304 -- path validated at Configure and Lstat-checked above
+	if err != nil {
+		return fmt.Errorf("hyperv: %s cannot be read", key)
+	}
+	defer func() { _ = f.Close() }()
+	if !content(io.LimitReader(f, enrollSourceMaxBytes)) {
+		return fmt.Errorf("hyperv: %s has unexpected content type", key)
+	}
+	return nil
+}
+
+func checkExecutableHeader(r io.Reader) bool {
+	hdr := make([]byte, 4)
+	n, _ := io.ReadFull(r, hdr)
+	hdr = hdr[:n]
+	return bytes.HasPrefix(hdr, []byte("MZ")) || bytes.HasPrefix(hdr, []byte("\x7fELF"))
+}
+
+func checkCertificatePEM(r io.Reader) bool {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return false
+	}
+	blocks := 0
+	for {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			return false
+		}
+		blocks++
+	}
+	return blocks > 0 && len(bytes.TrimSpace(data)) == 0
 }

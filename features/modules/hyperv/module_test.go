@@ -675,3 +675,38 @@ func TestModuleYAMLHasStewardExecutor(t *testing.T) {
 	require.Len(t, schema.Executors, 1, "executors must contain exactly one element")
 	assert.Equal(t, "steward", schema.Executors[0], "executor must be steward")
 }
+
+func TestConfigure_RejectsInvalidEnrollSourcePaths(t *testing.T) {
+	keys := map[string]error{
+		"enroll_steward_path":  errInvalidEnrollStewardPath,
+		"enroll_launcher_path": errInvalidEnrollLauncherPath,
+		"enroll_ca_path":       errInvalidEnrollCAPath,
+	}
+	bad := []string{
+		`\\server\share\steward.exe`,
+		`seed\steward.exe`,
+		`C:\seed\..\Windows\steward.exe`,
+		`C:\seed\*.exe`,
+		`C:\seed\st?ward`,
+		`C:\seed\[a]`,
+		`/etc/passwd`,
+	}
+	for key, want := range keys {
+		for _, p := range bad {
+			m := newEnrollCfgModule(t)
+			err := m.Configure(mapConfigState{"tenant_id": "ops", key: p})
+			assert.ErrorIs(t, err, want, "%s=%q must be rejected", key, p)
+		}
+		m := newEnrollCfgModule(t)
+		assert.NoError(t, m.Configure(mapConfigState{"tenant_id": "ops", key: `C:\seed-assets\file`}))
+		m = newEnrollCfgModule(t)
+		assert.NoError(t, m.Configure(mapConfigState{"tenant_id": "ops", key: ""}))
+	}
+}
+
+func newEnrollCfgModule(t *testing.T) *hypervModule {
+	t.Helper()
+	m := &hypervModule{executor: &stubHypervExecutor{}, transport: &testPSTransport{}, transportPinned: true}
+	require.NoError(t, m.SetSecretStore(newInlineStore("user-key", "hyperv-admin", "pass-key", "pw")))
+	return m
+}
