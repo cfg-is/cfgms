@@ -1328,3 +1328,7 @@ Founder decision, 2026-10-21, superseding Amendment 8's relay-required decision:
 - Only a cfg Bearer session or an mTLS admin certificate can lodge a relay request; a web-cookie session is refused with `WEB_SESSION_CANNOT_LODGE`.
 - A relay request ID attaches only to the ceremony that named it at `presence/begin`; a missing, extra or different ID at finish is refused with `REQUEST_CEREMONY_MISMATCH`.
 - The server-side, single-use, short-lived action binding (method, canonical path with query, body hash, permission) is enforced for every presence token, and `cfg tenant approve-delete` remains available.
+
+### Note (2026-10-21): Scoped API keys keep installer and upgrade automation; `AllowMachine` (Issue #5298)
+
+Founder decision Q1 (a): human sessions need a per-action passkey tap for installer writes, steward binary publish, rollout start and upgrade dispatch, while scoped API keys keep working for installer upload, upgrade dispatch and config push. `Requirement.AllowMachine` records this in code: when true, an `AssuranceMachine` principal holding the permission skips both the `Min` and presence checks in `requirePermission`; human principals keep the full floor. It is set only in `permissionAssurance`, never by assurance-policy overrides, and `scanAPIKeysForPrivilegedAccess` does not report such permissions. Halt and rollback are `PresenceExemptRoutes` of `installer:dispatch:steward` and need no tap.

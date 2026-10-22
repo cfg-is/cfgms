@@ -3227,7 +3227,7 @@ func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
 	for _, meta := range secrets {
 		var overlapping []string
 		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
-			if req, found := permissionAssurance[p]; found && req.Min > session.AssuranceMachine {
+			if req, found := permissionAssurance[p]; found && req.Min > session.AssuranceMachine && !req.AllowMachine {
 				overlapping = append(overlapping, p)
 			}
 		}
