@@ -200,8 +200,7 @@ func (s *Server) terminalTicketWrapper(next http.Handler) http.Handler {
 		// Every principal type is re-checked for as long as the shell runs. A request
 		// with no re-check available would open an unbounded relay, so it is refused
 		// before the ticket is consumed.
-		recheck := requestAuthRecheck(r)
-		if recheck == nil {
+		if requestAuthRecheck(r) == nil {
 			s.logger.Warn("Terminal relay refused: no credential re-check available",
 				"steward_id", logging.SanitizeLogValue(stewardID))
 			s.writeErrorResponse(w, http.StatusForbidden, "terminal session cannot be re-validated", "TERMINAL_RECHECK_UNAVAILABLE")
@@ -230,6 +229,7 @@ func (s *Server) terminalTicketWrapper(next http.Handler) http.Handler {
 			return
 		}
 
+		recheck := s.authzRecheck(r, "terminal:create", info.TenantID, "GET /api/v1/terminal/ws/{steward_id}")
 		callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 		proof := &transport.TerminalProof{
 			StewardID:     rec.stewardID,

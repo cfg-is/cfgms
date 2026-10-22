@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -166,4 +167,79 @@ func TestAPIKeyRecheck_FollowsDeletionAndExpiry(t *testing.T) {
 	assert.True(t, recheck(context.Background()))
 	require.NoError(t, srv.deleteAPIKeyRecord(context.Background(), "test-tenant", hashAPIKey(apiKey)))
 	assert.False(t, recheck(context.Background()), "deleted key must fail the re-check")
+}
+
+// TestTelemetryWS_ClosesWhenPermissionRemoved proves the telemetry stream re-runs the
+// route's permission decision: removing steward:telemetry from the tenant-scoped
+// account in the real account store closes the open socket.
+func TestTelemetryWS_ClosesWhenPermissionRemoved(t *testing.T) {
+	const stewardID = "telemetry-perm-steward"
+	srv := setupTestServer(t)
+	srv.setWatchKeepalive(2*time.Second, 100*time.Millisecond)
+	srv.SetTelemetryHandler(http.HandlerFunc(transport.NewTelemetryHandler(logging.NewLogger("info"), nil).ServeWebSocket))
+	token, acct := newBearerSessionForAccount(t, srv, "telemetry-perm-account", []string{"steward:telemetry"})
+	require.NoError(t, srv.controllerService.RegisterSteward(stewardID, acct.TenantID, "localhost:0", "active"))
+
+	conn := dialWSPath(t, srv, "/api/v1/telemetry/ws/"+stewardID, token)
+
+	updateTestAccount(t, srv, "telemetry-perm-account", func(a *account) { a.Permissions = []string{"steward:read"} })
+	requirePolicyViolationClose(t, conn)
+}
+
+// TestTelemetryWrapper_UnboundAdminCertStaysOpen proves an unchanged admin-certificate
+// stream survives several re-check ticks, and that a revoked certificate ends it.
+func TestTelemetryWrapper_UnboundAdminCertStaysOpen(t *testing.T) {
+	const stewardID = "telemetry-cert-steward"
+	certManager := newSharedTestCertManager(t)
+	srv := setupTestServerWithCertMgr(t, certManager)
+	srv.setWatchKeepalive(2*time.Second, 20*time.Millisecond)
+	require.NoError(t, srv.controllerService.RegisterSteward(stewardID, "test-tenant", "localhost:0", "active"))
+	req, serial := issueCertAndBuildRequest(t, http.MethodGet, "/api/v1/telemetry/ws/"+stewardID, certManager)
+	req = mux.SetURLVars(req, map[string]string{"id": stewardID})
+
+	cancelled := make(chan struct{})
+	handler := srv.authenticationMiddleware(srv.tenantScopedTelemetryWrapper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		close(cancelled)
+	})))
+	done := make(chan struct{})
+	go func() { defer close(done); handler.ServeHTTP(httptest.NewRecorder(), req) }()
+
+	select {
+	case <-cancelled:
+		t.Fatal("an unchanged admin-certificate stream must stay open across ticks")
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.NoError(t, certManager.Revoke(serial))
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a revoked certificate must end the stream")
+	}
+	<-done
+}
+
+// TestTelemetryWrapper_NoRecordedRecheckClosesOnFirstTick guards the fail-closed
+// direction: a request that never went through authentication has nothing to re-check.
+func TestTelemetryWrapper_NoRecordedRecheckClosesOnFirstTick(t *testing.T) {
+	const stewardID = "telemetry-norecheck-steward"
+	srv := setupTestServer(t)
+	srv.setWatchKeepalive(2*time.Second, 20*time.Millisecond)
+	require.NoError(t, srv.controllerService.RegisterSteward(stewardID, "test-tenant", "localhost:0", "active"))
+	req := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/telemetry/ws/"+stewardID, nil),
+		&Principal{ID: "p", TenantID: "test-tenant", ImplicitAdmin: true})
+	req = mux.SetURLVars(req, map[string]string{"id": stewardID})
+
+	closed := make(chan struct{})
+	go func() {
+		srv.tenantScopedTelemetryWrapper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+			close(closed)
+		})).ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stream with no recorded credential re-check must close")
+	}
 }
