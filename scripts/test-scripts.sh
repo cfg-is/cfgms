@@ -3510,7 +3510,7 @@ PQEOF
     cat > "${tmp_dir}/gh" << 'GHEOF'
 #!/usr/bin/env bash
 if [[ "$1" == "pr" && "$2" == "view" ]]; then
-    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"},"author":{"login":"trusted-maintainer"}}\n'
+    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","headRefOid":"1111111111111111111111111111111111111111","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"},"author":{"login":"trusted-maintainer"}}\n'
 elif [[ "$1" == "auth" && "$2" == "token" ]]; then
     echo "fake-token"
 else
@@ -3574,7 +3574,7 @@ test_create_clone_pr_external_author() {
     cat > "${tmp_dir}/gh" << 'GHEOF'
 #!/usr/bin/env bash
 if [[ "$1" == "pr" && "$2" == "view" ]]; then
-    printf '{"headRefName":"feature/story-9999-test","body":"Fixes #9999","labels":[],"author":{"login":"external-user"}}\n'
+    printf '{"headRefName":"feature/story-9999-test","headRefOid":"1111111111111111111111111111111111111111","body":"Fixes #9999","labels":[],"author":{"login":"external-user"}}\n'
 elif [[ "$1" == "pr" && "$2" == "comment" ]]; then
     exit 0
 else
@@ -3640,7 +3640,7 @@ test_create_clone_pr_release_base() {
         cat > "${tmp_dir}/gh" << GHEOF
 #!/usr/bin/env bash
 if [[ "\$1" == "pr" && "\$2" == "view" ]]; then
-    printf '{"headRefName":"${head}","baseRefName":"${base}","body":"","labels":[],"author":{"login":"internal-user"}}\\n'
+    printf '{"headRefName":"${head}","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"${base}","body":"","labels":[],"author":{"login":"internal-user"}}\\n'
 else
     printf '{}\\n'
 fi
@@ -3697,8 +3697,14 @@ exit 1
 DISPEOF
     chmod +x "${tmp_dir}/mock-dispatch.sh"
 
+    # dispatch-fix reads the PR head before the trust check (Issue #5401).
+    mkdir -p "${tmp_dir}/bin"
+    printf '#!/usr/bin/env bash\necho 1111111111111111111111111111111111111111\n' > "${tmp_dir}/bin/gh"
+    chmod +x "${tmp_dir}/bin/gh"
+
     local output exit_code=0
     output=$(
+        PATH="${tmp_dir}/bin:${PATH}" \
         CFGMS_TEST_DISPATCH="${tmp_dir}/mock-dispatch.sh" \
         CFGMS_TEST_WORKTREE_BASE="${tmp_dir}/worktrees" \
         bash "$po_act_script" dispatch-fix 9999 2>&1
