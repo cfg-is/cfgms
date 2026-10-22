@@ -1866,7 +1866,12 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
 				return
 			}
-			if assuranceFound && principal.Assurance < assuranceReq.Min {
+			// AllowMachine (code-only opt-in, never set by assurance-policy overrides): an
+			// API-key principal that holds the permission skips both the Min floor and the
+			// presence check. Human principals are unaffected. RBAC and tenant scoping above
+			// still apply.
+			machineAllowed := assuranceFound && assuranceReq.AllowMachine && principal.Assurance == session.AssuranceMachine
+			if assuranceFound && !machineAllowed && principal.Assurance < assuranceReq.Min {
 				decision := &AuthorizationDecision{
 					Granted:      false,
 					PermissionID: permissionID,
@@ -1908,7 +1913,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
 			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
 			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
-			if assuranceFound && assuranceReq.RequireUserPresence && !presenceExemptForRequest(r, assuranceReq) {
+			if assuranceFound && !machineAllowed && assuranceReq.RequireUserPresence && !presenceExemptForRequest(r, assuranceReq) {
 				levelName := assuranceReq.Min.String()
 
 				presenceToken := r.Header.Get(presenceTokenHeader)

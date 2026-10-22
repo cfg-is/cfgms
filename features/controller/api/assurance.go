@@ -30,6 +30,12 @@ type Requirement struct {
 	// default is a tap: a route not listed is gated. validatePresenceExemptRoutes
 	// fails construction when an entry matches no registered route.
 	PresenceExemptRoutes []string
+
+	// AllowMachine lets an AssuranceMachine (API-key) principal that holds the permission
+	// skip both the Min check and the presence check, for automation that cannot tap a
+	// passkey. Human principals keep the full floor. Set only in code: assurance-policy
+	// overrides raise Min and presence but never read or write this field.
+	AllowMachine bool
 }
 
 // permissionAssurance is the authoritative registry of permission IDs that require
@@ -261,6 +267,21 @@ var permissionAssurance = map[string]Requirement{
 	// intentionally absent (no elevated assurance floor for reads).
 	"hyperv-profile:create": {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"hyperv-profile:delete": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
+	// Installer and upgrade actions (Issue #5298): a human session needs a per-action passkey
+	// tap; scoped API keys keep working for automation (AllowMachine).
+	"installer:upload":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // PUT /installer/artifacts/{platform}/{arch}
+	"installer:delete":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // DELETE /installer/artifacts/{platform}/{arch}
+	"installer:publish:steward": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // steward binary publish (routes_steward_binaries.go)
+	// installer:dispatch:steward gates POST /rollout (start), POST /rollout/{rollout_id}/halt,
+	// POST /stewards/upgrade (dispatch) and POST /stewards/upgrade/{upgrade_id}/rollback.
+	// Halt and rollback are stop actions used during an incident and stay fast: no tap.
+	"installer:dispatch:steward": {
+		Min:                  session.AssuranceStrong,
+		RequireUserPresence:  true,
+		AllowMachine:         true,
+		PresenceExemptRoutes: []string{"POST /api/v1/rollout/{rollout_id}/halt", "POST /api/v1/stewards/upgrade/{upgrade_id}/rollback"},
+	},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

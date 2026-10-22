@@ -263,6 +263,11 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 		if req.Min <= session.AssuranceMachine {
 			continue
 		}
+		// AllowMachine permissions are deliberately reachable by API keys, so they have
+		// no Machine-403 route entry (Issue #5298).
+		if req.AllowMachine {
+			continue
+		}
 		if knownFuturePermissions[permID] {
 			continue
 		}

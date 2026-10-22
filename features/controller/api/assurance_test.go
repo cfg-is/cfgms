@@ -382,6 +382,10 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"hyperv-profile:delete":               true, // Issue #3785: mirrors module:approve/module:reject
 		"steward:execute-scripts":             true, // Issue #5416: per-action tap, cancel and inline command exempt
 		"script:admin":                        true, // Issue #5416: per-action tap, reads exempt
+		"installer:upload":                    true, // Issue #5298: per-action tap for human sessions
+		"installer:delete":                    true, // Issue #5298
+		"installer:publish:steward":           true, // Issue #5298
+		"installer:dispatch:steward":          true, // Issue #5298: start and dispatch gated, halt and rollback exempt
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {
