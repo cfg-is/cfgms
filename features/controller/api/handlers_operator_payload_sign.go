@@ -58,6 +58,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
@@ -116,25 +117,31 @@ type OperatorPayloadSignBeginRequest struct {
 	Selector string `json:"selector"`
 	Content  []byte `json:"content"`
 	Shell    string `json:"shell"`
+	// ExecutionContext is the account the script runs as: "system", "logged_in_user" or
+	// empty. It is bound into the signed Envelope so the steward can compare it with the
+	// delivered command.
+	ExecutionContext string `json:"execution_context,omitempty"`
 }
 
 // OperatorPayloadSignedEnvelope is the JSON view of an operatorpayload.Envelope returned to
 // the caller — identical field set to what was hashed into the WebAuthn challenge.
 type OperatorPayloadSignedEnvelope struct {
-	Content   []byte    `json:"content"`
-	Shell     string    `json:"shell"`
-	Targets   []string  `json:"targets"`
-	Nonce     string    `json:"nonce"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Content          []byte    `json:"content"`
+	Shell            string    `json:"shell"`
+	Targets          []string  `json:"targets"`
+	Nonce            string    `json:"nonce"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	ExecutionContext string    `json:"execution_context,omitempty"`
 }
 
 func toSignedEnvelopeView(e operatorpayload.Envelope) OperatorPayloadSignedEnvelope {
 	return OperatorPayloadSignedEnvelope{
-		Content:   e.Content,
-		Shell:     e.Shell,
-		Targets:   e.Targets,
-		Nonce:     e.Nonce,
-		ExpiresAt: e.ExpiresAt,
+		Content:          e.Content,
+		Shell:            e.Shell,
+		Targets:          e.Targets,
+		Nonce:            e.Nonce,
+		ExpiresAt:        e.ExpiresAt,
+		ExecutionContext: e.ExecutionContext,
 	}
 }
 
@@ -223,6 +230,13 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		s.writeErrorResponse(w, http.StatusBadRequest, "shell is required", "MISSING_SHELL")
 		return
 	}
+	switch req.ExecutionContext {
+	case "", string(scriptmodule.ExecutionContextSystem), string(scriptmodule.ExecutionContextLoggedInUser):
+	default:
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"execution_context must be \"system\", \"logged_in_user\" or empty", "INVALID_EXECUTION_CONTEXT")
+		return
+	}
 
 	filter, rerr := s.resolveSelectorFilter(r.Context(), req.Selector)
 	if rerr != nil {
@@ -283,11 +297,12 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 	}
 
 	envelope := operatorpayload.Envelope{
-		Content:   req.Content,
-		Shell:     req.Shell,
-		Targets:   targets,
-		Nonce:     nonce,
-		ExpiresAt: time.Now().Add(operatorPayloadSignExpiryTTL),
+		Content:          req.Content,
+		Shell:            req.Shell,
+		Targets:          targets,
+		Nonce:            nonce,
+		ExpiresAt:        time.Now().Add(operatorPayloadSignExpiryTTL),
+		ExecutionContext: req.ExecutionContext,
 	}
 
 	// Domain-separated challenge preimage (operatorpayload.ChallengeHash): the hash is
@@ -540,7 +555,8 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	// now naming the concrete credential the begin-time rejection could not.
 	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(pending.envelope.Content),
-		hex.EncodeToString(credential.ID), pending.envelope.Targets, "", business.AuditResultSuccess, "")
+		hex.EncodeToString(credential.ID), pending.envelope.Targets, "", business.AuditResultSuccess, "",
+		auditDetail{Key: "execution_context", Value: pending.envelope.ExecutionContext})
 
 	s.writeResponse(w, http.StatusOK, OperatorPayloadSignFinishResponse{
 		Envelope:          toSignedEnvelopeView(pending.envelope),

@@ -887,3 +887,108 @@ func TestGenerateOperatorPayloadSignNonce_SourceUsesCryptoRand(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(body), "uuid", "nonce must not derive from a UUID")
 	assert.NotContains(t, body, "atomic.Add", "nonce must not derive from a counter")
 }
+
+// TestOperatorPayloadSignBegin_ExecutionContextBoundIntoChallenge proves execution_context
+// is part of the hashed envelope: the returned context is echoed, the challenge equals the
+// hash with that context, and differs from the hash of the same envelope without it.
+func TestOperatorPayloadSignBegin_ExecutionContextBoundIntoChallenge(t *testing.T) {
+	server, username := setupOperatorPayloadSignServer(t)
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, []byte("exec-ctx-cred"), pubKey, 0)
+	principal := &Principal{ID: testAccountID(t, server, username)}
+
+	challenges := map[string][]byte{}
+	for _, ec := range []string{"system", "logged_in_user"} {
+		b, _ := json.Marshal(OperatorPayloadSignBeginRequest{
+			Selector: "all", Content: []byte("echo hello"), Shell: "bash", ExecutionContext: ec,
+		})
+		rec := doSignBegin(t, server, principal, "sess-"+ec, bytes.NewReader(b))
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp struct {
+			Data OperatorPayloadSignBeginResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, ec, resp.Data.Envelope.ExecutionContext)
+
+		env := operatorpayload.Envelope{
+			Content: resp.Data.Envelope.Content, Shell: resp.Data.Envelope.Shell,
+			Targets: resp.Data.Envelope.Targets, Nonce: resp.Data.Envelope.Nonce,
+			ExpiresAt: resp.Data.Envelope.ExpiresAt, ExecutionContext: ec,
+		}
+		want, err := operatorpayload.ChallengeHash(env)
+		require.NoError(t, err)
+		challenge, err := base64.RawURLEncoding.DecodeString(resp.Data.Assertion.Response.Challenge.String())
+		require.NoError(t, err)
+		assert.Equal(t, want[:], challenge, "challenge must bind execution_context")
+
+		env.ExecutionContext = ""
+		without, err := operatorpayload.ChallengeHash(env)
+		require.NoError(t, err)
+		assert.NotEqual(t, without[:], challenge, "challenge must differ from the hash without the context")
+
+		challenges[ec] = challenge
+		_, stored := server.operatorPayloadSignSessions.Load("sess-" + ec)
+		assert.True(t, stored)
+	}
+	assert.NotEqual(t, challenges["system"], challenges["logged_in_user"])
+}
+
+func TestOperatorPayloadSignBegin_UnknownExecutionContext_400NoSession(t *testing.T) {
+	server, username := setupOperatorPayloadSignServer(t)
+	injectSignCredential(t, server, username, []byte("exec-ctx-bad"), []byte("pubkey"), 0)
+	principal := &Principal{ID: testAccountID(t, server, username)}
+
+	b, _ := json.Marshal(OperatorPayloadSignBeginRequest{
+		Selector: "all", Content: []byte("echo hello"), Shell: "bash", ExecutionContext: "root",
+	})
+	rec := doSignBegin(t, server, principal, "sess-bad", bytes.NewReader(b))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "INVALID_EXECUTION_CONTEXT", errCode(t, rec.Body.Bytes()))
+	_, stored := server.operatorPayloadSignSessions.Load("sess-bad")
+	assert.False(t, stored, "no sign session may be stored for a rejected request")
+}
+
+// TestOperatorPayloadSignFinish_AuditCarriesExecutionContext proves the completed-sign
+// audit event records the signed execution_context (empty recorded as an empty string).
+func TestOperatorPayloadSignFinish_AuditCarriesExecutionContext(t *testing.T) {
+	for _, ec := range []string{"logged_in_user", ""} {
+		t.Run("ctx="+ec, func(t *testing.T) {
+			server, username := setupOperatorPayloadSignServer(t)
+			credID := []byte("audit-ctx-cred")
+			priv, pubKey := generateSyntheticCredential(t)
+			injectSignCredential(t, server, username, credID, pubKey, 0)
+			principal := &Principal{ID: testAccountID(t, server, username)}
+
+			b, _ := json.Marshal(OperatorPayloadSignBeginRequest{
+				Selector: "all", Content: []byte("echo hello"), Shell: "bash", ExecutionContext: ec,
+			})
+			beginRec := doSignBegin(t, server, principal, "audit-sess", bytes.NewReader(b))
+			require.Equal(t, http.StatusOK, beginRec.Code, "body: %s", beginRec.Body.String())
+			var begin struct {
+				Data OperatorPayloadSignBeginResponse `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
+
+			body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
+				begin.Data.Assertion.Response.Challenge.String(), 1)
+			rec := doSignFinish(t, server, principal, "audit-sess", body)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			require.NoError(t, server.auditManager.Flush(context.Background()))
+			entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{})
+			require.NoError(t, err)
+			var found *business.AuditEntry
+			for _, e := range entries {
+				if e.Action == "operator_payload.dispatch" && e.Result == business.AuditResultSuccess {
+					found = e
+					break
+				}
+			}
+			require.NotNil(t, found, "sign finish must emit an operator_payload.dispatch audit event")
+			got, ok := found.Details["execution_context"]
+			require.True(t, ok, "execution_context detail must be present")
+			assert.Equal(t, ec, got)
+		})
+	}
+}
