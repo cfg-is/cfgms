@@ -26,6 +26,12 @@ import (
 //
 // shell is part of the signed canonical bytes, so an envelope signed for one purpose
 // (a script shell, or operatorpayload.ActionShell) does not verify under another.
+// The execution context is part of the signed bytes too: it is rebuilt from the
+// command's execution_context param (a string; absent means empty), so a delivered
+// run-as context the operator did not sign fails signature verification, and a
+// non-string value is refused. steward_action and open_terminal carry none and verify
+// with an empty context.
+//
 // Every failure wraps ErrUnauthenticatedCommand.
 func (h *Handler) verifyOperatorEnvelope(cmd *cpTypes.Command, content []byte, shell string) error {
 	sigAlgorithm, _ := cmd.Params["signature_algorithm"].(string)
@@ -52,12 +58,22 @@ func (h *Handler) verifyOperatorEnvelope(cmd *cpTypes.Command, content []byte, s
 		return fmt.Errorf("%w: missing or invalid operator envelope expiry", ErrUnauthenticatedCommand)
 	}
 
+	executionContext := ""
+	if v, present := cmd.Params["execution_context"]; present {
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("%w: execution_context must be a string", ErrUnauthenticatedCommand)
+		}
+		executionContext = s
+	}
+
 	envelope := operatorpayload.Envelope{
-		Content:   content,
-		Shell:     shell,
-		Targets:   targets,
-		Nonce:     nonce,
-		ExpiresAt: expiresAt,
+		Content:          content,
+		Shell:            shell,
+		Targets:          targets,
+		Nonce:            nonce,
+		ExpiresAt:        expiresAt,
+		ExecutionContext: executionContext,
 	}
 
 	if hasSig {

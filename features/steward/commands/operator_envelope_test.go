@@ -259,3 +259,57 @@ func TestExecuteScript_TerminalEnvelopeReplayedAsScriptRefused(t *testing.T) {
 	sc := testSignedCommandWithParams("replay-term-001", cpTypes.CommandExecuteScript, params)
 	require.ErrorIs(t, h.HandleCommand(context.Background(), sc), ErrUnauthenticatedCommand)
 }
+
+// signedContextParams builds X.509-signed inline-script envelope params whose signed
+// envelope carries signedContext, with no execution_context param delivered.
+func signedContextParams(t *testing.T, signer *cert.Certificate, content []byte, shell, signedContext string) map[string]interface{} {
+	t.Helper()
+	targets := []string{"steward-test"}
+	nonce := sigTestNonce(t)
+	expiresAt := time.Now().Add(time.Minute)
+	params := sigTestOperatorEnvelopeParamsFull(t, signer.PrivateKeyPEM, string(signer.CertificatePEM), content, shell, targets, nonce, expiresAt)
+	env := operatorpayload.Envelope{Content: content, Shell: shell, Targets: targets, Nonce: nonce, ExpiresAt: expiresAt, ExecutionContext: signedContext}
+	canonical, err := operatorpayload.CanonicalBytes(env)
+	require.NoError(t, err)
+	params["signature_value"] = sigTestSignWithCert(t, signer.PrivateKeyPEM, canonical)
+	return params
+}
+
+// TestVerifyOperatorEnvelope_ExecutionContextBound proves the delivered
+// execution_context must equal the signed one.
+func TestVerifyOperatorEnvelope_ExecutionContextBound(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	content := []byte("echo hi")
+
+	tests := []struct {
+		name      string
+		signed    string
+		delivered interface{} // nil = absent
+		wantErr   bool
+	}{
+		{"match", "logged_in_user", "logged_in_user", false},
+		{"signed user delivered system", "logged_in_user", "system", true},
+		{"signed user delivered absent", "logged_in_user", nil, true},
+		{"signed user delivered other", "logged_in_user", "root", true},
+		{"signed empty delivered system", "", "system", true},
+		{"signed empty delivered absent", "", nil, false},
+		{"signed empty delivered empty", "", "", false},
+		{"non-string", "", 42, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandlerWithSigning(t, nil, true, caPool)
+			params := signedContextParams(t, signer, content, "bash", tc.signed)
+			if tc.delivered != nil {
+				params["execution_context"] = tc.delivered
+			}
+			err := h.verifyOperatorEnvelope(envelopeCmd(params), content, "bash")
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
