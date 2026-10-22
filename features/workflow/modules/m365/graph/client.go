@@ -51,6 +51,10 @@ type Client interface {
 	UpdateApplication(ctx context.Context, token *auth.AccessToken, applicationID string, request *UpdateApplicationRequest) error
 	DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error
 
+	// Service principal operations
+	ListServicePrincipals(ctx context.Context, token *auth.AccessToken, filter string) ([]ServicePrincipal, error)
+	CreateServicePrincipal(ctx context.Context, token *auth.AccessToken, request *CreateServicePrincipalRequest) (*ServicePrincipal, error)
+
 	// Administrative Unit operations
 	GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*AdministrativeUnit, error)
 	ListAdministrativeUnits(ctx context.Context, token *auth.AccessToken, filter string) ([]AdministrativeUnit, error)
@@ -425,6 +429,32 @@ type Application struct {
 	PasswordCredentials    []ApplicationPasswordCredential `json:"passwordCredentials"`
 	OptionalClaims         *ApplicationOptionalClaims      `json:"optionalClaims,omitempty"`
 	Tags                   []string                        `json:"tags"`
+}
+
+// ServicePrincipal represents a Microsoft Graph service principal object
+type ServicePrincipal struct {
+	ID                         string   `json:"id"`
+	AppID                      string   `json:"appId"`
+	DisplayName                string   `json:"displayName,omitempty"`
+	AccountEnabled             bool     `json:"accountEnabled"`
+	AppRoleAssignmentRequired  bool     `json:"appRoleAssignmentRequired"`
+	ServicePrincipalType       string   `json:"servicePrincipalType,omitempty"`
+	Tags                       []string `json:"tags,omitempty"`
+	PreferredSingleSignOnMode  string   `json:"preferredSingleSignOnMode,omitempty"`
+	ReplyUrls                  []string `json:"replyUrls,omitempty"`
+	NotificationEmailAddresses []string `json:"notificationEmailAddresses,omitempty"`
+}
+
+// CreateServicePrincipalRequest represents a request to create a service principal
+type CreateServicePrincipalRequest struct {
+	AppID                      string   `json:"appId"`
+	AccountEnabled             bool     `json:"accountEnabled"`
+	AppRoleAssignmentRequired  bool     `json:"appRoleAssignmentRequired"`
+	ServicePrincipalType       string   `json:"servicePrincipalType,omitempty"`
+	Tags                       []string `json:"tags,omitempty"`
+	PreferredSingleSignOnMode  string   `json:"preferredSingleSignOnMode,omitempty"`
+	ReplyUrls                  []string `json:"replyUrls,omitempty"`
+	NotificationEmailAddresses []string `json:"notificationEmailAddresses,omitempty"`
 }
 
 // ApplicationWeb represents web settings for an application

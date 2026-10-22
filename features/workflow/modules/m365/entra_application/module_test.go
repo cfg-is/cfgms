@@ -204,6 +204,22 @@ func (m *MockGraphClient) DeleteApplication(ctx context.Context, token *auth.Acc
 }
 
 // Administrative Unit operations
+func (m *MockGraphClient) ListServicePrincipals(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.ServicePrincipal, error) {
+	args := m.Called(ctx, token, filter)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]graph.ServicePrincipal), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateServicePrincipal(ctx context.Context, token *auth.AccessToken, request *graph.CreateServicePrincipalRequest) (*graph.ServicePrincipal, error) {
+	args := m.Called(ctx, token, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.ServicePrincipal), args.Error(1)
+}
+
 func (m *MockGraphClient) GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*graph.AdministrativeUnit, error) {
 	args := m.Called(ctx, token, unitID)
 	return args.Get(0).(*graph.AdministrativeUnit), args.Error(1)
@@ -1119,6 +1135,11 @@ type fakeGraphServer struct {
 	mu       sync.Mutex
 	existing map[string]interface{}
 	requests []graphRequest
+
+	// existingSPs is returned by GET /servicePrincipals; spCreateStatus, when
+	// non-zero, is the status returned for POST /servicePrincipals.
+	existingSPs    []map[string]interface{}
+	spCreateStatus int
 }
 
 func (f *fakeGraphServer) handler(t *testing.T) http.Handler {
@@ -1140,6 +1161,18 @@ func (f *fakeGraphServer) handler(t *testing.T) http.Handler {
 			assert.NoError(t, json.NewEncoder(w).Encode(existing))
 		case r.Method == http.MethodPatch && existingPath != "" && r.URL.Path == existingPath:
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/servicePrincipals":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"value": f.existingSPs}))
+		case r.Method == http.MethodPost && r.URL.Path == "/servicePrincipals":
+			if f.spCreateStatus != 0 {
+				w.WriteHeader(f.spCreateStatus)
+				_, werr := w.Write([]byte(`{"error":{"code":"Forbidden","message":"denied"}}`))
+				assert.NoError(t, werr)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, werr := w.Write([]byte(`{"id":"sp-1","appId":"app-2"}`))
+			assert.NoError(t, werr)
 		case r.Method == http.MethodPost && r.URL.Path == "/applications":
 			w.WriteHeader(http.StatusCreated)
 			_, werr := w.Write([]byte(`{"id":"obj-2","appId":"app-2"}`))
@@ -1254,8 +1287,6 @@ func TestSet_RejectsUnapplicableFieldsWithoutGraphCalls(t *testing.T) {
 		"pre_authorized_applications":     {"pre_authorized_applications": []interface{}{"a"}},
 		"requested_access_token_version":  {"requested_access_token_version": 2},
 		"publisher_domain":                {"publisher_domain": "example.com"},
-		"create_service_principal":        {"create_service_principal": true},
-		"service_principal_settings":      {"service_principal_settings": map[string]interface{}{"account_enabled": true}},
 		"password_credentials":            {"password_credentials": []interface{}{map[string]interface{}{"display_name": "s", "secret_text": "hunter2-secret"}}},
 		"key_credentials":                 {"key_credentials": []interface{}{map[string]interface{}{"display_name": "k", "key": "KEYMATERIAL"}}},
 		"managed app_roles (empty)":       {"managed_fields": []interface{}{"app_roles"}},
@@ -1302,7 +1333,6 @@ func TestUnsupportedHelpersFailClosed(t *testing.T) {
 	m := &entraApplicationModule{}
 	ctx := context.Background()
 	calls := map[string]error{
-		"createServicePrincipal":  m.createServicePrincipal(ctx, nil, "app", &ServicePrincipalConfig{}),
 		"addPasswordCredential":   m.addPasswordCredential(ctx, nil, "obj", &PasswordCredential{}),
 		"addKeyCredential":        m.addKeyCredential(ctx, nil, "obj", &KeyCredential{Key: "KEYMATERIAL"}),
 		"syncPasswordCredentials": m.syncPasswordCredentials(ctx, nil, "obj", []PasswordCredential{{}}),
@@ -1316,4 +1346,101 @@ func TestUnsupportedHelpersFailClosed(t *testing.T) {
 			assert.NotContains(t, err.Error(), "KEYMATERIAL")
 		})
 	}
+}
+
+func spStep(extra map[string]interface{}) mapState {
+	step := map[string]interface{}{
+		"create_service_principal": true,
+		"service_principal_settings": map[string]interface{}{
+			"account_enabled":              true,
+			"app_role_assignment_required": true,
+			"tags":                         []interface{}{"WindowsAzureActiveDirectoryIntegratedApp"},
+			"reply_urls":                   []interface{}{"https://sp/cb"},
+		},
+	}
+	for k, v := range extra {
+		step[k] = v
+	}
+	return baseStep(step)
+}
+
+func (f *fakeGraphServer) requestsTo(method, path string) []graphRequest {
+	var out []graphRequest
+	for _, r := range f.recorded() {
+		if r.Method == method && r.Path == path {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestSet_CreateMakesServicePrincipalForAppID(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, nil)
+	require.NoError(t, m.Set(ctx, "m365-t:obj-2", spStep(nil)))
+
+	posts := fg.requestsTo(http.MethodPost, "/servicePrincipals")
+	require.Len(t, posts, 1, "exactly one service principal create call")
+	var got graph.CreateServicePrincipalRequest
+	require.NoError(t, json.Unmarshal(posts[0].Body, &got))
+	assert.Equal(t, "app-2", got.AppID, "keyed by the application's appId, not its object id")
+	assert.True(t, got.AccountEnabled)
+	assert.True(t, got.AppRoleAssignmentRequired)
+	assert.Equal(t, []string{"WindowsAzureActiveDirectoryIntegratedApp"}, got.Tags)
+	assert.Equal(t, []string{"https://sp/cb"}, got.ReplyUrls)
+}
+
+func TestSet_ServicePrincipalIdempotentWhenExists(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, map[string]interface{}{
+		"id": "obj-1", "appId": "app-1", "displayName": "App", "signInAudience": "AzureADMyOrg",
+	})
+	fg.existingSPs = []map[string]interface{}{{"id": "sp-9", "appId": "app-1"}}
+
+	require.NoError(t, m.Set(ctx, "m365-t:obj-1", spStep(nil)))
+
+	assert.Empty(t, fg.requestsTo(http.MethodPost, "/servicePrincipals"), "no create when one exists")
+	assert.Len(t, fg.requestsTo(http.MethodGet, "/servicePrincipals"), 1)
+}
+
+func TestSet_UpdateCreatesMissingServicePrincipalWithAppID(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, map[string]interface{}{
+		"id": "obj-1", "appId": "app-1", "displayName": "App", "signInAudience": "AzureADMyOrg",
+	})
+
+	require.NoError(t, m.Set(ctx, "m365-t:obj-1", spStep(nil)))
+
+	posts := fg.requestsTo(http.MethodPost, "/servicePrincipals")
+	require.Len(t, posts, 1)
+	var got graph.CreateServicePrincipalRequest
+	require.NoError(t, json.Unmarshal(posts[0].Body, &got))
+	assert.Equal(t, "app-1", got.AppID)
+}
+
+func TestSet_ServicePrincipalGraphErrorFailsClosed(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, nil)
+	fg.spCreateStatus = http.StatusForbidden
+
+	err := m.Set(ctx, "m365-t:obj-2", spStep(nil))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "service principal")
+}
+
+func TestSet_ServicePrincipalSettingsWrongType(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, nil)
+	err := m.Set(ctx, "m365-t:obj-2", baseStep(map[string]interface{}{
+		"create_service_principal":   true,
+		"service_principal_settings": "not-a-map",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "service_principal_settings")
+	assert.Empty(t, fg.recorded())
+}
+
+func TestSet_ManagedServicePrincipalFalseRejected(t *testing.T) {
+	m, fg, _, ctx := setupSetModule(t, nil)
+	err := m.Set(ctx, "m365-t:obj-2", baseStep(map[string]interface{}{
+		"managed_fields": []interface{}{"create_service_principal"},
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create_service_principal")
+	assert.Empty(t, fg.recorded())
 }

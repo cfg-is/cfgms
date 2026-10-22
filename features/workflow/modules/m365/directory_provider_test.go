@@ -468,6 +468,12 @@ func (s *stubGraphClient) UpdateApplication(_ context.Context, _ *auth.AccessTok
 func (s *stubGraphClient) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
 	return nil
 }
+func (s *stubGraphClient) ListServicePrincipals(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.ServicePrincipal, error) {
+	return nil, nil
+}
+func (s *stubGraphClient) CreateServicePrincipal(_ context.Context, _ *auth.AccessToken, _ *graph.CreateServicePrincipalRequest) (*graph.ServicePrincipal, error) {
+	return nil, nil
+}
 func (s *stubGraphClient) GetAdministrativeUnit(ctx context.Context, t *auth.AccessToken, unitID string) (*graph.AdministrativeUnit, error) {
 	if s.getAdminUnitFn != nil {
 		return s.getAdminUnitFn(ctx, t, unitID)

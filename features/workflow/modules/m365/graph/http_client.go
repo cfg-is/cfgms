@@ -787,6 +787,34 @@ func (c *HTTPClient) ListApplications(ctx context.Context, token *auth.AccessTok
 	return response.Value, nil
 }
 
+// ListServicePrincipals retrieves service principals with optional OData filter
+func (c *HTTPClient) ListServicePrincipals(ctx context.Context, token *auth.AccessToken, filter string) ([]ServicePrincipal, error) {
+	endpoint := "/servicePrincipals"
+	if filter != "" {
+		endpoint = fmt.Sprintf("/servicePrincipals?$filter=%s", url.QueryEscape(filter))
+	}
+
+	var response struct {
+		Value []ServicePrincipal `json:"value"`
+	}
+
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list service principals: %w", err)
+	}
+
+	return response.Value, nil
+}
+
+// CreateServicePrincipal creates a service principal for an application
+func (c *HTTPClient) CreateServicePrincipal(ctx context.Context, token *auth.AccessToken, request *CreateServicePrincipalRequest) (*ServicePrincipal, error) {
+	endpoint := "/servicePrincipals"
+	var sp ServicePrincipal
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &sp); err != nil {
+		return nil, fmt.Errorf("failed to create service principal: %w", err)
+	}
+	return &sp, nil
+}
+
 // GetAdministrativeUnit retrieves an administrative unit by ID
 func (c *HTTPClient) GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*AdministrativeUnit, error) {
 	endpoint := fmt.Sprintf("/administrativeUnits/%s", unitID)

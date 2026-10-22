@@ -214,6 +214,22 @@ func (m *MockGraphClient) DeleteApplication(ctx context.Context, token *auth.Acc
 }
 
 // Administrative Unit operations
+func (m *MockGraphClient) ListServicePrincipals(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.ServicePrincipal, error) {
+	args := m.Called(ctx, token, filter)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]graph.ServicePrincipal), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateServicePrincipal(ctx context.Context, token *auth.AccessToken, request *graph.CreateServicePrincipalRequest) (*graph.ServicePrincipal, error) {
+	args := m.Called(ctx, token, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.ServicePrincipal), args.Error(1)
+}
+
 func (m *MockGraphClient) GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*graph.AdministrativeUnit, error) {
 	args := m.Called(ctx, token, unitID)
 	if args.Get(0) == nil {
@@ -1192,6 +1208,12 @@ func (s *stubEntraGroupGC) UpdateApplication(_ context.Context, _ *auth.AccessTo
 }
 func (s *stubEntraGroupGC) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
 	return nil
+}
+func (s *stubEntraGroupGC) ListServicePrincipals(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.ServicePrincipal, error) {
+	return nil, nil
+}
+func (s *stubEntraGroupGC) CreateServicePrincipal(_ context.Context, _ *auth.AccessToken, _ *graph.CreateServicePrincipalRequest) (*graph.ServicePrincipal, error) {
+	return nil, nil
 }
 func (s *stubEntraGroupGC) GetAdministrativeUnit(_ context.Context, _ *auth.AccessToken, _ string) (*graph.AdministrativeUnit, error) {
 	return nil, nil

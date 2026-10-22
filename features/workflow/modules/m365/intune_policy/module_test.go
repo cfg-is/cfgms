@@ -127,6 +127,12 @@ func (s *stubIntuneGraphClient) UpdateApplication(_ context.Context, _ *auth.Acc
 func (s *stubIntuneGraphClient) DeleteApplication(_ context.Context, _ *auth.AccessToken, _ string) error {
 	return nil
 }
+func (s *stubIntuneGraphClient) ListServicePrincipals(_ context.Context, _ *auth.AccessToken, _ string) ([]graph.ServicePrincipal, error) {
+	return nil, nil
+}
+func (s *stubIntuneGraphClient) CreateServicePrincipal(_ context.Context, _ *auth.AccessToken, _ *graph.CreateServicePrincipalRequest) (*graph.ServicePrincipal, error) {
+	return nil, nil
+}
 func (s *stubIntuneGraphClient) GetAdministrativeUnit(_ context.Context, _ *auth.AccessToken, _ string) (*graph.AdministrativeUnit, error) {
 	return nil, nil
 }
