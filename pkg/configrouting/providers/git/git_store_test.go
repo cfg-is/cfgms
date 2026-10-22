@@ -1243,3 +1243,40 @@ func TestGitConfigStore_SyncConcurrentWithReads(t *testing.T) {
 		require.NoError(t, err, "reads must not fail while a sync swaps the clone")
 	}
 }
+
+// loopbackResolver answers 127.0.0.1 for every host name.
+type loopbackResolver struct{}
+
+func (loopbackResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+}
+
+// TestNewGitConfigStore_ConnectTimeBlockedAddress proves the clone connects through the
+// guarded transport: a name resolving to a blocked address fails with no request sent
+// and no clone directory left behind.
+func TestNewGitConfigStore_ConnectTimeBlockedAddress(t *testing.T) {
+	t.Cleanup(pkgconfig.UseHostResolverForTesting(loopbackResolver{}))
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		http.Error(w, "no", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	source := &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeGit, URL: fmt.Sprintf("https://git.cfgms.local:%d/repo", port)}
+
+	workDir := t.TempDir()
+	_, err := NewGitConfigStore(context.Background(), source, "tenant1", newMemorySecretStore(nil), workDir, logging.NewNoopLogger())
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "127.0.0.1")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, requests, "no connection may reach the server")
+	entries, rerr := os.ReadDir(filepath.Join(workDir, "tenant1"))
+	if rerr == nil {
+		assert.Empty(t, entries, "no clone directory may be left behind")
+	}
+}

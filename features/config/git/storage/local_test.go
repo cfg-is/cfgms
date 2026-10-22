@@ -4,9 +4,14 @@ package storage_test
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	gitstorage "github.com/cfgis/cfgms/features/config/git/storage"
+	cfgpkg "github.com/cfgis/cfgms/pkg/config"
 )
 
 // commitFile writes a file into the worktree and commits it, returning the commit SHA.
@@ -196,4 +202,34 @@ func TestLocalRepositoryStore_WriteFile_WritesAndStages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, gogit.Added, st.File("plain.yaml").Staging)
 	assert.Equal(t, gogit.Added, st.File("new/nested/dir/f.yaml").Staging)
+}
+
+// loopbackResolver answers 127.0.0.1 for every host name.
+type loopbackResolver struct{}
+
+func (loopbackResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+}
+
+// TestLocalRepositoryStore_Clone_RefusesBlockedConnectAddress proves Clone connects
+// through the guarded transport: a host resolving to loopback is refused before any
+// request is sent and no clone directory is left behind.
+func TestLocalRepositoryStore_Clone_RefusesBlockedConnectAddress(t *testing.T) {
+	t.Cleanup(cfgpkg.UseHostResolverForTesting(loopbackResolver{}))
+	var requests atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "no", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+
+	dest := filepath.Join(t.TempDir(), "clone")
+	store := gitstorage.NewLocalRepositoryStore("", "")
+	err := store.Clone(context.Background(), fmt.Sprintf("https://git.cfgms.local:%d/repo", port), dest)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "127.0.0.1")
+	assert.Zero(t, requests.Load(), "no connection may reach the server")
+	_, statErr := os.Stat(dest)
+	assert.True(t, os.IsNotExist(statErr), "clone directory must not be left behind")
 }

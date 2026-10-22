@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 
 	cfgit "github.com/cfgis/cfgms/features/config/git"
+	cfgpkg "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
@@ -45,6 +46,7 @@ func NewLocalRepositoryStore(username, password string) *LocalRepositoryStore {
 
 // Clone clones a repository to a local path
 func (s *LocalRepositoryStore) Clone(ctx context.Context, cloneURL, localPath string) error {
+	cfgpkg.EnsureGuardedGitTransport()
 	_, err := git.PlainCloneContext(ctx, localPath, false, &git.CloneOptions{
 		URL:  cloneURL,
 		Auth: s.auth,
@@ -62,6 +64,7 @@ func (s *LocalRepositoryStore) Clone(ctx context.Context, cloneURL, localPath st
 // on disk use it instead of Clone: ctx bounds only the fetch, so the caller sizes the
 // HEAD tree from the object headers and checks it out itself once it fits.
 func (s *LocalRepositoryStore) CloneShallow(ctx context.Context, cloneURL, localPath string) error {
+	cfgpkg.EnsureGuardedGitTransport()
 	_, err := git.PlainCloneContext(ctx, localPath, false, &git.CloneOptions{
 		URL:          cloneURL,
 		Auth:         s.auth,

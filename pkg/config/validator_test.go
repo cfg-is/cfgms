@@ -173,10 +173,20 @@ func TestValidateMountPoint_Unreachable(t *testing.T) {
 	assert.Contains(t, err.Error(), "mount point connection test failed")
 }
 
+// loopbackConnect lets the connect-time check reach httptest servers on loopback:
+// the dialer resolves every name to 127.0.0.1 and admits loopback, while the returned
+// option keeps admission answering a public address (admission checks are unchanged).
+func loopbackConnect(t *testing.T) MountPointValidatorOption {
+	t.Helper()
+	t.Cleanup(UseHostResolverForTesting(&fakeResolver{addrs: ipAddrs("127.0.0.1")}))
+	t.Cleanup(AllowLoopbackForTesting())
+	return WithHostResolver(publicTestResolver())
+}
+
 // TestValidateMountPoint_CredentialFailure verifies that ValidateMountPoint returns an
 // error when the remote rejects authentication, and that the error contains no credential.
 func TestValidateMountPoint_CredentialFailure(t *testing.T) {
-	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
+	admit := loopbackConnect(t)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -188,7 +198,7 @@ func TestValidateMountPoint_CredentialFailure(t *testing.T) {
 
 	ss := newBoundTestSecretStore(map[string]string{"mytoken": "super-secret-value"}, repoURL)
 
-	v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+	v := NewDefaultMountPointValidator(WithInsecureSkipTLS(), admit)
 	info := &ConfigSourceInfo{
 		Type:          ConfigSourceTypeGit,
 		URL:           repoURL,
@@ -202,7 +212,7 @@ func TestValidateMountPoint_CredentialFailure(t *testing.T) {
 // TestValidateMountPoint_Timeout verifies that ValidateMountPoint returns an error when
 // the caller's context deadline expires before the remote responds.
 func TestValidateMountPoint_Timeout(t *testing.T) {
-	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
+	admit := loopbackConnect(t)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done() // block until client disconnects
 	}))
@@ -211,7 +221,7 @@ func TestValidateMountPoint_Timeout(t *testing.T) {
 	port := srv.Listener.Addr().(*net.TCPAddr).Port
 	repoURL := fmt.Sprintf("https://localhost:%d/repo", port)
 
-	v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+	v := NewDefaultMountPointValidator(WithInsecureSkipTLS(), admit)
 	info := &ConfigSourceInfo{
 		Type: ConfigSourceTypeGit,
 		URL:  repoURL,
@@ -354,14 +364,14 @@ func bindingTestServer(t *testing.T) (repoURL string, sawAuth func() bool) {
 // TestValidateMountPoint_CredentialBinding covers the binding check: a credential
 // bound to another repository, or to none, is refused before any network call.
 func TestValidateMountPoint_CredentialBinding(t *testing.T) {
-	t.Cleanup(UseHostResolverForTesting(publicTestResolver()))
+	admit := loopbackConnect(t)
 	const token = "binding-secret-token-xyz"
 	const fix = "cfg tenant config-source set-credential"
 
 	t.Run("bound to another repository is refused with no Authorization header", func(t *testing.T) {
 		urlB, sawAuth := bindingTestServer(t)
 		ss := newBoundTestSecretStore(map[string]string{"ref": token}, "https://other.cfgms.local/repo")
-		v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+		v := NewDefaultMountPointValidator(WithInsecureSkipTLS(), admit)
 		err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: urlB, CredentialRef: "ref"}, ss)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), fix)
@@ -372,7 +382,7 @@ func TestValidateMountPoint_CredentialBinding(t *testing.T) {
 	t.Run("unbound credential is refused", func(t *testing.T) {
 		urlB, sawAuth := bindingTestServer(t)
 		ss := newTestSecretStore(map[string]string{"ref": token})
-		v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+		v := NewDefaultMountPointValidator(WithInsecureSkipTLS(), admit)
 		err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: urlB, CredentialRef: "ref"}, ss)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), fix)
@@ -383,7 +393,7 @@ func TestValidateMountPoint_CredentialBinding(t *testing.T) {
 	t.Run("bound credential is sent, also across host case and trailing slash", func(t *testing.T) {
 		urlA, sawAuth := bindingTestServer(t)
 		ss := newBoundTestSecretStore(map[string]string{"ref": token}, urlA)
-		v := NewDefaultMountPointValidator(WithInsecureSkipTLS())
+		v := NewDefaultMountPointValidator(WithInsecureSkipTLS(), admit)
 		for _, u := range []string{urlA, strings.Replace(urlA, "localhost", "LOCALHOST", 1), urlA + "/"} {
 			err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: u, CredentialRef: "ref"}, ss)
 			// The server answers 401, so the call fails at the network step, not the binding.
@@ -463,4 +473,30 @@ func TestValidateMountPoint_RejectsNonCanonicalNumericHosts(t *testing.T) {
 			assert.Contains(t, err.Error(), "URL validation failed")
 		})
 	}
+}
+
+// TestValidateMountPoint_ConnectTimeBlockedAddress verifies that a name resolving to a
+// public address at admission but to a blocked one at connect time is refused with no
+// request reaching the server.
+func TestValidateMountPoint_ConnectTimeBlockedAddress(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		http.Error(w, "no", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	repoURL := fmt.Sprintf("https://git.cfgms.local:%d/repo", port)
+
+	t.Cleanup(UseHostResolverForTesting(&fakeResolver{addrs: ipAddrs("127.0.0.1")})) // connect time
+	v := NewDefaultMountPointValidator(WithInsecureSkipTLS(), WithHostResolver(publicTestResolver()))
+	err := v.ValidateMountPoint(context.Background(), &ConfigSourceInfo{Type: ConfigSourceTypeGit, URL: repoURL}, nil)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "127.0.0.1")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, requests, "no connection may reach the server")
 }
