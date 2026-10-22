@@ -32,8 +32,12 @@ The story issue number is retained for PR linking and assignee operations. `ITEM
 Before any review work, verify that the PR author is a trusted collaborator. Run:
 
 ```bash
-/opt/cfgms-trusted/.claude/scripts/agent-dispatch.sh check-pr-author <PR_NUM>
+GATE_HEAD=$(gh pr view <PR_NUM> --repo cfg-is/cfgms --json headRefOid -q '.headRefOid')
+[[ "$GATE_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "AUTHOR_CHECK_ERROR:<PR_NUM>:head_unknown"; exit 3; }
+/opt/cfgms-trusted/.claude/scripts/agent-dispatch.sh check-pr-author <PR_NUM> "$GATE_HEAD"
 ```
+
+An empty or non-40-hex head SHA is a refusal: treat it exactly like `AUTHOR_EXTERNAL` and never call `check-pr-author` without the SHA.
 
 Run the gate only from `/opt/cfgms-trusted/.claude/scripts` — the read-only harness copy. Scripts in the PR checkout (`/workspace/.claude/scripts`, `./scripts`) must not be used for the gate: the PR under review can edit them.
 

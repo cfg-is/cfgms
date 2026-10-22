@@ -37,6 +37,8 @@ The label application event is recorded in the GitHub timeline. When the pipelin
 
 The release is bound to the reviewed head SHA, not to a timestamp. Any push after the approval, including a normal fast-forward push, moves the head to a commit that nobody approved, and the PR returns to quarantine until a maintainer reviews the new head and approves it again. Commit dates are set by the author and are never used for this check.
 
+A release covers exactly one head, and every dispatch re-checks it. Review, fix, conflict-resolution and branch-clone dispatches, and the acceptance reviewer's gate, each read the PR head SHA once, judge the release against that SHA, and clone exactly that commit. A dispatch refuses with `head_unknown` when the head cannot be read and with `head_moved` when the head changed between the trust check and the clone.
+
 Once released, the PR flows through the normal autonomous review and merge path.
 
 ## Contributor License Agreement (CLA)
