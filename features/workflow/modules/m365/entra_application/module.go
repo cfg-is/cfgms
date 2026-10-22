@@ -617,6 +617,30 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 	return nil
 }
 
+// The helpers below are not implemented. They fail closed so a caller can never
+// report success for a service principal or credential change that was not made.
+// Error text deliberately carries no credential or key material.
+
+func (m *entraApplicationModule) createServicePrincipal(ctx context.Context, token *auth.AccessToken, appID string, settings *ServicePrincipalConfig) error {
+	return fmt.Errorf("creating a service principal is unsupported")
+}
+
+func (m *entraApplicationModule) addPasswordCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *PasswordCredential) error {
+	return fmt.Errorf("adding a password credential is unsupported")
+}
+
+func (m *entraApplicationModule) addKeyCredential(ctx context.Context, token *auth.AccessToken, appID string, credential *KeyCredential) error {
+	return fmt.Errorf("adding a key credential is unsupported")
+}
+
+func (m *entraApplicationModule) syncPasswordCredentials(ctx context.Context, token *auth.AccessToken, appID string, credentials []PasswordCredential) error {
+	return fmt.Errorf("synchronizing password credentials is unsupported")
+}
+
+func (m *entraApplicationModule) syncKeyCredentials(ctx context.Context, token *auth.AccessToken, appID string, credentials []KeyCredential) error {
+	return fmt.Errorf("synchronizing key credentials is unsupported")
+}
+
 // Utility types and functions
 
 type ApplicationInfo struct {

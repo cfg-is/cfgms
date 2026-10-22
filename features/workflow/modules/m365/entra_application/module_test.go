@@ -1297,3 +1297,23 @@ func TestSet_WrongTypeNamesKey(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsupportedHelpersFailClosed(t *testing.T) {
+	m := &entraApplicationModule{}
+	ctx := context.Background()
+	calls := map[string]error{
+		"createServicePrincipal":  m.createServicePrincipal(ctx, nil, "app", &ServicePrincipalConfig{}),
+		"addPasswordCredential":   m.addPasswordCredential(ctx, nil, "obj", &PasswordCredential{}),
+		"addKeyCredential":        m.addKeyCredential(ctx, nil, "obj", &KeyCredential{Key: "KEYMATERIAL"}),
+		"syncPasswordCredentials": m.syncPasswordCredentials(ctx, nil, "obj", []PasswordCredential{{}}),
+		"syncKeyCredentials":      m.syncKeyCredentials(ctx, nil, "obj", []KeyCredential{{Key: "KEYMATERIAL"}}),
+	}
+	for name, err := range calls {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "unsupported")
+			assert.NotContains(t, err.Error(), "SecretText")
+			assert.NotContains(t, err.Error(), "KEYMATERIAL")
+		})
+	}
+}
