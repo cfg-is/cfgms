@@ -37,6 +37,15 @@ type DefaultMountPointValidator struct {
 	// insecureSkipTLS disables TLS certificate verification.
 	// Production code always uses false; set via WithInsecureSkipTLS in tests only.
 	insecureSkipTLS bool
+	// resolver resolves the host at admission; nil means the package default.
+	resolver HostResolver
+}
+
+// WithHostResolver sets the resolver used to check the host's addresses at admission.
+func WithHostResolver(r HostResolver) MountPointValidatorOption {
+	return func(v *DefaultMountPointValidator) {
+		v.resolver = r
+	}
 }
 
 // MountPointValidatorOption is a functional option for DefaultMountPointValidator.
@@ -73,14 +82,19 @@ func (v *DefaultMountPointValidator) ValidateMountPoint(ctx context.Context, inf
 		return nil
 	}
 
-	// Step 1: Re-validate URL independently; do not trust stored metadata.
-	if err := validateSourceURL(info.URL); err != nil {
-		return fmt.Errorf("URL validation failed: %w", err)
-	}
-
-	// Step 2: Apply 10-second deadline; caller's deadline wins if it is sooner.
+	// Step 2 (first): Apply 10-second deadline; caller's deadline wins if it is sooner.
+	// Created before admission so the host lookup runs under it.
 	ctx, cancel := context.WithTimeout(ctx, mountPointValidationTimeout)
 	defer cancel()
+
+	// Step 1: Re-validate URL independently (resolving the host); do not trust stored metadata.
+	resolver := v.resolver
+	if resolver == nil {
+		resolver = defaultHostResolver
+	}
+	if err := ValidateSourceURLWithResolver(ctx, info.URL, resolver); err != nil {
+		return fmt.Errorf("URL validation failed: %w", err)
+	}
 
 	// Step 3: Fetch credentials from secretStore — never from info or env vars.
 	var auth *githttp.BasicAuth

@@ -4,6 +4,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -141,16 +142,120 @@ func validateSourceURL(raw string) error {
 		if err := checkSSRF(ip); err != nil {
 			return fmt.Errorf("SSRF guard: config_source_url %q %w", parsed.Redacted(), err)
 		}
+	} else if isNonCanonicalNumericHost(host) {
+		return fmt.Errorf("SSRF guard: config_source_url %q uses a non-canonical numeric IP form", parsed.Redacted())
 	}
 
 	return nil
 }
 
+// isNonCanonicalNumericHost reports whether every dot-separated label of host is a
+// number (decimal, leading-zero octal or 0x hexadecimal). Resolvers and HTTP clients
+// may interpret such a host as an IPv4 address (2130706433, 0177.0.0.1, 0x7f.1), so
+// it is refused without resolution. The caller has already ruled out canonical IP
+// literals via net.ParseIP.
+func isNonCanonicalNumericHost(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !isNumericLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNumericLabel(label string) bool {
+	if label == "" {
+		return false
+	}
+	digits := label
+	hex := false
+	if len(label) >= 2 && label[0] == '0' && (label[1] == 'x' || label[1] == 'X') {
+		hex = true
+		digits = label[2:]
+	}
+	for i := 0; i < len(digits); i++ {
+		c := digits[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case hex && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// HostResolver resolves a host name to its addresses. *net.Resolver satisfies it.
+type HostResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+// sourceURLResolveTimeout bounds the lookup done by the context-free ValidateSourceURL.
+const sourceURLResolveTimeout = 5 * time.Second
+
+var defaultHostResolver HostResolver = net.DefaultResolver
+
+// UseHostResolverForTesting replaces the package default resolver and returns a
+// function restoring the previous one. FOR TESTS ONLY — never use in production.
+func UseHostResolverForTesting(r HostResolver) (restore func()) {
+	prev := defaultHostResolver
+	defaultHostResolver = r
+	return func() { defaultHostResolver = prev }
+}
+
+// ValidateSourceURLWithResolver applies validateSourceURL, then — for a host that is
+// not an IP literal — resolves it through r and checks every returned address with
+// checkSSRF. It fails closed: a resolver error, timeout, cancelled context or empty
+// answer rejects the URL. Errors use the redacted URL and never contain an address.
+func ValidateSourceURLWithResolver(ctx context.Context, raw string, r HostResolver) error {
+	if err := validateSourceURL(raw); err != nil {
+		return err
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid config_source_url: %w", err)
+	}
+	host := parsed.Hostname()
+	if net.ParseIP(host) != nil {
+		return nil // literal already checked by validateSourceURL
+	}
+	if r == nil {
+		r = defaultHostResolver
+	}
+	addrs, err := r.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("SSRF guard: config_source_url %q host could not be resolved", parsed.Redacted())
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("SSRF guard: config_source_url %q host resolved to no addresses", parsed.Redacted())
+	}
+	for _, a := range addrs {
+		if err := checkSSRF(a.IP); err != nil {
+			return fmt.Errorf("SSRF guard: config_source_url %q %w", parsed.Redacted(), err)
+		}
+	}
+	return nil
+}
+
 // checkSSRF returns an error if ip falls within a disallowed range.
 // Covers: RFC 1918, IPv6 ULA (fc00::/7), loopback, link-local, unspecified.
-// NOTE: hostname-based bypasses (DNS resolving to private IPs) are not caught here;
-// the consumer must re-validate the resolved address at dial time.
+// Also blocks shared address space, multicast/reserved ranges, and IPv6 forms that
+// embed an IPv4 address (checked as that IPv4 address). Hostname resolution is done by
+// ValidateSourceURLWithResolver; the consumer must still re-validate at dial time.
 func checkSSRF(ip net.IP) error {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	} else if len(ip) == net.IPv6len {
+		if emb := embeddedIPv4(ip); emb != nil {
+			if err := checkSSRF(emb); err != nil {
+				return err
+			}
+		}
+	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
 		return fmt.Errorf("resolves to a private/loopback/link-local address")
 	}
@@ -168,11 +273,43 @@ func checkSSRF(ip net.IP) error {
 	return nil
 }
 
+// embeddedIPv4 returns the IPv4 address carried by a NAT64 (64:ff9b::/96), 6to4
+// (2002::/16) or IPv4-compatible (::/96) IPv6 address, or nil.
+func embeddedIPv4(ip net.IP) net.IP {
+	switch {
+	case ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b && allZero(ip[4:12]):
+		return net.IPv4(ip[12], ip[13], ip[14], ip[15]).To4()
+	case ip[0] == 0x20 && ip[1] == 0x02:
+		return net.IPv4(ip[2], ip[3], ip[4], ip[5]).To4()
+	case allZero(ip[:12]):
+		return net.IPv4(ip[12], ip[13], ip[14], ip[15]).To4()
+	}
+	return nil
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // ssrfExtraBlocks catches ranges not covered by net.IP helper methods above.
 var ssrfExtraBlocks = func() []*net.IPNet {
 	cidrs := []string{
-		"0.0.0.0/8", // unspecified / "this" network
-		"fec0::/10", // deprecated IPv6 site-local
+		"0.0.0.0/8",     // unspecified / "this" network
+		"fec0::/10",     // deprecated IPv6 site-local
+		"100.64.0.0/10", // shared address space (CGNAT)
+		"192.0.0.0/24",  // IETF protocol assignments
+		"198.18.0.0/15", // benchmarking
+		"224.0.0.0/4",   // multicast
+		"240.0.0.0/4",   // reserved, including broadcast
+		"ff00::/8",      // IPv6 multicast
+		"64:ff9b::/96",  // NAT64
+		"2002::/16",     // 6to4
+		"::/96",         // IPv4-compatible
 	}
 	blocks := make([]*net.IPNet, 0, len(cidrs))
 	for _, cidr := range cidrs {
@@ -242,9 +379,11 @@ func CheckCredentialBinding(secret *secretsiface.Secret, repoURL string) error {
 }
 
 // ValidateSourceURL applies the config_source_url security rules (https scheme, no
-// userinfo, no private/loopback/link-local IP literal) to raw. Callers that accept a
+// userinfo, no blocked IP literal, and every resolved address checked) to raw. Callers that accept a
 // repository URL from an operator use it so the URL is checked exactly as
 // ParseConfigSource checks it.
 func ValidateSourceURL(raw string) error {
-	return validateSourceURL(raw)
+	ctx, cancel := context.WithTimeout(context.Background(), sourceURLResolveTimeout)
+	defer cancel()
+	return ValidateSourceURLWithResolver(ctx, raw, defaultHostResolver)
 }
