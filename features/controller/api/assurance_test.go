@@ -382,6 +382,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"hyperv-profile:delete":               true, // Issue #3785: mirrors module:approve/module:reject
 		"steward:execute-scripts":             true, // Issue #5416: per-action tap, cancel and inline command exempt
 		"script:admin":                        true, // Issue #5416: per-action tap, reads exempt
+		"refresh:set-policy":                  true, // Issue #5419: can switch a tenant to auto_accept
 		"installer:upload":                    true, // Issue #5298: per-action tap for human sessions
 		"installer:delete":                    true, // Issue #5298
 		"installer:publish:steward":           true, // Issue #5298
@@ -394,4 +395,60 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		assert.False(t, req.RequireUserPresence,
 			"permission %q should not have RequireUserPresence (only catastrophic permissions carry this flag)", perm)
 	}
+}
+
+// TestPermissionAssurance_ConfigPushAndRefreshPolicy is a REQUIRED test (Issue #5419):
+// config:push carries a Strong floor and refresh:set-policy requires user presence.
+func TestPermissionAssurance_ConfigPushAndRefreshPolicy(t *testing.T) {
+	push, found := permissionAssurance["config:push"]
+	require.True(t, found, "config:push must be in permissionAssurance (Issue #5419)")
+	assert.Equal(t, session.AssuranceStrong, push.Min)
+	assert.True(t, push.AllowMachine, "scoped API keys keep working for config push")
+	assert.False(t, push.RequireUserPresence)
+
+	refresh, found := permissionAssurance["refresh:set-policy"]
+	require.True(t, found, "refresh:set-policy must be in permissionAssurance")
+	assert.Equal(t, session.AssuranceStrong, refresh.Min)
+	assert.True(t, refresh.RequireUserPresence, "refresh:set-policy can switch a tenant to auto_accept")
+}
+
+// TestPermissionAssurance_ConfigPush_FloorEnforced drives the real requirePermission
+// middleware on POST /api/v1/config/push (Issue #5419).
+func TestPermissionAssurance_ConfigPush_FloorEnforced(t *testing.T) {
+	server := setupTestServer(t)
+
+	reached := false
+	probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := server.requirePermission("config", "push")(probe)
+
+	serve := func(p *Principal) *httptest.ResponseRecorder {
+		reached = false
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", nil)
+		req = req.WithContext(context.WithValue(req.Context(), principalContextKey, p))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("Basic human session is challenged", func(t *testing.T) {
+		rec := serve(&Principal{ID: "basic-user", Assurance: session.AssuranceBasic, Permissions: []string{"config:push"}})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+		assert.False(t, reached)
+	})
+
+	t.Run("Strong human session is admitted", func(t *testing.T) {
+		rec := serve(&Principal{ID: "strong-user", Assurance: session.AssuranceStrong, Permissions: []string{"config:push"}})
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, reached)
+	})
+
+	t.Run("API key principal is admitted", func(t *testing.T) {
+		rec := serve(&Principal{ID: "api-key", Assurance: session.AssuranceMachine, Permissions: []string{"config:push"}})
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, reached)
+	})
 }

@@ -687,9 +687,14 @@ func (s *FleetTestSuite) setStewardStatusByID(t *testing.T, stewardID, status st
 
 // setRefreshPolicy sets the per-tenant refresh policy via the controller REST API.
 // mode is one of: "auto_accept", "require_approval", "reject".
+//
+// It uses the test-mode endpoint, not PUT /tenants/{tenant_path}/refresh-policy: that
+// route requires a Strong session plus a per-action passkey tap (refresh:set-policy),
+// which the suite's admin certificate cannot produce. The fleet-controller must have
+// CFGMS_ENABLE_TEST_ENDPOINTS=true.
 func (s *FleetTestSuite) setRefreshPolicy(t *testing.T, tenantID, mode string) {
 	t.Helper()
-	url := fmt.Sprintf("%s/api/v1/tenants/%s/refresh-policy", s.controllerURL, tenantID)
+	url := fmt.Sprintf("%s/api/v1/test/tenants/%s/refresh-policy", s.controllerURL, tenantID)
 	body, err := json.Marshal(map[string]string{"mode": mode})
 	require.NoError(t, err, "setRefreshPolicy: marshal request body")
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, strings.NewReader(string(body)))
