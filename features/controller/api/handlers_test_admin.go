@@ -118,3 +118,44 @@ func (s *Server) handleTestAuditCount(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("handleTestAuditCount: encode failed", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
+
+// handleTestSetRefreshPolicy handles PUT /api/v1/test/tenants/{tenant_path}/refresh-policy.
+// It writes the tenant refresh policy straight to the store. The production route
+// (PUT /tenants/{tenant_path}/refresh-policy, refresh:set-policy) requires a Strong
+// session and a per-action passkey tap that the fleet E2E suite's admin certificate
+// cannot produce; this endpoint leaves that floor untouched and exists only in a
+// binary built with cfgms_test_endpoints and run with CFGMS_ENABLE_TEST_ENDPOINTS=true.
+//
+//architecture:allow-unscoped-tenant-read -- test-only, build-tag- and env-var-gated, never shipped in a production binary
+func (s *Server) handleTestSetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") != "true" {
+		http.Error(w, "test endpoints disabled", http.StatusForbidden)
+		return
+	}
+	if s.refreshPolicyStore == nil {
+		http.Error(w, "refresh policy store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req AdminRefreshPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	switch req.Mode {
+	case "auto_accept", "require_approval", "reject":
+	default:
+		http.Error(w, "invalid mode: must be auto_accept, require_approval, or reject", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := mux.Vars(r)["tenant_path"]
+	policy := &business.RefreshPolicy{TenantID: tenantID, Mode: req.Mode, MaxDormancyDays: req.MaxDormancyDays}
+	if err := s.refreshPolicyStore.SetPolicy(r.Context(), policy); err != nil {
+		s.logger.Error("handleTestSetRefreshPolicy: failed to set policy",
+			"tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to set refresh policy", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}

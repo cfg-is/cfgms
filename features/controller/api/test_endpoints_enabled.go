@@ -25,5 +25,6 @@ func registerTestRoutes(s *Server) {
 
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", testOnly(s.handleUpdateStewardConfig)).Methods("PUT", "OPTIONS")
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/status", testOnly(s.handleTestSetStewardStatus)).Methods("PUT")
+	s.router.HandleFunc("/api/v1/test/tenants/{tenant_path:.+}/refresh-policy", testOnly(s.handleTestSetRefreshPolicy)).Methods("PUT")
 	s.router.HandleFunc("/api/v1/test/audit/count", testOnly(s.handleTestAuditCount)).Methods("GET")
 }
