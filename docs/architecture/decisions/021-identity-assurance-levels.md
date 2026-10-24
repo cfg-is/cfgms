@@ -472,6 +472,8 @@ implementer who hits the wall treats it as the design working, not a gap to rout
 around. If an automated flow ever genuinely needs one of these, that requires a new
 ADR — a scoped, audited machine-elevation grant — not a weakened gate.
 
+> **Superseded in part by [ADR-036](036-scoped-automation-grants-and-pre-approved-content.md) (2026-10-23).** ADR-036 defines that scoped, audited machine-elevation grant: an automation grant, configured once by an admin with a presence tap, that can read and run pre-approved scripts and workflows within one tenant per run. It never reaches a permission that requires presence. Everything else in this section stands.
+
 ---
 
 ## Sequencing: blocked on a durable session store
