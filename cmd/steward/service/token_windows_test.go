@@ -168,6 +168,24 @@ func TestReadTokenFile_WindowsRefusesDenyACE(t *testing.T) {
 	assert.NotContains(t, err.Error(), "tok_deny_ace")
 }
 
+// TestReadTokenFile_WindowsExplainsDeniedOpen covers a DACL that denies the
+// caller read access: the open fails with ERROR_ACCESS_DENIED, and the error
+// must still be the descriptor refusal rather than the bare OS error. It needs
+// no elevation; as a normal user the test owns the file, so the owner check
+// refuses it, and as an administrator the deny ACE is refused.
+func TestReadTokenFile_WindowsExplainsDeniedOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registration-token")
+	require.NoError(t, os.WriteFile(path, []byte("tok_denied_open\n"), 0o600))
+	setDACLFromSDDL(t, path, "D:P(D;;FA;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)", true)
+	t.Cleanup(func() { setDACLFromSDDL(t, path, "D:P(A;;FA;;;WD)", true) })
+
+	_, err := ReadTokenFile(path)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "Access is denied", "the refusal must name the descriptor problem")
+	assert.Regexp(t, `must be owned by SYSTEM or BUILTIN\\Administrators|must grant access to SYSTEM and BUILTIN\\Administrators only`, err.Error())
+	assert.NotContains(t, err.Error(), "tok_denied_open")
+}
+
 func TestReadTokenFile_WindowsRefusesNullDACL(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())

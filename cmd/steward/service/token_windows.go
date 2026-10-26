@@ -113,6 +113,9 @@ func ReadTokenFile(path string) (string, error) {
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 			return "", fmt.Errorf("registration token file %s does not exist", path)
 		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return "", explainAccessDenied(path, err)
+		}
 		return "", fmt.Errorf("open registration token file %s: %w", path, err)
 	}
 	f := os.NewFile(uintptr(h), path)
@@ -146,16 +149,42 @@ func ReadTokenFile(path string) (string, error) {
 	return token, nil
 }
 
-// checkTokenFileSecurity refuses the open token file h unless its owner is
-// SYSTEM or BUILTIN\Administrators and every ACE of its DACL is an
-// access-allowed ACE for one of those two principals. A missing (NULL) DACL,
-// which grants everyone full access, is refused.
+// explainAccessDenied reports why the token file could not be opened for
+// reading. A deny ACE, or any ACE that withholds read from the caller, makes
+// the open fail before the DACL can be checked, and every CreateFile handle
+// needs SYNCHRONIZE, which a deny-all ACE also withholds. The owner is always
+// granted READ_CONTROL, so the descriptor is read by path instead and the
+// same checks run, returning the refusal they give. This path only ever
+// produces an error and never reads the file, so reading the descriptor
+// through a link here cannot admit a token. When the checks pass, the open
+// error is returned.
+func explainAccessDenied(path string, openErr error) error {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err == nil {
+		if err := checkTokenFileDescriptor(sd, path); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("open registration token file %s: %w", path, openErr)
+}
+
+// checkTokenFileSecurity refuses the open token file h unless its security
+// descriptor passes checkTokenFileDescriptor.
 func checkTokenFileSecurity(h windows.Handle, path string) error {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("read security descriptor of registration token file %s: %w", path, err)
 	}
+	return checkTokenFileDescriptor(sd, path)
+}
+
+// checkTokenFileDescriptor refuses sd unless its owner is SYSTEM or
+// BUILTIN\Administrators and every ACE of its DACL is an access-allowed ACE
+// for one of those two principals. A missing (NULL) DACL, which grants
+// everyone full access, is refused.
+func checkTokenFileDescriptor(sd *windows.SECURITY_DESCRIPTOR, path string) error {
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil {
 		return fmt.Errorf("cannot determine owner of registration token file %s", path)
