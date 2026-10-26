@@ -112,6 +112,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/monitoring/components/{component}/health":               {rootReadPlatform, "controller component health (Decision 4: system and platform logs and metrics)"},
 	"/api/v1/monitoring/config":                                      {rootReadPlatform, "controller monitoring configuration (Decision 4: system and platform logs and metrics)"},
 	"/api/v1/monitoring/health":                                      {rootReadPlatform, "controller system health (Decision 4: system and platform logs and metrics)"},
+	"/api/v1/osquery/catalog":                                        {rootReadSharedReference, "the osquery catalog is compiled into the module bundle with no owning tenant"},
 	"/api/v1/notifications/email":                                    {rootReadSharedReference, "email delivery is one controller-wide capability with no owning tenant"},
 	"/api/v1/rbac/permissions":                                       {rootReadSharedReference, "permission definitions are shared reference data with no owning tenant"},
 	"/api/v1/rbac/permissions/{id}":                                  {rootReadSharedReference, "permission definitions are shared reference data with no owning tenant"},

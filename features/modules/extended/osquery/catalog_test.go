@@ -4,6 +4,7 @@
 package osquery
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -228,5 +229,39 @@ func TestParamSchema_Charset_CaseInsensitiveSQLMeta(t *testing.T) {
 		if err := s.Validate("p", variant); err == nil {
 			t.Errorf("Validate must reject case-variant SQL keyword %q", variant)
 		}
+	}
+}
+
+func TestListCatalog_Sorted(t *testing.T) {
+	list := ListCatalog()
+	if len(list) != len(catalogRegistry) {
+		t.Fatalf("got %d entries, want %d", len(list), len(catalogRegistry))
+	}
+	for i := 1; i < len(list); i++ {
+		if list[i-1].ID >= list[i].ID {
+			t.Errorf("entries not sorted: %q before %q", list[i-1].ID, list[i].ID)
+		}
+	}
+	for _, e := range list {
+		for i := 1; i < len(e.Params); i++ {
+			if e.Params[i-1].Name >= e.Params[i].Name {
+				t.Errorf("%s params not sorted", e.ID)
+			}
+		}
+	}
+}
+
+func TestListCatalog_OmitsQueryText(t *testing.T) {
+	raw, err := json.Marshal(ListCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range catalogRegistry {
+		if strings.Contains(string(raw), entry.query) {
+			t.Errorf("JSON contains query text of %q", entry.ID)
+		}
+	}
+	if strings.Contains(strings.ToUpper(string(raw)), "SELECT") {
+		t.Error("JSON contains SQL")
 	}
 }

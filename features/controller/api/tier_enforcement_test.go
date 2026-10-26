@@ -141,6 +141,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// OSquery ad-hoc fleet query dispatch (Issue #3569) — catalog queries may reach sensitive
 	// host state; RequireUserPresence mirrors module:approve/module:reject.
 	{"POST", "/api/v1/osquery/query", "osquery:execute"},
+	// osquery:list-catalog (Issue #5449) is intentionally absent: a read of catalog ids and
+	// parameter schemas, mirroring enrolment-token:list.
 	// Strong-credential floor for script execution (Issue #3687) - a compromised or
 	// stolen API key can no longer dispatch/cancel scripts or command runs.
 	{"POST", "/api/v1/runs/script", "steward:execute-scripts"},

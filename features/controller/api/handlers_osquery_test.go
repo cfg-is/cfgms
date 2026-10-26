@@ -515,7 +515,8 @@ func TestHandleOsqueryQuery_NoTargets(t *testing.T) {
 }
 
 // TestHandleOsqueryQuery_ParamPassthrough verifies that params are passed through
-// to the dispatcher without modification — catalog validation is S7's responsibility.
+// to the dispatcher without modification once the controller has validated them
+// against the catalog (Issue #5449).
 func TestHandleOsqueryQuery_ParamPassthrough(t *testing.T) {
 	disp := &stubOsqueryDispatcher{}
 	server := setupTestServer(t)
@@ -536,9 +537,9 @@ func TestHandleOsqueryQuery_ParamPassthrough(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Len(t, disp.calls, 1)
 	assert.Equal(t, "file_info", disp.calls[0].catalogID,
-		"catalog_id must be passed through unchanged (no controller-side re-validation)")
+		"catalog_id must be passed through unchanged (controller validates, then passes through)")
 	assert.Equal(t, map[string]string{"path": "/etc/os-release"}, disp.calls[0].params,
-		"params must be passed through unchanged (catalog validation is S7's responsibility)")
+		"params must be passed through unchanged (validated by the controller, then passed through)")
 }
 
 // TestHandleOsqueryQuery_AuditEmitted verifies that a successful dispatch results
