@@ -2001,3 +2001,37 @@ func (c *APIClient) WebAuthnRevokeCredential(ctx context.Context, username, cred
 	}
 	return nil
 }
+
+// OsqueryCatalogParam is one parameter of an OsqueryCatalogEntry.
+type OsqueryCatalogParam struct {
+	Name          string   `json:"name"`
+	Type          string   `json:"type"`
+	AllowedValues []string `json:"allowed_values,omitempty"`
+}
+
+// OsqueryCatalogEntry is one catalog id and its parameter schema.
+type OsqueryCatalogEntry struct {
+	ID     string                `json:"id"`
+	Params []OsqueryCatalogParam `json:"params"`
+}
+
+// ListOsqueryCatalog calls GET /api/v1/osquery/catalog.
+func (c *APIClient) ListOsqueryCatalog(ctx context.Context) ([]OsqueryCatalogEntry, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/osquery/catalog", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data []OsqueryCatalogEntry `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return envelope.Data, nil
+}

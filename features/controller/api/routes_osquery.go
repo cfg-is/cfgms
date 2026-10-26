@@ -17,4 +17,7 @@ func registerOsqueryRoutes(s *Server, api *mux.Router) {
 	osquery := api.PathPrefix("/osquery").Subrouter()
 	osquery.Handle("/query",
 		s.requirePermission("osquery", "execute")(http.HandlerFunc(s.handleOsqueryQuery))).Methods("POST")
+	// GET /osquery/catalog — list catalog ids and parameter schemas (Issue #5449).
+	osquery.Handle("/catalog",
+		s.requirePermission("osquery", "list-catalog")(http.HandlerFunc(s.handleOsqueryCatalog))).Methods("GET")
 }

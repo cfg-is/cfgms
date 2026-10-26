@@ -30,6 +30,7 @@ package osquery
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -254,4 +255,43 @@ func ValidateParams(entry *CatalogEntry, params map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// CatalogSummary is the admin-facing description of one catalog entry: its id
+// and parameter schema. The SQL text and charset regexps are never exposed.
+type CatalogSummary struct {
+	ID     string         `json:"id"`
+	Params []ParamSummary `json:"params"`
+}
+
+// ParamSummary describes one catalog parameter. Type is "enum" or "charset";
+// AllowedValues is set for enum parameters only.
+type ParamSummary struct {
+	Name          string   `json:"name"`
+	Type          string   `json:"type"`
+	AllowedValues []string `json:"allowed_values,omitempty"`
+}
+
+// ListCatalog returns a summary of every registered catalog entry, sorted by
+// ID, with each entry's params sorted by name.
+func ListCatalog() []CatalogSummary {
+	out := make([]CatalogSummary, 0, len(catalogRegistry))
+	for _, entry := range catalogRegistry {
+		sum := CatalogSummary{ID: entry.ID, Params: make([]ParamSummary, 0, len(entry.Params))}
+		for name, schema := range entry.Params {
+			ps := ParamSummary{Name: name}
+			switch schema.Type {
+			case ParamTypeEnum:
+				ps.Type = "enum"
+				ps.AllowedValues = append([]string(nil), schema.AllowedValues...)
+			case ParamTypeCharset:
+				ps.Type = "charset"
+			}
+			sum.Params = append(sum.Params, ps)
+		}
+		sort.Slice(sum.Params, func(i, j int) bool { return sum.Params[i].Name < sum.Params[j].Name })
+		out = append(out, sum)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }

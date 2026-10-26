@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	osquerymodule "github.com/cfgis/cfgms/features/modules/extended/osquery"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -19,9 +20,9 @@ import (
 
 // stewardOsqueryDispatcher is the minimal interface satisfied by *osquery.OsqueryHandler.
 // Defined here to keep the api package self-contained and to allow test doubles.
-// The catalog-only constraint (catalog_id validation, SQL construction) is enforced
-// entirely at S7's (Issue #3566) admission step — this layer passes through without
-// re-validating query content.
+// The controller validates catalog_id and params against the catalog before any
+// fan-out (Issue #5449), then passes the values through unchanged; the steward-side
+// admission step (Issue #3566) re-validates and builds the SQL.
 type stewardOsqueryDispatcher interface {
 	QuerySteward(ctx context.Context, stewardID, catalogID string, params map[string]string) ([]*transportpb.OsqueryRow, error)
 }
@@ -65,6 +66,22 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 
 	if req.CatalogID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "catalog_id is required", "MISSING_CATALOG_ID")
+		return
+	}
+
+	entry, err := osquerymodule.LookupCatalogEntry(req.CatalogID)
+	if err != nil {
+		s.logger.Debug("Unknown osquery catalog id",
+			"catalog_id", logging.SanitizeLogValue(req.CatalogID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Unknown catalog_id", "INVALID_CATALOG_ID")
+		return
+	}
+	if err := osquerymodule.ValidateParams(entry, req.Params); err != nil {
+		s.logger.Debug("Invalid osquery params",
+			"catalog_id", logging.SanitizeLogValue(req.CatalogID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid params for catalog_id", "INVALID_PARAMS")
 		return
 	}
 
@@ -210,4 +227,10 @@ func (s *Server) emitOsqueryAudit(r *http.Request, catalogID string, stewardIDs 
 			"error", logging.SanitizeLogValue(err.Error()),
 			"catalog_id", logging.SanitizeLogValue(catalogID))
 	}
+}
+
+// handleOsqueryCatalog handles GET /api/v1/osquery/catalog: the catalog entry ids
+// and parameter schemas, never the SQL text (Issue #5449).
+func (s *Server) handleOsqueryCatalog(w http.ResponseWriter, _ *http.Request) {
+	s.writeSuccessResponse(w, osquerymodule.ListCatalog())
 }

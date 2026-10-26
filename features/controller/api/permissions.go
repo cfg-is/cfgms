@@ -234,6 +234,9 @@ var knownPermissions = map[string]bool{
 	// which dispatches catalog queries to targeted stewards. Carries AssuranceStrong +
 	// RequireUserPresence in permissionAssurance (catalog templates may reach sensitive host state).
 	"osquery:execute": true,
+	// Catalog listing (Issue #5449): gates GET /api/v1/osquery/catalog. A read of ids and
+	// parameter schemas only (never SQL); intentionally absent from permissionAssurance.
+	"osquery:list-catalog": true,
 	// CLI session management (Issue #3584, Epic #3178). These three permissions were
 	// deliberately absent from knownPermissions before #3576 landed: without per-request
 	// account-permission resolution for Bearer sessions, session:create could mint a

@@ -1492,6 +1492,23 @@ session token, even if one happens to be active.
 | `credential-request:list-orphaned` | none | Read-only; outside the elevated-assurance surface |
 | `credential-request:revoke-orphaned` | `AssuranceStrong` | Revokes a listed orphaned certificate (Issue #3725) |
 | — (none) | — | `POST /api/v1/credential-renewal` (Issue #3724) has no permission gate; the presented certificate is itself the authorization |
+| `osquery:list-catalog` | none | Read-only; lists osquery catalog ids and parameter schemas, never query text (Issue #5449) |
+
+## osquery Catalog (Issue #5449)
+
+### cfg osquery catalog
+
+```bash
+cfg osquery catalog [--url <url>] [--tls-ca-cert <path>] [--tls-insecure] [--server-name <name>]
+```
+
+Lists the catalog entries the controller accepts for `POST /api/v1/osquery/query`: each
+entry's `id` and its parameters (name, type `enum` or `charset`, and the allowed values
+of an enum). Query text is never shown. Backed by `GET /api/v1/osquery/catalog`, which
+requires `osquery:list-catalog`.
+
+`POST /api/v1/osquery/query` rejects an unknown `catalog_id` with `400 INVALID_CATALOG_ID`
+and invalid params with `400 INVALID_PARAMS` before any steward is resolved.
 
 ## Workflow Management
 
