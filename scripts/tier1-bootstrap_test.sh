@@ -1097,6 +1097,7 @@ rm -rf "$DL5_PREFIX" "$DL_STUB_DIR" "$DL_SRC_PREFIX"
 
 EB_PREFIX="$(mktemp -d)"
 make_mock_controller "$EB_PREFIX"
+make_mock_cfg "$EB_PREFIX"
 run_bootstrap "$EB_PREFIX" --hostname=ctrl.test.lab --skip-smoke
 UNIT="${EB_PREFIX}/etc/systemd/system/cfgms-controller.service"
 if [[ -f "$UNIT" ]] && grep -q '^\[Install\]$' "$UNIT" && grep -q '^WantedBy=multi-user.target$' "$UNIT"; then
