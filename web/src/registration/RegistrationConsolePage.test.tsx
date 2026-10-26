@@ -47,6 +47,21 @@ function tab(name: RegExp) {
 // ── Tab strip composition ─────────────────────────────────────────────────────
 
 describe('RegistrationConsolePage — tab strip', () => {
+  it('RegistrationConsolePage lists the Enrolment tokens tab', () => {
+    renderPage()
+    const t = tab(/^Enrolment tokens/i)
+    expect(t).toBeInTheDocument()
+    expect(within(t).queryByText(/^soon$/i)).toBeNull()
+    // Keyboard reachable: ArrowLeft from Pending wraps to the last tab; walk to it.
+    fireEvent.click(t)
+    expect(t).toHaveAttribute('aria-selected', 'true')
+    expect(t).toHaveAttribute('tabindex', '0')
+    fireEvent.keyDown(t, { key: 'ArrowLeft' })
+    expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(tab(/^Credential Requests/i), { key: 'ArrowRight' })
+    expect(t).toHaveAttribute('aria-selected', 'true')
+  })
+
   it('renders a tablist with Pending, Tokens, IP Trust, and Credential Requests', () => {
     renderPage()
 
@@ -180,27 +195,30 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
 
     fireEvent.keyDown(tablist, { key: 'ArrowRight' })
     expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.keyDown(tablist, { key: 'ArrowRight' })
+    expect(tab(/^Enrolment tokens/i)).toHaveAttribute('aria-selected', 'true')
   })
 
   it('ArrowRight wraps from the last tab back to Pending', () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
-    fireEvent.click(tab(/^Credential Requests/i))
+    fireEvent.click(tab(/^Enrolment tokens/i))
     fireEvent.keyDown(tablist, { key: 'ArrowRight' })
 
     expect(tab(/^Pending/i)).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByTestId('pending-loading')).toBeInTheDocument()
   })
 
-  it('ArrowLeft wraps from Pending to the last tab (Credential Requests)', async () => {
+  it('ArrowLeft wraps from Pending to the last tab (Enrolment tokens)', async () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
     fireEvent.keyDown(tablist, { key: 'ArrowLeft' })
 
-    expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByTestId('credential-requests-loading')).toBeInTheDocument()
+    expect(tab(/^Enrolment tokens/i)).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('enrolment-tokens-loading')).toBeInTheDocument()
   })
 
   it('ArrowLeft steps backwards one tab at a time', () => {
@@ -327,7 +345,7 @@ describe('RegistrationConsolePage — pending count badge', () => {
 
 describe('TABS', () => {
   it('declares Pending, Tokens, IP Trust, and Credential Requests with real panels', () => {
-    expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust', 'credential-requests'])
+    expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust', 'credential-requests', 'enrolment-tokens'])
     for (const spec of TABS) {
       expect(spec.soon).toBe(false)
       expect(spec.Panel).toBeDefined()

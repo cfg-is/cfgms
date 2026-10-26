@@ -8,6 +8,7 @@
  *   Tokens              — read-only token lifecycle view (Story #2935)
  *   IP Trust            — add/revoke behind step-up (Story #2936 layout, #2971 actions)
  *   Credential Requests — browser-authenticated CLI enrolment approval (Story #3723)
+ *   Enrolment tokens    — list, mint, revoke, revoke issued credentials (Story #5451)
  *
  * Tab pattern mirrors StewardAssetPage.tsx exactly: role="tablist", roving
  * tabindex, ArrowLeft/Right keyboard navigation, implicit aria-labelledby
@@ -16,11 +17,12 @@
 import { type ComponentType, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import CredentialRequestsTab from './CredentialRequestsTab.tsx'
+import EnrolmentTokensTab from './EnrolmentTokensTab.tsx'
 import IPTrustTab from './IPTrustTab.tsx'
 import PendingQueueTab, { parsePendingRegistrations } from './PendingQueueTab.tsx'
 import TokensTab from './TokensTab.tsx'
 
-type TabKey = 'pending' | 'tokens' | 'ip-trust' | 'credential-requests'
+type TabKey = 'pending' | 'tokens' | 'ip-trust' | 'credential-requests' | 'enrolment-tokens'
 
 interface TabSpec {
   key: TabKey
@@ -48,6 +50,7 @@ export const TABS: readonly TabSpec[] = [
   { key: 'tokens', label: 'Tokens', soon: false, Panel: TokensTab },
   { key: 'ip-trust', label: 'IP Trust', soon: false, Panel: IPTrustTab },
   { key: 'credential-requests', label: 'Credential Requests', soon: false, Panel: CredentialRequestsTab },
+  { key: 'enrolment-tokens', label: 'Enrolment tokens', soon: false, Panel: EnrolmentTokensTab },
 ]
 
 export default function RegistrationConsolePage() {
