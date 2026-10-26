@@ -87,7 +87,8 @@ func (h *stewardServiceHandler) Execute(
 				cancel()
 				// Wait up to 30 s for graceful shutdown before returning to SCM.
 				select {
-				case <-errCh:
+				case errChErr := <-errCh:
+					_ = errChErr
 				case <-time.After(30 * time.Second):
 				}
 				return false, 0
