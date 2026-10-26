@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -64,6 +65,29 @@ func (s *Server) storePrivilegeMetadata(ctx context.Context, tenantID, scriptID 
 	return s.privilegeStore.StoreConfig(ctx, entry)
 }
 
+// callerTenantID returns the authenticated caller's tenant ("" when none).
+func callerTenantID(r *http.Request) string {
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	return tenantID
+}
+
+// listScriptsForCaller lists the caller tenant's library. A tenant-resolving
+// repository fails closed on an empty tenant; a plain repository is used as is.
+func (s *Server) listScriptsForCaller(r *http.Request) ([]*script.ScriptMetadata, error) {
+	if resolver, ok := s.scriptRepo.(script.TenantScriptResolver); ok {
+		return resolver.ListForTenant(callerTenantID(r), nil)
+	}
+	return s.scriptRepo.List(nil)
+}
+
+// getScriptForCaller reads a script from the caller tenant's library.
+func (s *Server) getScriptForCaller(r *http.Request, id string) (*script.VersionedScript, error) {
+	if resolver, ok := s.scriptRepo.(script.TenantScriptResolver); ok {
+		return resolver.GetForTenant(callerTenantID(r), id, "")
+	}
+	return s.scriptRepo.Get(id, "")
+}
+
 // handleListScripts handles GET /api/v1/scripts.
 func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 	if s.scriptRepo == nil {
@@ -71,9 +95,13 @@ func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scripts, err := s.scriptRepo.List(nil)
+	scripts, err := s.listScriptsForCaller(r)
 	if err != nil {
-		s.logger.Error("Failed to list scripts", "error", err)
+		if errors.Is(err, script.ErrTenantRequired) {
+			s.writeErrorResponse(w, http.StatusBadRequest, "Tenant is required", "TENANT_REQUIRED")
+			return
+		}
+		s.logger.Error("Failed to list scripts", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list scripts", "INTERNAL_ERROR")
 		return
 	}
@@ -83,14 +111,8 @@ func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 
 // handleGetScriptLibraryItem handles GET /api/v1/scripts/{id}.
 //
-// Script library items are shared, non-tenant-scoped reference data:
-// VersionedScript/ScriptMetadata carry no TenantID, there is no Create route
-// through this API (scripts are provisioned via the git-backed repository), and
-// handleListScripts (same file) already returns the full library to every
-// authenticated caller. There is no owning tenant to check the caller against —
-// same trust boundary as handleListScripts.
-//
-//architecture:allow-unscoped-tenant-read -- shared reference data, no owning tenant (Issue #4335)
+// The script library is stored per tenant: the script is resolved from the
+// caller's own tenant library, and a caller with no tenant is refused.
 func (s *Server) handleGetScriptLibraryItem(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
@@ -107,8 +129,12 @@ func (s *Server) handleGetScriptLibraryItem(w http.ResponseWriter, r *http.Reque
 
 	sanitizedID := logging.SanitizeLogValue(id)
 
-	vs, err := s.scriptRepo.Get(id, "")
+	vs, err := s.getScriptForCaller(r, id)
 	if err != nil {
+		if errors.Is(err, script.ErrTenantRequired) {
+			s.writeErrorResponse(w, http.StatusBadRequest, "Tenant is required", "TENANT_REQUIRED")
+			return
+		}
 		s.logger.Warn("Script not found", "id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "Script not found", "NOT_FOUND")
 		return
@@ -131,7 +157,11 @@ func (s *Server) handlePutScriptPrivilege(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	tenantID := callerTenantID(r)
+	if tenantID == "" { //architecture:allow-root-scope -- refuses an empty tenant (TENANT_REQUIRED); not a grant
+		s.writeErrorResponse(w, http.StatusBadRequest, "Tenant is required", "TENANT_REQUIRED")
+		return
+	}
 
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {

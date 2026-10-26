@@ -675,21 +675,16 @@ func hasParams(params map[string]interface{}, keys []string) bool {
 	return true
 }
 
-// sendCommand builds and transmits a CommandExecuteScript via the control plane.
-func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *script.QueuedExecution, prepared *script.PreparedExecution) error {
-	content := prepared.ScriptContent
-
-	// Enforce decoded script content size cap before base64 encoding.
-	if len(content) > maxScriptContentBytes {
-		return fmt.Errorf("script exceeds maximum inline size of 1 MB (execution_id=%s, size=%d bytes)",
-			exec.ExecutionID, len(content))
-	}
-
-	encodedContent := base64.StdEncoding.EncodeToString([]byte(content))
-
+// BuildScriptCommandParams builds the execute_script command params for a prepared
+// execution. For a library run (exec.ScriptRef set) it forwards the library identity
+// and the stored signature (script_id, signature_algorithm, signature_value,
+// signature_public_key) so the steward verifies the script against its trusted keys;
+// the script ID comes from exec.ScriptRef because synthesis sets only ScriptRef.
+// An inline run carries none of those four params.
+func BuildScriptCommandParams(exec *script.QueuedExecution, prepared *script.PreparedExecution) map[string]interface{} {
 	params := map[string]interface{}{
 		"execution_id":   exec.ExecutionID,
-		"script_content": encodedContent,
+		"script_content": base64.StdEncoding.EncodeToString([]byte(prepared.ScriptContent)),
 		"shell":          string(exec.Shell),
 	}
 	for _, key := range adhocEnvelopeKeys {
@@ -703,13 +698,11 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 	if targets := extractMetaStringSlice(exec.Metadata, "targets"); len(targets) > 0 {
 		params["targets"] = targets
 	}
-	if d.requireSignedAdhoc && exec.ScriptRef == "" {
-		// Exactly the credential the operator presented must be complete: the full
-		// X.509 set or the full WebAuthn set (roster manifest included). A partial
-		// set of either is refused.
-		if !hasParams(params, adhocX509Keys) && !hasParams(params, adhocWebAuthnKeys) {
-			return fmt.Errorf("signed ad-hoc execution missing a complete operator credential")
-		}
+	if exec.ScriptRef != "" {
+		params["script_id"] = exec.ScriptRef
+		params["signature_algorithm"] = prepared.SignatureAlgorithm
+		params["signature_value"] = prepared.SignatureValue
+		params["signature_public_key"] = prepared.SignaturePublicKey
 	}
 
 	if exec.ExecutionContext != "" {
@@ -724,24 +717,46 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		params["environment"] = prepared.Environment
 	}
 
+	if scope := extractMetaStringSlice(exec.Metadata, "required_api_scope"); len(scope) > 0 {
+		params["required_api_scope"] = scope
+	}
+	return params
+}
+
+// sendCommand builds and transmits a CommandExecuteScript via the control plane.
+func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *script.QueuedExecution, prepared *script.PreparedExecution) error {
+	content := prepared.ScriptContent
+
+	// Enforce decoded script content size cap before base64 encoding.
+	if len(content) > maxScriptContentBytes {
+		return fmt.Errorf("script exceeds maximum inline size of 1 MB (execution_id=%s, size=%d bytes)",
+			exec.ExecutionID, len(content))
+	}
+
+	params := BuildScriptCommandParams(exec, prepared)
+	if d.requireSignedAdhoc && exec.ScriptRef == "" {
+		// Exactly the credential the operator presented must be complete: the full
+		// X.509 set or the full WebAuthn set (roster manifest included). A partial
+		// set of either is refused.
+		if !hasParams(params, adhocX509Keys) && !hasParams(params, adhocWebAuthnKeys) {
+			return fmt.Errorf("signed ad-hoc execution missing a complete operator credential")
+		}
+	}
+
 	// Issue #1675: create JIT relay grant when the script requires API access.
 	// The scope comes from QueuedExecution.Metadata["required_api_scope"] which is set
 	// by SynthesizeScriptRun from the stored ScriptPrivilegeMetadata — never from runtime input.
-	if scope := extractMetaStringSlice(exec.Metadata, "required_api_scope"); len(scope) > 0 {
-		params["required_api_scope"] = scope
-
-		if d.grantManager != nil {
-			tenantID, ok := exec.Metadata["tenant_id"].(string)
-			if !ok || tenantID == "" {
-				return fmt.Errorf("create execution grant: missing or invalid tenant_id in script metadata")
-			}
-			ttl := exec.Timeout
-			if ttl <= 0 {
-				ttl = 15 * time.Minute // matches defaultScriptTimeoutSec in steward handler
-			}
-			if err := d.grantManager.CreateGrant(deviceID, tenantID, exec.ExecutionID, scope, ttl); err != nil {
-				return fmt.Errorf("create execution grant: %w", err)
-			}
+	if scope := extractMetaStringSlice(exec.Metadata, "required_api_scope"); len(scope) > 0 && d.grantManager != nil {
+		tenantID, ok := exec.Metadata["tenant_id"].(string)
+		if !ok || tenantID == "" {
+			return fmt.Errorf("create execution grant: missing or invalid tenant_id in script metadata")
+		}
+		ttl := exec.Timeout
+		if ttl <= 0 {
+			ttl = 15 * time.Minute // matches defaultScriptTimeoutSec in steward handler
+		}
+		if err := d.grantManager.CreateGrant(deviceID, tenantID, exec.ExecutionID, scope, ttl); err != nil {
+			return fmt.Errorf("create execution grant: %w", err)
 		}
 	}
 
