@@ -20,10 +20,10 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
-// TestExecuteCommand_CommandExecuteScript_Default30sDeadline verifies that a
+// TestExecuteCommand_CommandExecuteScript_DefaultInlineDeadline verifies that a
 // CommandExecuteScript command with no timeout_seconds override still receives
-// a context.Context with a deadline ~30s out from executeCommand — the same
-// default that applied before Issue #3801 decoupled CommandSyncConfig from it.
+// a context.Context whose deadline is the 5m inline default (plus the report grace)
+// from executeCommand (Issue #5393; it was 30s before).
 //
 // The registered handler intercepts dispatch instead of calling
 // RegisterExecuteScriptHandler (which would run a real script executor) — this
@@ -32,7 +32,7 @@ import (
 // has to pass HandleCommand's script-signature preflight (handler.go:420-424,
 // unconditional for CommandExecuteScript type, independent of which handler
 // function is registered), so it carries a validly signed inline envelope.
-func TestExecuteCommand_CommandExecuteScript_Default30sDeadline(t *testing.T) {
+func TestExecuteCommand_CommandExecuteScript_DefaultInlineDeadline(t *testing.T) {
 	h, err := New(&Config{
 		StewardID:         "steward-test",
 		OnStatus:          noopStatus,
@@ -70,8 +70,8 @@ func TestExecuteCommand_CommandExecuteScript_Default30sDeadline(t *testing.T) {
 	// before <= T <= after, so an exactly-30s default lands in
 	// [before+30s, after+30s]. Bounding both ends makes the assertion
 	// load-independent instead of relying on a fixed slack window.
-	assertDeadlineWithin(t, deadline, before, after, 30*time.Second,
-		"CommandExecuteScript's default deadline must remain 30s from dispatch")
+	assertDeadlineWithin(t, deadline, before, after, 5*time.Minute+scriptReportGrace,
+		"CommandExecuteScript without timeout_seconds gets the 5m inline default, not 30s")
 }
 
 // assertDeadlineWithin asserts that deadline is exactly want past the instant
@@ -119,6 +119,30 @@ func TestExecuteCommand_CommandExecuteScript_TimeoutSecondsOverrideUnaffected(t 
 	after := time.Now()
 
 	deadline := <-deadlineCh
-	assertDeadlineWithin(t, deadline, before, after, 5*time.Second,
+	assertDeadlineWithin(t, deadline, before, after, 5*time.Second+scriptReportGrace,
 		"timeout_seconds override must still be honored for CommandExecuteScript")
+}
+
+// TestCommandTimeout_ScriptDefaultsAndClamp asserts the computed execution timeout
+// per command (Issue #5393): 5m inline default for scripts, timeout_seconds honored,
+// clamped to 60m, and the generic 30s kept for other command types.
+func TestCommandTimeout_ScriptDefaultsAndClamp(t *testing.T) {
+	cases := []struct {
+		name   string
+		typ    cpTypes.CommandType
+		params map[string]interface{}
+		want   time.Duration
+	}{
+		{"script absent", cpTypes.CommandExecuteScript, map[string]interface{}{}, 5 * time.Minute},
+		{"script zero", cpTypes.CommandExecuteScript, map[string]interface{}{"timeout_seconds": float64(0)}, 5 * time.Minute},
+		{"script 45s", cpTypes.CommandExecuteScript, map[string]interface{}{"timeout_seconds": float64(45)}, 45 * time.Second},
+		{"script clamped", cpTypes.CommandExecuteScript, map[string]interface{}{"timeout_seconds": float64(86400)}, 60 * time.Minute},
+		{"other absent", cpTypes.CommandSyncConfig, map[string]interface{}{}, 30 * time.Second},
+		{"other 7s", cpTypes.CommandSyncConfig, map[string]interface{}{"timeout_seconds": float64(7)}, 7 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, commandTimeout(&cpTypes.Command{Type: tc.typ, Params: tc.params}))
+		})
+	}
 }

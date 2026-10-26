@@ -43,7 +43,7 @@ func TestSharedStores_RunAcceptedOnOneNodeCompletesOnAnother(t *testing.T) {
 	runID, err := SynthesizeCommandRun(ctx, nodeA.manager, nodeA.queue,
 		&staticFleetQuery{results: []fleet.StewardResult{{ID: device, TenantID: "tenant-x"}}},
 		"tenant-x", "admin", fleet.Filter{IDs: []string{device}}, "hostname", scriptmodule.ShellPowerShell,
-		nil, nil, nil, "nonce-"+device, time.Now().Add(time.Hour))
+		nil, nil, nil, "nonce-"+device, time.Now().Add(time.Hour), 0)
 	require.NoError(t, err)
 
 	// Node B sees the run node A created.

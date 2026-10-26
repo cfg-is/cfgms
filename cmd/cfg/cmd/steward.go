@@ -240,7 +240,9 @@ var stewardExecCmd = &cobra.Command{
 The argument is a selector identifying which stewards to target — a bare
 hostname, id:, glob, or attribute filter. The command is submitted as a signed
 inline script and dispatched to every steward the selector matches.
-The CLI blocks until all jobs reach a terminal state or the timeout elapses.
+The CLI blocks until all jobs reach a terminal state. --timeout is the execution
+timeout on the steward (default 5m, allowed range 1s to 60m); the CLI waits that
+long plus a dispatch margin.
 
 Requires an active session or admin bundle for the API connection (--bundle or
 CFGMS_ADMIN_BUNDLE), and a payload-signing credential for the signature — run
@@ -272,7 +274,7 @@ Examples:
   cfg steward exec os:linux --command "uname -r" --shell bash --yes
 
   # Explicit steward ID
-  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 2m
+  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 10m
 
   # JSON output keyed by hostname#steward-id
   cfg steward exec web-01 --command "uptime" --shell bash --json`,
@@ -789,7 +791,7 @@ func init() {
 	stewardExecCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
 	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
-	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", defaultStewardExecTimeout, "Maximum time to wait for job completion (must exceed the dispatcher poll interval plus steward heartbeat)")
+	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", defaultStewardExecTimeout, "Execution timeout for the command on the steward (the CLI waits this long plus a dispatch margin)")
 	stewardExecCmd.Flags().BoolVar(&stewardExecJSONOutput, "json", false, "Emit JSON job record instead of plain output")
 
 	// run-status flags
@@ -1767,10 +1769,13 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	timeout := stewardExecTimeout
-	if timeout <= 0 {
-		timeout = defaultStewardExecTimeout
+	execTimeout := stewardExecTimeout
+	if execTimeout <= 0 {
+		execTimeout = defaultStewardExecTimeout
 	}
+	// The CLI waits for the steward to finish, so its wait covers the execution
+	// timeout plus the time to dispatch and report.
+	waitTimeout := execTimeout + stewardExecDispatchMargin
 
 	client, err := getStewardClient()
 	if err != nil {
@@ -1807,6 +1812,8 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		"targets":    envelope.Targets,
 		"nonce":      envelope.Nonce,
 		"expires_at": envelope.ExpiresAt.Format(time.RFC3339),
+		// Not part of the signed envelope; the steward clamps it to 60m.
+		"timeout_seconds": int((execTimeout + time.Second - 1) / time.Second),
 	}
 
 	bodyJSON, err := json.Marshal(reqBody)
@@ -1845,7 +1852,7 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to write progress: %w", err)
 	}
 
-	if err := waitForRun(context.Background(), client, runID, timeout, progressW); err != nil {
+	if err := waitForRun(context.Background(), client, runID, waitTimeout, progressW); err != nil {
 		return err
 	}
 
@@ -2250,10 +2257,15 @@ func fetchRunRecord(ctx context.Context, client *APIClient, runID string) (*runR
 	return &apiResp.Data, nil
 }
 
-// defaultStewardExecTimeout is the default --timeout for `cfg steward exec`. It
-// must exceed the dispatcher poll interval (30s) plus the steward heartbeat
-// interval (20s) plus jitter so a healthy steward can receive and run a command.
-const defaultStewardExecTimeout = 2 * time.Minute
+// defaultStewardExecTimeout is the default --timeout for `cfg steward exec`: how
+// long the command may run on the steward.
+const defaultStewardExecTimeout = 5 * time.Minute
+
+// stewardExecDispatchMargin is added to the execution timeout for the CLI's own
+// wait. It must exceed the dispatcher poll interval (30s) plus the steward
+// heartbeat interval (20s) plus jitter so a healthy steward can receive the
+// command before the CLI gives up.
+const stewardExecDispatchMargin = 2 * time.Minute
 
 // waitForRun polls GET /api/v1/runs/{runID} every runWaitPollInterval until the
 // run reaches a terminal state or the timeout elapses. Progress text is written

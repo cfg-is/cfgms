@@ -2066,3 +2066,46 @@ func TestRunScript_FleetSearchError_ServiceUnavailable(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assertNoRunCreated(t, manager)
 }
+
+// TestPostRunCommand_Timeout covers the per-run execution timeout (Issue #5393): a
+// value outside 1s-60m is a 400 stating the range, an in-range value reaches
+// QueuedExecution.Timeout, and an absent value gets the 5m default.
+func TestPostRunCommand_Timeout(t *testing.T) {
+	const content = "hostname"
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "test-tenant"}}
+	principal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+
+	post := func(t *testing.T, timeout interface{}) (*httptest.ResponseRecorder, *scriptmodule.ExecutionQueue) {
+		server, _, queue := setupRunServer(t, stewards)
+		body := withEnvelopeFields(map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte(content)),
+			"shell":   "bash",
+		}, signedOperatorEnvelopeFields(t, server, []byte(content), "bash", []string{"steward-1"}))
+		if timeout != nil {
+			body["timeout_seconds"] = timeout
+		}
+		return postRunCommand(t, server, principal, body), queue
+	}
+
+	for _, secs := range []int{0, -5, 3601, 86400} {
+		rec, queue := post(t, secs)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "timeout_seconds=%d body: %s", secs, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "between 1s and 60m")
+		assert.Empty(t, queue.PeekForDevice("steward-1"), "rejected timeout must not queue")
+	}
+
+	for secs, want := range map[int]time.Duration{1: time.Second, 170: 170 * time.Second, 3600: time.Hour} {
+		rec, queue := post(t, secs)
+		require.Equal(t, http.StatusOK, rec.Code, "timeout_seconds=%d body: %s", secs, rec.Body.String())
+		queued := queue.PeekForDevice("steward-1")
+		require.Len(t, queued, 1)
+		assert.Equal(t, want, queued[0].Timeout)
+	}
+
+	rec, queue := post(t, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	queued := queue.PeekForDevice("steward-1")
+	require.Len(t, queued, 1)
+	assert.Equal(t, 5*time.Minute, queued[0].Timeout, "absent timeout gets the 5m default")
+}

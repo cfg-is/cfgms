@@ -28,10 +28,9 @@ import (
 )
 
 const (
-	scriptPreviewMaxBytes   = 4096
-	execOutputHardCapBytes  = 1 << 20 // 1 MB combined stdout+stderr cap
-	execOutputTruncMarker   = "\n[output truncated at 1 MB]"
-	defaultScriptTimeoutSec = 900 // 15 minutes
+	scriptPreviewMaxBytes  = 4096
+	execOutputHardCapBytes = 1 << 20 // 1 MB combined stdout+stderr cap
+	execOutputTruncMarker  = "\n[output truncated at 1 MB]"
 )
 
 // RegisterExecuteScriptHandler registers the built-in execute_script command handler on h.
@@ -80,12 +79,9 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 	// RequiredAPIScope set (Issue #1675). Inline run-command scripts never have a scope.
 	requiredAPIScope := extractStringSlice(cmd.Params["required_api_scope"])
 
-	// Extract timeout; default to 15 minutes per spec.
-	timeoutSecs := float64(defaultScriptTimeoutSec)
-	if ts, ok := cmd.Params["timeout_seconds"].(float64); ok && ts > 0 {
-		timeoutSecs = ts
-	}
-	timeout := time.Duration(timeoutSecs) * time.Second
+	// Timeout: timeout_seconds clamped to 60m, or the 5m inline default.
+	timeout := commandTimeout(cmd)
+	timeoutSecs := timeout.Seconds()
 
 	// Map execution_context param to script.ExecutionContext.
 	execCtx := script.ExecutionContextSystem
@@ -197,8 +193,9 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 			CommandID: cmd.ID,
 			Timestamp: time.Now(),
 			Details: map[string]interface{}{
-				"execution_id": executionID,
-				"error":        execErr.Error(),
+				"execution_id":    executionID,
+				"error":           execErr.Error(),
+				"timeout_seconds": int(timeoutSecs),
 			},
 		})
 		return nil

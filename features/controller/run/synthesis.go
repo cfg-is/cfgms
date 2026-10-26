@@ -271,6 +271,7 @@ func SynthesizeCommandRun(
 	targets []string,
 	nonce string,
 	expiresAt time.Time,
+	timeout time.Duration,
 ) (string, error) {
 	filter.TenantID = tenantID
 	devices, err := fleetQuery.Search(ctx, filter)
@@ -278,7 +279,7 @@ func SynthesizeCommandRun(
 		return "", fmt.Errorf("synthesize command run: fleet search: %w", err)
 	}
 	return SynthesizeCommandRunForDevices(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
-		inlineContent, shell, params, commandSignature, nil, targets, nonce, expiresAt)
+		inlineContent, shell, params, commandSignature, nil, targets, nonce, expiresAt, timeout)
 }
 
 // SynthesizeCommandRunForDevices is SynthesizeCommandRun over an already-resolved
@@ -305,6 +306,7 @@ func SynthesizeCommandRunForDevices(
 	targets []string,
 	nonce string,
 	expiresAt time.Time,
+	timeout time.Duration,
 ) (string, error) {
 	if commandSignature != nil {
 		if err := commandSignature.validateWebAuthn(devices, manifests); err != nil {
@@ -386,6 +388,7 @@ func SynthesizeCommandRunForDevices(
 			Shell:       shell,
 			Parameters:  resolved,
 			Metadata:    metadata,
+			Timeout:     timeout,
 		}
 		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {

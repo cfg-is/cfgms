@@ -111,7 +111,17 @@ type postRunCommandRequest struct {
 	Targets   []string               `json:"targets"`    // resolved steward IDs the signature binds
 	Nonce     string                 `json:"nonce"`      // single-use replay-prevention token
 	ExpiresAt string                 `json:"expires_at"` // RFC3339 envelope expiry
+	// TimeoutSeconds bounds execution on the steward. It is not part of the signed
+	// operator envelope; the steward clamps what a controller can request. Zero or
+	// absent selects defaultRunCommandTimeout.
+	TimeoutSeconds *int `json:"timeout_seconds"`
 }
+
+const (
+	defaultRunCommandTimeout = 5 * time.Minute
+	minRunCommandTimeout     = time.Second
+	maxRunCommandTimeout     = 60 * time.Minute
+)
 
 // validatePublicBetaCommandSignature verifies the operator signature over the
 // reconstructed operatorpayload.Envelope canonical bytes (content, shell, targets,
@@ -532,6 +542,16 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "expires_at must be RFC3339", "INVALID_EXPIRES_AT")
 		return
 	}
+	timeout := defaultRunCommandTimeout
+	if req.TimeoutSeconds != nil {
+		secs := *req.TimeoutSeconds
+		if secs < int(minRunCommandTimeout/time.Second) || secs > int(maxRunCommandTimeout/time.Second) {
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"timeout_seconds must be between 1s and 60m (1-3600 seconds)", "INVALID_TIMEOUT")
+			return
+		}
+		timeout = time.Duration(secs) * time.Second
+	}
 	var credentialID string
 	switch {
 	case req.Signature != nil && req.WebAuthn != nil:
@@ -677,6 +697,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		req.Targets,
 		req.Nonce,
 		expiresAt,
+		timeout,
 	)
 	if err != nil {
 		s.logger.Error("Failed to synthesize command run",
