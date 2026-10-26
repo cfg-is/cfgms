@@ -54,6 +54,7 @@ import {
   type RoleInfo,
 } from './useAccounts.ts'
 import RolesView, { JustificationField } from './RolesView.tsx'
+import CertBindingsSection from './CertBindingsSection.tsx'
 
 function LoadingRows() {
   return (
@@ -430,6 +431,8 @@ function AccountExpandPanel({ account }: { account: WebAccountInfo }) {
           <span className="wf-form-error" data-testid="revoke-error-panel">{revokeError}</span>
         )}
       </div>
+
+      <CertBindingsSection username={account.username} />
 
       {revokingRole !== null && (
         <div
