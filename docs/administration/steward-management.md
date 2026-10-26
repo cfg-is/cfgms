@@ -150,3 +150,19 @@ cfg steward move-identity <steward-id> --to <pending-id> [--yes]
 `rotate-credentials` and `move-identity` require AssuranceStrong (permissions
 `steward:rotate-credentials` and `steward:move-identity`); `clones list` needs `steward:read`.
 They take a steward ID, not a selector.
+
+### Console row actions
+
+The fleet table's row menu (the kebab at the end of each steward row) offers the same
+operations as the `cfg` commands above:
+
+- **Rotate credentials** — a confirm step names the steward; nothing is sent until you
+  choose **Confirm** (**Cancel** backs out). Requires AssuranceStrong
+  (`steward:rotate-credentials`), so the console prompts for your passkey when needed.
+- **Move identity** — lists the queued copies of this steward from the identity-clone list
+  (hostname, source IP and registration time). Pick one, choose **Move**, then **Confirm**
+  in the step that names the steward; the console sends the chosen pending registration ID.
+  When the steward has no queued copy the menu shows an empty state and no **Move** button.
+  Requires AssuranceStrong (`steward:move-identity`); listing needs `steward:read`.
+- **Refresh auth** — asks the steward to refresh its authentication and reports
+  `refresh_requested`. This route has no step-up requirement.

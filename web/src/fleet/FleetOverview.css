@@ -876,6 +876,56 @@ a.row-link {
   cursor: default;
 }
 
+/* Steward identity row actions (Story #5443) — rotate / move identity / refresh auth. */
+.rdecom-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--border);
+}
+.rdecom-warn {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.ract-btns {
+  display: flex;
+  gap: 4px;
+}
+.rtag-btn-danger {
+  border-color: var(--state-crit);
+  background: var(--state-crit);
+}
+.rtag-btn-sec {
+  background: transparent;
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+.rid-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rid-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.rid-host {
+  font-family: var(--font-mono);
+}
+.rid-meta {
+  color: var(--text-faint);
+}
+
 /* Bulk action bar (Story #2939) — appears above the fleet table when ≥1 row selected. */
 .bulkbar {
   display: flex;

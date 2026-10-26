@@ -11,7 +11,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import RowActionMenu, { parseTags } from './RowActionMenu.tsx'
+import { MemoryRouter } from 'react-router'
+import { AuthProvider } from '../auth/AuthContext.tsx'
+import RowActionMenu, { parseTags, parseQueuedCopies } from './RowActionMenu.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -548,5 +550,216 @@ describe('decommission', () => {
 
     expect(screen.getByRole('menuitem', { name: 'Decommission' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Confirm decommission' })).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Steward identity row actions (Story #5443)
+// ---------------------------------------------------------------------------
+
+function jsonRes(status: number, body: unknown = {}, headers: Record<string, string> = {}) {
+  return new Response(status === 204 ? null : JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  })
+}
+
+const ELEVATION_CHALLENGE = { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' }
+
+const CLONES = {
+  data: [
+    {
+      steward_id: 'other',
+      tenant_id: 't',
+      detection_count: 1,
+      queued_copies: [{ pending_id: 'p-other', hostname: 'other-host', source_ip: '1.1.1.1', registered_at: 'x' }],
+    },
+    {
+      steward_id: 'stw-1',
+      tenant_id: 't',
+      detection_count: 2,
+      queued_copies: [
+        { pending_id: 'p-1', hostname: 'host-a', source_ip: '10.0.0.1', registered_at: '2026-10-01T00:00:00Z' },
+        { pending_id: 'p-2', hostname: '<b>host-b</b>', source_ip: '10.0.0.2', registered_at: '2026-10-02T00:00:00Z' },
+      ],
+    },
+  ],
+}
+
+function renderMenu(stewardId = 'stw-1') {
+  return render(
+    <MemoryRouter>
+      <AuthProvider>
+        <RowActionMenu stewardId={stewardId} />
+      </AuthProvider>
+    </MemoryRouter>,
+  )
+}
+
+function openItem(name: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+  fireEvent.click(screen.getByRole('menuitem', { name }))
+}
+
+function stubElevation(target: (u: string, m: string) => Response | null) {
+  vi.stubGlobal('navigator', {
+    credentials: {
+      get: vi.fn().mockResolvedValue({
+        id: 'c',
+        type: 'public-key',
+        rawId: new ArrayBuffer(1),
+        response: {
+          clientDataJSON: new ArrayBuffer(1),
+          authenticatorData: new ArrayBuffer(1),
+          signature: new ArrayBuffer(1),
+          userHandle: null,
+        },
+        getClientExtensionResults: () => ({}),
+        authenticatorAttachment: null,
+      }),
+    },
+  })
+  let elevated = false
+  fetchMock.mockImplementation((input, init) => {
+    const u = String(input)
+    const m = (init?.method ?? 'GET').toUpperCase()
+    if (u.includes('elevate/begin')) {
+      return Promise.resolve(
+        jsonRes(200, {
+          data: {
+            publicKey: { challenge: 'Y2g', timeout: 60000, rpId: 'localhost', allowCredentials: [], userVerification: 'required' },
+          },
+        }),
+      )
+    }
+    if (u.includes('elevate/finish')) {
+      elevated = true
+      return Promise.resolve(jsonRes(200, { assurance: 'strong' }))
+    }
+    const r = target(u, m)
+    if (r !== null && !elevated && m === 'POST') return Promise.resolve(jsonRes(401, {}, ELEVATION_CHALLENGE))
+    return Promise.resolve(r ?? jsonRes(404))
+  })
+}
+
+describe('parseQueuedCopies (untrusted wire data)', () => {
+  it('returns copies only of the matching steward and drops malformed ones', () => {
+    const data = [
+      { steward_id: 'a', queued_copies: [{ pending_id: 'x' }] },
+      { steward_id: 'b', queued_copies: [{ pending_id: 'p', hostname: 'h' }, { pending_id: 3 }, null, { pending_id: '' }] },
+    ]
+    expect(parseQueuedCopies(data, 'b')).toEqual([
+      { pendingId: 'p', hostname: 'h', sourceIp: '', registeredAt: '' },
+    ])
+    expect(parseQueuedCopies('nope', 'b')).toEqual([])
+    expect(parseQueuedCopies(data, 'missing')).toEqual([])
+  })
+})
+
+describe('RowActionMenu rotate and move-identity handle elevation 401 without a presence token', () => {
+  it('rotate: confirm names the steward, sends nothing until Confirm, retries without X-Presence-Token', async () => {
+    stubElevation((u, m) => (m === 'POST' && u.endsWith('/credentials/rotate') ? jsonRes(200, { data: { status: 'archived' } }) : null))
+    renderMenu()
+    openItem('Rotate credentials')
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    expect(screen.getByText(/stw-1/)).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Credentials rotated'))
+    const posts = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/stewards/stw-1/credentials/rotate'))
+    expect(posts).toHaveLength(2)
+    expect(new Headers(posts[1]?.[1]?.headers).get('X-Presence-Token')).toBeNull()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/begin'))).toBe(false)
+  })
+
+  it('move identity: retries after elevation without X-Presence-Token', async () => {
+    stubElevation((u, m) => {
+      if (m === 'GET' && u.endsWith('/stewards/identity-clones')) return jsonRes(200, CLONES)
+      if (m === 'POST' && u.endsWith('/identity/move')) return jsonRes(200, { data: { status: 'moved' } })
+      return null
+    })
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-a/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+    expect(screen.getByText(/stw-1/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Identity moved'))
+    const posts = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/identity/move'))
+    expect(posts).toHaveLength(2)
+    expect(new Headers(posts[1]?.[1]?.headers).get('X-Presence-Token')).toBeNull()
+  })
+})
+
+describe('RowActionMenu move-identity picker', () => {
+  it('sends the selected pending_id and lists only this steward\'s copies as text', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const u = String(input)
+      if (u.endsWith('/stewards/identity-clones')) return Promise.resolve(jsonRes(200, CLONES))
+      if ((init?.method ?? 'GET') === 'POST') return Promise.resolve(jsonRes(200, { data: { status: 'moved' } }))
+      return Promise.resolve(jsonRes(404))
+    })
+    renderMenu()
+    openItem('Move identity')
+    await screen.findByText('host-a')
+    expect(screen.getByText('<b>host-b</b>')).toBeInTheDocument()
+    expect(screen.getByText('10.0.0.2')).toBeInTheDocument()
+    expect(screen.queryByText('other-host')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Move' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('radio', { name: /host-b/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Identity moved'))
+    const post = fetchMock.mock.calls.find(([, i]) => (i?.method ?? 'GET') === 'POST')
+    expect(String(post?.[0])).toBe('/api/v1/stewards/stw-1/identity/move')
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ pending_id: 'p-2' })
+  })
+
+  it('Cancel returns without sending', async () => {
+    fetchMock.mockResolvedValue(jsonRes(200, CLONES))
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-a/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Move' })).toBeInTheDocument()
+  })
+
+  it('shows an empty state and no Move button when the steward has no queued copy', async () => {
+    fetchMock.mockResolvedValue(jsonRes(200, { data: [] }))
+    renderMenu()
+    openItem('Move identity')
+    expect(await screen.findByText(/No queued copies/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Move' })).not.toBeInTheDocument()
+  })
+
+  it('shows an alert when the list fails to load', async () => {
+    fetchMock.mockResolvedValue(jsonRes(500, {}))
+    renderMenu()
+    openItem('Move identity')
+    expect(await screen.findByRole('alert')).toHaveTextContent('500')
+  })
+})
+
+describe('RowActionMenu auth refresh', () => {
+  it('auth refresh posts with no step-up and no presence request, and reports refresh_requested', async () => {
+    fetchMock.mockResolvedValue(jsonRes(200, { data: { steward_id: 'stw-1', status: 'refresh_requested' } }))
+    renderMenu()
+    openItem('Refresh auth')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Auth refresh requested'))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('/api/v1/stewards/stw-1/auth/refresh')
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('POST')
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/webauthn/presence/begin'))).toBe(false)
+  })
+
+  it('shows an alert on failure', async () => {
+    fetchMock.mockResolvedValue(jsonRes(404, {}))
+    renderMenu()
+    openItem('Refresh auth')
+    expect(await screen.findByRole('alert')).toHaveTextContent('404')
   })
 })
