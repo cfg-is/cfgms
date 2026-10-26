@@ -197,7 +197,8 @@ func (h *ExecProcessHandle) Drain(ctx context.Context) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	select {
-	case <-exitCh:
+	case exitChErr := <-exitCh:
+		_ = exitChErr
 		return nil
 	case <-waitCtx.Done():
 		return fmt.Errorf("cutover: drain timeout after %s waiting for %s to exit", timeout, h.Binary)
@@ -229,7 +230,8 @@ func (h *ExecProcessHandle) Stop(ctx context.Context) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	select {
-	case <-exitCh:
+	case exitChErr := <-exitCh:
+		_ = exitChErr
 		return nil
 	case <-waitCtx.Done():
 		return fmt.Errorf("cutover: stop timeout reaping %s", h.Binary)

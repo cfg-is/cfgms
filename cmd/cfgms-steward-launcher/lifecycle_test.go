@@ -949,7 +949,8 @@ func TestSupervise_CleanStartup_WritesFlagAndPrunesVersions(t *testing.T) {
 		t.Fatal("upgrade-committed flag file never appeared within 5s")
 	}
 	cancel()
-	<-done
+	doneErr := <-done
+	_ = doneErr
 
 	// upgrade-committed must contain the current version (v4).
 	data, err := os.ReadFile(flagPath) //nolint:gosec // test temp path
@@ -1059,7 +1060,8 @@ func TestSupervise_ConsecutiveFailures_CountAndReset(t *testing.T) {
 		t.Fatal("upgrade-committed flag file never appeared after clean startup")
 	}
 	cancel2()
-	<-done2
+	done2Err := <-done2
+	_ = done2Err
 
 	ps2, loadErr2 := l.loadState()
 	if loadErr2 != nil {
@@ -1503,7 +1505,8 @@ func TestSupervise_KnownGood_MarkedAfterHealthyRun(t *testing.T) {
 		t.Fatal("upgrade-committed flag never appeared")
 	}
 	cancel()
-	<-done
+	doneErr := <-done
+	_ = doneErr
 
 	ps, err := l.loadState()
 	if err != nil {
@@ -1594,7 +1597,8 @@ func TestSupervise_HashFailureAfterCleanRun_SkipsKnownGoodUpdate(t *testing.T) {
 		t.Fatal("upgrade-committed flag not written after clean run with hash failure (post-exec hash failure must not skip the committed branch)")
 	}
 	cancel()
-	<-done // supervisor exits (nil or error — both are acceptable here)
+	doneErr := <-done
+	_ = doneErr // supervisor exits (nil or error — both are acceptable here)
 
 	// The pre-existing KnownGood marker must be completely untouched.
 	ps, loadErr := l.loadState()

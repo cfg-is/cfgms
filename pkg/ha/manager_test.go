@@ -1015,7 +1015,8 @@ func TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning(t *testing.T) {
 	go func() { stopDone <- manager.Stop(context.Background()) }()
 
 	select {
-	case <-stopDone:
+	case stopDoneErr := <-stopDone:
+		_ = stopDoneErr
 		t.Fatal("Stop() returned while runLeaseAcquisition's AcquireOrRenew call was still blocked in flight — Stop() is not joining the background loop")
 	case <-time.After(200 * time.Millisecond):
 	}
@@ -1067,7 +1068,8 @@ func TestManager_Stop_JoinsNodeRegistrationLoopBeforeReturning(t *testing.T) {
 	go func() { stopDone <- manager.Stop(context.Background()) }()
 
 	select {
-	case <-stopDone:
+	case stopDoneErr := <-stopDone:
+		_ = stopDoneErr
 		t.Fatal("Stop() returned while runNodeRegistration's RegisterNode call was still blocked in flight — Stop() is not joining the background loop")
 	case <-time.After(200 * time.Millisecond):
 	}

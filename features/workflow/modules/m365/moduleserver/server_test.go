@@ -152,7 +152,8 @@ func TestModuleServer_UsesTokenMintedFromStoredConnection(t *testing.T) {
 		defer cancel()
 		_, _ = client.Shutdown(sctx, &proto.ShutdownRequest{})
 		select {
-		case <-serveErr:
+		case serveErrErr := <-serveErr:
+			_ = serveErrErr
 		case <-time.After(5 * time.Second):
 		}
 	})

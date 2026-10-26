@@ -258,7 +258,8 @@ func TestTerminalBridge_Teardown(t *testing.T) {
 	cancel()
 
 	select {
-	case <-dialDone:
+	case dialDoneErr := <-dialDone:
+		_ = dialDoneErr
 	case <-time.After(5 * time.Second):
 		t.Fatal("Dial did not return after context cancel")
 	}
@@ -323,7 +324,8 @@ func TestTerminalBridge_ResizeFrame(t *testing.T) {
 
 	cancel()
 	select {
-	case <-dialDone:
+	case dialDoneErr := <-dialDone:
+		_ = dialDoneErr
 	case <-time.After(5 * time.Second):
 		t.Fatal("Dial did not return after context cancel")
 	}
@@ -378,7 +380,8 @@ func TestTerminalBridge_SessionIDFilter(t *testing.T) {
 
 	cancel()
 	select {
-	case <-dialDone:
+	case dialDoneErr := <-dialDone:
+		_ = dialDoneErr
 	case <-time.After(5 * time.Second):
 		t.Fatal("Dial did not return after context cancel")
 	}

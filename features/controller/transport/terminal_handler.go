@@ -291,7 +291,8 @@ relayLoop:
 	}
 
 	relay.close()
-	<-sendErrCh
+	sendErrChErr := <-sendErrCh
+	_ = sendErrChErr
 	return finalErr
 }
 

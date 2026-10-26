@@ -330,7 +330,8 @@ func TestCoalescedWebhookSurvivesWaiterCancelMidSync(t *testing.T) {
 	close(f.proceed)
 
 	require.NoError(t, <-coalescedErr, "the coalesced trigger's sync must complete despite the waiter cancelling")
-	<-waiterErr
+	waiterErrErr := <-waiterErr
+	_ = waiterErrErr
 	got, ok := f.bindings.Get(f.binding.TenantPath, f.binding.Namespace)
 	require.True(t, ok)
 	assert.NotEmpty(t, got.LastSyncedSHA, "the shared sync must have completed")

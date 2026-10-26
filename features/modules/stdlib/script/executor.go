@@ -211,7 +211,8 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		// did not release every handle (AC2). A working tree kill always reaches
 		// done first, so the executor goroutine exits and is not leaked.
 		select {
-		case <-done:
+		case doneErr := <-done:
+			_ = doneErr
 		case <-time.After(reapGracePeriod):
 			e.logger.Warn("script process tree did not reap within grace period after termination",
 				"grace", reapGracePeriod, "pid", result.PID)
