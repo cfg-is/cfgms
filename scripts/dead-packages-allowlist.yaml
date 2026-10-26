@@ -123,7 +123,11 @@ packages:
   # --- section to avoid double-covering the same packages. Reasons below ----
   # --- are unchanged from Issue #4317's original baseline entries. ----------
   - path: features/workflow/modules/m365
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+    reason: >
+      Holds EntraIDDirectoryProvider, which implements
+      pkg/directory/interfaces.DirectoryProvider (Epic #4450). No main package
+      reaches it yet: registering the Entra and AD providers at controller
+      startup is a later #4450 story.
   - path: pkg/directory/providers/network_activedirectory
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
 
@@ -131,28 +135,12 @@ packages:
   # --- caller/registration point. Follow-up issues drafted in the #4345 -----
   # --- classification comment, pending PO creation. Wiring or deleting any --
   # --- of these is explicitly out of scope for #4345 — see its Out of Scope.
-  - path: features/controller/directory
-    reason: >
-      WIRE (Issue #4345): DirectoryService facade, real implementation
-      (service.go, interfaces.go). Its only non-excluded consumer,
-      features/controller (root), is itself DELETE-classified below — the
-      wiring gap is a caller one level up: features/controller/server or
-      cmd/controller/main.go needs to construct this service directly (the
-      way it already constructs other features/controller/* subpackages),
-      then register a pkg/directory/interfaces provider. Tightly coupled to
-      pkg/directory/dna below (its sole consumer). Wiring must coordinate
-      with the separate M365/AD module-wiring story and include a security
-      review — pkg/directory/providers/network_activedirectory/provider.go
-      (out of #4345's package list, owned by that story) carries a
-      confirmed finding that would go live the moment a provider is
-      registered here.
-
   - path: pkg/directory/dna
     reason: >
       Directory-object DNA drift/monitoring extension, 10k+ lines, under
       active maintenance — not abandoned. Owns directory comparison
-      (CompareDirectories over interfaces.DirectoryProvider). Once the
-      features/controller/directory facade is deleted (Epic #4450) this
+      (CompareDirectories over interfaces.DirectoryProvider). With
+      the features/controller/directory facade deleted (Epic #4450) this
       package has no importer; it is kept by decision (b) of #4450. A
       reachable caller (controller endpoint or workflow) is a future
       feature, not part of #4450.
@@ -168,6 +156,4 @@ packages:
   # seven test-only importers of features/controller now construct against
   # features/controller/server.Server directly, matching
   # cmd/controller/main.go's own wiring, and all four packages are gone from
-  # the tree. features/controller/directory (below) is unaffected — it is a
-  # subdirectory, not part of the deleted root package, and Issue #4406 was
-  # scoped to leave its WIRE entry untouched for the sibling wiring story.
+  # the tree.

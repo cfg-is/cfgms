@@ -1,6 +1,6 @@
 # Directory
 
-Pluggable directory services (Active Directory, Entra ID). Business logic imports `pkg/directory/interfaces` only.
+Pluggable directory services (Active Directory, Entra ID). Business logic imports `pkg/directory/interfaces` only. `interfaces.DirectoryProvider` is the sole directory contract; there is no separate controller-side facade.
 
 ## Contract
 
@@ -26,3 +26,16 @@ The first provider registered becomes the default. `SetDefaultProvider` override
 `ExecuteProviderOp(ctx, name, fn)` resolves the provider (empty means default), connects it lazily, runs `fn`, and records one request, its latency and its error. A resolve or connect failure counts as one request and one error. There is no exported way to record an operation directly.
 
 `GetProviderStatistics(ctx, name)` returns `ProviderStatistics`: live `UserCount` and `GroupCount` (from `ListUsers`/`ListGroups` with `Limit: 1`, reading `TotalCount`), plus `RequestCount`, `ErrorCount` and `AverageLatency`. When a provider leaves `TotalCount` at 0 while returning items or `HasMore`, the count is `UnknownCount` (`-1`).
+
+## Providers
+
+| Provider | Package | Notes |
+|----------|---------|-------|
+| Active Directory | `pkg/directory/providers/network_activedirectory` | Read-only; OUs supported |
+| Microsoft Entra ID | `features/workflow/modules/m365` (`EntraIDDirectoryProvider`) | No OUs; administrative units are managed by the `entra_admin_unit` module |
+
+### Entra ID execution tenant
+
+`EntraIDDirectoryProvider` holds no tenant or credential. `Connect` accepts only an optional `graph_url` (in `ProviderConfig.ProviderConfig`) and makes no Graph call. Every operation obtains its Graph token from `authProvider.GetAccessToken` for the CFGMS execution tenant in the context (`ctxkeys.TenantID`); credentials are resolved by the auth provider from the credential store. A missing or empty tenant fails closed before any Graph call.
+
+`HealthCheck` follows the same rule: without an execution tenant in the context it reports unhealthy by design. `GetProviderStatuses` calls it with a bare context, so Entra shows unhealthy there until a tenant-scoped check exists.
