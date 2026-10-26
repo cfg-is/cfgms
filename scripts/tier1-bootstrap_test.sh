@@ -1093,6 +1093,31 @@ else
 fi
 rm -rf "$DL5_PREFIX" "$DL_STUB_DIR" "$DL_SRC_PREFIX"
 
+# ── Enable-at-boot: [Install] section and no suppressed enable ───────────────
+
+EB_PREFIX="$(mktemp -d)"
+make_mock_controller "$EB_PREFIX"
+make_mock_cfg "$EB_PREFIX"
+run_bootstrap "$EB_PREFIX" --hostname=ctrl.test.lab --skip-smoke
+UNIT="${EB_PREFIX}/etc/systemd/system/cfgms-controller.service"
+if [[ -f "$UNIT" ]] && grep -q '^\[Install\]$' "$UNIT" && grep -q '^WantedBy=multi-user.target$' "$UNIT"; then
+    pass "enable-at-boot: generated unit has [Install] and WantedBy=multi-user.target"
+else
+    fail "enable-at-boot: generated unit lacks [Install]/WantedBy=multi-user.target (exit=${LAST_EXIT})"
+fi
+rm -rf "$EB_PREFIX"
+
+if grep -E 'systemctl[[:space:]]+enable[[:space:]]' "${BOOTSTRAP_SH}" | grep -Eq '\|\|[[:space:]]*true|2>/dev/null'; then
+    fail "enable-at-boot: tier1-bootstrap.sh suppresses a systemctl enable failure"
+else
+    pass "enable-at-boot: tier1-bootstrap.sh does not suppress systemctl enable failures"
+fi
+if grep -Eq 'systemctl[[:space:]]+enable[[:space:]]' "${BOOTSTRAP_SH}" && grep -q 'is-enabled' "${BOOTSTRAP_SH}"; then
+    pass "enable-at-boot: tier1-bootstrap.sh enables and verifies with is-enabled"
+else
+    fail "enable-at-boot: tier1-bootstrap.sh missing enable or is-enabled verification"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

@@ -753,7 +753,15 @@ EOF
 
 if [[ -z "$INSTALL_PREFIX" ]]; then
     systemctl daemon-reload
-    systemctl enable cfgms-controller 2>/dev/null || true
+    if ! systemctl enable cfgms-controller; then
+        echo "Error: 'systemctl enable cfgms-controller' failed; the controller would not start at boot." >&2
+        exit 1
+    fi
+    ENABLED_STATE="$(systemctl is-enabled cfgms-controller 2>&1)" || true
+    if [[ "$ENABLED_STATE" != "enabled" ]]; then
+        echo "Error: cfgms-controller unit is '${ENABLED_STATE}' after enable, expected 'enabled'." >&2
+        exit 1
+    fi
     if systemctl is-active --quiet cfgms-controller 2>/dev/null; then
         log "cfgms-controller service already running."
     else

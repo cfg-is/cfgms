@@ -670,6 +670,13 @@ from that file instead.
 /etc/systemd/system/cfgms-steward.service
 ```
 
+The controller unit is installed and enabled in one step (`[Install]` with
+`WantedBy=multi-user.target`, then `systemctl enable cfgms-controller`), by
+`cfgms-controller install` or either bootstrap script. Verify with
+`systemctl is-enabled cfgms-controller`, which must print `enabled`; `static`
+means the controller will not start after a reboot. Re-run the bootstrap script
+to repair such a node.
+
 ---
 
 **Document Control**
