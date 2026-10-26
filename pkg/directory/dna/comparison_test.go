@@ -119,7 +119,7 @@ func TestCompareDirectories_DetectsRealDiffs(t *testing.T) {
 			sawUpdate = true
 			assert.Equal(t, "display_name", d.Field)
 			assert.Equal(t, "Alice Smith", d.OldValue) // baseline (provider 2)
-			assert.Equal(t, "Alice", d.NewValue) // current (provider 1)
+			assert.Equal(t, "Alice", d.NewValue)       // current (provider 1)
 		}
 	}
 	assert.True(t, sawCreate && sawUpdate, "got %+v", result.UserDifferences)
