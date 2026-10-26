@@ -392,14 +392,67 @@ func TestExec_BareStewardID_SameResolutionAsIDForm(t *testing.T) {
 	assert.Equal(t, filters[0], filters[1])
 }
 
-// TestExec_DefaultTimeout_CoversDispatchLatency asserts the --timeout default is
-// 2m, above the dispatcher poll interval plus heartbeat interval plus jitter.
-func TestExec_DefaultTimeout_CoversDispatchLatency(t *testing.T) {
+// TestExec_DefaultTimeout_IsExecutionTimeout asserts the --timeout default is 5m
+// and that it is documented as the execution timeout (Issue #5393).
+func TestExec_DefaultTimeout_IsExecutionTimeout(t *testing.T) {
 	f := stewardExecCmd.Flags().Lookup("timeout")
 	require.NotNil(t, f)
-	assert.Equal(t, (2 * time.Minute).String(), f.DefValue)
-	assert.Equal(t, 2*time.Minute, defaultStewardExecTimeout)
-	assert.Contains(t, stewardExecCmd.Long, "--timeout 2m")
+	assert.Equal(t, (5 * time.Minute).String(), f.DefValue)
+	assert.Equal(t, 5*time.Minute, defaultStewardExecTimeout)
+	assert.Contains(t, f.Usage, "Execution timeout")
+	assert.Contains(t, stewardExecCmd.Long, "--timeout 10m")
+	assert.GreaterOrEqual(t, stewardExecDispatchMargin, 50*time.Second,
+		"dispatch margin must cover dispatcher poll plus steward heartbeat")
+}
+
+// TestExec_Timeout_SentInRequestBody asserts --timeout reaches the POST body as
+// timeout_seconds, and the default (5m) is sent when the flag is unset.
+func TestExec_Timeout_SentInRequestBody(t *testing.T) {
+	cases := []struct {
+		name    string
+		timeout time.Duration
+		want    float64
+	}{
+		{"explicit 170s", 170 * time.Second, 170},
+		{"default 5m", defaultStewardExecTimeout, 300},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody map[string]interface{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+					writeRunAPIResponse(w, []StewardInfo{{ID: "host-abc", DNA: &StewardInfoDNA{Hostname: "host-abc"}}})
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/command":
+					b, _ := io.ReadAll(r.Body)
+					_ = json.Unmarshal(b, &gotBody)
+					writeRunAPIResponse(w, map[string]string{"run_id": "r1"})
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/r1":
+					writeRunAPIResponse(w, map[string]interface{}{"run_id": "r1", "status": "completed", "job_count": 1, "completed_jobs": 1})
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/r1/jobs":
+					writeRunAPIResponse(w, []map[string]interface{}{{"job_id": "j1", "device_id": "host-abc", "status": "completed", "output": "ok\n", "exit_code": 0}})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			saveExecGlobals(t)
+			stewardURL = srv.URL
+			stewardTLSInsecure = true
+			bundlePath = generateTestBundleWithRSA(t, t.TempDir())
+			stewardExecCommand = "hostname"
+			stewardExecShell = "bash"
+			stewardExecTimeout = tc.timeout
+			runWaitPollInterval = time.Millisecond
+
+			_ = captureStdout(t, func() {
+				require.NoError(t, runRunCommandSingle(stewardExecCmd, []string{"host-abc"}))
+			})
+			require.NotNil(t, gotBody)
+			assert.Equal(t, tc.want, gotBody["timeout_seconds"])
+		})
+	}
 }
 
 // TestWaitForRun_Timeout_ReportsRunStillInProgress asserts the timeout error

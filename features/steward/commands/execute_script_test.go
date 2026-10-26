@@ -1214,3 +1214,55 @@ func TestExecuteScriptHandler_InlineScript_ExecutionContextBoundToSignature(t *t
 		})
 	}
 }
+
+// longRunningScriptBody returns a script that sleeps secs seconds and then prints "done".
+func longRunningScriptBody(secs int) string {
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("Start-Sleep -Seconds %d; Write-Output 'done'", secs)
+	}
+	return fmt.Sprintf("sleep %d; echo done", secs)
+}
+
+// TestExecuteScriptHandler_TimeoutSeconds45_RunsPast30s is a required test (Issue
+// #5393): a script sent with timeout_seconds=45 that runs for 32s completes; the
+// generic 30s fallback must not kill it.
+func TestExecuteScriptHandler_TimeoutSeconds45_RunsPast30s(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	params := signedInlineEnvelopeParams(t, []byte(longRunningScriptBody(32)), platformShell(), "steward-test")
+	params["execution_id"] = "esc-timeout-45"
+	params["timeout_seconds"] = float64(45)
+	sc := testSignedCommandWithParams("esc-timeout-45", cpTypes.CommandExecuteScript, params)
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "script running 32s under timeout_seconds=45 must complete")
+	assert.Contains(t, evt.Details["stdout"], "done")
+}
+
+// TestExecuteScriptHandler_Timeout_ErrorNamesFiredTimeout verifies the failure event
+// states the timeout that actually fired (Issue #5393).
+func TestExecuteScriptHandler_Timeout_ErrorNamesFiredTimeout(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	params := signedInlineEnvelopeParams(t, []byte(longRunningScriptBody(30)), platformShell(), "steward-test")
+	params["execution_id"] = "esc-timeout-2s"
+	params["timeout_seconds"] = float64(2)
+	sc := testSignedCommandWithParams("esc-timeout-2s", cpTypes.CommandExecuteScript, params)
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventCommandFailed)
+	require.NotNil(t, evt, "timed-out script must emit a failure event")
+	assert.Contains(t, evt.Details["error"], "timed out after 2s")
+	assert.Equal(t, 2, evt.Details["timeout_seconds"])
+}

@@ -534,6 +534,39 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	return nil
 }
 
+const (
+	// defaultCommandTimeout bounds command types that carry no timeout of their own.
+	defaultCommandTimeout = 30 * time.Second
+	// defaultInlineScriptTimeout is the execution timeout of a CommandExecuteScript
+	// that arrives without timeout_seconds.
+	defaultInlineScriptTimeout = 5 * time.Minute
+	// maxScriptTimeout caps the timeout a controller may request for a script.
+	maxScriptTimeout = 60 * time.Minute
+	// scriptReportGrace is how long the command context outlives the script deadline.
+	scriptReportGrace = 30 * time.Second
+)
+
+// commandTimeout returns the execution timeout for cmd. For CommandExecuteScript it
+// is timeout_seconds clamped to maxScriptTimeout, or defaultInlineScriptTimeout when
+// absent; other command types use timeout_seconds or defaultCommandTimeout.
+func commandTimeout(cmd *cpTypes.Command) time.Duration {
+	secs, ok := cmd.Params["timeout_seconds"].(float64)
+	hasTimeout := ok && secs > 0
+	if cmd.Type == cpTypes.CommandExecuteScript {
+		if !hasTimeout {
+			return defaultInlineScriptTimeout
+		}
+		if secs >= maxScriptTimeout.Seconds() {
+			return maxScriptTimeout
+		}
+		return time.Duration(secs * float64(time.Second))
+	}
+	if !hasTimeout {
+		return defaultCommandTimeout
+	}
+	return time.Duration(secs * float64(time.Second))
+}
+
 // executeCommand executes a command with timeout and error handling.
 func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 	defer h.wg.Done()
@@ -544,9 +577,11 @@ func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 		"timestamp", cmd.Timestamp)
 
 	// Create execution context with timeout
-	timeout := 30 * time.Second
-	if timeoutVal, ok := cmd.Params["timeout_seconds"].(float64); ok {
-		timeout = time.Duration(timeoutVal) * time.Second
+	timeout := commandTimeout(cmd)
+	if cmd.Type == cpTypes.CommandExecuteScript {
+		// The script executor enforces its own deadline (commandTimeout) and reports
+		// the timeout; the outer context outlives it so that report can still be sent.
+		timeout += scriptReportGrace
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

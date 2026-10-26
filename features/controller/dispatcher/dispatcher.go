@@ -753,7 +753,7 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		}
 		ttl := exec.Timeout
 		if ttl <= 0 {
-			ttl = 15 * time.Minute // matches defaultScriptTimeoutSec in steward handler
+			ttl = 15 * time.Minute // library-script grant lifetime; independent of the steward inline default
 		}
 		if err := d.grantManager.CreateGrant(deviceID, tenantID, exec.ExecutionID, scope, ttl); err != nil {
 			return fmt.Errorf("create execution grant: %w", err)

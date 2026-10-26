@@ -137,6 +137,7 @@ func saveStewardRunGlobals(t *testing.T) {
 	origExecCmd := stewardExecCommand
 	origExecShell := stewardExecShell
 	origExecTimeout := stewardExecTimeout
+	origExecDispatchMargin := stewardExecDispatchMargin
 	origExecJSON := stewardExecJSONOutput
 	// confirm gate and JSON output vars
 	origYes := stewardYes
@@ -162,6 +163,7 @@ func saveStewardRunGlobals(t *testing.T) {
 		stewardExecCommand = origExecCmd
 		stewardExecShell = origExecShell
 		stewardExecTimeout = origExecTimeout
+		stewardExecDispatchMargin = origExecDispatchMargin
 		stewardExecJSONOutput = origExecJSON
 		stewardYes = origYes
 		stewardRunScriptJSONOutput = origScriptJSON
@@ -872,6 +874,9 @@ func TestRunCommandSingle_TimeoutError(t *testing.T) {
 	stewardExecCommand = "sleep 999"
 	stewardExecShell = "bash"
 	stewardExecTimeout = 10 * time.Millisecond
+	// The CLI waits execution timeout plus the dispatch margin; shrink the margin
+	// so the wait deadline elapses within the test.
+	stewardExecDispatchMargin = 10 * time.Millisecond
 	runWaitPollInterval = time.Millisecond
 
 	_ = captureStdout(t, func() {

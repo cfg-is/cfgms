@@ -225,7 +225,7 @@ func TestSynthesizeCommandRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 		scriptmodule.ShellBash,
 		nil,
 		nil,
-		nil, "", time.Time{},
+		nil, "", time.Time{}, 0,
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -264,7 +264,7 @@ func TestSynthesizeCommandRunForDevices_WebAuthnProofAndPerDeviceManifest(t *tes
 	manifests := map[string]string{"dev-a": "manifest-a", "dev-b": "manifest-b"}
 
 	_, err := SynthesizeCommandRunForDevices(ctx, manager, queue, devices, "t", "u", fleet.Filter{},
-		"echo hi", scriptmodule.ShellBash, nil, sig, manifests, []string{"dev-a", "dev-b"}, "n1", time.Now().Add(time.Minute))
+		"echo hi", scriptmodule.ShellBash, nil, sig, manifests, []string{"dev-a", "dev-b"}, "n1", time.Now().Add(time.Minute), 0)
 	require.NoError(t, err)
 
 	for _, id := range []string{"dev-a", "dev-b"} {
@@ -289,12 +289,12 @@ func TestSynthesizeCommandRunForDevices_RefusesPartialWebAuthnSet(t *testing.T) 
 
 	partial := &CommandSignature{WebAuthnAuthenticatorData: "YQ==", WebAuthnClientDataJSON: "Yg=="}
 	_, err := SynthesizeCommandRunForDevices(ctx, manager, queue, devices, "t", "u", fleet.Filter{},
-		"echo hi", scriptmodule.ShellBash, nil, partial, map[string]string{"dev-a": "m", "dev-b": "m"}, nil, "n", exp)
+		"echo hi", scriptmodule.ShellBash, nil, partial, map[string]string{"dev-a": "m", "dev-b": "m"}, nil, "n", exp, 0)
 	require.Error(t, err)
 
 	full := &CommandSignature{WebAuthnAuthenticatorData: "YQ==", WebAuthnClientDataJSON: "Yg==", WebAuthnSignature: "Yw==", WebAuthnCredentialID: "ZA=="}
 	_, err = SynthesizeCommandRunForDevices(ctx, manager, queue, devices, "t", "u", fleet.Filter{},
-		"echo hi", scriptmodule.ShellBash, nil, full, map[string]string{"dev-a": "m"}, nil, "n", exp)
+		"echo hi", scriptmodule.ShellBash, nil, full, map[string]string{"dev-a": "m"}, nil, "n", exp, 0)
 	require.Error(t, err, "a device without a manifest must refuse the whole run")
 
 	assert.Empty(t, queue.PeekForDevice("dev-a"))
@@ -455,7 +455,7 @@ func TestSynthesizeCommandRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 		scriptmodule.ShellBash,
 		nil,
 		nil,
-		nil, "", time.Time{},
+		nil, "", time.Time{}, 0,
 	)
 	require.NoError(t, err)
 
@@ -554,7 +554,7 @@ func TestSynthesizeCommandRunForDevices_EnqueueFailure_RollsBack(t *testing.T) {
 	queue := newFailingQueue(2)
 
 	_, err := SynthesizeCommandRunForDevices(context.Background(), manager, queue, rollbackDevices(), "t", "u",
-		fleet.Filter{}, "echo hi", scriptmodule.ShellBash, nil, nil, nil, nil, "", time.Time{})
+		fleet.Filter{}, "echo hi", scriptmodule.ShellBash, nil, nil, nil, nil, "", time.Time{}, 0)
 	assertRolledBack(t, manager, queue, err)
 }
 
@@ -567,4 +567,20 @@ func TestSynthesizeActionRunForDevices_EnqueueFailure_RollsBack(t *testing.T) {
 		fleet.Filter{}, scriptmodule.StewardActionSpec{Verb: "stop", TargetKind: "service", TargetName: "svc"},
 		sig, nil, "nonce", time.Now().Add(time.Hour))
 	assertRolledBack(t, manager, queue, err)
+}
+
+// TestSynthesizeCommandRunForDevices_SetsQueuedTimeout verifies the requested
+// timeout reaches QueuedExecution.Timeout (Issue #5393).
+func TestSynthesizeCommandRunForDevices_SetsQueuedTimeout(t *testing.T) {
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+	devices := []fleet.StewardResult{{ID: "dev-t", TenantID: "t"}}
+
+	_, err := SynthesizeCommandRunForDevices(context.Background(), manager, queue, devices, "t", "u", fleet.Filter{},
+		"echo hi", scriptmodule.ShellBash, nil, nil, nil, nil, "", time.Time{}, 170*time.Second)
+	require.NoError(t, err)
+
+	queued := queue.PeekForDevice("dev-t")
+	require.Len(t, queued, 1)
+	assert.Equal(t, 170*time.Second, queued[0].Timeout)
 }
