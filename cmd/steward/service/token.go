@@ -27,10 +27,20 @@ func validateToken(token string) error {
 // regTokenFlag is the launcher child argument carrying the registration token.
 const regTokenFlag = "--regtoken"
 
+// regTokenFileFlag is the launcher child argument carrying the path of the
+// registration token file.
+const regTokenFileFlag = "--regtoken-file"
+
 // commandLineHasRegToken reports whether a service command line or definition
-// carries a non-empty --regtoken argument. It never returns the value.
+// carries a non-empty --regtoken or --regtoken-file argument. It never returns
+// the value.
 func commandLineHasRegToken(definition string) bool {
-	_, rest, found := strings.Cut(definition, regTokenFlag+" ")
+	return commandLineHasFlagValue(definition, regTokenFlag) ||
+		commandLineHasFlagValue(definition, regTokenFileFlag)
+}
+
+func commandLineHasFlagValue(definition, flag string) bool {
+	_, rest, found := strings.Cut(definition, flag+" ")
 	if !found {
 		return false
 	}

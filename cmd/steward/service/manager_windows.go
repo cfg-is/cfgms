@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
@@ -167,6 +168,9 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 	if err := validateToken(token); err != nil {
 		return err
 	}
+	if tokenPath := platformTokenFilePath(); strings.ContainsAny(tokenPath, " \t\n\r\"") {
+		return fmt.Errorf("registration token file path %q must not contain whitespace or quotes", tokenPath)
+	}
 	// Verify fingerprint before any privileged operations so the caller gets a
 	// clear error without needing to undo partial changes.
 	if caCertPEM != "" && expectedFingerprint != "" {
@@ -231,7 +235,11 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 			return existing.Start()
 		},
 		stage: func() error {
-			return m.stageInstall(launcherSrc, caCertPEM)
+			if err := m.stageInstall(launcherSrc, caCertPEM); err != nil {
+				return err
+			}
+			_, err := installRegistrationToken(token)
+			return err
 		},
 		replaceDefinition: func() error {
 			if existing != nil {
@@ -245,7 +253,7 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 					return fmt.Errorf("failed to delete existing service: %w", err)
 				}
 			}
-			return registerAndStartService(scm, token, controllerURL)
+			return registerAndStartService(scm, platformTokenFilePath(), controllerURL)
 		},
 	})
 }
@@ -336,7 +344,7 @@ func stageDataDir(caCertPEM string) error {
 
 // registerAndStartService creates the launcher-backed service, sets its
 // environment and recovery actions, and starts it.
-func registerAndStartService(scm *mgr.Mgr, token, controllerURL string) error {
+func registerAndStartService(scm *mgr.Mgr, tokenPath, controllerURL string) error {
 	fmt.Println("Registering Windows service...")
 	newSvc, err := scm.CreateService(
 		windowsServiceName,
@@ -349,7 +357,7 @@ func registerAndStartService(scm *mgr.Mgr, token, controllerURL string) error {
 		// Arguments appended to the binary path; received as os.Args on
 		// service start. The launcher supervises the steward and forwards
 		// --child-args to it.
-		buildLauncherServiceArgs(windowsInstallDir, token, controllerURL)...,
+		buildLauncherServiceArgs(windowsInstallDir, tokenPath, controllerURL)...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create Windows service: %w", err)
@@ -391,11 +399,12 @@ func registerAndStartService(scm *mgr.Mgr, token, controllerURL string) error {
 // buildLauncherServiceArgs returns the service start arguments that make the
 // SCM run the launcher's supervision loop: `run --root <root> --child-args
 // "<steward args>"`. Args inside child-args are space-separated (the launcher
-// splits on whitespace via strings.Fields); the registration token is
-// validated to be free of spaces/quotes, so no per-arg quoting is needed.
+// splits on whitespace via strings.Fields), so the token file path must not
+// contain whitespace or quotes. The registration token itself never appears:
+// only the path of the SYSTEM and Administrators only token file is passed.
 // Mirrors generateSystemdUnit's childArgs on Linux.
-func buildLauncherServiceArgs(root, token, controllerURL string) []string {
-	childArgs := fmt.Sprintf(`--regtoken %s`, token)
+func buildLauncherServiceArgs(root, tokenPath, controllerURL string) []string {
+	childArgs := fmt.Sprintf(`--regtoken-file %s`, tokenPath)
 	if controllerURL != "" {
 		childArgs += fmt.Sprintf(` --controller-url %s`, controllerURL)
 	}
@@ -505,9 +514,14 @@ func (m *windowsManager) Stop() error {
 	return waitForStop(existing, 30*time.Second)
 }
 
-// RegistrationTokenConfigured reports whether the service's launcher command
-// line carries --regtoken. The command line is inspected, never returned.
+// RegistrationTokenConfigured reports whether a registration token file exists
+// and is non-empty, or, for a legacy install, whether the service's launcher
+// command line carries --regtoken. Neither the file content nor the command
+// line is returned.
 func (m *windowsManager) RegistrationTokenConfigured() (bool, error) {
+	if ok, err := tokenFileConfigured(platformTokenFilePath()); err != nil || ok {
+		return ok, err
+	}
 	scm, err := mgr.Connect()
 	if err != nil {
 		return false, fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)

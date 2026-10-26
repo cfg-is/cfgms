@@ -175,22 +175,26 @@ func TestWindowsInstallLauncherMissing(t *testing.T) {
 // (`run --root ... --child-args "..."`), never the bare steward binary —
 // mirrors TestGenerateSystemdUnit's assertions for Linux.
 func TestBuildLauncherServiceArgs(t *testing.T) {
+	tokenPath := `C:\ProgramData\cfgms\registration-token`
 	token := "tok_svc_args_abc123"
 
-	args := buildLauncherServiceArgs(windowsInstallDir, token, "")
-	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args", "--regtoken " + token}, args)
+	args := buildLauncherServiceArgs(windowsInstallDir, tokenPath, "")
+	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args", "--regtoken-file " + tokenPath}, args)
 
-	withURL := buildLauncherServiceArgs(windowsInstallDir, token, "https://ctrl.example.com:8443")
+	withURL := buildLauncherServiceArgs(windowsInstallDir, tokenPath, "https://ctrl.example.com:8443")
 	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args",
-		"--regtoken " + token + " --controller-url https://ctrl.example.com:8443"}, withURL)
+		"--regtoken-file " + tokenPath + " --controller-url https://ctrl.example.com:8443"}, withURL)
 
 	// The service args must never point execution at the bare steward binary.
 	joined := strings.Join(withURL, " ")
 	assert.NotContains(t, joined, windowsInstallPath+" --regtoken",
 		"service must exec the launcher, not the bare steward binary")
 
-	// Token appears exactly once (no duplication across args).
-	assert.Equal(t, 1, strings.Count(joined, token), "token should appear exactly once")
+	// Only the file path is passed: neither the token nor the legacy flag.
+	assert.NotContains(t, joined, token)
+	assert.NotContains(t, joined, "--regtoken ", "the legacy --regtoken flag must not come back")
+	assert.Equal(t, 1, strings.Count(joined, "--regtoken-file"))
+	assert.True(t, commandLineHasRegToken(joined), "a token-file service definition counts as configured")
 }
 
 // TestWindowsLauncherUnderProgramFilesACL is the REQUIRED LPE-hardening TEST

@@ -435,10 +435,10 @@ func buildRootCommand() *cobra.Command {
 Manages the local endpoint configuration on behalf of a CFGMS controller.
 
 Entry paths:
-  cfgms-steward --regtoken TOKEN     Run in foreground (controller-connected)
   cfgms-steward --regtoken-file PATH Run in foreground, token read from a root-only file
+  cfgms-steward --regtoken TOKEN     Run in foreground (legacy: token visible in the process list)
   cfgms-steward --config path.cfg    Run in standalone mode
-  cfgms-steward install --regtoken TOKEN  Install as OS service
+  cfgms-steward install --regtoken-file PATH  Install as OS service
   cfgms-steward                      Interactive mode (prompts for token)`, version.Short()),
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
@@ -449,7 +449,7 @@ Entry paths:
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
-	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
+	root.Flags().StringVar(&regToken, "regtoken", "", "Legacy: registration token on the command line, visible in the process list (prefer --regtoken-file)")
 	root.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token (mutually exclusive with --regtoken)")
 	root.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (overrides compile-time URL; set at install time via service definition)")
 
@@ -864,7 +864,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
-	var regToken, controllerURL, caCertPath, fingerprint string
+	var regToken, regTokenFile, controllerURL, caCertPath, fingerprint string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -880,28 +880,33 @@ Platforms:
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
 Install is idempotent: running it again updates the binary and restarts the service.
 
+Exactly one of --regtoken-file and --regtoken is required. The token file is
+checked (root-only on Linux/macOS, SYSTEM and Administrators only on Windows) and
+its content is copied to the service's own root-only token file. --regtoken is
+legacy: the value is visible in the process list during install.
+
 Compile-baked URL (default — binary built with -ldflags):
 
-  cfgms-steward install --regtoken TOKEN
+  cfgms-steward install --regtoken-file /path/to/token
 
 Install-pinned (private CA, self-hosted deployments — ADR-013 §3):
 
-  cfgms-steward install --regtoken TOKEN \
+  cfgms-steward install --regtoken-file /path/to/token \
     --controller-url https://ctrl.example.com \
     --controller-ca /path/to/ca.crt \
     --fingerprint HEXFP
 
 TOFU — trust-on-first-use (lab environments):
 
-  cfgms-steward install --regtoken TOKEN \
+  cfgms-steward install --regtoken-file /path/to/token \
     --controller-url https://ctrl.example.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, controllerURL, caCertPath, fingerprint)
+			return runInstall(regToken, regTokenFile, controllerURL, caCertPath, fingerprint)
 		},
 	}
 
-	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
-	_ = cmd.MarkFlagRequired("regtoken")
+	cmd.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token (one of --regtoken-file or --regtoken is required)")
+	cmd.Flags().StringVar(&regToken, "regtoken", "", "Legacy: registration token on the command line, visible in the process list (prefer --regtoken-file)")
 	cmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (install-pinned and TOFU modes; omit to use compile-time URL)")
 	cmd.Flags().StringVar(&caCertPath, "controller-ca", "", "Path to controller CA certificate PEM file (install-pinned mode)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
@@ -943,7 +948,13 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
+func runInstall(regToken, regTokenFile, controllerURL, caCertPath, fingerprint string) error {
+	if regToken != "" && regTokenFile != "" {
+		return fmt.Errorf("--regtoken and --regtoken-file cannot be used together")
+	}
+	if regToken == "" && regTokenFile == "" {
+		return fmt.Errorf("one of --regtoken-file or --regtoken is required")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -964,6 +975,14 @@ func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
 		return fmt.Errorf("install requires elevated privileges\n" +
 			"  Windows: right-click the binary and select 'Run as administrator'\n" +
 			"  Linux/macOS: re-run with sudo")
+	}
+
+	if regTokenFile != "" {
+		token, readErr := service.ReadTokenFile(regTokenFile)
+		if readErr != nil {
+			return readErr
+		}
+		regToken = token
 	}
 
 	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
@@ -1007,7 +1026,7 @@ func runStatus() error {
 
 	if !status.Installed {
 		fmt.Printf("  Status:        not installed\n")
-		fmt.Printf("\n  To install: cfgms-steward install --regtoken TOKEN\n")
+		fmt.Printf("\n  To install: cfgms-steward install --regtoken-file PATH\n")
 		return nil
 	}
 
@@ -1070,7 +1089,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "", "")
+		return runInstall(token, "", "", "", "")
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

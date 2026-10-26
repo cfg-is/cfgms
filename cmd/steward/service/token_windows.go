@@ -216,3 +216,27 @@ func isTokenFilePrincipal(sid *windows.SID) bool {
 	s := sid.String()
 	return s == sidLocalSystem || s == sidAdministrators
 }
+
+// installRegistrationToken writes token to the platform token file and returns
+// its path. The file is created admin-only by writeTokenFile.
+func installRegistrationToken(token string) (string, error) {
+	path := platformTokenFilePath()
+	fmt.Printf("Writing registration token to %s...\n", path)
+	if err := writeTokenFile(path, token); err != nil {
+		return "", fmt.Errorf("failed to write registration token file: %w", err)
+	}
+	return path, nil
+}
+
+// tokenFileConfigured reports whether path is a non-empty regular file. A
+// missing path reports false, not an error. It never returns the content.
+func tokenFileConfigured(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect registration token file %s: %w", path, err)
+	}
+	return info.Mode().IsRegular() && info.Size() > 0, nil
+}
