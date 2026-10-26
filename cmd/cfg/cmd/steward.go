@@ -2264,8 +2264,9 @@ const defaultStewardExecTimeout = 5 * time.Minute
 // stewardExecDispatchMargin is added to the execution timeout for the CLI's own
 // wait. It must exceed the dispatcher poll interval (30s) plus the steward
 // heartbeat interval (20s) plus jitter so a healthy steward can receive the
-// command before the CLI gives up.
-const stewardExecDispatchMargin = 2 * time.Minute
+// command before the CLI gives up. Overridable in tests so the CLI wait timeout
+// can be exercised without a real two-minute wait.
+var stewardExecDispatchMargin = 2 * time.Minute
 
 // waitForRun polls GET /api/v1/runs/{runID} every runWaitPollInterval until the
 // run reaches a terminal state or the timeout elapses. Progress text is written
