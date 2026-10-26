@@ -1558,3 +1558,29 @@ func TestScriptNode_Execute_InlinePath_ExactlyOneRecordPerDevice(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, records, 2, "each Execute invocation must produce exactly one record per device")
 }
+
+// TestScriptNode_Execute_LibraryRunCarriesTenantID verifies a library run queued by
+// the script node carries the node's authenticated tenant, so the dispatcher can
+// resolve the script from that tenant's library (Issue #5422).
+func TestScriptNode_Execute_LibraryRunCarriesTenantID(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	defer q.Stop()
+
+	config := &ScriptStepConfig{
+		ScriptID: "lib-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"device-1"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "tenant-lib", "device-1")
+	node.SetExecutionQueue(q)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	require.True(t, output.Success)
+
+	entries := q.PeekForDevice("device-1")
+	require.Len(t, entries, 1)
+	assert.Equal(t, "tenant-lib", entries[0].Metadata["tenant_id"])
+}

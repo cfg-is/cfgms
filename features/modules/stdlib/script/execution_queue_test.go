@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ----------------------------------------------------------------------------
@@ -1118,4 +1119,63 @@ func TestInMemoryQueueStoreCancel_NotFoundSentinel(t *testing.T) {
 	err = queue.CancelExecution("device-001", "exec-002")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, business.ErrExecutionQueueEntryNotFound))
+}
+
+func TestPrepareExecution_TenantResolver(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := NewTenantScriptRepository(sm.GetConfigStore())
+	require.NoError(t, err)
+	seedTenantScript(t, repo, "tenant-a", "lib-script")
+
+	queue := NewExecutionQueue(NewExecutionMonitor(), nil, 0, "", nil, repo, 0)
+	defer queue.Stop()
+
+	t.Run("signature copied, tenant from metadata", func(t *testing.T) {
+		prepared, err := queue.PrepareExecutionForDevice(t.Context(), "dev-1", "", &QueuedExecution{
+			ExecutionID: "e1", ScriptRef: "lib-script", Shell: ShellBash,
+			Metadata: map[string]interface{}{"tenant_id": "tenant-a"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "echo lib-script\n", prepared.ScriptContent)
+		assert.Equal(t, "lib-script", prepared.ScriptRef)
+		assert.Equal(t, "rsa-sha256", prepared.SignatureAlgorithm)
+		assert.Equal(t, "c2ln", prepared.SignatureValue)
+		assert.Equal(t, "pem", prepared.SignaturePublicKey)
+	})
+
+	t.Run("tenant argument wins", func(t *testing.T) {
+		prepared, err := queue.PrepareExecutionForDevice(t.Context(), "dev-1", "tenant-a", &QueuedExecution{
+			ExecutionID: "e2", ScriptRef: "lib-script", Shell: ShellBash,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "rsa-sha256", prepared.SignatureAlgorithm)
+	})
+
+	t.Run("missing tenant fails closed", func(t *testing.T) {
+		for _, meta := range []map[string]interface{}{nil, {}, {"tenant_id": ""}} {
+			_, err := queue.PrepareExecutionForDevice(t.Context(), "dev-1", "", &QueuedExecution{
+				ExecutionID: "e3", ScriptRef: "lib-script", Shell: ShellBash, Metadata: meta,
+			})
+			assert.ErrorIs(t, err, ErrTenantRequired)
+		}
+	})
+
+	t.Run("other tenant does not resolve", func(t *testing.T) {
+		_, err := queue.PrepareExecutionForDevice(t.Context(), "dev-1", "", &QueuedExecution{
+			ExecutionID: "e4", ScriptRef: "lib-script", Shell: ShellBash,
+			Metadata: map[string]interface{}{"tenant_id": "tenant-b"},
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("inline run is unaffected", func(t *testing.T) {
+		prepared, err := queue.PrepareExecutionForDevice(t.Context(), "dev-1", "", &QueuedExecution{
+			ExecutionID: "e5", Shell: ShellBash,
+			Metadata: map[string]interface{}{"inline_script_content": "echo hi"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "echo hi", prepared.ScriptContent)
+		assert.Empty(t, prepared.ScriptRef)
+		assert.Empty(t, prepared.SignatureValue)
+	})
 }

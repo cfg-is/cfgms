@@ -48,6 +48,10 @@ type ExecutionQueue struct {
 	stopOnce        sync.Once
 }
 
+// ScriptRepository returns the repository the queue resolves library scripts
+// from, or nil when none is wired. Exposed so startup wiring can be tested.
+func (q *ExecutionQueue) ScriptRepository() ScriptRepository { return q.scriptRepo }
+
 // QueuedExecution represents a script execution waiting for a device to come online.
 // ScriptRef identifies the script in the repository; actual content is resolved
 // at dispatch time via ScriptRepository.Get(ScriptRef, "").
@@ -324,7 +328,9 @@ func buildQueueTrackingRecord(entry *QueueEntry, state QueueState, result *Execu
 
 // PrepareExecutionForDevice prepares an execution for immediate delivery to a device.
 // It generates ephemeral API keys just-in-time and resolves the latest script content
-// from the script repository.
+// from the script repository. When the repository is a TenantScriptResolver the
+// library is resolved for tenantID (or Metadata["tenant_id"]) and a missing tenant
+// fails closed.
 func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID, tenantID string, execution *QueuedExecution) (*PreparedExecution, error) {
 	scriptRef := execution.ScriptRef
 	if scriptRef == "" {
@@ -334,17 +340,38 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 	// Resolve latest script content from repository
 	var resolvedContent string
 	var resolvedVersion string
+	var signatureAlgorithm, signatureValue, signaturePublicKey string
 
 	if scriptRef != "" {
 		// Library script: resolve the latest (or pinned) content from the repository.
 		if q.scriptRepo != nil {
 			pinVersion := execution.ScriptVersion // empty = resolve latest
-			script, err := q.scriptRepo.Get(scriptRef, pinVersion)
+			var script *VersionedScript
+			var err error
+			if resolver, ok := q.scriptRepo.(TenantScriptResolver); ok {
+				// Per-tenant library: the tenant is the argument, else the run's
+				// metadata. Neither present fails closed — no global fallback.
+				libTenant := tenantID
+				if libTenant == "" && execution.Metadata != nil {
+					libTenant, _ = execution.Metadata["tenant_id"].(string)
+				}
+				if libTenant == "" {
+					return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, ErrTenantRequired)
+				}
+				script, err = resolver.GetForTenant(libTenant, scriptRef, pinVersion)
+			} else {
+				script, err = q.scriptRepo.Get(scriptRef, pinVersion)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, err)
 			}
 			resolvedContent = script.Content
 			resolvedVersion = script.Metadata.Version.String()
+			if sig := script.Signature; sig != nil {
+				signatureAlgorithm = sig.Algorithm
+				signatureValue = sig.Signature
+				signaturePublicKey = sig.PublicKey
+			}
 		}
 	} else if execution.Metadata != nil {
 		// Inline (ad-hoc) execution: SynthesizeCommandRun threads the literal script
@@ -364,6 +391,11 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 		Timeout:       execution.Timeout,
 		Environment:   make(map[string]string),
 		PreparedAt:    time.Now(),
+
+		ScriptRef:          scriptRef,
+		SignatureAlgorithm: signatureAlgorithm,
+		SignatureValue:     signatureValue,
+		SignaturePublicKey: signaturePublicKey,
 	}
 
 	for k, v := range execution.Environment {
@@ -420,6 +452,14 @@ type PreparedExecution struct {
 	EphemeralKey  string            `json:"ephemeral_key,omitempty"`
 	KeyExpiresAt  time.Time         `json:"key_expires_at,omitempty"`
 	PreparedAt    time.Time         `json:"prepared_at"`
+
+	// Library identity and stored signature, set for a library run only. The
+	// dispatcher forwards them so the steward can verify the script against its
+	// trusted keys.
+	ScriptRef          string `json:"script_ref,omitempty"`
+	SignatureAlgorithm string `json:"signature_algorithm,omitempty"`
+	SignatureValue     string `json:"signature_value,omitempty"`
+	SignaturePublicKey string `json:"signature_public_key,omitempty"`
 }
 
 // ListQueuedExecutions returns all active (queued + dispatched) executions.

@@ -1083,6 +1083,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
+	var scriptLibrary *scriptmodule.TenantScriptRepository
 	var jobDispatcher *dispatcher.Dispatcher
 	// ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery
 	// RPC service handler and the dispatch-path cluster fallback it backs. Both
@@ -1378,6 +1379,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Initializing execution queue and job dispatcher...")
 		monitor := scriptmodule.NewExecutionMonitor()
 		keyManager := scriptmodule.NewEphemeralKeyManager()
+		// The script library is stored per tenant; the queue resolves a library run
+		// from the run's tenant, and the API server serves the caller's tenant.
+		if cs := storageManager.GetConfigStore(); cs != nil {
+			var libErr error
+			scriptLibrary, libErr = scriptmodule.NewTenantScriptRepository(cs)
+			if libErr != nil {
+				return nil, fmt.Errorf("failed to create script library: %w", libErr)
+			}
+		}
 		// Issue #4528: in cluster mode the queue is the shared database store, so
 		// the node holding a steward's session dispatches its work whichever node
 		// queued it. Single-node keeps the in-memory store (nil).
@@ -1399,11 +1409,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		executionQueue = scriptmodule.NewExecutionQueue(
 			monitor,
 			keyManager,
-			0,              // maxAge — defaults to 24 h
-			cfg.ListenAddr, // controllerURL for ephemeral-key callbacks
-			queueStore,     // store — nil defaults to InMemoryQueueStore
-			nil,            // scriptRepo — resolved at dispatch time when wired separately
-			0,              // dispatchTimeout — defaults to 1 h
+			0,                                 // maxAge — defaults to 24 h
+			cfg.ListenAddr,                    // controllerURL for ephemeral-key callbacks
+			queueStore,                        // store — nil defaults to InMemoryQueueStore
+			scriptRepoForQueue(scriptLibrary), // per-tenant script library (nil when no config store)
+			0,                                 // dispatchTimeout — defaults to 1 h
 		)
 		var dispatcherErr error
 		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
@@ -1820,6 +1830,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// selector-driven role adapter reads via GetConfigStore, config_service_v2.go).
 	if cs := storageManager.GetConfigStore(); cs != nil {
 		httpServer.SetRoleConfigStore(cs)
+		httpServer.SetPrivilegeStore(cs)
+	}
+	if scriptLibrary != nil {
+		httpServer.SetScriptRepository(scriptLibrary)
 	}
 
 	// Issue #3785: Wire the hyperv-profile store into the HTTP API server, same
@@ -5231,4 +5245,13 @@ func weakSSLModeLabel(sslmode string) string {
 		return "require"
 	}
 	return ""
+}
+
+// scriptRepoForQueue converts a possibly-nil tenant library to the queue's
+// interface without producing a non-nil interface wrapping a nil pointer.
+func scriptRepoForQueue(r *scriptmodule.TenantScriptRepository) scriptmodule.ScriptRepository {
+	if r == nil {
+		return nil
+	}
+	return r
 }

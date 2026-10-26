@@ -900,6 +900,12 @@ Commands are fire-and-forget with completion tracking — the controller publish
 
 Each steward re-verifies the proof it receives. Under `requireSignedAdhoc` the dispatcher sends a command only when it carries the full `signature_*` set or the full `webauthn_*` set (including `webauthn_manifest`).
 
+**Saved (library) scripts (Issue #5422).** A saved script is a signed entry in the tenant's script library, and a library run works end to end:
+
+- **Stored per tenant.** The script library is a `TenantScriptRepository` (`features/modules/stdlib/script`) that returns one repository per tenant, so a script stored for tenant A is never found when resolving for tenant B. Controller startup gives it to the execution queue and to the API server, which also gets the privilege store. `GET /api/v1/scripts`, `GET /api/v1/scripts/{id}` and `PUT /api/v1/scripts/{id}/privilege` act on the caller's tenant library.
+- **Identity and signature travel with the run.** When the dispatcher prepares a library run (`ScriptRef` set), the queue resolves the content and the stored signature from the run's tenant library, and `dispatcher.BuildScriptCommandParams` adds `script_id`, `signature_algorithm`, `signature_value` and `signature_public_key` to the `execute_script` command. The steward verifies the signature over the script content and shell against its `TrustedKeys` and refuses the run on a missing, untrusted or mismatched signature. An inline run carries none of these four params.
+- **No tenant, no run.** A library run resolves its tenant from the dispatch argument, else from `Metadata["tenant_id"]` (set by run synthesis and by the workflow script step from its authenticated tenant). With neither, the run fails with an error. A REST call whose principal has no tenant is refused with `400 TENANT_REQUIRED`. Neither path falls back to a global or root library.
+
 #### Steward Actions in the Execution Queue
 
 A steward action (verb, target kind, target name, parameters) travels the same

@@ -431,7 +431,14 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// runtime overrides and defaults only.
 	var scriptMeta *scriptmodule.ScriptMetadata
 	if s.scriptRepo != nil {
-		if vs, err := s.scriptRepo.Get(req.ScriptID, req.ScriptVersion); err == nil && vs != nil {
+		var vs *scriptmodule.VersionedScript
+		var getErr error
+		if resolver, isTenantLib := s.scriptRepo.(scriptmodule.TenantScriptResolver); isTenantLib {
+			vs, getErr = resolver.GetForTenant(tenantID, req.ScriptID, req.ScriptVersion)
+		} else {
+			vs, getErr = s.scriptRepo.Get(req.ScriptID, req.ScriptVersion)
+		}
+		if getErr == nil && vs != nil {
 			scriptMeta = vs.Metadata
 		}
 	}

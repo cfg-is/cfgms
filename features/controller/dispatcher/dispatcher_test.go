@@ -2456,3 +2456,47 @@ func TestDispatcher_LateResultForCancelledStewardActionIsAudited(t *testing.T) {
 	assert.Equal(t, "steward_action", late[0].Kind)
 	assert.False(t, h.lockHeld(device), "a late result still releases the device slot")
 }
+
+func TestDispatcherLibraryRunForwardsIdentityAndSignature(t *testing.T) {
+	queue := newTestQueue(t, nil)
+	controlPlane := &testControlPlane{}
+	dispatcher := newTestDispatcher(t, queue, controlPlane)
+
+	// Synthesis sets only ScriptRef; prepared.ScriptID is empty.
+	execution := &script.QueuedExecution{ExecutionID: "exec-lib", ScriptRef: "lib-script", Shell: script.ShellBash}
+	prepared := &script.PreparedExecution{
+		ScriptContent:      "echo hi",
+		SignatureAlgorithm: "rsa-sha256",
+		SignatureValue:     "stored-signature",
+		SignaturePublicKey: "stored-public-key",
+	}
+	require.NoError(t, dispatcher.sendCommand(context.Background(), "steward-1", execution, prepared))
+
+	require.Len(t, controlPlane.sent, 1)
+	params := controlPlane.sent[0].Command.Params
+	assert.Equal(t, "lib-script", params["script_id"])
+	assert.Equal(t, "rsa-sha256", params["signature_algorithm"])
+	assert.Equal(t, "stored-signature", params["signature_value"])
+	assert.Equal(t, "stored-public-key", params["signature_public_key"])
+}
+
+func TestBuildScriptCommandParams_InlineRunHasNoLibraryParams(t *testing.T) {
+	execution := &script.QueuedExecution{ExecutionID: "exec-inline", Shell: script.ShellBash}
+	params := BuildScriptCommandParams(execution, &script.PreparedExecution{ScriptContent: "hostname"})
+
+	for _, key := range []string{"script_id", "signature_algorithm", "signature_value", "signature_public_key"} {
+		assert.NotContains(t, params, key)
+	}
+	assert.Equal(t, "exec-inline", params["execution_id"])
+}
+
+func TestBuildScriptCommandParams_LibraryRunIgnoresMetadataSignature(t *testing.T) {
+	execution := &script.QueuedExecution{
+		ExecutionID: "exec-lib", ScriptRef: "lib-script", Shell: script.ShellBash,
+		Metadata: map[string]interface{}{"signature_value": "from-metadata"},
+	}
+	params := BuildScriptCommandParams(execution, &script.PreparedExecution{
+		ScriptContent: "echo hi", SignatureValue: "stored",
+	})
+	assert.Equal(t, "stored", params["signature_value"])
+}

@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -676,4 +678,105 @@ func TestScriptStewardRoutes_OwningTenant_Returns200(t *testing.T) {
 				"%s must not deny the owning tenant: %s", path, rec.Body.String())
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-scoped script library (Issue #5422)
+// ---------------------------------------------------------------------------
+
+// setupTenantScriptLibraryServer wires the per-tenant library exactly as
+// controller startup does.
+func setupTenantScriptLibraryServer(t *testing.T) (*Server, *script.TenantScriptRepository, cfgconfig.ConfigStore) {
+	t.Helper()
+	server := setupTestServer(t)
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := script.NewTenantScriptRepository(sm.GetConfigStore())
+	require.NoError(t, err)
+	server.SetScriptRepository(repo)
+	server.SetPrivilegeStore(sm.GetConfigStore())
+	return server, repo, sm.GetConfigStore()
+}
+
+func seedTenantLibraryScript(t *testing.T, repo *script.TenantScriptRepository, tenantID, id, name string) {
+	t.Helper()
+	gr, err := repo.ForTenant(tenantID)
+	require.NoError(t, err)
+	seedLibraryScript(t, gr, id, name)
+}
+
+func scriptIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	items, ok := resp.Data.([]interface{})
+	require.True(t, ok, "expected array in data")
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.(map[string]interface{})["id"].(string))
+	}
+	return ids
+}
+
+func TestScriptLibrary_TenantScoped_ListAndGet(t *testing.T) {
+	server, repo, _ := setupTenantScriptLibraryServer(t)
+	seedTenantLibraryScript(t, repo, "tenant-a", "a-only", "A Only")
+	principalA := runPrincipal("admin-a", []string{"script:admin"}, "tenant-a")
+	principalB := runPrincipal("admin-b", []string{"script:admin"}, "tenant-b")
+
+	recA := listScripts(server, principalA)
+	require.Equal(t, http.StatusOK, recA.Code, "a wired library must not 503")
+	assert.Equal(t, []string{"a-only"}, scriptIDs(t, recA))
+
+	recB := listScripts(server, principalB)
+	require.Equal(t, http.StatusOK, recB.Code)
+	assert.Empty(t, scriptIDs(t, recB), "tenant B must not see tenant A's script")
+
+	assert.Equal(t, http.StatusOK, getScriptLibraryItem(server, principalA, "a-only").Code)
+	assert.Equal(t, http.StatusNotFound, getScriptLibraryItem(server, principalB, "a-only").Code)
+}
+
+func TestScriptLibrary_EmptyTenantRefused(t *testing.T) {
+	server, repo, _ := setupTenantScriptLibraryServer(t)
+	seedTenantLibraryScript(t, repo, "tenant-a", "a-only", "A Only")
+	principal := runPrincipal("admin", []string{"script:admin"}, "")
+
+	noTenant := func(req *http.Request) *http.Request {
+		return req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, ""))
+	}
+	serve := func(method, pattern, path string, h http.HandlerFunc, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = noTenant(withPrincipal(req, principal))
+		if method == http.MethodPut {
+			req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, principal.ID, req, "script:admin"))
+		}
+		return serveOnRoute(server, method, pattern, "script", "admin", h, req)
+	}
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"list": serve(http.MethodGet, "/api/v1/scripts", "/api/v1/scripts", server.handleListScripts, ""),
+		"get":  serve(http.MethodGet, "/api/v1/scripts/{id}", "/api/v1/scripts/a-only", server.handleGetScriptLibraryItem, ""),
+		"put": serve(http.MethodPut, "/api/v1/scripts/{id}/privilege", "/api/v1/scripts/a-only/privilege",
+			server.handlePutScriptPrivilege, `{}`),
+	} {
+		assert.Equal(t, http.StatusBadRequest, rec.Code, name)
+		assert.Contains(t, rec.Body.String(), "TENANT_REQUIRED", name)
+	}
+}
+
+func TestScriptLibrary_PrivilegePersists(t *testing.T) {
+	server, repo, store := setupTenantScriptLibraryServer(t)
+	seedTenantLibraryScript(t, repo, "tenant-a", "priv-script", "Priv")
+	principal := runPrincipal("admin-a", []string{"script:admin", "steward:read-scripts"}, "tenant-a")
+
+	rec := putScriptPrivilege(t, server, principal, "priv-script", `{"required_api_scope": ["steward:read-scripts"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	entry, err := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID: "tenant-a", Namespace: "script-privilege", Name: "priv-script",
+	})
+	require.NoError(t, err, "privilege metadata must persist under the caller's tenant")
+	var meta ScriptPrivilegeMetadata
+	require.NoError(t, json.Unmarshal(entry.Data, &meta))
+	assert.Equal(t, []string{"steward:read-scripts"}, meta.RequiredAPIScope)
+	assert.Equal(t, "priv-script", meta.ScriptID)
 }

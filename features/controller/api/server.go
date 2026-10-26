@@ -1734,6 +1734,21 @@ func (s *Server) SetPrivilegeStore(cs cfgconfig.ConfigStore) {
 	s.privilegeStore = cs
 }
 
+// ScriptRepository returns the wired script library, or nil when unwired. Exposed
+// so controller startup wiring can be regression-tested.
+func (s *Server) ScriptRepository() script.ScriptRepository {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scriptRepo
+}
+
+// PrivilegeStore returns the wired script privilege store, or nil when unwired.
+func (s *Server) PrivilegeStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.privilegeStore
+}
+
 // SetRoleConfigStore wires the config store used to persist role configs under
 // the role-policies namespace (Issue #2543).
 // Call this after New() returns but before Start() is called.

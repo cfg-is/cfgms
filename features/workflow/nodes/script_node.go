@@ -247,6 +247,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	if n.executionQueue != nil {
 		// Build shared metadata once — the store deep-copies it on enqueue.
 		queueMeta := make(map[string]interface{})
+		// The library is stored per tenant: the dispatcher resolves the run's script
+		// from the node's authenticated tenant, never from workflow input.
+		queueMeta["tenant_id"] = n.tenantID
 		if runID, ok := input.Context["workflow_run_id"]; ok {
 			queueMeta["workflow_run_id"] = runID
 		}
