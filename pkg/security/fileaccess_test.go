@@ -566,7 +566,7 @@ func TestSecureWriteFileIntermediateSymlinkRefused(t *testing.T) {
 	}
 }
 
-// A swap after validation is simulated by calling the root writer directly with a
+// A swap after validation is modelled by calling the root writer directly with a
 // path that was valid before the intermediate directory became a link.
 func TestWriteFileInRootSwappedIntermediateStaysInRoot(t *testing.T) {
 	base := t.TempDir()
