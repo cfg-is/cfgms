@@ -163,7 +163,11 @@ Copy [cfgms-controller.service](cfgms-controller.service) to `/etc/systemd/syste
 ```bash
 sudo cp cfgms-controller.service /etc/systemd/system/cfgms-controller.service
 sudo systemctl daemon-reload
+sudo systemctl enable cfgms-controller
+test "$(systemctl is-enabled cfgms-controller)" = enabled
 ```
+
+Enabling is part of installing the unit: the unit carries an `[Install]` section (`WantedBy=multi-user.target`), so the controller starts at boot. `enable` does not start the service; you start it after initialization below. A unit reporting `static` is not enabled and will not survive a reboot.
 
 ### Initialize the controller
 
@@ -263,8 +267,8 @@ Run `cfgms-controller bootstrap-admin --regenerate` to re-issue the admin bundle
 ### Start the controller
 
 ```bash
-sudo systemctl enable cfgms-controller
 sudo systemctl start cfgms-controller
+sudo systemctl is-enabled cfgms-controller   # must print: enabled
 ```
 
 ### Validate

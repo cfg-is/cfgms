@@ -487,8 +487,13 @@ not by `--init` — it has no meaning when you run `--init` by hand.)
 **Step 6 — Systemd**
 The script writes the unit file to `/etc/systemd/system/cfgms-controller.service`
 and runs `systemctl daemon-reload && systemctl enable --now cfgms-controller`.
+The unit has an `[Install]` section (`WantedBy=multi-user.target`); the script
+aborts if `enable` fails or if `systemctl is-enabled cfgms-controller` does not
+print `enabled`, so the controller starts at boot. Re-running the script repairs a
+node whose unit is `static`.
 Manually: copy the unit from `docs/deployment/single-controller/cfgms-controller.service`
-and run the same systemctl commands.
+and run the same systemctl commands; installing the unit includes enabling it, and
+`systemctl is-enabled cfgms-controller` must print `enabled`.
 
 **Step 7 — Tenant seed**
 The script runs `cfg tenant create` four times (idempotent):
