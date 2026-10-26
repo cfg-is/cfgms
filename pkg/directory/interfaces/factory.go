@@ -205,9 +205,11 @@ func CreateDirectoryProvider(ctx context.Context, config ProviderConfig) (Direct
 
 // DirectoryProviderManager manages multiple directory providers for hybrid environments
 type DirectoryProviderManager struct {
-	providers map[string]DirectoryProvider
-	factory   DirectoryProviderFactory
-	mutex     sync.RWMutex
+	providers     map[string]DirectoryProvider
+	registrations map[string]*providerRegistration
+	defaultName   string
+	factory       DirectoryProviderFactory
+	mutex         sync.RWMutex
 }
 
 // NewDirectoryProviderManager creates a new provider manager
@@ -217,8 +219,9 @@ func NewDirectoryProviderManager(factory DirectoryProviderFactory) *DirectoryPro
 	}
 
 	return &DirectoryProviderManager{
-		providers: make(map[string]DirectoryProvider),
-		factory:   factory,
+		providers:     make(map[string]DirectoryProvider),
+		registrations: make(map[string]*providerRegistration),
+		factory:       factory,
 	}
 }
 
@@ -236,6 +239,10 @@ func (m *DirectoryProviderManager) AddProvider(name string, config ProviderConfi
 	}
 
 	m.providers[name] = provider
+	m.registrations[name] = &providerRegistration{provider: provider}
+	if m.defaultName == "" {
+		m.defaultName = name
+	}
 	return nil
 }
 
@@ -271,6 +278,10 @@ func (m *DirectoryProviderManager) RemoveProvider(name string) error {
 	}
 
 	delete(m.providers, name)
+	delete(m.registrations, name)
+	if m.defaultName == name {
+		m.defaultName = ""
+	}
 	return nil
 }
 
@@ -324,6 +335,8 @@ func (m *DirectoryProviderManager) Close(ctx context.Context) error {
 
 	// Clear the providers map
 	m.providers = make(map[string]DirectoryProvider)
+	m.registrations = make(map[string]*providerRegistration)
+	m.defaultName = ""
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)

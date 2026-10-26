@@ -41,6 +41,7 @@ pkg/{name}/             → Direct provider (single implementation)
 - Use the auto-registration pattern (each provider registers itself with the interface registry in its `init()`; business logic selects a backend by name)
 - Business logic imports `pkg/{name}/interfaces` ONLY
 - Examples: `storage`, `logging`, `secrets`, `directory`, `controlplane`, `dataplane`, `notification`
+- `directory`: contract, manager, default provider, lazy connect and statistics are documented in [`pkg/directory/README.md`](directory/README.md)
 
 **Direct Providers** (no `interfaces/` subdirectory):
 - Single implementation
