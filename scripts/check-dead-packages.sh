@@ -35,9 +35,8 @@
 #
 # This intentionally does NOT walk importers ("does anything import this
 # package?"). A package can have an importer that is itself unreachable from
-# every main package — pkg/directory/interfaces is imported only by
-# features/controller/directory, which is imported only by features/controller,
-# and none of the three is reachable from any main package. An
+# every main package — a provider package imported only by another package that
+# no main package reaches still looks "imported" to a backward walk. An
 # importer-walking implementation reports such a package as reachable; this
 # one does not, because it starts from `main` packages and walks forward, not
 # from an arbitrary package and walks backward. See

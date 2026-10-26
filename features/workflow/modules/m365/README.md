@@ -110,6 +110,10 @@ Manages Intune device configuration policies:
           include_groups: ["Corporate Devices"]
 ```
 
+## Directory Provider
+
+`EntraIDDirectoryProvider` (`directory_provider.go`) implements `pkg/directory/interfaces.DirectoryProvider` for users, groups, membership, search, bulk user operations, cross-directory sync and schema. It has no tenant of its own: each call takes its Graph token for the CFGMS execution tenant in the context, and fails closed when none is present. `Connect` accepts only an optional `graph_url`. Entra ID has no organizational units, so OU operations return an unsupported error and `ListOUs` is empty. Administrative units are not part of the directory contract; manage them with the `entra_admin_unit` module.
+
 ## Authentication
 
 The modules support both OAuth2 application permissions and delegated permissions with secure local credential storage:
