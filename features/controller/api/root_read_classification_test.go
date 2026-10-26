@@ -78,6 +78,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/configs/{id}/deployments":                               {rootReadCrossing, ""},
 	"/api/v1/credential-requests":                                    {rootReadCrossing, ""},
 	"/api/v1/credential-requests/orphaned":                           {rootReadCrossing, ""},
+	"/api/v1/enrolment-tokens":                                       {rootReadCrossing, ""},
 	"/api/v1/entities":                                               {rootReadCrossing, ""},
 	"/api/v1/entities/drifted":                                       {rootReadCrossing, ""},
 	"/api/v1/entities/timeline":                                      {rootReadCrossing, ""},
