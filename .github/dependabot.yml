@@ -24,10 +24,9 @@ updates:
     groups:
       # Security updates get their own group for priority handling
       security-updates:
+        applies-to: security-updates
         patterns:
           - "*"
-        update-types:
-          - "security"
 
       # Development dependencies grouped together
       development-dependencies:
