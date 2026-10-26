@@ -255,15 +255,22 @@ stewards can download a pre-packaged install bundle (binary + CA cert + fingerpr
 # Build the steward binary with your controller URL compiled in
 make build-steward STEWARD_CONTROLLER_URL=https://<CONTROLLER_IP>:9080
 
-# Upload the Linux amd64 binary to the controller
+# Sign the binary with the publisher key (prints the URL-safe base64 signature).
+# Without CFGMS_PUBLISHER_SEED this uses the dev key, trusted only by dev/lab controllers.
+go run ./scripts/sign-steward-binary --installer bin/cfgms-steward linux amd64 > bin/cfgms-steward.sig
+
+# Upload the Linux amd64 binary and its signature to the controller
 cfg installer upload bin/cfgms-steward --platform linux --arch amd64 \
-  --url=https://<CONTROLLER_IP>:9080
+  --signature bin/cfgms-steward.sig --url=https://<CONTROLLER_IP>:9080
 
 # Verify the artifact is listed
 cfg installer list --url=https://<CONTROLLER_IP>:9080
 ```
 
-The uploaded binary is stored in the controller's blob store and served as a
+The controller verifies the signature against its trusted publisher key before storing
+the installer; an unsigned or wrongly signed upload is refused with
+`SIGNATURE_REQUIRED` or `SIGNATURE_VERIFICATION_FAILED`. The uploaded binary is stored
+in the controller's blob store and served as a
 self-contained install package via the public download endpoint.
 
 ### 4b — Download the install package

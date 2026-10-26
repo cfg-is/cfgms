@@ -7,7 +7,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +23,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 const (
@@ -37,6 +43,16 @@ func insecureHTTPClient() *http.Client {
 		},
 		Timeout: 30 * time.Second,
 	}
+}
+
+// signInstallerContent signs content as an installer artifact with the zero-seed
+// publisher key the fleet controller trusts, returning URL-safe base64 (no padding).
+func signInstallerContent(t *testing.T, content []byte, platform, arch string) string {
+	t.Helper()
+	sum := sha256.Sum256(content)
+	msg, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), platform, arch)
+	require.NoError(t, err)
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(testUpgradePrivKey(), []byte(msg)))
 }
 
 // TestFleetInstallPackageFlow exercises the full install-package lifecycle:
@@ -60,10 +76,26 @@ func TestFleetInstallPackageFlow(t *testing.T) {
 
 	// ── Step 2: upload the binary to the controller ──────────────────────────────
 
-	uploadReq, err := http.NewRequestWithContext(
+	// The controller stores only publisher-signed installers: an unsigned upload is
+	// refused, the signed one is accepted.
+	unsignedReq, err := http.NewRequestWithContext(
 		context.Background(),
 		http.MethodPut,
 		fleetControllerHTTP+"/api/v1/installer/artifacts/linux/amd64",
+		bytes.NewReader(binaryData),
+	)
+	require.NoError(t, err)
+	unsignedReq.Header.Set("X-API-Key", installerAPIKey)
+	unsignedReq.Header.Set("Content-Type", "application/octet-stream")
+	unsignedResp, err := client.Do(unsignedReq)
+	require.NoError(t, err)
+	_ = unsignedResp.Body.Close()
+	require.Equal(t, http.StatusBadRequest, unsignedResp.StatusCode, "unsigned upload must be refused")
+
+	uploadReq, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPut,
+		fleetControllerHTTP+"/api/v1/installer/artifacts/linux/amd64?signature="+signInstallerContent(t, binaryData, "linux", "amd64"),
 		bytes.NewReader(binaryData),
 	)
 	require.NoError(t, err)

@@ -7,8 +7,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -17,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +34,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -52,7 +57,51 @@ func setupTestServerWithBlobStore(t *testing.T) (*Server, blob.BlobStore) {
 	store := newFSBlobStore(t)
 	server := setupTestServer(t)
 	server.blobStore = store
+	server.stewardBinaryTrustStore = installerTestTrustStore(t)
 	return server, store
+}
+
+// installerTestPriv is the publisher key installer uploads are signed with in tests;
+// its public half is the "cfgms" publisher in installerTestTrustStore.
+var installerTestPriv = func() ed25519.PrivateKey {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return priv
+}()
+
+// installerTestTrustStore returns a real trust store trusting installerTestPriv.
+func installerTestTrustStore(t *testing.T) trust.TrustStore {
+	t.Helper()
+	store := trust.NewInMemoryTrustStore()
+	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{
+		Name:      "cfgms",
+		PublicKey: []byte(installerTestPriv.Public().(ed25519.PublicKey)),
+		Algorithm: "ed25519",
+	}))
+	return store
+}
+
+// signInstallerContent returns the URL-safe base64 (no padding) publisher signature
+// over the installer message for content at platform/arch.
+func signInstallerContent(t *testing.T, content []byte, platform, arch string) string {
+	t.Helper()
+	sum := sha256.Sum256(content)
+	msg, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), platform, arch)
+	require.NoError(t, err)
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(installerTestPriv, []byte(msg)))
+}
+
+// signedInstallerPath appends a valid ?signature= (or &signature= when path already
+// has a query) for content to an installer upload path.
+func signedInstallerPath(t *testing.T, path string, content []byte, platform, arch string) string {
+	t.Helper()
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "signature=" + signInstallerContent(t, content, platform, arch)
 }
 
 // withTenant returns a copy of r with tenantID injected into the context.
@@ -83,8 +132,10 @@ func withVars(r *http.Request, vars map[string]string) *http.Request {
 func TestHandleUploadInstallerArtifact_ValidInput(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
-	body := bytes.NewBufferString("fake-installer-content")
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	content := []byte("fake-installer-content")
+	req := httptest.NewRequest(http.MethodPut,
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", content, "linux", "amd64"),
+		bytes.NewReader(content))
 	req = withTenant(req, "test-tenant")
 	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
 	rec := httptest.NewRecorder()
@@ -311,7 +362,7 @@ func TestInstallerArtifactRoundTrip(t *testing.T) {
 
 	// Upload
 	uploadReq := httptest.NewRequest(http.MethodPut,
-		"/api/v1/installer/artifacts/"+platform+"/"+arch,
+		signedInstallerPath(t, "/api/v1/installer/artifacts/"+platform+"/"+arch, artifactContent, platform, arch),
 		bytes.NewBuffer(artifactContent))
 	uploadReq = withTenant(uploadReq, tenantID)
 	uploadReq = withVars(uploadReq, map[string]string{"platform": platform, "arch": arch})
@@ -408,7 +459,7 @@ func TestInstallerArtifactTenantIsolation(t *testing.T) {
 
 	// Upload for tenant-a
 	uploadReq := httptest.NewRequest(http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64",
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", []byte("tenant-a-content"), "linux", "amd64"),
 		bytes.NewBufferString("tenant-a-content"))
 	uploadReq = withTenant(uploadReq, "tenant-a")
 	uploadReq = withVars(uploadReq, map[string]string{"platform": "linux", "arch": "amd64"})
@@ -438,8 +489,10 @@ func TestInstallerArtifactRouterPermissions(t *testing.T) {
 	// Generate a key with installer:upload permission.
 	uploadKey := NewEphemeralTestKey(t, server, []string{"installer:upload"}, "test-tenant", 5*time.Minute)
 
-	body := bytes.NewBufferString("test content")
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	content := []byte("test content")
+	req := httptest.NewRequest(http.MethodPut,
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", content, "linux", "amd64"),
+		bytes.NewReader(content))
 	req.Header.Set("X-API-Key", uploadKey)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -760,8 +813,10 @@ func TestInstallerHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 	t.Run("upload succeeds and writes to blobStore", func(t *testing.T) {
 		server, store := newNonAuthoritativeServer(t)
 
-		body := bytes.NewBufferString("fake-installer-content")
-		req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+		content := []byte("fake-installer-content")
+		req := httptest.NewRequest(http.MethodPut,
+			signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", content, "linux", "amd64"),
+			bytes.NewReader(content))
 		req = withTenant(req, "test-tenant")
 		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
 		rec := httptest.NewRecorder()
@@ -816,8 +871,10 @@ func TestInstallerHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 	server.haManager = newAuthoritativeHAManager(t)
 
-	body := bytes.NewBufferString("content")
-	uploadReq := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	content := []byte("content")
+	uploadReq := httptest.NewRequest(http.MethodPut,
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", content, "linux", "amd64"),
+		bytes.NewReader(content))
 	uploadReq = withTenant(uploadReq, "test-tenant")
 	uploadReq = withVars(uploadReq, map[string]string{"platform": "linux", "arch": "amd64"})
 	uploadRec := httptest.NewRecorder()
@@ -940,7 +997,8 @@ func TestInstallerArtifact_UploadAndDeleteAreAudited(t *testing.T) {
 
 	up := httptest.NewRecorder()
 	server.handleUploadInstallerArtifact(up, prep(httptest.NewRequest(http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64", bytes.NewBufferString("installer-bytes"))))
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", []byte("installer-bytes"), "linux", "amd64"),
+		bytes.NewBufferString("installer-bytes"))))
 	require.Equal(t, http.StatusOK, up.Code)
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(up.Body.Bytes(), &resp))
@@ -990,7 +1048,8 @@ func TestInstallerArtifact_UploadAuditedWhenMetadataReReadFails(t *testing.T) {
 	principal := &Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}
 	payload := []byte("installer-bytes")
 	req := withTenant(httptest.NewRequest(http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64", bytes.NewReader(payload)), "test-tenant")
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", payload, "linux", "amd64"),
+		bytes.NewReader(payload)), "test-tenant")
 	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
 	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
 
@@ -1011,4 +1070,119 @@ func TestInstallerArtifact_UploadAuditedWhenMetadataReReadFails(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	assert.Equal(t, "admin-bob", uploads[0].UserID)
 	assert.Equal(t, hex.EncodeToString(sum[:]), uploads[0].Details["checksum"])
+}
+
+// TestHandleUploadInstallerArtifact_RefusesUnverifiedSignatures proves an installer
+// without a valid publisher signature is refused with 400, audited as one failure,
+// and never stored.
+func TestHandleUploadInstallerArtifact_RefusesUnverifiedSignatures(t *testing.T) {
+	content := []byte("installer-bytes")
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	sum := sha256.Sum256(content)
+	untrustedMsg, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), "linux", "amd64")
+	require.NoError(t, err)
+	untrusted := base64.RawURLEncoding.EncodeToString(ed25519.Sign(otherPriv, []byte(untrustedMsg)))
+
+	cases := []struct {
+		name string
+		sig  string
+		code string
+	}{
+		{"unsigned", "", "SIGNATURE_REQUIRED"},
+		{"untrusted key", untrusted, "SIGNATURE_VERIFICATION_FAILED"},
+		{"malformed", "***not-base64***", "SIGNATURE_VERIFICATION_FAILED"},
+		{"other platform", signInstallerContent(t, content, "windows", "amd64"), "SIGNATURE_VERIFICATION_FAILED"},
+		{"other arch", signInstallerContent(t, content, "linux", "arm64"), "SIGNATURE_VERIFICATION_FAILED"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := setupTestServerWithBlobStore(t)
+			auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+			server.auditManager = auditMgr
+
+			path := "/api/v1/installer/artifacts/linux/amd64"
+			if tc.sig != "" {
+				path += "?signature=" + tc.sig
+			}
+			req := withTenant(httptest.NewRequest(http.MethodPut, path, bytes.NewReader(content)), "test-tenant")
+			req = req.WithContext(context.WithValue(req.Context(), principalContextKey,
+				&Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}))
+			req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+			rec := httptest.NewRecorder()
+			server.handleUploadInstallerArtifact(rec, req)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.code)
+
+			require.NoError(t, auditMgr.Flush(context.Background()))
+			entries, err := auditMgr.QueryEntries(context.Background(),
+				&business.AuditFilter{Actions: []string{"installer.artifact.uploaded"}})
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, business.AuditResultFailure, entries[0].Result)
+
+			getReq := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/installer/artifacts/linux/amd64", nil), "test-tenant")
+			getReq = withVars(getReq, map[string]string{"platform": "linux", "arch": "amd64"})
+			getRec := httptest.NewRecorder()
+			server.handleGetInstallerArtifact(getRec, getReq)
+			assert.Equal(t, http.StatusNotFound, getRec.Code, "a refused upload must store nothing")
+		})
+	}
+}
+
+// TestHandleUploadInstallerArtifact_SignedUploadRecordsPublisher proves a correctly
+// signed upload is stored, listed with its publisher, and audited as one success
+// whose checksum matches the response.
+func TestHandleUploadInstallerArtifact_SignedUploadRecordsPublisher(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	content := []byte("signed-installer-bytes")
+	req := withTenant(httptest.NewRequest(http.MethodPut,
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", content, "linux", "amd64"),
+		bytes.NewReader(content)), "test-tenant")
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey,
+		&Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}))
+	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+	rec := httptest.NewRecorder()
+	server.handleUploadInstallerArtifact(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var up struct {
+		Data installerUploadResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &up))
+
+	rc, meta, err := store.GetBlob(context.Background(), blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"})
+	require.NoError(t, err)
+	stored, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	_ = rc.Close()
+	assert.Equal(t, content, stored)
+	assert.Equal(t, "cfgms", meta.Labels["publisher"])
+	assert.NotEmpty(t, meta.Labels["signature"])
+	assert.NotEmpty(t, meta.Labels["signature_digest"])
+
+	listReq := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/installer/artifacts", nil), "test-tenant")
+	listRec := httptest.NewRecorder()
+	server.handleListInstallerArtifacts(listRec, listReq)
+	var list struct {
+		Data []installerArtifactInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
+	require.Len(t, list.Data, 1)
+	assert.Equal(t, "cfgms", list.Data[0].Publisher)
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(),
+		&business.AuditFilter{Actions: []string{"installer.artifact.uploaded"}})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
+	assert.Equal(t, entries[0].Details["checksum"], up.Data.Checksum)
 }

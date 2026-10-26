@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -266,4 +267,38 @@ func TestRun_ErrInvalidSignatureMessageIsSentinel(t *testing.T) {
 	_, err := trust.StewardBinaryMessage("hash", "", "windows", "amd64")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, trust.ErrInvalidSignatureMessage))
+}
+
+func TestRun_InstallerMode_SignatureVerifiesAsInstallerOnly(t *testing.T) {
+	t.Setenv(publisherSeedEnv, "")
+	content := []byte("installer-bytes")
+	path := writeBinary(t, content)
+
+	var out bytes.Buffer
+	require.NoError(t, run([]string{"--installer", path, "windows", "amd64"}, &out))
+	sigBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(out.String()))
+	require.NoError(t, err, "installer mode must print only the URL-safe base64 signature")
+
+	priv, err := publisherKey()
+	require.NoError(t, err)
+	store := trust.NewInMemoryTrustStore()
+	require.NoError(t, store.AddPublisher(trust.PublisherIdentity{
+		Name: "cfgms", PublicKey: []byte(priv.Public().(ed25519.PublicKey)), Algorithm: "ed25519",
+	}))
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
+
+	require.NoError(t, trust.VerifyInstallerSignature(hash, "windows", "amd64", sig, store))
+	assert.Error(t, trust.VerifyInstallerSignature(hash, "linux", "amd64", sig, store))
+	assert.Error(t, trust.VerifyStewardBinarySignature(hash, "v1.0.0", "windows", "amd64", sig, store),
+		"an installer signature must not verify as a steward-binary signature")
+}
+
+func TestRun_InstallerMode_Errors(t *testing.T) {
+	var out bytes.Buffer
+	assert.Error(t, run([]string{"--installer", "only-a-file"}, &out))
+	assert.Error(t, run([]string{"--installer", filepath.Join(t.TempDir(), "missing"), "linux", "amd64"}, &out))
+	assert.ErrorIs(t, run([]string{"--installer", writeBinary(t, []byte("x")), "li|nux", "amd64"}, &out),
+		trust.ErrInvalidSignatureMessage)
 }

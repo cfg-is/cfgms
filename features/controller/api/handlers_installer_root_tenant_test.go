@@ -62,7 +62,7 @@ func TestInstallerArtifacts_RootScoped_UsesRootTenant(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64", caller, []byte("root-linux-binary"), "linux", "amd64"))
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", []byte("root-linux-binary"), "linux", "amd64"), caller, []byte("root-linux-binary"), "linux", "amd64"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	err := getInstallerBlob(t, store, blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"})
@@ -99,7 +99,7 @@ func TestInstallerArtifacts_RootScopedClientTenant_RequiresCrossing(t *testing.T
 	upload := func() *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
-			"/api/v1/installer/artifacts/linux/amd64?tenant=msp-sel", caller, []byte("client-binary"), "linux", "amd64"))
+			signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64?tenant=msp-sel", []byte("client-binary"), "linux", "amd64"), caller, []byte("client-binary"), "linux", "amd64"))
 		return rec
 	}
 
@@ -148,7 +148,7 @@ func TestInstallerDownload_ServesRootTenantResolvedByPosition(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64", rootScopedPrincipal("root-operator-inst"), []byte("acme-linux-binary"), "linux", "amd64"))
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", []byte("acme-linux-binary"), "linux", "amd64"), rootScopedPrincipal("root-operator-inst"), []byte("acme-linux-binary"), "linux", "amd64"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	req := withVars(httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil),
