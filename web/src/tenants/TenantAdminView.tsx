@@ -36,6 +36,7 @@
  */
 import { useState, useMemo, useSyncExternalStore } from 'react'
 import { Link } from 'react-router'
+import TenantSettingsPanel from './TenantSettingsPanel.tsx'
 import {
   useTenantList,
   suspendTenant,
@@ -499,6 +500,7 @@ function TenantRow({
   showSupportLink?: boolean
 }) {
   const { tenant, depth, children } = node
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const suspended = isSuspended(tenant)
   const hasPending = !!tenant.pending_deletion
   const del = tenant.pending_deletion
@@ -638,6 +640,15 @@ function TenantRow({
             <button
               type="button"
               className="wf-btn-secondary"
+              aria-expanded={settingsOpen}
+              onClick={() => setSettingsOpen((open) => !open)}
+              data-testid="tenant-settings-toggle"
+            >
+              Settings
+            </button>
+            <button
+              type="button"
+              className="wf-btn-secondary"
               onClick={() => onEdit(tenant)}
               data-testid="edit-btn"
             >
@@ -656,6 +667,14 @@ function TenantRow({
           </div>
         </td>
       </tr>
+
+      {settingsOpen && (
+        <tr data-testid="tenant-settings-row">
+          <td colSpan={4} style={{ paddingTop: 0 }}>
+            <TenantSettingsPanel tenantId={tenant.id} />
+          </td>
+        </tr>
+      )}
 
       {/* Sub-row: hold countdown or eligible detail */}
       {hasPending && del && (

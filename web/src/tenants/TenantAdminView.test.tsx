@@ -1323,3 +1323,35 @@ describe('TenantAdminView — boundary rows', () => {
     expect(screen.getAllByTestId('tenant-row')[1]).toHaveAttribute('data-tenant-id', 'msp-b')
   })
 })
+
+// ── Settings expand (Issue #5444) ─────────────────────────────────────────────
+
+describe('TenantAdminView — settings panel expand', () => {
+  it('expands and collapses the settings panel on a tenant row', async () => {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('-policy')) return Promise.resolve(jsonResponse(200, { data: { mode: 'reject', overrides: [] } }))
+      return Promise.resolve(makeTenantsResponse([makeTenant()]))
+    })
+    renderView()
+    await waitFor(() => screen.getByTestId('tenant-settings-toggle'))
+    expect(screen.queryByTestId('tenant-settings-panel')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('tenant-settings-toggle'))
+    expect(screen.getByTestId('tenant-settings-panel')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Refresh policy' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Assurance policy' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('tenant-settings-toggle'))
+    expect(screen.queryByTestId('tenant-settings-panel')).not.toBeInTheDocument()
+  })
+
+  it('shows no settings toggle on a boundary row', async () => {
+    fetchMock.mockResolvedValue(
+      makeTenantsResponse([makeTenant({ id: 'msp-b', name: 'msp-b', boundary: true, accessible: false })]),
+    )
+    renderView()
+    await waitFor(() => screen.getByTestId('boundary-row'))
+    expect(screen.queryByTestId('tenant-settings-toggle')).not.toBeInTheDocument()
+  })
+})
