@@ -1066,6 +1066,18 @@ POST /api/v1/enrolment-tokens/{id}/revoke
 Requires `enrolment-token:revoke` at `AssuranceStrong`. A token that has already been
 spent cannot be revoked (409) — its one use is already consumed.
 
+To list enrolment tokens for the tenants the caller can see:
+
+```
+GET /api/v1/enrolment-tokens
+cfg credential enrolment-token list
+```
+
+Requires `enrolment-token:list` (no assurance floor — a read surface). Each row carries
+`id`, `token_prefix`, `tenant_id`, `created_at`, `created_by`, `expires_at`, `status`
+(`active`, `spent`, `expired` or `revoked`) and `spent_at`. The token secret is never
+returned; only the short `token_prefix` identifies a token.
+
 ### Lodging a signing request
 
 ```
@@ -1471,6 +1483,7 @@ session token, even if one happens to be active.
 |------------|------------------|-------|
 | `enrolment-token:mint` | `AssuranceStrong` | Mints a single-use, short-lived token |
 | `enrolment-token:revoke` | `AssuranceStrong` | Revokes an unspent token |
+| `enrolment-token:list` | none | Read-only; lists tokens without their secret |
 | `credential-request:list` | none | Read-only; outside the elevated-assurance surface |
 | `credential-request:deny` | none | De-escalation action, mirrors `registration:deny` |
 | `credential-request:approve` | `AssuranceStrong` + presence | Decides the marker set and account binding (Issue #3718); signs nothing |

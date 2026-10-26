@@ -1577,6 +1577,10 @@ type MintEnrolmentTokenResponse struct {
 	ExpiresAt   string  `json:"expires_at"`
 	Revoked     bool    `json:"revoked"`
 	RevokedAt   *string `json:"revoked_at,omitempty"`
+	// CreatedBy, SpentAt and Status are populated on list rows only.
+	CreatedBy string  `json:"created_by,omitempty"`
+	SpentAt   *string `json:"spent_at,omitempty"`
+	Status    string  `json:"status,omitempty"`
 }
 
 // MintEnrolmentToken calls POST /api/v1/enrolment-tokens. The caller must already be
@@ -1608,6 +1612,28 @@ func (c *APIClient) MintEnrolmentToken(ctx context.Context, tenantID string) (*M
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	return &envelope.Data, nil
+}
+
+// ListEnrolmentTokens calls GET /api/v1/enrolment-tokens. Rows never carry the raw
+// token — only the non-secret token_prefix.
+func (c *APIClient) ListEnrolmentTokens(ctx context.Context) ([]MintEnrolmentTokenResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/enrolment-tokens", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data []MintEnrolmentTokenResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return envelope.Data, nil
 }
 
 // RevokeEnrolmentToken calls POST /api/v1/enrolment-tokens/{id}/revoke. The response

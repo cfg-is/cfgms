@@ -618,6 +618,7 @@ submitting and reports the remaining stewards as not submitted.
 | Reconnect by name | `cfg connect <name>` |
 | Reconnect (single connection) | `cfg connect` |
 | Mint an enrolment token (administrator) | `cfg credential enrolment-token mint --tenant-id <id>` |
+| List enrolment tokens (administrator) | `cfg credential enrolment-token list` |
 | Revoke an unspent enrolment token (administrator) | `cfg credential enrolment-token revoke <id>` |
 | Enrol a headless machine (operator, on that machine) | `cfg credential enrol --token <token> --url <url>` |
 | Revoke every credential issued from a token (administrator) | `cfg credential revoke-by-token <token-id>` |
