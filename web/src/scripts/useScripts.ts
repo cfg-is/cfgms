@@ -556,3 +556,37 @@ export function useJobList(): UseJobListResult {
     retry,
   }
 }
+
+// ── setPrivilege (Issue #5447) ────────────────────────────────────────────────
+
+export interface SetPrivilegeBody {
+  required_api_scope: string[]
+  param_platform_bindings: Record<string, string>
+}
+
+/**
+ * PUT /api/v1/scripts/{id}/privilege. script:admin is Strong + presence gated,
+ * so apiFetch runs the passkey tap before the retried request. A 401 that
+ * survives apiFetch means the tap was cancelled or failed: nothing was saved.
+ * Other non-ok responses throw the server's message verbatim.
+ */
+export async function setPrivilege(scriptId: string, body: SetPrivilegeBody): Promise<void> {
+  const response = await apiFetch(`/api/v1/scripts/${encodeURIComponent(scriptId)}/privilege`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (response.ok) return
+  if (response.status === 401) {
+    throw new Error('Passkey confirmation was cancelled or failed — nothing was saved')
+  }
+  const errBody = (await response.json().catch(() => null)) as Record<string, unknown> | null
+  const err = errBody?.error
+  const message =
+    typeof err === 'string'
+      ? err
+      : typeof err === 'object' && err !== null
+        ? str((err as Record<string, unknown>).message)
+        : ''
+  throw new Error(message || `Saving privilege failed — ${response.status}`)
+}

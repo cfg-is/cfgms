@@ -30,6 +30,7 @@ import {
   useRunStatus,
   useRunJobs,
   useJobList,
+  setPrivilege,
   RUN_POLL_INTERVAL,
   RUN_TERMINAL,
 } from './useScripts.ts'
@@ -583,5 +584,43 @@ describe('useJobList', () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.jobs).toHaveLength(1)
     expect(result.current.error).toBeNull()
+  })
+})
+
+// ── setPrivilege (Issue #5447) ───────────────────────────────────────────────
+
+describe('useScripts setPrivilege', () => {
+  it('sends the exact body', async () => {
+    fetchMock.mockResolvedValue(makeSuccessResponse({ script_id: 'script-1' }))
+    await setPrivilege('script-1', {
+      required_api_scope: ['steward:read-dna'],
+      param_platform_bindings: { target: 'linux' },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('/api/v1/scripts/script-1/privilege')
+    expect(init?.method).toBe('PUT')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      required_api_scope: ['steward:read-dna'],
+      param_platform_bindings: { target: 'linux' },
+    })
+  })
+
+  it('url-encodes the script id', async () => {
+    fetchMock.mockResolvedValue(makeSuccessResponse({}))
+    await setPrivilege('a/b', { required_api_scope: [], param_platform_bindings: {} })
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('/api/v1/scripts/a%2Fb/privilege')
+  })
+
+  it('throws the server message verbatim on a non-ok response', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 'INVALID_REQUEST', message: 'bad platform "amiga"' } }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    await expect(
+      setPrivilege('script-1', { required_api_scope: [], param_platform_bindings: { p: 'amiga' } }),
+    ).rejects.toThrow('bad platform "amiga"')
   })
 })
