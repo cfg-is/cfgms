@@ -806,3 +806,183 @@ describe('InstallerPage — page structure', () => {
     ).toBeInTheDocument()
   })
 })
+
+// ── Steward upgrade dispatch and rollback (Issue #5445) ───────────────────────
+
+const jsonRes = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  })
+const envelope = (data: unknown) => ({ data, timestamp: new Date().toISOString() })
+
+const passkeyCredential = {
+  id: 'cred-id',
+  type: 'public-key',
+  rawId: new TextEncoder().encode('cred-id').buffer,
+  response: {
+    clientDataJSON: new TextEncoder().encode('{"type":"webauthn.get"}').buffer,
+    authenticatorData: new TextEncoder().encode('authenticator-data').buffer,
+    signature: new TextEncoder().encode('signature').buffer,
+    userHandle: null,
+  },
+  getClientExtensionResults: () => ({}),
+  authenticatorAttachment: null,
+  toJSON: () => ({}),
+}
+
+function upgradeRecord(status: string, extra: Record<string, unknown> = {}) {
+  return envelope({ ID: 'up-1', StewardID: 's1', Version: '1.2.3', Platform: 'linux', Arch: 'amd64', Status: status, ...extra })
+}
+
+function callsTo(suffix: string, method = 'POST') {
+  return fetchMock.mock.calls.filter(
+    ([url, init]) => String(url).endsWith(suffix) && (init?.method ?? 'GET') === method,
+  )
+}
+
+function installUpgradeRoutes(opts: { presence: boolean; status?: string }) {
+  fetchMock.mockImplementation((input, init) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (url === '/api/v1/installer/artifacts') return Promise.resolve(makeArtifactListResponse([]))
+    if (url.includes('presence/begin')) {
+      return Promise.resolve(
+        jsonRes(200, envelope({
+          publicKey: {
+            challenge: 'Y2hhbGxlbmdl',
+            timeout: 60000,
+            rpId: 'localhost',
+            allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+            userVerification: 'required',
+          },
+        })),
+      )
+    }
+    if (url.includes('presence/finish')) {
+      return Promise.resolve(jsonRes(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 })))
+    }
+    if (url === '/api/v1/stewards/upgrade' && method === 'POST') {
+      const token = new Headers(init?.headers).get('X-Presence-Token')
+      if (opts.presence && token !== 'tap-token-1') {
+        return Promise.resolve(
+          jsonRes(401, { error: 'step_up_required' }, {
+            'WWW-Authenticate':
+              'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="installer:dispatch:steward"',
+          }),
+        )
+      }
+      return Promise.resolve(jsonRes(202, envelope({ upgrade_id: 'up-1', steward_count: 2, status: 'accepted' })))
+    }
+    if (url === '/api/v1/stewards/upgrade/up-1/rollback') {
+      return Promise.resolve(jsonRes(202, envelope({ status: 'accepted' })))
+    }
+    if (url === '/api/v1/stewards/upgrade/up-1') {
+      return Promise.resolve(jsonRes(200, upgradeRecord(opts.status ?? 'dispatched')))
+    }
+    return Promise.resolve(jsonRes(404, {}))
+  })
+}
+
+async function fillAndDispatch() {
+  renderPage()
+  await waitFor(() => expect(screen.getByTestId('upgrade-section')).toBeInTheDocument())
+  fireEvent.change(screen.getByRole('textbox', { name: /upgrade target selector/i }), { target: { value: 'os:linux' } })
+  fireEvent.change(screen.getByTestId('upgrade-version'), { target: { value: '1.2.3' } })
+  fireEvent.change(screen.getByTestId('upgrade-platform'), { target: { value: 'linux' } })
+  fireEvent.change(screen.getByTestId('upgrade-arch'), { target: { value: 'amd64' } })
+  fireEvent.click(screen.getByTestId('upgrade-dispatch-btn'))
+}
+
+describe('InstallerPage upgrade dispatch', () => {
+  it('sends X-Presence-Token after the tap', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(passkeyCredential) } })
+    installUpgradeRoutes({ presence: true })
+    await fillAndDispatch()
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(callsTo('/api/v1/stewards/upgrade')).toHaveLength(1)
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(callsTo('/api/v1/stewards/upgrade')).toHaveLength(2))
+    const retry = callsTo('/api/v1/stewards/upgrade')[1]![1]
+    expect(new Headers(retry?.headers).get('X-Presence-Token')).toBe('tap-token-1')
+    expect(JSON.parse(String(retry?.body))).toEqual({
+      selector: 'os:linux', version: '1.2.3', platform: 'linux', arch: 'amd64',
+    })
+    await waitFor(() => expect(screen.getByTestId('upgrade-id')).toHaveTextContent('up-1'))
+  })
+
+  it('sends no second mutation and says so when the tap is cancelled', async () => {
+    const get = vi.fn()
+    vi.stubGlobal('navigator', { credentials: { get } })
+    installUpgradeRoutes({ presence: true })
+    await fillAndDispatch()
+
+    await waitFor(() => expect(screen.getByTestId('step-up-cancel-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('step-up-cancel-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('upgrade-error')).toHaveTextContent(/cancelled/i))
+    expect(callsTo('/api/v1/stewards/upgrade')).toHaveLength(1)
+    expect(screen.queryByTestId('upgrade-id')).not.toBeInTheDocument()
+  })
+
+  it('shows the upgrade_id and renders the polled status as text', async () => {
+    installUpgradeRoutes({ presence: false, status: 'swapped' })
+    await fillAndDispatch()
+    await waitFor(() => expect(screen.getByTestId('upgrade-status')).toHaveTextContent('swapped'))
+    expect(screen.getByTestId('upgrade-id')).toHaveTextContent('up-1')
+  })
+
+  it('keeps Dispatch disabled until every field is set', async () => {
+    installUpgradeRoutes({ presence: false })
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('upgrade-section')).toBeInTheDocument())
+    expect(screen.getByTestId('upgrade-dispatch-btn')).toBeDisabled()
+  })
+
+  it('shows the server message when dispatch is rejected', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input) === '/api/v1/stewards/upgrade' && init?.method === 'POST') {
+        return Promise.resolve(jsonRes(409, { error: { code: 'X', message: 'upgrade already in progress' } }))
+      }
+      return Promise.resolve(makeArtifactListResponse([]))
+    })
+    await fillAndDispatch()
+    await waitFor(() => expect(screen.getByTestId('upgrade-error')).toHaveTextContent('upgrade already in progress'))
+  })
+})
+
+describe('InstallerPage upgrade rollback', () => {
+  async function dispatched() {
+    installUpgradeRoutes({ presence: false, status: 'committed' })
+    await fillAndDispatch()
+    await waitFor(() => expect(screen.getByTestId('upgrade-id')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('rollback-version'), { target: { value: '1.2.2' } })
+  }
+
+  it('requests no presence tap (exempt route)', async () => {
+    await dispatched()
+    fireEvent.click(screen.getByTestId('rollback-btn'))
+    fireEvent.click(screen.getByTestId('rollback-confirm-btn'))
+
+    await waitFor(() => expect(callsTo('/api/v1/stewards/upgrade/up-1/rollback')).toHaveLength(1))
+    const init = callsTo('/api/v1/stewards/upgrade/up-1/rollback')[0]![1]
+    expect(new Headers(init?.headers).get('X-Presence-Token')).toBeNull()
+    expect(JSON.parse(String(init?.body))).toEqual({ version: '1.2.2' })
+    expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence'))).toBe(false)
+    await waitFor(() => expect(screen.getByTestId('rollback-note')).toBeInTheDocument())
+  })
+
+  it('sends nothing until Confirm, and Cancel abandons it', async () => {
+    await dispatched()
+    fireEvent.click(screen.getByTestId('rollback-btn'))
+    expect(screen.getByTestId('rollback-confirm-row')).toBeInTheDocument()
+    expect(callsTo('/api/v1/stewards/upgrade/up-1/rollback')).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('rollback-cancel-btn'))
+    expect(screen.queryByTestId('rollback-confirm-row')).not.toBeInTheDocument()
+    expect(callsTo('/api/v1/stewards/upgrade/up-1/rollback')).toHaveLength(0)
+  })
+})

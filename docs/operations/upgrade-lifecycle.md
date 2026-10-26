@@ -105,6 +105,23 @@ binary archive directory (configured per-deployment) for files whose
 If `upgrade.pruned` was emitted for that path, the binary is gone — pull
 from your backup or rebuild from source.
 
+## Dispatching and rolling back steward upgrades from the console
+
+Steward upgrades can also be dispatched from the **Installer** page of the web
+console, under *Upgrade stewards*, instead of `POST /api/v1/stewards/upgrade`:
+
+1. Enter a target selector, the version, the platform (`windows`, `darwin`,
+   `linux`) and the architecture (`amd64`, `arm64`), then choose
+   **Dispatch upgrade**. Dispatch needs a fresh passkey tap; cancelling the
+   prompt sends nothing.
+2. The page shows the returned `upgrade_id` and the steward count, and checks
+   `GET /api/v1/stewards/upgrade/{upgrade_id}` every 3 seconds until the status
+   is `committed`, `rolled_back` or `failed`.
+3. To roll back, enter the version to restore and choose **Roll back**, then
+   **Confirm** (the request is sent only on Confirm; **Cancel** abandons it).
+   This calls `POST /api/v1/stewards/upgrade/{upgrade_id}/rollback` and needs no
+   passkey tap.
+
 ## Steward-side upgrade lifecycle
 
 The launcher (`cfgms-steward-launcher`) implements the same upgrade

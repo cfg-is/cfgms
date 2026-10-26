@@ -53,6 +53,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import ErrorCard from '../shell/ErrorCard.tsx'
+import SelectorInput from '../shell/SelectorInput.tsx'
+import { ARCHES as UPGRADE_ARCHES, PLATFORMS as UPGRADE_PLATFORMS, isTerminalUpgradeStatus, useUpgrade } from './useUpgrade.ts'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -440,6 +442,205 @@ function CommandAssembler() {
   )
 }
 
+// ── Steward upgrade (Issue #5445) ─────────────────────────────────────────────
+
+// Dispatch is Strong + a passkey tap (apiFetch runs the ceremony); rollback is
+// Strong only. Nothing is sent by rollback until the inline Confirm is pressed.
+function UpgradeSection() {
+  const { dispatch, record, busy, error, rollbackNote, pollError, startUpgrade, rollback } = useUpgrade()
+  const [selector, setSelector] = useState('')
+  const [version, setVersion] = useState('')
+  const [platform, setPlatform] = useState('')
+  const [arch, setArch] = useState('')
+  const [rollbackVersion, setRollbackVersion] = useState('')
+  const [confirming, setConfirming] = useState(false)
+
+  const canDispatch =
+    !busy && selector.trim() !== '' && version.trim() !== '' && platform !== '' && arch !== ''
+  const status = record?.status ?? dispatch?.status ?? ''
+  const canRollback = !busy && rollbackVersion.trim() !== ''
+
+  async function handleDispatch() {
+    setConfirming(false)
+    await startUpgrade({ selector: selector.trim(), version: version.trim(), platform, arch })
+  }
+
+  async function handleConfirmRollback() {
+    await rollback(rollbackVersion.trim())
+    setConfirming(false)
+  }
+
+  return (
+    <section className="panel" aria-labelledby="upgrade-heading" data-testid="upgrade-section">
+      <h2 id="upgrade-heading">Upgrade stewards</h2>
+      <p className="mut">
+        Send a published steward binary to the stewards a selector matches. You confirm the
+        dispatch with your passkey.
+      </p>
+
+      <div className="assembler-form">
+        <label className="field-label">
+          Target stewards
+          <SelectorInput
+            value={selector}
+            onChange={setSelector}
+            hintId="upgrade-selector-hint"
+            hintTestId="upgrade-selector-hint"
+            placeholder="os:linux tag:canary"
+            ariaLabel="Upgrade target selector"
+            className="wf-input"
+          />
+        </label>
+        <label className="field-label">
+          Version
+          <input
+            type="text"
+            className="wf-input mono2"
+            value={version}
+            onChange={(e) => setVersion(e.target.value)}
+            placeholder="1.2.3"
+            data-testid="upgrade-version"
+          />
+        </label>
+        <label className="field-label">
+          Platform
+          <select
+            className="wf-input"
+            value={platform}
+            onChange={(e) => setPlatform(e.target.value)}
+            data-testid="upgrade-platform"
+          >
+            <option value="">Select platform…</option>
+            {UPGRADE_PLATFORMS.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          Architecture
+          <select
+            className="wf-input"
+            value={arch}
+            onChange={(e) => setArch(e.target.value)}
+            data-testid="upgrade-arch"
+          >
+            <option value="">Select arch…</option>
+            {UPGRADE_ARCHES.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+        </label>
+        <div>
+          <button
+            type="button"
+            className="wf-btn-sm"
+            disabled={!canDispatch}
+            onClick={() => void handleDispatch()}
+            data-testid="upgrade-dispatch-btn"
+          >
+            Dispatch upgrade
+          </button>
+        </div>
+      </div>
+
+      {error !== null && (
+        <span className="wf-form-error" role="alert" data-testid="upgrade-error">
+          {error}
+        </span>
+      )}
+
+      {dispatch !== null && (
+        <>
+          <table className="tbl" data-testid="upgrade-status-table">
+            <thead>
+              <tr>
+                <th>Upgrade ID</th>
+                <th>Stewards</th>
+                <th>Status</th>
+                <th className="c-spacer" aria-hidden="true" />
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span className="mono2" data-testid="upgrade-id">{dispatch.upgradeId}</span></td>
+                <td><span className="mut">{dispatch.stewardCount}</span></td>
+                <td><span className="nm" data-testid="upgrade-status">{status}</span></td>
+                <td className="c-spacer" />
+              </tr>
+            </tbody>
+          </table>
+          {record !== null && record.errorMessage !== '' && (
+            <p className="mut" data-testid="upgrade-record-error">{record.errorMessage}</p>
+          )}
+          {pollError !== null && (
+            <p className="mut" role="status" data-testid="upgrade-poll-error">{pollError}</p>
+          )}
+          {record !== null && !isTerminalUpgradeStatus(record.status) && (
+            <p className="mut" data-testid="upgrade-polling">Checking status every 3 seconds…</p>
+          )}
+
+          <div className="assembler-form">
+            <label className="field-label">
+              Roll back to version
+              <input
+                type="text"
+                className="wf-input mono2"
+                value={rollbackVersion}
+                onChange={(e) => {
+                  setRollbackVersion(e.target.value)
+                  setConfirming(false)
+                }}
+                placeholder="1.2.2"
+                data-testid="rollback-version"
+              />
+            </label>
+            <div>
+              {confirming ? (
+                <span data-testid="rollback-confirm-row">
+                  <span className="mut">
+                    Roll back to <span className="mono2">{rollbackVersion.trim()}</span>?{' '}
+                  </span>
+                  <button
+                    type="button"
+                    className="wf-btn-sm"
+                    disabled={busy}
+                    onClick={() => void handleConfirmRollback()}
+                    data-testid="rollback-confirm-btn"
+                  >
+                    Confirm
+                  </button>{' '}
+                  <button
+                    type="button"
+                    className="wf-btn-sm"
+                    disabled={busy}
+                    onClick={() => setConfirming(false)}
+                    data-testid="rollback-cancel-btn"
+                  >
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="wf-btn-sm"
+                  disabled={!canRollback}
+                  onClick={() => setConfirming(true)}
+                  data-testid="rollback-btn"
+                >
+                  Roll back
+                </button>
+              )}
+            </div>
+          </div>
+          {rollbackNote !== null && (
+            <p className="mut" role="status" data-testid="rollback-note">{rollbackNote}</p>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function InstallerPage() {
@@ -508,6 +709,8 @@ export default function InstallerPage() {
         </section>
 
         <CommandAssembler />
+
+        <UpgradeSection />
       </div>
     </>
   )
