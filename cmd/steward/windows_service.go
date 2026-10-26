@@ -7,12 +7,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/spf13/pflag"
 	"golang.org/x/sys/windows/svc"
+
+	"github.com/cfgis/cfgms/cmd/steward/service"
 )
 
 // checkAndRunAsWindowsService detects whether the process was launched by the
@@ -30,6 +33,20 @@ func checkAndRunAsWindowsService() bool {
 		fmt.Fprintf(os.Stderr, "Windows service run failed: %v\n", err)
 	}
 	return true
+}
+
+// serviceRegToken returns the registration token from the service arguments:
+// the --regtoken value, or the content of the --regtoken-file file read with
+// service.ReadTokenFile, which refuses a file that SYSTEM and Administrators do
+// not exclusively control. Giving both flags is an error.
+func serviceRegToken(regToken, regTokenFile string) (string, error) {
+	if regToken != "" && regTokenFile != "" {
+		return "", errors.New("--regtoken and --regtoken-file cannot be used together")
+	}
+	if regTokenFile == "" {
+		return regToken, nil
+	}
+	return service.ReadTokenFile(regTokenFile)
 }
 
 // winServiceName must match the name registered in service/manager_windows.go.
@@ -58,6 +75,7 @@ func (h *stewardServiceHandler) Execute(
 	// --regtoken, --controller-url etc. that were stored in the service definition.
 	flags := pflag.NewFlagSet("steward-service", pflag.ContinueOnError)
 	regToken := flags.String("regtoken", "", "registration token")
+	regTokenFile := flags.String("regtoken-file", "", "path to a file holding the registration token")
 	controllerURL := flags.String("controller-url", "", "controller URL")
 	configPath := flags.String("config", "", "config path")
 	// Ignore unknown flags (e.g. subcommand names) so the service can start even
@@ -65,12 +83,20 @@ func (h *stewardServiceHandler) Execute(
 	flags.ParseErrorsAllowlist.UnknownFlags = true
 	_ = flags.Parse(os.Args[1:])
 
+	token, err := serviceRegToken(*regToken, *regTokenFile)
+	if err != nil {
+		// The error names the file, never the token. A non-zero exit lets the
+		// SCM apply recovery actions.
+		fmt.Fprintf(os.Stderr, "steward service start failed: %v\n", err)
+		return true, 1
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runSteward(ctx, *regToken, *controllerURL, *configPath)
+		errCh <- runSteward(ctx, token, *controllerURL, *configPath)
 	}()
 
 	status <- svc.Status{

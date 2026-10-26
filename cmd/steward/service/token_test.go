@@ -72,5 +72,7 @@ func TestCommandLineHasRegToken(t *testing.T) {
 	assert.False(t, commandLineHasRegToken(`run --child-args "--controller-url https://c"`))
 	assert.False(t, commandLineHasRegToken(`run --child-args "--regtoken "`))
 	assert.False(t, commandLineHasRegToken(`run --child-args "--regtoken --controller-url x"`))
+	assert.True(t, commandLineHasRegToken(`run --child-args "--regtoken-file C:\\cfgms\\registration-token"`))
+	assert.False(t, commandLineHasRegToken(`run --child-args "--regtoken-file --controller-url x"`))
 	assert.False(t, commandLineHasRegToken(""))
 }

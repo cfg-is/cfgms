@@ -101,10 +101,7 @@ func TestPublicBetaSecurityProfileCannotBeDowngraded(t *testing.T) {
 }
 
 func TestInstallCommandEnforcesRequiredRegtoken(t *testing.T) {
-	// Verify cobra's MarkFlagRequired("regtoken") rejects the install subcommand
-	// when --regtoken is absent. This is the cobra-level guard that supersedes
-	// any manual empty-token check in runInstall — runInstall is never reached
-	// without a non-empty token value.
+	// install without either token flag is refused before any privileged work.
 	root := buildRootCommand()
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
@@ -114,11 +111,33 @@ func TestInstallCommandEnforcesRequiredRegtoken(t *testing.T) {
 	assert.Contains(t, err.Error(), "regtoken")
 }
 
+// TestInstallCommandRegtokenFile asserts install accepts --regtoken-file without
+// --regtoken (it gets past flag validation and fails only on the missing file),
+// and that giving both flags is an error.
+func TestInstallCommandRegtokenFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-token")
+
+	err := runInstall("", missing, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no-ca.crt", "--regtoken-file alone must pass flag validation")
+	assert.NotContains(t, err.Error(), "is required")
+	assert.NotContains(t, err.Error(), "cannot be used together")
+
+	root := buildRootCommand()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"install", "--regtoken", "tok_secret_abc", "--regtoken-file", missing})
+	err = root.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be used together")
+	assert.NotContains(t, err.Error(), "tok_secret_abc")
+}
+
 func TestRunInstallRequiresElevation(t *testing.T) {
 	if isElevated() {
 		t.Skip("test requires non-elevated process — running as root")
 	}
-	err := runInstall("tok_test_abc123", "", "", "")
+	err := runInstall("tok_test_abc123", "", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "elevated privileges")
 }
@@ -127,13 +146,13 @@ func TestRunInstallCACertFileNotFound(t *testing.T) {
 	// Verify runInstall returns an error that includes the filename when --controller-ca
 	// names a path that does not exist.
 	missing := filepath.Join(t.TempDir(), "nonexistent-ca.crt")
-	err := runInstall("tok_test_abc123", "", missing, "")
+	err := runInstall("tok_test_abc123", "", "", missing, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nonexistent-ca.crt")
 }
 
 // TestInstallCommandFlagSurface asserts the install subcommand's flag set is
-// exactly {--regtoken, --controller-url, --controller-ca, --fingerprint}.
+// exactly {--regtoken, --regtoken-file, --controller-url, --controller-ca, --fingerprint}.
 // All Hyper-V-specific flags were removed in Issue #1894; no role-specific
 // flags belong on the install command. --ca-cert was renamed to --controller-ca
 // (ADR-013 §3, Issue #1517).
@@ -143,6 +162,7 @@ func TestInstallCommandFlagSurface(t *testing.T) {
 
 	expected := map[string]bool{
 		"regtoken":       true,
+		"regtoken-file":  true,
 		"controller-url": true,
 		"controller-ca":  true,
 		"fingerprint":    true,
@@ -155,14 +175,14 @@ func TestInstallCommandFlagSurface(t *testing.T) {
 
 	for _, name := range flagNames {
 		assert.True(t, expected[name],
-			"unexpected flag %q on install subcommand — install accepts only --regtoken, --controller-url, --controller-ca, --fingerprint", name)
+			"unexpected flag %q on install subcommand — install accepts only --regtoken, --regtoken-file, --controller-url, --controller-ca, --fingerprint", name)
 	}
 	for name := range expected {
 		assert.NotNil(t, cmd.Flags().Lookup(name),
 			"required flag %q must be registered on install subcommand", name)
 	}
 	assert.Len(t, flagNames, len(expected),
-		"install command must have exactly %d flags: --regtoken, --controller-url, --controller-ca, --fingerprint", len(expected))
+		"install command must have exactly %d flags: --regtoken, --regtoken-file, --controller-url, --controller-ca, --fingerprint", len(expected))
 }
 
 func TestRunUninstallRequiresElevation(t *testing.T) {
@@ -1801,7 +1821,7 @@ func runRootWithSeam(t *testing.T, args ...string) (gotToken string, started boo
 
 func TestRegTokenFileStartsStewardWithToken(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("--regtoken-file is not available on Windows yet")
+		t.Skip("a Windows token file must carry an admin-only DACL rather than mode 0600; covered by TestRegTokenFile_WindowsAdminOnlyFile")
 	}
 	path := filepath.Join(t.TempDir(), "registration-token")
 	require.NoError(t, os.WriteFile(path, []byte("tok_from_file_123\n"), 0o600))
@@ -1824,13 +1844,10 @@ func TestRegTokenAndRegTokenFileTogetherIsError(t *testing.T) {
 }
 
 func TestRegTokenFileUnreadableIsErrorWithoutToken(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission semantics differ on Windows; the flag is rejected there")
-	}
 	dir := t.TempDir()
 	wide := filepath.Join(dir, "wide")
 	require.NoError(t, os.WriteFile(wide, []byte("tok_secret_789\n"), 0o600))
-	require.NoError(t, os.Chmod(wide, 0o644))
+	makeReadableByOthers(t, wide)
 
 	for _, path := range []string{wide, filepath.Join(dir, "missing")} {
 		_, started, err := runRootWithSeam(t, "--regtoken-file", path)
