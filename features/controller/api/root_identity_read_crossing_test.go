@@ -476,6 +476,8 @@ func TestRootIdentityReads_CredentialRequestLists(t *testing.T) {
 	lodgeTestCredentialRequest(t, server, identityMSP)
 	collectThenOrphan(t, server, testRootTenantID, "orphan-root-owner", ApproveCredentialRequestBody{})
 	collectThenOrphan(t, server, identityMSP, "orphan-msp-owner", ApproveCredentialRequestBody{})
+	mintTestEnrolmentToken(t, server, testRootTenantID)
+	mintTestEnrolmentToken(t, server, identityMSP)
 
 	tenantsOf := func(t *testing.T, h http.HandlerFunc, caller func(*http.Request, map[string]string) *http.Request, pick func(*testing.T, *httptest.ResponseRecorder) []string) []string {
 		return pick(t, identityServe(h, http.MethodGet, "/", caller, nil))
@@ -487,10 +489,15 @@ func TestRootIdentityReads_CredentialRequestLists(t *testing.T) {
 		return identityDataList(t, rec, func(r OrphanedCredentialInfo) string { return r.TenantID })
 	}
 
+	tokens := func(t *testing.T, rec *httptest.ResponseRecorder) []string {
+		return identityDataList(t, rec, func(r EnrolmentTokenResponse) string { return r.TenantID })
+	}
+
 	for name, route := range map[string]struct {
 		h    http.HandlerFunc
 		pick func(*testing.T, *httptest.ResponseRecorder) []string
 	}{
+		"GET /api/v1/enrolment-tokens":             {server.handleListEnrolmentTokens, tokens},
 		"GET /api/v1/credential-requests":          {server.handleListCredentialRequests, pending},
 		"GET /api/v1/credential-requests/orphaned": {server.handleListOrphanedCredentials, orphaned},
 	} {

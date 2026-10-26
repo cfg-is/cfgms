@@ -265,6 +265,7 @@ var knownPermissions = map[string]bool{
 	// registration:list-pending / registration:deny.
 	"enrolment-token:mint":    true,
 	"enrolment-token:revoke":  true,
+	"enrolment-token:list":    true, // read; intentionally absent from permissionAssurance (Issue #5442)
 	"credential-request:list": true,
 	"credential-request:deny": true,
 

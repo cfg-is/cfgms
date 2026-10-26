@@ -776,6 +776,71 @@ func (s *Server) handleListCredentialRequests(w http.ResponseWriter, r *http.Req
 	s.writeSuccessResponse(w, result)
 }
 
+// enrolmentTokenStatus derives the operator-facing lifecycle state of a token at now;
+// first match wins: revoked, spent, expired, else active.
+func enrolmentTokenStatus(tok *enrolmentToken, now time.Time) string {
+	switch {
+	case tok.Revoked:
+		return enrolmentTokenStatusRevoked
+	case tok.SpentAt != nil:
+		return enrolmentTokenStatusSpent
+	case now.After(tok.ExpiresAt):
+		return enrolmentTokenStatusExpired
+	default:
+		return enrolmentTokenStatusActive
+	}
+}
+
+// handleListEnrolmentTokens handles GET /api/v1/enrolment-tokens. Lists enrolment
+// tokens scoped to the caller's tenant subtree. Rows are always redacted: only the
+// non-secret token_prefix is exposed, never the raw token or its hash.
+func (s *Server) handleListEnrolmentTokens(w http.ResponseWriter, r *http.Request) {
+	if s.secretStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+	callerTenant := s.callerTenantID(r)
+	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
+		Tags: []string{"enrolment_token"},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: enrolmentTokenSecretType,
+		},
+		IncludeExpired: true,
+	})
+	if err != nil {
+		s.logger.Error("Failed to list enrolment tokens", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list enrolment tokens", "STORE_ERROR")
+		return
+	}
+
+	subtree := s.tenantSubtreeIDs(r.Context(), callerTenant)
+	readScope := s.tenantReadScope(r, "GET /api/v1/enrolment-tokens")
+	defer readScope.LogSummary()
+
+	now := time.Now()
+	result := make([]EnrolmentTokenResponse, 0, len(metas))
+	for _, m := range metas {
+		if readScope.Skips(m.TenantID) {
+			continue
+		}
+		if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped subtree filter; a boundary-subject root caller is decided by readScope above
+			if !subtree.Contains(m.TenantID) {
+				continue
+			}
+		}
+		tok := enrolmentTokenFromMetadata(m)
+		row := enrolmentTokenToResponseRedacted(tok)
+		row.CreatedBy = tok.CreatedBy
+		row.Status = enrolmentTokenStatus(tok, now)
+		if tok.SpentAt != nil {
+			sp := tok.SpentAt.UTC().Format(time.RFC3339)
+			row.SpentAt = &sp
+		}
+		result = append(result, row)
+	}
+	s.writeSuccessResponse(w, result)
+}
+
 // handleDenyCredentialRequest handles POST /api/v1/credential-requests/{id}/deny.
 // Marks a pending request denied so it can never later be approved or collected —
 // a terminal transition (Issue #3717 AC).

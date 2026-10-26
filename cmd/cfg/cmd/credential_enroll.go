@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -113,6 +114,17 @@ enrolment-token:mint permission.`,
 	RunE: runCredentialEnrolmentTokenMint,
 }
 
+// credentialEnrolmentTokenListCmd implements cfg credential enrolment-token list.
+var credentialEnrolmentTokenListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List enrolment tokens for the tenants you can see",
+	Long: `Lists enrolment tokens with their status (active, spent, expired or revoked).
+The token secret is never shown — only its short prefix. Requires the
+enrolment-token:list permission.`,
+	Args: cobra.NoArgs,
+	RunE: runCredentialEnrolmentTokenList,
+}
+
 // credentialEnrolmentTokenRevokeCmd implements cfg credential enrolment-token revoke.
 var credentialEnrolmentTokenRevokeCmd = &cobra.Command{
 	Use:   "revoke <id>",
@@ -157,6 +169,7 @@ func init() {
 
 	credentialEnrolmentTokenCmd.AddCommand(credentialEnrolmentTokenMintCmd)
 	credentialEnrolmentTokenCmd.AddCommand(credentialEnrolmentTokenRevokeCmd)
+	credentialEnrolmentTokenCmd.AddCommand(credentialEnrolmentTokenListCmd)
 	credentialCmd.AddCommand(credentialEnrolmentTokenCmd)
 
 	credentialEnrolCmd.Flags().StringVar(&credentialEnrolToken, "token", "", "Enrolment token minted by an administrator (env: CFGMS_ENROLMENT_TOKEN)")
@@ -210,6 +223,38 @@ func runCredentialEnrolmentTokenMint(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(out, "Hand this value to the enrolling machine out of band, then run there:")
 	_, _ = fmt.Fprintln(out, "  cfg credential enrol --token <token> --url <controller-url>")
 	return nil
+}
+
+func runCredentialEnrolmentTokenList(cmd *cobra.Command, _ []string) error {
+	client, err := resolveCredentialManagementClient(credentialEnrolmentTokenAPIURL, credentialEnrolmentTokenTLSInsecure, credentialEnrolmentTokenServerName)
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	rows, err := client.ListEnrolmentTokens(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list enrolment tokens: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+	if len(rows) == 0 {
+		_, _ = fmt.Fprintln(out, "No enrolment tokens found")
+		return nil
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "ID\tPREFIX\tTENANT\tSTATUS\tCREATED BY\tCREATED\tEXPIRES\tSPENT")
+	for _, r := range rows {
+		spent := "-"
+		if r.SpentAt != nil {
+			spent = logging.SanitizeLogValue(*r.SpentAt)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			logging.SanitizeLogValue(r.ID), logging.SanitizeLogValue(r.TokenPrefix),
+			logging.SanitizeLogValue(r.TenantID), logging.SanitizeLogValue(r.Status),
+			logging.SanitizeLogValue(r.CreatedBy), logging.SanitizeLogValue(r.CreatedAt),
+			logging.SanitizeLogValue(r.ExpiresAt), spent)
+	}
+	return tw.Flush()
 }
 
 func runCredentialEnrolmentTokenRevoke(cmd *cobra.Command, args []string) error {

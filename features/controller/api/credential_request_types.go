@@ -254,7 +254,20 @@ type EnrolmentTokenResponse struct {
 	ExpiresAt   string  `json:"expires_at"`
 	Revoked     bool    `json:"revoked"`
 	RevokedAt   *string `json:"revoked_at,omitempty"`
+	// CreatedBy, SpentAt and Status are populated on list rows (Issue #5442); the
+	// mint and revoke responses leave them empty.
+	CreatedBy string  `json:"created_by,omitempty"`
+	SpentAt   *string `json:"spent_at,omitempty"`
+	Status    string  `json:"status,omitempty"`
 }
+
+// Enrolment token list statuses (Issue #5442), derived at read time.
+const (
+	enrolmentTokenStatusRevoked = "revoked"
+	enrolmentTokenStatusSpent   = "spent"
+	enrolmentTokenStatusExpired = "expired"
+	enrolmentTokenStatusActive  = "active"
+)
 
 // LodgeCredentialRequestBody is the POST .../credential-requests/lodge body. Every
 // field besides CSRPEM is display-only untrusted text (Issue #3717 implementation

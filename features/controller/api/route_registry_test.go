@@ -144,6 +144,7 @@ var goldenRouteTable = []string{
 	"GET /api/v1/configs/{id}/deployments",
 	"GET /api/v1/credential-requests",
 	"GET /api/v1/credential-requests/orphaned",
+	"GET /api/v1/enrolment-tokens",
 	"GET /api/v1/entities",
 	"GET /api/v1/entities/drifted",
 	"GET /api/v1/entities/timeline",

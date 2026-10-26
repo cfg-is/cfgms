@@ -106,6 +106,36 @@ func TestCredentialEnrolmentTokenMint_RequiresTenantID(t *testing.T) {
 	assert.Contains(t, err.Error(), "--tenant-id")
 }
 
+func TestCredentialEnrolmentTokenListCommand(t *testing.T) {
+	var capturedMethod, capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod, capturedPath = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"id": "et-1", "token_prefix": "abc123", "tenant_id": "root/msp-a", "status": "active",
+					"created_by": "admin-1", "created_at": "2026-01-01T00:00:00Z", "expires_at": "2026-01-01T01:00:00Z"},
+				{"id": "et-2", "token_prefix": "def456", "tenant_id": "root/msp-b", "status": "spent",
+					"created_by": "admin-2", "created_at": "2026-01-01T00:00:00Z", "expires_at": "2026-01-01T01:00:00Z",
+					"spent_at": "2026-01-01T00:30:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	setCredentialEnrolmentTokenFlags(t, srv.URL)
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runCredentialEnrolmentTokenList(credentialEnrolmentTokenListCmd, nil))
+	})
+	assert.Equal(t, "GET", capturedMethod)
+	assert.Equal(t, "/api/v1/enrolment-tokens", capturedPath)
+	for _, want := range []string{"et-1", "abc123", "root/msp-a", "active", "admin-1", "et-2", "spent", "2026-01-01T00:30:00Z"} {
+		assert.Contains(t, out, want)
+	}
+}
+
 func TestCredentialEnrolmentTokenRevoke_HappyPath(t *testing.T) {
 	var capturedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

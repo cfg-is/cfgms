@@ -31,6 +31,9 @@ func registerCredentialRequestRoutes(s *Server, api *mux.Router) {
 	)
 	tokens := api.PathPrefix("/enrolment-tokens").Subrouter()
 	tokens.Handle("", mintHandler).Methods("POST")
+	tokens.Handle("",
+		s.requirePermission("enrolment-token", "list")(http.HandlerFunc(s.handleListEnrolmentTokens)),
+	).Methods("GET")
 	tokens.Handle("/{id}/revoke",
 		s.requirePermission("enrolment-token", "revoke")(http.HandlerFunc(s.handleRevokeEnrolmentToken)),
 	).Methods("POST")
