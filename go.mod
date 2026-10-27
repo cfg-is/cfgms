@@ -13,11 +13,11 @@ require (
 	github.com/aws/smithy-go v1.28.5
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
-	github.com/go-git/go-billy/v5 v5.9.2
+	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/go-ole/go-ole v1.3.0
 	github.com/go-webauthn/webauthn v0.18.2
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.3.13-0.20230620182252-4639ecce2aba
