@@ -4210,6 +4210,8 @@ The label is trimmed, control characters are removed and it is truncated to 64 c
 
 Bind an mTLS admin certificate to the account by serial number. The serial is the binding and lookup key — it matches what `extractAdminPrincipal` already checks via `certManager.IsRevoked(serial)` on every mTLS admin request.
 
+The Accounts page lists an account's certificate bindings and binds, revokes and rotates them (revoke and rotate ask for an inline confirm first).
+
 **Authentication:** Required  
 **Required permission:** `cert-binding:bind`  
 **Assurance:** Strong session required

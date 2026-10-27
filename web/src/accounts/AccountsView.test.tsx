@@ -1535,3 +1535,136 @@ describe('AccountsView — role chips on the collapsed row (Issue #4602)', () =>
     expect(screen.queryByTestId('account-no-roles')).not.toBeInTheDocument()
   })
 })
+
+// ── Certificate bindings in the expand panel (Issue #5448) ────────────────────
+
+describe('AccountsView — certificate bindings (Issue #5448)', () => {
+  const OPTIONS = {
+    publicKey: {
+      challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+      timeout: 60000,
+      rpId: 'localhost',
+      allowCredentials: [{ type: 'public-key', id: 'Y3JlZGVudGlhbC1pZA', transports: ['internal'] }],
+      userVerification: 'required',
+    },
+  }
+
+  function credential() {
+    const buf = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+    return {
+      id: 'cred-id-b64u',
+      type: 'public-key',
+      rawId: buf('cred-id-b64u'),
+      response: {
+        clientDataJSON: buf('{"type":"webauthn.get"}'),
+        authenticatorData: buf('authenticator-data'),
+        signature: buf('signature'),
+        userHandle: null,
+      },
+      getClientExtensionResults: () => ({}),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    }
+  }
+
+  function json(status: number, body: unknown = {}) {
+    return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
+  }
+
+  function stubNetwork(bindings: object[], elevate: boolean) {
+    const challenged = new Set<string>()
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (u.includes('elevate/begin')) return json(200, { data: OPTIONS })
+      if (u.includes('elevate/finish')) return json(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' })
+      if (u.includes('/certs')) {
+        if (method === 'GET') return json(200, { data: bindings })
+        if (elevate && !challenged.has(u)) {
+          challenged.add(u)
+          return Promise.resolve(
+            new Response('', { status: 401, headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' } }),
+          )
+        }
+        return json(200, {})
+      }
+      if (u.includes('/rbac/roles')) return json(200, { data: [] })
+      if (u.includes('/rbac/')) return json(200, { data: [] })
+      return json(200, { data: [makeAccount({ username: 'alice' })] })
+    })
+  }
+
+  async function expand() {
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('cert-bindings-section')).toBeInTheDocument())
+  }
+
+  function certWrites() {
+    return fetchMock.mock.calls.filter(
+      ([u, init]) => String(u).includes('/certs') && (init?.method ?? 'GET').toUpperCase() === 'POST',
+    )
+  }
+
+  async function elevate() {
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+    })
+  }
+
+  function expectNoPresenceToken() {
+    const retried = certWrites()
+    expect(retried.length).toBeGreaterThanOrEqual(2)
+    for (const [, init] of retried) {
+      expect(new Headers(init?.headers).get('X-Presence-Token')).toBeNull()
+    }
+  }
+
+  it('[REQUIRED TEST] AccountsView cert bind, revoke and rotate handle elevation 401 without a presence token', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential()) } })
+    stubNetwork([{ serial: '3a:2f', fingerprint: 'sha256:abc', bound_at: '2026-01-01T00:00:00Z' }], true)
+    await expand()
+    await waitFor(() => screen.getByTestId('cert-revoke-btn'))
+
+    // bind
+    fireEvent.change(screen.getByTestId('cert-bind-serial-input'), { target: { value: 's9' } })
+    fireEvent.change(screen.getByTestId('cert-bind-fingerprint-input'), { target: { value: 'f9' } })
+    fireEvent.click(screen.getByTestId('cert-bind-btn'))
+    await elevate()
+    await waitFor(() => expect(certWrites()).toHaveLength(2))
+    expectNoPresenceToken()
+
+    // revoke
+    fireEvent.click(screen.getByTestId('cert-revoke-btn'))
+    fireEvent.click(screen.getByTestId('cert-confirm-btn'))
+    await elevate()
+    await waitFor(() => expect(certWrites()).toHaveLength(4))
+    expect(screen.queryByTestId('cert-action-error')).not.toBeInTheDocument()
+
+    // rotate
+    await waitFor(() => screen.getByTestId('cert-rotate-btn'))
+    fireEvent.click(screen.getByTestId('cert-rotate-btn'))
+    fireEvent.change(screen.getByTestId('cert-rotate-serial-input'), { target: { value: 'new-1' } })
+    fireEvent.click(screen.getByTestId('cert-confirm-btn'))
+    await elevate()
+    await waitFor(() => expect(certWrites()).toHaveLength(6))
+    for (const [, init] of certWrites()) {
+      expect(new Headers(init?.headers).get('X-Presence-Token')).toBeNull()
+    }
+    expect(screen.queryByTestId('cert-action-error')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED TEST] AccountsView cert label renders as text', async () => {
+    stubNetwork(
+      [{ serial: 's1', fingerprint: 'f1', bound_at: '2026-01-01T00:00:00Z', label: '<img src=x onerror=alert(1)><b>hi</b>' }],
+      false,
+    )
+    await expand()
+    await waitFor(() => screen.getByTestId('cert-label'))
+    const label = screen.getByTestId('cert-label')
+    expect(label).toHaveTextContent('<img src=x onerror=alert(1)><b>hi</b>')
+    expect(label.querySelector('img, b')).toBeNull()
+  })
+})
