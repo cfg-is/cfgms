@@ -118,13 +118,6 @@ packages:
       cannot see them as test-support importers. It must never be reachable
       from a main package: it creates local accounts.
 
-  # --- Out of scope for Issue #4345: module-kind work with its own wiring ---
-  # --- story (M365 / Active Directory), excluded per #4345's Out of Scope ---
-  # --- section to avoid double-covering the same packages. Reasons below ----
-  # --- are unchanged from Issue #4317's original baseline entries. ----------
-  - path: pkg/directory/providers/network_activedirectory
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-
   # --- WIRE (Issue #4345): real, tested implementations missing only a ------
   # --- caller/registration point. Follow-up issues drafted in the #4345 -----
   # --- classification comment, pending PO creation. Wiring or deleting any --

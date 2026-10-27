@@ -120,8 +120,6 @@ Modules are organized by execution environment and category:
   - hyperv/ - Hyper-V VM, vswitch, and read-only failover-cluster management on the host's own steward via the in-host PowerShell host (psHostTransport)
 
 ### **Outpost Modules** (Network Resource Management)
-- **Network Directory Modules**: Remote directory management
-  - network_activedirectory/ - Remote AD management via LDAP
 - **Network Infrastructure Modules**: Remote system management
   - ssh_file/ - Remote file management via SSH
   - rest_api/ - Generic REST API management

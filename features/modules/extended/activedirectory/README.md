@@ -264,7 +264,6 @@ logging:
 
 ## Related Modules
 
-- **network_activedirectory** - Network-based AD provider for outpost components
 - **directory** - Generic directory operations and provider abstraction
 - **entra_user** - Azure AD/Entra ID user management
 - **conditional_access** - Azure AD conditional access policies
