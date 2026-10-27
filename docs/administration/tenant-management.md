@@ -117,3 +117,7 @@ A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connec
 - **Output.** `--json` prints the response data as received.
 - **Permissions.** `set`, `delete`, `gdap-customers` and `gdap-link` need `tenant:manage`; `get` needs `tenant:read`. A root-scoped operator needs an active crossing into the MSP.
 - **Audit.** Each write emits one event per affected client tenant: `m365.connection.set`, `m365.connection.delete` or `m365.gdap.link`.
+
+## Reboot window
+
+The tenant settings panel has a **Reboot window** section beside the `cfg` reboot-window commands. It edits the tenant's declared schedule as YAML text (the same text the API takes) and the tenant default timezone. It shows the status the controller returns (`scheduled` or `unrestricted`) and the next occurrence. A schedule the controller rejects shows the controller's validation message verbatim under the editor and saves nothing. Saving needs `reboot_window:override` and asks for no passkey tap.

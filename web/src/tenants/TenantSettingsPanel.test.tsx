@@ -564,3 +564,28 @@ describe('TenantSettingsPanel m365', () => {
     expect(screen.getByTestId('gdap-secret-input')).toHaveValue('')
   })
 })
+
+describe('TenantSettingsPanel reboot window sends timezone only on tenant save [REQUIRED]', () => {
+  it('PUTs schedule_yaml and tenant_default_timezone with no step-up', async () => {
+    const RW = '/api/v1/tenants/root/msp-a/reboot-window'
+    const window = { tenant_id: 'root/msp-a', status: 'scheduled', next_occurrence_display: 'Sun 02:00 UTC' }
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === RW && init?.method === 'PUT') return Promise.resolve(json(200, envelope(window)))
+      if (url === RW) return Promise.resolve(json(200, envelope({ tenant_id: 'root/msp-a', status: 'unrestricted' })))
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByTestId('reboot-window-status')).toHaveTextContent('unrestricted'))
+    fireEvent.change(screen.getByTestId('reboot-window-timezone'), { target: { value: 'UTC' } })
+    fireEvent.change(screen.getByTestId('reboot-window-yaml'), { target: { value: 'days: [sun]' } })
+    fireEvent.click(screen.getByTestId('reboot-window-save-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('reboot-window-next')).toHaveTextContent('Sun 02:00 UTC'))
+    const puts = putsTo(RW)
+    expect(puts).toHaveLength(1)
+    expect(JSON.parse(String(puts[0]![1]?.body))).toEqual({ schedule_yaml: 'days: [sun]', tenant_default_timezone: 'UTC' })
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/webauthn/presence/begin'))).toBe(false)
+  })
+})
