@@ -29,6 +29,7 @@
  *   /tenants         → AppShell layout → TenantAdminView
  *   /support-access  → AppShell layout → SupportAccessView
  *   /installer       → AppShell layout → InstallerPage
+ *   /api-keys        → AppShell layout → ApiKeysView (Issue #5441)
  *   /cases           → AppShell layout → CaseListView (Story #3614)
  *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
  *
@@ -82,6 +83,7 @@ import MonitoringView from './monitoring/MonitoringView.tsx'
 import TenantAdminView from './tenants/TenantAdminView.tsx'
 import SupportAccessView from './tenants/SupportAccessView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
+import ApiKeysView from './apikeys/ApiKeysView.tsx'
 import CockpitView from './cockpit/CockpitView.tsx'
 import CaseListView from './cockpit/CaseListView.tsx'
 
@@ -128,6 +130,7 @@ function App() {
                   <Route path="tenants" element={<TenantAdminView />} />
                   <Route path="support-access" element={<SupportAccessView />} />
                   <Route path="installer" element={<InstallerPage />} />
+                  <Route path="api-keys" element={<ApiKeysView />} />
                   <Route path="cases" element={<CaseListView />} />
                   <Route path="cases/:id" element={<CockpitView />} />
                 </Route>

@@ -1548,6 +1548,8 @@ system role returns `403 SYSTEM_ROLE_IMMUTABLE`.
 
 ### API Key Management
 
+The console's API keys page (`/api-keys`) creates, lists and deletes keys using these endpoints.
+
 #### GET /api/v1/api-keys
 
 List API keys.
