@@ -39,3 +39,26 @@ func TestCreateOSSStorageManager_ReportTemplateStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "n", got.Name)
 }
+
+// TestCreateAllStoresFromConfig_ReportTemplateStore verifies the single-provider
+// construction path wires a report template store with sqlite.
+func TestCreateAllStoresFromConfig_ReportTemplateStore(t *testing.T) {
+	configs := map[string]map[string]interface{}{
+		"sqlite": {"path": filepath.Join(t.TempDir(), "single-report-templates.db")},
+	}
+	for name, cfg := range configs {
+		t.Run(name, func(t *testing.T) {
+			sm, err := interfaces.CreateAllStoresFromConfig(name, cfg) //nolint:staticcheck // single-provider path is the one under test
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = sm.Close() })
+			store := sm.GetReportTemplateStore()
+			require.NotNil(t, store)
+			assert.True(t, sm.HasStore(interfaces.StoreNameReportTemplate))
+			ctx := context.Background()
+			require.NoError(t, store.Save(ctx, "t1", &business.ReportTemplate{ID: "r1", TenantID: "t1", Name: "n"}))
+			got, err := store.GetByID(ctx, "t1", "r1")
+			require.NoError(t, err)
+			assert.Equal(t, "n", got.Name)
+		})
+	}
+}

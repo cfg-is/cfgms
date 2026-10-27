@@ -751,6 +751,12 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 	}
 	appendIfCloser(&openedStores, approvalStore)
 
+	reportTemplateStore, err := provider.CreateReportTemplateStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create report template store: %w", err)
+	}
+	appendIfCloser(&openedStores, reportTemplateStore)
+
 	workflowExecutionStore, err := provider.CreateWorkflowExecutionStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create workflow execution store: %w", err)
@@ -831,6 +837,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		approvalStore:          approvalStore,
+		reportTemplateStore:    reportTemplateStore,
 		workflowExecutionStore: workflowExecutionStore,
 		nonceStore:             nonceStore,
 		leaseStore:             leaseStore,
@@ -1500,6 +1507,11 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		return nil, fmt.Errorf("cluster storage: failed to create approval store: %w", err)
 	}
 	appendIfCloser(&openedStores, approvalStore)
+	reportTemplateStore, err := provider.CreateReportTemplateStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create report template store: %w", err)
+	}
+	appendIfCloser(&openedStores, reportTemplateStore)
 	workflowExecutionStore, err := provider.CreateWorkflowExecutionStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create workflow execution store: %w", err)
@@ -1527,6 +1539,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		approvalStore:          approvalStore,
+		reportTemplateStore:    reportTemplateStore,
 		workflowExecutionStore: workflowExecutionStore,
 	}
 	if pendingRegStore != nil {
