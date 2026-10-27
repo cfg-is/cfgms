@@ -1510,6 +1510,18 @@ requires `osquery:list-catalog`.
 `POST /api/v1/osquery/query` rejects an unknown `catalog_id` with `400 INVALID_CATALOG_ID`
 and invalid params with `400 INVALID_PARAMS` before any steward is resolved.
 
+### cfg osquery query
+
+```bash
+cfg osquery query <catalog-id> --selector <selector> [--param k=v ...] [--url <url>] [--tls-ca-cert <path>] [--tls-insecure] [--server-name <name>]
+```
+
+Runs a catalog query against the stewards a fleet selector matches, via `POST /api/v1/osquery/query` with body `{catalog_id, params, selector}`, and prints the rows per steward. A steward that failed is shown as `error: <message>`, apart from `(no rows)` for a steward that returned none. The route requires a strong credential plus presence (`osquery:execute`); the 401 presence challenge is answered through the standard CLI presence relay.
+
+- `--selector` is required; an empty selector is refused before any request.
+- `--param` is repeatable as `k=v`. `k=` sends an empty string; an argument with no `=` is an error; a repeated key is an error (`parameter k given twice`).
+- Catalog ids are not guessed; find them with `cfg osquery catalog`.
+
 ## Workflow Management
 
 `cfg workflow` subcommands manage workflow definitions and their executions on the controller.

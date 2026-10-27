@@ -2035,3 +2035,49 @@ func (c *APIClient) ListOsqueryCatalog(ctx context.Context) ([]OsqueryCatalogEnt
 	}
 	return envelope.Data, nil
 }
+
+// OsqueryStewardResult is one steward's outcome for a catalog query.
+type OsqueryStewardResult struct {
+	StewardID string              `json:"steward_id"`
+	Rows      []map[string]string `json:"rows"`
+	Error     string              `json:"error,omitempty"`
+}
+
+// QueryOsquery calls POST /api/v1/osquery/query. The route is Strong + presence
+// gated; the step-up relay on the client answers the challenge.
+func (c *APIClient) QueryOsquery(ctx context.Context, catalogID string, params map[string]string, selector string) ([]OsqueryStewardResult, error) {
+	if params == nil {
+		params = map[string]string{}
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"catalog_id": catalogID,
+		"params":     params,
+		"selector":   selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode request: %w", err)
+	}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/osquery/query", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data struct {
+			Results []OsqueryStewardResult `json:"results"`
+		} `json:"data"`
+		Results []OsqueryStewardResult `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	if envelope.Data.Results != nil {
+		return envelope.Data.Results, nil
+	}
+	return envelope.Results, nil
+}
