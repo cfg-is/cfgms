@@ -13,7 +13,7 @@ require (
 	github.com/aws/smithy-go v1.28.5
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
-	github.com/go-git/go-billy/v5 v5.9.2
+	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/go-ole/go-ole v1.3.0
 	github.com/go-webauthn/webauthn v0.18.2
@@ -28,7 +28,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/mattn/go-isatty v0.0.24
 	github.com/openbao/openbao/api/v2 v2.7.1
-	github.com/quic-go/quic-go v0.63.0
+	github.com/quic-go/quic-go v0.64.1
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
