@@ -117,7 +117,10 @@ func TestInstallCommandEnforcesRequiredRegtoken(t *testing.T) {
 func TestInstallCommandRegtokenFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-token")
 
-	err := runInstall("", missing, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
+	valid := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(valid, []byte("tok_file_abc123"), 0o600))
+
+	err := runInstall("", valid, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no-ca.crt", "--regtoken-file alone must pass flag validation")
 	assert.NotContains(t, err.Error(), "is required")

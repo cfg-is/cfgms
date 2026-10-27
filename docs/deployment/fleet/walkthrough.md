@@ -781,9 +781,9 @@ sudo journalctl -u cfgms-steward -f
 | Steward registration fails: `controller URL not set` | Neither `--controller-url` nor compile-baked URL set | Pass `--controller-url` to `install.sh`, or rebuild with `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` |
 | `Connected Stewards: 0` in controller metrics | Stewards registered but not connecting on 4433/UDP | Check firewall — port 4433 must be open for UDP |
 | `curl` REST API call returns `401` | No valid auth credentials | Extract cert/key from admin bundle; see Phase 5 |
-| Convergence not running | Steward is in standalone mode (no regtoken path) | Verify service is using `--regtoken` not `--config` |
+| Convergence not running | Steward is in standalone mode (no regtoken path) | Verify service is using `--regtoken-file` (or legacy `--regtoken`) not `--config` |
 | Config not applied after push | `converge_interval` delay | Wait up to 30m, or check push was accepted (202) |
-| `cfgms-steward status` shows `not installed` | install subcommand not run as root | Re-run `sudo cfgms-steward install --regtoken <token>` |
+| `cfgms-steward status` shows `not installed` | install subcommand not run as root | Re-run `sudo cfgms-steward install --regtoken-file <path>` (legacy: `--regtoken <token>`) |
 
 ### Diagnostic commands
 

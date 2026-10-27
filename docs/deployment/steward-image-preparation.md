@@ -11,7 +11,7 @@ approval flow.
 ## When to run it
 
 Run it once, on the machine you are about to capture, after the steward is
-installed (`cfgms-steward install --regtoken TOKEN`) and before the image is taken.
+installed (`cfgms-steward install --regtoken-file PATH`) and before the image is taken.
 Do not start the steward again before capturing the image: a start re-enrolls the
 machine and recreates the identity.
 
