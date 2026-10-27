@@ -11,11 +11,13 @@ features/reports/
 │   └── handlers.go       # Dashboard and report HTTP handlers
 ├── engine/               # Report generation engine
 │   ├── engine.go         # Core report generation logic
-│   └── advanced.go       # Audit-integrated, multi-tenant report generation (not yet wired to an API endpoint)
+│   ├── advanced.go       # Audit-integrated, multi-tenant report generation (not yet wired to an API endpoint)
+│   └── custom_templates.go # Custom template manager over the durable report template store
 ├── interfaces/           # Shared types and interface contracts
 │   ├── interfaces.go     # Core report types (ReportRequest, Report, DataQuery, ...)
 │   ├── advanced.go       # Advanced/audit-integrated report types
-│   └── custom.go         # Custom and scheduled report type contracts
+│   ├── custom.go         # Custom and scheduled report type contracts
+│   └── custom_template_errors.go # Template sentinel errors
 ├── provider/             # Data integration layer
 │   ├── provider.go       # DNA storage and drift detection integration
 │   └── advanced.go       # Audit data integration and cross-system metrics
@@ -23,6 +25,14 @@ features/reports/
 ├── exporters/            # Multi-format export (JSON, CSV, HTML, PDF)
 └── cache/                # Report caching
 ```
+
+`engine.CustomTemplateManager` stores custom templates in `business.ReportTemplateStore`.
+Every method takes an explicit tenant and refuses an empty one. Templates are readable by
+their owner or by a tenant with a non-expired `read` share; save, share and delete are
+owner-only. Share targets must pass the `ShareScopeFunc` (same MSP subtree, existing
+tenant); every refusal returns the same `ErrShareTargetInvalid`. Non-owners see only their
+own entry in `SharedWith`. The `modify` permission is accepted for forward compatibility
+but grants nothing today, since `SaveTemplate` is owner-only.
 
 Only `api`, `engine`, `interfaces`, `provider`, `templates`, `exporters`, and `cache` are
 part of the live report path — every binary in the module reaches report generation
