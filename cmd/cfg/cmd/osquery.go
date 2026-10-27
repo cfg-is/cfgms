@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -143,6 +144,32 @@ func parseOsqueryParams(args []string) (map[string]string, error) {
 	return params, nil
 }
 
+// escapeControl renders control characters (C0, C1, DEL, including ESC, tab and
+// newline) as visible \xNN / \uNNNN escapes. Steward-originated strings are
+// untrusted, so they must not reach the terminal raw.
+func escapeControl(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r < 0x100 && unicode.IsControl(r):
+			fmt.Fprintf(&b, "\\x%02x", r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func escapeAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = escapeControl(s)
+	}
+	return out
+}
+
 func runOsqueryQuery(cmd *cobra.Command, args []string) error {
 	if strings.TrimSpace(osquerySelector) == "" {
 		return fmt.Errorf("--selector is required and must not be empty")
@@ -168,9 +195,9 @@ func runOsqueryQuery(cmd *cobra.Command, args []string) error {
 
 	out := cmd.OutOrStdout()
 	for _, r := range results {
-		_, _ = fmt.Fprintf(out, "STEWARD %s\n", r.StewardID)
+		_, _ = fmt.Fprintf(out, "STEWARD %s\n", escapeControl(r.StewardID))
 		if r.Error != "" {
-			_, _ = fmt.Fprintf(out, "  error: %s\n", r.Error)
+			_, _ = fmt.Fprintf(out, "  error: %s\n", escapeControl(r.Error))
 			continue
 		}
 		if len(r.Rows) == 0 {
@@ -189,11 +216,11 @@ func runOsqueryQuery(cmd *cobra.Command, args []string) error {
 		}
 		sort.Strings(names)
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "  "+strings.Join(names, "\t"))
+		_, _ = fmt.Fprintln(w, "  "+strings.Join(escapeAll(names), "\t"))
 		for _, row := range r.Rows {
 			vals := make([]string, len(names))
 			for i, c := range names {
-				vals[i] = row[c]
+				vals[i] = escapeControl(row[c])
 			}
 			_, _ = fmt.Fprintln(w, "  "+strings.Join(vals, "\t"))
 		}

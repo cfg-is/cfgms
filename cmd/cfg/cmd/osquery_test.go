@@ -166,3 +166,29 @@ func TestOsqueryQueryCommand_ShowsPerStewardErrors(t *testing.T) {
 	assert.Contains(t, s, "(no rows)")
 	assert.NotContains(t, s, "stw-ok: error")
 }
+
+func TestOsqueryQueryCommand_EscapesControlCharacters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{"results": []map[string]interface{}{
+				{"steward_id": "stw\x1b]0;x\x07", "rows": []map[string]string{}, "error": "bad\x1b[2Jerr\r"},
+				{"steward_id": "stw-2", "rows": []map[string]string{{"c\x1b[1m": "v\x1b[31mal\u009b\u202e"}}},
+			}},
+		})
+	}))
+	defer srv.Close()
+	out := setupOsqueryQueryTest(t, srv.URL)
+
+	osquerySelector = "all"
+	require.NoError(t, runOsqueryQuery(osqueryQueryCmd, []string{"host_info"}))
+
+	s := out.String()
+	assert.NotContains(t, s, "\x1b")
+	assert.NotContains(t, s, "\x07")
+	assert.NotContains(t, s, "\r")
+	assert.NotContains(t, s, "\u009b")
+	assert.NotContains(t, s, "\u202e")
+	assert.Contains(t, s, `bad\x1b[2Jerr\x0d`)
+	assert.Contains(t, s, `v\x1b[31mal\x9b`)
+}
