@@ -275,6 +275,14 @@ var permissionAssurance = map[string]Requirement{
 	// keys keep working for automation (AllowMachine), with no presence tap.
 	"config:push": {Min: session.AssuranceStrong, AllowMachine: true},
 
+	// workflow:write (Issue #5498) gates POST /api/v1/workflows, PUT /api/v1/workflows/{id}
+	// and DELETE /api/v1/workflows/{id}; workflow:execute gates POST /api/v1/workflows/{id}/execute.
+	// Workflows can run steps that change managed systems, so a human session needs Strong,
+	// as for config:push. Scoped API keys keep working for automation (AllowMachine), with no
+	// presence tap. workflow:read is unchanged.
+	"workflow:write":   {Min: session.AssuranceStrong, AllowMachine: true},
+	"workflow:execute": {Min: session.AssuranceStrong, AllowMachine: true},
+
 	"installer:upload":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // PUT /installer/artifacts/{platform}/{arch}
 	"installer:delete":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // DELETE /installer/artifacts/{platform}/{arch}
 	"installer:publish:steward": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // steward binary publish (routes_steward_binaries.go)
