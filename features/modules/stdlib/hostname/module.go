@@ -15,6 +15,7 @@ package hostname
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 
@@ -23,11 +24,16 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // hostnamePattern matches valid hostname labels per RFC 952 / RFC 1123.
 // Accepts alphanumeric labels and hyphens; rejects leading/trailing hyphens,
 // empty strings, and control characters.
+// ErrHostnameBootConfigConflict is returned when the desired hostname would
+// make the steward load a boot config that already exists for that name.
+var ErrHostnameBootConfigConflict = errors.New("hostname refused: a steward boot config already exists for that name")
+
 var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?$`)
 
 // workgroupPattern matches valid Windows workgroup names (NetBIOS name rules).
@@ -179,6 +185,23 @@ func (m *hostnameModule) Set(ctx context.Context, resourceID string, config modu
 			"resource_id", logging.SanitizeLogValue(resourceID),
 			"status", "no-op")
 		return nil
+	}
+
+	// A rename must not let a delivered resource choose the boot config the
+	// steward loads at next start (<hostname>.cfg).
+	if err != nil || current.Hostname != hc.Hostname {
+		if security.BootConfigExistsForHostname(hc.Hostname) {
+			logger.ErrorCtx(ctx, "Refusing hostname change onto an existing boot config",
+				"operation", "hostname_set",
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error_code", "HOSTNAME_BOOT_CONFIG_CONFLICT")
+			return ErrHostnameBootConfigConflict
+		}
+		// Protect <desired>.cfg before the rename is applied. On Windows the
+		// rename is pending until reboot and os.Hostname keeps the old name,
+		// so the boot-config guard must learn the desired name here or a
+		// file resource could plant the config loaded after the reboot.
+		security.AddProtectedBootConfigHostname(hc.Hostname)
 	}
 
 	desired := hostnameState{

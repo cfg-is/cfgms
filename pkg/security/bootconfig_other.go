@@ -18,10 +18,10 @@ func isProtectedBootConfigPath(path string) bool {
 		if samePath(target, d) {
 			return true
 		}
-		for _, name := range BootConfigFileNames() {
-			if samePath(target, filepath.Join(d, name)) {
-				return true
-			}
+	}
+	for _, c := range protectedCandidates() {
+		if samePath(target, resolveForCompare(c)) {
+			return true
 		}
 	}
 	return false

@@ -52,14 +52,14 @@ func isProtectedBootConfigPath(path string) bool {
 		if d == target {
 			return true
 		}
-		for _, name := range BootConfigFileNames() {
-			f, err := canonicalize(filepath.Join(dir, name))
-			if err != nil {
-				return true
-			}
-			if f == target {
-				return true
-			}
+	}
+	for _, c := range protectedCandidates() {
+		f, err := canonicalize(c)
+		if err != nil {
+			return true
+		}
+		if f == target {
+			return true
 		}
 	}
 	return false
