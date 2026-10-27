@@ -617,11 +617,11 @@ submitting and reports the remaining stewards as not submitted.
 | First connect (import bootstrap bundle — one time only, before any account exists) | `cfg connect --bundle <path> --url <url>` |
 | Reconnect by name | `cfg connect <name>` |
 | Reconnect (single connection) | `cfg connect` |
-| Mint an enrolment token (administrator) | `cfg credential enrolment-token mint --tenant-id <id>` |
-| List enrolment tokens (administrator) | `cfg credential enrolment-token list` |
-| Revoke an unspent enrolment token (administrator) | `cfg credential enrolment-token revoke <id>` |
+| Mint an enrolment token (administrator) | `cfg credential enrolment-token mint --tenant-id <id>`, or Registration → Enrolment tokens → Mint token in the web console (the secret is shown once) |
+| List enrolment tokens (administrator) | `cfg credential enrolment-token list`, or Registration → Enrolment tokens in the web console |
+| Revoke an unspent enrolment token (administrator) | `cfg credential enrolment-token revoke <id>`, or Revoke on an active row in the web console |
 | Enrol a headless machine (operator, on that machine) | `cfg credential enrol --token <token> --url <url>` |
-| Revoke every credential issued from a token (administrator) | `cfg credential revoke-by-token <token-id>` |
+| Revoke every credential issued from a token (administrator) | `cfg credential revoke-by-token <token-id>`, or Revoke issued credentials on the row in the web console |
 | Cancel an approved-but-uncollected request (administrator) | `cfg credential cancel-request <request-id>` |
 | List unbound enrolment-flow certificates (administrator) | `cfg credential list-orphaned` |
 | Revoke a listed unbound certificate (administrator) | `cfg credential revoke-orphaned <serial>` |
