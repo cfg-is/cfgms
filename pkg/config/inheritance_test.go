@@ -1373,6 +1373,110 @@ func TestResolveConfiguration_PostureDowngradeRefused_RecordsAuditEvent(t *testi
 	assert.True(t, found, "expected a denied steward_config.security_posture_downgrade audit entry")
 }
 
+// resolvePublisherFixture stores an MSP and a client document that carry only
+// module_trust settings, resolves the client, and returns the effective
+// additional_publishers plus the audit entries recorded for the client's
+// declared steward ID.
+func resolvePublisherFixture(t *testing.T, msp, client stewardconfig.ModuleTrustConfig) ([]string, []*business.AuditEntry) {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	auditManager, err := audit.NewManager(sm.GetAuditStore(), "test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditManager.Stop(stopCtx)
+	})
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{ModuleTrust: msp},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{ID: "device-declared-1", ModuleTrust: client},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm).WithAuditManager(auditManager)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-live-id")
+	require.NoError(t, err)
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditManager.Flush(flushCtx))
+
+	trail, err := auditManager.GetResourceAuditTrail(context.Background(), "steward_config", "steward:device-declared-1", nil)
+	require.NoError(t, err)
+	return effective.Config.Steward.ModuleTrust.AdditionalPublishers, trail
+}
+
+func countPostureAudit(trail []*business.AuditEntry, result business.AuditResult) int {
+	n := 0
+	for _, e := range trail {
+		if e.Action == "steward_config.security_posture_downgrade" && e.Result == result && e.Details["setting"] == "module_trust" {
+			n++
+		}
+	}
+	return n
+}
+
+// [REQUIRED TEST] A descendant adding a publisher its ancestor does not list,
+// without authorize_downgrade, is refused and the ancestor's list is kept.
+func TestResolveConfiguration_AdditionalPublishers_AddedWithoutAuthorization_Refused(t *testing.T) {
+	got, trail := resolvePublisherFixture(t,
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"acme-corp"}},
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"acme-corp", "vendor-a"}})
+	assert.Equal(t, []string{"acme-corp"}, got)
+	assert.Equal(t, 1, countPostureAudit(trail, business.AuditResultDenied))
+}
+
+// [REQUIRED TEST] With authorize_downgrade the declared list replaces the
+// accumulated one and one authorization audit event is written.
+func TestResolveConfiguration_AdditionalPublishers_AddedWithAuthorization_Applied(t *testing.T) {
+	got, trail := resolvePublisherFixture(t,
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"acme-corp"}},
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"acme-corp", "vendor-a"}, AuthorizeDowngrade: true})
+	assert.Equal(t, []string{"acme-corp", "vendor-a"}, got)
+	assert.Equal(t, 1, countPostureAudit(trail, business.AuditResultSuccess))
+	assert.Equal(t, 0, countPostureAudit(trail, business.AuditResultDenied))
+}
+
+// [REQUIRED TEST] A strict subset of the ancestor list is applied with no audit.
+func TestResolveConfiguration_AdditionalPublishers_Subset_AppliedWithoutAudit(t *testing.T) {
+	got, trail := resolvePublisherFixture(t,
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"acme-corp", "vendor-a"}},
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"vendor-a"}})
+	assert.Equal(t, []string{"vendor-a"}, got)
+	assert.Empty(t, trail)
+}
+
+// [REQUIRED TEST] An empty accumulated list exempts only the root level: a
+// descendant first to declare publishers is still refused.
+func TestResolveConfiguration_AdditionalPublishers_EmptyAccumulated_DescendantRefused(t *testing.T) {
+	got, trail := resolvePublisherFixture(t,
+		stewardconfig.ModuleTrustConfig{},
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"vendor-a"}})
+	assert.Empty(t, got)
+	assert.Equal(t, 1, countPostureAudit(trail, business.AuditResultDenied))
+}
+
+// The root level may declare publishers into an empty accumulated list freely.
+func TestResolveConfiguration_AdditionalPublishers_RootLevelDeclares_Applied(t *testing.T) {
+	got, trail := resolvePublisherFixture(t,
+		stewardconfig.ModuleTrustConfig{AdditionalPublishers: []string{"acme-corp"}},
+		stewardconfig.ModuleTrustConfig{})
+	assert.Equal(t, []string{"acme-corp"}, got)
+	assert.Empty(t, trail)
+}
+
 // Tenant-boundary tests (Issue #4340): a caller scoped to one tenant cannot use
 // ResolveConfiguration to read a sibling's configuration, and — because a
 // child-scoped caller cannot resolve any tenantID outside its own subtree at
