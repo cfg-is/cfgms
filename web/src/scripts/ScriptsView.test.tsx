@@ -241,3 +241,148 @@ describe('ScriptsView — history toggle', () => {
     expect(screen.queryByTestId('runs-view')).not.toBeInTheDocument()
   })
 })
+
+// ── Privilege editing (Issue #5447) ──────────────────────────────────────────
+
+describe('ScriptsView privilege', () => {
+  const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json', ...headers },
+    })
+  const envelope = (data: unknown) => ({ data, timestamp: new Date().toISOString() })
+
+  const credential = {
+    id: 'cred-id',
+    type: 'public-key',
+    rawId: new TextEncoder().encode('cred-id').buffer,
+    response: {
+      clientDataJSON: new TextEncoder().encode('{"type":"webauthn.get"}').buffer,
+      authenticatorData: new TextEncoder().encode('authenticator-data').buffer,
+      signature: new TextEncoder().encode('signature').buffer,
+      userHandle: null,
+    },
+    getClientExtensionResults: () => ({}),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  }
+
+  let puts: { token: string | null; body: unknown }[]
+
+  function installRoutes() {
+    puts = []
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === '/api/v1/scripts') {
+        return Promise.resolve(
+          makeScriptListResponse([
+            makeScript({
+              parameters: [{ name: 'target', description: '', type: 'string', required: false }],
+            }),
+          ]),
+        )
+      }
+      if (url.includes('presence/begin')) {
+        return Promise.resolve(
+          json(
+            200,
+            envelope({
+              publicKey: {
+                challenge: 'Y2hhbGxlbmdl',
+                timeout: 60000,
+                rpId: 'localhost',
+                allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+                userVerification: 'required',
+              },
+            }),
+          ),
+        )
+      }
+      if (url.includes('presence/finish')) {
+        return Promise.resolve(json(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 })))
+      }
+      if (url === '/api/v1/scripts/script-1/privilege') {
+        const token = new Headers(init?.headers).get('X-Presence-Token')
+        puts.push({ token, body: JSON.parse(String(init?.body)) })
+        if (['tap-token-1'].includes(token ?? '')) return Promise.resolve(json(200, envelope({})))
+        return Promise.resolve(
+          json(
+            401,
+            { error: 'step_up_required', required_assurance: 'strong', presence_required: true },
+            {
+              'WWW-Authenticate':
+                'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="script:admin"',
+            },
+          ),
+        )
+      }
+      return Promise.resolve(makeRunListResponse())
+    })
+  }
+
+  async function fillAndSave() {
+    renderScriptsView()
+    await waitFor(() => expect(screen.getByTestId('script-row')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('script-row'))
+    fireEvent.change(screen.getByLabelText(/required api scopes/i), {
+      target: { value: 'steward:read-dna\n\n  script:admin  \n' },
+    })
+    fireEvent.click(screen.getByTestId('privilege-add-binding-btn'))
+    fireEvent.change(screen.getByLabelText('Binding parameter 1'), { target: { value: 'target' } })
+    fireEvent.change(screen.getByLabelText('Binding platform 1'), { target: { value: 'linux' } })
+    fireEvent.click(screen.getByTestId('privilege-save-btn'))
+  }
+
+  it('privilege save sends X-Presence-Token after the tap', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential) } })
+    installRoutes()
+    await fillAndSave()
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(puts).toHaveLength(1)
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(puts).toHaveLength(2))
+    expect(puts[1]!.token).toBe('tap-token-1')
+    expect(puts[1]!.body).toEqual({
+      required_api_scope: ['steward:read-dna', 'script:admin'],
+      param_platform_bindings: { target: 'linux' },
+    })
+    await waitFor(() => expect(screen.getByTestId('privilege-saved')).toBeInTheDocument())
+  })
+
+  it('privilege cancelled tap sends no second request', async () => {
+    installRoutes()
+    await fillAndSave()
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('step-up-cancel-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('privilege-error')).toHaveTextContent(/nothing was saved/i),
+    )
+    expect(puts).toHaveLength(1)
+  })
+
+  it('shows the server error verbatim for bad values', async () => {
+    installRoutes()
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url === '/api/v1/scripts') return Promise.resolve(makeScriptListResponse([makeScript()]))
+      if (url.endsWith('/privilege')) {
+        return Promise.resolve(
+          json(400, { error: { code: 'INVALID_REQUEST', message: 'unknown platform "amiga"' } }),
+        )
+      }
+      return Promise.resolve(makeRunListResponse())
+    })
+    renderScriptsView()
+    await waitFor(() => expect(screen.getByTestId('script-row')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('script-row'))
+    fireEvent.click(screen.getByTestId('privilege-save-btn'))
+    await waitFor(() =>
+      expect(screen.getByTestId('privilege-error')).toHaveTextContent('unknown platform "amiga"'),
+    )
+  })
+})

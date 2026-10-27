@@ -12,6 +12,7 @@
 import { useState } from 'react'
 import { useScriptList, type ScriptMetadata } from './useScripts.ts'
 import RunPanel from './RunPanel.tsx'
+import ScriptPrivilegePanel from './ScriptPrivilegePanel.tsx'
 import RunsView from './RunsView.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
 
@@ -152,6 +153,10 @@ export default function ScriptsView() {
           script={selectedScript}
           onClose={() => setSelectedScript(null)}
         />
+      )}
+
+      {selectedScript !== null && (
+        <ScriptPrivilegePanel key={selectedScript.id} script={selectedScript} />
       )}
     </>
   )
