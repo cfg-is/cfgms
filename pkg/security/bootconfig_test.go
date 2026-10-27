@@ -35,6 +35,8 @@ func TestIsProtectedBootConfigPath(t *testing.T) {
 func TestLoadedBootConfigSurvivesHostnameChange(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PROGRAMDATA", home)
 	t.Chdir(t.TempDir())
 	var dir string
 	for _, d := range BootConfigDirs() {
@@ -70,6 +72,7 @@ func TestAddProtectedBootConfigHostname(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("PROGRAMDATA", home)
 	t.Chdir(t.TempDir())
 	var dir string
 	for _, d := range BootConfigDirs() {

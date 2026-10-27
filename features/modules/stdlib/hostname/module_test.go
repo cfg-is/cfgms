@@ -327,6 +327,8 @@ func (r *recordingExecutor) setState(s hostnameState) error {
 func TestHostnameModule_Set_RefusesExistingBootConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PROGRAMDATA", home)
 	t.Chdir(t.TempDir())
 	var dir string
 	for _, d := range security.BootConfigDirs() {
@@ -373,6 +375,7 @@ func TestHostnameModule_Set_ProtectsDesiredBootConfigWhileRenamePending(t *testi
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("PROGRAMDATA", home)
 	t.Chdir(t.TempDir())
 	var dir string
 	for _, d := range security.BootConfigDirs() {
