@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -831,6 +832,11 @@ func (b *CustomReportBuilder) GetReportData(ctx context.Context, pagination inte
 	if pagination.PageSize > 0 {
 		spec.pageSize = min(pagination.PageSize, b.cfg.MaxPageSize)
 	}
+	// Page is caller-supplied: reject values whose row offsets (Page-1)*pageSize and
+	// Page*pageSize would overflow int, which would otherwise wrap negative.
+	if pagination.Page-1 > (math.MaxInt-spec.pageSize)/spec.pageSize {
+		return nil, false, fmt.Errorf("%w: invalid page", interfaces.ErrInvalidQuery)
+	}
 
 	// Device ownership can change after the token was issued.
 	if err := b.authorizeDevices(ctx, spec.tenantID, spec.deviceIDs); err != nil {
@@ -869,7 +875,7 @@ type cachedPage struct {
 }
 
 func window[T any](in []T, from, to int) []T {
-	if from >= len(in) {
+	if from < 0 || to < from || from >= len(in) {
 		return nil
 	}
 	return in[from:min(to, len(in))]

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -315,6 +316,18 @@ func TestCustomBuilder_GetReportData_WithPagination(t *testing.T) {
 	_, _, err = b.GetReportData(context.Background(), interfaces.PaginationRequest{TenantID: "a", StreamToken: rep.StreamToken, Page: 0})
 	assert.ErrorIs(t, err, interfaces.ErrInvalidQuery)
 
+	// Caller-supplied pages whose row offsets would overflow int are refused, not sliced.
+	for _, page := range []int{math.MaxInt, math.MaxInt/10 + 2, (math.MaxInt-10)/10 + 2} {
+		_, _, err = b.GetReportData(context.Background(), interfaces.PaginationRequest{TenantID: "a", StreamToken: rep.StreamToken, Page: page})
+		assert.ErrorIs(t, err, interfaces.ErrInvalidQuery, "page %d", page)
+	}
+	// The largest non-overflowing page is past the data: empty, no more pages, no panic.
+	maxPage := (math.MaxInt-10)/10 + 1
+	body, more, err := b.GetReportData(context.Background(), interfaces.PaginationRequest{TenantID: "a", StreamToken: rep.StreamToken, Page: maxPage})
+	require.NoError(t, err)
+	assert.False(t, more)
+	assert.NotEmpty(t, body)
+
 	for _, tok := range []string{"", "nope", string(make([]byte, 64)), fmt.Sprintf("%064d", 0)} {
 		_, _, err = b.GetReportData(context.Background(), interfaces.PaginationRequest{TenantID: "a", StreamToken: tok, Page: 1})
 		assert.ErrorIs(t, err, interfaces.ErrStreamTokenInvalid)
@@ -528,4 +541,13 @@ func TestNewCustomReportBuilder_RequiredArguments(t *testing.T) {
 	assert.Error(t, err)
 	_, err = NewCustomReportBuilder(newSeededProvider(), interfaces.CustomReportConfig{}, pc, nil, nil, "")
 	assert.Error(t, err)
+}
+
+func TestWindow_RejectsInvalidBounds(t *testing.T) {
+	in := []int{1, 2, 3}
+	assert.Nil(t, window(in, -1, 2))
+	assert.Nil(t, window(in, 1, -5))
+	assert.Nil(t, window(in, 2, 1))
+	assert.Nil(t, window(in, 3, 4))
+	assert.Equal(t, []int{2, 3}, window(in, 1, 10))
 }
