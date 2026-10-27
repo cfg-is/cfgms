@@ -66,12 +66,20 @@ make_mock_binary() {
     cat > "$binary" <<EOF
 #!/bin/bash
 echo "\$@" > "$record_file"
+while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "--regtoken-file" ]]; then
+        echo "\$2" > "$dir/recorded-token-path"
+        if [[ "\${MOCK_EXIT:-0}" == "0" ]]; then cp "\$2" "$dir/recorded-token"; fi
+    fi
+    shift
+done
+exit "\${MOCK_EXIT:-0}"
 EOF
     chmod +x "$binary"
     echo "$record_file"
 }
 
-# ── Test 1: REGTOKEN only — calls install with --regtoken ────────────────────
+# ── Test 1: REGTOKEN only — calls install with --regtoken-file ────────────────────
 
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
@@ -83,10 +91,12 @@ ARGS_FILE="$(make_mock_binary "$T")"
 OUTPUT="$(run_postinstall "$PLIST" "$T")"
 RECORDED="$(cat "$ARGS_FILE")"
 
-if [[ "$RECORDED" == "install --regtoken tok-abc-123" ]]; then
+TOKPATH1="$(cat "$T/recorded-token-path")"
+if [[ "$RECORDED" == "install --regtoken-file $TOKPATH1" && "$RECORDED" != *tok-abc-123* \
+    && "$(cat "$T/recorded-token")" == "tok-abc-123" ]]; then
     pass "test1: regtoken-only passes correct args"
 else
-    fail "test1: expected 'install --regtoken tok-abc-123', got '$RECORDED'"
+    fail "test1: expected 'install --regtoken-file <path>' with token read from file, got '$RECORDED'"
 fi
 
 # ── Test 2: REGTOKEN + CA_FINGERPRINT — adds --fingerprint ──────────────────
@@ -100,15 +110,15 @@ ARGS_FILE2="$(make_mock_binary "$T2")"
 run_postinstall "$PLIST2" "$T2" >/dev/null
 RECORDED2="$(cat "$ARGS_FILE2")"
 
-if [[ "$RECORDED2" == "install --regtoken tok-xyz --fingerprint aabbcc1122" ]]; then
+if [[ "$RECORDED2" == "install --regtoken-file $(cat "$T2/recorded-token-path") --fingerprint aabbcc1122" ]]; then
     pass "test2: regtoken+fingerprint passes correct args"
 else
-    fail "test2: expected 'install --regtoken tok-xyz --fingerprint aabbcc1122', got '$RECORDED2'"
+    fail "test2: expected 'install --regtoken-file <path> --fingerprint aabbcc1122', got '$RECORDED2'"
 fi
 
 rm -rf "$T2"
 
-# ── Test 3: All fields — adds --ca-cert ──────────────────────────────────────
+# ── Test 3: All fields — adds --controller-ca ──────────────────────────────────────
 
 T3=$(mktemp -d)
 
@@ -119,7 +129,7 @@ ARGS_FILE3="$(make_mock_binary "$T3")"
 run_postinstall "$PLIST3" "$T3" >/dev/null
 RECORDED3="$(cat "$ARGS_FILE3")"
 
-EXPECTED3="install --regtoken tok-full --fingerprint ddeeff3344 --ca-cert /etc/cfgms/controller-ca.crt"
+EXPECTED3="install --regtoken-file $(cat "$T3/recorded-token-path") --fingerprint ddeeff3344 --controller-ca /etc/cfgms/controller-ca.crt"
 if [[ "$RECORDED3" == "$EXPECTED3" ]]; then
     pass "test3: all fields passes correct args"
 else
@@ -164,6 +174,46 @@ else
 fi
 
 rm -rf "$T5"
+
+# ── Test 6: success consumes the token ───────────────────────────────────────
+
+T6=$(mktemp -d)
+PLIST6="$T6/steward-deploy.plist"
+write_plist "$PLIST6" "tok-consume"
+make_mock_binary "$T6" >/dev/null
+
+run_postinstall "$PLIST6" "$T6" >/dev/null
+TOKPATH6="$(cat "$T6/recorded-token-path")"
+if [[ "$(cat "$T6/recorded-token")" == "tok-consume" ]] \
+    && ! grep -q "REGTOKEN" "$PLIST6" \
+    && ! /usr/libexec/PlistBuddy -c "Print :REGTOKEN" "$PLIST6" >/dev/null 2>&1 \
+    && [[ ! -e "$TOKPATH6" && ! -e "$(dirname "$TOKPATH6")" ]]; then
+    pass "test6: token passed by file, removed from plist, temp file gone"
+else
+    fail "test6: token not consumed correctly (path: $TOKPATH6)"
+fi
+
+rm -rf "$T6"
+
+# ── Test 7: install failure keeps the plist and cleans the temp file ─────────
+
+T7=$(mktemp -d)
+PLIST7="$T7/steward-deploy.plist"
+write_plist "$PLIST7" "tok-retry"
+make_mock_binary "$T7" >/dev/null
+
+T7_RC=0
+MOCK_EXIT=3 run_postinstall "$PLIST7" "$T7" >/dev/null || T7_RC=$?
+TOKPATH7="$(cat "$T7/recorded-token-path")"
+if [[ $T7_RC -ne 0 ]] \
+    && /usr/libexec/PlistBuddy -c "Print :REGTOKEN" "$PLIST7" >/dev/null 2>&1 \
+    && [[ -n "$TOKPATH7" && ! -e "$TOKPATH7" && ! -e "$(dirname "$TOKPATH7")" ]]; then
+    pass "test7: failed install exits non-zero, keeps REGTOKEN, removes temp file"
+else
+    fail "test7: rc=$T7_RC, plist/temp-file state wrong (path: $TOKPATH7)"
+fi
+
+rm -rf "$T7"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
