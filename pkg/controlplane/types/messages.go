@@ -74,7 +74,44 @@ const (
 type ObserveModuleSpec struct {
 	Name string `json:"name"` // module name (e.g. "hyperv")
 	Kind string `json:"kind"` // ownership kind for fragment assembly (e.g. "hyperv")
+
+	// PerObject marks a module whose owned kind has one fragment per managed
+	// object (e.g. directory objects) rather than one per host. The controller
+	// copies it from the module manifest's owns entry; the steward routes such
+	// fragments through the bulk lane.
+	PerObject bool `json:"per_object,omitempty"`
 }
+
+// SYNC_DNA bulk-lane request parameters. The three modes are mutually exclusive
+// and a command carries at most one "bulk" value.
+//
+//   - bulk=buckets: reply with the 256 bucket roots.
+//   - bulk=manifest plus buckets=<json list of bucket numbers>: reply with
+//     (fragment_id, fragment_hash) entries for those buckets.
+//   - bulk=fragments plus fragment_ids=<json list>: reply with those fragments
+//     as a delta.
+const (
+	// SyncDNAParamBulk selects the bulk-lane mode.
+	SyncDNAParamBulk = "bulk"
+	// SyncDNAParamBuckets carries a JSON list of bucket numbers (bulk=manifest).
+	SyncDNAParamBuckets = "buckets"
+	// SyncDNAParamFragmentIDs carries a JSON list of fragment IDs (bulk=fragments).
+	SyncDNAParamFragmentIDs = "fragment_ids"
+
+	// SyncDNABulkBuckets requests the 256 bucket roots.
+	SyncDNABulkBuckets = "buckets"
+	// SyncDNABulkManifest requests the manifest entries of the listed buckets.
+	SyncDNABulkManifest = "manifest"
+	// SyncDNABulkFragments requests the listed fragments as a delta.
+	SyncDNABulkFragments = "fragments"
+)
+
+// HeartbeatMetricDNABulkRoot is the heartbeat Metrics side-channel key carrying
+// Heartbeat.DNABulkRoot, alongside HeartbeatMetricDNAAggregateRoot.
+const (
+	HeartbeatMetricDNAAggregateRoot = "dna_aggregate_root"
+	HeartbeatMetricDNABulkRoot      = "dna_bulk_root"
+)
 
 // Command represents a command sent from controller to steward.
 //
@@ -267,6 +304,11 @@ type Heartbeat struct {
 	// sends SYNC_DNA with fragment_ids on mismatch (ADR-017 §7).
 	// Empty for stewards without a fragment-capable collector.
 	DNAAggregateRoot string `json:"dna_aggregate_root,omitempty"`
+
+	// DNABulkRoot is the aggregate root over the steward's per-object (bulk-lane)
+	// fragments. Empty means the steward has no bulk fragments; older stewards
+	// never set it.
+	DNABulkRoot string `json:"dna_bulk_root,omitempty"`
 
 	// ActiveSessions is the number of active control-channel streams the steward holds.
 	// Value is 1 when connected, 0 otherwise.

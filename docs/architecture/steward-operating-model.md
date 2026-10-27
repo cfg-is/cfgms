@@ -489,6 +489,24 @@ DNA is a deterministic, hashable dataset with a **two-level (Merkle-style) hash*
 - **Partial sync**: on a root mismatch the controller diffs manifests and requests only the changed/added/removed fragments' bytes (data plane), then recomputes the root to prove its copy is fully in sync — no whole-DNA re-transfer
 - **Full sync** is required only on initial registration
 
+#### Bulk lane (per-object fragments)
+
+Modules whose owned kind has one fragment per managed object (for example directory objects) set `per_object: true` on the `owns` entry in `module.yaml`. The controller copies that flag into the `per_object` field of each `ObserveModuleSpec` it sends in `CommandObserveModules`. Per-object fragments are reconciled in a separate bulk lane, so thousands of objects never inflate the host-fragment manifest.
+
+Wire format:
+
+- **Heartbeat**: `dna_bulk_root` is a second key in the heartbeat Metrics side-channel, next to `dna_aggregate_root`. Absent means the steward has no bulk fragments; older stewards never send it.
+- **Buckets**: a fragment's bucket is the first byte of the SHA-256 of its fragment id (256 buckets). A bucket root is the aggregate root over that bucket's `(fragment_id, fragment_hash)` entries; an empty bucket has the fixed empty root (SHA-256 of the empty string). The bulk root is the hash over the 256 bucket roots in bucket order. A change touches exactly one bucket root, and one bucket manifest holds about 200 entries per 50,000 objects.
+- **`SYNC_DNA` modes**: three mutually exclusive parameter sets, constants in `pkg/controlplane/types`:
+
+| Params | Reply |
+|--------|-------|
+| `bulk=buckets` | `DNATransfer` with `Bulk=true` and `BucketRoots` (exactly 256 entries) |
+| `bulk=manifest`, `buckets=<json list>` | `DNATransfer` with `Bulk=true` and `Manifest` entries for those buckets |
+| `bulk=fragments`, `fragment_ids=<json list>` | Those fragments as a delta |
+
+**Sweep cadence for per-object modules**: the steward raises `EventObserveSweepRequest` from `checkAndTriggerObserveSweep` on each convergence-loop tick (tier-2 cadence). The controller answers with `CommandObserveModules` for every approved manifest whose `observe_when` matches the baseline DNA, so a per-object module such as AD is observed every Nth convergence cycle on the matching domain controller.
+
 The controller stores DNA **versioned and append-only** (ADR-017 Amendment A1.3), not last-write-wins: each accepted delta produces a new fragment version, so per-entity state stays queryable over time. Because unchanged fragments dedupe by hash, history cost tracks change volume, not fleet-size × time.
 
 ### Health

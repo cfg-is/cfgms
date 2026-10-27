@@ -96,6 +96,17 @@ type DNATransfer struct {
 	// When Delta=false, this field is nil and Attributes carries the full snapshot.
 	Fragments []*commonpb.Fragment `json:"fragments,omitempty"`
 
+	// Bulk marks a bulk-lane reply (per-object fragments, ADR-017 bulk lane).
+	Bulk bool `json:"bulk,omitempty"`
+
+	// BucketRoots carries the bulk-lane bucket roots in reply to bulk=buckets.
+	// Exactly 256 entries when set.
+	BucketRoots [][]byte `json:"bucket_roots,omitempty"`
+
+	// Manifest carries (fragment_id, fragment_hash) entries in reply to
+	// bulk=manifest.
+	Manifest []*commonpb.ManifestEntry `json:"manifest,omitempty"`
+
 	// BaseVersion is the DNA version this delta is based on (if Delta=true)
 	BaseVersion string `json:"base_version,omitempty"`
 
