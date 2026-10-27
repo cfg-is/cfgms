@@ -334,9 +334,334 @@ function DecommissionPanel({
   )
 }
 
+export interface QueuedCopy {
+  pendingId: string
+  hostname: string
+  sourceIp: string
+  registeredAt: string
+}
+
+/**
+ * Validate the identity-clone list from untrusted wire data and return the
+ * queued copies of the entry whose steward_id equals stewardId. Entries or
+ * copies with the wrong shape are dropped.
+ */
+export function parseQueuedCopies(data: unknown, stewardId: string): QueuedCopy[] {
+  if (!Array.isArray(data)) return []
+  const out: QueuedCopy[] = []
+  for (const entry of data) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const e = entry as Record<string, unknown>
+    if (e.steward_id !== stewardId || !Array.isArray(e.queued_copies)) continue
+    for (const c of e.queued_copies) {
+      if (typeof c !== 'object' || c === null) continue
+      const q = c as Record<string, unknown>
+      if (typeof q.pending_id !== 'string' || q.pending_id === '') continue
+      out.push({
+        pendingId: q.pending_id,
+        hostname: typeof q.hostname === 'string' ? q.hostname : '',
+        sourceIp: typeof q.source_ip === 'string' ? q.source_ip : '',
+        registeredAt: typeof q.registered_at === 'string' ? q.registered_at : '',
+      })
+    }
+  }
+  return out
+}
+
+function PanelHeader({ title, onBack }: { title: string; onBack: () => void }) {
+  return (
+    <div className="rtag-hd">
+      <button type="button" className="rtag-back" aria-label="Back to menu" onClick={onBack}>
+        ←
+      </button>
+      <span className="rtag-title">{title}</span>
+    </div>
+  )
+}
+
+function RotateCredentialsPanel({
+  stewardId,
+  onBack,
+}: {
+  stewardId: string
+  onBack: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function rotate() {
+    setBusy(true)
+    setError(null)
+    try {
+      const resp = await apiFetch(
+        `/api/v1/stewards/${encodeURIComponent(stewardId)}/credentials/rotate`,
+        { method: 'POST' },
+      )
+      if (!resp.ok) {
+        setError(`Failed to rotate credentials (${resp.status})`)
+        return
+      }
+      setDone(true)
+    } catch {
+      setError('Failed to rotate credentials')
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
+  return (
+    <div className="row-rotate-panel">
+      <PanelHeader title="Rotate credentials" onBack={onBack} />
+      {error !== null && (
+        <div className="rtag-err" role="alert">
+          {error}
+        </div>
+      )}
+      {done ? (
+        <div className="rmove-ok" role="status">
+          Credentials rotated
+        </div>
+      ) : confirming ? (
+        <div className="rdecom-confirm">
+          <p className="rdecom-warn">
+            Revoke every certificate issued to {stewardId} and archive its record?
+          </p>
+          <div className="ract-btns">
+            <button
+              type="button"
+              className="rtag-btn rtag-btn-danger"
+              disabled={busy}
+              onClick={() => void rotate()}
+            >
+              Confirm
+            </button>
+            <button
+              type="button"
+              className="rtag-btn rtag-btn-sec"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="rdecom-confirm">
+          <button type="button" className="rtag-btn" onClick={() => setConfirming(true)}>
+            Rotate credentials
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MoveIdentityPanel({
+  stewardId,
+  onBack,
+}: {
+  stewardId: string
+  onBack: () => void
+}) {
+  const [copies, setCopies] = useState<QueuedCopy[] | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/v1/stewards/identity-clones')
+      .then(async (resp) => {
+        const body: unknown = await resp.json()
+        if (cancelled) return
+        if (!resp.ok) {
+          setError(`Failed to load identity copies (${resp.status})`)
+          return
+        }
+        setCopies(parseQueuedCopies((body as Record<string, unknown>)?.data, stewardId))
+      })
+      .catch(() => {
+        if (!cancelled) setError('Failed to load identity copies')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [stewardId])
+
+  async function move() {
+    if (selected === null) return
+    setBusy(true)
+    setError(null)
+    try {
+      const resp = await apiFetch(
+        `/api/v1/stewards/${encodeURIComponent(stewardId)}/identity/move`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pending_id: selected }),
+        },
+      )
+      if (!resp.ok) {
+        setError(`Failed to move identity (${resp.status})`)
+        return
+      }
+      setDone(true)
+    } catch {
+      setError('Failed to move identity')
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
+  return (
+    <div className="row-move-identity-panel">
+      <PanelHeader title="Move identity" onBack={onBack} />
+      {error !== null && (
+        <div className="rtag-err" role="alert">
+          {error}
+        </div>
+      )}
+      {done ? (
+        <div className="rmove-ok" role="status">
+          Identity moved
+        </div>
+      ) : (
+        <>
+          {copies === null && error === null && <div className="rtag-spin">Loading…</div>}
+          {copies !== null && copies.length === 0 && (
+            <div className="rtag-empty">No queued copies to move this identity to</div>
+          )}
+          {copies !== null && copies.length > 0 && (
+            <ul className="rid-list" role="radiogroup" aria-label="Queued copies">
+              {copies.map((c) => (
+                <li key={c.pendingId}>
+                  <label className="rid-copy">
+                    <input
+                      type="radio"
+                      name={`pending-${stewardId}`}
+                      checked={selected === c.pendingId}
+                      disabled={busy}
+                      onChange={() => {
+                        setSelected(c.pendingId)
+                        setConfirming(false)
+                      }}
+                    />
+                    <span className="rid-host">{c.hostname}</span>
+                    <span className="rid-meta">{c.sourceIp}</span>
+                    <span className="rid-meta">{c.registeredAt}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+          {copies !== null && copies.length > 0 && confirming && (
+            <div className="rdecom-confirm">
+              <p className="rdecom-warn">Move the identity of {stewardId} to the selected copy?</p>
+              <div className="ract-btns">
+                <button
+                  type="button"
+                  className="rtag-btn rtag-btn-danger"
+                  disabled={busy}
+                  onClick={() => void move()}
+                >
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  className="rtag-btn rtag-btn-sec"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {copies !== null && copies.length > 0 && !confirming && (
+            <div className="rdecom-confirm">
+              <button
+                type="button"
+                className="rtag-btn"
+                disabled={selected === null}
+                onClick={() => setConfirming(true)}
+              >
+                Move
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** Posts the refresh request as soon as the panel opens; no step-up applies. */
+function RefreshAuthPanel({
+  stewardId,
+  onBack,
+}: {
+  stewardId: string
+  onBack: () => void
+}) {
+  const [error, setError] = useState<string | null>(null)
+  const [requested, setRequested] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch(`/api/v1/stewards/${encodeURIComponent(stewardId)}/auth/refresh`, {
+      method: 'POST',
+    })
+      .then(async (resp) => {
+        if (cancelled) return
+        if (!resp.ok) {
+          setError(`Failed to request auth refresh (${resp.status})`)
+          return
+        }
+        const body: unknown = await resp.json().catch(() => null)
+        const data = (body as Record<string, unknown> | null)?.data
+        const status = (data as Record<string, unknown> | undefined)?.status
+        if (!cancelled) {
+          if (status === 'refresh_requested') setRequested(true)
+          else setError('Unexpected response to auth refresh')
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setError('Failed to request auth refresh')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [stewardId])
+
+  return (
+    <div className="row-refresh-panel">
+      <PanelHeader title="Refresh auth" onBack={onBack} />
+      {error !== null && (
+        <div className="rtag-err" role="alert">
+          {error}
+        </div>
+      )}
+      {requested && (
+        <div className="rmove-ok" role="status">
+          Auth refresh requested
+        </div>
+      )}
+      {!requested && error === null && <div className="rtag-spin">Requesting…</div>}
+    </div>
+  )
+}
+
 export default function RowActionMenu({ stewardId }: { stewardId: string }) {
   const [open, setOpen] = useState(false)
-  const [mode, setMode] = useState<'menu' | 'tags' | 'move' | 'decommission'>('menu')
+  const [mode, setMode] = useState<
+    'menu' | 'tags' | 'move' | 'decommission' | 'rotate' | 'moveIdentity' | 'refresh'
+  >('menu')
   const wrapRef = useRef<HTMLDivElement>(null)
 
   /* Escape and outside-click lifecycle — verbatim reuse of ColumnPicker.tsx pattern. */
@@ -366,6 +691,9 @@ export default function RowActionMenu({ stewardId }: { stewardId: string }) {
   const MENU_ITEMS: MenuItemSpec[] = [
     { id: 'tags', label: 'Edit tags', onActivate: () => setMode('tags') },
     { id: 'move', label: 'Move to tenant', onActivate: () => setMode('move') },
+    { id: 'rotate', label: 'Rotate credentials', onActivate: () => setMode('rotate') },
+    { id: 'moveIdentity', label: 'Move identity', onActivate: () => setMode('moveIdentity') },
+    { id: 'refresh', label: 'Refresh auth', onActivate: () => setMode('refresh') },
     { id: 'decommission', label: 'Decommission', onActivate: () => setMode('decommission') },
   ]
 
@@ -420,6 +748,15 @@ export default function RowActionMenu({ stewardId }: { stewardId: string }) {
           )}
           {mode === 'move' && (
             <MoveTenantPanel stewardId={stewardId} onBack={() => setMode('menu')} />
+          )}
+          {mode === 'rotate' && (
+            <RotateCredentialsPanel stewardId={stewardId} onBack={() => setMode('menu')} />
+          )}
+          {mode === 'moveIdentity' && (
+            <MoveIdentityPanel stewardId={stewardId} onBack={() => setMode('menu')} />
+          )}
+          {mode === 'refresh' && (
+            <RefreshAuthPanel stewardId={stewardId} onBack={() => setMode('menu')} />
           )}
           {mode === 'decommission' && (
             <DecommissionPanel stewardId={stewardId} onBack={() => setMode('menu')} />
