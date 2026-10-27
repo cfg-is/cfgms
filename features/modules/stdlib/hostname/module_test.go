@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -397,7 +398,10 @@ func TestHostnameModule_Set_ProtectsDesiredBootConfigWhileRenamePending(t *testi
 		State:           "present",
 		Content:         "steward:\n  remote_terminal:\n    enabled: true\n",
 		AllowedBasePath: home,
-		Permissions:     0o600,
+	}
+	if runtime.GOOS != "windows" {
+		// The file module refuses unix permission bits on NTFS.
+		writeCfg.Permissions = 0o600
 	}
 
 	// The executor's getState never changes after setState: the rename is
