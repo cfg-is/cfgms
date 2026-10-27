@@ -430,3 +430,144 @@ describe('SupportAccessView — contacts', () => {
     expect(item.querySelector('i')).toBeNull()
   })
 })
+
+describe('SupportAccessView — break-glass second approval', () => {
+  const rootSession = { tenant_id: 'msp-a', root_scope: true }
+  const approveUrl = '/api/v1/tenants/msp-a/break-glass/bg-2/approve'
+  const pendingRow = (over: Record<string, unknown> = {}) =>
+    breakGlass({ id: 'bg-2', status: 'pending', approval_state: 'pending', principal_name: 'root-dana', ...over })
+  const envelope = (data: unknown) => ({ data, timestamp: new Date().toISOString() })
+  const presenceChallenge = () =>
+    jsonResponse(
+      401,
+      { error: 'step_up_required', required_assurance: 'strong', presence_required: true },
+      {
+        'WWW-Authenticate':
+          'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="tenant:crossing-approve-break-glass"',
+      },
+    )
+  const presenceEndpoints = (url: string) => {
+    if (url.includes('presence/begin')) {
+      return jsonResponse(
+        200,
+        envelope({
+          publicKey: {
+            challenge: 'Y2hhbGxlbmdl',
+            timeout: 60000,
+            rpId: 'localhost',
+            allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+            userVerification: 'required',
+          },
+        }),
+      )
+    }
+    if (url.includes('presence/finish')) return jsonResponse(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 }))
+    return undefined
+  }
+  const approvePosts = () =>
+    fetchMock.mock.calls.filter((c) => String(c[0]) === approveUrl && (c[1] as RequestInit | undefined)?.method === 'POST')
+
+  it('approve sends X-Presence-Token after the tap', async () => {
+    let state = 'pending'
+    renderSession(rootSession, (url, init) => {
+      const p = presenceEndpoints(url)
+      if (p) return p
+      if (url === approveUrl) {
+        if (new Headers(init?.headers).get('X-Presence-Token') !== 'tap-token-1') return presenceChallenge()
+        state = 'active'
+        return jsonResponse(200, { data: { ok: true } })
+      }
+      if (url === grantsUrl) {
+        return jsonResponse(200, {
+          data: [state === 'pending' ? pendingRow() : pendingRow({ status: 'active', approval_state: 'approved' })],
+        })
+      }
+      return undefined
+    })
+    await signIn()
+    fireEvent.click(await screen.findByTestId('approve-btn'))
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(approvePosts()).toHaveLength(1)
+    fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
+    await waitFor(() => expect(approvePosts()).toHaveLength(2))
+    expect(new Headers((approvePosts()[1]![1] as RequestInit).headers).get('X-Presence-Token')).toBe('tap-token-1')
+    await waitFor(() => expect(screen.queryByTestId('approve-btn')).not.toBeInTheDocument())
+    expect(screen.getByTestId('crossing-row')).toHaveTextContent('Active')
+  })
+
+  it('approve cancelled tap shows a message and sends no second request', async () => {
+    renderSession(rootSession, (url) => {
+      const p = presenceEndpoints(url)
+      if (p) return p
+      if (url === approveUrl) return presenceChallenge()
+      if (url === grantsUrl) return jsonResponse(200, { data: [pendingRow()] })
+      return undefined
+    })
+    await signIn()
+    fireEvent.click(await screen.findByTestId('approve-btn'))
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    fireEvent.click(await screen.findByTestId('step-up-cancel-btn'))
+    expect(await screen.findByTestId('approve-error')).toHaveTextContent('passkey check was cancelled')
+    expect(approvePosts()).toHaveLength(1)
+  })
+
+  it('approve is disabled for the requester', async () => {
+    renderSession(rootSession, (url) => {
+      if (url === grantsUrl) return jsonResponse(200, { data: [pendingRow({ principal_name: 'admin' })] })
+      return undefined
+    })
+    await signIn()
+    const btn = await screen.findByTestId('approve-btn')
+    expect(btn).toBeDisabled()
+    expect(screen.getByTestId('approve-requester-note')).toHaveTextContent('different root admin')
+    fireEvent.click(btn)
+    expect(approvePosts()).toHaveLength(0)
+  })
+
+  it('approve hidden for a non-root-scope principal', async () => {
+    renderSession(mspSession, (url) => {
+      if (url === grantsUrl) return jsonResponse(200, { data: [pendingRow()] })
+      if (url === contactsUrl) return jsonResponse(200, { data: { contacts: [] } })
+      return undefined
+    })
+    await signIn()
+    await screen.findByTestId('crossing-row')
+    expect(screen.queryByTestId('approve-btn')).not.toBeInTheDocument()
+  })
+
+  it('approve is not offered on a non-pending row', async () => {
+    renderSession(rootSession, (url) => {
+      if (url === grantsUrl) return jsonResponse(200, { data: [breakGlass()] })
+      return undefined
+    })
+    await signIn()
+    await screen.findByTestId('crossing-row')
+    expect(screen.queryByTestId('approve-btn')).not.toBeInTheDocument()
+  })
+
+  it('renders server SAME_APPROVER 403 even when the client check passed', async () => {
+    renderSession(rootSession, (url, init) => {
+      if (url === approveUrl && init?.method === 'POST') {
+        return jsonResponse(403, { error: { code: 'SAME_APPROVER', message: 'The requester cannot approve their own break-glass.' } })
+      }
+      if (url === grantsUrl) return jsonResponse(200, { data: [pendingRow()] })
+      return undefined
+    })
+    await signIn()
+    fireEvent.click(await screen.findByTestId('approve-btn'))
+    expect(await screen.findByTestId('approve-error')).toHaveTextContent('The requester cannot approve their own break-glass.')
+  })
+
+  it('renders a 409 NOT_PENDING message', async () => {
+    renderSession(rootSession, (url, init) => {
+      if (url === approveUrl && init?.method === 'POST') {
+        return jsonResponse(409, { error: { code: 'NOT_PENDING', message: 'This break-glass is no longer pending.' } })
+      }
+      if (url === grantsUrl) return jsonResponse(200, { data: [pendingRow()] })
+      return undefined
+    })
+    await signIn()
+    fireEvent.click(await screen.findByTestId('approve-btn'))
+    expect(await screen.findByTestId('approve-error')).toHaveTextContent('no longer pending')
+  })
+})

@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, renderHook, waitFor } from '@testing-library/react'
 import {
+  approveBreakGlass,
   createAccessGrant,
   endCrossing,
   fetchActiveCrossings,
@@ -188,5 +189,26 @@ describe('useTenantCrossings', () => {
     const { result } = renderHook(() => useTenantCrossings(null))
     expect(result.current.loading).toBe(false)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('approveBreakGlass', () => {
+  it('posts to the approve route with no body', async () => {
+    fetchMock.mockResolvedValueOnce(json(200, { data: { ok: true } }))
+    await approveBreakGlass('msp a', 'bg/1')
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('/api/v1/tenants/msp%20a/break-glass/bg%2F1/approve')
+    expect(init?.method).toBe('POST')
+    expect(init?.body).toBeUndefined()
+  })
+
+  it('maps 403 to TenantApiError', async () => {
+    fetchMock.mockResolvedValueOnce(json(403, { error: { code: 'SAME_APPROVER', message: 'Requester cannot approve.' } }))
+    await expect(approveBreakGlass('msp-a', 'bg-1')).rejects.toMatchObject({
+      name: 'TenantApiError',
+      status: 403,
+      code: 'SAME_APPROVER',
+      message: 'Requester cannot approve.',
+    })
   })
 })

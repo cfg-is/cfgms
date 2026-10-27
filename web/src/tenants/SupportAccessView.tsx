@@ -22,6 +22,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../auth/AuthContext.tsx'
 import {
   approvalStatePending,
+  approveBreakGlass,
   breakGlassReasons,
   createAccessGrant,
   endCrossing,
@@ -240,8 +241,33 @@ function ConfirmRow({
   )
 }
 
-function CrossingRow({ c, nowMs, onAction }: { c: Crossing; nowMs: number; onAction: () => void }) {
+function isPendingBreakGlass(c: Crossing): boolean {
+  return isBreakGlass(c) && c.approvalState === approvalStatePending && c.status === 'pending'
+}
+
+interface ApproveControls {
+  /** Signed-in username; the client-side requester check compares it with the row. */
+  username: string
+  busy: boolean
+  onApprove: (c: Crossing) => void
+}
+
+function CrossingRow({
+  c,
+  nowMs,
+  onAction,
+  approve,
+  approveError,
+}: {
+  c: Crossing
+  nowMs: number
+  onAction: () => void
+  approve: ApproveControls | null
+  approveError: string | null
+}) {
   const bg = isBreakGlass(c)
+  const canApprove = approve !== null && isPendingBreakGlass(c)
+  const isRequester = canApprove && approve.username !== '' && c.principalName === approve.username
   const live = isLive(c)
   const rel = relative(c, nowMs)
   const cls = `${bg && live ? 'sa-row-bg' : ''}${live ? '' : ' sa-row-dim'}`.trim()
@@ -276,6 +302,29 @@ function CrossingRow({ c, nowMs, onAction }: { c: Crossing; nowMs: number; onAct
         </span>
       </td>
       <td>
+        {canApprove && (
+          <>
+            <button
+              type="button"
+              className="sa-btn sa-sm"
+              onClick={() => approve.onApprove(c)}
+              disabled={approve.busy || isRequester}
+              data-testid="approve-btn"
+            >
+              Approve
+            </button>
+            {isRequester && (
+              <div className="sa-hint" data-testid="approve-requester-note">
+                You requested this, so a different root admin must approve it.
+              </div>
+            )}
+            {approveError !== null && (
+              <div className="sa-msg sa-msg-crit" role="alert" data-testid="approve-error">
+                {approveError}
+              </div>
+            )}
+          </>
+        )}
         {live && (
           <button type="button" className="sa-btn-danger-soft sa-sm" onClick={onAction} data-testid="revoke-btn">
             {actionLabel(c)}
@@ -287,6 +336,9 @@ function CrossingRow({ c, nowMs, onAction }: { c: Crossing; nowMs: number; onAct
 }
 
 function CrossingSection({ tenantId, version }: { tenantId: string; version: number }) {
+  const { principal } = useAuth()
+  const rootScope = principal?.rootScope === true
+  const username = principal?.username ?? ''
   const { crossings, loading, error, refetch } = useTenantCrossings(tenantId, version)
   const [showAll, setShowAll] = useState(false)
   const [confirming, setConfirming] = useState<string | null>(null)
@@ -298,6 +350,22 @@ function CrossingSection({ tenantId, version }: { tenantId: string; version: num
     const id = window.setInterval(() => setNowMs(Date.now()), 60_000)
     return () => window.clearInterval(id)
   }, [])
+
+  const [approving, setApproving] = useState<string | null>(null)
+  const [approveFailure, setApproveFailure] = useState<{ id: string; message: string } | null>(null)
+
+  async function approve(c: Crossing) {
+    setApproving(c.id)
+    setApproveFailure(null)
+    try {
+      await approveBreakGlass(tenantId, c.id)
+      refetch()
+    } catch (cause: unknown) {
+      setApproveFailure({ id: c.id, message: actionError(cause, 'Approve failed') })
+    } finally {
+      setApproving(null)
+    }
+  }
 
   async function confirmEnd(c: Crossing) {
     setBusy(true)
@@ -402,6 +470,8 @@ function CrossingSection({ tenantId, version }: { tenantId: string; version: num
                   confirming={confirming === c.id}
                   busy={busy}
                   error={revokeError}
+                  approve={rootScope ? { username, busy: approving !== null, onApprove: (row) => void approve(row) } : null}
+                  approveError={approveFailure?.id === c.id ? approveFailure.message : null}
                   onAction={() => {
                     setRevokeError(null)
                     setConfirming(c.id)
@@ -424,6 +494,8 @@ function FragmentRows({
   confirming,
   busy,
   error,
+  approve,
+  approveError,
   onAction,
   onKeep,
   onConfirm,
@@ -433,13 +505,15 @@ function FragmentRows({
   confirming: boolean
   busy: boolean
   error: string | null
+  approve: ApproveControls | null
+  approveError: string | null
   onAction: () => void
   onKeep: () => void
   onConfirm: () => void
 }) {
   return (
     <>
-      <CrossingRow c={c} nowMs={nowMs} onAction={onAction} />
+      <CrossingRow c={c} nowMs={nowMs} onAction={onAction} approve={approve} approveError={approveError} />
       {confirming && <ConfirmRow c={c} busy={busy} error={error} onKeep={onKeep} onConfirm={onConfirm} />}
     </>
   )
@@ -630,6 +704,7 @@ export default function SupportAccessView() {
       </div>
 
       {isRoot ? (
+        <>
         <section className="sa-panel" data-testid="root-state">
           <div className="sa-rootnote">
             <h3>This page is for MSP administrators</h3>
@@ -643,6 +718,9 @@ export default function SupportAccessView() {
             </p>
           </div>
         </section>
+        {/* A root admin who works on a tenant sees its access list to give a break-glass second approval. */}
+        {principal?.rootScope === true && tenantId !== '' && <CrossingSection tenantId={tenantId} version={version} />}
+        </>
       ) : (
         <>
           <IssueGrant tenantId={tenantId} onIssued={() => setVersion((v) => v + 1)} />

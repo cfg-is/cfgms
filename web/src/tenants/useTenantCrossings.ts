@@ -10,6 +10,7 @@
  *   POST   /api/v1/tenants/{id}/break-glass                    → requestBreakGlass (root operator)
  *   GET    /api/v1/tenant-crossings/active                     → fetchActiveCrossings
  *   DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}    → endCrossing
+ *   POST   /api/v1/tenants/{id}/break-glass/{crossing_id}/approve → approveBreakGlass (second root approver)
  *
  * The controller serialises a crossing with snake_case keys (`expires_at`); the
  * parser also accepts the Go field names (`ExpiresAt`) and coerces every string.
@@ -217,6 +218,15 @@ export async function endCrossing(tenantId: string, crossingId: string): Promise
     method: 'DELETE',
   })
   if (!response.ok) throw await crossingError(response, 'End session failed')
+}
+
+/** Second approval of a pending break-glass; the server rejects the requester (`SAME_APPROVER`). */
+export async function approveBreakGlass(tenantId: string, crossingId: string): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/tenants/${encodeURIComponent(tenantId)}/break-glass/${encodeURIComponent(crossingId)}/approve`,
+    { method: 'POST' },
+  )
+  if (!response.ok) throw await crossingError(response, 'Approve break-glass failed')
 }
 
 // ── useTenantCrossings ────────────────────────────────────────────────────────

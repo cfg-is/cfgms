@@ -233,6 +233,10 @@ it:
 cfg tenant approve-break-glass msp-a <crossing-id>
 ```
 
+A root admin can also approve from the **Support access** page: the pending row shows an **Approve** action
+that asks for a fresh passkey tap. The page disables it for the requester and states why; the server's
+`SAME_APPROVER` check stays authoritative.
+
 The invoker cannot approve their own request (`403 SAME_APPROVER`), and a crossing that is not pending
 returns `409 NOT_PENDING`. The 30-minute window starts at approval, and the MSP is notified at approval, not
 at the request. A pending request that nobody approves expires after 30 minutes.
