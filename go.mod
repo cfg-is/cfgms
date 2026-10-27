@@ -6,14 +6,14 @@ toolchain go1.27.2
 
 require (
 	github.com/Microsoft/go-winio v0.6.3
-	github.com/aws/aws-sdk-go-v2 v1.47.3
+	github.com/aws/aws-sdk-go-v2 v1.47.4
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
-	github.com/aws/smithy-go v1.28.5
+	github.com/aws/smithy-go v1.28.6
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
-	github.com/go-git/go-billy/v5 v5.9.2
+	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/go-ole/go-ole v1.3.0
 	github.com/go-webauthn/webauthn v0.18.2
