@@ -311,6 +311,21 @@ func (p *FlatFileProvider) CreateWorkflowExecutionStore(config map[string]interf
 	return store, nil
 }
 
+// CreateReportTemplateStore creates a flat-file-backed ReportTemplateStore (Issue #5527).
+// Config map must contain "root" (string): the root directory.
+// Templates are stored at <root>/report_templates/templates.json with atomic writes.
+func (p *FlatFileProvider) CreateReportTemplateStore(config map[string]interface{}) (business.ReportTemplateStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileReportTemplateStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create report template store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateNonceStore creates a flat-file-backed NonceStore (Issue #3755, ADR-031
 // amendment to ADR-011). Implements interfaces.NonceStoreCreator.
 // Config map must contain "root" (string): the root directory.

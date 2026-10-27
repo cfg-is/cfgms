@@ -36,6 +36,7 @@ type HybridStorageManager struct {
 	ipTrustStore             business.IPTrustStore
 	alertStore               business.AlertStore
 	approvalStore            business.ApprovalStore
+	reportTemplateStore      business.ReportTemplateStore
 	workflowExecutionStore   business.WorkflowExecutionStore
 	pendingRegistrationStore business.PendingRegistrationStore
 
@@ -92,6 +93,13 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 		return nil, fmt.Errorf("failed to create approval store: %w", err)
 	}
 	manager.approvalStore = approvalStore
+
+	// Report template storage follows the same pattern as approval storage.
+	reportTemplateStore, err := opProvider.CreateReportTemplateStore(config.Operational.Config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create report template store: %w", err)
+	}
+	manager.reportTemplateStore = reportTemplateStore
 
 	workflowExecutionStore, err := opProvider.CreateWorkflowExecutionStore(config.Operational.Config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
@@ -150,6 +158,12 @@ func (h *HybridStorageManager) GetApprovalStore() business.ApprovalStore {
 // (operational backend, nil if the operational provider does not support it).
 func (h *HybridStorageManager) GetWorkflowExecutionStore() business.WorkflowExecutionStore {
 	return h.workflowExecutionStore
+}
+
+// GetReportTemplateStore returns the durable report template storage interface
+// (operational backend, nil if the operational provider does not support it).
+func (h *HybridStorageManager) GetReportTemplateStore() business.ReportTemplateStore {
+	return h.reportTemplateStore
 }
 
 // GetPendingRegistrationStore returns the pending registration storage interface
