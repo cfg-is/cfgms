@@ -3,7 +3,7 @@
 # read the compiler export data written by the active Go toolchain.
 #
 # Both tools load packages through x/tools' gcimporter. gosec v2.29.0 vendors
-# x/tools v0.49.0 (staticcheck 2026.2.2 requires v0.51.0), and the Go 1.27.2
+# x/tools v0.49.0 (staticcheck 2026.2.2 requires v0.51.0), and the Go 1.27.3
 # toolchain writes export data older x/tools cannot decode ("export data version 5 is
 # greater than maximum supported version 4"). `go install pkg@version` ignores
 # any override, so this builds both from a throwaway module that raises x/tools.
