@@ -274,3 +274,118 @@ describe('TenantSettingsPanel assurance policy save handles elevation 401 withou
     expect(putsTo(ASSURANCE)).toHaveLength(0)
   })
 })
+
+const CS_CRED = '/api/v1/tenants/root/msp-a/config-source/credential'
+const CS_TEST = '/api/v1/tenants/root/msp-a/config-source/test'
+
+async function fillConfigSource() {
+  await waitFor(() => expect(screen.getByTestId('config-source-url-input')).toBeInTheDocument())
+  fireEvent.change(screen.getByTestId('config-source-url-input'), { target: { value: 'https://git.example.com/org/configs.git' } })
+  fireEvent.change(screen.getByTestId('config-source-token-input'), { target: { value: 'secret-token' } })
+}
+
+describe('TenantSettingsPanel config source', () => {
+  it('save handles elevation 401 without a presence token', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential) } })
+    let elevated = false
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url.includes('elevate/begin')) return Promise.resolve(json(200, beginOptions))
+      if (url.includes('elevate/finish')) {
+        elevated = true
+        return Promise.resolve(json(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }))
+      }
+      if (url === CS_CRED && init?.method === 'PUT') {
+        if (elevated) {
+          return Promise.resolve(json(200, envelope({ credential_ref: 'root/msp-a/config-source-git', bound_repository_url: 'https://git.example.com/org/configs.git' })))
+        }
+        return Promise.resolve(elevationChallenge('tenant:manage'))
+      }
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await fillConfigSource()
+    fireEvent.click(screen.getByTestId('config-source-save-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(putsTo(CS_CRED)).toHaveLength(2))
+    const retry = putsTo(CS_CRED)[1]?.[1]
+    expect(new Headers(retry?.headers).get('X-Presence-Token')).toBeNull()
+    expect(JSON.parse(String(retry?.body))).toEqual({ url: 'https://git.example.com/org/configs.git', token: 'secret-token' })
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/'))).toBe(false)
+    await waitFor(() => expect(screen.getByTestId('config-source-saved')).toHaveTextContent('root/msp-a/config-source-git'))
+  })
+
+  it('clears the token field after save', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === CS_CRED && init?.method === 'PUT') {
+        return Promise.resolve(json(200, envelope({ credential_ref: 'r', bound_repository_url: 'u' })))
+      }
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await fillConfigSource()
+    const input = screen.getByTestId('config-source-token-input')
+    expect(input).toHaveAttribute('type', 'password')
+    expect(input).toHaveAttribute('autocomplete', 'off')
+    fireEvent.click(screen.getByTestId('config-source-save-btn'))
+    await waitFor(() => expect(screen.getByTestId('config-source-saved')).toBeInTheDocument())
+    expect(input).toHaveValue('')
+    expect(JSON.stringify(Object.entries(localStorage)) + JSON.stringify(Object.entries(sessionStorage))).not.toContain('secret-token')
+  })
+
+  it('clears the token and shows the server text when the save fails', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === CS_CRED && init?.method === 'PUT') {
+        return Promise.resolve(json(400, { error: { message: 'bad <b>url</b>' } }))
+      }
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await fillConfigSource()
+    fireEvent.click(screen.getByTestId('config-source-save-btn'))
+    await waitFor(() => expect(screen.getByTestId('config-source-save-error')).toHaveTextContent('bad <b>url</b>'))
+    expect(screen.getByTestId('config-source-token-input')).toHaveValue('')
+    expect(document.querySelector('b')).toBeNull()
+  })
+
+  it('test button posts and renders the result as text', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === CS_TEST && init?.method === 'POST') {
+        return Promise.resolve(json(200, envelope({ reachable: false, error: '<i>dial timeout</i>' })))
+      }
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await waitFor(() => expect(screen.getByTestId('config-source-test-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('config-source-test-btn'))
+    await waitFor(() => expect(screen.getByTestId('config-source-test-result')).toHaveTextContent('Not reachable: <i>dial timeout</i>'))
+    expect(document.querySelector('i')).toBeNull()
+  })
+})
+
+describe('TenantSettingsPanel config source validation', () => {
+  it('refuses an empty URL, an empty token and an oversized token locally', async () => {
+    fetchMock.mockImplementation((input) => Promise.resolve(readRoutes(String(input)) ?? json(404, {})))
+    renderPanel()
+    await waitFor(() => expect(screen.getByTestId('config-source-url-input')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('config-source-save-btn'))
+    expect(screen.getByTestId('config-source-save-error')).toHaveTextContent(/URL is required/)
+
+    fireEvent.change(screen.getByTestId('config-source-url-input'), { target: { value: 'https://git.example.com/r.git' } })
+    fireEvent.click(screen.getByTestId('config-source-save-btn'))
+    expect(screen.getByTestId('config-source-save-error')).toHaveTextContent(/Token is required/)
+
+    fireEvent.change(screen.getByTestId('config-source-token-input'), { target: { value: 'x'.repeat(4097) } })
+    fireEvent.click(screen.getByTestId('config-source-save-btn'))
+    expect(screen.getByTestId('config-source-save-error')).toHaveTextContent(/at most 4096/)
+    expect(putsTo(CS_CRED)).toHaveLength(0)
+  })
+})

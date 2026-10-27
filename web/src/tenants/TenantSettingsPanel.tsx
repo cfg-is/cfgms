@@ -20,6 +20,13 @@ import {
   type MinOverride,
   type RefreshMode,
 } from './useTenantPolicies.ts'
+import {
+  configSourceCredentialMaxTokenLen,
+  putConfigSourceCredential,
+  testConfigSource,
+  type ConfigSourceCredentialResult,
+  type ConfigSourceTestResult,
+} from './useTenantConfigSource.ts'
 
 function modeLabel(mode: RefreshMode): string {
   switch (mode) {
@@ -297,6 +304,118 @@ function AssuranceForm({ tenantId, initial }: { tenantId: string; initial: Assur
   )
 }
 
+// ── Config source ─────────────────────────────────────────────────────────────
+
+function ConfigSourceSection({ tenantId }: { tenantId: string }) {
+  const [url, setUrl] = useState('')
+  const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<ConfigSourceCredentialResult | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testError, setTestError] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<ConfigSourceTestResult | null>(null)
+
+  async function handleSave() {
+    if (url.trim() === '') {
+      setError('Repository URL is required')
+      return
+    }
+    if (token.length === 0) {
+      setError('Token is required')
+      return
+    }
+    if (token.length > configSourceCredentialMaxTokenLen) {
+      setError(`Token must be at most ${configSourceCredentialMaxTokenLen} characters`)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    setResult(null)
+    try {
+      setResult(await putConfigSourceCredential(tenantId, url.trim(), token))
+    } catch (cause: unknown) {
+      setError(errorText(cause, 'Save failed'))
+    } finally {
+      // The token is write-only: drop it from state whether or not the save worked.
+      setToken('')
+      setSaving(false)
+    }
+  }
+
+  async function handleTest() {
+    setTesting(true)
+    setTestError(null)
+    setTestResult(null)
+    try {
+      setTestResult(await testConfigSource(tenantId))
+    } catch (cause: unknown) {
+      setTestError(errorText(cause, 'Connection test failed'))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <section aria-labelledby="config-source-heading" data-testid="config-source-section" className="wf-form-panel">
+      <h3 id="config-source-heading">Config source</h3>
+      <div className="wf-form">
+        <p className="mut">
+          The token is bound to one repository URL and can be replaced but never read back.
+          Saving and testing ask for a strong session.
+        </p>
+        <div className="wf-form-row">
+          <div className="wf-form-field">
+            <span className="wf-form-label">Repository URL</span>
+            <input
+              type="text"
+              aria-label="Repository URL"
+              placeholder="https://git.example.com/org/configs.git"
+              value={url}
+              onChange={(e) => { setUrl(e.target.value); setResult(null) }}
+              data-testid="config-source-url-input"
+            />
+          </div>
+          <div className="wf-form-field">
+            <span className="wf-form-label">Access token</span>
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label="Access token"
+              value={token}
+              onChange={(e) => { setToken(e.target.value); setResult(null) }}
+              data-testid="config-source-token-input"
+            />
+          </div>
+        </div>
+        <div className="wf-form-actions">
+          <button type="button" className="wf-btn" disabled={saving} onClick={() => void handleSave()} data-testid="config-source-save-btn">
+            {saving ? 'Saving…' : 'Save credential'}
+          </button>
+          <button type="button" className="wf-btn-secondary" disabled={testing} onClick={() => void handleTest()} data-testid="config-source-test-btn">
+            {testing ? 'Testing…' : 'Test connection'}
+          </button>
+          {result && (
+            <span className="mut" role="status" data-testid="config-source-saved">
+              Saved as {result.credential_ref} for {result.bound_repository_url}
+            </span>
+          )}
+          {error && <span className="wf-form-error" role="alert" data-testid="config-source-save-error">{error}</span>}
+        </div>
+        <div className="wf-form-actions">
+          {testResult && (
+            <span className="mut" role="status" data-testid="config-source-test-result">
+              {testResult.reachable ? 'Reachable' : 'Not reachable'}
+              {testResult.error ? `: ${testResult.error}` : ''}
+            </span>
+          )}
+          {testError && <span className="wf-form-error" role="alert" data-testid="config-source-test-error">{testError}</span>}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 export default function TenantSettingsPanel({ tenantId }: { tenantId: string }) {
@@ -304,6 +423,7 @@ export default function TenantSettingsPanel({ tenantId }: { tenantId: string }) 
     <div data-testid="tenant-settings-panel" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
       <RefreshPolicySection tenantId={tenantId} />
       <AssurancePolicySection tenantId={tenantId} />
+      <ConfigSourceSection tenantId={tenantId} />
     </div>
   )
 }
