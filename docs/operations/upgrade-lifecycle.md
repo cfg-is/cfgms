@@ -122,6 +122,23 @@ console, under *Upgrade stewards*, instead of `POST /api/v1/stewards/upgrade`:
    This calls `POST /api/v1/stewards/upgrade/{upgrade_id}/rollback` and needs no
    passkey tap.
 
+## Starting and halting a fleet rollout from the console
+
+A ringed fleet rollout can be driven from the **Installer** page, under *Fleet
+rollout*, instead of calling `POST /api/v1/rollout` directly:
+
+1. Enter the target version (and, optionally, a tenant path; blank uses your
+   own tenant) and choose **Start rollout**. Start needs a fresh passkey tap;
+   cancelling the prompt sends nothing.
+2. The page shows the `rollout_id` and checks `GET /api/v1/rollout/{rollout_id}`
+   every 3 seconds until the rollout is no longer `in-progress`. When the
+   controller cannot query ring health the page says *metrics unavailable* with
+   the reason, and shows no on-version, failed or pending numbers — they are
+   unknown, not zero.
+3. To stop it, choose **Halt**, then **Confirm** (the request is sent only on
+   Confirm; **Cancel** abandons it). This calls
+   `POST /api/v1/rollout/{rollout_id}/halt` and needs no passkey tap.
+
 ## Steward-side upgrade lifecycle
 
 The launcher (`cfgms-steward-launcher`) implements the same upgrade

@@ -54,6 +54,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import ErrorCard from '../shell/ErrorCard.tsx'
 import SelectorInput from '../shell/SelectorInput.tsx'
+import { isTerminalRolloutStatus, useRollout } from './useRollout.ts'
 import { ARCHES as UPGRADE_ARCHES, PLATFORMS as UPGRADE_PLATFORMS, isTerminalUpgradeStatus, useUpgrade } from './useUpgrade.ts'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -641,6 +642,177 @@ function UpgradeSection() {
   )
 }
 
+// ── Fleet rollout (Issue #5452) ───────────────────────────────────────────────
+
+// Start is Strong + a passkey tap (apiFetch runs the ceremony); halt is Strong
+// only. Nothing is sent by halt until the inline Confirm is pressed.
+function RolloutSection() {
+  const { start, status, busy, error, haltNote, pollError, startRollout, halt } = useRollout()
+  const [version, setVersion] = useState('')
+  const [tenant, setTenant] = useState('')
+  const [confirming, setConfirming] = useState(false)
+
+  const canStart = !busy && version.trim() !== ''
+  const current = status?.status ?? start?.status ?? ''
+  const canHalt = !busy && !isTerminalRolloutStatus(current)
+
+  async function handleStart() {
+    setConfirming(false)
+    await startRollout({ targetVersion: version.trim(), tenantId: tenant.trim() })
+  }
+
+  async function handleConfirmHalt() {
+    await halt()
+    setConfirming(false)
+  }
+
+  return (
+    <section className="panel" aria-labelledby="rollout-heading" data-testid="rollout-section">
+      <h2 id="rollout-heading">Fleet rollout</h2>
+      <p className="mut">
+        Roll a steward version out to the fleet ring by ring. You confirm the start with your
+        passkey; a halt needs no tap.
+      </p>
+
+      <div className="assembler-form">
+        <label className="field-label">
+          Target version
+          <input
+            type="text"
+            className="wf-input mono2"
+            value={version}
+            onChange={(e) => setVersion(e.target.value)}
+            placeholder="1.2.3"
+            data-testid="rollout-version"
+          />
+        </label>
+        <label className="field-label">
+          Tenant (blank for your own)
+          <input
+            type="text"
+            className="wf-input mono2"
+            value={tenant}
+            onChange={(e) => setTenant(e.target.value)}
+            placeholder="root/msp-a"
+            data-testid="rollout-tenant"
+          />
+        </label>
+        <div>
+          <button
+            type="button"
+            className="wf-btn-sm"
+            disabled={!canStart}
+            onClick={() => void handleStart()}
+            data-testid="rollout-start-btn"
+          >
+            Start rollout
+          </button>
+        </div>
+      </div>
+
+      {error !== null && (
+        <span className="wf-form-error" role="alert" data-testid="rollout-error">
+          {error}
+        </span>
+      )}
+
+      {start !== null && (
+        <>
+          <table className="tbl" data-testid="rollout-status-table">
+            <thead>
+              <tr>
+                <th>Rollout ID</th>
+                <th>Status</th>
+                <th>Ring</th>
+                <th>Rings done</th>
+                <th>On version</th>
+                <th>Failed</th>
+                <th>Pending</th>
+                <th className="c-spacer" aria-hidden="true" />
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span className="mono2" data-testid="rollout-id">{start.rolloutId}</span></td>
+                <td><span className="nm" data-testid="rollout-status">{current}</span></td>
+                <td><span className="mut" data-testid="rollout-ring">{status?.currentRing ?? ''}</span></td>
+                <td>
+                  <span className="mut" data-testid="rollout-rings">
+                    {status !== null ? `${status.ringsCompleted} / ${status.ringsTotal}` : ''}
+                  </span>
+                </td>
+                {status !== null && !status.healthMetricsAvailable && !isTerminalRolloutStatus(status.status) ? (
+                  <td colSpan={3}>
+                    <span className="mut" data-testid="rollout-metrics-unavailable">
+                      metrics unavailable
+                      {status.healthMetricsError !== '' ? ` — ${status.healthMetricsError}` : ''}
+                    </span>
+                  </td>
+                ) : (
+                  <>
+                    <td><span className="mut" data-testid="rollout-on-version">{status !== null && status.healthMetricsAvailable ? `${status.onVersionPct}%` : ''}</span></td>
+                    <td><span className="mut" data-testid="rollout-failed">{status !== null && status.healthMetricsAvailable ? status.failedCount : ''}</span></td>
+                    <td><span className="mut" data-testid="rollout-pending">{status !== null && status.healthMetricsAvailable ? status.pendingCount : ''}</span></td>
+                  </>
+                )}
+                <td className="c-spacer" />
+              </tr>
+            </tbody>
+          </table>
+          {status !== null && status.error !== '' && (
+            <p className="mut" data-testid="rollout-record-error">{status.error}</p>
+          )}
+          {pollError !== null && (
+            <p className="mut" role="status" data-testid="rollout-poll-error">{pollError}</p>
+          )}
+          {status !== null && !isTerminalRolloutStatus(status.status) && (
+            <p className="mut" data-testid="rollout-polling">Checking status every 3 seconds…</p>
+          )}
+
+          <div>
+            {confirming ? (
+              <span data-testid="halt-confirm-row">
+                <span className="mut">Halt this rollout? </span>
+                <button
+                  type="button"
+                  className="wf-btn-sm"
+                  disabled={busy}
+                  onClick={() => void handleConfirmHalt()}
+                  data-testid="halt-confirm-btn"
+                >
+                  Confirm
+                </button>{' '}
+                <button
+                  type="button"
+                  className="wf-btn-sm"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                  data-testid="halt-cancel-btn"
+                >
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="wf-btn-sm"
+                disabled={!canHalt}
+                onClick={() => setConfirming(true)}
+                data-testid="halt-btn"
+              >
+                Halt
+              </button>
+            )}
+          </div>
+          {haltNote !== null && (
+            <p className="mut" role="status" data-testid="halt-note">{haltNote}</p>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function InstallerPage() {
@@ -711,6 +883,8 @@ export default function InstallerPage() {
         <CommandAssembler />
 
         <UpgradeSection />
+
+        <RolloutSection />
       </div>
     </>
   )
