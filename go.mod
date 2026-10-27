@@ -13,7 +13,7 @@ require (
 	github.com/aws/smithy-go v1.28.5
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
-	github.com/go-git/go-billy/v5 v5.9.2
+	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/go-ole/go-ole v1.3.0
 	github.com/go-webauthn/webauthn v0.18.2
@@ -51,7 +51,7 @@ require (
 	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 
-require github.com/ebitengine/purego v0.11.1
+require github.com/ebitengine/purego v0.11.2
 
 require golang.org/x/term v0.47.0
 
