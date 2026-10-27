@@ -5,11 +5,16 @@ package hostname
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/conformance"
+	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // TestHostnameModule_New verifies the module constructor returns a non-nil Module.
@@ -306,4 +311,118 @@ func TestHostnameModule_ConformanceNoEphemeralFields(t *testing.T) {
 		t.Fatal("Get(\"system\") returned nil state with nil error")
 	}
 	conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
+}
+
+type recordingExecutor struct {
+	state hostnameState
+	sets  []hostnameState
+}
+
+func (r *recordingExecutor) getState() (hostnameState, error) { return r.state, nil }
+func (r *recordingExecutor) setState(s hostnameState) error {
+	r.sets = append(r.sets, s)
+	return nil
+}
+
+func TestHostnameModule_Set_RefusesExistingBootConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	var dir string
+	for _, d := range security.BootConfigDirs() {
+		if strings.HasPrefix(d, home) {
+			dir = d
+			break
+		}
+	}
+	if dir == "" {
+		t.Skip("no boot-config dir under HOME on this platform")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "planted.cfg"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := &recordingExecutor{state: hostnameState{Hostname: "current"}}
+	m := &hostnameModule{executor: exec}
+
+	err := m.Set(context.Background(), "host", &HostnameConfig{Hostname: "planted"})
+	if !errors.Is(err, ErrHostnameBootConfigConflict) {
+		t.Fatalf("want ErrHostnameBootConfigConflict, got %v", err)
+	}
+	if len(exec.sets) != 0 {
+		t.Fatalf("setState must not be reached, got %v", exec.sets)
+	}
+
+	if err := m.Set(context.Background(), "host", &HostnameConfig{Hostname: "fresh"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(exec.sets) != 1 {
+		t.Fatalf("want one setState, got %d", len(exec.sets))
+	}
+}
+
+// A rename that is pending until reboot (Windows: netdom /reboot:0) leaves
+// os.Hostname on the old name. The boot config for the desired name must still
+// be refused by the file module from the moment the rename is queued, or a
+// delivered file resource could plant the config loaded after the reboot
+// (Issue #5490).
+func TestHostnameModule_Set_ProtectsDesiredBootConfigWhileRenamePending(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
+	var dir string
+	for _, d := range security.BootConfigDirs() {
+		if strings.HasPrefix(d, home) {
+			dir = d
+			break
+		}
+	}
+	if dir == "" {
+		t.Fatal("no boot-config dir under HOME/USERPROFILE on this platform")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	desiredName := "pending-rename-5490"
+	target := filepath.Join(dir, desiredName+".cfg")
+	writeCfg := &file.FileConfig{
+		State:           "present",
+		Content:         "steward:\n  remote_terminal:\n    enabled: true\n",
+		AllowedBasePath: home,
+		Permissions:     0o600,
+	}
+
+	// The executor's getState never changes after setState: the rename is
+	// queued, not yet in effect, so the current host name stays the old one.
+	exec := &recordingExecutor{state: hostnameState{Hostname: "current"}}
+	m := &hostnameModule{executor: exec}
+
+	if err := m.Set(context.Background(), "host", &HostnameConfig{Hostname: desiredName}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(exec.sets) != 1 {
+		t.Fatalf("want one setState, got %d", len(exec.sets))
+	}
+	if st, _ := exec.getState(); st.Hostname != "current" {
+		t.Fatalf("pending rename must not change the observed host name, got %q", st.Hostname)
+	}
+
+	err := file.New().Set(context.Background(), target, writeCfg)
+	if !errors.Is(err, file.ErrProtectedBootConfig) {
+		t.Fatalf("file module must refuse %s while the rename is pending, got %v", target, err)
+	}
+	if _, serr := os.Lstat(target); !os.IsNotExist(serr) {
+		t.Fatalf("%s must not be created, stat err=%v", target, serr)
+	}
+
+	// An unrelated .cfg in the same directory is still writable.
+	other := filepath.Join(dir, "unrelated-5490.cfg")
+	if err := file.New().Set(context.Background(), other, writeCfg); err != nil {
+		t.Fatalf("unrelated file write failed: %v", err)
+	}
 }

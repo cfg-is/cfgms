@@ -108,3 +108,49 @@ func permOr(v interface{}) int {
 	i, _ := v.(int)
 	return i
 }
+
+// After the hostname changes, the file the steward loaded and the file for the
+// new hostname both stay protected (Issue #5490).
+func TestFileModule_Set_RefusesLoadedBootConfigAfterHostnameChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("boot-config search dirs on Windows come from PROGRAMDATA; covered by pkg/security tests")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var dir string
+	for _, d := range security.BootConfigDirs() {
+		if strings.HasPrefix(d, home) {
+			dir = d
+			break
+		}
+	}
+	require.NotEmpty(t, dir)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	realHost, err := os.Hostname()
+	require.NoError(t, err)
+	oldHost := "oldhost-" + realHost
+
+	oldPath := filepath.Join(dir, oldHost+".cfg")
+	newPath := filepath.Join(dir, realHost+".cfg")
+	original := []byte("steward:\n  remote_terminal:\n    enabled: false\n")
+	require.NoError(t, os.WriteFile(oldPath, original, 0o600))
+	require.NoError(t, os.WriteFile(newPath, original, 0o600))
+	security.SetLoadedBootConfigPath(oldPath)
+
+	for _, target := range []string{oldPath, newPath} {
+		err := New().Set(context.Background(), target, &FileConfig{
+			State: "present", Content: "steward:\n  remote_terminal:\n    enabled: true\n",
+			AllowedBasePath: home, Permissions: 0o600,
+		})
+		assert.ErrorIs(t, err, ErrProtectedBootConfig, target)
+		got, rerr := os.ReadFile(target)
+		require.NoError(t, rerr)
+		assert.Equal(t, original, got)
+	}
+
+	other := filepath.Join(dir, "other.cfg")
+	require.NoError(t, New().Set(context.Background(), other, &FileConfig{
+		State: "present", Content: "x", AllowedBasePath: home, Permissions: 0o600,
+	}))
+}

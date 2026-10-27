@@ -180,7 +180,7 @@ func LoadConfiguration(configPath string) (StewardConfig, error) {
 
 	// If specific path provided, use it
 	if configPath != "" {
-		return loadFromPath(configPath)
+		return loadAndRecord(configPath)
 	}
 
 	// Search for configuration file in priority order
@@ -189,11 +189,21 @@ func LoadConfiguration(configPath string) (StewardConfig, error) {
 	for _, path := range searchPaths {
 		if _, err := os.Stat(path); err == nil {
 			warnShadowedConfigs(searchPaths, path)
-			return loadFromPath(path)
+			return loadAndRecord(path)
 		}
 	}
 
 	return config, fmt.Errorf("%w in search paths", ErrNoConfiguration)
+}
+
+// loadAndRecord loads path and records it with the boot-config write guard, so
+// the file the running steward loaded stays protected even if the host is
+// renamed afterwards.
+func loadAndRecord(path string) (StewardConfig, error) {
+	if _, err := os.Stat(path); err == nil {
+		security.SetLoadedBootConfigPath(path)
+	}
+	return loadFromPath(path)
 }
 
 // loadFromPath loads configuration from a specific file path

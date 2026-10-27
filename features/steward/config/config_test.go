@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 func TestLoadConfiguration(t *testing.T) {
@@ -1436,4 +1437,14 @@ resources:
 	_, err := LoadConfiguration(configFile)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "observe_sweep_n")
+}
+
+func TestLoadConfiguration_RecordsLoadedBootConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "recorded-"+filepath.Base(dir)+".cfg")
+	require.NoError(t, os.WriteFile(path, []byte("steward:\n  id: test\n"), 0o600))
+
+	_, err := LoadConfiguration(path)
+	require.NoError(t, err)
+	assert.True(t, security.IsProtectedBootConfigPath(path))
 }

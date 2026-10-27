@@ -106,3 +106,28 @@ func TestIsProtectedBootConfigPath_WindowsFailsClosed(t *testing.T) {
 	// Embedded NUL cannot be converted to a Win32 path.
 	assert.True(t, IsProtectedBootConfigPath(filepath.Join(cwd, "a\x00b")))
 }
+
+func TestLoadedBootConfigSurvivesHostnameChange_Windows(t *testing.T) {
+	pd := t.TempDir()
+	t.Setenv("PROGRAMDATA", pd)
+	t.Chdir(t.TempDir())
+	dir := filepath.Join(pd, "cfgms")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	orig := hostnameFunc
+	resetLoadedBootConfig()
+	t.Cleanup(func() { hostnameFunc = orig; resetLoadedBootConfig() })
+
+	hostnameFunc = func() (string, error) { return "oldhost", nil }
+	SetLoadedBootConfigPath(filepath.Join(dir, "oldhost.cfg"))
+	hostnameFunc = func() (string, error) { return "newhost", nil }
+
+	assert.True(t, IsProtectedBootConfigPath(filepath.Join(dir, "oldhost.cfg")))
+	assert.True(t, IsProtectedBootConfigPath(filepath.Join(dir, "newhost.cfg")))
+	assert.True(t, IsProtectedBootConfigPath(filepath.Join(dir, "steward.cfg")))
+	assert.False(t, IsProtectedBootConfigPath(filepath.Join(dir, "other.cfg")))
+
+	assert.False(t, BootConfigExistsForHostname("planted"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "planted.cfg"), []byte("x"), 0o600))
+	assert.True(t, BootConfigExistsForHostname("planted"))
+}
