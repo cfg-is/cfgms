@@ -272,6 +272,23 @@ See `features/modules/conformance/fragment_test_helper.go` for godoc and
 `features/modules/conformance/fragment_test_helper_test.go` for a worked
 example using `stdlib/file`.
 
+### Per-object ownership (`per_object`)
+
+An `owns` entry may set `per_object: true` for a kind whose objects are many (for example directory users). `Get(kind)` then returns the objects under the reserved `__cfgms_objects` key (`modules.PerObjectKey`) of its `AsMap()` output, and the DNA assembler emits one fragment per object instead of one per kind.
+
+```go
+map[string]interface{}{
+    "__cfgms_objects": []interface{}{
+        map[string]interface{}{"id": "u-1001", "attrs": map[string]interface{}{"upn": "a@acme-corp.example"}},
+    },
+}
+```
+
+- Each fragment has `FragmentId = <kind>:<id>` and is canonicalized and hashed individually, with its own envelope. For a declaration without `per_object`, the key is ignored.
+- Object ids must be non-empty, at most 128 bytes, free of control characters and unique within the result. A violating object is skipped and counted in one log line.
+- More than 200,000 objects in one result fails closed: no fragments for that kind.
+- On a successful `Get`, the new set replaces every previous fragment whose id starts with `<kind>:`. On a `Get` error the previous fragments are kept (stale beats erased). Retiring a kind that is no longer observed is the caller's job, not the assembler's.
+
 ### Fragment edge declarations
 
 Modules may declare topology relationships — edges in the entity graph — by including a reserved key `__entitygraph_edges` in their `AsMap()` output alongside entity state fields.

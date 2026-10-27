@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -601,4 +602,128 @@ func TestAssembler_ConflictedKindExcludedFromHostFacts(t *testing.T) {
 	ids := fragmentIDSet(frags)
 	assert.False(t, ids["host:cpu"],
 		"conflicted kind must produce zero fragments — neither module nor gatherer may win (atomicity)")
+}
+
+// --- Per-object tests --------------------------------------------------------
+
+func objList(ids ...string) []interface{} {
+	out := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, map[string]interface{}{
+			"id":    id,
+			"attrs": map[string]interface{}{"upn": id + "@acme-corp.example", "enabled": true},
+		})
+	}
+	return out
+}
+
+func perObjectFixture(list []interface{}) map[string]modules.Module {
+	return map[string]modules.Module{
+		"ad": stateFixture(map[string]interface{}{modules.PerObjectKey: list}),
+	}
+}
+
+var perObjectOwnership = map[string][]modules.OwnershipDeclaration{
+	"ad": {{Kind: "directory_user", PerObject: true}},
+}
+
+func fragsByID(frags []*commonpb.Fragment) map[string]*commonpb.Fragment {
+	m := make(map[string]*commonpb.Fragment, len(frags))
+	for _, f := range frags {
+		m[f.FragmentId] = f
+	}
+	return m
+}
+
+func TestAssemble_PerObject_EmitsOneFragmentPerObject(t *testing.T) {
+	frags, envs, err := newTestAssembler().Assemble(context.Background(),
+		perObjectFixture(objList("a", "b", "c")), perObjectOwnership, nil)
+	require.NoError(t, err)
+	require.Len(t, frags, 3)
+	hashes := map[string]bool{}
+	for _, id := range []string{"a", "b", "c"} {
+		f := fragsByID(frags)["directory_user:"+id]
+		require.NotNil(t, f)
+		assert.Equal(t, "ad", f.Authority)
+		assert.NotEmpty(t, f.CanonicalBytes)
+		hashes[f.FragmentHash] = true
+		assert.Contains(t, envs, f.FragmentId)
+	}
+	assert.Len(t, hashes, 3, "hashes must be distinct")
+}
+
+func TestAssemble_PerObject_RemovedObjectDropsFromMergedSet(t *testing.T) {
+	a := newTestAssembler()
+	first, _, err := a.Assemble(context.Background(), perObjectFixture(objList("a", "b", "c")), perObjectOwnership, nil)
+	require.NoError(t, err)
+	second, _, err := a.Assemble(context.Background(), perObjectFixture(objList("a", "b")), perObjectOwnership, first)
+	require.NoError(t, err)
+	require.Len(t, second, 2)
+	assert.NotContains(t, fragsByID(second), "directory_user:c")
+}
+
+func TestAssemble_PerObject_GetErrorKeepsPreviousFragments(t *testing.T) {
+	a := newTestAssembler()
+	first, _, err := a.Assemble(context.Background(), perObjectFixture(objList("a", "b")), perObjectOwnership, nil)
+	require.NoError(t, err)
+	failing := map[string]modules.Module{"ad": &asmFakeModule{err: errors.New("boom")}}
+	second, envs, err := a.Assemble(context.Background(), failing, perObjectOwnership, first)
+	require.NoError(t, err)
+	assert.Len(t, second, 2, "stale beats erased")
+	assert.Empty(t, envs)
+}
+
+func TestAssemble_PerObject_RejectsDuplicateAndOversizedIDs(t *testing.T) {
+	list := objList("ok", "dup", "dup", "", strings.Repeat("x", 129), "bad\x00id", strings.Repeat("y", 128))
+	frags, _, err := newTestAssembler().Assemble(context.Background(), perObjectFixture(list), perObjectOwnership, nil)
+	require.NoError(t, err)
+	ids := fragsByID(frags)
+	assert.Len(t, frags, 3)
+	assert.Contains(t, ids, "directory_user:ok")
+	assert.Contains(t, ids, "directory_user:dup")
+	assert.Contains(t, ids, "directory_user:"+strings.Repeat("y", 128))
+}
+
+func TestAssemble_PerObject_OverBoundFailsClosed(t *testing.T) {
+	list := make([]interface{}, maxObjectsPerKind+1)
+	for i := range list {
+		list[i] = map[string]interface{}{"id": fmt.Sprint(i), "attrs": map[string]interface{}{}}
+	}
+	frags, envs, err := newTestAssembler().Assemble(context.Background(), perObjectFixture(list), perObjectOwnership, nil)
+	require.NoError(t, err)
+	assert.Empty(t, frags)
+	assert.Empty(t, envs)
+}
+
+func TestAssemble_PerObject_StableHashAcrossRuns(t *testing.T) {
+	a := newTestAssembler()
+	f1, _, err := a.Assemble(context.Background(), perObjectFixture(objList("a", "b", "c")), perObjectOwnership, nil)
+	require.NoError(t, err)
+	f2, _, err := a.Assemble(context.Background(), perObjectFixture(objList("c", "a", "b")), perObjectOwnership, nil)
+	require.NoError(t, err)
+	root := func(fs []*commonpb.Fragment) string {
+		var m []*commonpb.ManifestEntry
+		for _, f := range fs {
+			m = append(m, &commonpb.ManifestEntry{FragmentId: f.FragmentId, FragmentHash: f.FragmentHash})
+		}
+		r, err := AggregateRoot(m)
+		require.NoError(t, err)
+		return r
+	}
+	b2 := fragsByID(f2)
+	for _, f := range f1 {
+		assert.Equal(t, f.FragmentHash, b2[f.FragmentId].FragmentHash)
+	}
+	assert.Equal(t, root(f1), root(f2))
+}
+
+func TestAssemble_NonPerObjectDeclarationIgnoresReservedKey(t *testing.T) {
+	active := map[string]modules.Module{"ad": stateFixture(map[string]interface{}{
+		"name": "x", modules.PerObjectKey: objList("a", "b"),
+	})}
+	own := map[string][]modules.OwnershipDeclaration{"ad": {{Kind: "directory_user"}}}
+	frags, _, err := newTestAssembler().Assemble(context.Background(), active, own, nil)
+	require.NoError(t, err)
+	require.Len(t, frags, 1)
+	assert.Equal(t, "directory_user", frags[0].FragmentId)
 }

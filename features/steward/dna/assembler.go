@@ -5,7 +5,10 @@ package dna
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -13,6 +16,31 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+const (
+	// maxObjectIDBytes bounds a per-object fragment id suffix.
+	maxObjectIDBytes = 128
+	// maxObjectsPerKind bounds the objects accepted from one per-object Get;
+	// above it the kind fails closed.
+	maxObjectsPerKind = 200000
+)
+
+// objectState is the ConfigState of a single per-object fragment.
+type objectState struct {
+	attrs map[string]interface{}
+}
+
+func (s *objectState) AsMap() map[string]interface{} {
+	m := make(map[string]interface{}, len(s.attrs))
+	for k, v := range s.attrs {
+		m[k] = v
+	}
+	return m
+}
+func (s *objectState) ToYAML() ([]byte, error)    { return nil, nil }
+func (s *objectState) FromYAML(_ []byte) error    { return nil }
+func (s *objectState) Validate() error            { return nil }
+func (s *objectState) GetManagedFields() []string { return nil }
 
 // ConfidenceReporter is an optional interface that ConfigState implementations
 // may implement to declare the confidence level of their Get output.
@@ -94,11 +122,28 @@ func (a *Assembler) Assemble(
 	var fragments []*commonpb.Fragment
 	envelopes := make(map[string]*commonpb.FragmentEnvelope)
 
+	// perObjectReplaced holds per-object kinds whose Get succeeded; the previous
+	// "<kind>:" fragments in hostFactFragments are replaced by the new set.
+	perObjectReplaced := make(map[string]bool)
+
 	for kind, moduleName := range kindToModule {
 		mod, ok := activeModules[moduleName]
 		if !ok {
 			a.logger.Warn("ownership declared for module not found in active set",
 				"module", moduleName, "kind", kind)
+			continue
+		}
+
+		if kindToDecl[kind].PerObject {
+			objFrags, objEnvs, okObj := a.buildObjectFragments(ctx, moduleName, kindToDecl[kind], mod, observedAt)
+			if !okObj {
+				continue
+			}
+			perObjectReplaced[kind] = true
+			fragments = append(fragments, objFrags...)
+			for id, env := range objEnvs {
+				envelopes[id] = env
+			}
 			continue
 		}
 
@@ -128,10 +173,133 @@ func (a *Assembler) Assemble(
 				"kind", frag.FragmentId)
 			continue
 		}
+		if k, _, found := strings.Cut(frag.FragmentId, ":"); found && perObjectReplaced[k] {
+			a.logger.Debug("dropping previous per-object fragment: kind was re-observed",
+				"kind", k)
+			continue
+		}
 		fragments = append(fragments, frag)
 	}
 
 	return fragments, envelopes, nil
+}
+
+// buildObjectFragments calls Get on a per-object module and emits one fragment
+// per object in the reserved PerObjectKey list. The boolean is false when the
+// kind produced no authoritative result (Get error, malformed or over-bound
+// list); the caller then keeps the previous fragments for the kind.
+func (a *Assembler) buildObjectFragments(
+	ctx context.Context,
+	moduleName string,
+	decl modules.OwnershipDeclaration,
+	mod modules.Module,
+	observedAt time.Time,
+) ([]*commonpb.Fragment, map[string]*commonpb.FragmentEnvelope, bool) {
+	state, err := mod.Get(ctx, decl.Kind)
+	if err != nil {
+		a.logger.Error("module Get returned error — previous per-object fragments kept",
+			"module", moduleName, "kind", decl.Kind, "error_category", moduleGetErrorCategory(err))
+		return nil, nil, false
+	}
+
+	var raw []interface{}
+	switch v := state.AsMap()[modules.PerObjectKey].(type) {
+	case []interface{}:
+		raw = v
+	case []map[string]interface{}:
+		raw = make([]interface{}, len(v))
+		for i := range v {
+			raw[i] = v[i]
+		}
+	default:
+		a.logger.Error("per-object Get result lacks a valid object list — previous fragments kept",
+			"module", moduleName, "kind", decl.Kind)
+		return nil, nil, false
+	}
+	if len(raw) > maxObjectsPerKind {
+		a.logger.Error("per-object Get result exceeds object bound — kind fails closed",
+			"module", moduleName, "kind", decl.Kind, "count", len(raw), "max", maxObjectsPerKind)
+		return nil, nil, false
+	}
+
+	confidence := "high"
+	if cr, ok := state.(ConfidenceReporter); ok {
+		if c := cr.Confidence(); c != "" {
+			confidence = c
+		}
+	}
+
+	seen := make(map[string]bool, len(raw))
+	frags := make([]*commonpb.Fragment, 0, len(raw))
+	envs := make(map[string]*commonpb.FragmentEnvelope, len(raw))
+	skipped := 0
+	for _, entry := range raw {
+		obj, _ := entry.(map[string]interface{})
+		id, _ := obj["id"].(string)
+		attrs, attrsOK := obj["attrs"].(map[string]interface{})
+		if obj == nil || !attrsOK || !validObjectID(id) || seen[id] {
+			skipped++
+			continue
+		}
+		st := &objectState{attrs: attrs}
+		if !a.objectHasRequiredFields(decl, st) {
+			skipped++
+			continue
+		}
+		canonical, err := CanonicalizeFragment(decl.Kind, moduleName, st)
+		if err != nil {
+			skipped++
+			continue
+		}
+		seen[id] = true
+		fragID := decl.Kind + ":" + id
+		frags = append(frags, &commonpb.Fragment{
+			FragmentId:     fragID,
+			Authority:      moduleName,
+			CanonicalBytes: canonical,
+			FragmentHash:   FragmentHash(canonical),
+		})
+		envs[fragID] = &commonpb.FragmentEnvelope{
+			Source:     "module:" + moduleName,
+			ObservedAt: timestamppb.New(observedAt),
+			Confidence: confidence,
+		}
+	}
+	if skipped > 0 {
+		a.logger.Warn("per-object Get: invalid, duplicate or unusable objects skipped",
+			"module", logging.SanitizeLogValue(moduleName), "kind", logging.SanitizeLogValue(decl.Kind), "skipped", skipped)
+	}
+	sort.Slice(frags, func(i, j int) bool { return frags[i].FragmentId < frags[j].FragmentId })
+	return frags, envs, true
+}
+
+// objectHasRequiredFields applies decl.RequiredFields to one object's attrs
+// without logging per object (the caller counts skips).
+func (a *Assembler) objectHasRequiredFields(decl modules.OwnershipDeclaration, st *objectState) bool {
+	for _, field := range decl.RequiredFields {
+		v, present := st.attrs[field]
+		if !present || v == nil {
+			return false
+		}
+		if s, ok := v.(string); ok && s == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// validObjectID reports whether id is non-empty, at most maxObjectIDBytes long
+// and free of control characters.
+func validObjectID(id string) bool {
+	if id == "" || len(id) > maxObjectIDBytes {
+		return false
+	}
+	for _, r := range id {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // buildModuleFragment calls Get on the module, applies ADR-020 §3 required-fields
