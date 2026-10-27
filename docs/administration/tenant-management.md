@@ -69,6 +69,15 @@ cfg tenant end-crossing client-1 <crossing-id>
 - **Listing.** `crossings` prints active and pending records with their id, kind, reason category, status and expiry, or `no active crossings` and exits 0 when there are none. `--json` prints every record the server returned, including expired and ended ones.
 - **Errors.** The server's message is printed and the command exits non-zero: `401` (session expired, or step-up not completed), `403` (for example `NOT_ROOT_SCOPED`, `ROOT_SCOPED_CANNOT_GRANT`), `404` (tenant or crossing not found), `400` (`INVALID_REASON_CATEGORY`, `INVALID_DURATION`, `JUSTIFICATION_REQUIRED`), `SAME_APPROVER` and `NOT_PENDING` when approving. When access to a tenant is refused because no crossing is active, the message suggests `cfg tenant break-glass`.
 
+## Tenant settings in the console
+
+In the web console, open the Tenants page and choose **Settings** on a tenant row to expand its settings panel. The panel has one section per setting.
+
+- **Refresh policy** sets how the tenant handles steward credential refresh requests: `auto_accept`, `require_approval` or `reject`, with an optional maximum dormancy in days. Saving requires a strong session and a passkey tap.
+- **Assurance policy** lists per-permission overrides: a permission ID, an optional minimum assurance (`basic` or `strong`) and whether a passkey tap is required. Overrides can only raise the bar above the platform default. Saving requires a strong session. The server's message is shown unchanged when it rejects a value, for example an unknown permission ID.
+
+Boundary rows (tenants outside your access) have no settings panel.
+
 ## Git config source credential
 
 A tenant's git config source authenticates with a token that is bound to one repository URL. Store the credential with `cfg tenant config-source set-credential`, then point the tenant at it. The order matters:
