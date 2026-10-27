@@ -12,7 +12,8 @@
 #   2. /Library/Application Support/cfgms/steward-deploy.plist (MDM-deployed)
 #
 # Plist format (Apple XML plist <dict>):
-#   REGTOKEN       — required; one-time registration token from the controller
+#   REGTOKEN       — required; one-time registration token from the controller.
+#                    Consumed: removed from the plist after a successful install.
 #   CA_FINGERPRINT — optional; SHA-256 hex fingerprint for private-CA TOFU
 #   CA_CERT_PATH   — optional; path to controller CA cert PEM for private-CA installs
 #
@@ -64,16 +65,40 @@ fi
 
 echo "cfgms postinstall: registering steward service..."
 
-INSTALL_ARGS=(install --regtoken "$REGTOKEN")
+# The token never appears in the installer's argument list: it is written to a
+# private file (umask 077, root-only temp directory) and passed by path. The
+# trap removes the file and directory on every exit path.
+
+TOKEN_DIR=""
+cleanup() {
+    if [[ -n "$TOKEN_DIR" ]]; then
+        rm -rf "$TOKEN_DIR"
+    fi
+}
+trap cleanup EXIT
+
+umask 077
+TOKEN_DIR="$(mktemp -d)"
+TOKEN_FILE="$TOKEN_DIR/regtoken"
+printf '%s' "$REGTOKEN" > "$TOKEN_FILE"
+
+INSTALL_ARGS=(install --regtoken-file "$TOKEN_FILE")
 
 if [[ -n "$CA_FINGERPRINT" ]]; then
     INSTALL_ARGS+=(--fingerprint "$CA_FINGERPRINT")
 fi
 
 if [[ -n "$CA_CERT_PATH" ]]; then
-    INSTALL_ARGS+=(--ca-cert "$CA_CERT_PATH")
+    INSTALL_ARGS+=(--controller-ca "$CA_CERT_PATH")
 fi
 
+# On failure set -e exits here, leaving the plist unchanged so the install can be retried.
 "$BINARY_PATH" "${INSTALL_ARGS[@]}"
+
+# Install succeeded: the token is consumed, so remove it from the staging plist.
+if ! /usr/libexec/PlistBuddy -c "Delete :REGTOKEN" "$PLIST"; then
+    echo "cfgms postinstall: ERROR — failed to remove REGTOKEN from: $PLIST" >&2
+    exit 1
+fi
 
 echo "cfgms postinstall: done."
