@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
-**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol; 2026-08-21 — [Amendment 5](#amendment-5-2026-08-21--fragment-based-control-plane-delta-issue-3330): fragment-based control-plane delta; 2026-08-23 — [Amendment 6](#amendment-6-2026-08-23--commonpbdnaattributes-retired-issue-3331): `commonpb.DNA.attributes` proto field and Go struct field retired
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol; 2026-08-21 — [Amendment 5](#amendment-5-2026-08-21--fragment-based-control-plane-delta-issue-3330): fragment-based control-plane delta; 2026-08-23 — [Amendment 6](#amendment-6-2026-08-23--commonpbdnaattributes-retired-issue-3331): `commonpb.DNA.attributes` proto field and Go struct field retired; 2026-10-27 — [Amendment 7](#amendment-7-2026-10-27--per-object-dna-lane-epic-5497): per-object DNA lane (second root, bucket diff, removals)
 **Issue:** #2901
 **Epic:** #2852 — DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph (ADR-017)
 
@@ -436,3 +436,41 @@ Any caller that compiled against `GetAttributes()` must project from `GetFragmen
 via `service.FlattenDNAFragments` or `sdna.FlattenFragments`. The flat attribute map
 path through the controller is fully retired. ADR-017 fragment-only operation is now
 complete for all controller consumers.
+
+## Amendment 7 (2026-10-27) — Per-object DNA lane (Epic #5497)
+
+**Status:** Accepted (2026-10-27, Epic #5497)
+
+**Context.** Epic #5497 makes Active Directory and Microsoft 365 users and groups visible to the controller as DNA: one fragment per object, for directories of 50,000 objects or more. The sync described in §7 and Amendment 5 cannot carry this. Verified on `origin/develop` on 2026-10-27:
+
+- `Assembler.Assemble` emits one fragment per owned kind.
+- A full snapshot is capped at 1024 fragments and 8 MiB (`maxDNATransferFragments` in `dna_handler.go`).
+- The partial-sync path (`DNAHandler.WithPartialSync`, `FragmentDeltaStore`) has no production caller and no production store. On a root mismatch it requests every stored id, and it rejects ids it did not request, so it cannot add new objects. It never removes an object.
+- The heartbeat root callback (`onFragmentRoot` in the heartbeat service) is never set in production.
+
+Raising or paging the cap does not help: every change would still resend the whole directory.
+
+**Decision.**
+
+1. **Per-object kinds.** A module manifest's `owns:` entry may set `per_object: true`. For such a kind, `Get(kind)` returns many objects, and the assembler emits one fragment per object, replacing the previous set for that kind.
+2. **A second root, the same machinery.** Per-object fragments form a *bulk lane*. It uses the same `Fragment` type, canonical hash, `SYNC_DNA` command, `DNATransfer` message, heartbeat message and entity-graph writer as host DNA. It differs in three ways:
+   - The heartbeat carries a second root, `dna_bulk_root`, beside `dna_aggregate_root`.
+   - `SYNC_DNA` gains three bulk modes: bucket roots, bucket manifests, and named fragments.
+   - Removals are first-class.
+3. **Buckets.** A fragment's bucket is the first byte of SHA-256 of its fragment id (256 buckets). Each bucket root is a hash over its sorted `(fragment_id, fragment_hash)` pairs, and the bulk root is a hash over the 256 bucket roots. On a bulk-root mismatch, the controller:
+   - fetches the bucket roots;
+   - fetches the manifests of only the changed buckets;
+   - fetches only the changed or new fragments;
+   - retracts the ids that vanished;
+   - verifies the bulk root again.
+
+   One changed user in 50,000 moves well under 1 MB.
+4. **Exclusions.** Bulk-lane fragments are never sent in the control-plane DNA event (Amendment 5) or in a full snapshot. Host DNA, its root and its full sync are unchanged.
+5. **Bounds at the trust boundary.** A single request asks for at most 256 buckets and 10,000 ids. A reply is at most 8 MiB. The controller stores at most 250,000 bulk fragments per steward and rejects a delta over that cap with no partial write. The controller derives fragment hashes from the bytes it receives. It never trusts an asserted hash.
+6. **Durable manifest.** The controller keeps a per-steward bulk manifest, sharded by bucket, in `pkg/storage/interfaces`. A delta rewrites only the buckets it touches. This is the first production `FragmentDeltaStore`.
+7. **Retirement.** When an observe sweep no longer lists a per-object kind for a steward (for example, the domain controller role moved), the steward retires that kind's fragments, and the next round retracts them.
+8. **Controller-produced DNA.** The controller writes inventory it collects itself (Microsoft 365) through the same per-object fragment model and entity-graph writer, under the client tenant's M365 entity. No steward is involved.
+
+**Authority (directory objects).** A directory fragment is accepted only from a steward whose own effective cfg declares that domain. A domain is declared by exactly one tenant, and the controller keeps a domain registry. A directory entity's owning tenant never changes after its first write. Unverified claims are dropped. They are never written to a host scope.
+
+**Consequences.** The host lane's partial sync stays off. Moving host fragments onto the bucket protocol is a later follow-up, once the bulk lane has run in production. A module that declares `per_object` must give each object a stable id (for directory objects, the object GUID).
