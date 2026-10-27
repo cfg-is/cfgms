@@ -75,6 +75,7 @@ In the web console, open the Tenants page and choose **Settings** on a tenant ro
 
 - **Refresh policy** sets how the tenant handles steward credential refresh requests: `auto_accept`, `require_approval` or `reject`, with an optional maximum dormancy in days. Saving requires a strong session and a passkey tap.
 - **Assurance policy** lists per-permission overrides: a permission ID, an optional minimum assurance (`basic` or `strong`) and whether a passkey tap is required. Overrides can only raise the bar above the platform default. Saving requires a strong session. The server's message is shown unchanged when it rejects a value, for example an unknown permission ID.
+- **Config source** stores the git credential for the tenant: a repository URL and an access token (a password field). The token is write-only: it is cleared from the form after saving and is never shown again. **Test connection** checks the stored credential and shows whether the repository is reachable, with the server's message when it is not. Saving and testing require a strong session; no passkey tap is needed.
 
 Boundary rows (tenants outside your access) have no settings panel.
 
