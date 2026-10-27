@@ -957,6 +957,16 @@ func runInstall(regToken, regTokenFile, controllerURL, caCertPath, fingerprint s
 	if regToken == "" && regTokenFile == "" {
 		return fmt.Errorf("one of --regtoken-file or --regtoken is required")
 	}
+	// Read the token file before the elevation check so a bad file fails
+	// before any privileged step.
+	if regTokenFile != "" {
+		token, readErr := service.ReadTokenFile(regTokenFile)
+		if readErr != nil {
+			return readErr
+		}
+		regToken = token
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -977,14 +987,6 @@ func runInstall(regToken, regTokenFile, controllerURL, caCertPath, fingerprint s
 		return fmt.Errorf("install requires elevated privileges\n" +
 			"  Windows: right-click the binary and select 'Run as administrator'\n" +
 			"  Linux/macOS: re-run with sudo")
-	}
-
-	if regTokenFile != "" {
-		token, readErr := service.ReadTokenFile(regTokenFile)
-		if readErr != nil {
-			return readErr
-		}
-		regToken = token
 	}
 
 	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
