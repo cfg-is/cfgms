@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -451,4 +452,81 @@ func TestPermissionAssurance_ConfigPush_FloorEnforced(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.True(t, reached)
 	})
+}
+
+// TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced is a REQUIRED test (Issue #5498):
+// workflow:write and workflow:execute carry a Strong floor for human sessions, keep working
+// for scoped API keys, and need no presence tap. It drives the real requirePermission middleware.
+func TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced(t *testing.T) {
+	server := setupTestServer(t)
+
+	for _, action := range []string{"write", "execute"} {
+		perm := "workflow:" + action
+		t.Run(perm, func(t *testing.T) {
+			req, found := permissionAssurance[perm]
+			require.True(t, found, "%s must be in permissionAssurance", perm)
+			assert.Equal(t, session.AssuranceStrong, req.Min)
+			assert.True(t, req.AllowMachine)
+			assert.False(t, req.RequireUserPresence)
+
+			reached := false
+			probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+			handler := server.requirePermission("workflow", action)(probe)
+
+			serve := func(p *Principal) *httptest.ResponseRecorder {
+				reached = false
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/workflows", nil)
+				r = r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, r)
+				return rec
+			}
+
+			rec := serve(&Principal{ID: "basic-user", Assurance: session.AssuranceBasic, Permissions: []string{perm}})
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+			assert.False(t, reached)
+
+			rec = serve(&Principal{ID: "strong-user", Assurance: session.AssuranceStrong, Permissions: []string{perm}})
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.True(t, reached)
+
+			rec = serve(&Principal{ID: "api-key", Assurance: session.AssuranceMachine, Permissions: []string{perm}})
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.True(t, reached)
+		})
+	}
+
+	assert.NotContains(t, permissionAssurance, "workflow:read", "workflow:read stays ungated")
+}
+
+// TestStartupScan_NoWarnForWorkflowWriteExecuteKey is a REQUIRED test (Issue #5498): an API key
+// holding only workflow:write and workflow:execute is not flagged by the startup scan.
+func TestStartupScan_NoWarnForWorkflowWriteExecuteKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-workflow-key",
+		Value:     "hash-workflow-key",
+		TenantID:  "default",
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            "test-workflow-key-id",
+			"permissions":                   "workflow:write,workflow:execute",
+		},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, server.scanAPIKeysForPrivilegedAccess(context.Background()))
+	assert.Nil(t, capLog.kvValue("overlapping_permissions"),
+		"a key holding only workflow:write/execute must not be flagged")
 }
