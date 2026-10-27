@@ -40,6 +40,10 @@ type OwnershipDeclaration struct {
 	// write-integrity guard. Omitting RequiredFields is valid (no additional
 	// constraint beyond module ownership).
 	RequiredFields []string `yaml:"required_fields,omitempty" json:"required_fields,omitempty"`
+	// PerObject marks a kind that has one DNA fragment per managed object
+	// (e.g. directory objects) instead of one per host. The controller forwards
+	// it in the observe sweep spec so the steward uses the bulk lane.
+	PerObject bool `yaml:"per_object,omitempty" json:"per_object,omitempty"`
 }
 
 // ModuleMetadata represents the complete metadata for a module
@@ -517,7 +521,7 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 	if m.Owns != nil {
 		clone.Owns = make([]OwnershipDeclaration, len(m.Owns))
 		for i, o := range m.Owns {
-			clone.Owns[i] = OwnershipDeclaration{Kind: o.Kind}
+			clone.Owns[i] = OwnershipDeclaration{Kind: o.Kind, PerObject: o.PerObject}
 			if o.RequiredFields != nil {
 				clone.Owns[i].RequiredFields = make([]string, len(o.RequiredFields))
 				copy(clone.Owns[i].RequiredFields, o.RequiredFields)

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 )
@@ -302,4 +303,47 @@ func TestDNATransfer_ConsistentTenantID(t *testing.T) {
 	got, err := chunksToDNATransfer(chunks)
 	require.NoError(t, err, "consistent TenantID must pass validation")
 	assert.Equal(t, dna.TenantID, got.TenantID)
+}
+
+// TestDNATransfer_BulkFieldsRoundTrip verifies the bulk-lane fields survive the
+// real data plane chunk encode/decode, including a payload spanning many chunks.
+func TestDNATransfer_BulkFieldsRoundTrip(t *testing.T) {
+	roots := make([][]byte, 256)
+	for i := range roots {
+		roots[i] = []byte(strings.Repeat(string(rune('a'+i%26)), 32))
+	}
+	var manifest []*commonpb.ManifestEntry
+	for i := 0; i < 3000; i++ {
+		manifest = append(manifest, &commonpb.ManifestEntry{
+			FragmentId:   "user:" + strings.Repeat("x", 20) + string(rune('A'+i%26)),
+			FragmentHash: strings.Repeat("f", 64),
+		})
+	}
+	in := &types.DNATransfer{
+		ID: "bulk-1", StewardID: "s1", TenantID: "t1",
+		Bulk: true, BucketRoots: roots, Manifest: manifest,
+	}
+	chunks, err := dnaTransferToChunks(in)
+	require.NoError(t, err)
+	require.Greater(t, len(chunks), 1, "payload must span multiple chunks")
+
+	out, err := chunksToDNATransfer(chunks)
+	require.NoError(t, err)
+	assert.True(t, out.Bulk)
+	require.Len(t, out.BucketRoots, 256)
+	assert.Equal(t, roots, out.BucketRoots)
+	require.Len(t, out.Manifest, len(manifest))
+	for i := range manifest {
+		assert.Equal(t, manifest[i].GetFragmentId(), out.Manifest[i].GetFragmentId())
+		assert.Equal(t, manifest[i].GetFragmentHash(), out.Manifest[i].GetFragmentHash())
+	}
+
+	// A non-bulk transfer decodes with the bulk fields zero.
+	plain, err := dnaTransferToChunks(&types.DNATransfer{ID: "p", StewardID: "s1", TenantID: "t1"})
+	require.NoError(t, err)
+	got, err := chunksToDNATransfer(plain)
+	require.NoError(t, err)
+	assert.False(t, got.Bulk)
+	assert.Nil(t, got.BucketRoots)
+	assert.Nil(t, got.Manifest)
 }

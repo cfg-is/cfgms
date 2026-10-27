@@ -803,3 +803,43 @@ func TestSigningPayloadVersion_RoundTrip(t *testing.T) {
 	absent := signedCommandFromProto(signedCommandToProto(&types.SignedCommand{Command: types.Command{ID: "c2", StewardID: "s1"}}))
 	assert.Zero(t, absent.Command.SigningPayloadVersion)
 }
+
+// TestHeartbeat_BulkRootRoundTrip verifies DNABulkRoot travels through the real
+// heartbeat conversion as a second Metrics side-channel key, and that a heartbeat
+// from an older steward (no bulk key) still decodes.
+func TestHeartbeat_BulkRootRoundTrip(t *testing.T) {
+	now := time.Now().Truncate(time.Microsecond)
+
+	t.Run("both roots plus user metrics", func(t *testing.T) {
+		hb := &types.Heartbeat{
+			StewardID: "s1", Status: types.StatusHealthy, Timestamp: now,
+			DNAAggregateRoot: "agg", DNABulkRoot: "bulk",
+			Metrics: map[string]interface{}{"region": "us-east"},
+		}
+		pb := heartbeatToProto(hb)
+		assert.Equal(t, "bulk", pb.GetMetrics()["dna_bulk_root"])
+		assert.Equal(t, "agg", pb.GetMetrics()["dna_aggregate_root"])
+
+		got := heartbeatFromProto(pb)
+		assert.Equal(t, "bulk", got.DNABulkRoot)
+		assert.Equal(t, "agg", got.DNAAggregateRoot)
+		assert.Equal(t, map[string]interface{}{"region": "us-east"}, got.Metrics)
+	})
+
+	t.Run("bulk root only strips key", func(t *testing.T) {
+		pb := heartbeatToProto(&types.Heartbeat{StewardID: "s1", Status: types.StatusHealthy, Timestamp: now, DNABulkRoot: "bulk"})
+		got := heartbeatFromProto(pb)
+		assert.Equal(t, "bulk", got.DNABulkRoot)
+		assert.Empty(t, got.DNAAggregateRoot)
+		assert.Nil(t, got.Metrics)
+	})
+
+	t.Run("old-format heartbeat without bulk key", func(t *testing.T) {
+		pb := heartbeatToProto(&types.Heartbeat{StewardID: "s1", Status: types.StatusHealthy, Timestamp: now, DNAAggregateRoot: "agg"})
+		_, has := pb.GetMetrics()["dna_bulk_root"]
+		assert.False(t, has, "empty bulk root must not be encoded")
+		got := heartbeatFromProto(pb)
+		assert.Empty(t, got.DNABulkRoot)
+		assert.Equal(t, "agg", got.DNAAggregateRoot)
+	})
+}

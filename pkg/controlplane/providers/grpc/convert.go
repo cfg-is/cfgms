@@ -316,7 +316,13 @@ func heartbeatToProto(hb *types.Heartbeat) *transportpb.Heartbeat {
 		if merged == nil {
 			merged = make(map[string]string)
 		}
-		merged["dna_aggregate_root"] = hb.DNAAggregateRoot
+		merged[types.HeartbeatMetricDNAAggregateRoot] = hb.DNAAggregateRoot
+	}
+	if hb.DNABulkRoot != "" {
+		if merged == nil {
+			merged = make(map[string]string)
+		}
+		merged[types.HeartbeatMetricDNABulkRoot] = hb.DNABulkRoot
 	}
 	if len(merged) > 0 {
 		pb.Metrics = merged
@@ -338,22 +344,19 @@ func heartbeatFromProto(pb *transportpb.Heartbeat) *types.Heartbeat {
 		ActiveSessions:  pb.GetActiveSessions(),
 		ConnectionState: pb.GetConnectionState(),
 	}
-	// Extract DNAAggregateRoot from Metrics (side-channelled in heartbeatToProto).
-	// Remaining Metrics (without the aggregate root key) are surfaced as hb.Metrics.
+	// Extract DNAAggregateRoot and DNABulkRoot from Metrics (side-channelled in
+	// heartbeatToProto). Remaining Metrics are surfaced as hb.Metrics.
 	if rawMetrics := pb.GetMetrics(); len(rawMetrics) > 0 {
-		if root, ok := rawMetrics["dna_aggregate_root"]; ok {
-			hb.DNAAggregateRoot = root
-			filtered := make(map[string]string, len(rawMetrics)-1)
-			for k, v := range rawMetrics {
-				if k != "dna_aggregate_root" {
-					filtered[k] = v
-				}
+		hb.DNAAggregateRoot = rawMetrics[types.HeartbeatMetricDNAAggregateRoot]
+		hb.DNABulkRoot = rawMetrics[types.HeartbeatMetricDNABulkRoot]
+		filtered := make(map[string]string, len(rawMetrics))
+		for k, v := range rawMetrics {
+			if k != types.HeartbeatMetricDNAAggregateRoot && k != types.HeartbeatMetricDNABulkRoot {
+				filtered[k] = v
 			}
-			if len(filtered) > 0 {
-				hb.Metrics = stringMapToInterfaceMap(filtered)
-			}
-		} else {
-			hb.Metrics = stringMapToInterfaceMap(rawMetrics)
+		}
+		if len(filtered) > 0 {
+			hb.Metrics = stringMapToInterfaceMap(filtered)
 		}
 	}
 	return hb

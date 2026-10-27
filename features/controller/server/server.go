@@ -4572,8 +4572,9 @@ func (s *Server) handleObserveSweepRequest(ctx context.Context, event *controlpl
 		}
 		for _, own := range m.Owns {
 			specs = append(specs, controlplaneTypes.ObserveModuleSpec{
-				Name: m.Name,
-				Kind: own.Kind,
+				Name:      m.Name,
+				Kind:      own.Kind,
+				PerObject: own.PerObject,
 			})
 		}
 	}
