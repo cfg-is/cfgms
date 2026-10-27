@@ -428,7 +428,7 @@ func (s *Server) caIsPrivate() bool {
 	}
 	caCertPEM, err := s.certManager.GetCACertificate()
 	if err != nil {
-		s.logger.Warn("failed to read CA certificate from cert manager; skipping CA bundle", "error", err)
+		s.logger.Warn("failed to read CA certificate from cert manager; skipping CA bundle", "error", logging.SanitizeLogValue(err.Error()))
 		return false
 	}
 	block, _ := pem.Decode(caCertPEM)
@@ -438,7 +438,7 @@ func (s *Server) caIsPrivate() bool {
 	}
 	caCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		s.logger.Warn("failed to parse CA certificate; skipping CA bundle", "error", err)
+		s.logger.Warn("failed to parse CA certificate; skipping CA bundle", "error", logging.SanitizeLogValue(err.Error()))
 		return false
 	}
 	// A self-signed CA has identical raw issuer and subject bytes, indicating a private
@@ -500,6 +500,10 @@ func (s *Server) handleDownloadInstallPackage(w http.ResponseWriter, r *http.Req
 	servePublicDownload(w, r, archiveName, asset)
 }
 
+// errInstallerUnverified marks a stored installer whose publisher signature is
+// missing or does not verify; the download path refuses to serve it.
+var errInstallerUnverified = errors.New("installer artifact signature not verified")
+
 func (s *Server) buildInstallPackage(
 	r *http.Request,
 	platform, arch, archiveName string,
@@ -521,7 +525,7 @@ func (s *Server) buildInstallPackage(
 	}
 	defer func() {
 		if cerr := rc.Close(); cerr != nil {
-			s.logger.Warn("failed to close installer artifact reader", "error", cerr)
+			s.logger.Warn("failed to close installer artifact reader", "error", logging.SanitizeLogValue(cerr.Error()))
 		}
 	}()
 	if meta.Size > maxBinaryRequestBodyBytes {
@@ -533,6 +537,22 @@ func (s *Server) buildInstallPackage(
 	}
 	if int64(len(artifactBytes)) > maxBinaryRequestBodyBytes {
 		return nil, errPublicDownloadTooLarge
+	}
+
+	// Fail closed: re-verify the publisher signature over the bytes about to be
+	// served, so an artifact altered or re-labelled at rest is never distributed.
+	sigBytes, decErr := base64.RawURLEncoding.DecodeString(meta.Labels["signature"])
+	if decErr != nil || len(sigBytes) == 0 {
+		return nil, errInstallerUnverified
+	}
+	sum := sha256.Sum256(artifactBytes)
+	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
+	if verifyErr := trust.VerifyInstallerSignature(hex.EncodeToString(sum[:]), platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
+		s.logger.Error("Stored installer artifact failed signature verification; refusing to serve",
+			"error", logging.SanitizeLogValue(verifyErr.Error()),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return nil, errInstallerUnverified
 	}
 
 	var caCertPEM []byte

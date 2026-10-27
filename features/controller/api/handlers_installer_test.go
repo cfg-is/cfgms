@@ -104,6 +104,16 @@ func signedInstallerPath(t *testing.T, path string, content []byte, platform, ar
 	return path + sep + "signature=" + signInstallerContent(t, content, platform, arch)
 }
 
+// signedInstallerMeta returns blob metadata carrying a valid publisher signature
+// label for content, as the upload handler would have stored it.
+func signedInstallerMeta(t *testing.T, content []byte, platform, arch string) blob.BlobMeta {
+	t.Helper()
+	return blob.BlobMeta{
+		ContentType: "application/octet-stream",
+		Labels:      map[string]string{"signature": signInstallerContent(t, content, platform, arch), "publisher": "cfgms"},
+	}
+}
+
 // withTenant returns a copy of r with tenantID injected into the context.
 //
 // An empty tenantID means a root admin caller: the request carries an explicit
@@ -622,7 +632,7 @@ func TestHandleDownloadInstallPackage_WithCA(t *testing.T) {
 		context.Background(),
 		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader(artifactContent),
-		blob.BlobMeta{ContentType: "application/octet-stream"},
+		signedInstallerMeta(t, artifactContent, "linux", "amd64"),
 	))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
@@ -663,7 +673,7 @@ func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
 		context.Background(),
 		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "windows-amd64"},
 		bytes.NewReader(artifactContent),
-		blob.BlobMeta{ContentType: "application/octet-stream"},
+		signedInstallerMeta(t, artifactContent, "windows", "amd64"),
 	))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/windows/amd64", nil)
@@ -695,7 +705,7 @@ func TestHandleDownloadInstallPackage_CacheValidatorsAndRanges(t *testing.T) {
 		context.Background(),
 		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader([]byte("range-test-installer-binary")),
-		blob.BlobMeta{ContentType: "application/octet-stream"},
+		signedInstallerMeta(t, []byte("range-test-installer-binary"), "linux", "amd64"),
 	))
 
 	request := func(rangeHeader, etag string) *httptest.ResponseRecorder {
@@ -900,7 +910,7 @@ func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
 		context.Background(),
 		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader([]byte("dummy")),
-		blob.BlobMeta{ContentType: "application/octet-stream"},
+		signedInstallerMeta(t, []byte("dummy"), "linux", "amd64"),
 	))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
@@ -934,9 +944,10 @@ func serverWithRootTenant(t *testing.T, rootID string) (*Server, blob.BlobStore)
 
 func putInstaller(t *testing.T, store blob.BlobStore, tenantID, name string, content []byte) {
 	t.Helper()
+	platform, arch, _ := strings.Cut(name, "-")
 	require.NoError(t, store.PutBlob(context.Background(),
 		blob.BlobKey{TenantID: tenantID, Namespace: "installers", Name: name},
-		bytes.NewReader(content), blob.BlobMeta{ContentType: "application/octet-stream"}))
+		bytes.NewReader(content), signedInstallerMeta(t, content, platform, arch)))
 }
 
 func downloadInstaller(server *Server, platform, arch string) *httptest.ResponseRecorder {
