@@ -37,6 +37,7 @@ import {
   type M365Connection,
 } from './useTenantM365.ts'
 import { PolicyApiError } from './useTenantPolicies.ts'
+import RebootWindowEditor from '../fleet/RebootWindowEditor.tsx'
 
 function modeLabel(mode: RefreshMode): string {
   switch (mode) {
@@ -761,6 +762,7 @@ export default function TenantSettingsPanel({ tenantId }: { tenantId: string }) 
       <AssurancePolicySection tenantId={tenantId} />
       <ConfigSourceSection tenantId={tenantId} />
       <M365Section tenantId={tenantId} />
+      <RebootWindowEditor scope="tenants" id={tenantId} />
     </div>
   )
 }

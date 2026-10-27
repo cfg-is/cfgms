@@ -166,3 +166,7 @@ operations as the `cfg` commands above:
   Requires AssuranceStrong (`steward:move-identity`); listing needs `steward:read`.
 - **Refresh auth** — asks the steward to refresh its authentication and reports
   `refresh_requested`. This route has no step-up requirement.
+
+## Reboot window
+
+The steward detail drawer has a **Reboot window** section beside the `cfg` reboot-window commands. It edits the schedule declared for this one steward as YAML text, overriding the tenant window, and shows the returned status (`scheduled` or `unrestricted`) and next occurrence. A schedule the controller rejects shows the validation message verbatim and saves nothing. There is no timezone field here; the timezone is set on the tenant. Saving needs `reboot_window:override` and asks for no passkey tap.

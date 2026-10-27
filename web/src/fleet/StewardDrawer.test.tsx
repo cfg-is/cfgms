@@ -231,7 +231,7 @@ describe('Export DNA (Story #4591)', () => {
   })
 
   it('is disabled with a reason when DNA is unavailable', async () => {
-    fetchMock.mockResolvedValue(new Response('nope', { status: 404 }))
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('nope', { status: 404 })))
     renderDrawer()
     await waitFor(() =>
       expect(screen.getByTestId('drawer-export-dna')).toHaveAttribute(
@@ -243,7 +243,7 @@ describe('Export DNA (Story #4591)', () => {
   })
 
   it('downloads a Blob whose JSON equals the fetched DNA', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify(dnaBody), { status: 200 }))
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify(dnaBody), { status: 200 })))
     let blob: Blob | undefined
     URL.createObjectURL = vi.fn((b: Blob | MediaSource) => {
       blob = b as Blob
@@ -277,5 +277,33 @@ describe('Export DNA (Story #4591)', () => {
       attributes: { tenant: 'acme-corp' },
     })
     click.mockRestore()
+  })
+})
+
+describe('StewardDrawer reboot window', () => {
+  it('shows server validation error', async () => {
+    const RW = '/api/v1/stewards/stw-42/reboot-window'
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === RW && init?.method === 'PUT') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { message: 'invalid schedule: unknown day "funday"' } }), { status: 400 }),
+        )
+      }
+      if (url === RW) {
+        return Promise.resolve(new Response(JSON.stringify({ data: { steward_id: 'stw-42', status: 'unrestricted' } }), { status: 200 }))
+      }
+      return new Promise(() => {})
+    })
+    renderDrawer()
+
+    await waitFor(() => expect(screen.getByTestId('reboot-window-yaml')).toBeInTheDocument())
+    expect(screen.queryByTestId('reboot-window-timezone')).toBeNull()
+    fireEvent.change(screen.getByTestId('reboot-window-yaml'), { target: { value: 'days: [funday]' } })
+    fireEvent.click(screen.getByTestId('reboot-window-save-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('reboot-window-save-error')).toHaveTextContent('invalid schedule: unknown day "funday"'),
+    )
   })
 })

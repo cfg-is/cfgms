@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from 'react'
 import DnaDrawer, { useStewardDna, type StewardDnaState } from './DnaDrawer.tsx'
 import ShellTab from './ShellTab.tsx'
 import LiveActivityTab from './LiveActivityTab.tsx'
+import RebootWindowEditor from './RebootWindowEditor.tsx'
 
 type DrawerTabKey = 'dna' | 'config' | 'shell' | 'live'
 
@@ -244,6 +245,10 @@ export default function StewardDrawer({
             dnaState={dnaState}
             onViewDna={() => setActiveTab('dna')}
           />
+        </div>
+
+        <div className="db" style={{ overflow: 'auto' }}>
+          <RebootWindowEditor scope="stewards" id={stewardId} />
         </div>
       </aside>
     </>
