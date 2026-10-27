@@ -1135,3 +1135,166 @@ describe('InstallerPage rollout halt', () => {
     expect(callsTo('/api/v1/rollout/ro-1/halt')).toHaveLength(0)
   })
 })
+
+// ── Artifact upload, delete and publish (Issue #5456) ─────────────────────────
+
+const ARTIFACT_PATH = '/api/v1/installer/artifacts/linux/amd64'
+const PUBLISH_PREFIX = '/api/v1/installer/steward-binaries/1.2.3/linux/amd64'
+
+function installArtifactRoutes(opts: { presence: boolean }) {
+  fetchMock.mockImplementation((input, init) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (url === '/api/v1/installer/artifacts') return Promise.resolve(makeArtifactListResponse([makeArtifact()]))
+    if (url.includes('presence/begin')) {
+      return Promise.resolve(
+        jsonRes(200, envelope({
+          publicKey: {
+            challenge: 'Y2hhbGxlbmdl',
+            timeout: 60000,
+            rpId: 'localhost',
+            allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+            userVerification: 'required',
+          },
+        })),
+      )
+    }
+    if (url.includes('presence/finish')) {
+      return Promise.resolve(jsonRes(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 })))
+    }
+    if (method !== 'GET') {
+      const token = new Headers(init?.headers).get('X-Presence-Token')
+      if (opts.presence && token !== 'tap-token-1') {
+        return Promise.resolve(
+          jsonRes(401, { error: 'step_up_required' }, {
+            'WWW-Authenticate':
+              'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="installer:publish:steward"',
+          }),
+        )
+      }
+      return Promise.resolve(jsonRes(200, envelope({})))
+    }
+    return Promise.resolve(jsonRes(404, {}))
+  })
+}
+
+function mutationCalls() {
+  return fetchMock.mock.calls.filter(([url, init]) => {
+    const u = String(url)
+    return (init?.method ?? 'GET') !== 'GET' && !u.includes('presence')
+  })
+}
+
+async function tap() {
+  await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+  await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+  fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+}
+
+async function pickUpload(file: File) {
+  renderPage()
+  await waitFor(() => expect(screen.getByTestId('artifact-manage-section')).toBeInTheDocument())
+  fireEvent.change(screen.getByTestId('upload-platform'), { target: { value: 'linux' } })
+  fireEvent.change(screen.getByTestId('upload-arch'), { target: { value: 'amd64' } })
+  fireEvent.change(screen.getByTestId('upload-file'), { target: { files: [file] } })
+  fireEvent.click(screen.getByTestId('upload-btn'))
+}
+
+async function fillPublish(file: File, signature = 'c2ln') {
+  renderPage()
+  await waitFor(() => expect(screen.getByTestId('artifact-manage-section')).toBeInTheDocument())
+  fireEvent.change(screen.getByTestId('publish-version'), { target: { value: '1.2.3' } })
+  fireEvent.change(screen.getByTestId('publish-platform'), { target: { value: 'linux' } })
+  fireEvent.change(screen.getByTestId('publish-arch'), { target: { value: 'amd64' } })
+  fireEvent.change(screen.getByTestId('publish-signature'), { target: { value: signature } })
+  fireEvent.change(screen.getByTestId('publish-file'), { target: { files: [file] } })
+}
+
+describe('InstallerPage upload, delete and publish', () => {
+  beforeEach(() => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(passkeyCredential) } })
+  })
+
+  it('send X-Presence-Token after the tap', async () => {
+    installArtifactRoutes({ presence: true })
+    await pickUpload(new File(['payload'], 'a.bin'))
+    await tap()
+    await waitFor(() => expect(mutationCalls()).toHaveLength(2))
+    expect(new Headers(mutationCalls()[1]![1]?.headers).get('X-Presence-Token')).toBe('tap-token-1')
+    expect(mutationCalls()[1]![1]?.method).toBe('PUT')
+    cleanup()
+
+    fetchMock.mockClear()
+    installArtifactRoutes({ presence: true })
+    renderPage()
+    await waitFor(() => screen.getByTestId('delete-linux-amd64'))
+    fireEvent.click(screen.getByTestId('delete-linux-amd64'))
+    expect(mutationCalls()).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('delete-confirm-linux-amd64'))
+    await tap()
+    await waitFor(() => expect(mutationCalls()).toHaveLength(2))
+    expect(mutationCalls()[1]![0]).toBe(ARTIFACT_PATH)
+    expect(mutationCalls()[1]![1]?.method).toBe('DELETE')
+    expect(new Headers(mutationCalls()[1]![1]?.headers).get('X-Presence-Token')).toBe('tap-token-1')
+    cleanup()
+
+    fetchMock.mockClear()
+    installArtifactRoutes({ presence: true })
+    await fillPublish(new File(['bin'], 'steward'))
+    fireEvent.click(screen.getByTestId('publish-btn'))
+    await tap()
+    await waitFor(() => expect(mutationCalls()).toHaveLength(2))
+    expect(mutationCalls()[1]![0]).toBe(`${PUBLISH_PREFIX}?signature=c2ln`)
+    expect(new Headers(mutationCalls()[1]![1]?.headers).get('X-Presence-Token')).toBe('tap-token-1')
+  })
+
+  it('upload replays the full body after the tap', async () => {
+    installArtifactRoutes({ presence: true })
+    const file = new File(['full-body-bytes'], 'a.bin')
+    await pickUpload(file)
+    await tap()
+    await waitFor(() => expect(mutationCalls()).toHaveLength(2))
+    const [first, second] = mutationCalls()
+    expect(first![0]).toBe(ARTIFACT_PATH)
+    expect(first![1]?.body).toBe(file)
+    expect(second![1]?.body).toBe(file)
+    expect(await (second![1]?.body as Blob).text()).toBe('full-body-bytes')
+  })
+
+  it('upload says so and sends no second mutation when the tap is cancelled', async () => {
+    installArtifactRoutes({ presence: true })
+    await pickUpload(new File(['x'], 'a.bin'))
+    await waitFor(() => screen.getByTestId('step-up-cancel-btn'))
+    fireEvent.click(screen.getByTestId('step-up-cancel-btn'))
+    await waitFor(() => expect(screen.getByTestId('artifact-error')).toHaveTextContent(/cancelled/i))
+    expect(mutationCalls()).toHaveLength(1)
+  })
+
+  it('delete sends nothing until Confirm, and Cancel abandons it', async () => {
+    installArtifactRoutes({ presence: false })
+    renderPage()
+    await waitFor(() => screen.getByTestId('delete-linux-amd64'))
+    fireEvent.click(screen.getByTestId('delete-linux-amd64'))
+    fireEvent.click(screen.getByTestId('delete-cancel-linux-amd64'))
+    expect(mutationCalls()).toHaveLength(0)
+    expect(screen.getByTestId('delete-linux-amd64')).toBeInTheDocument()
+  })
+
+  it('publish refuses without a signature', async () => {
+    installArtifactRoutes({ presence: false })
+    await fillPublish(new File(['bin'], 'steward'), '  ')
+    expect(screen.getByTestId('publish-btn')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('publish-btn'))
+    expect(mutationCalls()).toHaveLength(0)
+  })
+
+  it('publish refuses a file over 64 MiB and states the limit', async () => {
+    installArtifactRoutes({ presence: false })
+    const big = new File(['x'], 'big')
+    Object.defineProperty(big, 'size', { value: 64 * 1024 * 1024 + 1 })
+    await fillPublish(big)
+    fireEvent.click(screen.getByTestId('publish-btn'))
+    await waitFor(() => expect(screen.getByTestId('artifact-error')).toHaveTextContent('64 MiB'))
+    expect(mutationCalls()).toHaveLength(0)
+  })
+})

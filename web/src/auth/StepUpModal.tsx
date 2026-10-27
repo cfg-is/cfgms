@@ -142,6 +142,9 @@ async function hashRetryBody(body: RequestInit['body']): Promise<string> {
   if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
     return sha256Hex(body as BufferSource)
   }
+  // A File is a Blob: re-reading its bytes here is what lets a raw-file upload
+  // carry a presence token bound to the exact body the replay will resend.
+  if (body instanceof Blob) return sha256Hex(await body.arrayBuffer())
   throw new Error('unsupported request body for presence binding')
 }
 
