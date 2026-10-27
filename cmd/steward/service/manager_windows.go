@@ -235,11 +235,7 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 			return existing.Start()
 		},
 		stage: func() error {
-			if err := m.stageInstall(launcherSrc, caCertPEM); err != nil {
-				return err
-			}
-			_, err := installRegistrationToken(token)
-			return err
+			return m.stageInstall(launcherSrc, caCertPEM, token)
 		},
 		replaceDefinition: func() error {
 			if existing != nil {
@@ -266,7 +262,9 @@ type installSteps struct {
 	stopExisting func() bool
 	// restartExisting starts the service stopped by stopExisting again.
 	restartExisting func() error
-	// stage installs the launcher, stages the steward binary, and writes the CA cert.
+	// stage installs the launcher, stages the steward binary, and writes the
+	// CA cert (if any) and the registration token into the locked-down data
+	// directory.
 	stage func() error
 	// replaceDefinition deletes the existing service definition (if any) and
 	// registers and starts the new one.
@@ -291,9 +289,10 @@ func runInstallSequence(s installSteps) error {
 }
 
 // stageInstall installs the launcher, stages the steward binary under the
-// launcher's versioned layout, and writes the CA cert. It runs while the
-// existing service is stopped but still defined.
-func (m *windowsManager) stageInstall(launcherSrc, caCertPEM string) error {
+// launcher's versioned layout, then writes the CA cert and registration token
+// via stageDataFiles. It runs while the existing service is stopped but still
+// defined.
+func (m *windowsManager) stageInstall(launcherSrc, caCertPEM, token string) error {
 	// Create install directory.
 	if err := os.MkdirAll(windowsInstallDir, 0755); err != nil {
 		return fmt.Errorf("failed to create install directory %s: %w", windowsInstallDir, err)
@@ -320,11 +319,22 @@ func (m *windowsManager) stageInstall(launcherSrc, caCertPEM string) error {
 		return fmt.Errorf("failed to stage steward binary via launcher: %w\n%s", err, out)
 	}
 
-	// Write CA cert before registering the service so the service finds it on first start.
+	return stageDataFiles(caCertPEM, token)
+}
+
+// stageDataFiles writes the pinned CA cert (when caCertPEM is non-empty) and
+// the registration token into the steward data directory, locking the
+// directory down to SYSTEM and Administrators around each write. The token is
+// always staged through stageRegistrationToken, so the lockdown happens with
+// or without a CA cert. Both are written before the service is registered so
+// the service finds them on first start.
+func stageDataFiles(caCertPEM, token string) error {
 	if caCertPEM != "" {
-		return stageDataDir(caCertPEM)
+		if err := stageDataDir(caCertPEM); err != nil {
+			return err
+		}
 	}
-	return nil
+	return stageRegistrationToken(token)
 }
 
 // stageDataDir secures the steward data directory, writes the pinned CA cert
@@ -340,6 +350,28 @@ func stageDataDir(caCertPEM string) error {
 		return fmt.Errorf("failed to write CA cert: %w", err)
 	}
 	return prepareDataDir()
+}
+
+// stageRegistrationToken locks down the steward data directory, writes the
+// token file into it, then locks the directory down again so the new file,
+// created by the installing administrator's own account, is handed to
+// Administrators (ReadTokenFile refuses any other owner). The lockdown runs
+// whether or not a CA cert is staged. A token file planted by another principal
+// makes the first lockdown fail, so the install aborts before the write. If the
+// second lockdown fails the token file is removed rather than left unlocked.
+func stageRegistrationToken(token string) error {
+	if err := prepareDataDir(); err != nil {
+		return err
+	}
+	path, err := installRegistrationToken(token)
+	if err != nil {
+		return err
+	}
+	if err := prepareDataDir(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // registerAndStartService creates the launcher-backed service, sets its

@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 const (
@@ -260,4 +262,145 @@ func TestWriteTokenFile_WindowsRejectsWhitespaceToken(t *testing.T) {
 	require.Error(t, writeTokenFile(path, "tok with space"))
 	_, err := os.Stat(path)
 	assert.True(t, os.IsNotExist(err), "no token file may be written for an invalid token")
+}
+
+// TestStageRegistrationToken_WithoutCAIsReadable stages the token with no CA
+// cert and no pre-existing data directory: the directory is locked down and
+// the file is readable by ReadTokenFile.
+func TestStageRegistrationToken_WithoutCAIsReadable(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+
+	require.NoError(t, stageRegistrationToken("tok_stage_no_ca"))
+
+	path := platformTokenFilePath()
+	assertSystemAndAdministratorsOnly(t, path)
+	token, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_stage_no_ca", token)
+	dirSIDs, _ := fileACESIDs(t, filepath.Dir(path))
+	assert.NotContains(t, dirSIDs, sidUsers)
+}
+
+// TestStageRegistrationToken_LocksUnlockedDirBeforeWrite starts from a data
+// directory that grants BUILTIN\Users read access. Staging must lock it down
+// even though no CA cert is staged, so the token never sits under a Users ACE.
+func TestStageRegistrationToken_LocksUnlockedDirBeforeWrite(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := platformTokenFilePath()
+	dir := filepath.Dir(path)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	setDACLFromSDDL(t, dir, "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)", false)
+
+	require.NoError(t, stageRegistrationToken("tok_stage_unlocked"))
+
+	sids, _ := fileACESIDs(t, dir)
+	assert.NotContains(t, sids, sidUsers, "the data directory must be locked down")
+	assertSystemAndAdministratorsOnly(t, path)
+	token, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_stage_unlocked", token)
+}
+
+// TestStageRegistrationToken_UserOwnedTokenNeverHoldsToken places a token file
+// owned by BUILTIN\Users, with a Users ACE, at the target path. Staging must
+// either fail without writing the token or replace it with an admin-owned file
+// carrying no Users entry; the token never ends up in the user-owned file.
+func TestStageRegistrationToken_UserOwnedTokenNeverHoldsToken(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := platformTokenFilePath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("tok_planted\n"), 0o600))
+	setDACLFromSDDL(t, path, "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)", true)
+	setOwnerWithRestorePrivilege(t, path, sidUsers)
+
+	err := stageRegistrationToken("tok_secret_new")
+
+	data, rerr := os.ReadFile(path) // #nosec G304 - test-controlled path
+	require.NoError(t, rerr)
+	if err != nil {
+		assert.NotContains(t, string(data), "tok_secret_new", "a failed stage must not write the token")
+		return
+	}
+	sids, _ := fileACESIDs(t, path)
+	assert.NotContains(t, sids, sidUsers)
+	assertSystemAndAdministratorsOnly(t, path)
+	token, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_secret_new", token)
+}
+
+// TestStageDataFiles_NoCALocksDownUsersReadableDir drives the install's data
+// staging step (stageInstall -> stageDataFiles) with no CA cert, starting from
+// a data directory that grants BUILTIN\Users read access, as one inherited from
+// %ProgramData% would. The token must still land in a directory locked down to
+// SYSTEM and Administrators.
+func TestStageDataFiles_NoCALocksDownUsersReadableDir(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := platformTokenFilePath()
+	dir := filepath.Dir(path)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	setDACLFromSDDL(t, dir, "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)", false)
+
+	require.NoError(t, stageDataFiles("", "tok_install_no_ca"))
+
+	sids, _ := fileACESIDs(t, dir)
+	assert.NotContains(t, sids, sidUsers, "the data directory must be locked down without a CA cert")
+	assertSystemAndAdministratorsOnly(t, path)
+	_, err := os.Stat(platformCACertPath())
+	assert.True(t, os.IsNotExist(err), "no CA cert may be written when none is staged")
+	token, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_install_no_ca", token)
+}
+
+// TestStageDataFiles_WithCAStagesBothAndPassesStartCheck drives the install's
+// data staging step with a CA cert: both the cert and the token are written,
+// the token is readable, and the tree passes the steward's start-up check.
+func TestStageDataFiles_WithCAStagesBothAndPassesStartCheck(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	certPEM, _ := generateTestCACert(t)
+
+	require.NoError(t, stageDataFiles(certPEM, "tok_install_with_ca"))
+
+	path := platformTokenFilePath()
+	assertSystemAndAdministratorsOnly(t, path)
+	token, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_install_with_ca", token)
+	_, err = os.Stat(platformCACertPath())
+	require.NoError(t, err, "the CA cert must be written")
+	require.NoError(t, security.EnsureAdminOnlyDir(filepath.Dir(path)), "steward start-up check must accept the installed tree")
+}
+
+// TestStageDataFiles_UserOwnedTokenAbortsOrReplaces plants a token file owned
+// by BUILTIN\Users at the target path and drives the install's data staging
+// step with no CA cert. The new token must never end up in the user-owned file.
+func TestStageDataFiles_UserOwnedTokenAbortsOrReplaces(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := platformTokenFilePath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("tok_planted\n"), 0o600))
+	setDACLFromSDDL(t, path, "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)", true)
+	setOwnerWithRestorePrivilege(t, path, sidUsers)
+
+	err := stageDataFiles("", "tok_install_secret")
+
+	data, rerr := os.ReadFile(path) // #nosec G304 - test-controlled path
+	require.NoError(t, rerr)
+	if err != nil {
+		assert.NotContains(t, string(data), "tok_install_secret", "a failed stage must not write the token")
+		return
+	}
+	sids, _ := fileACESIDs(t, path)
+	assert.NotContains(t, sids, sidUsers)
+	assertSystemAndAdministratorsOnly(t, path)
+	token, err := ReadTokenFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "tok_install_secret", token)
 }
