@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -21,6 +22,8 @@ import (
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -53,12 +56,15 @@ type installerArtifactInfo struct {
 	Size        int64  `json:"size"`
 	Checksum    string `json:"checksum"`
 	ContentType string `json:"content_type"`
+	Publisher   string `json:"publisher,omitempty"`
 }
 
 // handleUploadInstallerArtifact handles PUT /api/v1/installer/artifacts/{platform}/{arch}.
 // Stores the request body as an installer artifact in the BlobStore under
 // Namespace "installers", Name "<platform>-<arch>". Returns 200 with the
-// computed size and SHA-256 checksum on success.
+// computed size and SHA-256 checksum on success. The request must carry a
+// publisher signature (?signature=, URL-safe base64) over the installer message;
+// unsigned or wrongly signed bodies are refused, audited and never stored.
 func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Request) {
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
@@ -92,20 +98,80 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		Name:      platform + "-" + arch,
 	}
 
-	hasher := sha256.New()
-	body := io.TeeReader(r.Body, hasher)
-	if err := s.blobStore.PutBlob(r.Context(), key, body, blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil {
+	// Every refusal below audits a failure and stores nothing: a taken-over admin
+	// session must not be able to replace the installer new endpoints run with
+	// administrator rights without a publisher signature.
+	refuse := func(status int, message, code string) {
+		s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, "", business.AuditResultFailure)
+		s.writeErrorResponse(w, status, message, code)
+	}
+
+	sigBase64 := r.URL.Query().Get("signature")
+	if sigBase64 == "" {
+		refuse(http.StatusBadRequest,
+			"Signature required; provide ?signature=<base64> (see scripts/sign-steward-binary --installer)",
+			"SIGNATURE_REQUIRED")
+		return
+	}
+	// Signature is URL-safe base64 (no padding) so it survives query-param sanitization.
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigBase64)
+	if err != nil {
+		refuse(http.StatusBadRequest,
+			"Invalid signature encoding; must be URL-safe base64 (no padding)",
+			"SIGNATURE_VERIFICATION_FAILED")
+		return
+	}
+
+	// Buffer the bounded body: the signature covers its SHA-256, which must be
+	// known before anything is stored.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
+	content, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error("Failed to read installer artifact body",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			refuse(http.StatusRequestEntityTooLarge, "Installer artifact too large", "ARTIFACT_TOO_LARGE")
+			return
+		}
+		refuse(http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
+		return
+	}
+	sum := sha256.Sum256(content)
+	contentHash := hex.EncodeToString(sum[:])
+
+	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
+	if verifyErr := trust.VerifyInstallerSignature(contentHash, platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
+		s.logger.Warn("Installer artifact signature verification failed",
+			"error", logging.SanitizeLogValue(verifyErr.Error()),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		refuse(http.StatusBadRequest, "Signature verification failed", "SIGNATURE_VERIFICATION_FAILED")
+		return
+	}
+	sigDigest := sha256.Sum256(sigBytes)
+
+	meta := blob.BlobMeta{
+		ContentType: "application/octet-stream",
+		Labels: map[string]string{
+			"signature":        base64.RawURLEncoding.EncodeToString(sigBytes),
+			"publisher":        "cfgms",
+			"signature_digest": hex.EncodeToString(sigDigest[:]),
+		},
+	}
+	if err := s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(content), meta); err != nil {
 		s.logger.Error("Failed to store installer artifact",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
-		s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, "", business.AuditResultFailure)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
+		refuse(http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
 		return
 	}
 	// Audit immediately: a stored artifact must always have an audit record,
 	// independent of the metadata re-read below.
-	s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, hex.EncodeToString(hasher.Sum(nil)), business.AuditResultSuccess)
+	s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, contentHash, business.AuditResultSuccess)
 	if tenantID == s.rootTenantID(r.Context()) {
 		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
 	}
@@ -165,6 +231,7 @@ func (s *Server) handleListInstallerArtifacts(w http.ResponseWriter, r *http.Req
 			Size:        b.Meta.Size,
 			Checksum:    b.Meta.Checksum,
 			ContentType: b.Meta.ContentType,
+			Publisher:   b.Meta.Labels["publisher"],
 		})
 	}
 
@@ -228,6 +295,7 @@ func (s *Server) handleGetInstallerArtifact(w http.ResponseWriter, r *http.Reque
 		Size:        meta.Size,
 		Checksum:    meta.Checksum,
 		ContentType: meta.ContentType,
+		Publisher:   meta.Labels["publisher"],
 	})
 }
 
@@ -360,7 +428,7 @@ func (s *Server) caIsPrivate() bool {
 	}
 	caCertPEM, err := s.certManager.GetCACertificate()
 	if err != nil {
-		s.logger.Warn("failed to read CA certificate from cert manager; skipping CA bundle", "error", err)
+		s.logger.Warn("failed to read CA certificate from cert manager; skipping CA bundle", "error", logging.SanitizeLogValue(err.Error()))
 		return false
 	}
 	block, _ := pem.Decode(caCertPEM)
@@ -370,7 +438,7 @@ func (s *Server) caIsPrivate() bool {
 	}
 	caCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		s.logger.Warn("failed to parse CA certificate; skipping CA bundle", "error", err)
+		s.logger.Warn("failed to parse CA certificate; skipping CA bundle", "error", logging.SanitizeLogValue(err.Error()))
 		return false
 	}
 	// A self-signed CA has identical raw issuer and subject bytes, indicating a private
@@ -432,6 +500,10 @@ func (s *Server) handleDownloadInstallPackage(w http.ResponseWriter, r *http.Req
 	servePublicDownload(w, r, archiveName, asset)
 }
 
+// errInstallerUnverified marks a stored installer whose publisher signature is
+// missing or does not verify; the download path refuses to serve it.
+var errInstallerUnverified = errors.New("installer artifact signature not verified")
+
 func (s *Server) buildInstallPackage(
 	r *http.Request,
 	platform, arch, archiveName string,
@@ -453,7 +525,7 @@ func (s *Server) buildInstallPackage(
 	}
 	defer func() {
 		if cerr := rc.Close(); cerr != nil {
-			s.logger.Warn("failed to close installer artifact reader", "error", cerr)
+			s.logger.Warn("failed to close installer artifact reader", "error", logging.SanitizeLogValue(cerr.Error()))
 		}
 	}()
 	if meta.Size > maxBinaryRequestBodyBytes {
@@ -465,6 +537,22 @@ func (s *Server) buildInstallPackage(
 	}
 	if int64(len(artifactBytes)) > maxBinaryRequestBodyBytes {
 		return nil, errPublicDownloadTooLarge
+	}
+
+	// Fail closed: re-verify the publisher signature over the bytes about to be
+	// served, so an artifact altered or re-labelled at rest is never distributed.
+	sigBytes, decErr := base64.RawURLEncoding.DecodeString(meta.Labels["signature"])
+	if decErr != nil || len(sigBytes) == 0 {
+		return nil, errInstallerUnverified
+	}
+	sum := sha256.Sum256(artifactBytes)
+	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
+	if verifyErr := trust.VerifyInstallerSignature(hex.EncodeToString(sum[:]), platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
+		s.logger.Error("Stored installer artifact failed signature verification; refusing to serve",
+			"error", logging.SanitizeLogValue(verifyErr.Error()),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return nil, errInstallerUnverified
 	}
 
 	var caCertPEM []byte

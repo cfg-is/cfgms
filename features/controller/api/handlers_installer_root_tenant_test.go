@@ -62,7 +62,7 @@ func TestInstallerArtifacts_RootScoped_UsesRootTenant(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64", caller, []byte("root-linux-binary"), "linux", "amd64"))
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", []byte("root-linux-binary"), "linux", "amd64"), caller, []byte("root-linux-binary"), "linux", "amd64"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	err := getInstallerBlob(t, store, blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"})
@@ -99,7 +99,7 @@ func TestInstallerArtifacts_RootScopedClientTenant_RequiresCrossing(t *testing.T
 	upload := func() *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
-			"/api/v1/installer/artifacts/linux/amd64?tenant=msp-sel", caller, []byte("client-binary"), "linux", "amd64"))
+			signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64?tenant=msp-sel", []byte("client-binary"), "linux", "amd64"), caller, []byte("client-binary"), "linux", "amd64"))
 		return rec
 	}
 
@@ -148,7 +148,7 @@ func TestInstallerDownload_ServesRootTenantResolvedByPosition(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
-		"/api/v1/installer/artifacts/linux/amd64", rootScopedPrincipal("root-operator-inst"), []byte("acme-linux-binary"), "linux", "amd64"))
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", []byte("acme-linux-binary"), "linux", "amd64"), rootScopedPrincipal("root-operator-inst"), []byte("acme-linux-binary"), "linux", "amd64"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	req := withVars(httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil),
@@ -160,4 +160,48 @@ func TestInstallerDownload_ServesRootTenantResolvedByPosition(t *testing.T) {
 	files := extractTarGz(t, rec.Body.Bytes())
 	require.Contains(t, files, "installer/linux-amd64/cfgms-steward-amd64")
 	assert.True(t, bytes.Equal([]byte("acme-linux-binary"), files["installer/linux-amd64/cfgms-steward-amd64"]))
+}
+
+// TestInstallerDownload_RefusesTamperedOrUnsignedArtifact guards the read-side
+// publisher-signature check: bytes altered after upload, or a blob stored without
+// a signature label, are never served.
+func TestInstallerDownload_RefusesTamperedOrUnsignedArtifact(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	key := blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"}
+	original := []byte("signed-linux-binary")
+
+	rec := httptest.NewRecorder()
+	server.handleUploadInstallerArtifact(rec, installerRequestAs(t, http.MethodPut,
+		signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", original, "linux", "amd64"),
+		rootScopedPrincipal("root-operator-inst"), original, "linux", "amd64"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	download := func() *httptest.ResponseRecorder {
+		req := withVars(httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil),
+			map[string]string{"platform": "linux", "arch": "amd64"})
+		w := httptest.NewRecorder()
+		server.handleDownloadInstallPackage(w, req)
+		return w
+	}
+	require.Equal(t, http.StatusOK, download().Code, "untampered artifact is served")
+
+	rc, meta, err := store.GetBlob(context.Background(), key)
+	require.NoError(t, err)
+	_ = rc.Close()
+
+	// Bytes changed after upload, signature label kept.
+	tampered := []byte("malicious-linux-binary")
+	require.NoError(t, store.PutBlob(context.Background(), key, bytes.NewReader(tampered), meta))
+	server.publicDownloadCache.invalidate(installerDownloadCacheKey("linux", "amd64"))
+	w := download()
+	assert.GreaterOrEqual(t, w.Code, 400)
+	assert.NotContains(t, w.Body.String(), "malicious-linux-binary")
+	assert.NotContains(t, w.Header().Get("Content-Type"), "gzip")
+
+	// Signature label removed entirely.
+	require.NoError(t, store.PutBlob(context.Background(), key, bytes.NewReader(original), blob.BlobMeta{ContentType: "application/octet-stream"}))
+	server.publicDownloadCache.invalidate(installerDownloadCacheKey("linux", "amd64"))
+	w = download()
+	assert.GreaterOrEqual(t, w.Code, 400)
+	assert.NotContains(t, w.Header().Get("Content-Type"), "gzip")
 }

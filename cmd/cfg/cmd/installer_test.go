@@ -254,6 +254,7 @@ func TestInstallerUpload(t *testing.T) {
 
 		installerPlatform = "windows"
 		installerArch = "amd64"
+		setUploadSignature(t, "c2lnLWZyb20tc2lnbmVy")
 
 		fileContent := strings.Repeat("x", 1024)
 		f, err := os.CreateTemp(t.TempDir(), "installer-*.exe")
@@ -265,6 +266,8 @@ func TestInstallerUpload(t *testing.T) {
 			assert.Equal(t, "PUT", r.Method)
 			assert.Equal(t, "/api/v1/installer/artifacts/windows/amd64", r.URL.Path)
 			assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+			assert.Equal(t, "c2lnLWZyb20tc2lnbmVy", r.URL.Query().Get("signature"),
+				"the signature file's content must be sent as the signature query parameter")
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -306,6 +309,7 @@ func TestInstallerUpload(t *testing.T) {
 
 		installerPlatform = "linux"
 		installerArch = "amd64"
+		setUploadSignature(t, "c2lnLWZyb20tc2lnbmVy")
 
 		f, err := os.CreateTemp(t.TempDir(), "installer-*.bin")
 		require.NoError(t, err)
@@ -342,6 +346,7 @@ func TestInstallerUpload(t *testing.T) {
 
 		installerPlatform = "darwin"
 		installerArch = "arm64"
+		setUploadSignature(t, "c2lnLWZyb20tc2lnbmVy")
 
 		dir := t.TempDir()
 		installerPath := filepath.Join(dir, "cfgms-steward-darwin-arm64.pkg")
@@ -373,6 +378,82 @@ func TestInstallerUpload(t *testing.T) {
 
 		assert.Equal(t, "/api/v1/installer/artifacts/darwin/arm64", receivedPath)
 		assert.Contains(t, output, "darwin/arm64")
+	})
+}
+
+// setUploadSignature writes sig (plus the trailing newline the signer prints) to a
+// temp file and points --signature at it for the test.
+func setUploadSignature(t *testing.T, sig string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "installer.sig")
+	require.NoError(t, os.WriteFile(path, []byte(sig+"\n"), 0600))
+	orig := uploadSignature
+	t.Cleanup(func() { uploadSignature = orig })
+	uploadSignature = path
+	return path
+}
+
+func TestInstallerUpload_Signature(t *testing.T) {
+	setup := func(t *testing.T, handler http.HandlerFunc) {
+		t.Helper()
+		origPlatform, origArch, origURL := installerPlatform, installerArch, installerAPIURL
+		t.Cleanup(func() {
+			installerPlatform, installerArch, installerAPIURL = origPlatform, origArch, origURL
+		})
+		installerPlatform, installerArch = "linux", "amd64"
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		installerAPIURL = server.URL
+	}
+	installerFile := func(t *testing.T) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "installer.bin")
+		require.NoError(t, os.WriteFile(p, []byte("installer"), 0600))
+		return p
+	}
+
+	t.Run("missing signature file fails before any request", func(t *testing.T) {
+		calls := 0
+		setup(t, func(w http.ResponseWriter, r *http.Request) { calls++ })
+		orig := uploadSignature
+		t.Cleanup(func() { uploadSignature = orig })
+		uploadSignature = filepath.Join(t.TempDir(), "absent.sig")
+
+		err := runInstallerUpload(installerUploadCmd, []string{installerFile(t)})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "signature file not found")
+		assert.Equal(t, 0, calls, "no request may reach the server")
+	})
+
+	t.Run("empty signature file fails before any request", func(t *testing.T) {
+		calls := 0
+		setup(t, func(w http.ResponseWriter, r *http.Request) { calls++ })
+		setUploadSignature(t, "")
+
+		err := runInstallerUpload(installerUploadCmd, []string{installerFile(t)})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty")
+		assert.Equal(t, 0, calls)
+	})
+
+	t.Run("server refusal is reported with its message", func(t *testing.T) {
+		setup(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			// The controller's real error envelope: {"error":{"code","message"}}.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{
+					"code":    "SIGNATURE_VERIFICATION_FAILED",
+					"message": "Signature verification failed",
+				},
+			})
+		})
+		setUploadSignature(t, "YmFkLXNpZw")
+
+		err := runInstallerUpload(installerUploadCmd, []string{installerFile(t)})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Signature verification failed")
+		assert.Contains(t, err.Error(), "SIGNATURE_VERIFICATION_FAILED")
 	})
 }
 

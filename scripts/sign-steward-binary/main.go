@@ -21,6 +21,12 @@
 //
 //	go run ./scripts/sign-steward-binary <binary> <version> <platform> <arch>
 //	go run ./scripts/sign-steward-binary cfgms-steward.exe v0.9.41 windows amd64
+//
+// Installer artifacts (`cfg installer upload --signature <file>`) have no version, so
+// they are signed in installer mode over trust.InstallerMessage. Only the URL-safe
+// base64 signature is printed, ready to redirect into the --signature file:
+//
+//	go run ./scripts/sign-steward-binary --installer <file> <platform> <arch> > installer.sig
 package main
 
 import (
@@ -46,6 +52,9 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "--installer" {
+		return runInstaller(args[1:], out)
+	}
 	if len(args) != 4 {
 		return fmt.Errorf("usage: sign-steward-binary <binary> <version> <platform> <arch>\n" +
 			"  e.g. sign-steward-binary cfgms-steward.exe v0.9.41 windows amd64")
@@ -111,4 +120,36 @@ func publisherKey() (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("%s must decode to %d bytes, got %d", publisherSeedEnv, ed25519.SeedSize, len(seed))
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// runInstaller signs an installer artifact and prints only the URL-safe base64
+// signature. The message comes from trust.InstallerMessage, the helper the
+// controller's verify-on-upload uses.
+func runInstaller(args []string, out io.Writer) error {
+	if len(args) != 3 {
+		return fmt.Errorf("usage: sign-steward-binary --installer <file> <platform> <arch>\n" +
+			"  e.g. sign-steward-binary --installer cfgms-steward-windows-amd64.exe windows amd64")
+	}
+	path, platform, arch := args[0], args[1], args[2]
+
+	// #nosec G304 G703 -- this isolated build/release tool intentionally reads
+	// the artifact path supplied by its trusted local operator.
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read installer: %w", err)
+	}
+	sum := sha256.Sum256(content)
+	message, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), platform, arch)
+	if err != nil {
+		return err
+	}
+	priv, err := publisherKey()
+	if err != nil {
+		return err
+	}
+	sig := ed25519.Sign(priv, []byte(message))
+	if _, err := fmt.Fprintln(out, base64.RawURLEncoding.EncodeToString(sig)); err != nil {
+		return fmt.Errorf("write output: %w", err)
+	}
+	return nil
 }
