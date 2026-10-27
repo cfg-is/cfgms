@@ -693,8 +693,8 @@ describe('RowActionMenu rotate and move-identity handle elevation 401 without a 
   })
 })
 
-describe('RowActionMenu move-identity picker', () => {
-  it('sends the selected pending_id and lists only this steward\'s copies as text', async () => {
+describe('RowActionMenu move-identity', () => {
+  it('sends the selected pending_id', async () => {
     fetchMock.mockImplementation((input, init) => {
       const u = String(input)
       if (u.endsWith('/stewards/identity-clones')) return Promise.resolve(jsonRes(200, CLONES))
