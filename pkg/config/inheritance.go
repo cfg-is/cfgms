@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -644,7 +645,10 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(ctx context.Context,
 	// tightening-only rule; module_trust enforces the same for Mode, with an
 	// explicit authorize_downgrade escape hatch (mirroring the more-permissive-
 	// wins precedent of Upgrade.AllowDowngrade above) for an intentional
-	// relaxation. A refused transition keeps the already-accumulated (stronger)
+	// relaxation. AdditionalPublishers follows the same rule: a level declaring a
+	// publisher absent from the accumulated list (widening trust) is refused
+	// unless it sets authorize_downgrade; a subset is applied freely. An empty
+	// accumulated list exempts only the root (MSP) level. A refused transition keeps the already-accumulated (stronger)
 	// value rather than failing the whole cascade, so the rest of this level's
 	// config still applies — the config push itself is refused, not the entire
 	// resolution.
@@ -674,8 +678,26 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(ctx context.Context,
 	}
 
 	if len(config.Steward.ModuleTrust.AdditionalPublishers) > 0 {
-		effective.Config.Steward.ModuleTrust.AdditionalPublishers = config.Steward.ModuleTrust.AdditionalPublishers
-		effective.Sources["steward.module_trust.additional_publishers"] = source
+		prev := effective.Config.Steward.ModuleTrust.AdditionalPublishers
+		added := 0
+		for _, p := range config.Steward.ModuleTrust.AdditionalPublishers {
+			if !slices.Contains(prev, p) {
+				added++
+			}
+		}
+		// An empty accumulated list exempts only the root level; a descendant
+		// that is first to declare publishers is still gated (fail closed).
+		widens := added > 0 && (len(prev) > 0 || source.Level != int(LevelMSP))
+		if widens && !config.Steward.ModuleTrust.AuthorizeDowngrade {
+			err := fmt.Errorf("module_trust additional_publishers change adding %d publisher(s) not trusted by an ancestor refused: set authorize_downgrade to permit", added)
+			ir.refusePostureDowngrade(ctx, config, source, "module_trust", err)
+		} else {
+			if widens {
+				ir.recordPostureDowngradeAuthorized(ctx, config, source, "module_trust")
+			}
+			effective.Config.Steward.ModuleTrust.AdditionalPublishers = config.Steward.ModuleTrust.AdditionalPublishers
+			effective.Sources["steward.module_trust.additional_publishers"] = source
+		}
 	}
 
 	// Apply module mappings

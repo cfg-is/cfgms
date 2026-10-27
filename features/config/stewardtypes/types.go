@@ -221,11 +221,17 @@ type ModuleTrustConfig struct {
 
 	// AdditionalPublishers lists publisher identifiers trusted in addition to
 	// the CFGMS publisher identity baked into the steward binary.
-	// Only consulted when Mode is "strict".
+	// Only consulted when Mode is "strict". A descendant level that declares a
+	// publisher not in the list accumulated from its ancestors is refused (the
+	// ancestor list is kept) unless that level sets AuthorizeDowngrade; a
+	// declared list that is a subset of the accumulated one applies freely.
+	// When the accumulated list is empty, only the root (MSP) level may declare
+	// publishers without AuthorizeDowngrade.
 	AdditionalPublishers []string `yaml:"additional_publishers,omitempty" json:"additional_publishers,omitempty"`
 
 	// AuthorizeDowngrade must be set explicitly, at the same config level that
-	// weakens Mode (e.g. strict→controller or strict→bypass), for that transition
+	// weakens Mode (e.g. strict→controller or strict→bypass) or adds an
+	// AdditionalPublishers entry its ancestors do not list, for that transition
 	// to be accepted. Without it, a transition that lowers trust is refused and
 	// the previously established (stronger) mode continues to apply (Issue #4324).
 	// Mirrors the more-permissive-wins precedent of Upgrade.AllowDowngrade: the

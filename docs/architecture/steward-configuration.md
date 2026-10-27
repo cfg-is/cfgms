@@ -162,8 +162,8 @@ resources:
   - `controller` (default): The steward accepts any bundle the controller has approved. Trust decisions are delegated to the controller.
   - `strict`: The steward independently verifies publisher signatures. The CFGMS publisher identity is baked into the steward binary; `additional_publishers` extends the trusted set.
   - `bypass`: Disables all trust enforcement. Unavailable in a release build — gated by the `cfgms_dev_bypass` build tag, the same mechanism used for test-only routes, so `ValidateModuleTrustConfig` rejects it from pushed configuration on any normally built steward.
-- `module_trust.additional_publishers`: List of publisher identifiers trusted in addition to the baked-in CFGMS publisher identity. Only consulted when `mode` is `strict`. Changing this list requires a steward restart. A supplied entry sharing the baked-in identity's name can never displace it.
-- `module_trust.authorize_downgrade`: Must be set explicitly, at the level that weakens `mode` (e.g. `strict` → `controller` or `strict` → `bypass`), for that transition to take effect during config cascade resolution. Otherwise the transition is refused and recorded in the audit log (Issue #4324).
+- `module_trust.additional_publishers`: List of publisher identifiers trusted in addition to the baked-in CFGMS publisher identity. Only consulted when `mode` is `strict`. Changing this list requires a steward restart. A supplied entry sharing the baked-in identity's name can never displace it. A level that adds an entry its ancestors do not list is refused (the ancestors' list is kept and the refusal audited) unless it sets `authorize_downgrade`; a subset of the ancestors' list applies freely, and an empty ancestor list exempts only the root level.
+- `module_trust.authorize_downgrade`: Must be set explicitly, at the level that weakens `mode` (e.g. `strict` → `controller` or `strict` → `bypass`) or adds an `additional_publishers` entry its ancestors do not list, for that change to take effect during config cascade resolution. Otherwise the transition is refused and recorded in the audit log (Issue #4324).
 
 ### Required Modules Section
 

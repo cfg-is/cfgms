@@ -286,7 +286,7 @@ A local configuration (`hostname.cfg`) that fails parsing or validation stops th
 A transition that weakens this setting (`strict` → `controller` or `strict` → `bypass`) is refused
 during config cascade resolution unless the level making the change also sets
 `module_trust.authorize_downgrade: true`, and the refusal (or the authorized downgrade) is recorded
-in the audit log.
+in the audit log. A descendant level that adds an `additional_publishers` entry its ancestors do not list is refused the same way unless it sets `authorize_downgrade` (an empty ancestor list exempts only the root level); a list that is a subset of the ancestors' list applies freely.
 
 In `strict` mode, the trusted publisher set is:
 1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push, including by a same-named entry in `additional_publishers`.
