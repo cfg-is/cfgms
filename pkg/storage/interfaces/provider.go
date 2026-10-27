@@ -57,6 +57,7 @@ type BusinessStoreBundle struct {
 	Case                business.CaseStore              // ADR-022 §8: cockpit investigation cases
 	Lease               business.LeaseStore             // ADR-031 Decision 5: fenced singleton-claim leases
 	Approval            business.ApprovalStore          // Issue #4607: durable workflow approvals
+	ReportTemplate      business.ReportTemplateStore    // Issue #5527: durable custom report templates
 	WorkflowExecution   business.WorkflowExecutionStore // Issue #4675: durable workflow execution history
 }
 
@@ -233,6 +234,7 @@ type StorageProvider interface {
 	CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error)
 	CreateAlertStore(config map[string]interface{}) (business.AlertStore, error)
 	CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error)
+	CreateReportTemplateStore(config map[string]interface{}) (business.ReportTemplateStore, error)
 	CreateWorkflowExecutionStore(config map[string]interface{}) (business.WorkflowExecutionStore, error)
 
 	// Provider capabilities and metadata
@@ -749,6 +751,12 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 	}
 	appendIfCloser(&openedStores, approvalStore)
 
+	reportTemplateStore, err := provider.CreateReportTemplateStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create report template store: %w", err)
+	}
+	appendIfCloser(&openedStores, reportTemplateStore)
+
 	workflowExecutionStore, err := provider.CreateWorkflowExecutionStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create workflow execution store: %w", err)
@@ -829,6 +837,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		approvalStore:          approvalStore,
+		reportTemplateStore:    reportTemplateStore,
 		workflowExecutionStore: workflowExecutionStore,
 		nonceStore:             nonceStore,
 		leaseStore:             leaseStore,
@@ -855,6 +864,7 @@ type StorageManager struct {
 	ipTrustStore             business.IPTrustStore
 	alertStore               business.AlertStore                 // Issue #3266: alert acknowledge and silence
 	approvalStore            business.ApprovalStore              // Issue #4607: durable workflow approvals
+	reportTemplateStore      business.ReportTemplateStore        // Issue #5527: durable custom report templates
 	workflowExecutionStore   business.WorkflowExecutionStore     // Issue #4675: durable workflow execution history
 	pendingRefreshStore      business.PendingRefreshStore        // Issue #2098: registration-refresh approval queue
 	refreshPolicyStore       business.RefreshPolicyStore         // Issue #2098: per-tenant refresh policy
@@ -999,6 +1009,17 @@ func (sm *StorageManager) GetWorkflowExecutionStore() business.WorkflowExecution
 // SetWorkflowExecutionStore wires the workflow execution store after construction.
 func (sm *StorageManager) SetWorkflowExecutionStore(s business.WorkflowExecutionStore) {
 	sm.workflowExecutionStore = s
+}
+
+// GetReportTemplateStore returns the durable report template store (Issue #5527).
+// Returns nil when the current storage provider does not support report template storage.
+func (sm *StorageManager) GetReportTemplateStore() business.ReportTemplateStore {
+	return sm.reportTemplateStore
+}
+
+// SetReportTemplateStore wires the report template store after construction.
+func (sm *StorageManager) SetReportTemplateStore(s business.ReportTemplateStore) {
+	sm.reportTemplateStore = s
 }
 
 // GetPendingRefreshStore returns the pending-refresh approval queue (Issue #2098).
@@ -1259,6 +1280,7 @@ func (sm *StorageManager) Close() error {
 		sm.ipTrustStore,
 		sm.alertStore,
 		sm.approvalStore,
+		sm.reportTemplateStore,
 		sm.workflowExecutionStore,
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
@@ -1485,6 +1507,11 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		return nil, fmt.Errorf("cluster storage: failed to create approval store: %w", err)
 	}
 	appendIfCloser(&openedStores, approvalStore)
+	reportTemplateStore, err := provider.CreateReportTemplateStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create report template store: %w", err)
+	}
+	appendIfCloser(&openedStores, reportTemplateStore)
 	workflowExecutionStore, err := provider.CreateWorkflowExecutionStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create workflow execution store: %w", err)
@@ -1512,6 +1539,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		approvalStore:          approvalStore,
+		reportTemplateStore:    reportTemplateStore,
 		workflowExecutionStore: workflowExecutionStore,
 	}
 	if pendingRegStore != nil {
@@ -1848,6 +1876,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		if bundle.Approval != nil {
 			sm.SetApprovalStore(bundle.Approval)
 		}
+		if bundle.ReportTemplate != nil {
+			sm.SetReportTemplateStore(bundle.ReportTemplate)
+		}
 		if bundle.WorkflowExecution != nil {
 			sm.SetWorkflowExecutionStore(bundle.WorkflowExecution)
 		}
@@ -1928,6 +1959,16 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if workflowExecutionStore != nil {
 		sm.SetWorkflowExecutionStore(workflowExecutionStore)
 		appendIfCloser(&openedStores, workflowExecutionStore)
+	}
+	// Report template store (Issue #5527): business data, so it comes from the SQLite
+	// provider, mirroring the approval store above.
+	reportTemplateStore, err := sqProvider.CreateReportTemplateStore(sqliteCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create report template store (sqlite): %w", err)
+	}
+	if reportTemplateStore != nil {
+		sm.SetReportTemplateStore(reportTemplateStore)
+		appendIfCloser(&openedStores, reportTemplateStore)
 	}
 	// Wire lease store if the SQLite provider implements LeaseStoreCreator (ADR-031
 	// Decision 5). The bundle path above takes bundle.Lease from the shared handle;

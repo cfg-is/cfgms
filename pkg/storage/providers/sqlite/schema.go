@@ -1189,6 +1189,30 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_workflow_approvals_pending ON workflow_approvals(tenant_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_workflow_approvals_expiry ON workflow_approvals(status, expires_at)`,
 
+		// Durable custom report templates (Issue #5527). id is globally unique so a share
+		// recipient can resolve a template another tenant owns; reads are always scoped by
+		// tenant_id or by a share naming the caller. Timestamps are UNIX nanoseconds
+		// (0 = unset). definition is the opaque JSON query and parameters document;
+		// shared_with and tags are JSON arrays.
+		`CREATE TABLE IF NOT EXISTS report_templates (
+			id          TEXT PRIMARY KEY,
+			tenant_id   TEXT NOT NULL,
+			name        TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			definition  TEXT NOT NULL DEFAULT '',
+			created_by  TEXT NOT NULL DEFAULT '',
+			created_at  INTEGER NOT NULL DEFAULT 0,
+			updated_at  INTEGER NOT NULL DEFAULT 0,
+			is_shared   INTEGER NOT NULL DEFAULT 0,
+			shared_with TEXT NOT NULL DEFAULT '[]',
+			tags        TEXT NOT NULL DEFAULT '[]',
+			category    TEXT NOT NULL DEFAULT '',
+			version     TEXT NOT NULL DEFAULT '',
+			usage_count INTEGER NOT NULL DEFAULT 0,
+			last_used   INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_report_templates_tenant ON report_templates(tenant_id)`,
+
 		// Durable workflow execution history (Issue #4675). Timestamps are UNIX
 		// nanoseconds (0 = unset). tenant_id '' is the root tenant. payload is opaque
 		// engine-owned JSON (step results, error, trace); run variables are never stored.

@@ -538,6 +538,10 @@ func (p *testNoPushStoreProvider) CreateApprovalStore(_ map[string]interface{}) 
 	return nil, business.ErrNotSupported
 }
 
+func (p *testNoPushStoreProvider) CreateReportTemplateStore(_ map[string]interface{}) (business.ReportTemplateStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *testNoPushStoreProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
 	return nil, business.ErrNotSupported
 }

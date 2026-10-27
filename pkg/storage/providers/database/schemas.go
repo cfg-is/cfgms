@@ -1282,6 +1282,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateReportTemplatesTable(ctx, db); err != nil {
+		return err
+	}
+
 	if err := s.CreateWorkflowExecutionsTable(ctx, db); err != nil {
 		return err
 	}
@@ -1916,6 +1920,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS session_token_store;",
 		"DROP TABLE IF EXISTS cfgms_alert_states;",
 		"DROP TABLE IF EXISTS cfgms_workflow_approvals;",
+		"DROP TABLE IF EXISTS cfgms_report_templates;",
 		"DROP TABLE IF EXISTS cfgms_workflow_executions;",
 		// Issue #3401: omitted here, so pending-registration rows survived
 		// setupTestDatabase and every re-run of the store's tests failed with
@@ -2098,6 +2103,42 @@ func (s DatabaseSchemas) CreateWorkflowApprovalsTable(ctx context.Context, db *s
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to create cfgms_workflow_approvals table: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateReportTemplatesTable creates the cfgms_report_templates table backing
+// business.ReportTemplateStore (Issue #5527). id is globally unique so a share recipient
+// can resolve a template another tenant owns; reads are always scoped by tenant_id or by
+// a share naming the caller. definition is the opaque JSON query and parameters document,
+// kept as TEXT so it round-trips byte for byte; shared_with is JSONB so the recipient
+// lookup is a containment query served by the GIN index.
+func (s DatabaseSchemas) CreateReportTemplatesTable(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS cfgms_report_templates (
+			id          TEXT PRIMARY KEY,
+			tenant_id   TEXT NOT NULL,
+			name        TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			definition  TEXT NOT NULL DEFAULT '',
+			created_by  TEXT NOT NULL DEFAULT '',
+			created_at  TIMESTAMP WITH TIME ZONE NOT NULL,
+			updated_at  TIMESTAMP WITH TIME ZONE NOT NULL,
+			is_shared   BOOLEAN NOT NULL DEFAULT FALSE,
+			shared_with JSONB NOT NULL DEFAULT '[]'::jsonb,
+			tags        JSONB NOT NULL DEFAULT '[]'::jsonb,
+			category    TEXT NOT NULL DEFAULT '',
+			version     TEXT NOT NULL DEFAULT '',
+			usage_count INTEGER NOT NULL DEFAULT 0,
+			last_used   TIMESTAMP WITH TIME ZONE
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_report_templates_tenant ON cfgms_report_templates(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_report_templates_shared_with ON cfgms_report_templates USING GIN (shared_with jsonb_path_ops);",
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create cfgms_report_templates table: %w", err)
 		}
 	}
 	return nil

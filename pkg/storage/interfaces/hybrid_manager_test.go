@@ -400,6 +400,10 @@ func (p *mockProvider) CreateApprovalStore(_ map[string]interface{}) (business.A
 	return nil, business.ErrNotSupported
 }
 
+func (p *mockProvider) CreateReportTemplateStore(_ map[string]interface{}) (business.ReportTemplateStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *mockProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
 	return nil, business.ErrNotSupported
 }

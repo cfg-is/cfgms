@@ -242,6 +242,19 @@ checkpoint can carry step outputs and credentials, so it is written through the 
 provider (SOPS-encrypted at rest); the approval record holds only `CheckpointRef`. Like
 `AlertStore`, it is not yet carried by `cfg migrate --provider storage`.
 
+**`ReportTemplateStore` (Issue #5527).** Custom report templates live in a provider-backed
+store — `flatfile` (`report_templates/templates.json`), `sqlite` (`report_templates`) and
+`database` (`cfgms_report_templates`). A template's `ID` is globally unique (caller-supplied
+UUID) so a share recipient can resolve it; the owning tenant is fixed by the first `Save`.
+`Save` takes the tenant explicitly and rejects a mismatch with `template.TenantID`; saving an
+ID another tenant owns returns `ErrReportTemplateExists` and changes nothing. `GetByID` and
+`ListOwned` / `ListSharedWith` never cross tenants except through a share that names the
+caller and has not expired, and a recipient sees only its own share entry. `Delete` and
+`UpdateSharing` are owner-only. Tenant and template IDs are validated with `keysafe` before
+any path is built or query run. The query and parameters are one opaque JSON document; the
+store never interprets it. Like `AlertStore`, it is not yet carried by
+`cfg migrate --provider storage`.
+
 **`WorkflowExecutionStore` (Issue #4675).** Workflow execution history — status, step
 results, error and timestamps — lives in a provider-backed store: `flatfile`
 (`workflow_executions/<tenant>/<execution>.json`, one file per execution), `sqlite`

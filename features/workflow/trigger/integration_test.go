@@ -173,6 +173,10 @@ func (t *TestStorageProvider) CreateApprovalStore(_ map[string]interface{}) (bus
 	return nil, business.ErrNotSupported
 }
 
+func (t *TestStorageProvider) CreateReportTemplateStore(_ map[string]interface{}) (business.ReportTemplateStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (t *TestStorageProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
 	return nil, business.ErrNotSupported
 }

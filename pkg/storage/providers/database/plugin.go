@@ -568,6 +568,20 @@ func (p *DatabaseProvider) CreateWorkflowExecutionStore(config map[string]interf
 	return store, nil
 }
 
+// CreateReportTemplateStore creates a PostgreSQL-backed ReportTemplateStore shared by
+// every controller node (Issue #5527).
+func (p *DatabaseProvider) CreateReportTemplateStore(config map[string]interface{}) (business.ReportTemplateStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseReportTemplateStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database report template store: %w", err)
+	}
+	return store, nil
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get the provider's shared connection pool
 	db, err := p.sharedPool(config)

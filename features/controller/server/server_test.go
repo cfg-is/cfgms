@@ -92,6 +92,10 @@ func (p *testNonClusterProvider) CreateApprovalStore(_ map[string]interface{}) (
 	return nil, business.ErrNotSupported
 }
 
+func (p *testNonClusterProvider) CreateReportTemplateStore(_ map[string]interface{}) (business.ReportTemplateStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (p *testNonClusterProvider) CreateWorkflowExecutionStore(_ map[string]interface{}) (business.WorkflowExecutionStore, error) {
 	return nil, business.ErrNotSupported
 }
@@ -152,6 +156,10 @@ func (p *testClusterProvider) CreateAlertStore(_ map[string]interface{}) (busine
 }
 
 func (p *testClusterProvider) CreateApprovalStore(_ map[string]interface{}) (business.ApprovalStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (p *testClusterProvider) CreateReportTemplateStore(_ map[string]interface{}) (business.ReportTemplateStore, error) {
 	return nil, business.ErrNotSupported
 }
 
