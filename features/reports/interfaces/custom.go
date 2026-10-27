@@ -234,6 +234,9 @@ type ProcessedQuery struct {
 
 // PaginationRequest represents a request for paginated data
 type PaginationRequest struct {
+	// TenantID is the caller's tenant. The API layer sets it from the authenticated
+	// session; it is never read from a request body.
+	TenantID    string `json:"-"`
 	StreamToken string `json:"stream_token"`
 	Page        int    `json:"page"`
 	PageSize    int    `json:"page_size"`

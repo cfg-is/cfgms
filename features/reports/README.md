@@ -12,12 +12,14 @@ features/reports/
 ├── engine/               # Report generation engine
 │   ├── engine.go         # Core report generation logic
 │   ├── advanced.go       # Audit-integrated, multi-tenant report generation (not yet wired to an API endpoint)
-│   └── custom_templates.go # Custom template manager over the durable report template store
+│   ├── custom_templates.go # Custom template manager over the durable report template store
+│   └── custom_builder.go # Custom report builder: ad-hoc queries over the dna, drift, device_stats and trends data sources
 ├── interfaces/           # Shared types and interface contracts
 │   ├── interfaces.go     # Core report types (ReportRequest, Report, DataQuery, ...)
 │   ├── advanced.go       # Advanced/audit-integrated report types
 │   ├── custom.go         # Custom and scheduled report type contracts
-│   └── custom_template_errors.go # Template sentinel errors
+│   ├── custom_template_errors.go # Template sentinel errors
+│   └── custom_report_errors.go # Custom report builder sentinel errors
 ├── provider/             # Data integration layer
 │   ├── provider.go       # DNA storage and drift detection integration
 │   └── advanced.go       # Audit data integration and cross-system metrics
@@ -33,6 +35,17 @@ owner-only. Share targets must pass the `ShareScopeFunc` (same MSP subtree, exis
 tenant); every refusal returns the same `ErrShareTargetInvalid`. Non-owners see only their
 own entry in `SharedWith`. The `modify` permission is accepted for forward compatibility
 but grants nothing today, since `SaveTemplate` is owner-only.
+
+`engine.CustomReportBuilder` runs user-defined queries over the `dna`, `drift`,
+`device_stats` and `trends` data sources on `interfaces.DataProvider`. It validates
+parameters, enforces the `CustomReportConfig` limits, and above `StreamThreshold` returns a
+stream token whose pages `GetReportData` serves. **Tenant rule:** every query it builds sets
+`DataQuery.TenantIDs` to the request's tenant; an empty tenant and the root tenant are
+refused before any provider call, and stream tokens, page cache entries and query cache keys
+are bound to the tenant. Because the provider treats `DeviceIDs` as an alternative to
+`TenantIDs`, every device ID a query names (`device_id` / `device_ids`, in filters or user
+parameters) is checked against the tenant's subtree first; unknown and foreign devices are
+refused identically.
 
 Only `api`, `engine`, `interfaces`, `provider`, `templates`, `exporters`, and `cache` are
 part of the live report path — every binary in the module reaches report generation
