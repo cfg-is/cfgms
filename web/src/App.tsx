@@ -17,6 +17,7 @@
  *   /config          → AppShell layout → ConfigListView
  *   /modules         → AppShell layout → ModuleReviewQueue
  *   /workflows       → AppShell layout → WorkflowListView
+ *   /approvals       → AppShell layout → ApprovalsView (Issue #5450)
  *   /workflows/:name/builder, /workflows/new/builder → WorkflowBuilder (full-screen, no shell; Issue #4615)
  *   /accounts        → AppShell layout → AccountsView
  *   /certificates    → AppShell layout → CertificatesView
@@ -66,6 +67,7 @@ import AuditView from './audit/AuditView.tsx'
 import ConfigListView from './config/ConfigListView.tsx'
 import WorkflowBuilder from './workflow/WorkflowBuilder.tsx'
 import WorkflowListView from './workflow/WorkflowListView.tsx'
+import ApprovalsView from './workflow/ApprovalsView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
 import CertificatesView from './certificates/CertificatesView.tsx'
 import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
@@ -116,6 +118,7 @@ function App() {
                   <Route path="config" element={<ConfigListView />} />
                   <Route path="modules" element={<ModuleReviewQueue />} />
                   <Route path="workflows" element={<WorkflowListView />} />
+                  <Route path="approvals" element={<ApprovalsView />} />
                   <Route path="accounts" element={<AccountsView />} />
                   <Route path="certificates" element={<CertificatesView />} />
                   <Route path="scripts" element={<ScriptsView />} />

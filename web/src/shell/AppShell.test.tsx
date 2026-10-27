@@ -76,6 +76,11 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /^tenants$/i })).toHaveAttribute('href', '/tenants')
   })
 
+  it('renders the Approvals entry as a link to /approvals (Issue #5450)', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /^approvals$/i })).toHaveAttribute('href', '/approvals')
+  })
+
   it('renders the API keys entry as a link to /api-keys (Issue #5441)', () => {
     renderShell()
     expect(screen.getByRole('link', { name: /^api keys$/i })).toHaveAttribute('href', '/api-keys')

@@ -35,6 +35,7 @@ const NAV_ITEMS = [
   { label: 'Modules', to: '/modules', soon: false },
   { label: 'Config', to: '/config', soon: false },
   { label: 'Workflows', to: '/workflows', soon: false },
+  { label: 'Approvals', to: '/approvals', soon: false },
   { label: 'Scripts', to: '/scripts', soon: false },
   { label: 'Registration', to: '/registration', soon: false },
   { label: 'Refresh Requests', to: '/refresh', soon: false },
