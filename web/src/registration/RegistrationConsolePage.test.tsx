@@ -204,21 +204,21 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
-    fireEvent.click(tab(/^Enrolment tokens/i))
+    fireEvent.click(tab(/^Orphaned/i))
     fireEvent.keyDown(tablist, { key: 'ArrowRight' })
 
     expect(tab(/^Pending/i)).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByTestId('pending-loading')).toBeInTheDocument()
   })
 
-  it('ArrowLeft wraps from Pending to the last tab (Enrolment tokens)', async () => {
+  it('ArrowLeft wraps from Pending to the last tab (Orphaned)', async () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
     fireEvent.keyDown(tablist, { key: 'ArrowLeft' })
 
-    expect(tab(/^Enrolment tokens/i)).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByTestId('enrolment-tokens-loading')).toBeInTheDocument()
+    expect(tab(/^Orphaned/i)).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('orphaned-loading')).toBeInTheDocument()
   })
 
   it('ArrowLeft steps backwards one tab at a time', () => {
@@ -345,7 +345,7 @@ describe('RegistrationConsolePage — pending count badge', () => {
 
 describe('TABS', () => {
   it('declares Pending, Tokens, IP Trust, and Credential Requests with real panels', () => {
-    expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust', 'credential-requests', 'enrolment-tokens'])
+    expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust', 'credential-requests', 'enrolment-tokens', 'orphaned'])
     for (const spec of TABS) {
       expect(spec.soon).toBe(false)
       expect(spec.Panel).toBeDefined()
