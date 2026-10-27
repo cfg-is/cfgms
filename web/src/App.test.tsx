@@ -138,6 +138,17 @@ describe('App', () => {
     expect(screen.getByRole('navigation')).toBeInTheDocument()
   })
 
+  it('the approvals route is reachable when signed in', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { data: [] })))
+    render(
+      <MemoryRouter initialEntries={['/approvals']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Approvals', level: 1 })).toBeInTheDocument()
+    expect(screen.getByRole('navigation')).toBeInTheDocument()
+  })
+
   it('the api-keys route is reachable when signed in', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { data: [] })))
     render(
