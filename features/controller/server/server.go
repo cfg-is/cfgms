@@ -80,6 +80,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
+	directoryif "github.com/cfgis/cfgms/pkg/directory/interfaces"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egdatabase "github.com/cfgis/cfgms/pkg/entitygraph/providers/database"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
@@ -217,6 +218,7 @@ type Server struct {
 	egDNAWriter                     *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
 	configSyncService               *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
 	configSyncCancel                context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
+	directoryManager                *directoryif.DirectoryProviderManager    // Issue #5431: Entra ID registered unconnected, closed on Stop
 	routerSecretStore               secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
 	egTenantSyncWriter              *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
 	egCorrelatorWriter              *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
@@ -788,6 +790,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize config router secret store: %w", routerSecretErr)
 	}
 	openedStores = append(openedStores, routerSecretStore.Close)
+
+	// Issue #5431: directory manager with the Entra ID provider registered
+	// unconnected. Its credentials are the tenant M365 connections held in the
+	// same secret store the router store is built over.
+	directoryManager, dirErr := registerDirectoryProviders(routerSecretStore, logger)
+	if dirErr != nil {
+		return nil, fmt.Errorf("failed to initialize directory providers: %w", dirErr)
+	}
 
 	gitConfigWorkDir := filepath.Join(resolveDNADataRoot(cfg), "config-git-sources")
 	if mkErr := os.MkdirAll(gitConfigWorkDir, 0750); mkErr != nil {
@@ -2112,6 +2122,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		egProvider:              egProvider,           // Issue #3253: closed in Stop() to release DB handle
 		configSyncService:       configSyncService,    // Issue #4408: Run() started in Start(), Stop()ped in Stop()
 		routerSecretStore:       routerSecretStore,    // Issue #4408: closed in Stop()
+		directoryManager:        directoryManager,     // Issue #5431: closed in Stop()
 		egTenantSyncWriter:      egTenantSyncWriter,   // Issue #4413: periodic sweep started in Start()
 		egCorrelatorWriter:      egCorrelatorWriter,   // Issue #4413: periodic sweep started in Start()
 		egTenantSyncLeaseJob:    egTenantSyncLeaseJob, // Issue #4413: gates the tenant-sync sweep (ADR-031 Decision 4)
@@ -3393,6 +3404,14 @@ func (s *Server) Stop() error {
 	if s.stewardEventManager != nil {
 		if err := closeStewardEventManager(s.stewardEventManager); err != nil {
 			s.logger.Warn("Failed to flush and close steward event manager", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+
+	// Close the directory manager (Issue #5431) before the secret store its
+	// providers read credentials from.
+	if s.directoryManager != nil {
+		if err := s.directoryManager.Close(context.Background()); err != nil {
+			s.logger.Warn("Failed to close directory manager", "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 

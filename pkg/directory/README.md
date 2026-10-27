@@ -39,3 +39,13 @@ The first provider registered becomes the default. `SetDefaultProvider` override
 `EntraIDDirectoryProvider` holds no tenant or credential. `Connect` accepts only an optional `graph_url` (in `ProviderConfig.ProviderConfig`) and makes no Graph call. Every operation obtains its Graph token from `authProvider.GetAccessToken` for the CFGMS execution tenant in the context (`ctxkeys.TenantID`); credentials are resolved by the auth provider from the credential store. A missing or empty tenant fails closed before any Graph call.
 
 `HealthCheck` follows the same rule: without an execution tenant in the context it reports unhealthy by design. `GetProviderStatuses` calls it with a bare context, so Entra shows unhealthy there until a tenant-scoped check exists.
+
+## Controller registration
+
+`NewServer` builds one `DirectoryProviderManager` (`registerDirectoryProviders` in `features/controller/server/directory_wiring.go`), holds it on the `Server` and closes it on `Stop`. Registered providers:
+
+| Name | Provider | State at startup |
+|------|----------|------------------|
+| `entraid` | `EntraIDDirectoryProvider` | Registered, not connected |
+
+The Entra provider is built over an `OAuth2Provider` on the controller's secret store with a nil default config, and a rate-limited Graph HTTP client. No `Connect` or `HealthCheck` runs at startup; the manager connects it on the first `ExecuteProviderOp` call. Each call resolves the credential of the CFGMS tenant in the context (`ctxkeys.TenantID`), never a connect-time tenant; a tenant with no M365 connection on file fails. With no secret store the Entra registration is skipped with a warning and startup continues. Active Directory is not registered by the controller yet.

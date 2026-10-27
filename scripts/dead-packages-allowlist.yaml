@@ -122,12 +122,6 @@ packages:
   # --- story (M365 / Active Directory), excluded per #4345's Out of Scope ---
   # --- section to avoid double-covering the same packages. Reasons below ----
   # --- are unchanged from Issue #4317's original baseline entries. ----------
-  - path: features/workflow/modules/m365
-    reason: >
-      Holds EntraIDDirectoryProvider, which implements
-      pkg/directory/interfaces.DirectoryProvider (Epic #4450). No main package
-      reaches it yet: registering the Entra and AD providers at controller
-      startup is a later #4450 story.
   - path: pkg/directory/providers/network_activedirectory
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
 
