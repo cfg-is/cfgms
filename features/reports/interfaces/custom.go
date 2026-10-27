@@ -46,27 +46,6 @@ type CustomTemplateManager interface {
 	DeleteTemplate(ctx context.Context, templateID, tenantID string) error
 }
 
-// CustomTemplateStore defines the interface for storing custom report templates
-type CustomTemplateStore interface {
-	// Save saves a custom report template
-	Save(ctx context.Context, template *CustomReportTemplate) (*CustomReportTemplate, error)
-
-	// GetByID retrieves a template by ID
-	GetByID(ctx context.Context, id string) (*CustomReportTemplate, error)
-
-	// GetByTenant retrieves templates owned by a tenant
-	GetByTenant(ctx context.Context, tenantID string) ([]*CustomReportTemplate, error)
-
-	// GetSharedTemplates retrieves templates shared with a tenant
-	GetSharedTemplates(ctx context.Context, tenantID string) ([]*CustomReportTemplate, error)
-
-	// Delete deletes a template
-	Delete(ctx context.Context, id string, tenantID string) error
-
-	// UpdateSharing updates the sharing configuration of a template
-	UpdateSharing(ctx context.Context, templateID string, shares []TemplateShare) error
-}
-
 // ScheduledReportManager defines the interface for scheduled report generation
 type ScheduledReportManager interface {
 	// ScheduleReport schedules a custom report for automatic generation
@@ -227,6 +206,9 @@ type TemplateShare struct {
 
 // ShareTemplateRequest represents a request to share a template
 type ShareTemplateRequest struct {
+	// TenantID is the sharing tenant. It must own the template; the API layer sets it
+	// from the session.
+	TenantID          string     `json:"tenant_id"`
 	TemplateID        string     `json:"template_id"`
 	SharedWithTenants []string   `json:"shared_with_tenants"`
 	Permissions       []string   `json:"permissions"`
