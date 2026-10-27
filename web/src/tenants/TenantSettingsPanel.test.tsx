@@ -389,3 +389,178 @@ describe('TenantSettingsPanel config source validation', () => {
     expect(putsTo(CS_CRED)).toHaveLength(0)
   })
 })
+
+const M365 = '/api/v1/tenants/root/msp-a/m365-connection'
+const GDAP_CUSTOMERS = '/api/v1/tenants/root/msp-a/m365-gdap-customers'
+const GDAP_LINKS = '/api/v1/tenants/root/msp-a/m365-gdap-links'
+const m365Conn = {
+  tenant_id: 'root/msp-a',
+  mode: 'direct',
+  app_id: 'app-1',
+  m365_tenant_id: 'dir-1',
+  has_client_secret: true,
+}
+
+function callsTo(url: string, method: string) {
+  return fetchMock.mock.calls.filter(([u, i]) => String(u) === url && (i?.method ?? 'GET') === method)
+}
+
+async function fillM365(secret = 'client-secret-1') {
+  await waitFor(() => expect(screen.getByTestId('m365-app-id-input')).toBeInTheDocument())
+  fireEvent.change(screen.getByTestId('m365-app-id-input'), { target: { value: 'app-1' } })
+  fireEvent.change(screen.getByTestId('m365-tenant-id-input'), { target: { value: 'dir-1' } })
+  fireEvent.change(screen.getByTestId('m365-secret-input'), { target: { value: secret } })
+}
+
+function stepUp() {
+  vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential) } })
+  return (url: string) => {
+    if (url.includes('elevate/begin')) return json(200, beginOptions)
+    if (url.includes('elevate/finish')) return json(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' })
+    return null
+  }
+}
+
+describe('TenantSettingsPanel m365', () => {
+  it('save and clear handle elevation 401 without a presence token', async () => {
+    const ceremony = stepUp()
+    let elevated = false
+    let connected = false
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      const step = ceremony(url)
+      if (step) {
+        if (url.includes('finish')) elevated = true
+        return Promise.resolve(step)
+      }
+      if (url === M365 && init?.method === 'PUT') {
+        if (!elevated) return Promise.resolve(elevationChallenge('tenant:manage'))
+        connected = true
+        return Promise.resolve(json(200, envelope(m365Conn)))
+      }
+      if (url === M365 && init?.method === 'DELETE') {
+        if (!elevated) return Promise.resolve(elevationChallenge('tenant:manage'))
+        connected = false
+        return Promise.resolve(json(200, envelope({ tenant_id: 'root/msp-a', deleted: true })))
+      }
+      if (url === M365) return Promise.resolve(connected ? json(200, envelope(m365Conn)) : json(404, { error: { message: 'none' } }))
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await fillM365()
+    fireEvent.click(screen.getByTestId('m365-save-btn'))
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(callsTo(M365, 'PUT')).toHaveLength(2))
+    const retry = callsTo(M365, 'PUT')[1]?.[1]
+    expect(new Headers(retry?.headers).get('X-Presence-Token')).toBeNull()
+    expect(JSON.parse(String(retry?.body))).toEqual({ app_id: 'app-1', m365_tenant_id: 'dir-1', client_secret: 'client-secret-1', replace: false })
+    await waitFor(() => expect(screen.getByTestId('m365-secret-badge')).toHaveTextContent('Client secret set'))
+
+    // Clear: nothing is sent until Confirm.
+    elevated = false
+    fireEvent.click(screen.getByTestId('m365-clear-btn'))
+    expect(callsTo(M365, 'DELETE')).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('m365-clear-confirm-btn'))
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+    await waitFor(() => expect(callsTo(M365, 'DELETE')).toHaveLength(2))
+    expect(new Headers(callsTo(M365, 'DELETE')[1]?.[1]?.headers).get('X-Presence-Token')).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('m365-none')).toBeInTheDocument())
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/'))).toBe(false)
+  })
+
+  it('secret field is cleared after save', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === M365 && init?.method === 'PUT') return Promise.resolve(json(400, { error: { message: 'bad <b>app</b>' } }))
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await fillM365()
+    const input = screen.getByTestId('m365-secret-input')
+    expect(input).toHaveAttribute('type', 'password')
+    expect(input).toHaveAttribute('autocomplete', 'off')
+    fireEvent.click(screen.getByTestId('m365-save-btn'))
+    await waitFor(() => expect(screen.getByTestId('m365-save-error')).toHaveTextContent('bad <b>app</b>'))
+    expect(input).toHaveValue('')
+    expect(document.querySelector('b')).toBeNull()
+    expect(JSON.stringify(Object.entries(localStorage)) + JSON.stringify(Object.entries(sessionStorage))).not.toContain('client-secret-1')
+  })
+
+  it('offers Replace on 409 and resends with replace true', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === M365 && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body)) as { replace: boolean }
+        return Promise.resolve(body.replace ? json(200, envelope(m365Conn)) : json(409, { error: { message: 'exists' } }))
+      }
+      if (url === M365) return Promise.resolve(json(200, envelope(m365Conn)))
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await fillM365()
+    fireEvent.click(screen.getByTestId('m365-save-btn'))
+    await waitFor(() => expect(screen.getByTestId('m365-save-btn')).toHaveTextContent('Replace connection'))
+    expect(screen.getByTestId('m365-secret-input')).toHaveValue('')
+    fireEvent.change(screen.getByTestId('m365-secret-input'), { target: { value: 'client-secret-2' } })
+    fireEvent.click(screen.getByTestId('m365-save-btn'))
+    await waitFor(() => expect(callsTo(M365, 'PUT')).toHaveLength(2))
+    expect(JSON.parse(String(callsTo(M365, 'PUT')[1]?.[1]?.body))).toMatchObject({ replace: true, client_secret: 'client-secret-2' })
+  })
+
+  it('cancel on the inline confirm sends nothing', async () => {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url === M365) return Promise.resolve(json(200, envelope(m365Conn)))
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await waitFor(() => screen.getByTestId('m365-clear-btn'))
+    fireEvent.click(screen.getByTestId('m365-clear-btn'))
+    fireEvent.click(screen.getByTestId('m365-clear-cancel-btn'))
+    expect(screen.queryByTestId('m365-clear-confirm')).toBeNull()
+    expect(callsTo(M365, 'DELETE')).toHaveLength(0)
+  })
+
+  it('discovers GDAP customers, links the chosen ones and clears the secret each call', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url === GDAP_CUSTOMERS && init?.method === 'POST') {
+        return Promise.resolve(json(200, envelope({
+          msp_tenant_id: 'root/msp-a',
+          customers: [{ customer_tenant_id: 'c-1', name: '<i>Acme</i>', status: 'active', expires_at: '2027-01-01T00:00:00Z', roles: ['Helpdesk'], link_state: 'unlinked' }],
+        })))
+      }
+      if (url === GDAP_LINKS && init?.method === 'POST') {
+        return Promise.resolve(json(200, envelope({ msp_tenant_id: 'root/msp-a', linked: [{ customer_tenant_id: 'c-1', tenant_id: 'root/msp-a/client-1' }] })))
+      }
+      return Promise.resolve(readRoutes(url) ?? json(404, {}))
+    })
+    renderPanel()
+    await waitFor(() => screen.getByTestId('gdap-partner-input'))
+    fireEvent.change(screen.getByTestId('gdap-partner-input'), { target: { value: 'partner-1' } })
+    fireEvent.change(screen.getByTestId('gdap-app-id-input'), { target: { value: 'app-1' } })
+    fireEvent.change(screen.getByTestId('gdap-secret-input'), { target: { value: 'partner-secret' } })
+    fireEvent.click(screen.getByTestId('gdap-discover-btn'))
+    await waitFor(() => expect(screen.getByTestId('gdap-customer-row')).toHaveTextContent('<i>Acme</i>'))
+    expect(document.querySelector('i')).toBeNull()
+    expect(screen.getByTestId('gdap-secret-input')).toHaveValue('')
+
+    fireEvent.change(screen.getByLabelText('Client tenant for c-1'), { target: { value: 'root/msp-a/client-1' } })
+    fireEvent.change(screen.getByTestId('gdap-roles-input'), { target: { value: 'Helpdesk, Reader' } })
+    fireEvent.change(screen.getByTestId('gdap-secret-input'), { target: { value: 'partner-secret' } })
+    fireEvent.click(screen.getByTestId('gdap-link-btn'))
+    await waitFor(() => expect(screen.getByTestId('gdap-linked')).toHaveTextContent('Linked 1 customer'))
+    expect(JSON.parse(String(callsTo(GDAP_LINKS, 'POST')[0]?.[1]?.body))).toEqual({
+      partner_tenant_id: 'partner-1',
+      app_id: 'app-1',
+      client_secret: 'partner-secret',
+      links: [{ customer_tenant_id: 'c-1', tenant_id: 'root/msp-a/client-1' }],
+      gdap_roles: ['Helpdesk', 'Reader'],
+      replace: false,
+    })
+    expect(screen.getByTestId('gdap-secret-input')).toHaveValue('')
+  })
+})

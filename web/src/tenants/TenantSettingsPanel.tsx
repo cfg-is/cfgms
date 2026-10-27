@@ -27,6 +27,16 @@ import {
   type ConfigSourceCredentialResult,
   type ConfigSourceTestResult,
 } from './useTenantConfigSource.ts'
+import {
+  deleteM365Connection,
+  getM365Connection,
+  linkGdapCustomers,
+  listGdapCustomers,
+  putM365Connection,
+  type GdapCustomer,
+  type M365Connection,
+} from './useTenantM365.ts'
+import { PolicyApiError } from './useTenantPolicies.ts'
 
 function modeLabel(mode: RefreshMode): string {
   switch (mode) {
@@ -416,6 +426,332 @@ function ConfigSourceSection({ tenantId }: { tenantId: string }) {
   )
 }
 
+// ── M365 connection ───────────────────────────────────────────────────────────
+
+function isConflict(cause: unknown): boolean {
+  return cause instanceof PolicyApiError && cause.status === 409
+}
+
+function M365Section({ tenantId }: { tenantId: string }) {
+  const loaded = useLoaded(() => getM365Connection(tenantId), tenantId)
+  return (
+    <section aria-labelledby="m365-heading" data-testid="m365-section" className="wf-form-panel">
+      <h3 id="m365-heading">M365 connection</h3>
+      {loaded.kind === 'loading' && <span className="mut" data-testid="m365-loading">Loading M365 connection…</span>}
+      {loaded.kind === 'error' && (
+        <div className="wf-form-actions">
+          <span className="wf-form-error" role="alert" data-testid="m365-load-error">{loaded.message}</span>
+          <button type="button" className="wf-btn-secondary" onClick={loaded.reload}>Retry</button>
+        </div>
+      )}
+      {loaded.kind === 'ready' && (
+        <M365DirectForm tenantId={tenantId} connection={loaded.value} onChanged={loaded.reload} />
+      )}
+      {/* Outside the load gate so a reload after linking keeps the result message. */}
+      <GdapDiscovery tenantId={tenantId} onLinked={loaded.reload} />
+    </section>
+  )
+}
+
+function M365DirectForm({
+  tenantId,
+  connection,
+  onChanged,
+}: {
+  tenantId: string
+  connection: M365Connection | null
+  onChanged: () => void
+}) {
+  const [appId, setAppId] = useState('')
+  const [m365Tenant, setM365Tenant] = useState('')
+  const [secret, setSecret] = useState('')
+  const [replace, setReplace] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [clearing, setClearing] = useState(false)
+  const [clearError, setClearError] = useState<string | null>(null)
+
+  async function handleSave() {
+    if (appId.trim() === '' || m365Tenant.trim() === '') {
+      setError('App ID and M365 tenant ID are required')
+      return
+    }
+    if (secret.length === 0) {
+      setError('Client secret is required')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      await putM365Connection(tenantId, {
+        app_id: appId.trim(),
+        m365_tenant_id: m365Tenant.trim(),
+        client_secret: secret,
+        replace,
+      })
+      setAppId('')
+      setM365Tenant('')
+      setReplace(false)
+      onChanged()
+    } catch (cause: unknown) {
+      if (isConflict(cause)) {
+        setReplace(true)
+        setError('A connection already exists. Enter the client secret again and choose Replace to overwrite it.')
+      } else {
+        setError(errorText(cause, 'Save failed'))
+      }
+    } finally {
+      // The secret is write-only: drop it from state whether or not the save worked.
+      setSecret('')
+      setSaving(false)
+    }
+  }
+
+  async function handleClear() {
+    setClearing(true)
+    setClearError(null)
+    try {
+      await deleteM365Connection(tenantId)
+      setConfirming(false)
+      onChanged()
+    } catch (cause: unknown) {
+      setClearError(errorText(cause, 'Clear failed'))
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  return (
+    <div className="wf-form">
+      <p className="mut">
+        Connects this client tenant to Microsoft 365. The client secret can be replaced but never read back.
+        Changes ask for a strong session.
+      </p>
+      {connection ? (
+        <div className="wf-form-actions" data-testid="m365-current">
+          <span>
+            <b>{connection.mode}</b> · app <span data-testid="m365-current-app">{connection.app_id}</span> · M365 tenant{' '}
+            <span data-testid="m365-current-tenant">{connection.m365_tenant_id}</span>
+            {connection.partner_tenant_id ? <> · partner {connection.partner_tenant_id}</> : null}
+            {connection.gdap_roles && connection.gdap_roles.length > 0 ? <> · roles {connection.gdap_roles.join(', ')}</> : null}
+          </span>
+          <span className="mut" data-testid="m365-secret-badge">
+            {connection.has_client_secret ? 'Client secret set' : 'No client secret'}
+          </span>
+          {!confirming && (
+            <button type="button" className="wf-btn-sm-secondary" onClick={() => setConfirming(true)} data-testid="m365-clear-btn">
+              Clear
+            </button>
+          )}
+          {confirming && (
+            <span role="group" aria-label="Confirm clear" data-testid="m365-clear-confirm">
+              <b>Clear this M365 connection?</b>{' '}
+              <button type="button" className="wf-btn-sm-secondary" disabled={clearing} onClick={() => { setConfirming(false); setClearError(null) }} data-testid="m365-clear-cancel-btn">
+                Cancel
+              </button>{' '}
+              <button type="button" className="wf-btn-sm-danger" disabled={clearing} onClick={() => void handleClear()} data-testid="m365-clear-confirm-btn">
+                {clearing ? 'Clearing…' : 'Confirm'}
+              </button>
+            </span>
+          )}
+          {clearError && <span className="wf-form-error" role="alert" data-testid="m365-clear-error">{clearError}</span>}
+        </div>
+      ) : (
+        <span className="mut" data-testid="m365-none">No M365 connection</span>
+      )}
+      <div className="wf-form-row">
+        <div className="wf-form-field">
+          <span className="wf-form-label">App ID</span>
+          <input type="text" aria-label="M365 app ID" value={appId} onChange={(e) => setAppId(e.target.value)} data-testid="m365-app-id-input" />
+        </div>
+        <div className="wf-form-field">
+          <span className="wf-form-label">M365 tenant ID</span>
+          <input type="text" aria-label="M365 tenant ID" value={m365Tenant} onChange={(e) => setM365Tenant(e.target.value)} data-testid="m365-tenant-id-input" />
+        </div>
+        <div className="wf-form-field">
+          <span className="wf-form-label">Client secret</span>
+          <input
+            type="password"
+            autoComplete="off"
+            aria-label="M365 client secret"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            data-testid="m365-secret-input"
+          />
+        </div>
+      </div>
+      <div className="wf-form-actions">
+        <button type="button" className="wf-btn" disabled={saving} onClick={() => void handleSave()} data-testid="m365-save-btn">
+          {saving ? 'Saving…' : replace ? 'Replace connection' : 'Save connection'}
+        </button>
+        {error && <span className="wf-form-error" role="alert" data-testid="m365-save-error">{error}</span>}
+      </div>
+    </div>
+  )
+}
+
+function GdapDiscovery({ tenantId, onLinked }: { tenantId: string; onLinked: () => void }) {
+  const [partner, setPartner] = useState('')
+  const [appId, setAppId] = useState('')
+  const [secret, setSecret] = useState('')
+  const [roles, setRoles] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [customers, setCustomers] = useState<GdapCustomer[] | null>(null)
+  const [targets, setTargets] = useState<Record<string, string>>({})
+  const [replace, setReplace] = useState(false)
+  const [linked, setLinked] = useState<number | null>(null)
+
+  function partnerInput() {
+    return { partner_tenant_id: partner.trim(), app_id: appId.trim(), client_secret: secret }
+  }
+
+  function validate(): string | null {
+    if (partner.trim() === '' || appId.trim() === '') return 'Partner tenant ID and app ID are required'
+    if (secret.length === 0) return 'Client secret is required'
+    return null
+  }
+
+  async function handleDiscover() {
+    const problem = validate()
+    if (problem) {
+      setError(problem)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setLinked(null)
+    try {
+      setCustomers(await listGdapCustomers(tenantId, partnerInput()))
+      setTargets({})
+      setReplace(false)
+    } catch (cause: unknown) {
+      setError(errorText(cause, 'Could not list GDAP customers'))
+    } finally {
+      setSecret('')
+      setBusy(false)
+    }
+  }
+
+  async function handleLink() {
+    const problem = validate()
+    if (problem) {
+      setError(problem)
+      return
+    }
+    const links = Object.entries(targets)
+      .filter(([, t]) => t.trim() !== '')
+      .map(([customer, t]) => ({ customer_tenant_id: customer, tenant_id: t.trim() }))
+    if (links.length === 0) {
+      setError('Choose a client tenant for at least one customer')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setLinked(null)
+    try {
+      const done = await linkGdapCustomers(tenantId, {
+        ...partnerInput(),
+        links,
+        gdap_roles: roles.split(',').map((r) => r.trim()).filter((r) => r !== ''),
+        replace,
+      })
+      setLinked(done.length)
+      setCustomers(null)
+      setTargets({})
+      setReplace(false)
+      onLinked()
+    } catch (cause: unknown) {
+      if (isConflict(cause)) {
+        setReplace(true)
+        setError(`${errorText(cause, 'Conflict')} Enter the client secret again and choose Replace to overwrite existing connections.`)
+      } else {
+        setError(errorText(cause, 'Could not link GDAP customers'))
+      }
+    } finally {
+      setSecret('')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="wf-form" data-testid="gdap-discovery">
+      <h4>GDAP customers</h4>
+      <p className="mut">
+        Run on an MSP tenant: discover its active GDAP customers, then link each to an existing client tenant.
+        The secret is cleared after every request.
+      </p>
+      <div className="wf-form-row">
+        <div className="wf-form-field">
+          <span className="wf-form-label">Partner tenant ID</span>
+          <input type="text" aria-label="Partner tenant ID" value={partner} onChange={(e) => setPartner(e.target.value)} data-testid="gdap-partner-input" />
+        </div>
+        <div className="wf-form-field">
+          <span className="wf-form-label">App ID</span>
+          <input type="text" aria-label="Partner app ID" value={appId} onChange={(e) => setAppId(e.target.value)} data-testid="gdap-app-id-input" />
+        </div>
+        <div className="wf-form-field">
+          <span className="wf-form-label">Client secret</span>
+          <input
+            type="password"
+            autoComplete="off"
+            aria-label="Partner client secret"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            data-testid="gdap-secret-input"
+          />
+        </div>
+      </div>
+      <div className="wf-form-actions">
+        <button type="button" className="wf-btn-secondary" disabled={busy} onClick={() => void handleDiscover()} data-testid="gdap-discover-btn">
+          {busy && customers === null ? 'Working…' : 'Discover customers'}
+        </button>
+        {linked !== null && <span className="mut" role="status" data-testid="gdap-linked">Linked {linked} customer{linked === 1 ? '' : 's'}</span>}
+        {error && <span className="wf-form-error" role="alert" data-testid="gdap-error">{error}</span>}
+      </div>
+      {customers !== null && customers.length === 0 && <span className="mut" data-testid="gdap-empty">No active GDAP customers</span>}
+      {customers !== null && customers.length > 0 && (
+        <>
+          {customers.map((c) => (
+            <div className="wf-form-row" key={c.customer_tenant_id} data-testid="gdap-customer-row">
+              <div className="wf-form-field">
+                <span className="wf-form-label">{c.name}</span>
+                <span className="mut">
+                  {c.customer_tenant_id} · {c.status} · expires {c.expires_at}
+                  {c.roles.length > 0 ? ` · ${c.roles.join(', ')}` : ''}
+                  {c.link_state === 'linked' ? ` · linked to ${c.linked_to ?? 'a client tenant'}` : ''}
+                </span>
+              </div>
+              <div className="wf-form-field">
+                <span className="wf-form-label">Client tenant</span>
+                <input
+                  type="text"
+                  aria-label={`Client tenant for ${c.customer_tenant_id}`}
+                  placeholder="root/msp-a/client-1"
+                  value={targets[c.customer_tenant_id] ?? ''}
+                  onChange={(e) => setTargets((prev) => ({ ...prev, [c.customer_tenant_id]: e.target.value }))}
+                />
+              </div>
+            </div>
+          ))}
+          <div className="wf-form-row">
+            <div className="wf-form-field">
+              <span className="wf-form-label">GDAP roles (comma separated, optional)</span>
+              <input type="text" aria-label="GDAP roles" value={roles} onChange={(e) => setRoles(e.target.value)} data-testid="gdap-roles-input" />
+            </div>
+          </div>
+          <div className="wf-form-actions">
+            <button type="button" className="wf-btn" disabled={busy} onClick={() => void handleLink()} data-testid="gdap-link-btn">
+              {replace ? 'Replace links' : 'Link customers'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 export default function TenantSettingsPanel({ tenantId }: { tenantId: string }) {
@@ -424,6 +760,7 @@ export default function TenantSettingsPanel({ tenantId }: { tenantId: string }) 
       <RefreshPolicySection tenantId={tenantId} />
       <AssurancePolicySection tenantId={tenantId} />
       <ConfigSourceSection tenantId={tenantId} />
+      <M365Section tenantId={tenantId} />
     </div>
   )
 }
