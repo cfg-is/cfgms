@@ -111,26 +111,18 @@ func TestInstallCommandEnforcesRequiredRegtoken(t *testing.T) {
 	assert.Contains(t, err.Error(), "regtoken")
 }
 
-// TestInstallCommandRegtokenFile asserts install accepts --regtoken-file without
-// --regtoken (it gets past flag validation and fails only on the missing file),
-// and that giving both flags is an error.
+// TestInstallCommandRegtokenFile asserts giving both token flags is an error.
+// The --regtoken-file-alone path is covered by the unix-only
+// TestInstallCommandRegtokenFileAlone (Windows enforces an owner/DACL check on
+// the token file that a plain test file cannot satisfy).
 func TestInstallCommandRegtokenFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-token")
-
-	valid := filepath.Join(t.TempDir(), "token")
-	require.NoError(t, os.WriteFile(valid, []byte("tok_file_abc123"), 0o600))
-
-	err := runInstall("", valid, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no-ca.crt", "--regtoken-file alone must pass flag validation")
-	assert.NotContains(t, err.Error(), "is required")
-	assert.NotContains(t, err.Error(), "cannot be used together")
 
 	root := buildRootCommand()
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
 	root.SetArgs([]string{"install", "--regtoken", "tok_secret_abc", "--regtoken-file", missing})
-	err = root.Execute()
+	err := root.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot be used together")
 	assert.NotContains(t, err.Error(), "tok_secret_abc")

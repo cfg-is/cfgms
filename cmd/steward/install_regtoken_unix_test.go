@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-// SPDX-License-Identifier: AGPL-3.0-only
-// Copyright 2026 Jordan Ritz
-
 //go:build !windows
 
 package main
@@ -46,4 +43,17 @@ func TestRunInstallReadsTokenFileBeforeElevation(t *testing.T) {
 		assert.Contains(t, err.Error(), "elevated privileges")
 		assert.NotContains(t, err.Error(), token)
 	})
+}
+
+// TestInstallCommandRegtokenFileAlone asserts install accepts --regtoken-file
+// without --regtoken: it gets past flag validation and fails on the missing CA file.
+func TestInstallCommandRegtokenFileAlone(t *testing.T) {
+	valid := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(valid, []byte("tok_file_abc123"), 0o600))
+
+	err := runInstall("", valid, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no-ca.crt", "--regtoken-file alone must pass flag validation")
+	assert.NotContains(t, err.Error(), "is required")
+	assert.NotContains(t, err.Error(), "cannot be used together")
 }
