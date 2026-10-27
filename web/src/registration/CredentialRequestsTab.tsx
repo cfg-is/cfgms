@@ -39,6 +39,7 @@
  */
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
+  apiFetch,
   approveCredentialRequest,
   denyCredentialRequest,
   listCredentialRequests,
@@ -46,6 +47,7 @@ import {
 } from '../api/client.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
+import '../tenants/SupportAccessView.css'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -55,10 +57,10 @@ interface FetchOutcome {
   error?: string
 }
 
-type RowStatus = 'pending' | 'approved' | 'denied' | 'expired'
+type RowStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled'
 
 interface RowOutcome {
-  status: 'approved' | 'denied'
+  status: 'approved' | 'denied' | 'cancelled'
   grantedMarkers: string[]
 }
 
@@ -79,7 +81,7 @@ function rowStatus(entry: CredentialRequestEntry, outcome: RowOutcome | undefine
 function statusClass(s: RowStatus): string {
   if (s === 'approved') return 'pill ok'
   if (s === 'denied') return 'pill crit'
-  if (s === 'expired') return 'pill neutral'
+  if (s === 'expired' || s === 'cancelled') return 'pill neutral'
   return 'pill warn'
 }
 
@@ -87,6 +89,7 @@ function statusLabel(s: RowStatus): string {
   if (s === 'approved') return 'Approved'
   if (s === 'denied') return 'Denied'
   if (s === 'expired') return 'Expired'
+  if (s === 'cancelled') return 'Cancelled'
   return 'Pending'
 }
 
@@ -291,6 +294,9 @@ export default function CredentialRequestsTab() {
   const [denyPending, setDenyPending] = useState<Set<string>>(new Set())
   const [rowOutcomes, setRowOutcomes] = useState<Map<string, RowOutcome>>(new Map())
   const [reviewingId, setReviewingId] = useState<string | null>(null)
+  const [cancellingId, setCancellingId] = useState<string | null>(null)
+  const [cancelPending, setCancelPending] = useState(false)
+  const [cancelErrors, setCancelErrors] = useState<Map<string, string>>(new Map())
   const [conflictNotices, setConflictNotices] = useState<Map<string, string>>(new Map())
 
   const key = `credential-requests:${attempt}`
@@ -342,6 +348,28 @@ export default function CredentialRequestsTab() {
         next.delete(id)
         return next
       })
+    }
+  }
+
+  async function handleCancel(id: string) {
+    setCancelErrors(new Map())
+    setCancelPending(true)
+    try {
+      const response = await apiFetch(`/api/v1/credential-requests/${encodeURIComponent(id)}/cancel`, {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        setCancelErrors(new Map().set(id, `Cancel failed — ${response.status}`))
+        return
+      }
+      setRowOutcomes((prev) => new Map(prev).set(id, { status: 'cancelled', grantedMarkers: [] }))
+      setCancellingId(null)
+    } catch (cause: unknown) {
+      setCancelErrors(
+        new Map().set(id, cause instanceof Error && cause.message ? cause.message : 'Cancel request failed'),
+      )
+    } finally {
+      setCancelPending(false)
     }
   }
 
@@ -450,10 +478,64 @@ export default function CredentialRequestsTab() {
                             >
                               {denyPending.has(entry.id) ? '…' : 'Deny'}
                             </button>
+                            <button
+                              type="button"
+                              className="wf-btn-sm-danger"
+                              data-testid={`cancel-btn-${entry.id}`}
+                              onClick={() => {
+                                setCancelErrors(new Map())
+                                setCancellingId(entry.id)
+                              }}
+                            >
+                              Cancel
+                            </button>
                           </>
                         )}
                       </td>
                     </tr>
+                    {cancellingId === entry.id && actionable && (
+                      <tr className="sa-confirm" data-testid="cancel-confirm-row">
+                        <td colSpan={6}>
+                          <div className="sa-confirm-in">
+                            <span className="sa-confirm-text">
+                              <b>Cancel this credential request?</b> It can no longer be approved or collected.
+                              <span className="sa-confirm-sub">You confirm with your passkey.</span>
+                            </span>
+                            <button
+                              type="button"
+                              className="sa-btn-sec sa-sm"
+                              disabled={cancelPending}
+                              data-testid="cancel-abort-btn"
+                              onClick={() => setCancellingId(null)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="sa-btn-danger sa-sm"
+                              disabled={cancelPending}
+                              data-testid="cancel-confirm-btn"
+                              onClick={() => void handleCancel(entry.id)}
+                            >
+                              {cancelPending ? '…' : 'Confirm'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    {cancelErrors.has(entry.id) && (
+                      <tr>
+                        <td colSpan={6}>
+                          <span
+                            className="wf-form-error"
+                            role="alert"
+                            data-testid={`cancel-error-${entry.id}`}
+                          >
+                            {cancelErrors.get(entry.id)}
+                          </span>
+                        </td>
+                      </tr>
+                    )}
                     {denyErrors.has(entry.id) && (
                       <tr>
                         <td colSpan={6}>

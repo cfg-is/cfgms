@@ -17,7 +17,7 @@
  */
 import { useEffect, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import CredentialRequestsTab from './CredentialRequestsTab.tsx'
@@ -527,5 +527,113 @@ describe('CredentialRequestsTab — approve as a root-scope admin session', () =
       const parsedBody = JSON.parse(String((approveCall[1] as RequestInit).body)) as Record<string, unknown>
       expect(parsedBody.grant_root_scope_marker).toBe(grant)
     }
+  })
+})
+
+// ── Cancel (Issue #5455) ──────────────────────────────────────────────────────
+
+describe('CredentialRequestsTab cancel', () => {
+  const cancelPath = '/api/v1/credential-requests/creq-abc123/cancel'
+  const cancelPosts = () =>
+    fetchMock.mock.calls.filter(([u, init]) => String(u).endsWith(cancelPath) && init?.method === 'POST')
+
+  it('offers Cancel only on non-terminal rows and sends nothing until Confirm', async () => {
+    fetchMock.mockResolvedValue(
+      makeListResponse([
+        makeEntry(),
+        makeEntry({ id: 'creq-old', expires_at: '2000-01-01T00:00:00Z' }),
+      ]),
+    )
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('cancel-btn-creq-abc123')).toBeInTheDocument())
+    expect(screen.queryByTestId('cancel-btn-creq-old')).toBeNull()
+    fireEvent.click(screen.getByTestId('cancel-btn-creq-abc123'))
+    expect(cancelPosts()).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('cancel-abort-btn'))
+    expect(screen.queryByTestId('cancel-confirm-row')).toBeNull()
+    expect(cancelPosts()).toHaveLength(0)
+  })
+
+  it('confirm posts the cancel and marks the row Cancelled', async () => {
+    fetchMock.mockImplementation((u, init) =>
+      Promise.resolve(
+        String(u).endsWith(cancelPath) && init?.method === 'POST'
+          ? jsonResponse(200, { data: {} })
+          : makeListResponse([makeEntry()]),
+      ),
+    )
+    renderTab()
+    await waitFor(() => screen.getByTestId('cancel-btn-creq-abc123'))
+    fireEvent.click(screen.getByTestId('cancel-btn-creq-abc123'))
+    fireEvent.click(screen.getByTestId('cancel-confirm-btn'))
+    await waitFor(() =>
+      expect(screen.getByTestId('status-creq-abc123')).toHaveTextContent('Cancelled'),
+    )
+    expect(cancelPosts()).toHaveLength(1)
+    expect(screen.queryByTestId('cancel-btn-creq-abc123')).toBeNull()
+  })
+
+  it('surfaces a failed cancel inline', async () => {
+    fetchMock.mockImplementation((_u, init) =>
+      Promise.resolve(
+        init?.method === 'POST' ? jsonResponse(409, {}) : makeListResponse([makeEntry()]),
+      ),
+    )
+    renderTab()
+    await waitFor(() => screen.getByTestId('cancel-btn-creq-abc123'))
+    fireEvent.click(screen.getByTestId('cancel-btn-creq-abc123'))
+    fireEvent.click(screen.getByTestId('cancel-confirm-btn'))
+    await waitFor(() => expect(screen.getByTestId('cancel-error-creq-abc123')).toHaveTextContent(/409/))
+  })
+
+  it('handles elevation 401 without a presence token', async () => {
+    const toAB = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+    const cred = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: toAB('cred-id'),
+      response: {
+        clientDataJSON: toAB('{"type":"webauthn.get"}'),
+        authenticatorData: toAB('a'),
+        signature: toAB('s'),
+        userHandle: null,
+      },
+      getClientExtensionResults: () => ({}),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    }
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(cred) } })
+    let challenged = false
+    fetchMock.mockImplementation((u) => {
+      const url = String(u)
+      if (url.includes('elevate/begin'))
+        return Promise.resolve(jsonResponse(200, { data: { publicKey: MOCK_PASSKEY_BEGIN_OPTIONS.publicKey } }))
+      if (url.includes('elevate/finish')) return Promise.resolve(jsonResponse(200, { assurance: 'strong' }))
+      if (url.endsWith(cancelPath)) {
+        if (!challenged) {
+          challenged = true
+          return Promise.resolve(
+            new Response('{}', {
+              status: 401,
+              headers: {
+                'Content-Type': 'application/json',
+                'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+              },
+            }),
+          )
+        }
+        return Promise.resolve(jsonResponse(200, { data: {} }))
+      }
+      return Promise.resolve(makeListResponse([makeEntry()]))
+    })
+    renderTab()
+    await waitFor(() => screen.getByTestId('cancel-btn-creq-abc123'))
+    fireEvent.click(screen.getByTestId('cancel-btn-creq-abc123'))
+    fireEvent.click(screen.getByTestId('cancel-confirm-btn'))
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    act(() => screen.getByTestId('step-up-verify-btn').click())
+    await waitFor(() => expect(cancelPosts()).toHaveLength(2))
+    expect(new Headers(cancelPosts()[1]![1]?.headers).get('X-Presence-Token')).toBeNull()
+    expect(screen.queryByTestId('cancel-error-creq-abc123')).toBeNull()
   })
 })

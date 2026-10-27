@@ -622,9 +622,9 @@ submitting and reports the remaining stewards as not submitted.
 | Revoke an unspent enrolment token (administrator) | `cfg credential enrolment-token revoke <id>`, or Revoke on an active row in the web console |
 | Enrol a headless machine (operator, on that machine) | `cfg credential enrol --token <token> --url <url>` |
 | Revoke every credential issued from a token (administrator) | `cfg credential revoke-by-token <token-id>`, or Revoke issued credentials on the row in the web console |
-| Cancel an approved-but-uncollected request (administrator) | `cfg credential cancel-request <request-id>` |
-| List unbound enrolment-flow certificates (administrator) | `cfg credential list-orphaned` |
-| Revoke a listed unbound certificate (administrator) | `cfg credential revoke-orphaned <serial>` |
+| Cancel an approved-but-uncollected request (administrator) | `cfg credential cancel-request <request-id>`, or Cancel on the row in Registration → Credential Requests in the web console |
+| List unbound enrolment-flow certificates (administrator) | `cfg credential list-orphaned`, or Registration → Orphaned in the web console |
+| Revoke a listed unbound certificate (administrator) | `cfg credential revoke-orphaned <serial>`, or Revoke on the row in Registration → Orphaned in the web console |
 | Start/stop/restart a service, or end/suspend/resume a process | `cfg steward service` / `cfg steward process` |
 | Check active session | `cfg connections current` |
 | List all connections | `cfg connections list` |
