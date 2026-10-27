@@ -986,3 +986,152 @@ describe('InstallerPage upgrade rollback', () => {
     expect(callsTo('/api/v1/stewards/upgrade/up-1/rollback')).toHaveLength(0)
   })
 })
+
+// ── Fleet rollout start, status and halt (Issue #5452) ────────────────────────
+
+function rolloutBody(extra: Record<string, unknown> = {}) {
+  return envelope({
+    rollout_id: 'ro-1', target_version: '1.2.3', current_ring: 'canary', status: 'in-progress',
+    on_version_pct: 0, failed_count: 0, pending_count: 0, health_metrics_available: true,
+    rings_completed: 0, rings_total: 3, started_at: '2026-01-01T00:00:00Z', ...extra,
+  })
+}
+
+function installRolloutRoutes(opts: { presence: boolean; status?: Record<string, unknown> }) {
+  fetchMock.mockImplementation((input, init) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (url === '/api/v1/installer/artifacts') return Promise.resolve(makeArtifactListResponse([]))
+    if (url.includes('presence/begin')) {
+      return Promise.resolve(
+        jsonRes(200, envelope({
+          publicKey: {
+            challenge: 'Y2hhbGxlbmdl', timeout: 60000, rpId: 'localhost',
+            allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+            userVerification: 'required',
+          },
+        })),
+      )
+    }
+    if (url.includes('presence/finish')) {
+      return Promise.resolve(jsonRes(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 })))
+    }
+    if (url === '/api/v1/rollout' && method === 'POST') {
+      const token = new Headers(init?.headers).get('X-Presence-Token')
+      if (opts.presence && token !== 'tap-token-1') {
+        return Promise.resolve(
+          jsonRes(401, { error: 'step_up_required' }, {
+            'WWW-Authenticate':
+              'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="installer:dispatch:steward"',
+          }),
+        )
+      }
+      return Promise.resolve(jsonRes(202, envelope({ rollout_id: 'ro-1', status: 'in-progress' })))
+    }
+    if (url === '/api/v1/rollout/ro-1/halt') return Promise.resolve(jsonRes(200, envelope({ rollout_id: 'ro-1', status: 'halted' })))
+    if (url === '/api/v1/rollout/ro-1') return Promise.resolve(jsonRes(200, rolloutBody(opts.status)))
+    return Promise.resolve(jsonRes(404, {}))
+  })
+}
+
+async function fillAndStart() {
+  renderPage()
+  await waitFor(() => expect(screen.getByTestId('rollout-section')).toBeInTheDocument())
+  fireEvent.change(screen.getByTestId('rollout-version'), { target: { value: '1.2.3' } })
+  fireEvent.change(screen.getByTestId('rollout-tenant'), { target: { value: 'root' } })
+  fireEvent.click(screen.getByTestId('rollout-start-btn'))
+}
+
+describe('InstallerPage rollout start', () => {
+  it('sends X-Presence-Token after the tap', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(passkeyCredential) } })
+    installRolloutRoutes({ presence: true })
+    await fillAndStart()
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(callsTo('/api/v1/rollout')).toHaveLength(1)
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(callsTo('/api/v1/rollout')).toHaveLength(2))
+    const retry = callsTo('/api/v1/rollout')[1]![1]
+    expect(new Headers(retry?.headers).get('X-Presence-Token')).toBe('tap-token-1')
+    expect(JSON.parse(String(retry?.body))).toEqual({ target_version: '1.2.3', tenant_id: 'root' })
+    await waitFor(() => expect(screen.getByTestId('rollout-id')).toHaveTextContent('ro-1'))
+  })
+
+  it('sends no second mutation and says so when the tap is cancelled', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn() } })
+    installRolloutRoutes({ presence: true })
+    await fillAndStart()
+
+    await waitFor(() => expect(screen.getByTestId('step-up-cancel-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('step-up-cancel-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('rollout-error')).toHaveTextContent(/cancelled/i))
+    expect(callsTo('/api/v1/rollout')).toHaveLength(1)
+    expect(screen.queryByTestId('rollout-id')).not.toBeInTheDocument()
+  })
+
+  it('keeps Start disabled until a version is set', async () => {
+    installRolloutRoutes({ presence: false })
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('rollout-section')).toBeInTheDocument())
+    expect(screen.getByTestId('rollout-start-btn')).toBeDisabled()
+  })
+})
+
+describe('InstallerPage rollout status', () => {
+  it('shows metrics unavailable instead of zeros', async () => {
+    installRolloutRoutes({
+      presence: false,
+      status: { health_metrics_available: false, health_metrics_error: 'ring health metrics are unavailable: the fleet query failed' },
+    })
+    await fillAndStart()
+    await waitFor(() => expect(screen.getByTestId('rollout-metrics-unavailable')).toHaveTextContent(/metrics unavailable/i))
+    expect(screen.getByTestId('rollout-metrics-unavailable')).toHaveTextContent('the fleet query failed')
+    expect(screen.queryByTestId('rollout-on-version')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rollout-failed')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rollout-pending')).not.toBeInTheDocument()
+  })
+
+  it('renders counts when metrics are available', async () => {
+    installRolloutRoutes({ presence: false, status: { on_version_pct: 40, failed_count: 2, pending_count: 5 } })
+    await fillAndStart()
+    await waitFor(() => expect(screen.getByTestId('rollout-on-version')).toHaveTextContent('40%'))
+    expect(screen.getByTestId('rollout-failed')).toHaveTextContent('2')
+    expect(screen.getByTestId('rollout-pending')).toHaveTextContent('5')
+    expect(screen.getByTestId('rollout-ring')).toHaveTextContent('canary')
+  })
+})
+
+describe('InstallerPage rollout halt', () => {
+  async function started() {
+    installRolloutRoutes({ presence: false })
+    await fillAndStart()
+    await waitFor(() => expect(screen.getByTestId('rollout-status')).toHaveTextContent('in-progress'))
+  }
+
+  it('requests no presence tap', async () => {
+    await started()
+    fireEvent.click(screen.getByTestId('halt-btn'))
+    fireEvent.click(screen.getByTestId('halt-confirm-btn'))
+
+    await waitFor(() => expect(callsTo('/api/v1/rollout/ro-1/halt')).toHaveLength(1))
+    const init = callsTo('/api/v1/rollout/ro-1/halt')[0]![1]
+    expect(new Headers(init?.headers).get('X-Presence-Token')).toBeNull()
+    expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence'))).toBe(false)
+    await waitFor(() => expect(screen.getByTestId('halt-note')).toBeInTheDocument())
+  })
+
+  it('sends nothing until Confirm, and Cancel abandons it', async () => {
+    await started()
+    fireEvent.click(screen.getByTestId('halt-btn'))
+    expect(screen.getByTestId('halt-confirm-row')).toBeInTheDocument()
+    expect(callsTo('/api/v1/rollout/ro-1/halt')).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('halt-cancel-btn'))
+    expect(screen.queryByTestId('halt-confirm-row')).not.toBeInTheDocument()
+    expect(callsTo('/api/v1/rollout/ro-1/halt')).toHaveLength(0)
+  })
+})
