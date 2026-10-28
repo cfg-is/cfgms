@@ -42,9 +42,16 @@ type OwnershipDeclaration struct {
 	RequiredFields []string `yaml:"required_fields,omitempty" json:"required_fields,omitempty"`
 	// PerObject marks a kind that has one DNA fragment per managed object
 	// (e.g. directory objects) instead of one per host. The controller forwards
-	// it in the observe sweep spec so the steward uses the bulk lane.
+	// it in the observe sweep spec so the steward uses the bulk lane. The module's
+	// Get(kind) returns many objects under the reserved PerObjectKey and the DNA
+	// assembler emits one fragment per object (FragmentId "<kind>:<id>").
 	PerObject bool `yaml:"per_object,omitempty" json:"per_object,omitempty"`
 }
+
+// PerObjectKey is the reserved key in a per-object module's Get(kind).AsMap()
+// output carrying the object list: a list of maps, each with a string "id" and a
+// map "attrs". It is only honoured for ownership declarations with PerObject set.
+const PerObjectKey = "__cfgms_objects"
 
 // ModuleMetadata represents the complete metadata for a module
 // This extends the existing module.yaml format with dependency management

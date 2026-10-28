@@ -1625,3 +1625,28 @@ func TestM365ModuleManifests_DeclareProxyEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnershipDeclaration_PerObjectParsesAndClones(t *testing.T) {
+	yamlDoc := `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: directory_user
+    per_object: true
+    required_fields: [upn]
+  - kind: other`
+	md, err := ParseModuleMetadata(strings.NewReader(yamlDoc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(md.Owns) != 2 || !md.Owns[0].PerObject || md.Owns[1].PerObject {
+		t.Fatalf("PerObject not parsed: %+v", md.Owns)
+	}
+	c := md.Clone()
+	if !c.Owns[0].PerObject || c.Owns[1].PerObject || c.Owns[0].Kind != "directory_user" ||
+		len(c.Owns[0].RequiredFields) != 1 {
+		t.Errorf("clone lost fields: %+v", c.Owns)
+	}
+}
