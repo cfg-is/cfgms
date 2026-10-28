@@ -4,6 +4,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -1849,5 +1851,37 @@ func TestRegTokenFileUnreadableIsErrorWithoutToken(t *testing.T) {
 		require.Error(t, err)
 		assert.False(t, started)
 		assert.NotContains(t, err.Error(), "tok_secret_789")
+	}
+}
+
+// TestPromptRegistrationToken_NonTerminal covers piped stdin: the token is
+// returned, the prompt is written, and the token is never echoed to out.
+func TestPromptRegistrationToken_NonTerminal(t *testing.T) {
+	const token = "cfgms_reg_s3cr3t-token"
+
+	in := strings.NewReader("  " + token + "  \n1\n")
+	reader := bufio.NewReader(in)
+	var out bytes.Buffer
+
+	got, err := promptRegistrationToken(in, reader, &out)
+	require.NoError(t, err)
+	assert.Equal(t, token, got)
+	assert.Contains(t, out.String(), "Registration token:")
+	assert.NotContains(t, out.String(), token, "token must not be written back to the output")
+
+	// The following line stays available for the menu choice read.
+	choice, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	assert.Equal(t, "1\n", choice)
+}
+
+func TestPromptRegistrationToken_Errors(t *testing.T) {
+	for name, input := range map[string]string{"empty": "\n", "blank": "   \n", "eof": ""} {
+		t.Run(name, func(t *testing.T) {
+			in := strings.NewReader(input)
+			var out bytes.Buffer
+			_, err := promptRegistrationToken(in, bufio.NewReader(in), &out)
+			require.Error(t, err)
+		})
 	}
 }
