@@ -2,7 +2,7 @@
 name: acceptance-checker
 description: Pre-PR acceptance-criteria verification for the story-complete review team. Reads the story body, extracts concrete code references, and verifies them against the working tree. Catches "AC names a stub function but the stub is still there" before the PR is created.
 model: sonnet
-tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__find_referencing_symbols
+tools: Read, Grep, Glob, Bash
 ---
 
 # Acceptance Checker — Pre-PR AC Alignment Reviewer
@@ -69,12 +69,13 @@ You read files directly from disk — no `gh api` fetch needed. The working tree
 
 For each reference recorded in Phase 2:
 
-1. **Named function**: locate and read the function body precisely. Prefer serena `find_symbol` (name_path `<SymbolName>`, relative_path `<path>`) — it resolves the symbol to its real definition even if it was moved or renamed, and returns the exact body, so an AC that names a function which no longer exists at the cited location surfaces as an unresolved symbol (a finding in itself) rather than a silent grep miss. Compare the body against the AC's described "after" behavior. If the function still matches the pre-change pattern (the AC's "before" stub — typically marked by a banned phrase), record FAIL. Quote the actual current code in the report.
+1. **Named function**: locate and read the function body precisely. Grep for the definition at the cited path first; if it is not there, grep the whole tree, because the function may have been moved or renamed. An AC that names a function which no longer exists anywhere is a finding in itself — record it, do not treat it as a silent miss. Then Read the body at the matched line (`offset`/`limit`). Compare the body against the AC's described "after" behavior. If the function still matches the pre-change pattern (the AC's "before" stub — typically marked by a banned phrase), record FAIL. Quote the actual current code in the report.
 
    ```bash
-   # Preferred: serena find_symbol (exact, move/rename-proof).
-   # Fallback for non-symbol cases:
-   grep -nA 20 "^func.*<SymbolName>" <path>
+   # At the cited path (functions and methods):
+   grep -nE '^func (\([^)]*\) )?<SymbolName>\b' <path>
+   # Moved or renamed? Search the whole tree (grep also sees //go:build windows files):
+   grep -rnE '^func (\([^)]*\) )?<SymbolName>\b' --include='*.go' .
    ```
 
 2. **Banned phrase**: `grep -n -i -F "<phrase>" <path>`. ANY match in the file = FAIL — unless the line is preceded by `// Deferred: tracked in #NNN` (the explicit deferral escape hatch). Record the line number for the report.

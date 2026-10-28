@@ -77,7 +77,7 @@ Verdict: **BUMP**. Story body explains: routine refresh, past cooldown, no urgen
 
 Verdict: **INVESTIGATE**. Don't create a bump story (there's nowhere to bump to). Create a `high-priority` tracking issue describing the pin, the CVE, and the lack of upstream fix — assign to founder and set Blocked status via `po-act.sh block`. The skill should print this case explicitly in the report so the founder can escalate to the upstream or accept the risk.
 
-## MCP server pins (kind `mcp`, e.g. serena)
+## MCP server pins (kind `mcp`)
 
 MCP server pins run the **same** CVE/cooldown matrix above to decide *whether* to bump (cooldown is the default 3 days from the tag's `published_at`; an active HIGH/CRITICAL advisory affecting our pinned tag overrides it). What's different is a second, blast-radius classification that decides *what kind of story* the bump produces — because these are agent **tooling** dependencies: the planning and dev agents consume their tools by name (`mcp__<server>__<tool>` appears in `.claude/agents/*.md` `tools:` allowlists **and** instruction prose). A release that renames or removes a consumed tool silently breaks those agents — the `tools:` grant stops matching and the agent falls back to grep (or errors), which a one-line version bump would ship unnoticed.
 
@@ -85,7 +85,7 @@ MCP server pins run the **same** CVE/cooldown matrix above to decide *whether* t
 
 For an `mcp` pin with a newer release past cooldown:
 
-1. **Our consumed surface:** `grep -rhoE 'mcp__<server>__[a-z_]+' .claude/agents/ .mcp.json | sort -u` — the exact tools we depend on by name (e.g. `mcp__serena__find_symbol`, `find_referencing_symbols`, …).
+1. **Our consumed surface:** `grep -rhoE 'mcp__<server>__[a-z_]+' .claude/agents/ .mcp.json | sort -u` — the exact tools we depend on by name (e.g. `mcp__<server>__<tool>` for each tool an agent grants).
 2. **Upstream tool-surface change between `current` and `latest`:** WebFetch the release notes / CHANGELOG for every tag in `(current, latest]` and look for renamed, removed, or signature-changed tools. (GHSA rarely resolves a git-installed server, so release notes are also the CVE source — `ecosystem`/`package` are null by design.)
 3. **Intersect.** A change is **breaking for us** only if it touches a tool in our consumed surface (a renamed tool we don't use is irrelevant).
 
@@ -103,7 +103,7 @@ Title it `deps: rewire <server> <from> → <to> (breaking: <tool> renamed/remove
 - `.mcp.json` — bump the tag.
 - **Every `.claude/agents/*.md`** returned by `grep -rl 'mcp__<server>__' .claude/agents/` — update the `tools:` frontmatter allowlist entries AND the instruction prose that names the old tool, in lockstep.
 - Acceptance must include a **fresh-spawn smoke test** of an affected agent: spawn it and have it call a renamed/new tool directly, asserting it resolves. (Agent-definition edits hot-load on the next fresh subagent spawn — no restart — but an agent's self-report of its own toolset is unreliable, so force the actual tool call rather than asking it to introspect.)
-- Note the lockstep hazard explicitly in the body: bumping `.mcp.json` without updating the allowlists ships agents whose serena grant silently no-ops.
+- Note the lockstep hazard explicitly in the body: bumping `.mcp.json` without updating the allowlists ships agents whose `mcp__<server>__*` grants silently no-op.
 
 This is the one pin class where the bump is **not** purely mechanical — treat a breaking `mcp` bump as a real rewire, not a version swap. When in doubt about whether a change is breaking, classify as REWIRE (false-positive costs one review; false-negative ships broken agents).
 

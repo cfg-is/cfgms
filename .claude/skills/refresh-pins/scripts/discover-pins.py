@@ -41,8 +41,8 @@ Discovery sources:
   — one inventory entry per unique (action, sha) tuple so SHA drift across
   workflows is naturally visible (multiple entries with the same action name
   but different SHAs).
-- .mcp.json — git-pinned MCP servers (git+https://github.com/<owner>/<repo>@<tag>,
-  e.g. serena). kind="mcp"; these are agent *tooling* dependencies whose tool
+- .mcp.json — git-pinned MCP servers (git+https://github.com/<owner>/<repo>@<tag>),
+  when the file exists. kind="mcp"; these are agent *tooling* dependencies whose tool
   names are consumed by name in .claude/agents/*.md, so a tool-renaming release
   is a breaking change (see references/decision-matrix.md "MCP server pins").
 
@@ -819,11 +819,11 @@ def discover_github_actions(root: Path) -> list[dict]:
 def discover_mcp_pins(root: Path) -> list[dict]:
     """MCP server pins in .mcp.json — git+https://github.com/<owner>/<repo>@<tag>.
 
-    Each git-pinned MCP server (e.g. serena) becomes one pin entry. Generic:
+    Each git-pinned MCP server becomes one pin entry. Generic:
     any current/future .mcp.json server pinned to a GitHub git tag is covered.
 
     These are agent *tooling* dependencies — the planning/dev agents consume
-    their tools by name (e.g. `mcp__serena__find_symbol` appears in
+    their tools by name (`mcp__<server>__<tool>` appears in
     .claude/agents/*.md `tools:` allowlists and prose), so a release that
     renames/removes a tool is a BREAKING change that needs a rewire story, not a
     one-line pin bump. The blast-radius classification lives in Phase 3 (see
