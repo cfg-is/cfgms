@@ -594,6 +594,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// Record the configured (never live-peer-count) cluster signal for the shared
+	// atomic-update helper, and warn once if the config store cannot make a
+	// read-modify-write atomic across nodes (Issue #5550). Operations that need
+	// atomicity then fail closed with ErrNotClusterAtomic.
+	cfgconfig.SetClusterConfigured(cfg.HA.IsClusterMode())
+	if cfg.HA.IsClusterMode() {
+		if cs := storageManager.GetConfigStore(); cs != nil && !cfgconfig.ClusterAtomic(cs) {
+			logger.Warn("Config store is not cluster-atomic — domain claim, credential issue/reveal and directory membership writes will be refused; use the database storage provider for multi-node controllers",
+				"error", cfgconfig.ErrNotClusterAtomic.Error())
+		}
+	}
+
 	// Resolve the configured audit sink (Issue #4036/#4037/#4039, ADR-033).
 	// "local" is the zero-extra-infrastructure default; "worm" wraps the
 	// durable store with a forward-only shipper to an append-only WORM blob

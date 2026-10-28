@@ -218,6 +218,12 @@ audit store after construction. It is called exactly once, for the `worm`
 sink, to install the `WORMAuditStore`-wrapped store before anything else reads
 `GetAuditStore()`.
 
+### Cluster-Atomic Config Writes (Issue #5550)
+
+Read-modify-write and create-if-absent on a `ConfigStore` go through the shared helper in `pkg/storage/interfaces/config` (`AtomicUpdate`, `CreateIfAbsent`, `ClusterAtomic`). With the database provider it uses `CompareAndSwapConfig` with bounded retry. With flatfile (the default) it takes a per-key file lock in the store's own directory (mode 0700), which serializes processes on one host only.
+
+Multi-node controllers therefore require the database provider for the domain claim, credential issue and reveal, and directory membership. Whether the controller is a multi-node cluster is decided from configuration (`ha.mode: cluster`), never from the live peer count; with any other provider those operations return `ErrNotClusterAtomic` and never proceed, and the controller logs one startup warning.
+
 ### Degraded-Mode Visibility
 
 A deployment may run with declared-optional storage capabilities absent. Optionality is a legitimate design choice — a subsystem can declare a store as optional (`interfaces.RequirementOptional`) when it degrades gracefully without it, rather than failing composition. Silence about such gaps is not: every declared-optional store that composes absent is surfaced, not left for an operator to discover at request time.

@@ -37,6 +37,10 @@ type FlatFileConfigStore struct {
 	mutex sync.RWMutex
 }
 
+// AtomicLockRoot implements cfgconfig.AtomicLockDirProvider: per-key atomic-update
+// lock files live in a private subdirectory of the store's own root.
+func (s *FlatFileConfigStore) AtomicLockRoot() string { return s.root }
+
 // NewFlatFileConfigStore creates a new FlatFileConfigStore rooted at root.
 // The root directory is created (with MkdirAll) if it does not already exist.
 func NewFlatFileConfigStore(root string) (*FlatFileConfigStore, error) {
