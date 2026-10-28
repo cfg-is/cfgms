@@ -111,6 +111,15 @@ type FragmentCollector interface {
 // so a list this long indicates a malformed or hostile command.
 const maxRequestedFragmentIDs = 10000
 
+// Bulk-lane request bounds and reply sizing.
+const (
+	// maxRequestedBuckets bounds the buckets list of a bulk=manifest request.
+	maxRequestedBuckets = dna.BucketCount
+	// maxBulkReplyBytes is the canonical-byte budget of one bulk=fragments reply
+	// transfer. Replies split on object boundaries, never inside one object.
+	maxBulkReplyBytes = 8 << 20
+)
+
 // revocationManifestRefreshInterval is how often setupCommandHandler's periodic
 // revocation-manifest refresh polls the controller (Issue #4400). Well below
 // dnaRefreshInterval's 30-minute default: a leaked operator certificate's exposure
@@ -327,7 +336,16 @@ type TransportClient struct {
 	lastPublishedDNA        map[string]string    // full DNA from the last PublishDNAUpdate call (used as config-apply fallback)
 	currentDNAFragments     []*commonpb.Fragment // fragments from last fragment-collection (Issue #2906)
 	currentDNAAggregateRoot string               // AggregateRoot of currentDNAFragments (Issue #2906)
-	lastPublishedFragments  []*commonpb.Fragment // fragments from the last successful PublishDNAUpdate (Issue #3330)
+
+	// Bulk lane: per-object fragments are held apart from currentDNAFragments so
+	// the host aggregate root, the control-plane DNA event and full-sync
+	// snapshots never see them. All guarded by dnaMu, in memory only, rebuilt by
+	// the next observe sweep.
+	currentBulkFragments   []*commonpb.Fragment          // per-object fragments from the last sweep
+	currentBulkByID        map[string]*commonpb.Fragment // index over currentBulkFragments
+	currentBulkRoot        string                        // dna.BulkRoot of currentBulkFragments; "" when none
+	bulkKinds              map[string]bool               // per-object kinds seen in sweep specs
+	lastPublishedFragments []*commonpb.Fragment          // fragments from the last successful PublishDNAUpdate (Issue #3330)
 
 	// driftDiffs buffers drift-diff records accumulated since the last DNA sync
 	// (Issue #3373). The drift handler registered in InitializeConfigExecutor appends;
@@ -1567,6 +1585,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("data plane session not available for DNA sync")
 		}
 
+		// Bulk lane (per-object fragments): answered separately from the host
+		// partial/full sync paths below.
+		if rawBulk, present := cmd.Params[cpTypes.SyncDNAParamBulk]; present {
+			return c.handleSyncDNABulk(ctx, session, sid, tid, cmd, rawBulk)
+		}
+
 		// Partial-sync branch: fragment_ids param carries the IDs the controller
 		// wants us to send (ADR-017 §7 step 2 response).
 		if rawIDs, present := cmd.Params["fragment_ids"]; present {
@@ -1681,7 +1705,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		c.mu.RUnlock()
 		var fragBytes [][]byte
 		if collector != nil {
-			for _, frag := range collector.CollectFragments(ctx) {
+			for _, frag := range c.hostFragmentsOnly(collector.CollectFragments(ctx)) {
 				b, mErr := proto.Marshal(frag)
 				if mErr != nil {
 					c.logger.Warn("sync_dna: failed to marshal fragment, skipping",
@@ -2081,6 +2105,7 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 	c.dnaMu.RLock()
 	currentDNAHash := c.currentDNAHash
 	currentDNAAggregateRoot := c.currentDNAAggregateRoot
+	currentDNABulkRoot := c.currentBulkRoot
 	c.dnaMu.RUnlock()
 
 	activeSessions := int32(0)
@@ -2098,6 +2123,7 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		Metrics:          metricsMap,
 		DNAHash:          currentDNAHash,
 		DNAAggregateRoot: currentDNAAggregateRoot,
+		DNABulkRoot:      currentDNABulkRoot,
 		ActiveSessions:   activeSessions,
 		ConnectionState:  connectionState,
 		Version:          version.Short(),
@@ -2545,14 +2571,40 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 		c.setCurrentDNAFromAttrs(attrs)
 	}
 	if len(frags) > 0 {
-		c.setCurrentDNAFragments(frags)
+		c.setCurrentHostDNAFragments(frags)
 	}
 	return nil
 }
 
-// setCurrentDNAFragments updates currentDNAFragments and currentDNAAggregateRoot
-// under dnaMu. Called when the wired collector implements FragmentCollector.
-func (c *TransportClient) setCurrentDNAFragments(fragments []*commonpb.Fragment) {
+// isBulkFragmentID reports whether a fragment id belongs to a known per-object
+// kind: "<kind>:<object>". Caller holds dnaMu.
+func (c *TransportClient) isBulkFragmentID(id string) bool {
+	if len(c.bulkKinds) == 0 {
+		return false
+	}
+	kind, _, found := strings.Cut(id, ":")
+	return found && c.bulkKinds[kind]
+}
+
+// hostFragmentsOnly drops fragments of known per-object kinds from a freshly
+// collected set so the full-sync snapshot never carries bulk-lane fragments.
+func (c *TransportClient) hostFragmentsOnly(fragments []*commonpb.Fragment) []*commonpb.Fragment {
+	c.dnaMu.RLock()
+	defer c.dnaMu.RUnlock()
+	if len(c.bulkKinds) == 0 {
+		return fragments
+	}
+	out := make([]*commonpb.Fragment, 0, len(fragments))
+	for _, f := range fragments {
+		if !c.isBulkFragmentID(f.GetFragmentId()) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// manifestOf builds the (fragment_id, fragment_hash) manifest of a fragment set.
+func manifestOf(fragments []*commonpb.Fragment) []*commonpb.ManifestEntry {
 	manifest := make([]*commonpb.ManifestEntry, 0, len(fragments))
 	for _, f := range fragments {
 		manifest = append(manifest, &commonpb.ManifestEntry{
@@ -2560,15 +2612,57 @@ func (c *TransportClient) setCurrentDNAFragments(fragments []*commonpb.Fragment)
 			FragmentHash: f.GetFragmentHash(),
 		})
 	}
-	root, err := dna.AggregateRoot(manifest)
+	return manifest
+}
+
+// setCurrentDNAFragments replaces the steward's fragment state. Fragments whose
+// id starts with a known per-object kind go to the bulk lane (currentBulkFragments,
+// BulkRoot); the rest are host fragments whose aggregate root is computed exactly
+// as before, so it is byte-identical for input without bulk fragments.
+func (c *TransportClient) setCurrentDNAFragments(fragments []*commonpb.Fragment) {
+	c.storeDNAFragments(fragments, false)
+}
+
+// setCurrentHostDNAFragments is setCurrentDNAFragments for the collector refresh
+// paths: the collector only produces host fragments, so the bulk lane built by
+// the last observe sweep is left untouched instead of being wiped every refresh.
+func (c *TransportClient) setCurrentHostDNAFragments(fragments []*commonpb.Fragment) {
+	c.storeDNAFragments(fragments, true)
+}
+
+func (c *TransportClient) storeDNAFragments(fragments []*commonpb.Fragment, keepBulk bool) {
+	c.dnaMu.RLock()
+	host := make([]*commonpb.Fragment, 0, len(fragments))
+	var bulk []*commonpb.Fragment
+	for _, f := range fragments {
+		if c.isBulkFragmentID(f.GetFragmentId()) {
+			bulk = append(bulk, f)
+		} else {
+			host = append(host, f)
+		}
+	}
+	c.dnaMu.RUnlock()
+
+	root, err := dna.AggregateRoot(manifestOf(host))
 	if err != nil {
-		c.logger.Warn("failed to compute aggregate root; partial-sync root not updated", "error", err)
+		c.logger.Warn("failed to compute aggregate root; partial-sync root not updated", "error", logging.SanitizeLogValue(err.Error()))
 		return
 	}
+
 	c.dnaMu.Lock()
-	c.currentDNAFragments = fragments
+	defer c.dnaMu.Unlock()
+	c.currentDNAFragments = host
 	c.currentDNAAggregateRoot = root
-	c.dnaMu.Unlock()
+	if keepBulk {
+		return
+	}
+	byID := make(map[string]*commonpb.Fragment, len(bulk))
+	for _, f := range bulk {
+		byID[f.GetFragmentId()] = f
+	}
+	c.currentBulkFragments = bulk
+	c.currentBulkByID = byID
+	c.currentBulkRoot = dna.BulkRoot(manifestOf(bulk))
 }
 
 // PublishCurrentDNA collects the FULL composite DNA (hardware facts + module
@@ -2600,7 +2694,7 @@ func (c *TransportClient) PublishCurrentDNA(ctx context.Context) error {
 	// would leave currentDNAFragments/currentDNAAggregateRoot stale for the
 	// sync_dna partial-sync path. Same ordering as runDNARefreshTick.
 	if len(frags) > 0 {
-		c.setCurrentDNAFragments(frags)
+		c.setCurrentHostDNAFragments(frags)
 	}
 	if len(attrs) == 0 {
 		// Nothing attribute-based to publish; the fragment state is updated above.
@@ -2686,7 +2780,7 @@ func (c *TransportClient) runDNARefreshTick(ctx context.Context, collector DNACo
 	// computed inside PublishDNAUpdate reflects this tick's collected state, not
 	// the previous tick's. (Issue #3330)
 	if len(frags) > 0 {
-		c.setCurrentDNAFragments(frags)
+		c.setCurrentHostDNAFragments(frags)
 	}
 	if len(attrs) > 0 {
 		// Always refresh the current snapshot so heartbeats carry a truthful hash
@@ -3783,34 +3877,75 @@ func (c *TransportClient) handleObserveModules(ctx context.Context, cmd *cpTypes
 	if err != nil {
 		return fmt.Errorf("observe_modules: %w", err)
 	}
-	if len(specs) == 0 {
+
+	// Per-object kinds named by this sweep. A kind held from an earlier sweep
+	// that is absent here is retired: the module is no longer active on this
+	// host (e.g. the PDC emulator role moved). A sweep with no specs omits every
+	// held kind.
+	sweepBulkKinds := make(map[string]bool)
+	for _, spec := range specs {
+		if spec.PerObject {
+			sweepBulkKinds[spec.Kind] = true
+		}
+	}
+	c.dnaMu.RLock()
+	retiring := false
+	for kind := range c.bulkKinds {
+		if !sweepBulkKinds[kind] {
+			retiring = true
+			break
+		}
+	}
+	c.dnaMu.RUnlock()
+
+	if len(specs) == 0 && !retiring {
 		return nil
 	}
 
-	// Load each module and build the inputs for Assembler.Assemble.
+	// Load each module once and build the inputs for Assembler.Assemble. A module
+	// may own several kinds; every spec contributes its own ownership declaration.
 	activeModules := make(map[string]modules.Module, len(specs))
 	ownership := make(map[string][]modules.OwnershipDeclaration, len(specs))
+	loadFailed := make(map[string]bool)
 	for _, spec := range specs {
-		mod, loadErr := loader.LoadModule(spec.Name)
-		if loadErr != nil {
-			c.logger.Warn("observe sweep: module load failed; skipping",
-				"module", logging.SanitizeLogValue(spec.Name), "error", loadErr)
+		if loadFailed[spec.Name] {
 			continue
 		}
-		activeModules[spec.Name] = mod
-		ownership[spec.Name] = []modules.OwnershipDeclaration{{Kind: spec.Kind}}
+		if _, loaded := activeModules[spec.Name]; !loaded {
+			mod, loadErr := loader.LoadModule(spec.Name)
+			if loadErr != nil {
+				c.logger.Warn("observe sweep: module load failed; skipping",
+					"module", logging.SanitizeLogValue(spec.Name), "error", logging.SanitizeLogValue(loadErr.Error()))
+				loadFailed[spec.Name] = true
+				continue
+			}
+			activeModules[spec.Name] = mod
+		}
+		ownership[spec.Name] = append(ownership[spec.Name],
+			modules.OwnershipDeclaration{Kind: spec.Kind, PerObject: spec.PerObject})
 	}
 
-	if len(activeModules) == 0 {
+	if len(activeModules) == 0 && !retiring {
 		return nil
 	}
 
-	// Snapshot current host-fact fragments as input to the assembler so that
-	// module-owned kinds preempt the corresponding host-fact fragments
-	// (ADR-016 clause 5, Assembler phase 3).
+	// Snapshot current host-fact and previously observed bulk fragments as input
+	// to the assembler so that module-owned kinds preempt the corresponding
+	// host-fact fragments (ADR-016 clause 5, Assembler phase 3) and a per-object
+	// kind whose Get fails keeps its previous objects. Bulk fragments of retired
+	// kinds are dropped here.
 	c.dnaMu.RLock()
-	hostFactFragments := make([]*commonpb.Fragment, len(c.currentDNAFragments))
-	copy(hostFactFragments, c.currentDNAFragments)
+	hostFactFragments := make([]*commonpb.Fragment, 0, len(c.currentDNAFragments)+len(c.currentBulkFragments))
+	hostFactFragments = append(hostFactFragments, c.currentDNAFragments...)
+	retiredFragments := 0
+	for _, f := range c.currentBulkFragments {
+		kind, _, _ := strings.Cut(f.GetFragmentId(), ":")
+		if sweepBulkKinds[kind] {
+			hostFactFragments = append(hostFactFragments, f)
+		} else {
+			retiredFragments++
+		}
+	}
 	c.dnaMu.RUnlock()
 
 	// Merge observe-module fragments with host-fact fragments. The Assembler
@@ -3822,11 +3957,19 @@ func (c *TransportClient) handleObserveModules(ctx context.Context, cmd *cpTypes
 	}
 
 	// Write through the existing fragment emission path (ADR-024 Amendment 1 §2).
-	// setCurrentDNAFragments updates currentDNAAggregateRoot, which the heartbeat
-	// loop carries to the controller; the controller detects the change and issues
-	// CommandSyncDNA to pull the merged fragment set.
+	// setCurrentDNAFragments updates currentDNAAggregateRoot and the bulk root,
+	// which the heartbeat loop carries to the controller; the controller detects
+	// the change and issues CommandSyncDNA to pull the merged fragment set. The
+	// bulk kinds are installed first so the split sees this sweep's kinds.
+	c.dnaMu.Lock()
+	c.bulkKinds = sweepBulkKinds
+	c.dnaMu.Unlock()
 	c.setCurrentDNAFragments(merged)
 
+	if retiredFragments > 0 {
+		c.logger.Info("Tier-2 observe sweep retired per-object fragments",
+			"retired_fragments", retiredFragments)
+	}
 	c.logger.Info("Tier-2 observe sweep completed",
 		"observe_modules", len(activeModules),
 		"total_fragments", len(merged))
@@ -3869,6 +4012,9 @@ func parseObserveModuleSpecs(raw interface{}) ([]cpTypes.ObserveModuleSpec, erro
 			}
 			if kind, ok := m["kind"].(string); ok {
 				spec.Kind = kind
+			}
+			if perObject, ok := m["per_object"].(bool); ok {
+				spec.PerObject = perObject
 			}
 			specs = append(specs, spec)
 		}
@@ -3946,4 +4092,164 @@ func (c *TransportClient) newModuleInstaller() execution.ModuleInstaller {
 		Client:                   tc,
 		Logger:                   c.logger,
 	}
+}
+
+// parseBucketNumbers normalises the buckets param of a bulk=manifest SYNC_DNA
+// command. Like fragment_ids it crosses the wire JSON-decoded, so a JSON string,
+// []interface{} of numbers, or a native []int are all accepted. Out-of-range
+// numbers and lists over maxRequestedBuckets are rejected.
+func parseBucketNumbers(raw interface{}) ([]int, error) {
+	var nums []int
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if v == "" {
+			return nil, nil
+		}
+		if err := json.Unmarshal([]byte(v), &nums); err != nil {
+			return nil, fmt.Errorf("buckets is not a JSON number array: %w", err)
+		}
+	case []int:
+		nums = v
+	case []interface{}:
+		if len(v) > maxRequestedBuckets {
+			return nil, fmt.Errorf("buckets contains %d entries, limit is %d", len(v), maxRequestedBuckets)
+		}
+		nums = make([]int, 0, len(v))
+		for i, elem := range v {
+			f, isNum := elem.(float64)
+			if !isNum || f != float64(int(f)) {
+				return nil, fmt.Errorf("buckets[%d] is not an integer", i)
+			}
+			nums = append(nums, int(f))
+		}
+	default:
+		return nil, fmt.Errorf("buckets has unsupported type %T", raw)
+	}
+	if len(nums) > maxRequestedBuckets {
+		return nil, fmt.Errorf("buckets contains %d entries, limit is %d", len(nums), maxRequestedBuckets)
+	}
+	for i, n := range nums {
+		if n < 0 || n >= dna.BucketCount {
+			return nil, fmt.Errorf("buckets[%d] is out of range", i)
+		}
+	}
+	return nums, nil
+}
+
+// handleSyncDNABulk answers a SYNC_DNA bulk-lane request (bulk=buckets,
+// bulk=manifest, bulk=fragments) from the held per-object fragments. Requests
+// over the bounds are rejected with a logged error and no reply. Fragment ids
+// and contents are never logged, only counts.
+func (c *TransportClient) handleSyncDNABulk(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command, rawMode interface{}) error {
+	mode, _ := rawMode.(string)
+
+	reject := func(err error) error {
+		c.logger.Error("sync_dna bulk request rejected",
+			"command_id", logging.SanitizeLogValue(cmd.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return fmt.Errorf("sync_dna bulk request rejected: %w", err)
+	}
+
+	c.dnaMu.RLock()
+	bulk := make([]*commonpb.Fragment, len(c.currentBulkFragments))
+	copy(bulk, c.currentBulkFragments)
+	byID := c.currentBulkByID
+	c.dnaMu.RUnlock()
+
+	newTransfer := func(kind string) *dpTypes.DNATransfer {
+		return &dpTypes.DNATransfer{
+			ID:        fmt.Sprintf("dna_bulk_%s_%d", kind, time.Now().UnixNano()),
+			StewardID: sid,
+			TenantID:  tid,
+			Timestamp: time.Now(),
+			Bulk:      true,
+			Metadata:  map[string]string{"command_id": cmd.ID},
+		}
+	}
+
+	switch mode {
+	case cpTypes.SyncDNABulkBuckets:
+		t := newTransfer("buckets")
+		t.BucketRoots = dna.BucketRoots(manifestOf(bulk))
+		if err := session.SendDNA(ctx, t); err != nil {
+			return fmt.Errorf("failed to send bulk bucket roots: %w", err)
+		}
+		c.logger.Info("Bulk bucket roots sent", "command_id", logging.SanitizeLogValue(cmd.ID),
+			"fragment_count", len(bulk))
+		return nil
+
+	case cpTypes.SyncDNABulkManifest:
+		buckets, err := parseBucketNumbers(cmd.Params[cpTypes.SyncDNAParamBuckets])
+		if err != nil {
+			return reject(err)
+		}
+		wanted := make(map[int]bool, len(buckets))
+		for _, b := range buckets {
+			wanted[b] = true
+		}
+		var entries []*commonpb.ManifestEntry
+		for _, e := range manifestOf(bulk) {
+			if wanted[dna.BucketOf(e.GetFragmentId())] {
+				entries = append(entries, e)
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].GetFragmentId() < entries[j].GetFragmentId() })
+		t := newTransfer("manifest")
+		t.Manifest = entries
+		if err := session.SendDNA(ctx, t); err != nil {
+			return fmt.Errorf("failed to send bulk manifest: %w", err)
+		}
+		c.logger.Info("Bulk manifest sent", "command_id", logging.SanitizeLogValue(cmd.ID),
+			"bucket_count", len(wanted), "entry_count", len(entries))
+		return nil
+
+	case cpTypes.SyncDNABulkFragments:
+		ids, err := parseFragmentIDs(cmd.Params[cpTypes.SyncDNAParamFragmentIDs])
+		if err != nil {
+			return reject(err)
+		}
+		// Unknown ids are skipped: the controller diffed against a manifest that
+		// may have moved on, and a fallback to full sync would drag in host data.
+		selected := make([]*commonpb.Fragment, 0, len(ids))
+		seen := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			if f, ok := byID[id]; ok && !seen[id] {
+				seen[id] = true
+				selected = append(selected, f)
+			}
+		}
+		// Split on object boundaries so every transfer is a valid delta.
+		var chunks [][]*commonpb.Fragment
+		var cur []*commonpb.Fragment
+		curBytes := 0
+		for _, f := range selected {
+			n := len(f.GetCanonicalBytes())
+			if len(cur) > 0 && curBytes+n > maxBulkReplyBytes {
+				chunks = append(chunks, cur)
+				cur, curBytes = nil, 0
+			}
+			cur = append(cur, f)
+			curBytes += n
+		}
+		if len(cur) > 0 || len(chunks) == 0 {
+			chunks = append(chunks, cur)
+		}
+		for i, chunk := range chunks {
+			t := newTransfer("fragments")
+			t.ID = fmt.Sprintf("%s_%d", t.ID, i)
+			t.Delta = true
+			t.Fragments = chunk
+			t.Metadata["fragment_count"] = fmt.Sprintf("%d", len(chunk))
+			if err := session.SendDNA(ctx, t); err != nil {
+				return fmt.Errorf("failed to send bulk fragments: %w", err)
+			}
+		}
+		c.logger.Info("Bulk fragments sent", "command_id", logging.SanitizeLogValue(cmd.ID),
+			"requested_count", len(ids), "fragment_count", len(selected), "transfer_count", len(chunks))
+		return nil
+	}
+	return reject(fmt.Errorf("unknown bulk mode"))
 }

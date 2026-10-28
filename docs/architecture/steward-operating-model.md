@@ -505,6 +505,14 @@ Wire format:
 | `bulk=manifest`, `buckets=<json list>` | `DNATransfer` with `Bulk=true` and `Manifest` entries for those buckets |
 | `bulk=fragments`, `fragment_ids=<json list>` | Those fragments as a delta |
 
+Steward side of the bulk lane:
+
+- **Membership**: a fragment is a bulk fragment when its id starts with `<kind>:` for a kind that appeared with `per_object` in the latest sweep's specs. Membership is held in memory and rebuilt by the next sweep; nothing is persisted. A module that owns several kinds keeps all of them.
+- **Exclusions**: bulk fragments are held apart from the host fragments. They do not enter the host aggregate root (byte-identical to a steward without bulk fragments), the `Details["dna"]` payload of the control-plane DNA event, the event's skip-when-unchanged gate, or the full-sync snapshot. The periodic host DNA refresh does not clear them.
+- **Replies**: `bulk=buckets` answers with the 256 bucket roots; `bulk=manifest` answers with entries only for the requested buckets; `bulk=fragments` answers with `Delta=true, Bulk=true` carrying exactly the requested ids. An unknown id is skipped, never a fallback to full sync. A `bulk=fragments` reply over 8 MiB of canonical bytes is split into several transfers on object boundaries, each a valid delta.
+- **Bounds**: at most 256 buckets and at most 10,000 fragment ids per request. An over-bound or malformed request is rejected with a logged error and no reply. Logs carry counts, never fragment ids or contents.
+- **Retirement**: a sweep whose specs omit a per-object kind held from an earlier sweep retires that kind's fragments (the module is no longer active here, for example the PDC emulator role moved). A sweep with no specs omits every held kind. A module that fails to load or whose `Get` fails keeps its previous fragments; only omission retires.
+
 **Sweep cadence for per-object modules**: the steward raises `EventObserveSweepRequest` from `checkAndTriggerObserveSweep` on each convergence-loop tick (tier-2 cadence). The controller answers with `CommandObserveModules` for every approved manifest whose `observe_when` matches the baseline DNA, so a per-object module such as AD is observed every Nth convergence cycle on the matching domain controller.
 
 The controller stores DNA **versioned and append-only** (ADR-017 Amendment A1.3), not last-write-wins: each accepted delta produces a new fragment version, so per-entity state stays queryable over time. Because unchanged fragments dedupe by hash, history cost tracks change volume, not fleet-size × time.
