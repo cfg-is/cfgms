@@ -170,3 +170,19 @@ operations as the `cfg` commands above:
 ## Reboot window
 
 The steward detail drawer has a **Reboot window** section beside the `cfg` reboot-window commands. It edits the schedule declared for this one steward as YAML text, overriding the tenant window, and shows the returned status (`scheduled` or `unrestricted`) and next occurrence. A schedule the controller rejects shows the validation message verbatim and saves nothing. There is no timezone field here; the timezone is set on the tenant. Saving needs `reboot_window:override` and asks for no passkey tap.
+
+## Installer artifacts and steward binaries
+
+The console's **Installer** page manages the files stewards are installed and upgraded from.
+Each action below asks for your passkey, and files larger than 64 MiB are refused before
+anything is sent.
+
+- **Upload installer artifact** — choose a platform (`windows`, `darwin`, `linux`), an
+  architecture (`amd64`, `arm64`) and a file, then **Upload artifact**. The file is sent as the
+  body of `PUT /api/v1/installer/artifacts/{platform}/{arch}`.
+- **Delete** — the **Delete** action on an artifact row asks for an inline **Confirm**, then
+  sends `DELETE` to the same path.
+- **Publish steward binary** — enter the version, platform and architecture, paste the base64
+  signature the build pipeline produced, and choose the binary. The console posts the raw file
+  to `/api/v1/installer/steward-binaries/{version}/{platform}/{arch}?signature=<base64>`
+  (`installer:publish:steward`). The form does not send without all four fields.

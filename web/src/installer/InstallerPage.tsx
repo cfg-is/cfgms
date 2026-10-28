@@ -55,6 +55,7 @@ import { apiFetch } from '../api/client.ts'
 import ErrorCard from '../shell/ErrorCard.tsx'
 import SelectorInput from '../shell/SelectorInput.tsx'
 import { isTerminalRolloutStatus, useRollout } from './useRollout.ts'
+import { useArtifacts, type UseArtifacts } from './useArtifacts.ts'
 import { ARCHES as UPGRADE_ARCHES, PLATFORMS as UPGRADE_PLATFORMS, isTerminalUpgradeStatus, useUpgrade } from './useUpgrade.ts'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -224,7 +225,16 @@ export const DOWNLOAD_SCOPE_NOTE =
   'uploaded artifact, and the Checksum column above is the SHA-256 of the raw ' +
   'binary blob listed in this row, so it will not match the downloaded archive.'
 
-function ArtifactTable({ artifacts }: { artifacts: ArtifactInfo[] }) {
+function ArtifactTable({
+  artifacts,
+  onDelete,
+  busy,
+}: {
+  artifacts: ArtifactInfo[]
+  onDelete: (platform: string, arch: string) => Promise<boolean>
+  busy: boolean
+}) {
+  const [confirmKey, setConfirmKey] = useState<string | null>(null)
   return (
     <>
       <table className="tbl" data-testid="artifact-table">
@@ -235,6 +245,7 @@ function ArtifactTable({ artifacts }: { artifacts: ArtifactInfo[] }) {
             <th>Size</th>
             <th>Checksum</th>
             <th>Download</th>
+            <th>Actions</th>
             <th className="c-spacer" aria-hidden="true" />
           </tr>
         </thead>
@@ -265,6 +276,44 @@ function ArtifactTable({ artifacts }: { artifacts: ArtifactInfo[] }) {
                   >
                     Download
                   </a>
+                </td>
+                <td>
+                  {confirmKey === `${a.platform}/${a.arch}` ? (
+                    <span data-testid={`delete-confirm-row-${a.platform}-${a.arch}`}>
+                      <span className="mut">Delete this artifact? </span>
+                      <button
+                        type="button"
+                        className="wf-btn-sm"
+                        disabled={busy}
+                        onClick={() => {
+                          setConfirmKey(null)
+                          void onDelete(a.platform, a.arch)
+                        }}
+                        data-testid={`delete-confirm-${a.platform}-${a.arch}`}
+                      >
+                        Confirm
+                      </button>{' '}
+                      <button
+                        type="button"
+                        className="wf-btn-sm"
+                        onClick={() => setConfirmKey(null)}
+                        data-testid={`delete-cancel-${a.platform}-${a.arch}`}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="wf-btn-sm"
+                      disabled={busy}
+                      aria-label={`Delete the ${a.platform}/${a.arch} artifact`}
+                      onClick={() => setConfirmKey(`${a.platform}/${a.arch}`)}
+                      data-testid={`delete-${a.platform}-${a.arch}`}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </td>
                 <td className="c-spacer" />
               </tr>
@@ -439,6 +488,152 @@ function CommandAssembler() {
           </button>
         </div>
       </div>
+    </section>
+  )
+}
+
+// ── Artifact upload and steward binary publish (Issue #5456) ──────────────────
+
+// Both are Strong + a passkey tap (apiFetch runs the ceremony). The File is
+// handed to the hook as-is so the post-tap replay re-sends the full body.
+function ArtifactManageSection({ artifacts }: { artifacts: UseArtifacts }) {
+  const { busy, error, note, upload, publish } = artifacts
+  const [upPlatform, setUpPlatform] = useState('')
+  const [upArch, setUpArch] = useState('')
+  const [upFile, setUpFile] = useState<File | null>(null)
+  const [pubVersion, setPubVersion] = useState('')
+  const [pubPlatform, setPubPlatform] = useState('')
+  const [pubArch, setPubArch] = useState('')
+  const [pubSignature, setPubSignature] = useState('')
+  const [pubFile, setPubFile] = useState<File | null>(null)
+
+  const canUpload = !busy && upPlatform !== '' && upArch !== '' && upFile !== null
+  const canPublish =
+    !busy && pubVersion.trim() !== '' && pubPlatform !== '' && pubArch !== '' && pubSignature.trim() !== '' && pubFile !== null
+
+  return (
+    <section className="panel" aria-labelledby="artifact-manage-heading" data-testid="artifact-manage-section">
+      <h2 id="artifact-manage-heading">Upload and publish</h2>
+      <p className="mut">
+        Files larger than 64 MiB are refused. You confirm each upload or publish with your passkey.
+      </p>
+
+      <h3>Upload installer artifact</h3>
+      <div className="assembler-form">
+        <label className="field-label">
+          Platform
+          <select className="wf-input" value={upPlatform} onChange={(e) => setUpPlatform(e.target.value)} data-testid="upload-platform">
+            <option value="">Select platform…</option>
+            {UPGRADE_PLATFORMS.map((x) => (
+              <option key={x} value={x}>{x}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          Architecture
+          <select className="wf-input" value={upArch} onChange={(e) => setUpArch(e.target.value)} data-testid="upload-arch">
+            <option value="">Select arch…</option>
+            {UPGRADE_ARCHES.map((x) => (
+              <option key={x} value={x}>{x}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          Artifact file
+          <input
+            type="file"
+            className="wf-input"
+            onChange={(e) => setUpFile(e.target.files?.[0] ?? null)}
+            data-testid="upload-file"
+          />
+        </label>
+        <div>
+          <button
+            type="button"
+            className="wf-btn-sm"
+            disabled={!canUpload}
+            onClick={() => upFile !== null && void upload(upPlatform, upArch, upFile)}
+            data-testid="upload-btn"
+          >
+            Upload artifact
+          </button>
+        </div>
+      </div>
+
+      <h3>Publish steward binary</h3>
+      <div className="assembler-form">
+        <label className="field-label">
+          Version
+          <input
+            type="text"
+            className="wf-input mono2"
+            value={pubVersion}
+            onChange={(e) => setPubVersion(e.target.value)}
+            placeholder="1.2.3"
+            data-testid="publish-version"
+          />
+        </label>
+        <label className="field-label">
+          Platform
+          <select className="wf-input" value={pubPlatform} onChange={(e) => setPubPlatform(e.target.value)} data-testid="publish-platform">
+            <option value="">Select platform…</option>
+            {UPGRADE_PLATFORMS.map((x) => (
+              <option key={x} value={x}>{x}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          Architecture
+          <select className="wf-input" value={pubArch} onChange={(e) => setPubArch(e.target.value)} data-testid="publish-arch">
+            <option value="">Select arch…</option>
+            {UPGRADE_ARCHES.map((x) => (
+              <option key={x} value={x}>{x}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label">
+          Signature (base64, from the build pipeline)
+          <input
+            type="text"
+            className="wf-input mono2"
+            value={pubSignature}
+            onChange={(e) => setPubSignature(e.target.value)}
+            data-testid="publish-signature"
+          />
+        </label>
+        <label className="field-label">
+          Steward binary
+          <input
+            type="file"
+            className="wf-input"
+            onChange={(e) => setPubFile(e.target.files?.[0] ?? null)}
+            data-testid="publish-file"
+          />
+        </label>
+        <div>
+          <button
+            type="button"
+            className="wf-btn-sm"
+            disabled={!canPublish}
+            onClick={() =>
+              pubFile !== null &&
+              void publish({ version: pubVersion, platform: pubPlatform, arch: pubArch, signature: pubSignature, file: pubFile })
+            }
+            data-testid="publish-btn"
+          >
+            Publish binary
+          </button>
+        </div>
+      </div>
+
+      {error !== null && (
+        <span className="wf-form-error" role="alert" data-testid="artifact-error">
+          {error}
+        </span>
+      )}
+      {note !== null && (
+        <p className="mut" role="status" data-testid="artifact-note">{note}</p>
+      )}
     </section>
   )
 }
@@ -821,6 +1016,7 @@ export default function InstallerPage() {
 
   const key = `installer:${attempt}`
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
+  const artifactActions = useArtifacts(retry)
 
   useEffect(() => {
     let cancelled = false
@@ -876,9 +1072,11 @@ export default function InstallerPage() {
           ) : artifacts !== null && artifacts.length === 0 ? (
             <ArtifactEmpty />
           ) : artifacts !== null ? (
-            <ArtifactTable artifacts={artifacts} />
+            <ArtifactTable artifacts={artifacts} onDelete={artifactActions.remove} busy={artifactActions.busy} />
           ) : null}
         </section>
+
+        <ArtifactManageSection artifacts={artifactActions} />
 
         <CommandAssembler />
 
