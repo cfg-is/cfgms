@@ -215,7 +215,7 @@ func TestReadTokenFile_WindowsRefusesNullDACL(t *testing.T) {
 func TestReadTokenFile_WindowsRefusesSymlink(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	target := platformTokenFilePath()
+	target := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(target, "tok_behind_link"))
 	link := filepath.Join(t.TempDir(), "link-token")
 	if err := os.Symlink(target, link); err != nil {
