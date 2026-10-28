@@ -5,10 +5,8 @@ package config_test
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,10 +21,6 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/ha"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	"github.com/cfgis/cfgms/pkg/storage/providers/database"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
-	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
-	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 const concurrentWriters = 24
@@ -34,51 +28,6 @@ const concurrentWriters = 24
 type storeCase struct {
 	name string
 	new  func(t *testing.T) cfgconfig.ConfigStore
-}
-
-func newFlatfile(t *testing.T) cfgconfig.ConfigStore {
-	t.Helper()
-	s, err := flatfile.NewFlatFileConfigStore(t.TempDir())
-	require.NoError(t, err)
-	return s
-}
-
-// newDatabase builds a real PostgreSQL-backed store; it skips when the test
-// database is unavailable (merge-queue Postgres test, repository convention).
-func newDatabase(t *testing.T) cfgconfig.ConfigStore {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping database integration tests in short mode")
-	}
-	port := 5432
-	if p, err := strconv.Atoi(os.Getenv("CFGMS_TEST_DB_PORT")); err == nil {
-		port = p
-	}
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	require.NoError(t, err)
-	cfg := map[string]interface{}{
-		"host": "localhost", "port": port, "database": "cfgms_test",
-		"username": "cfgms_test", "password": testutil.GetTestDBPassword(),
-		"sslmode": "disable", "session_hmac_key": hex.EncodeToString(key),
-	}
-	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=disable",
-		cfg["host"], port, cfg["database"], cfg["username"], cfg["password"])
-	probe, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Skip("PostgreSQL test database not available:", err)
-	}
-	if err := probe.Ping(); err != nil {
-		_ = probe.Close()
-		t.Skip("PostgreSQL test database not reachable:", err)
-	}
-	_ = probe.Close()
-
-	p := &database.DatabaseProvider{}
-	t.Cleanup(func() { _ = p.Close() })
-	s, err := p.CreateConfigStore(cfg)
-	require.NoError(t, err)
-	return s
 }
 
 func lockingStores() []storeCase {
@@ -189,7 +138,7 @@ func TestAtomicUpdate_NilArguments(t *testing.T) {
 // SQLite has no ConfigStore (config data uses flatfile or the database provider),
 // so there is no sqlite store to take a lock on; pin that so the gap is visible.
 func TestAtomicUpdate_SQLiteHasNoConfigStore(t *testing.T) {
-	_, err := (&sqlite.SQLiteProvider{}).CreateConfigStore(map[string]interface{}{"path": filepath.Join(t.TempDir(), "x.db")})
+	_, err := newSQLiteConfigStore(filepath.Join(t.TempDir(), "x.db"))
 	assert.Error(t, err)
 }
 
@@ -263,7 +212,7 @@ func TestAtomicUpdate_RetryExhausted_NoBlindWrite(t *testing.T) {
 
 func TestAtomicLock_DirectoryModeAndLocation(t *testing.T) {
 	root := t.TempDir()
-	store, err := flatfile.NewFlatFileConfigStore(root)
+	store, err := newFlatfileAt(root)
 	require.NoError(t, err)
 	key := uniqueKey(t)
 	require.NoError(t, cfgconfig.CreateIfAbsent(context.Background(), store,
