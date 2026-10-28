@@ -83,10 +83,19 @@ func assertSystemAndAdministratorsOnly(t *testing.T, path string) {
 	}
 }
 
+// tokenPathInExistingDir returns the platform token file path after creating its
+// parent directory; writeTokenFile does not create it.
+func tokenPathInExistingDir(t *testing.T) string {
+	t.Helper()
+	path := platformTokenFilePath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	return path
+}
+
 func TestWriteTokenFile_WindowsDACLIsSystemAndAdministratorsOnly(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 
 	require.NoError(t, writeTokenFile(path, "tok_windows_dacl"))
 
@@ -102,7 +111,7 @@ func TestWriteTokenFile_WindowsDACLIsSystemAndAdministratorsOnly(t *testing.T) {
 func TestWriteTokenFile_ReplacesInheritedUsersReadableDACL(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 	dir := filepath.Dir(path)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	// A directory that was not locked yet: its files inherit a Users read ACE.
@@ -123,7 +132,7 @@ func TestWriteTokenFile_ReplacesInheritedUsersReadableDACL(t *testing.T) {
 func TestReadTokenFile_WindowsAcceptsFileWrittenByWriteTokenFile(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_round_trip"))
 
 	token, err := ReadTokenFile(path)
@@ -134,7 +143,7 @@ func TestReadTokenFile_WindowsAcceptsFileWrittenByWriteTokenFile(t *testing.T) {
 func TestReadTokenFile_WindowsRefusesFileOwnedByUsers(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_owned_by_users"))
 	setOwnerWithRestorePrivilege(t, path, sidUsers)
 
@@ -147,7 +156,7 @@ func TestReadTokenFile_WindowsRefusesFileOwnedByUsers(t *testing.T) {
 func TestReadTokenFile_WindowsRefusesUsersACE(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_users_ace"))
 	setDACLFromSDDL(t, path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)", true)
 
@@ -160,7 +169,7 @@ func TestReadTokenFile_WindowsRefusesUsersACE(t *testing.T) {
 func TestReadTokenFile_WindowsRefusesDenyACE(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_deny_ace"))
 	setDACLFromSDDL(t, path, "D:P(D;;FA;;;BU)(A;;FA;;;SY)(A;;FA;;;BA)", true)
 
@@ -191,7 +200,7 @@ func TestReadTokenFile_WindowsExplainsDeniedOpen(t *testing.T) {
 func TestReadTokenFile_WindowsRefusesNullDACL(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	path := platformTokenFilePath()
+	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_null_dacl"))
 	// A NULL DACL grants everyone full access.
 	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
@@ -206,7 +215,7 @@ func TestReadTokenFile_WindowsRefusesNullDACL(t *testing.T) {
 func TestReadTokenFile_WindowsRefusesSymlink(t *testing.T) {
 	requireElevatedToken(t)
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-	target := platformTokenFilePath()
+	target := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(target, "tok_behind_link"))
 	link := filepath.Join(t.TempDir(), "link-token")
 	if err := os.Symlink(target, link); err != nil {
@@ -236,7 +245,7 @@ func TestReadTokenFile_WindowsRefusesBadContent(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
-			path := platformTokenFilePath()
+			path := tokenPathInExistingDir(t)
 			require.NoError(t, writeTokenFile(path, "tok_placeholder"))
 			// Rewriting the content keeps the admin-only descriptor.
 			require.NoError(t, os.WriteFile(path, []byte(tc.content), 0o600))
@@ -254,6 +263,17 @@ func TestReadTokenFile_WindowsMissingFile(t *testing.T) {
 	_, err := ReadTokenFile(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not exist")
+}
+
+func TestWriteTokenFile_WindowsMissingDirectoryIsNotCreated(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing", "data")
+	path := filepath.Join(dir, tokenFileName)
+
+	require.Error(t, writeTokenFile(path, "tok_missing_dir"))
+	_, err := os.Stat(dir)
+	assert.True(t, os.IsNotExist(err), "writeTokenFile must not create the directory")
+	_, err = os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "no token file may be written")
 }
 
 func TestWriteTokenFile_WindowsRejectsWhitespaceToken(t *testing.T) {
