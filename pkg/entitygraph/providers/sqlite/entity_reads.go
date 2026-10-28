@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -121,6 +122,10 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 	}
 	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
 		conds = append(conds, tenantSubtreeCond("owning_tenant", cut, &args))
+	}
+	if filter.SubjectPrefix != "" {
+		conds = append(conds, "substr(subject, 1, ?) = ?")
+		args = append(args, utf8.RuneCountInString(filter.SubjectPrefix), filter.SubjectPrefix)
 	}
 
 	where := ""

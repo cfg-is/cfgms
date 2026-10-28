@@ -142,6 +142,20 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 			obs.Payload = withResolvedTenant(obs.Payload, peerTenant)
 		}
 
+		if interfaces.OwnerImmutableSubject(obs.Subject) && interfaces.OwnerImmutableKind(obs.Kind) {
+			writerTenant := peerTenant
+			if batch.AuthenticatedPeer == "" {
+				writerTenant = tenantPathOf(obs)
+			}
+			rejected, err := p.rejectOwnerChange(ctx, tx, obs, writerTenant)
+			if err != nil {
+				return err
+			}
+			if rejected {
+				continue
+			}
+		}
+
 		sourceClass := string(resolveSourceClass(obs.Source))
 
 		hash, err := payloadHash(obs.Payload)
@@ -402,4 +416,29 @@ func joinStrAttr(m map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// rejectOwnerChange enforces owner immutability for directory and m365 subjects:
+// an observation from a writer whose tenant differs from the subject's existing
+// owning tenant is skipped, logged as a security event naming both tenants, and
+// reported to the owner-conflict observer. A subject with no index row, or an
+// unowned one, is claimed by the writer.
+func (p *DatabaseEntityGraphProvider) rejectOwnerChange(ctx context.Context, tx *sql.Tx, obs types.Observation, writerTenant string) (bool, error) {
+	var existing string
+	err := tx.QueryRowContext(ctx,
+		`SELECT owning_tenant FROM eg_entity_index WHERE subject = $1`, obs.Subject,
+	).Scan(&existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("entitygraph/database: owner lookup: %w", err)
+	}
+	if existing == "" || existing == writerTenant {
+		return false, nil
+	}
+	interfaces.ReportOwnerConflict(ctx, &p.ownerConflicts, interfaces.OwnerConflict{
+		Subject: obs.Subject, ExistingTenant: existing, AttemptedTenant: writerTenant, Source: obs.Source,
+	})
+	return true, nil
 }

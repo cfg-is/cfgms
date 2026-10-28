@@ -43,6 +43,17 @@ type DatabaseEntityGraphProvider struct {
 	// owning_tenant — the fail-closed default, matching a nil
 	// dnasync.ClusterMembership verifier.
 	tenantResolver interfaces.TenantResolver
+
+	// ownerConflicts receives rejected cross-tenant writes to directory/m365
+	// subjects (see interfaces.OwnerImmutableSubject).
+	ownerConflicts interfaces.OwnerConflictSink
+}
+
+// SetOwnerConflictObserver installs the observer notified of each write rejected
+// by the owner-immutability rule. It carries both tenant ids and must only feed
+// the root admin audit stream.
+func (p *DatabaseEntityGraphProvider) SetOwnerConflictObserver(o interfaces.OwnerConflictObserver) {
+	p.ownerConflicts.Set(o)
 }
 
 // Option configures a DatabaseEntityGraphProvider at construction time.

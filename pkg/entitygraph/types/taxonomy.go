@@ -153,6 +153,13 @@ func DefaultTaxonomy() *Taxonomy {
 		tx.entityTypes[d.Kind] = d
 	}
 
+	// Per-object directory fragment kinds. Directory-authority only: a steward
+	// fragment of these kinds resolves to directory:<domain>/... when the domain
+	// is verified and is dropped otherwise — never host-scoped.
+	for _, kind := range []string{KindDirectoryUser, KindDirectoryGroup} {
+		tx.entityTypes[kind] = &EntityTypeDescriptor{Kind: kind, AuthorityClasses: []string{"directory"}}
+	}
+
 	// host:* observe-only kinds per ADR-017 §8 fixed contract — hardware and OS facts
 	// observed by the steward but not enforced by any module.
 	hostObserveSeeds := []*EntityTypeDescriptor{

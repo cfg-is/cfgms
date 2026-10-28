@@ -14,6 +14,8 @@ import (
 	"github.com/gorilla/mux"
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/controller/service"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -128,6 +130,18 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 	if _, _, err := selector.Parse(req.Selector); err != nil {
 		s.logger.Info("Invalid role selector", "selector", safeSelector, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid selector: %s", err.Error()), "INVALID_SELECTOR")
+		return
+	}
+
+	// A role fragment is inherited by every steward its selector matches, so it is
+	// not a device-level document: directory declarations and credential fields are
+	// rejected exactly as on the device save paths.
+	if errs := service.CheckDirectoryDeclarations(pkgconfig.LevelGroup, &req.Fragment); len(errs) > 0 {
+		msgs := make([]string, len(errs))
+		for i, e := range errs {
+			msgs[i] = e.Field + ": " + e.Message
+		}
+		s.writeErrorResponse(w, http.StatusBadRequest, "configuration validation failed: "+strings.Join(msgs, "; "), "VALIDATION_ERROR")
 		return
 	}
 

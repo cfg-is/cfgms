@@ -4,6 +4,7 @@
 package dnasync
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -34,6 +35,59 @@ const maxClusterAuthorityNameLen = 253
 // then resolves to its host-scoped EID, which is exactly the pre-cluster behaviour.
 type ClusterMembership interface {
 	IsClusterMember(peerHostAuthority, clusterName string) bool
+}
+
+// DirectoryAuthority answers, from controller-side state, whether the mTLS-verified
+// peer identity peerHostAuthority is entitled to write directory:<domain>/...
+// entities. domain is already normalized (lowercase, no trailing dot).
+//
+// It is the trust boundary for the directory branch of ResolveSubjectEID, the other
+// place a steward-supplied value (directory_domain) is permitted to reach an EID
+// authority segment. Implementations MUST answer from state the controller holds
+// independently of the delta being ingested (the domain registry and the peer's own
+// effective configuration) and MUST NOT grant authority on the peer's claim alone.
+// Returning false is always safe: the fragment is dropped, never host-scoped.
+//
+// The ad_pdc_emulator fact only activates observation on a steward; it is never an
+// input to this decision.
+type DirectoryAuthority interface {
+	IsDirectoryAuthority(peerHostAuthority, domain string) bool
+}
+
+// DirectoryDropReason names why a directory fragment was dropped.
+type DirectoryDropReason string
+
+const (
+	// DropKindNotInTaxonomy: the kind has no directory-class taxonomy entry.
+	DropKindNotInTaxonomy DirectoryDropReason = "kind_not_in_taxonomy"
+	// DropMalformedDomain: directory_domain is absent or not a valid DNS name.
+	DropMalformedDomain DirectoryDropReason = "malformed_domain"
+	// DropMalformedLocalID: the fragment_id carries no usable object id.
+	DropMalformedLocalID DirectoryDropReason = "malformed_local_id"
+	// DropNoVerifier: no DirectoryAuthority verifier is wired.
+	DropNoVerifier DirectoryDropReason = "no_verifier"
+	// DropNotAuthority: the verifier denied the peer for the domain.
+	DropNotAuthority DirectoryDropReason = "not_authority"
+)
+
+// DirectoryDropError is returned by ResolveSubjectEID when a directory fragment
+// cannot be attributed to a verified directory authority. It is a typed drop, not a
+// failure: the writer skips the fragment, counts it, and never falls back to a host
+// EID.
+type DirectoryDropError struct {
+	Reason DirectoryDropReason
+	Kind   string
+}
+
+// Error implements error.
+func (e *DirectoryDropError) Error() string {
+	return fmt.Sprintf("dnasync/resolve: directory fragment of kind %q dropped: %s", e.Kind, e.Reason)
+}
+
+// IsDirectoryDrop reports whether err is (or wraps) a DirectoryDropError.
+func IsDirectoryDrop(err error) bool {
+	var d *DirectoryDropError
+	return errors.As(err, &d)
 }
 
 // StaticClusterMembership is an immutable ClusterMembership snapshot: an explicit
@@ -133,12 +187,26 @@ func (m *StaticClusterMembership) IsClusterMember(peerHostAuthority, clusterName
 // which carries module_authority (= frag.GetAuthority()) and the decoded canonical fields
 // including ha_role when present. membership may be nil, which denies every cluster-scoped
 // VM claim.
+//
+// Directory branch: kinds directory_user / directory_group resolve to
+// directory:<domain>/user:<local> or directory:<domain>/group:<local>, source =
+// peerHostAuthority, claimScope = nil. The domain is read from payload
+// directory_domain, normalized, and reaches the authority segment ONLY when dirAuth
+// confirms peerHostAuthority is the authority for it. Every other outcome (nil
+// verifier, denial, malformed domain, kind missing from the taxonomy) returns a
+// *DirectoryDropError — this branch never falls back to a host EID, and it can
+// only ever produce a "directory" authority, never "m365".
 func ResolveSubjectEID(
 	kind, peerHostAuthority, fragID string,
 	payload map[string]interface{},
 	taxonomy *types.Taxonomy,
 	membership ClusterMembership,
+	dirAuth DirectoryAuthority,
 ) (types.EID, string, *types.ClaimScope, error) {
+	if kind == types.KindDirectoryUser || kind == types.KindDirectoryGroup {
+		return resolveDirectoryEID(kind, peerHostAuthority, fragID, payload, taxonomy, dirAuth)
+	}
+
 	desc, ok := taxonomy.LookupEntityType(kind)
 	isHostScoped := !ok || containsString(desc.AuthorityClasses, "host")
 
@@ -200,6 +268,71 @@ func ResolveSubjectEID(
 		return types.EID{}, "", nil, fmt.Errorf("dnasync/resolve: cluster eid for %q: %w", fragID, err)
 	}
 	return eid, clusterSource(peerHostAuthority, payload), nil, nil
+}
+
+// maxDirectoryLocalIDLen bounds the object id in a directory fragment_id (a GUID is 36).
+const maxDirectoryLocalIDLen = 128
+
+// resolveDirectoryEID implements the directory branch of ResolveSubjectEID.
+func resolveDirectoryEID(
+	kind, peerHostAuthority, fragID string,
+	payload map[string]interface{},
+	taxonomy *types.Taxonomy,
+	dirAuth DirectoryAuthority,
+) (types.EID, string, *types.ClaimScope, error) {
+	drop := func(r DirectoryDropReason) (types.EID, string, *types.ClaimScope, error) {
+		return types.EID{}, "", nil, &DirectoryDropError{Reason: r, Kind: kind}
+	}
+
+	desc, ok := taxonomy.LookupEntityType(kind)
+	if !ok || !containsString(desc.AuthorityClasses, "directory") {
+		return drop(DropKindNotInTaxonomy)
+	}
+
+	rawDomain, _ := payload[types.PayloadDirectoryDomain].(string)
+	domain, ok := types.NormalizeDirectoryDomain(rawDomain)
+	if !ok {
+		return drop(DropMalformedDomain)
+	}
+
+	local := ""
+	if idx := strings.Index(fragID, ":"); idx >= 0 {
+		local = fragID[idx+1:]
+	}
+	if !validDirectoryLocalID(local) {
+		return drop(DropMalformedLocalID)
+	}
+
+	if peerHostAuthority == "" || dirAuth == nil {
+		return drop(DropNoVerifier)
+	}
+	if !dirAuth.IsDirectoryAuthority(peerHostAuthority, domain) {
+		return drop(DropNotAuthority)
+	}
+
+	word := "user"
+	if kind == types.KindDirectoryGroup {
+		word = "group"
+	}
+	eid, err := types.NewEID("directory", domain, word+":"+local)
+	if err != nil {
+		return drop(DropMalformedLocalID)
+	}
+	return eid, peerHostAuthority, nil, nil
+}
+
+// validDirectoryLocalID reports whether a steward-supplied object id is storable:
+// non-empty, bounded, valid UTF-8, free of control characters.
+func validDirectoryLocalID(s string) bool {
+	if s == "" || len(s) > maxDirectoryLocalIDLen || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // clusterAuthorityAccepted reports whether a steward-asserted cluster name may be

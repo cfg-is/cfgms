@@ -94,3 +94,26 @@ func skipIfNoTestPostgres(t *testing.T) string {
 	}
 	return dsn
 }
+
+// TestOwnerImmutability_ContractBothProviders runs the owner-immutability contract
+// case against both providers. It lives here rather than in contract_test.go only
+// because the provider imports are permitted in this file alone.
+func TestOwnerImmutability_ContractBothProviders(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		testEGOwnerImmutability(t, func(t *testing.T) interfaces.EntityGraphProvider {
+			p, err := sqlite.NewSQLiteEntityGraphProvider(filepath.Join(t.TempDir(), "eg.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close() })
+			return p
+		})
+	})
+	t.Run("database", func(t *testing.T) {
+		dsn := skipIfNoTestPostgres(t)
+		testEGOwnerImmutability(t, func(t *testing.T) interfaces.EntityGraphProvider {
+			p, err := database.NewDatabaseEntityGraphProvider(dsn)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close() })
+			return p
+		})
+	})
+}

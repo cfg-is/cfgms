@@ -324,6 +324,10 @@ type ConfigurationServiceV2 struct {
 	callbackMu          sync.RWMutex
 	routerCloser        func() // stops the router's background cache goroutine
 	router              configroutingiface.ConfigSourceRouter
+
+	domainRegistry *DirectoryDomainRegistry
+	releaseMu      sync.RWMutex
+	releaseHandler DirectoryDomainReleaseHandler
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
@@ -382,6 +386,7 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
 		router:              router,
+		domainRegistry:      NewDirectoryDomainRegistry(storageManager.GetConfigStore()),
 	}
 	if c, ok := router.(interface{ Close() }); ok {
 		svc.routerCloser = c.Close
@@ -486,41 +491,17 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		}, nil
 	}
 
-	// Resolve full tenant-cascade-merged effective config via InheritanceResolver.
-	// ResolveConfiguration walks the ancestor chain (MSP→Client→Group→Device),
-	// child resources overriding parent resources of the same name (Issue #1722).
-	effective, err := s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, req.StewardId)
+	effective, err := s.resolveEffective(ctx, tenantID, req.StewardId)
 	if err != nil {
-		// ResolveConfiguration walks the steward's tenant ancestor chain, which
-		// requires the tenant to exist as a full tenant-hierarchy record. A
-		// steward can be registered under a tenant that exists only as an
-		// identifier — created from a registration token, never promoted to a
-		// TenantData record — and such a tenant has no ancestor chain to walk.
-		// Fall back to delivering the device-level config directly so SyncConfig
-		// still serves the steward; the full cascade still applies whenever the
-		// tenant hierarchy is known. (Issue #1722)
-		var fallbackErr error
-		effective, fallbackErr = s.resolveDeviceLevelFallback(ctx, tenantID, req.StewardId)
-		if fallbackErr != nil {
-			// A storage fault is not "absent": serving a device-only config would
-			// silently skip the tenant, cluster and role layers.
-			s.logger.Error("Failed to resolve configuration fallback",
-				"steward_id", logging.SanitizeLogValue(req.StewardId),
-				"error", logging.SanitizeLogValue(fallbackErr.Error()))
-			return nil, fmt.Errorf("resolve configuration fallback: %w", fallbackErr)
-		}
-		if effective == nil {
-			s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
-			return &controller.ConfigResponse{
-				Status: &common.Status{
-					Code:    common.Status_NOT_FOUND,
-					Message: "No configuration found for steward",
-				},
-			}, nil
-		}
+		// A storage fault is not "absent": serving a device-only config would
+		// silently skip the tenant, cluster and role layers.
+		s.logger.Error("Failed to resolve configuration fallback",
+			"steward_id", logging.SanitizeLogValue(req.StewardId),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil, fmt.Errorf("resolve configuration fallback: %w", err)
 	}
-	if len(effective.Sources) == 0 {
-		s.logger.Debug("No configuration found for steward at any hierarchy level", "steward_id", logging.SanitizeLogValue(req.StewardId))
+	if effective == nil {
+		s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -561,6 +542,50 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		Config:  &controller.SignedConfig{Config: protoConfig}, // Unsigned, QUIC handler will sign
 		Version: version,
 	}, nil
+}
+
+// resolveEffective resolves the full tenant-cascade-merged effective config the
+// controller serves to a steward (MSP→Client→Group→cluster→role→Device, child
+// resources overriding parent resources of the same name — Issue #1722). It is the
+// one effective-config function: GetConfiguration serves its result to the steward,
+// and the directory verifier reads the same result to decide what that steward
+// declares. (nil, nil) means no configuration exists at any level; any error is a
+// genuine fault and must fail the caller closed.
+func (s *ConfigurationServiceV2) resolveEffective(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
+	effective, err := s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, stewardID)
+	if err != nil {
+		// ResolveConfiguration walks the steward's tenant ancestor chain, which
+		// requires the tenant to exist as a full tenant-hierarchy record. A
+		// steward can be registered under a tenant that exists only as an
+		// identifier — created from a registration token, never promoted to a
+		// TenantData record — and such a tenant has no ancestor chain to walk.
+		// Fall back to delivering the device-level config directly so SyncConfig
+		// still serves the steward; the full cascade still applies whenever the
+		// tenant hierarchy is known. (Issue #1722)
+		effective, err = s.resolveDeviceLevelFallback(ctx, tenantID, stewardID)
+		if err != nil {
+			return nil, err
+		}
+		if effective == nil {
+			return nil, nil
+		}
+	}
+	if len(effective.Sources) == 0 {
+		return nil, nil
+	}
+	return effective, nil
+}
+
+// StewardEffectiveDeclaredDomains returns the directory domains declared in the
+// effective configuration delivered to stewardID, which is registered under
+// tenantID. It reads through resolveEffective, the same function that serves the
+// steward its configuration.
+func (s *ConfigurationServiceV2) StewardEffectiveDeclaredDomains(ctx context.Context, tenantID, stewardID string) ([]string, error) {
+	effective, err := s.resolveEffective(ctx, tenantID, stewardID)
+	if err != nil || effective == nil {
+		return nil, err
+	}
+	return DeclaredDirectoryDomains(effective.Config), nil
 }
 
 // resolveDeviceLevelFallback returns the steward's device-level configuration as an
@@ -608,7 +633,7 @@ func (s *ConfigurationServiceV2) resolveDeviceLevelFallback(ctx context.Context,
 // SetConfiguration stores a configuration for a specific steward using ConfigStore
 func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardtypes.StewardConfig) error {
 	// Validate configuration before storing
-	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, config)
+	validationResult := s.validateConfiguration(ctx, tenantID, stewardID, config)
 	if !validationResult.Valid {
 		// Separate config-derived errors (safe to return) from infrastructure errors.
 		// TENANT_LOOKUP_ERROR wraps a raw storage backend message that must not be
@@ -638,10 +663,23 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 			"message", logging.SanitizeLogValue(warning.Message))
 	}
 
+	// Register the directory domains this device cfg declares, and note the ones
+	// it stops declaring. A domain claimed here is undone if the store fails.
+	prevDomains, err := s.previousDeclaredDomains(ctx, tenantID, stewardID)
+	if err != nil {
+		return err
+	}
+	claim, err := s.claimDirectoryDomains(ctx, tenantID, stewardID, config)
+	if err != nil {
+		return err
+	}
+
 	// Store configuration
 	if err := s.configManager.StoreConfiguration(ctx, tenantID, stewardID, config); err != nil {
+		s.undoClaim(ctx, claim)
 		return fmt.Errorf("failed to store configuration: %w", err)
 	}
+	s.releaseDirectoryDomains(ctx, tenantID, stewardID, domainsRemoved(prevDomains, config))
 
 	s.logger.Info("Configuration stored successfully",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
@@ -793,7 +831,15 @@ func (s *ConfigurationServiceV2) ListConfigurations(ctx context.Context, tenantI
 
 // DeleteConfiguration removes a stored steward configuration
 func (s *ConfigurationServiceV2) DeleteConfiguration(ctx context.Context, tenantID, stewardID string) error {
-	return s.configManager.DeleteConfiguration(ctx, tenantID, stewardID)
+	prevDomains, err := s.previousDeclaredDomains(ctx, tenantID, stewardID)
+	if err != nil {
+		return err
+	}
+	if err := s.configManager.DeleteConfiguration(ctx, tenantID, stewardID); err != nil {
+		return err
+	}
+	s.releaseDirectoryDomains(ctx, tenantID, stewardID, prevDomains)
+	return nil
 }
 
 // GetConfigurationHistory retrieves version history for a configuration
@@ -805,7 +851,7 @@ func (s *ConfigurationServiceV2) GetConfigurationHistory(ctx context.Context, te
 func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, configs []*config.BatchConfigurationEntry) error {
 	// Validate all configurations first
 	for _, entry := range configs {
-		validationResult := s.validationManager.ValidateConfiguration(ctx, entry.TenantID, entry.StewardID, entry.Config)
+		validationResult := s.validateConfiguration(ctx, entry.TenantID, entry.StewardID, entry.Config)
 		if !validationResult.Valid {
 			var errorMessages []string
 			for _, err := range validationResult.Errors {
@@ -815,9 +861,41 @@ func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, con
 		}
 	}
 
+	// Register declared directory domains entry by entry; the first failure undoes
+	// every claim this call made.
+	prevDomains := make([][]string, len(configs))
+	var claims []*domainClaim
+	undoAll := func() {
+		for _, c := range claims {
+			s.undoClaim(ctx, c)
+		}
+	}
+	for i, entry := range configs {
+		prev, err := s.previousDeclaredDomains(ctx, entry.TenantID, entry.StewardID)
+		if err != nil {
+			undoAll()
+			return err
+		}
+		prevDomains[i] = prev
+		claim, err := s.claimDirectoryDomains(ctx, entry.TenantID, entry.StewardID, entry.Config)
+		if err != nil {
+			undoAll()
+			var vfe *ValidationFailedError
+			if errors.As(err, &vfe) {
+				return fmt.Errorf("validation failed for steward %s: %w", entry.StewardID, vfe)
+			}
+			return err
+		}
+		claims = append(claims, claim)
+	}
+
 	// Store all configurations in batch
 	if err := s.configManager.BatchStoreConfigurations(ctx, configs); err != nil {
+		undoAll()
 		return fmt.Errorf("failed to store configurations in batch: %w", err)
+	}
+	for i, entry := range configs {
+		s.releaseDirectoryDomains(ctx, entry.TenantID, entry.StewardID, domainsRemoved(prevDomains[i], entry.Config))
 	}
 
 	s.logger.Info("Batch configuration storage completed", "count", len(configs))
@@ -857,7 +935,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	stewardID := "validation" // For validation-only requests
 
 	// Use comprehensive validation framework
-	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, &stewardConfig)
+	validationResult := s.validateConfiguration(ctx, tenantID, stewardID, &stewardConfig)
 
 	// Convert validation result to proto format
 	var validationErrors []*controller.ValidationError
