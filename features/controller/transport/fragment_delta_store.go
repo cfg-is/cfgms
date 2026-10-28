@@ -9,8 +9,8 @@ import (
 // FragmentDeltaStore persists the controller's view of each steward's fragment
 // manifest and applies fragment deltas received over the data plane.
 //
-// The real entitygraph-backed implementation is wired in story S7. Tests use
-// InMemoryFragmentDeltaStore (defined in fragment_delta_store_test.go).
+// BulkManifestStore (dna_bulk_store.go) is the durable implementation. Tests may
+// also use InMemoryFragmentDeltaStore (defined in fragment_delta_store_test.go).
 type FragmentDeltaStore interface {
 	// CurrentManifest returns the stored (fragment_id, fragment_hash) manifest
 	// for a steward, or nil if no manifest has been recorded yet.
@@ -30,4 +30,8 @@ type FragmentDeltaStore interface {
 	// conforming implementation observes identical values — deriving keeps the
 	// invariant enforced at the storage boundary as well.
 	ApplyDelta(stewardID string, fragments []*commonpb.Fragment) error
+
+	// RemoveFragments deletes the named fragment IDs from the stored manifest.
+	// IDs that are not stored are ignored, and other stewards are unaffected.
+	RemoveFragments(stewardID string, ids []string) error
 }
