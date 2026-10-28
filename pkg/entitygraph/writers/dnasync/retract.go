@@ -53,7 +53,7 @@ func (w *Writer) RetractFragments(
 		if idx := strings.Index(fragID, ":"); idx >= 0 {
 			kind = fragID[:idx]
 		}
-		eid, src, _, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, map[string]interface{}{}, taxonomy, w.membership)
+		eid, src, _, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, map[string]interface{}{}, taxonomy, w.membership, nil)
 		if err != nil {
 			return fmt.Errorf("dnasync/retract: %w", err)
 		}
