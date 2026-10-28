@@ -38,14 +38,19 @@ const (
 // admin-only descriptor tokenFileSDDL, so the descriptor is in force before any
 // content is written. The temp file is flushed and then moved over the target
 // with MoveFileEx(MOVEFILE_REPLACE_EXISTING), which also replaces the
-// descriptor of a token file that already exists.
+// descriptor of a token file that already exists. The parent directory must
+// already exist; writeTokenFile returns an error rather than create it.
 func writeTokenFile(path, token string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil { //#nosec G301 -- shared config dir also holds the CA cert
-		return fmt.Errorf("create token directory: %w", err)
+	// The directory is never created here: MkdirAll would give it default
+	// inherited ACLs. The install locks it down first, so it must already exist.
+	if info, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("token directory %s is not available (it must exist and be locked down before the token is written): %w", dir, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("token directory %s is not a directory", dir)
 	}
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
