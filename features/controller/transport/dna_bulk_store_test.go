@@ -16,7 +16,6 @@ import (
 	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 // countingConfigStore wraps a real config store and counts entries written.
