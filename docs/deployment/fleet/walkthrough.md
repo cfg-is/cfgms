@@ -305,8 +305,12 @@ provided at install time, so the binary does not need to be rebuilt per controll
 FINGERPRINT="$(cat /tmp/cfgms-install/installer/ca.fingerprint)"
 CA_CERT="/tmp/cfgms-install/installer/ca.crt"
 
+# Root-only file holding the registration token (keeps it out of the process list)
+sudo install -m 600 /dev/null /root/cfgms.token
+printf '%s' '<REGISTRATION_TOKEN>' | sudo tee /root/cfgms.token >/dev/null
+
 sudo bash install.sh \
-  --regtoken <REGISTRATION_TOKEN> \
+  --regtoken-file /root/cfgms.token \
   --controller-url https://<CONTROLLER_IP>:9080 \
   --controller-ca "$CA_CERT" \
   --fingerprint "$FINGERPRINT"

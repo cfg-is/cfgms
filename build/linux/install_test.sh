@@ -308,6 +308,106 @@ else
 fi
 rm -rf "$T10" "$T10_PREFIX"
 
+# ── Tests 11-14: registration token is passed by file, never on argv ────────
+# A stub cfgms-steward records its arguments and the content of the file given
+# to --regtoken-file, and where that file lives, so the tests can prove the token
+# value never appears in argv and that a temporary file is removed afterwards.
+
+make_recording_dir() {
+    local dir="$1"
+    make_install_dir "$dir"
+    cat > "$dir/cfgms-steward" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$(dirname "$0")/args.txt"
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--regtoken-file" ]]; then
+        cp "$2" "$(dirname "$0")/token-seen.txt"
+        printf '%s' "$2" > "$(dirname "$0")/token-path.txt"
+        stat -c '%a' "$2" > "$(dirname "$0")/token-mode.txt"
+    fi
+    shift
+done
+exit 0
+STUB
+    chmod +x "$dir/cfgms-steward"
+}
+
+TOKEN_FIXTURE="fixture-value-for-argv-test"
+
+# Test 11: --regtoken is handed over by file; token not in steward argv; tmp file gone.
+T11="$(mktemp -d)"; T11_PREFIX="$(mktemp -d)"
+make_recording_dir "$T11"
+run_install "$T11" "$T11_PREFIX" --regtoken "$TOKEN_FIXTURE"
+T11_PATH="$(cat "$T11/token-path.txt" 2>/dev/null || true)"
+if [[ $LAST_EXIT -eq 0 ]] \
+    && grep -qx -- "--regtoken-file" "$T11/args.txt" \
+    && ! grep -q -- "$TOKEN_FIXTURE" "$T11/args.txt" \
+    && ! grep -qx -- "--regtoken" "$T11/args.txt" \
+    && [[ "$(cat "$T11/token-seen.txt")" == "$TOKEN_FIXTURE" ]] \
+    && [[ "$(cat "$T11/token-mode.txt")" == "600" ]] \
+    && [[ -n "$T11_PATH" && ! -e "$T11_PATH" && ! -e "$(dirname "$T11_PATH")" ]]; then
+    pass "test11: --regtoken passed via temp file, not argv; temp file removed"
+else
+    fail "test11: --regtoken file hand-off wrong (exit=$LAST_EXIT args='$(cat "$T11/args.txt" 2>/dev/null | tr '\n' ' ')' path=$T11_PATH)"
+fi
+rm -rf "$T11" "$T11_PREFIX"
+
+# Test 12: --regtoken-file passes the operator's file through and never deletes it.
+T12="$(mktemp -d)"; T12_PREFIX="$(mktemp -d)"
+make_recording_dir "$T12"
+printf '%s' "$TOKEN_FIXTURE" > "$T12/operator.token"; chmod 600 "$T12/operator.token"
+run_install "$T12" "$T12_PREFIX" --regtoken-file "$T12/operator.token"
+if [[ $LAST_EXIT -eq 0 ]] \
+    && grep -qx -- "--regtoken-file" "$T12/args.txt" \
+    && ! grep -q -- "$TOKEN_FIXTURE" "$T12/args.txt" \
+    && [[ "$(cat "$T12/token-seen.txt")" == "$TOKEN_FIXTURE" ]] \
+    && [[ -f "$T12/operator.token" ]]; then
+    pass "test12: --regtoken-file used, token not in argv, operator file kept"
+else
+    fail "test12: --regtoken-file hand-off wrong (exit=$LAST_EXIT output='$LAST_OUTPUT')"
+fi
+rm -rf "$T12" "$T12_PREFIX"
+
+# Test 13: both flags together is an error and the stub never runs.
+T13="$(mktemp -d)"; T13_PREFIX="$(mktemp -d)"
+make_recording_dir "$T13"
+printf '%s' "$TOKEN_FIXTURE" > "$T13/operator.token"; chmod 600 "$T13/operator.token"
+run_install "$T13" "$T13_PREFIX" --regtoken "$TOKEN_FIXTURE" --regtoken-file "$T13/operator.token"
+if [[ $LAST_EXIT -ne 0 && ! -e "$T13/args.txt" ]] && ! echo "$LAST_OUTPUT" | grep -q -- "$TOKEN_FIXTURE"; then
+    pass "test13: --regtoken with --regtoken-file fails"
+else
+    fail "test13: expected failure with both flags (exit=$LAST_EXIT output='$LAST_OUTPUT')"
+fi
+rm -rf "$T13" "$T13_PREFIX"
+
+# Test 14: unsafe token files are refused before the steward runs.
+T14="$(mktemp -d)"; T14_PREFIX="$(mktemp -d)"
+make_recording_dir "$T14"
+: > "$T14/empty.token"; chmod 600 "$T14/empty.token"
+run_install "$T14" "$T14_PREFIX" --regtoken-file "$T14/empty.token"
+T14_EMPTY_OK=0
+[[ $LAST_EXIT -ne 0 && ! -e "$T14/args.txt" ]] && T14_EMPTY_OK=1
+
+printf '%s' "$TOKEN_FIXTURE" > "$T14/open.token"; chmod 644 "$T14/open.token"
+run_install "$T14" "$T14_PREFIX" --regtoken-file "$T14/open.token"
+T14_MODE_OK=0
+[[ $LAST_EXIT -ne 0 && ! -e "$T14/args.txt" ]] && ! echo "$LAST_OUTPUT" | grep -q -- "$TOKEN_FIXTURE" && T14_MODE_OK=1
+
+T14_OWNER_OK=1
+if [[ "$(id -u)" == "0" ]]; then
+    printf '%s' "$TOKEN_FIXTURE" > "$T14/other.token"; chmod 600 "$T14/other.token"
+    chown 65534 "$T14/other.token"
+    run_install "$T14" "$T14_PREFIX" --regtoken-file "$T14/other.token"
+    T14_OWNER_OK=0
+    [[ $LAST_EXIT -ne 0 && ! -e "$T14/args.txt" ]] && ! echo "$LAST_OUTPUT" | grep -q -- "$TOKEN_FIXTURE" && T14_OWNER_OK=1
+fi
+if [[ $T14_EMPTY_OK -eq 1 && $T14_MODE_OK -eq 1 && $T14_OWNER_OK -eq 1 ]]; then
+    pass "test14: empty, mode 0644 (and non-root-owned when root) token files refused"
+else
+    fail "test14: unsafe token file accepted (empty=$T14_EMPTY_OK mode=$T14_MODE_OK owner=$T14_OWNER_OK)"
+fi
+rm -rf "$T14" "$T14_PREFIX"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
