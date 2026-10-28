@@ -16,11 +16,16 @@
 # clear error if the launcher binary is missing.
 #
 # Usage:
-#   sudo bash install.sh --regtoken TOKEN [--controller-url URL] \
+#   sudo bash install.sh --regtoken-file PATH [--controller-url URL] \
 #       [--fingerprint HEX] [--controller-ca PATH]
 #
 # Flags:
-#   --regtoken TOKEN        Registration token (required)
+#   --regtoken-file PATH    File holding the registration token (default form).
+#                           Must be non-empty, owned by the invoking user (root
+#                           under sudo) and not group/world accessible (mode 0600)
+#   --regtoken TOKEN        Registration token on the command line (visible in the
+#                           process list of this script; prefer --regtoken-file).
+#                           Exactly one of --regtoken-file / --regtoken is required
 #   --controller-url URL    Controller URL (install-pinned and TOFU modes;
 #                           omit to use the compile-time URL baked into the binary)
 #   --fingerprint HEX       CA cert SHA-256 fingerprint, lowercase hex no colons;
@@ -29,16 +34,21 @@
 #                           if present — matches the tar.gz bundle layout)
 #
 # Non-interactive install-pinned example:
-#   sudo bash install.sh --regtoken TOKEN \
+#   sudo bash install.sh --regtoken-file /root/cfgms.token \
 #       --controller-url https://ctrl.example.com \
 #       --controller-ca ca.crt --fingerprint aabbcc1122...
 #
 # Interactive example (CA bundled in tar.gz):
-#   sudo bash install.sh --regtoken TOKEN --controller-url https://ctrl.example.com
+#   sudo bash install.sh --regtoken-file /root/cfgms.token --controller-url https://ctrl.example.com
 #   (Displays the fingerprint from ca.fingerprint, prompts for confirmation)
 #
 # Compile-baked URL (default, binary rebuilt per controller):
-#   sudo bash install.sh --regtoken TOKEN
+#   sudo bash install.sh --regtoken-file /root/cfgms.token
+#
+# In every case the token reaches `cfgms-steward install` through --regtoken-file,
+# never on its command line. A --regtoken value is first written to a root-only
+# temporary file that is removed on every exit path; an operator-supplied token
+# file is never deleted.
 #
 # Test isolation:
 #   CFGMS_INSTALL_PREFIX=/tmp/test sudo bash install.sh ...
@@ -52,13 +62,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 REGTOKEN=""
+REGTOKEN_FILE=""
 CONTROLLER_URL=""
 FINGERPRINT=""
 CA_CERT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --regtoken)        REGTOKEN="$2";        shift 2 ;;
+        --regtoken)        REGTOKEN="${2:-}";    shift $(( $# >= 2 ? 2 : 1 )) ;;
+        --regtoken-file)   REGTOKEN_FILE="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
         --controller-url)  CONTROLLER_URL="$2";  shift 2 ;;
         --fingerprint)     FINGERPRINT="$2";     shift 2 ;;
         --controller-ca)   CA_CERT="$2";         shift 2 ;;
@@ -68,14 +80,47 @@ done
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
-if [[ -z "$REGTOKEN" ]]; then
-    echo "Usage: sudo bash install.sh --regtoken TOKEN [--controller-url URL] [--fingerprint HEX] [--controller-ca PATH]" >&2
+usage() {
+    echo "Usage: sudo bash install.sh --regtoken-file PATH [--controller-url URL] [--fingerprint HEX] [--controller-ca PATH]" >&2
     echo "" >&2
-    echo "  --regtoken TOKEN        Registration token (required)" >&2
+    echo "  --regtoken-file PATH    File holding the registration token (mode 0600, owned by root)" >&2
+    echo "  --regtoken TOKEN        Registration token on the command line (visible in the process list)" >&2
+    echo "                          Exactly one of --regtoken-file / --regtoken is required" >&2
     echo "  --controller-url URL    Controller URL (install-pinned/TOFU; omit for compile-baked binary)" >&2
     echo "  --fingerprint HEX       CA cert SHA-256 fingerprint for non-interactive install" >&2
     echo "  --controller-ca PATH    Path to CA cert PEM (default: ca.crt in script directory)" >&2
+}
+
+if [[ -n "$REGTOKEN" && -n "$REGTOKEN_FILE" ]]; then
+    echo "Error: --regtoken and --regtoken-file cannot be used together" >&2
     exit 1
+fi
+if [[ -z "$REGTOKEN" && -z "$REGTOKEN_FILE" ]]; then
+    usage
+    exit 1
+fi
+
+# Same checks as the steward's own token-file reader: a regular, non-empty file
+# owned by the invoking user and inaccessible to group and others. Messages never
+# include file contents.
+if [[ -n "$REGTOKEN_FILE" ]]; then
+    if [[ ! -f "$REGTOKEN_FILE" || -L "$REGTOKEN_FILE" ]]; then
+        echo "Error: --regtoken-file $REGTOKEN_FILE is not a regular file" >&2
+        exit 1
+    fi
+    read -r TOKEN_MODE TOKEN_UID < <(stat -c '%a %u' "$REGTOKEN_FILE")
+    if [[ "$TOKEN_UID" != "$(id -u)" ]]; then
+        echo "Error: --regtoken-file $REGTOKEN_FILE must be owned by the installing user (root)" >&2
+        exit 1
+    fi
+    if (( 8#$TOKEN_MODE & 8#077 )); then
+        echo "Error: --regtoken-file $REGTOKEN_FILE must not be group or world accessible (mode $TOKEN_MODE; use chmod 600)" >&2
+        exit 1
+    fi
+    if [[ ! -s "$REGTOKEN_FILE" ]]; then
+        echo "Error: --regtoken-file $REGTOKEN_FILE is empty" >&2
+        exit 1
+    fi
 fi
 
 # ── Locate CA cert ────────────────────────────────────────────────────────────
@@ -201,7 +246,24 @@ done
 
 # ── Build and run install command ─────────────────────────────────────────────
 
-INSTALL_ARGS=(install --regtoken "$REGTOKEN")
+# The token reaches the steward installer by file only. A --regtoken value is
+# written to a private temporary file; the trap is set before the directory is
+# created so every exit path removes it. An operator-supplied file is left alone.
+TOKEN_TMP_DIR=""
+cleanup_token_tmp() {
+    if [[ -n "$TOKEN_TMP_DIR" ]]; then
+        rm -rf "$TOKEN_TMP_DIR"
+    fi
+}
+trap cleanup_token_tmp EXIT
+
+if [[ -n "$REGTOKEN" ]]; then
+    TOKEN_TMP_DIR="$(umask 077 && mktemp -d)"
+    REGTOKEN_FILE="$TOKEN_TMP_DIR/regtoken"
+    (umask 077 && printf '%s' "$REGTOKEN" > "$REGTOKEN_FILE")
+fi
+
+INSTALL_ARGS=(install --regtoken-file "$REGTOKEN_FILE")
 if [[ -n "$CONTROLLER_URL" ]]; then
     INSTALL_ARGS+=(--controller-url "$CONTROLLER_URL")
 fi
@@ -213,4 +275,5 @@ if [[ -n "$FINGERPRINT" ]]; then
 fi
 
 echo "Installing CFGMS Steward..."
+# Not exec'd: the EXIT trap must run after the installer returns.
 "$STEWARD_BIN" "${INSTALL_ARGS[@]}"
