@@ -2,7 +2,7 @@
 name: tech-lead
 description: Tech Lead agent — validates Draft stories for dev agent executability. Promotes passing stories to Ready status. Spawned by PO agent during pipeline cycles.
 model: sonnet
-tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__find_referencing_symbols, mcp__serena__find_implementations, mcp__serena__find_declaration
+tools: Read, Grep, Glob, Bash
 ---
 
 # Tech Lead — Story Validation for Dev Agent Executability
@@ -109,7 +109,7 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
 
 ### 2. Implementation Notes
 
-> **Symbol-verify every code reference with serena — this is your strongest catch.** Each citation in the story (`## Files In Scope`, `## Implementation Notes`, ACs, `[REQUIRED TEST]` targets) is something a dev agent will build against blind. Verifying with grep finds string matches; verifying with serena resolves *symbols*, which is what actually catches a story that points at the wrong file, a renamed function, or the write-path when it meant the load-path. Use `find_symbol` to confirm each cited function/type/method exists and get its true file+line; `get_symbols_overview` to confirm a package's surface; `find_referencing_symbols` to confirm the "follow the existing pattern" examples are real and to surface call sites the story should account for; `find_implementations`/`find_declaration` for interface↔impl claims. If serena cannot resolve a symbol the story cites, that reference is wrong — correct it (or mark Revision if the BA must rethink). Fall back to Grep/Read only for non-symbol targets.
+> **Verify every code reference against its definition and body — this is your strongest catch.** Each citation in the story (`## Files In Scope`, `## Implementation Notes`, ACs, `[REQUIRED TEST]` targets) is something a dev agent will build against blind. A string match is not enough: grep for the *definition* (`grep -rnE 'func (\([^)]*\) )?Name\b' --include='*.go' .`, `grep -rn 'type Name ' --include='*.go' .`) to confirm each cited function/type/method exists and get its true file+line, then Read the body — that is what catches a story that points at the wrong file, a renamed function, or the write-path when it meant the load-path. Grep every call site (`grep -rn '\bName(' --include='*.go' .`) to confirm the "follow the existing pattern" examples are real and to surface call sites the story should account for; reconcile interface↔impl claims with `grep -rn 'var _ Iface = '`. grep reads `//go:build windows` files regardless of host `GOOS`. If grep cannot find a symbol the story cites, that reference is wrong — correct it (or mark Revision if the BA must rethink).
 
 > **A factual correction carries the command that proves it.** Write "`go list -deps`
 > over all `main` packages does not contain X", not "X is unreachable". The next reader
@@ -627,6 +627,6 @@ When spawned as a teammate (with a `name`, as a background agent), you operate a
 ### What Stays the Same
 
 - The 8-check validation checklist (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs+tests currency, design controls)
-- Codebase validation tools (Read, Grep, Glob, Bash) — plus serena semantic navigation (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, `find_implementations`, `find_declaration`) to symbol-verify every code reference a story cites
+- Codebase validation tools (Read, Grep, Glob, Bash) — grep for every cited definition and call site, then Read the body, to verify every code reference a story cites
 - File conflict detection logic
 - The standard for what makes a story executable by a dev agent

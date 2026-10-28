@@ -539,17 +539,15 @@ docs/          # Documentation
 - Committing test artifacts — use `git add <specific files>`
 - Logging unsanitized input — use `logging.SanitizeLogValue()`
 
-### Code Navigation (serena MCP + grep)
+### Code Navigation (grep + Read)
 
-Use the right tool per question; never trust one weak query for "what's been done" (this is measured — see [code-navigation-tooling](docs/development/code-navigation-tooling.md)). Each tool has a distinct, reproducible failure mode, so combine them:
+Navigate with grep, Glob and Read; never trust one weak query for "what's been done" (this is measured — see [code-navigation-tooling](docs/development/code-navigation-tooling.md)). grep's failure mode is false confidence about whether code is real, so pair every search with a read:
 
-- **Structure → serena.** `get_symbols_overview` / `find_symbol` for a file/type's surface + signatures; `replace_symbol_body` / `insert_after_symbol` / `insert_before_symbol` for symbol-level edits. Cheap, precise, low-context — serena's strongest use.
-- **Every caller / usage / import → grep, exhaustively.** serena's `find_referencing_symbols` / `find_implementations` are *hints, not a complete set*: they (1) under-report on a **cold gopls index** — prime gopls first (a `get_symbols_overview` on the target + likely caller packages) and union a re-run; (2) `find_implementations` includes test doubles — filter them and reconcile with a `var _ Iface = (*T)(nil)` grep. Always cross-check a "complete caller/impl set" with grep.
-- **gopls sees ONE build configuration.** Linux dev containers default to `GOOS=linux`, so serena is **blind to `//go:build windows` code** (verified: a Linux gopls drops `pollClusterStatus`→`getCluster` because `cluster_windows.go` is excluded from the package). For build-tagged packages — the hyperv `*_windows.go` cluster/monitor/PS-dispatch surface especially — **grep is authoritative; serena is not.** grep reads text regardless of `GOOS`.
+- **Where is it defined → grep the definition.** `grep -rnE 'func (\([^)]*\) )?Name\b' --include='*.go' .` for functions and methods, `grep -rn 'type Name ' --include='*.go' .` for types. A cited symbol that grep cannot find does not exist where the citation says.
+- **Every caller / usage / import → grep, exhaustively.** `grep -rn '\bName(' --include='*.go' .`; reconcile interface implementations with a `var _ Iface = (*T)(nil)` grep and filter test doubles.
+- **grep sees every build configuration.** It reads text regardless of `GOOS`, so `//go:build windows` code (the hyperv `*_windows.go` cluster/monitor/PS-dispatch surface especially) is visible from a Linux container. Tools built on `go/packages` resolve one `GOOS` at a time; grep is authoritative for build-tagged packages.
 - **"Real or a stub?" → read the body** + grep stub markers (`ErrNotImplemented`, `panic("TODO")`, bare `return nil`) + run the real gate (`go vet`, `make check-architecture`, the tests). A symbol existing is not evidence it's implemented; not having read it is not evidence it's a stub. When an authoritative gate exists, run it instead of inferring.
-- **Calibrate confidence to verification depth.** One grep keyword or one relational query → *low* confidence until cross-verified; "read the body and two independent methods agree" → *high*.
-
-Call serena's `initial_instructions` at the start of a coding task to load its manual.
+- **Calibrate confidence to verification depth.** One grep keyword → *low* confidence until cross-verified; "read the body and two independent methods agree" → *high*.
 
 **What a wide read actually costs.** Every tool result stays in context and is re-billed
 on every later call in the session, so a read's price is its size × how many calls
@@ -558,9 +556,9 @@ cheap alternative:
 
 - **Re-reading slices of one large file.** Reading a file, then re-reading it around
   a different line, repeatedly, is the single largest context cost measured (one
-  session read `client_transport.go` 63 times). Get the shape once with
-  `get_symbols_overview`, jump to the symbol with `find_symbol`, and when a raw
-  slice is genuinely needed pass `offset`/`limit` instead of pulling the file again.
+  session read `client_transport.go` 63 times). Find the symbol's line once with
+  `grep -n`, then Read just that region with `offset`/`limit` instead of pulling the
+  file again.
 - **Bare `git diff` on a wide change.** The whole diff lands in context and stays
   there. Use `git diff --stat` to see the shape, then `git diff -- <path>` for the
   file being worked.

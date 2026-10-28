@@ -201,7 +201,7 @@ For each of these pins (run in parallel where independent — separate Bash call
    done
    ```
    Then for each artifact URL, download, unzip, and grep the SARIF for `"Installed Version": "<current_pin>"`. A match means the gate is currently failing on this exact pin → flag for cooldown override.
-4. **MCP pins only (`kind: mcp`, e.g. serena)** — research the **consumed-tool delta**: the set of `mcp__<server>__<tool>` names we use (`grep -rhoE 'mcp__<server>__[a-z_]+' .claude/agents/ .mcp.json | sort -u`) versus any tool renamed/removed/signature-changed between `current` and `latest` (WebFetch the release notes for each intervening tag). This is what Phase 3 needs to classify the bump as mechanical vs. breaking. Release notes are also the CVE source for these pins (GHSA rarely resolves a git-installed server; `ecosystem`/`package` are null).
+4. **MCP pins only (`kind: mcp`, any git-pinned server in `.mcp.json`)** — research the **consumed-tool delta**: the set of `mcp__<server>__<tool>` names we use (`grep -rhoE 'mcp__<server>__[a-z_]+' .claude/agents/ .mcp.json | sort -u`) versus any tool renamed/removed/signature-changed between `current` and `latest` (WebFetch the release notes for each intervening tag). This is what Phase 3 needs to classify the bump as mechanical vs. breaking. Release notes are also the CVE source for these pins (GHSA rarely resolves a git-installed server; `ecosystem`/`package` are null).
 
 ## Phase 3: Justify (apply the decision matrix)
 

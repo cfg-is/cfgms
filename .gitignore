@@ -48,6 +48,8 @@ vendor/
 .idea/
 .vscode/
 .obsidian/
+# Local code-navigation server state; no longer configured by the repo (#5586)
+.serena/
 *.swp
 *.swo
 
