@@ -17,6 +17,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/big"
@@ -33,6 +34,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/cmd/steward/service"
@@ -1051,6 +1053,37 @@ func controllerURLOrUnknown() string {
 	return ControllerURL
 }
 
+// promptRegistrationToken prompts for the registration token on out and reads
+// it from in. When in is a terminal the token is read without echo so it does
+// not linger in scrollback or session transcripts; otherwise (piped input) it
+// is read as a line from reader, which wraps in. The token is never written to
+// out.
+func promptRegistrationToken(in io.Reader, reader *bufio.Reader, out io.Writer) (string, error) {
+	_, _ = fmt.Fprint(out, "Registration token: ")
+
+	var raw string
+	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		b, err := term.ReadPassword(int(f.Fd()))
+		_, _ = fmt.Fprintln(out) // the user's Enter was not echoed
+		if err != nil {
+			return "", fmt.Errorf("failed to read registration token: %w", err)
+		}
+		raw = string(b)
+	} else {
+		line, err := reader.ReadString('\n')
+		if err != nil && (err != io.EOF || line == "") {
+			return "", fmt.Errorf("failed to read registration token: %w", err)
+		}
+		raw = line
+	}
+
+	token := strings.TrimSpace(raw)
+	if token == "" {
+		return "", fmt.Errorf("registration token cannot be empty")
+	}
+	return token, nil
+}
+
 // runInteractive enters the interactive terminal UI shown when the binary is
 // launched with no arguments (including Windows double-click).
 //
@@ -1065,15 +1098,9 @@ func runInteractive() error {
 	fmt.Printf("CFGMS Steward %s\n\n", version.Short())
 	fmt.Printf("Controller: %s\n\n", controllerURLOrUnknown())
 
-	fmt.Print("Registration token: ")
-	token, err := reader.ReadString('\n')
+	token, err := promptRegistrationToken(os.Stdin, reader, os.Stdout)
 	if err != nil {
-		return fmt.Errorf("failed to read registration token: %w", err)
-	}
-	token = strings.TrimSpace(token)
-
-	if token == "" {
-		return fmt.Errorf("registration token cannot be empty")
+		return err
 	}
 
 	fmt.Println()
