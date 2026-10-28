@@ -69,4 +69,22 @@ func (s *InMemoryFragmentDeltaStore) ApplyDelta(stewardID string, fragments []*c
 	return nil
 }
 
+// RemoveFragments implements FragmentDeltaStore.
+func (s *InMemoryFragmentDeltaStore) RemoveFragments(stewardID string, ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	drop := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		drop[id] = struct{}{}
+	}
+	var kept []*commonpb.ManifestEntry
+	for _, e := range s.manifests[stewardID] {
+		if _, gone := drop[e.GetFragmentId()]; !gone {
+			kept = append(kept, e)
+		}
+	}
+	s.manifests[stewardID] = kept
+	return nil
+}
+
 var _ FragmentDeltaStore = (*InMemoryFragmentDeltaStore)(nil)

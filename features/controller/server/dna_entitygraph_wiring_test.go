@@ -173,6 +173,23 @@ func (s *wiringFragmentStore) ApplyDelta(stewardID string, fragments []*commonpb
 	return nil
 }
 
+func (s *wiringFragmentStore) RemoveFragments(stewardID string, ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	drop := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		drop[id] = struct{}{}
+	}
+	var kept []*commonpb.ManifestEntry
+	for _, e := range s.manifests[stewardID] {
+		if _, gone := drop[e.GetFragmentId()]; !gone {
+			kept = append(kept, e)
+		}
+	}
+	s.manifests[stewardID] = kept
+	return nil
+}
+
 var _ controllerTransport.FragmentDeltaStore = (*wiringFragmentStore)(nil)
 
 // mergeManifestEntriesForTest replaces or adds one manifest entry per fragment,
