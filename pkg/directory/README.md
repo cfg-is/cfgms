@@ -31,7 +31,7 @@ The first provider registered becomes the default. `SetDefaultProvider` override
 
 | Provider | Package | Notes |
 |----------|---------|-------|
-| Active Directory | `pkg/directory/providers/network_activedirectory` | Read-only; OUs supported |
+| Active Directory | `features/modules/extended/activedirectory` (module) | Writes users and groups; reads are served by DNA and the directory read API, not a `pkg/directory` provider |
 | Microsoft Entra ID | `features/workflow/modules/m365` (`EntraIDDirectoryProvider`) | No OUs; administrative units are managed by the `entra_admin_unit` module |
 
 ### Entra ID execution tenant
