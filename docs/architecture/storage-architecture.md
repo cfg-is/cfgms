@@ -7,22 +7,27 @@
 
 CFGMS controller storage is partitioned into five data types. Each type has its own interfaces and its own backend selection. Deployments compose one provider per type rather than choosing a single global backend.
 
-Git is not a storage backend. For OSS, file-based storage is served by a flat-file provider; the admin is responsible for backups. Git re-enters the architecture as an *optional sync source* for admin-designated config scopes, implemented by a single git-sync component that works against both flat-file (OSS) and PostgreSQL (commercial) backends.
+Git is not a storage backend. File-based storage is served by a flat-file provider; the operator is responsible for backups. Git re-enters the architecture as an *optional sync source* for admin-designated config scopes, implemented by a single git-sync component that works against both flat-file and PostgreSQL backends.
 
 > **Scope note**: This document covers controller-side storage. Steward persistence (local config file, OS keychain, in-memory state between convergence runs) is a separate, simpler concern.
 
 ## The Five Data Types
 
-| Type | OSS default | Commercial/SaaS default |
+| Type | Local deployment examples | Hosted deployment options |
 |------|-------------|-------------------------|
 | Business data | SQLite | PostgreSQL |
 | Config storage | Flat file | PostgreSQL |
-| Config *git sync* (optional, per-scope) | Flat file ⇄ external git origin | PostgreSQL ⇄ external git origin |
-| Secrets | SOPS files / OpenBao (dev-mode) | Key vault (AWS Secrets Manager / HashiCorp Vault / OpenBao cluster / Azure Key Vault) |
-| Timeseries | Local log files | ClickHouse / Timescale / Influx |
+| Config *git sync* (optional, per-scope) | External git origin → flat file | External git origin → PostgreSQL |
+| Secrets | SOPS files | SOPS or OpenBao; select an implemented provider |
+| Timeseries | File logging provider | Timescale logging provider |
 | Blobs | Local filesystem | S3-compatible object storage |
 
-**OSS column shows defaults, not limits.** Any backend listed in the Commercial column is available to OSS deployments — the licensing boundary is single-root tenant tree shape, not backend choice. An OSS single-root MSP is welcome to run PostgreSQL, Vault, and S3 if that's what fits the environment. See [LICENSING.md](../../LICENSING.md).
+**Deployment columns are examples, not licensing tiers.** Backend choice and
+single-root/multi-root topology do not create separate license tiers. All CFGMS
+code is AGPL-3.0; commercial embedding terms concern incorporation into
+proprietary products. The implemented secrets providers are under
+`pkg/secrets/providers/`, and logging providers under `pkg/logging/providers/`.
+See [LICENSING.md](../../LICENSING.md).
 
 ### What belongs where
 
@@ -41,15 +46,15 @@ The previous architecture treated Git as a first-class storage backend (one comm
 1. The admin designates one or more **scopes** (tenant path + namespace, e.g., `root/msp-a/client-1/firewall`) as git-synced.
 2. Each scope binds to an external git origin: URL, branch, credentials reference.
 3. The git-sync component pulls from each bound origin on webhook (push event) with a polling fallback.
-4. Imported configs write through to the controller's config backend — flat-file for OSS, PostgreSQL for commercial.
+4. Imported configs write through to the controller's config backend — the selected flat-file or PostgreSQL backend.
 5. Unbound scopes live natively in the backend.
 6. The read path is always the backend. Git is the *editing surface* for bound scopes, not a query target.
 
 **v1 is strictly one-way, read-only** (git → backend). The controller never writes to the git origin. For bound scopes, all edits happen at the git origin — the admin opens a PR, merges it, and git-sync pulls the result. A config file deleted or renamed at the origin is removed from the store on the next sync; only entries written by git-sync are removed. UI-initiated edits on bound scopes are not supported in v1; they either fail or fall through to unbound scopes. Bidirectional sync is out of scope for v1 and will be a future ADR if demand emerges.
 
-### Why one component, two backends
+### One sync path across storage backends
 
-The same git-sync code path serves both OSS and commercial deployments. The only variable is the backend adapter it writes through to. This avoids the fork that would result from git-as-backend-for-OSS and git-sync-for-SaaS existing side-by-side.
+The same git-sync code path serves local and hosted deployments. The only variable is the backend adapter it writes through to. This avoids the fork that would result from git-as-backend-for-OSS and git-sync-for-SaaS existing side-by-side.
 
 ### Implementation: `pkg/gitsync`
 
@@ -495,7 +500,7 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 **Fleet tracker**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`) in-memory via a `sync.Map`.
 
-`SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
+`SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file and PostgreSQL providers.
 
 ### CommandStore (Issue #665; delivery lifecycle: Issue #3757, ADR-031 Decision 2)
 

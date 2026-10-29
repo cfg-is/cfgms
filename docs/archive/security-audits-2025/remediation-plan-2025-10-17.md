@@ -520,7 +520,7 @@ stringData:
   api-key: "..."
 ```
 
-See [Security Best Practices](./SECURITY.md) for details.
+See [Security Best Practices](../../../SECURITY.md) for details.
 
 ```
 

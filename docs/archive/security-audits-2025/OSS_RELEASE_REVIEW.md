@@ -132,8 +132,6 @@ These files strengthen the project's security posture and build trust with poten
 ## Related Documentation
 
 - [Security Policy](../../../SECURITY.md) - Public security reporting process
-- [Documentation Review Report](../../DOCUMENTATION_REVIEW_REPORT.md) - Overall documentation audit
-- [Documentation Review Status](../../DOCUMENTATION_REVIEW_STATUS.md) - Progress tracking
 
 ---
 

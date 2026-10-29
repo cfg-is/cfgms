@@ -82,7 +82,7 @@ cfg steward upgrade <selector> --version <version>
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--version` | Yes | Target steward version (e.g. `v0.5.12`) |
-| `--platform` | No | Target platform (`linux`, `windows`). Auto-detected from blob metadata if omitted. |
+| `--platform` | No | Target platform (`linux`, `windows`, `darwin`). Auto-detected from blob metadata if omitted. |
 | `--arch` | No | Target architecture (`amd64`, `arm64`). Auto-detected from blob metadata if omitted. |
 | `--wait` | No | Block until all dispatched stewards reach a terminal state |
 | `--wait-timeout` | No | Maximum wait duration when `--wait` is set (default: `2m`) |

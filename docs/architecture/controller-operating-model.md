@@ -693,15 +693,21 @@ Pending stewards are excluded from the halt-threshold denominator — they are s
 
 Health metrics are computed live against the current ring for in-progress rollouts; terminal states report the final observed values.
 
-#### v1 In-Memory Durability Risk
+#### Rollout restart behavior
 
-The rollout goroutine runs in memory on the in-memory workflow engine. **A controller restart during a rollout loses the orchestration state (current ring, progress counter).** The operator must re-issue the rollout after restart.
+The ring-advance goroutine runs in memory. A controller restart stops that
+orchestration; the operator must re-issue the rollout. The current-ring
+`desired_version` update changes this process's configuration in memory, not a
+Git-backed configuration store. `RolloutStore` durably records the rollout and
+progress through the selected business-data provider; it is not a Git provider.
 
-Ring `desired_version` mutations applied by the goroutine are in-memory only in v1; they survive for the lifetime of the controller process but are not persisted to the git-backed config. The `RolloutRecord` stored in `RolloutStore` is durable (git-backed or database-backed depending on the configured provider) and tracks which rings were completed before the restart.
-
-**Mitigation**: the operator re-issues `POST /api/v1/rollout` after restart. Rings already at the target version will pass their health gate quickly (soak re-runs from scratch); rings not yet reached are processed as if starting fresh. No data is lost; at most a soak period is duplicated.
-
-This risk is tracked in [ADR-008](decisions/008-durable-execution-substrate.md) and will be addressed when durable workflow execution (DBOS or equivalent) is adopted. Do not engineer around this limitation in v1 stories.
+After restart, re-issue `POST /api/v1/rollout` and inspect reported progress and
+endpoint versions. Health/soak checks run again. Do not infer automatic resume
+from a persisted rollout record or promise that only a soak interval is lost.
+The current implementation is `features/controller/api/handlers_rollout.go`
+(`runRollout`, `setRingDesiredVersion`). [ADR-008](decisions/008-durable-execution-substrate.md)
+records the durable execution direction; it does not establish implemented
+crash recovery for this goroutine.
 
 ### Config Signing
 

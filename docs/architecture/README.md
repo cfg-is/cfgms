@@ -14,7 +14,6 @@ Consult these before changing steward or controller behaviour.
 
 - [Provider Architecture](provider-architecture.md) - The pluggable central-provider pattern
 - [Storage Architecture](storage-architecture.md) - Five-type storage taxonomy (ADR-003)
-- [Git Backend Design](git-backend-design.md) - Design of the git storage backend (the git provider was removed in v0.10)
 - [Communication Layer Migration](communication-layer-migration.md) - gRPC-over-QUIC transport architecture
 - [Rollback Design](rollback-design.md) - Configuration rollback system
 - [Workflow Debug System](workflow-debug-system.md) - Workflow debugging capabilities
